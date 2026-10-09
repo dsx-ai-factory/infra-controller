@@ -23,6 +23,22 @@ use crate::component_manager::common;
 use crate::errors::CarbideCliError;
 use crate::rpc::ApiClient;
 
+fn ensure_firmware_status_succeeded(
+    statuses: &[::rpc::forge::FirmwareUpdateStatus],
+) -> Result<(), CarbideCliError> {
+    let (failures, failure_summary) = common::component_failure_count_and_summary(
+        statuses.iter().map(|status| status.result.as_ref()),
+    );
+
+    if failures > 0 {
+        return Err(CarbideCliError::GenericError(format!(
+            "{failures} component firmware status result(s) failed{failure_summary}"
+        )));
+    }
+
+    Ok(())
+}
+
 pub(super) async fn get_status(
     opts: Args,
     format: OutputFormat,
@@ -77,18 +93,37 @@ pub(super) async fn get_status(
         table.printstd();
     }
 
-    let (failures, failure_summary) = common::component_failure_count_and_summary(
-        response
-            .statuses
-            .iter()
-            .map(|status| status.result.as_ref()),
-    );
+    ensure_firmware_status_succeeded(&response.statuses)
+}
 
-    if failures > 0 {
-        return Err(CarbideCliError::GenericError(format!(
-            "{failures} component firmware status result(s) failed{failure_summary}"
-        )));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_firmware_status_returns_a_cli_error_with_the_backend_reason() {
+        let statuses = [::rpc::forge::FirmwareUpdateStatus {
+            result: Some(::rpc::forge::ComponentResult {
+                component_id: Some("rack-1".into()),
+                status: ::rpc::forge::ComponentManagerStatusCode::InternalError as i32,
+                error: "rack firmware failed".into(),
+                mac_address: None,
+            }),
+            state: ::rpc::forge::FirmwareUpdateState::FwStateFailed as i32,
+            target_version: "fw-42".into(),
+            updated_at: None,
+        }];
+
+        let error = ensure_firmware_status_succeeded(&statuses)
+            .expect_err("a failed component result must make the command fail");
+
+        let CarbideCliError::GenericError(message) = error else {
+            panic!("firmware status failures must return GenericError");
+        };
+
+        assert_eq!(
+            message,
+            "1 component firmware status result(s) failed: rack-1=internal-error(2): rack firmware failed"
+        );
     }
-
-    Ok(())
 }

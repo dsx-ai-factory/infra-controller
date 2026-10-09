@@ -5,6 +5,7 @@ package inventorysync
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
 
 // These tests exercise the mirror's write paths against a real database —
@@ -36,8 +38,25 @@ func mirrorTestPool(t *testing.T) (context.Context, *cdb.Session) {
 	dbConf, err := cdb.ConfigFromEnv()
 	require.NoError(t, err)
 	pool, err := utils.UnitTestDB(ctx, t, dbConf)
+	t.Cleanup(pool.Close)
 	require.NoError(t, err)
 	return ctx, pool
+}
+
+func TestMirrorTestPool(t *testing.T) {
+	var pool *cdb.Session
+	if !t.Run("session", func(t *testing.T) {
+		ctx, session := mirrorTestPool(t)
+		pool = session
+		require.NoError(t, pool.DB.PingContext(ctx))
+	}) {
+		return
+	}
+	if pool == nil {
+		t.Skip("database fixture was skipped")
+	}
+	defer pool.Close()
+	assert.EqualError(t, pool.DB.PingContext(context.Background()), "sql: database is closed")
 }
 
 func strPtr(s string) *string { return &s }
@@ -71,7 +90,195 @@ func computeSpec(mfr, serial, mac string) expectedComponentSpec {
 	}
 }
 
+func TestSyncExpectedFromCore(t *testing.T) {
+	ctx, pool := mirrorTestPool(t)
+	t.Cleanup(func() { pool.Close() })
+	dbConf, err := cdb.ConfigFromEnv()
+	require.NoError(t, err)
+	dbConf.DBName = pool.DBName
+
+	const rackExternalID = "rack-01"
+	var rackID uuid.UUID
+	componentIDs := make(map[string]uuid.UUID)
+
+	for _, step := range []struct {
+		name            string
+		rackName        string
+		machineName     string
+		switchName      string
+		includeShelf    bool
+		machineError    error
+		reconnect       bool
+		wantMachineName string
+	}{
+		{
+			name:            "initial poll resolves components to the newly mirrored rack",
+			rackName:        "rack-initial",
+			machineName:     "machine-initial",
+			switchName:      "switch-initial",
+			includeShelf:    true,
+			wantMachineName: "machine-initial",
+		},
+		{
+			name:            "failed machine pull preserves machines while other snapshots apply",
+			rackName:        "rack-updated",
+			machineName:     "machine-updated",
+			switchName:      "switch-updated",
+			machineError:    errors.New("machine inventory temporarily unavailable"),
+			wantMachineName: "machine-initial",
+		},
+		{
+			name:            "fresh session retries the deferred machine update without replacing rows",
+			rackName:        "rack-updated",
+			machineName:     "machine-updated",
+			switchName:      "switch-updated",
+			reconnect:       true,
+			wantMachineName: "machine-updated",
+		},
+	} {
+		ok := t.Run(step.name, func(t *testing.T) {
+			if step.reconnect {
+				// Keep the database from the previous polls; a new fixture would
+				// discard the persisted state this recovery needs to reuse.
+				pool.Close()
+				reconnected, err := cdb.NewSessionFromConfig(ctx, dbConf)
+				require.NoError(t, err, "reconnect to the original Flow database")
+				pool = reconnected
+			}
+
+			mockClient := nicoapi.NewMockClient()
+			mockClient.AddExpectedRackDetail(coreRackNamed(rackExternalID, step.rackName, "NVIDIA", "RACK-01"))
+			mockClient.AddExpectedMachineDetail(nicoapi.ExpectedMachineDetail{
+				ExpectedMachineID:   "00000000-0000-4000-8000-000000000001",
+				BMCMACAddress:       "aa:bb:cc:dd:ee:01",
+				ChassisSerialNumber: "MACHINE-01",
+				RackID:              rackExternalID,
+				Name:                step.machineName,
+			})
+			mockClient.AddExpectedSwitchDetail(nicoapi.ExpectedSwitchDetail{
+				ExpectedSwitchID:   "00000000-0000-4000-8000-000000000002",
+				BMCMACAddress:      "aa:bb:cc:dd:ee:02",
+				SwitchSerialNumber: "SWITCH-01",
+				RackID:             rackExternalID,
+				Name:               step.switchName,
+			})
+			if step.includeShelf {
+				mockClient.AddExpectedPowerShelfDetail(nicoapi.ExpectedPowerShelfDetail{
+					ExpectedPowerShelfID: "00000000-0000-4000-8000-000000000003",
+					BMCMACAddress:        "aa:bb:cc:dd:ee:03",
+					ShelfSerialNumber:    "SHELF-01",
+					RackID:               rackExternalID,
+					Name:                 "shelf-initial",
+				})
+			}
+			var client nicoapi.Client = mockClient
+			if step.machineError != nil {
+				client = &errExpectedMachinesClient{Client: mockClient, err: step.machineError}
+			}
+
+			syncExpectedFromCore(ctx, pool, client)
+
+			var racks []model.Rack
+			err = pool.DB.NewSelect().Model(&racks).WhereAllWithDeleted().Scan(ctx)
+			require.NoError(t, err, "reload racks")
+			require.Len(t, racks, 1, "rack row count")
+			rack := racks[0]
+			if rackID == uuid.Nil {
+				rackID = rack.ID
+			}
+			assert.NotEqual(t, uuid.Nil, rack.ID, "rack ID")
+			assert.Equal(t, rackID, rack.ID, "rack ID remains stable across polls")
+			assert.Equal(t, strPtr(rackExternalID), rack.ExternalID, "rack external ID")
+			assert.Equal(t, step.rackName, rack.Name, "rack name")
+			assert.Nil(t, rack.DeletedAt, "rack remains active")
+
+			for _, want := range []struct {
+				componentType devicetypes.ComponentType
+				name          string
+				deleted       bool
+			}{
+				{componentType: devicetypes.ComponentTypeCompute, name: step.wantMachineName},
+				{componentType: devicetypes.ComponentTypeNVSwitch, name: step.switchName},
+				{componentType: devicetypes.ComponentTypePowerShelf, name: "shelf-initial", deleted: !step.includeShelf},
+			} {
+				componentType := devicetypes.ComponentTypeToString(want.componentType)
+				components, err := getAllComponentsByTypeIncludingDeleted(ctx, pool.DB, componentType)
+				require.NoError(t, err, "%s reload", componentType)
+				require.Len(t, components, 1, "%s row count", componentType)
+				component := components[0]
+				originalID, exists := componentIDs[componentType]
+				if !exists {
+					originalID = component.ID
+					componentIDs[componentType] = originalID
+				}
+				assert.NotEqual(t, uuid.Nil, component.ID, "%s ID", componentType)
+				assert.Equal(t, originalID, component.ID, "%s ID remains stable across polls", componentType)
+				assert.Equal(t, rackID, component.RackID, "%s references the mirrored rack", componentType)
+				assert.Equal(t, want.name, component.Name, "%s name", componentType)
+				assert.Equal(t, want.deleted, component.DeletedAt != nil, "%s soft deletion", componentType)
+			}
+		})
+		if !ok {
+			return
+		}
+	}
+}
+
 // --- rack mirror ----------------------------------------------------------
+
+func TestMirrorExpectedRacks_ProfileID(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		existing   bool
+		adopt      bool
+		oldProfile *string
+		profile    string
+	}{
+		{name: "insert", profile: "GB200_NVL72R1_C2G4_WIWYNN"},
+		{name: "populate predecessor rack", existing: true, adopt: true, profile: "GB200_NVL72R1_C2G4_LENOVO"},
+		{name: "replace old profile", existing: true, oldProfile: strPtr("GB200_NVL72R1_C2G4_WiWynn_NVIDIA_WiWynn"), profile: "GB200_NVL72R1_C2G4_WIWYNN"},
+		{name: "absent profile clears value", existing: true, oldProfile: strPtr("old-profile")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			core := coreRack("rack-01", "NVIDIA", "SN-01")
+			core.RackProfileID = test.profile
+			var original model.Rack
+			if test.existing {
+				original = model.Rack{Name: core.Name, Manufacturer: "NVIDIA", SerialNumber: "SN-01", RackProfileID: test.oldProfile}
+				if !test.adopt {
+					original.ExternalID = strPtr(core.RackID)
+				}
+				require.NoError(t, original.Create(ctx, pool.DB))
+			}
+			result := mirrorExpectedRacks(ctx, pool, []nicoapi.ExpectedRackDetail{core})
+			if test.existing {
+				assert.Equal(t, 1, result.updated)
+			} else {
+				assert.Equal(t, 1, result.inserted)
+			}
+			var stored model.Rack
+			require.NoError(t, pool.DB.NewSelect().Model(&stored).Where("external_id = ?", core.RackID).Scan(ctx))
+			if test.existing {
+				assert.Equal(t, original.ID, stored.ID)
+			}
+			if test.profile == "" {
+				assert.Nil(t, stored.RackProfileID)
+			} else {
+				require.NotNil(t, stored.RackProfileID)
+				assert.Equal(t, test.profile, *stored.RackProfileID)
+			}
+			result = mirrorExpectedRacks(ctx, pool, []nicoapi.ExpectedRackDetail{core})
+			assert.Zero(t, result.updated, "identical snapshots do not rewrite the rack")
+			patch := (&model.Rack{Name: "renamed"}).BuildPatch(&stored)
+			require.NotNil(t, patch)
+			require.NoError(t, patch.Patch(ctx, pool.DB))
+			var renamed model.Rack
+			require.NoError(t, pool.DB.NewSelect().Model(&renamed).Where("id = ?", stored.ID).Scan(ctx))
+			assert.Equal(t, stored.RackProfileID, renamed.RackProfileID, "metadata patches preserve the synchronized profile")
+		})
+	}
+}
 
 // A successful but empty Core response soft-deletes both mirror-adopted and
 // legacy racks because no remaining row can be adopted from this snapshot.
@@ -349,6 +556,7 @@ func TestMirrorRacks_CoreMetadataCorrectionConvergesExistingExternalID(t *testin
 	domain := model.NVLDomain{Name: "domain-a"}
 	require.NoError(t, domain.Create(ctx, pool.DB))
 	ingestedAt := time.Now().UTC().Truncate(time.Microsecond)
+	health := &types.HealthReport{Source: "rack-aggregate-health", Successes: []types.HealthProbeSuccess{}, Alerts: []types.HealthProbeAlert{}}
 
 	r := model.Rack{
 		Name:         "rack-a12",
@@ -360,6 +568,7 @@ func TestMirrorRacks_CoreMetadataCorrectionConvergesExistingExternalID(t *testin
 		NVLDomainID:  domain.ID,
 		Status:       model.RackStatusIngested,
 		IngestedAt:   &ingestedAt,
+		Health:       health,
 	}
 	require.NoError(t, r.Create(ctx, pool.DB))
 
@@ -392,6 +601,7 @@ func TestMirrorRacks_CoreMetadataCorrectionConvergesExistingExternalID(t *testin
 	}, got.Location)
 	assert.Equal(t, domain.ID, got.NVLDomainID)
 	assert.Equal(t, model.RackStatusIngested, got.Status)
+	assert.Equal(t, health, got.Health, "health is runtime-owned, must survive")
 	require.NotNil(t, got.IngestedAt)
 	assert.Equal(t, ingestedAt, got.IngestedAt.UTC())
 }
@@ -631,11 +841,12 @@ func TestMirrorComponents_ResurrectOnReReport(t *testing.T) {
 }
 
 // #5: an UPDATE must touch only mirror-managed columns and leave runtime-owned
-// columns (external_id, power_state, firmware_version) intact.
+// columns (external_id, power_state, firmware_version, health) intact.
 func TestMirrorComponents_UpdatePreservesRuntimeColumns(t *testing.T) {
 	ctx, pool := mirrorTestPool(t)
 
 	on := nicoapi.PowerStateOn
+	health := &types.HealthReport{Source: "aggregate-host-health", Successes: []types.HealthProbeSuccess{}, Alerts: []types.HealthProbeAlert{}}
 	c := model.Component{
 		Type:            compType(),
 		Manufacturer:    "Mfg",
@@ -644,6 +855,7 @@ func TestMirrorComponents_UpdatePreservesRuntimeColumns(t *testing.T) {
 		ComponentID:     strPtr("runtime-ext-id"),
 		PowerState:      &on,
 		FirmwareVersion: "9.9.9",
+		Health:          health,
 	}
 	require.NoError(t, c.Create(ctx, pool.DB))
 	hostBMC := model.BMC{
@@ -667,6 +879,117 @@ func TestMirrorComponents_UpdatePreservesRuntimeColumns(t *testing.T) {
 	require.NotNil(t, got.PowerState)
 	assert.Equal(t, nicoapi.PowerStateOn, *got.PowerState, "power_state is runtime-owned, must survive")
 	assert.Equal(t, "9.9.9", got.FirmwareVersion, "firmware_version is runtime-owned, must survive")
+	assert.Equal(t, health, got.Health, "health is runtime-owned, must survive")
+}
+
+func TestMirrorComponents_PositionPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		labels      map[string]string
+		preexisting bool
+		wantSlot    int
+		wantTray    int
+		wantHostID  int
+	}{
+		{
+			name:        "missing labels clear stale position to unknown",
+			labels:      map[string]string{},
+			preexisting: true,
+			wantSlot:    unknownPositionValue,
+			wantTray:    unknownPositionValue,
+			wantHostID:  unknownPositionValue,
+		},
+		{
+			name: "explicit zero remains valid",
+			labels: map[string]string{
+				labelComponentSlotID:  "0",
+				labelComponentTrayIdx: "0",
+				labelComponentHostID:  "0",
+			},
+			preexisting: true,
+			wantSlot:    0,
+			wantTray:    0,
+			wantHostID:  0,
+		},
+		{
+			name:       "fresh missing labels insert unknown",
+			labels:     map[string]string{},
+			wantSlot:   unknownPositionValue,
+			wantTray:   unknownPositionValue,
+			wantHostID: unknownPositionValue,
+		},
+		{
+			name: "fresh malformed labels insert unknown",
+			labels: map[string]string{
+				labelComponentSlotID:  "not-a-slot",
+				labelComponentTrayIdx: "not-a-tray",
+				labelComponentHostID:  "not-a-host",
+			},
+			wantSlot:   unknownPositionValue,
+			wantTray:   unknownPositionValue,
+			wantHostID: unknownPositionValue,
+		},
+		{
+			name: "negative labels preserve existing position",
+			labels: map[string]string{
+				labelComponentSlotID:  "-2",
+				labelComponentTrayIdx: "-3",
+				labelComponentHostID:  "-4",
+			},
+			preexisting: true,
+			wantSlot:    7,
+			wantTray:    8,
+			wantHostID:  9,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			const mac = "aa:bb:cc:dd:ee:11"
+			var componentID uuid.UUID
+			if tc.preexisting {
+				component := model.Component{
+					Type:         compType(),
+					Manufacturer: "Mfg",
+					SerialNumber: "POSITION-1",
+					SlotID:       7,
+					TrayIndex:    8,
+					HostID:       9,
+				}
+				require.NoError(t, component.Create(ctx, pool.DB))
+				componentID = component.ID
+				_, err := pool.DB.NewInsert().Model(&model.BMC{
+					MacAddress:  mac,
+					Type:        devicetypes.BMCTypeToString(devicetypes.BMCTypeHost),
+					ComponentID: component.ID,
+				}).Exec(ctx)
+				require.NoError(t, err)
+			}
+
+			detail := nicoapi.ExpectedMachineDetail{
+				BMCMACAddress:       mac,
+				ChassisSerialNumber: "POSITION-1",
+				Labels:              tc.labels,
+			}
+			mirrorExpectedComponents(
+				ctx,
+				pool,
+				compType(),
+				[]expectedComponentSpec{machineDetailToSpec(detail)},
+				map[string]uuid.UUID{},
+			)
+
+			if componentID == uuid.Nil {
+				var bmc model.BMC
+				require.NoError(t, pool.DB.NewSelect().Model(&bmc).Where("mac_address = ?", mac).Scan(ctx))
+				componentID = bmc.ComponentID
+			}
+			got, err := (&model.Component{ID: componentID}).GetIncludingDeleted(ctx, pool.DB)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantSlot, got.SlotID)
+			assert.Equal(t, tc.wantTray, got.TrayIndex)
+			assert.Equal(t, tc.wantHostID, got.HostID)
+		})
+	}
 }
 
 // #6: a host BMC insert whose MAC collides with an existing non-host (DPU) BMC
@@ -763,34 +1086,247 @@ func TestMirrorComponents_NoLabelsStillMirrored(t *testing.T) {
 	assert.Empty(t, got.SerialNumber)
 }
 
+// Clearing labels must store SQL NULL rather than empty strings so several
+// components can remain unlabelled without colliding on the unique index.
+func TestMirrorComponents_ClearingLabelsReleasesUniqueSlots(t *testing.T) {
+	ctx, pool := mirrorTestPool(t)
+
+	specs := []expectedComponentSpec{
+		computeSpec("Mfg", "C-CLEAR-1", "aa:bb:cc:dd:ee:45"),
+		computeSpec("Mfg", "C-CLEAR-2", "aa:bb:cc:dd:ee:46"),
+	}
+	mirrorExpectedComponents(ctx, pool, compType(), specs, map[string]uuid.UUID{})
+
+	for i := range specs {
+		specs[i].Manufacturer = ""
+		specs[i].SerialNumber = ""
+	}
+	mirrorExpectedComponents(ctx, pool, compType(), specs, map[string]uuid.UUID{})
+
+	nullLabels, err := pool.DB.NewSelect().
+		Model((*model.Component)(nil)).
+		Where("manufacturer IS NULL").
+		Where("serial_number IS NULL").
+		Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, len(specs), nullLabels)
+}
+
 // Relabelling a chassis in Core must not fork the component: the host BMC MAC
 // is its identity, so the existing row is updated in place.
 func TestMirrorComponents_MatchByMACSurvivesRelabel(t *testing.T) {
-	ctx, pool := mirrorTestPool(t)
+	for _, tc := range []struct {
+		name          string
+		componentType devicetypes.ComponentType
+		mac           string
+	}{
+		{"ExpectedMachine", devicetypes.ComponentTypeCompute, "aa:bb:cc:dd:ee:51"},
+		{"ExpectedSwitch", devicetypes.ComponentTypeNVSwitch, "aa:bb:cc:dd:ee:52"},
+		{"ExpectedPowerShelf", devicetypes.ComponentTypePowerShelf, "aa:bb:cc:dd:ee:53"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			componentType := devicetypes.ComponentTypeToString(tc.componentType)
+			component := model.Component{
+				Name:         "component",
+				Type:         componentType,
+				Manufacturer: "OldMfg",
+				SerialNumber: "OLD-SERIAL",
+				Description:  map[string]any{expectedDescriptionKey: "old description"},
+			}
+			require.NoError(t, component.Create(ctx, pool.DB))
+			hostBMC := model.BMC{
+				MacAddress:  tc.mac,
+				Type:        devicetypes.BMCTypeToString(devicetypes.BMCTypeHost),
+				ComponentID: component.ID,
+			}
+			_, err := pool.DB.NewInsert().Model(&hostBMC).Exec(ctx)
+			require.NoError(t, err)
 
-	const mac = "aa:bb:cc:dd:ee:51"
-	c := model.Component{Type: compType(), Manufacturer: "Mfg", SerialNumber: "C-OLD"}
-	require.NoError(t, c.Create(ctx, pool.DB))
-	hostBMC := model.BMC{
-		MacAddress:  mac,
-		Type:        devicetypes.BMCTypeToString(devicetypes.BMCTypeHost),
-		ComponentID: c.ID,
+			spec := expectedComponentSpec{
+				Type:         componentType,
+				Name:         "component",
+				Manufacturer: "NewMfg",
+				SerialNumber: "NEW-SERIAL",
+				Description:  "new description",
+				BMC:          expectedBMCSpec{MACAddress: tc.mac},
+			}
+			mirrorExpectedComponents(ctx, pool, componentType,
+				[]expectedComponentSpec{spec}, map[string]uuid.UUID{})
+
+			total, err := pool.DB.NewSelect().Model((*model.Component)(nil)).Count(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, 1, total, "the MAC match must update in place, not insert a second component")
+
+			got, err := (&model.Component{ID: component.ID}).GetIncludingDeleted(ctx, pool.DB)
+			require.NoError(t, err)
+			assert.Nil(t, got.DeletedAt)
+			assert.Equal(t, component.ID, got.ID)
+			assert.Equal(t, "NewMfg", got.Manufacturer)
+			assert.Equal(t, "NEW-SERIAL", got.SerialNumber)
+			assert.Equal(t, "new description", got.Description[expectedDescriptionKey])
+
+			spec.Manufacturer = ""
+			spec.SerialNumber = ""
+			mirrorExpectedComponents(ctx, pool, componentType,
+				[]expectedComponentSpec{spec}, map[string]uuid.UUID{})
+
+			got, err = (&model.Component{ID: component.ID}).GetIncludingDeleted(ctx, pool.DB)
+			require.NoError(t, err)
+			assert.Empty(t, got.Manufacturer, "Core clearing manufacturer must clear Flow's stale value")
+			assert.Empty(t, got.SerialNumber, "Core clearing serial_number must clear Flow's stale value")
+			assert.Equal(t, component.ID, got.ID, "clearing descriptive labels must keep the component UUID")
+		})
 	}
-	_, err := pool.DB.NewInsert().Model(&hostBMC).Exec(ctx)
-	require.NoError(t, err)
+}
 
-	mirrorExpectedComponents(ctx, pool, compType(),
-		[]expectedComponentSpec{computeSpec("Mfg", "C-NEW", mac)},
-		map[string]uuid.UUID{})
+// Label transfers and swaps must converge in one pass regardless of spec order.
+// The host BMC MAC, not the chassis pair, identifies each component.
+func TestMirrorComponents_ChassisLabelOwnershipTransitions(t *testing.T) {
+	type labels struct {
+		name         string
+		manufacturer string
+		serial       string
+		mac          string
+	}
 
-	total, err := pool.DB.NewSelect().Model((*model.Component)(nil)).Count(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, 1, total, "the MAC match must update in place, not insert a second component")
+	for _, tc := range []struct {
+		name    string
+		initial []labels
+		desired []labels
+	}{
+		{
+			name: "transfer is ordered recipient before current owner",
+			initial: []labels{
+				{name: "owner", manufacturer: "Mfg", serial: "PAIR-A", mac: "aa:bb:cc:dd:ee:71"},
+				{name: "recipient", manufacturer: "Mfg", serial: "PAIR-B", mac: "aa:bb:cc:dd:ee:72"},
+			},
+			desired: []labels{
+				{name: "recipient", manufacturer: "Mfg", serial: "PAIR-A", mac: "aa:bb:cc:dd:ee:72"},
+				{name: "owner", manufacturer: "Mfg", serial: "PAIR-C", mac: "aa:bb:cc:dd:ee:71"},
+			},
+		},
+		{
+			name: "two components swap pairs",
+			initial: []labels{
+				{name: "left", manufacturer: "Mfg", serial: "PAIR-LEFT", mac: "aa:bb:cc:dd:ee:73"},
+				{name: "right", manufacturer: "Mfg", serial: "PAIR-RIGHT", mac: "aa:bb:cc:dd:ee:74"},
+			},
+			desired: []labels{
+				{name: "left", manufacturer: "Mfg", serial: "PAIR-RIGHT", mac: "aa:bb:cc:dd:ee:73"},
+				{name: "right", manufacturer: "Mfg", serial: "PAIR-LEFT", mac: "aa:bb:cc:dd:ee:74"},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			idsByName := make(map[string]uuid.UUID, len(tc.initial))
+			for _, initial := range tc.initial {
+				component := model.Component{
+					Name:         initial.name,
+					Type:         compType(),
+					Manufacturer: initial.manufacturer,
+					SerialNumber: initial.serial,
+				}
+				require.NoError(t, component.Create(ctx, pool.DB))
+				idsByName[initial.name] = component.ID
+				bmc := model.BMC{
+					MacAddress:  initial.mac,
+					Type:        devicetypes.BMCTypeToString(devicetypes.BMCTypeHost),
+					ComponentID: component.ID,
+				}
+				_, err := pool.DB.NewInsert().Model(&bmc).Exec(ctx)
+				require.NoError(t, err)
+			}
 
-	got, err := (&model.Component{ID: c.ID}).GetIncludingDeleted(ctx, pool.DB)
-	require.NoError(t, err)
-	assert.Nil(t, got.DeletedAt)
-	assert.Equal(t, "C-OLD", got.SerialNumber, "a populated serial is not overwritten by Core's new one")
+			specs := make([]expectedComponentSpec, 0, len(tc.desired))
+			for _, desired := range tc.desired {
+				specs = append(specs, expectedComponentSpec{
+					Type:         compType(),
+					Name:         desired.name,
+					Manufacturer: desired.manufacturer,
+					SerialNumber: desired.serial,
+					BMC:          expectedBMCSpec{MACAddress: desired.mac},
+				})
+			}
+
+			mirrorExpectedComponents(ctx, pool, compType(), specs, map[string]uuid.UUID{})
+
+			total, err := pool.DB.NewSelect().Model((*model.Component)(nil)).Count(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, len(tc.initial), total)
+			for _, desired := range tc.desired {
+				id := idsByName[desired.name]
+				got, err := (&model.Component{ID: id}).GetIncludingDeleted(ctx, pool.DB)
+				require.NoError(t, err)
+				assert.Nil(t, got.DeletedAt)
+				assert.Equal(t, desired.manufacturer, got.Manufacturer)
+				assert.Equal(t, desired.serial, got.SerialNumber)
+			}
+		})
+	}
+}
+
+func TestMirrorComponents_ClaimsNaturalKeyAcrossComponentTypes(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		existingRecipient bool
+	}{
+		{name: "update", existingRecipient: true},
+		{name: "insert"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			owner := model.Component{
+				Name:         "switch-owner",
+				Type:         devicetypes.ComponentTypeToString(devicetypes.ComponentTypeNVSwitch),
+				Manufacturer: "Mfg",
+				SerialNumber: "CROSS-TYPE-PAIR",
+			}
+			require.NoError(t, owner.Create(ctx, pool.DB))
+
+			recipientMAC := "aa:bb:cc:dd:ee:81"
+			var recipientID uuid.UUID
+			if tc.existingRecipient {
+				recipient := model.Component{
+					Name:         "compute-recipient",
+					Type:         compType(),
+					Manufacturer: "Mfg",
+					SerialNumber: "OLD-COMPUTE-PAIR",
+				}
+				require.NoError(t, recipient.Create(ctx, pool.DB))
+				recipientID = recipient.ID
+				_, err := pool.DB.NewInsert().Model(&model.BMC{
+					MacAddress:  recipientMAC,
+					Type:        devicetypes.BMCTypeToString(devicetypes.BMCTypeHost),
+					ComponentID: recipient.ID,
+				}).Exec(ctx)
+				require.NoError(t, err)
+			}
+
+			spec := expectedComponentSpec{
+				Type:         compType(),
+				Name:         "compute-recipient",
+				Manufacturer: "Mfg",
+				SerialNumber: "CROSS-TYPE-PAIR",
+				BMC:          expectedBMCSpec{MACAddress: recipientMAC},
+			}
+			mirrorExpectedComponents(ctx, pool, compType(), []expectedComponentSpec{spec}, map[string]uuid.UUID{})
+
+			var recipient model.Component
+			require.NoError(t, pool.DB.NewSelect().Model(&recipient).Where("name = ?", spec.Name).Scan(ctx))
+			if tc.existingRecipient {
+				assert.Equal(t, recipientID, recipient.ID, "an update must keep the recipient UUID")
+			}
+			assert.Equal(t, spec.Manufacturer, recipient.Manufacturer)
+			assert.Equal(t, spec.SerialNumber, recipient.SerialNumber)
+
+			gotOwner, err := (&model.Component{ID: owner.ID}).GetIncludingDeleted(ctx, pool.DB)
+			require.NoError(t, err)
+			assert.Empty(t, gotOwner.Manufacturer)
+			assert.Empty(t, gotOwner.SerialNumber)
+		})
+	}
 }
 
 // Swapping a BMC board changes the MAC Core reports. The natural key adopts the

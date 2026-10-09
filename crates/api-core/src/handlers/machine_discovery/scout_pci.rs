@@ -18,7 +18,7 @@
 use std::collections::HashSet;
 
 use carbide_instrument::{DynamicLog, Event, LabelValue, LogAt};
-use carbide_uuid::machine::{DpuMachineId, MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait, MachineInterfaceId};
 use mac_address::MacAddress;
 use model::hardware_info::HardwareInfo;
 use model::machine::Machine;
@@ -99,7 +99,7 @@ pub(in crate::handlers) struct Comparison {
 impl Comparison {
     /// Captures a comparison and its stored machine context without emitting it.
     fn from_machine(
-        machine: &Machine,
+        machine: &Machine<impl MachineIdSubtypeTrait>,
         comparison: ScoutPciComparison,
         subject: Option<ComparisonSubject>,
         reason: &'static str,
@@ -197,7 +197,7 @@ impl DynamicLog for ScoutPciCompared {
 /// Compares endpoint PCI BDFs reported by scout with the stored boot interface.
 pub(in crate::handlers) fn compare(
     hardware_info: &HardwareInfo,
-    machine: &Machine,
+    machine: &Machine<impl MachineIdSubtypeTrait>,
 ) -> Option<Comparison> {
     let eligible_interfaces = eligible_interfaces(machine);
     if eligible_interfaces.len() < 2 {
@@ -214,7 +214,7 @@ pub(in crate::handlers) fn compare(
             .iter()
             .any(|interface| interface.mac_address == desired_mac_address)
             && machine.status.interfaces.iter().any(|interface| {
-                interface.machine_id == Some(machine.id)
+                interface.machine_id == Some(machine.id.into())
                     && interface.mac_address == desired_mac_address
             })
     }) {
@@ -271,14 +271,14 @@ pub(in crate::handlers) fn compare(
 }
 
 /// Collects this host's Admin interfaces that are attached to DPU machines.
-fn eligible_interfaces(machine: &Machine) -> Vec<EligibleInterface> {
+fn eligible_interfaces(machine: &Machine<impl MachineIdSubtypeTrait>) -> Vec<EligibleInterface> {
     let mut interfaces = machine
         .status
         .interfaces
         .iter()
         .filter_map(|interface| {
             let dpu_machine_id = interface.attached_dpu_machine_id?;
-            (interface.machine_id == Some(machine.id)
+            (interface.machine_id == Some(machine.id.into())
                 && interface.network_segment_type == Some(NetworkSegmentType::Admin))
             .then_some(EligibleInterface {
                 machine_interface_id: interface.id,
@@ -312,7 +312,7 @@ fn first_duplicate_dpu(interfaces: &[EligibleInterface]) -> Option<EligibleInter
 /// Matches every eligible MAC to one report row and one complete endpoint BDF.
 fn candidates_from_report(
     hardware_info: &HardwareInfo,
-    machine: &Machine,
+    machine: &Machine<impl MachineIdSubtypeTrait>,
     eligible_interfaces: &[EligibleInterface],
 ) -> Result<Vec<Candidate>, Comparison> {
     let mut candidates = Vec::with_capacity(eligible_interfaces.len());
@@ -395,7 +395,7 @@ fn candidates_from_report(
 
 /// Compares the scout candidate with the stored desired boot interface MAC.
 fn compare_candidate(
-    machine: &Machine,
+    machine: &Machine<impl MachineIdSubtypeTrait>,
     candidate: Candidate,
     desired_mac_address: MacAddress,
 ) -> Comparison {
@@ -469,7 +469,7 @@ mod tests {
         let mut interface = MachineInterfaceSnapshot::mock_with_mac(mac_address);
         interface.id =
             MachineInterfaceId::from(uuid::Uuid::from_u128(u128::from(mac_address.bytes()[5])));
-        interface.machine_id = Some(host_machine_id());
+        interface.machine_id = Some(host_machine_id().into());
         interface.attached_dpu_machine_id = Some(dpu_machine_id);
         interface.network_segment_type = Some(NetworkSegmentType::Admin);
         interface
@@ -479,7 +479,7 @@ mod tests {
     fn integrated_interface() -> MachineInterfaceSnapshot {
         let mut interface = MachineInterfaceSnapshot::mock_with_mac(mac(9));
         interface.id = MachineInterfaceId::from(uuid::Uuid::from_u128(9));
-        interface.machine_id = Some(host_machine_id());
+        interface.machine_id = Some(host_machine_id().into());
         interface.network_segment_type = Some(NetworkSegmentType::Admin);
         interface.attached_dpu_machine_id = None;
         interface

@@ -12,8 +12,26 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
 )
+
+type closeTrackingClient struct {
+	nicoapi.Client
+	closed bool
+}
+
+func (c *closeTrackingClient) Close() error {
+	c.closed = true
+	return nil
+}
+
+func TestProvider_Close(t *testing.T) {
+	client := &closeTrackingClient{}
+	provider := NewFromClient(client)
+	require.NoError(t, provider.Close())
+	assert.True(t, client.closed)
+}
 
 func TestConfigName(t *testing.T) {
 	assert.Equal(t, ProviderName, (&Config{}).Name())

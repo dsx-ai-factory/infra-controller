@@ -15,6 +15,8 @@ import (
 
 	"github.com/labstack/echo/v4"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
@@ -31,19 +33,17 @@ import (
 
 // UpdateAllocationConstraintHandler is the API Handler for updating a Allocation Constraint
 type UpdateAllocationConstraintHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewUpdateAllocationConstraintHandler initializes and returns a new handler for updating Allocation Constraint
 func NewUpdateAllocationConstraintHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateAllocationConstraintHandler {
 	return UpdateAllocationConstraintHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -61,7 +61,7 @@ func NewUpdateAllocationConstraintHandler(dbSession *cdb.Session, tc temporalCli
 // @Success 200 {object} model.APIAllocationConstraint
 // @Router /v2/org/{org}/nico/allocation/{allocation_id}/constraint/{id} [patch]
 func (uach UpdateAllocationConstraintHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("AllocationConstraint", "Update", c, uach.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("AllocationConstraint", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -103,7 +103,7 @@ func (uach UpdateAllocationConstraintHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Allocation Constraint ID in URL", nil)
 	}
 
-	uach.tracerSpan.SetAttribute(handlerSpan, attribute.String("allocation_constraint_id", acStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("allocation_constraint_id", acStrID))
 
 	// Validate request
 	// Bind request data to API model
@@ -201,6 +201,10 @@ func (uach UpdateAllocationConstraintHandler) Handle(c echo.Context) error {
 
 			if apiRequest.ConstraintValue < dbParentIPBlock.PrefixLength {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "New constraint value cannot be less than the source IP Block prefix length", nil)
+			}
+			err = dbParentIPBlock.ValidateChildPrefixLength(apiRequest.ConstraintValue)
+			if err != nil {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 			}
 
 			// get childIPBlock
@@ -376,6 +380,23 @@ func (uach UpdateAllocationConstraintHandler) Handle(c echo.Context) error {
 					return nil, cutil.NewAPIError(http.StatusBadRequest, "VPC Prefixes exist for Allocation Constraint, cannot update constraint value", nil)
 				}
 
+				// Lock the REST parent row before changing its IPAM tree. The child
+				// allocation helper uses the same order, so concurrent allocation and
+				// constraint updates cannot reverse the locks on the REST row and IPAM tree.
+				derr = ipam.LockAndValidateParentIPBlockForAllocation(ctx, tx, uach.dbSession, dbParentIPBlock)
+				if derr != nil {
+					if errors.Is(derr, ipam.ErrParentIPBlockReload) {
+						if errors.Is(derr, cdb.ErrDoesNotExist) {
+							logger.Warn().Err(derr).Msg("parent IP Block disappeared while updating Allocation Constraint")
+							return nil, cutil.NewAPIError(http.StatusBadRequest, "The parent IP Block for the Allocation Constraint no longer exists", nil)
+						}
+						logger.Error().Err(derr).Msg("unable to reload parent IP Block for Allocation Constraint update")
+						return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Allocation Constraint due to DB error", nil)
+					}
+					logger.Warn().Err(derr).Msg("parent IP Block rejected for Allocation Constraint update")
+					return nil, cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to update Allocation Constraint's parent IP Block. Details: %s", derr.Error()), nil)
+				}
+
 				// We must delete or cleanup the existing child prefix IPAM entry when we successfully update the constraint value by creating new child prefix entry in IPAM
 				existingChildCidr := ipam.GetCidrForIPBlock(ctx, existingChildIPBlock.Prefix, existingChildIPBlock.PrefixLength)
 				derr = ipam.DeleteChildIpamEntryFromCidr(ctx, tx, uach.dbSession, ipamStorage, dbParentIPBlock, existingChildCidr)
@@ -389,6 +410,10 @@ func (uach UpdateAllocationConstraintHandler) Handle(c echo.Context) error {
 				// Allocate a child prefix in IPAM for updated constraint value
 				newChildPrefix, derr := ipam.CreateChildIpamEntryForIPBlock(ctx, tx, uach.dbSession, ipamStorage, dbParentIPBlock, apiRequest.ConstraintValue)
 				if derr != nil {
+					if errors.Is(derr, ipam.ErrParentIPBlockReload) {
+						logger.Error().Err(derr).Msg("unable to reload parent IP Block for Allocation Constraint update")
+						return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Allocation Constraint due to DB error", nil)
+					}
 					// printing parent prefix usage to debug the child prefix failure
 					parentPrefix, sserr := ipamStorage.ReadPrefix(ctx, dbParentIPBlock.Prefix, ipam.GetIpamNamespaceForIPBlock(ctx, dbParentIPBlock.RoutingType, dbParentIPBlock.InfrastructureProviderID.String(), dbParentIPBlock.SiteID.String()))
 					if sserr == nil {

@@ -10,7 +10,7 @@
 ##    - INCOMPATIBLE with real hardware
 ##
 ## 2. CONTROLLER MODE (Large-Scale Testing) - mat-k8s-controller.enabled: true
-##    - Controller dynamically creates ClusterIP Services per BMC
+##    - Controller dynamically creates a Service per BMC (BMC IP as externalIP)
 ##    - Supports multi-pod deployments via `pods` configuration
 ##    - Compatible with real hardware
 ##
@@ -22,6 +22,9 @@ global:
   ## Namespace override (propagates to subcharts). Required when mat-k8s-controller is enabled.
   ## Example: --set global.namespaceOverride=nico-system
   namespaceOverride: ""
+  ## Pull Secrets referenced by the machine-a-tron and controller Deployments.
+  ## Example: [{name: machine-a-tron-pull}] together with imagePullSecret.create.
+  imagePullSecrets: []
   certificate:
     duration: 720h0m0s
     renewBefore: 360h0m0s
@@ -47,6 +50,12 @@ image:
 
 ## Create namespace when global.namespaceOverride is set
 createNamespace: true
+
+## Create the `machine-a-tron-pull` pull Secret from base64-encoded docker config
+## JSON. Reference it in global.imagePullSecrets.
+imagePullSecret:
+  create: false
+  dockerconfigjson: ""
 
 automountServiceAccountToken: false
 
@@ -112,7 +121,12 @@ certificate:
   identityNamespace: ""
   dnsNames: []
   uris: []
-  extraDnsNames: []
+  ## Every pod's certificate carries this shared name in addition to its own
+  ## Service names, so NICo can verify the hosted NMX-C mock, which it reaches
+  ## by switch NVOS address rather than by name, with one
+  ## `nvlink_config.nmx_c_tls_authority` across all machine-a-tron pods.
+  extraDnsNames:
+    - mat-mock.nvidia.com
   extraUris: []
 
 command:
@@ -124,27 +138,20 @@ env:
 
 extraEnv: []
 
-envFrom:
-  vaultApproleTokens:
-    secretName: nico-vault-approle-tokens
-  vaultToken:
-    secretName: nico-vault-token
-  vaultClusterInfo:
-    configMapName: vault-cluster-info
-
-# startupProbe gates the livenessProbe until MAT has bound its redfish port.
-# MAT binds the port only after registering all expected machines via the API,
-# which can take a while for large deployments (time scales with host count).
-# Without a startupProbe the kubelet kills the pod mid-registration (exit 137)
-# Scale the failureThreshold to cover your largest deployment:
-#   hosts=2300  → default (20 * 30s = 10 min)
-#   hosts=4500  → failureThreshold: 60  (30 min)
-#   hosts=13500 → failureThreshold: 1200 (10 h, see machine-a-tron-scale.yaml)
+# startupProbe gates liveness until MAT binds the redfish port, which happens
+# only after it registers every expected rack, host, switch and power shelf
+# with nico-api. DPUs are not registered: a GB200 rack has 71 BMCs but adds 36
+# records (1 rack + 18 hosts + 9 switches + 8 power shelves). Too short a
+# window kills the pod mid-registration (exit 137, issue #5968). Default 120 x
+# 30s = 60 min. Rule: ~2s per record this pod registers, round up, divide by
+# periodSeconds; e.g. 25 racks x 36 = 900 records = 30 min, so 60 min leaves
+# headroom for the 2s worst case (~10 pods registering against one nico-api at
+# once) plus a retry after an outage. A long window only delays hang detection.
 startupProbe:
   tcpSocket:
     port: redfish
   periodSeconds: 30
-  failureThreshold: 20
+  failureThreshold: 120
   successThreshold: 1
   timeoutSeconds: 10
 
@@ -195,6 +202,17 @@ machineATron:
   registerExpectedMachines: true
   hostBmcPassword: ""
   dpuBmcPassword: ""
+  ## Source of the site-wide BMC root password. At render time the chart looks
+  ## up bmc_site_wide_root.password in this Secret's credential file and pins
+  ## every mock BMC to it. hostBmcPassword and dpuBmcPassword override the
+  ## looked-up value. Set name to "" to disable the lookup. When neither source
+  ## sets a password, mat.toml carries no password line and each mock keeps its
+  ## factory default. helm template and client-side --dry-run have no cluster
+  ## and render no looked-up password. Use --dry-run=server to see it.
+  siteCredentialsSecret:
+    namespace: nico-system
+    name: nico-site-credentials
+    key: credentials.yaml
   apiRefreshInterval: "2s"
 
 ## =============================================================================
@@ -282,7 +300,7 @@ hwMacAddressRanges:
   ## Bits per allocated range (8 = 256 MACs per range allocation)
   rangeHostBits: 8
 
-##   - N ClusterIP BMC services (when mat-k8s-controller.enabled)
+##   - N BMC Services, one per BMC (when mat-k8s-controller.enabled)
 ##
 ##
 ## BMC count per GB200 NVL72 rack: 71
@@ -294,8 +312,11 @@ hwMacAddressRanges:
 ##   - hwType: Hardware type (required)
 ##   - hostCount: Number of hosts (required)
 ##   - dpuPerHostCount: DPUs per host (default: 0)
-##   - oobDhcpRelayAddress: OOB network gateway
-##   - adminDhcpRelayAddress: Admin network gateway
+##   - bmcDhcpRelayAddress: BMC (OOB) network gateway, the relay for BMC DHCP
+##   - underlayDhcpRelayAddress: underlay segment gateway, the relay for DPU OOB
+##     and switch NVOS DHCP
+##     (the previous names oobDhcpRelayAddress and adminDhcpRelayAddress are accepted as
+##     deprecated aliases; rack groups use bmc_dhcp_relay_address / underlay_dhcp_relay_address)
 ##
 ## All other settings inherit from machineDefaults above.
 ##
@@ -308,7 +329,10 @@ pods:
     # racks:
     #   gb200:
     #     type: wiwynn_gb200_nvl72
-    #     rack_profile_id: NVL72
+    #     # The profile nico-api derives from the rack's expected rack group,
+    #     # which machine-a-tron declares when no group declares the rack yet.
+    #     # The nico-api chart ships the derived profiles for both rack types.
+    #     rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
     #     ids:
     #       - rack-001
     #     dpu_reboot_delay: 20
@@ -322,8 +346,8 @@ pods:
         hwType: wiwynn_gb200_nvl
         hostCount: 10
         dpuPerHostCount: 2
-        oobDhcpRelayAddress: "192.168.192.1"
-        adminDhcpRelayAddress: "192.168.176.1"
+        bmcDhcpRelayAddress: "192.168.192.1"
+        underlayDhcpRelayAddress: "192.168.176.1"
         ## Host firmware upgrade simulation (optional).
         ## Set initial versions older than the API's desired versions to trigger
         ## the upgrade flow: version detection -> upload -> task polling ->
@@ -344,18 +368,18 @@ pods:
 #        hwType: wiwynn_gb200_nvl
 #        hostCount: 252       # 18 trays × 14 racks
 #        dpuPerHostCount: 2   # 2 BF3 per tray
-#        oobDhcpRelayAddress: "10.96.64.1"
-#        adminDhcpRelayAddress: "192.168.176.1"
+#        bmcDhcpRelayAddress: "10.200.0.1"
+#        underlayDhcpRelayAddress: "192.168.176.1"
 #      switches:
 #        hwType: nvidia_switch_nd5200_ld
 #        hostCount: 126       # 9 switches × 14 racks
-#        oobDhcpRelayAddress: "10.96.64.1"
-#        adminDhcpRelayAddress: "192.168.176.1"
+#        bmcDhcpRelayAddress: "10.200.0.1"
+#        underlayDhcpRelayAddress: "192.168.176.1"
 #      power:
 #        hwType: liteon_power_shelf
 #        hostCount: 112       # 8 shelves × 14 racks
-#        oobDhcpRelayAddress: "10.96.64.1"
-#        adminDhcpRelayAddress: "192.168.176.1"
+#        bmcDhcpRelayAddress: "10.200.0.1"
+#        underlayDhcpRelayAddress: "192.168.176.1"
 #
 #  mat-1:
 #    machines:
@@ -363,8 +387,8 @@ pods:
 #        hwType: wiwynn_gb200_nvl
 #        hostCount: 252
 #        dpuPerHostCount: 2
-#        oobDhcpRelayAddress: "10.96.64.1"
-#        adminDhcpRelayAddress: "192.168.176.1"
+#        bmcDhcpRelayAddress: "10.200.0.1"
+#        underlayDhcpRelayAddress: "192.168.176.1"
 #      # ... same pattern
 
 ## Persistence volume for machine state
@@ -402,14 +426,14 @@ configFiles:
   #     hw_type = "supermicro_gb300_nvl"
   #     host_count = 10
   #     dpu_per_host_count = 2
-  #     oob_dhcp_relay_address = "10.96.64.1"
+  #     oob_dhcp_relay_address = "10.200.0.1"
   #     admin_dhcp_relay_address = "192.168.176.1"
   #
   #     [machines.switches]
   #     hw_type = "nvidia_switch_nd5200_ld"
   #     host_count = 5
   #     dpu_per_host_count = 0
-  #     oob_dhcp_relay_address = "10.96.64.1"
+  #     oob_dhcp_relay_address = "10.200.0.1"
   #     admin_dhcp_relay_address = "192.168.176.1"
   matConfigs: {}
 
@@ -423,7 +447,8 @@ configFiles:
 ##   - Finds bmc-mock Services via label: nvidia-infra-controller/mat-service=true
 ##   - Polls /machines/status from each discovered instance
 ##
-## for ClusterIP assignment. See README troubleshooting for ClusterIP conflicts.
+## BMC IPs are published as Service externalIPs; the BMC network must not
+## overlap the cluster ServiceCIDR or pod CIDR. See README Requirements.
 ##
 mat-k8s-controller:
   enabled: false
@@ -438,3 +463,16 @@ mat-k8s-controller:
     syncInterval: "30s"
     insecureSkipVerify: false
     logLevel: "info"
+
+## nico-site-health-probe — synthetic monitoring for NICo APIs (#5360).
+## Disabled by default because it needs site-specific configuration to run:
+## the image has no registry prefix until overridden. Enable it per site with:
+##   nico-site-health-probe:
+##     enabled: true
+##     image:
+##       repository: <registry>/site-health-probe
+##       tag: "<version>"
+## REST probes additionally need org + Keycloak client secrets — see the
+## subchart's values.yaml.
+nico-site-health-probe:
+  enabled: false

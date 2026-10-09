@@ -100,6 +100,29 @@ const (
 	ConfigTracingEnabled = "tracing.enabled"
 	// ConfigTracingServiceName specifies the service name for tracing
 	ConfigTracingServiceName = "tracing.serviceName"
+	// DefaultTracingServiceName is the service.name used when neither the
+	// config nor the OTEL environment supplies one
+	DefaultTracingServiceName = "nico-rest-workflow"
+
+	// ConfigWorkerMaxConcurrentActivityPollers specifies how many concurrent activity
+	// task pollers the Temporal worker runs. This service reads only from config.yaml
+	// (Helm-rendered) -- unlike Site Agent's old-style config, there's no env var override.
+	ConfigWorkerMaxConcurrentActivityPollers = "worker.maxConcurrentActivityPollers"
+)
+
+const (
+	// DefaultMaxConcurrentActivityPollers is the poller count used when config.yaml
+	// doesn't set worker.maxConcurrentActivityPollers. Matches the historical hardcoded value.
+	DefaultMaxConcurrentActivityPollers = 10
+	// MaxMaxConcurrentActivityPollers caps the configurable poller count. Each poller can
+	// hold a DB connection from the shared pgx pool while its activity runs, and this worker
+	// also serves the cloud task queue. Lowered from an initial 200 (an unguessed
+	// fat-finger-only bound) to 20 per review: benchmarking found no throughput gain going
+	// from poller=10 to poller=40 at page_size=50, and Temporal's own worker design means a
+	// handful of pollers already saturates typical activity-execution-slot counts -- raising
+	// this further is unlikely to help and mainly risks pgx pool exhaustion on a worker that
+	// also serves the cloud task queue. Bump with fresh benchmark data if a real need appears.
+	MaxMaxConcurrentActivityPollers = 20
 )
 
 // Maintain a global config object
@@ -150,6 +173,8 @@ func NewConfig() *Config {
 	c.v.SetDefault(ConfigHealthzPort, 8899)
 
 	c.v.SetDefault(ConfigTracingEnabled, false)
+
+	c.v.SetDefault(ConfigWorkerMaxConcurrentActivityPollers, DefaultMaxConcurrentActivityPollers)
 
 	c.v.AutomaticEnv()
 	c.v.SetConfigFile(c.GetPathToConfig())
@@ -243,6 +268,10 @@ func (c *Config) Validate() {
 
 	if c.GetNgcAPIBaseURL() == "" {
 		log.Warn().Msg("ngc api base url config not specified, NGC user lookups will be unavailable")
+	}
+
+	if p := c.GetMaxConcurrentActivityPollers(); p < 1 || p > MaxMaxConcurrentActivityPollers {
+		log.Panic().Msgf("worker max concurrent activity pollers %d must be between 1 and %d", p, MaxMaxConcurrentActivityPollers)
 	}
 }
 
@@ -377,6 +406,12 @@ func (c *Config) GetDBPasswordPath() string {
 // GetDBPassword returns the password of the database
 func (c *Config) GetDBPassword() string {
 	return c.v.GetString(ConfigDBPassword)
+}
+
+// GetMaxConcurrentActivityPollers returns the number of concurrent activity task pollers
+// the Temporal worker should run
+func (c *Config) GetMaxConcurrentActivityPollers() int {
+	return c.v.GetInt(ConfigWorkerMaxConcurrentActivityPollers)
 }
 
 // GetTemporalHost returns the hostname for Temporal
@@ -543,9 +578,14 @@ func (c *Config) GetTracingEnabled() bool {
 	return c.v.GetBool(ConfigTracingEnabled)
 }
 
-// GetTracingServiceName gets the service name for tracing
+// GetTracingServiceName gets the service name for tracing, falling back to
+// the binary's default when the config omits it or leaves it empty. The OTEL
+// environment variables still take precedence over either value.
 func (c *Config) GetTracingServiceName() string {
-	return c.v.GetString(ConfigTracingServiceName)
+	if name := c.v.GetString(ConfigTracingServiceName); name != "" {
+		return name
+	}
+	return DefaultTracingServiceName
 }
 
 // WatchSecretFilePaths starts watching secret files for changes.

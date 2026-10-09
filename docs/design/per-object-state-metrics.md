@@ -1,6 +1,6 @@
 # Per-Object State Progress Metrics
 
-- **Issue:** [#2186](https://github.com/NVIDIA/infra-controller/issues/2186) · **Related:** [#191](https://github.com/NVIDIA/infra-controller/issues/191), [#2168](https://github.com/NVIDIA/infra-controller/pull/2168)
+- **Issue:** [#2186](https://github.com/dsx-ai-factory/infra-controller/issues/2186) · **Related:** [#191](https://github.com/dsx-ai-factory/infra-controller/issues/191), [#2168](https://github.com/dsx-ai-factory/infra-controller/pull/2168)
 - **Status:** Implemented (deviations from the original proposal are noted inline)
 
 ## Problem
@@ -29,7 +29,7 @@ small fixed set of gauges, served from a **dedicated, opt-in endpoint**.
   it aggregates them away.
 - `state_sla(state, object_state)` receives the full object state, so
   per-hardware-gen/tenant SLAs are a policy change in that function only.
-- PR [#2168](https://github.com/NVIDIA/infra-controller/pull/2168)'s `PerObjectMetricsRegistry` (`health-metrics/src/per_object.rs`)
+- PR [#2168](https://github.com/dsx-ai-factory/infra-controller/pull/2168)'s `PerObjectMetricsRegistry` (`health-metrics/src/per_object.rs`)
   was built to generalize across object types and is **reused directly**:
   shared registry keyed by `(object_type, object_id)`, observable gauges,
   lazy stale eviction, config-gated.
@@ -191,7 +191,7 @@ Two caveats apply to all joins below:
 
 **Stuck beyond per-object SLA** (warning; critical = `2 *`):
 
-```
+```text
 max by (object_type, object_id, state, substate)
     (time() - carbide_object_state_entered_timestamp_seconds)
   > on(object_type, object_id, state, substate) group_left()
@@ -201,7 +201,7 @@ max by (object_type, object_id, state, substate)
 
 **Manual-intervention ratio and triage breakdown:**
 
-```
+```text
 count(carbide_object_manual_intervention_required{object_type="machine"})
   / scalar(carbide_machines_total) > 0.05
 
@@ -213,7 +213,7 @@ count by (reason, rack_id) (
 **Suppress DPU-not-calling-home during reprovision** (join use case;
 `DPUReprovision` maps to `state="reprovisioning"` today):
 
-```
+```text
 (time() - carbide_forge_dpu_agent_last_call > 900)
 and on(dpu_id) label_replace(carbide_machine_dpu_info, "dpu_id", "$1", "dpu_id", "(.*)")
 unless on(machine_id) label_replace(
@@ -221,9 +221,9 @@ unless on(machine_id) label_replace(
   "machine_id", "$1", "object_id", "(.*)")
 ```
 
-**Stuck-and-unhealthy — is it hardware?** (join with the [#2168](https://github.com/NVIDIA/infra-controller/pull/2168)metric):
+**Stuck-and-unhealthy — is it hardware?** (join with the [#2168](https://github.com/dsx-ai-factory/infra-controller/pull/2168)metric):
 
-```
+```text
 carbide_object_manual_intervention_required
 and on(object_type, object_id)
   carbide_object_unhealthy_by_classification_count{classification="Hardware"}
@@ -253,9 +253,10 @@ by `(object_type, object_id)` "so the metric name stays stable as
 observability generalizes across object types" (its module doc) — and already
 provides everything the new metrics need: shared entry map, gauge callbacks
 over live entries, `hold_period` eviction, replace/remove-on-record
-semantics. 
+semantics.
 
 We extend the `PerObjectMetricsRegistry`, rather than adding a sibling:
+
 - Generalize the entry payload from classification-only to per-metric series:
   a `gauge(name, help, label_names)` handle API where writers `set`/`set_all`/
   `clear`/`touch` an object's series for that metric (the existing
@@ -280,7 +281,7 @@ A committed transition is published by the committing iteration, including
 the new state's re-resolved SLA. Objects the handler deletes have their
 series removed by that same iteration; objects deleted out-of-band are
 cleared by the enqueuer's next sweep, which diffs consecutive live sets
-(hold-period eviction remains the backstop). Wiring mirrors [#2168](https://github.com/NVIDIA/infra-controller/pull/2168): constructed in `setup.rs`, registered on the per-object
+(hold-period eviction remains the backstop). Wiring mirrors [#2168](https://github.com/dsx-ai-factory/infra-controller/pull/2168): constructed in `setup.rs`, registered on the per-object
 Prometheus registry, threaded via the controller builder.
 `carbide_object_info` and associations are recorded from the
 machine-controller handler, which already loads rack/SKU/DPU/instance data

@@ -69,6 +69,12 @@ impl Deref for DpuMachineId {
     }
 }
 
+impl AsRef<MachineId> for DpuMachineId {
+    fn as_ref(&self) -> &MachineId {
+        &self.0
+    }
+}
+
 impl TryFrom<MachineId> for DpuMachineId {
     type Error = InvalidMachineType;
 

@@ -4,6 +4,8 @@ This page describes how to create VPCs based on the routing profile configuratio
 
 This page is intended for engineers who are responsible for configuring or operating a production API server.
 
+To change the profile of an existing VPC, follow [Changing a VPC Routing Profile](changing_vpc_routing_profiles.md). That procedure covers VNI allocation, conditional reversal, and verification before releasing the previous VNI. Changing a VPC's profile does not change its tenant's profile.
+
 ## Core Concepts
 
 ### VPC
@@ -27,9 +29,9 @@ Routing profile names are free-form strings, not a fixed enumeration. The names 
 
 The API validates all supplied profile names against the configured profiles. Supplying an unknown name returns a `NOT_FOUND` error.
 
-The resolved `routing_profile_type` is returned on the `Vpc` resource in API responses, reflecting the profile selected at creation time, whether supplied explicitly in the creation request or inherited from the tenant.
+The stored `routing_profile_type` is returned on the `Vpc` resource in API responses. At creation, it reflects the explicitly selected or inherited profile. A successful VPC routing-profile change replaces that stored name.
 
-> **REST API note**: The REST API reserves three profile names for VPC creation: `external`, `internal`, and `privileged-internal`. These are the only values the REST API accepts for the `routingProfile` field; any other value is rejected. They are translated to their uppercase equivalents (`EXTERNAL`, `INTERNAL`, `PRIVILEGED_INTERNAL`) before being forwarded to the API server. Sites that serve REST API clients must define all three reserved names in `fnn.routing_profiles`. Additional profiles may be defined and used through the gRPC interface.
+> **REST API note**: REST translates the aliases `external`, `internal`, and `privileged-internal` to `EXTERNAL`, `INTERNAL`, and `PRIVILEGED_INTERNAL`. Other configured names pass through unchanged. VPC creation accepts names of 3 to 64 characters, starting with an ASCII letter and containing only ASCII letters, numbers, or dashes. The provider routing-profile update endpoint accepts names of 1 to 64 characters, as described in [Changing a VPC Routing Profile](changing_vpc_routing_profiles.md). Core validates the selected profile against the site's configuration and the tenant's permitted access tier.
 
 ### API Server Routing Profiles
 
@@ -137,29 +139,32 @@ The exact route-target values, leak settings, and `access_tier` values are site-
 
 ## How Tenant Routing Profiles Affect VPC Creation
 
-Each tenant may have a `routing_profile_type`. In a production site, this serves as the default routing profile for VPCs created under that tenant. This has two important consequences:
+Each tenant can have a `routing_profile_type`. In a production site, this serves as the default routing profile for VPCs created under that tenant. This has the following important consequences:
 
 - If a VPC creation request does not specify `routing_profile_type`, the tenant's routing profile is used automatically.
 - If the tenant is configured with a profile that is not present in `fnn.routing_profiles`, VPC creation will fail.
+- An FNN VPC creation request must reference an existing tenant with a routing profile.
 
 For this reason, tenant configuration and API server routing profile configuration must be managed together.
 
 ## Changing a Tenant’s Routing Profile
 
-A tenant's routing profile can only be changed if *the tenant has no active VPCs*. Otherwise, the API server rejects the update.
+A tenant's routing profile can only be changed if *the tenant has no active FNN VPCs*. Otherwise, the API server rejects the update.
 
-This restriction exists because VPC behavior depends on the tenant's permitted routing profile, and changing the tenant's profile while VPCs already exist could invalidate assumptions made when those VPCs were created.
+When FNN is enabled, `UpdateTenant` requests must include `routing_profile_type`. Clients updating only tenant metadata must preserve and resend the tenant's current profile.
+
+This restriction exists because FNN VPC behavior depends on the tenant's permitted routing profile, and changing the tenant's profile while FNN VPCs already exist could invalidate assumptions made when those VPCs were created. Non-FNN VPCs do not consume tenant routing policy, so they do not block a profile change.
 
 ### Process for Changing a Tenant's Routing Profile
 
 The following is a safe operational sequence for changing a tenant's routing profile:
 
 1. Confirm that the destination routing profile is already defined in `fnn.routing_profiles` on the API server.
-2. Verify that the tenant has no active VPCs.
+2. Verify that the tenant has no active FNN VPCs.
 3. Update the tenant's `routing_profile_type`.
 4. Create new VPCs for that tenant using the updated profile policy.
 
-If the tenant has active VPCs, those VPCs must be deleted before the tenant profile can be changed.
+If the tenant has active FNN VPCs, those VPCs must be deleted before the tenant profile can be changed. Non-FNN VPCs can remain active.
 
 ### Using the admin-cli
 
@@ -169,17 +174,17 @@ For deployments where this is insufficient, the gRPC admin-cli supports tenant p
 
 The tenant organization ID is required as a positional argument:
 
-```
-admin-cli tenant update <tenant-org> -p <profile>
+```bash
+nico-admin-cli tenant update <tenant-org> -p <profile>
 ```
 
 **Examples**
 
-```
-admin-cli tenant update example-org -p EXTERNAL
-admin-cli tenant update example-org -p INTERNAL
-admin-cli tenant update example-org -p PRIVILEGED_INTERNAL
-admin-cli tenant update example-org -p MAINTENANCE
+```bash
+nico-admin-cli tenant update example-org -p EXTERNAL
+nico-admin-cli tenant update example-org -p INTERNAL
+nico-admin-cli tenant update example-org -p PRIVILEGED_INTERNAL
+nico-admin-cli tenant update example-org -p MAINTENANCE
 ```
 
 The `-p` flag accepts any string. The supplied value must exactly match a key defined in `fnn.routing_profiles` in the API server configuration. The API validates the name and returns `NOT_FOUND` if the profile does not exist in the configuration.
@@ -188,35 +193,35 @@ This is the recommended workflow for changing a tenant's routing profile using t
 
 1. Review the current tenant record:
 
-   `admin-cli tenant show <tenant-org>`
+   `nico-admin-cli tenant show <tenant-org>`
 
-2. Confirm that the tenant has no active VPCs.
+2. Confirm that the tenant has no active FNN VPCs.
 
 3. Apply the update:
 
-   ```
-   admin-cli tenant update <tenant-org> -p INTERNAL
+   ```bash
+   nico-admin-cli tenant update <tenant-org> -p INTERNAL
    ```
 
 The CLI also supports an optional version-match flag:
 
-```
-admin-cli tenant update <tenant-org> -p INTERNAL -v <current-version>
+```bash
+nico-admin-cli tenant update <tenant-org> -p INTERNAL -v <current-version>
 ```
 
 This flag is optional. It is not a verbosity setting, but is used for optimistic concurrency checking and causes the update to be rejected if the tenant record has changed since it was last reviewed.
 
-If the tenant still has active VPCs, the command will fail. In this case, the existing VPCs must be removed before the tenant routing profile can be changed.
+If the tenant still has active FNN VPCs, the command will fail. In this case, the existing FNN VPCs must be removed before the tenant routing profile can be changed.
 
 ### Operational implication
 
-This means the tenant routing profile should be treated as a planning decision rather than a casual runtime toggle. It is possible to change, but only when the tenant has been returned to a state with no active VPCs.
+This means the tenant routing profile should be treated as a planning decision rather than a casual runtime toggle. It is possible to change while non-FNN VPCs remain active, but only when the tenant has no active FNN VPCs.
 
 ## Troubleshooting Example: External Routing Profile Not Found
 
 Consider the following example error returned during VPC creation:
 
-```
+```text
 RoutingProfile not found: EXTERNAL
 ```
 
@@ -288,15 +293,15 @@ Instances reach destinations outside the overlay by following a default route pr
 
 There are several common causes, and distinguishing between them requires comparing the routing profile against the expected network deployment:
 
-* **The routing profile does not import the correct route-target.**
+- **The routing profile does not import the correct route-target.**
 
   The VPC’s routing profile may not include a `route_target_imports` entry that causes a default route to be imported into the overlay. Without such an import, the VPC has no default route regardless of what the network advertises.
 
-* **The routing profile is correct, but the network injection is not occurring.**
+- **The routing profile is correct, but the network injection is not occurring.**
 
   Some deployment models intentionally omit a default-route route-target import from the profile and instead rely on the network to inject a default route by advertising a route that matches the VPC’s native route-target (`<ASN>:<VNI_OF_VPC>`). In this case the profile is configured as intended, but the expected network-side advertisement is absent or misconfigured.
 
-* **The network device VRF is not importing the VPC’s route-targets.**
+- **The network device VRF is not importing the VPC’s route-targets.**
 
   Even when the VPC has a default route and can forward traffic outbound, the network device’s VRF may not be configured to import the route-targets present on VPC routes. If the VRF does not import those route-targets, the network has no visibility into VPC prefixes and cannot return traffic to instances. This produces the same symptom—no external connectivity—despite the overlay routing table appearing correct from the VPC side.
 

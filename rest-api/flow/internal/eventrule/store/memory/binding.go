@@ -10,7 +10,6 @@ import (
 	converterdao "github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/dao"
 	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	"github.com/google/uuid"
 )
 
 // Bind stores a rule-to-scope association.
@@ -45,7 +44,8 @@ func (s *Store) Bind(_ context.Context, binding eventrule.Binding) error {
 	for _, persisted := range s.bindings {
 		if bindingRecordMatchesScope(persisted, binding.EventType, binding.Scope) {
 			return fmt.Errorf(
-				"event type %q already has a binding for scope %q",
+				"%w: event type %q already has a binding for scope %q",
+				eventrule.ErrBindingConflict,
 				binding.EventType,
 				binding.Scope.Type,
 			)
@@ -55,7 +55,11 @@ func (s *Store) Bind(_ context.Context, binding eventrule.Binding) error {
 	for _, persisted := range s.bindings {
 		if persisted.RuleID == binding.RuleID &&
 			persisted.ScopeType != string(binding.Scope.Type) {
-			return fmt.Errorf("event rule %s cannot mix site and rack bindings", binding.RuleID)
+			return fmt.Errorf(
+				"%w: event rule %s cannot mix site and rack bindings",
+				eventrule.ErrBindingConflict,
+				binding.RuleID,
+			)
 		}
 	}
 
@@ -68,16 +72,35 @@ func (s *Store) Bind(_ context.Context, binding eventrule.Binding) error {
 	return nil
 }
 
-// Unbind deletes one binding.
-func (s *Store) Unbind(_ context.Context, id uuid.UUID) error {
+// Unbind atomically deletes the binding for an event type and scope.
+func (s *Store) Unbind(
+	_ context.Context,
+	eventType eventrule.Type,
+	scope eventrule.Scope,
+) error {
+	if err := eventType.Validate(); err != nil {
+		return err
+	}
+	if err := scope.Validate(); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.bindings[id]; !ok {
-		return fmt.Errorf("%w: binding %s", eventrule.ErrRuleNotFound, id)
+	for id, binding := range s.bindings {
+		if bindingRecordMatchesScope(binding, eventType, scope) {
+			delete(s.bindings, id)
+			return nil
+		}
 	}
-	delete(s.bindings, id)
-	return nil
+
+	return fmt.Errorf(
+		"%w: binding for event type %q and scope %q",
+		eventrule.ErrBindingNotFound,
+		eventType,
+		scope.Type,
+	)
 }
 
 // GetForScope returns the binding for an event type and scope.

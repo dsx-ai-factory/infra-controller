@@ -6,9 +6,11 @@ package db
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
 )
@@ -46,11 +48,17 @@ func (c *Config) Validate() error {
 // BuildDSN builds the Data Source Name (DSN) string for connecting to
 // the database. User and password are URL-encoded to handle special
 // characters such as "@", ":", "/", etc.
+// IPv6 hosts may be supplied with or without brackets.
 func (c *Config) BuildDSN() string {
+	host := c.Host
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+
 	u := &url.URL{
 		Scheme: "postgres",
 		User:   url.UserPassword(c.Credential.User, c.Credential.Password.Value),
-		Host:   fmt.Sprintf("%s:%d", c.Host, c.Port),
+		Host:   net.JoinHostPort(host, strconv.Itoa(c.Port)),
 		Path:   c.DBName,
 	}
 

@@ -25,8 +25,14 @@ REMOTE_PATH="/home/${USER}/${NVOS_File}"
 SSHPASS_BASE=(sshpass -p "$PASS")
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 
+# SCP needs brackets around IPv6 hosts; SSH and ping use the original address.
+SCP_HOST="$SWITCH_IP"
+if [[ "$SCP_HOST" == *:* && "$SCP_HOST" != \[*\] ]]; then
+  SCP_HOST="[$SCP_HOST]"
+fi
+
 echo "Copying NVOS file to switch..."
-"${SSHPASS_BASE[@]}" scp "${SSH_OPTS[@]}" "$LOCAL_NVos" "${USER}@${SWITCH_IP}:/home/${USER}" || {
+"${SSHPASS_BASE[@]}" scp "${SSH_OPTS[@]}" "$LOCAL_NVos" "${USER}@${SCP_HOST}:/home/${USER}" || {
   echo "SCP failed"
   exit 1
 }

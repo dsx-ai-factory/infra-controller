@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+{{- $name := include "nico-site-health-probe.name" . }}
+{{- $namespace := include "nico-site-health-probe.namespace" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "nico-site-health-probe.labels" . | nindent 4 }}
+spec:
+  # A canary, not a load generator: one replica is the design.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "nico-site-health-probe.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nico-site-health-probe.labels" . | nindent 8 }}
+      annotations:
+        # Restart on config change so probe settings apply without manual rollouts.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ $name }}
+      # The probe reaches its targets via explicit config URLs. Kubelet's
+      # per-Service env injection is not just unused — in a machine-a-tron
+      # namespace with thousands of per-BMC Services it overflows the exec
+      # argument/env limit (E2BIG) and the container cannot start at all.
+      enableServiceLinks: false
+      {{- with .Values.global }}
+      {{- with .imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        # Explicit numeric UID/GID (distroless "nonroot") so runAsNonRoot
+        # verification never depends on the image's USER metadata.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: site-health-probe
+          image: {{ include "nico-site-health-probe.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config=/etc/nico/site-health-probe/config.yaml
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nico/site-health-probe
+              readOnly: true
+            {{- if .Values.probes.grpcMachines.enabled }}
+            - name: spiffe-tls
+              mountPath: /var/run/secrets/spiffe.io
+              readOnly: true
+            {{- end }}
+            {{- if .Values.probes.restMachines.enabled }}
+            - name: keycloak-machines
+              mountPath: /var/secrets/keycloak-machines
+              readOnly: true
+            {{- end }}
+            {{- if .Values.probes.restInstances.enabled }}
+            - name: keycloak-instances
+              mountPath: /var/secrets/keycloak-instances
+              readOnly: true
+            {{- end }}
+            {{- if .Values.restCa.existingSecret.name }}
+            - name: rest-ca
+              mountPath: /var/secrets/rest-ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $name }}-config
+        {{- if .Values.probes.grpcMachines.enabled }}
+        - name: spiffe-tls
+          secret:
+            secretName: {{ $name }}-tls
+        {{- end }}
+        {{- if .Values.probes.restMachines.enabled }}
+        - name: keycloak-machines
+          secret:
+            secretName: {{ required "probes.restMachines.auth.existingSecret.name is required when the probe is enabled" .Values.probes.restMachines.auth.existingSecret.name }}
+        {{- end }}
+        {{- if .Values.probes.restInstances.enabled }}
+        - name: keycloak-instances
+          secret:
+            secretName: {{ required "probes.restInstances.auth.existingSecret.name is required when the probe is enabled" .Values.probes.restInstances.auth.existingSecret.name }}
+        {{- end }}
+        {{- if .Values.restCa.existingSecret.name }}
+        - name: rest-ca
+          secret:
+            secretName: {{ .Values.restCa.existingSecret.name }}
+        {{- end }}

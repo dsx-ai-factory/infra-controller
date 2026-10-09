@@ -20,6 +20,7 @@ use std::str::FromStr;
 use carbide_network::ip::IpAddressFamily;
 use mac_address::MacAddress;
 use model::address_selection_strategy::AddressSelectionStrategy;
+use model::allocation_type::AllocationType;
 use model::dns::{Domain, NewDomain};
 use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{
@@ -347,6 +348,7 @@ async fn test_ipv6_allocation_skips_address_owned_outside_managed_segment(
         interface.id,
         &managed_segment,
         IpAddressFamily::Ipv6,
+        AllocationType::Dhcp,
     )
     .await?;
     assert_eq!(recovered, vec![next_available_address]);
@@ -536,6 +538,7 @@ async fn test_machine_interface_ipv6_allocation_shift_widths(
             interface.id,
             &network_segment,
             IpAddressFamily::Ipv6,
+            AllocationType::Dhcp,
         )
         .await?;
         assert_eq!(allocated.len(), 1);
@@ -543,6 +546,48 @@ async fn test_machine_interface_ipv6_allocation_shift_widths(
         assert!(network_segment.prefixes[0].prefix.contains(allocated[0]));
     }
 
+    Ok(())
+}
+
+/// Verify that an IPv6 /128 address is persisted and cannot be allocated twice.
+#[crate::sqlx_test]
+async fn test_machine_interface_ipv6_single_address_allocation(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = pool.begin().await?;
+    let address: IpAddr = "2001:db8::1".parse()?;
+    let mut definition = admin_segment("IPV6-SINGLETON", "2001:db8::1/128", "2001:db8::1", 0);
+    // IPv6 prefixes cannot have a gateway, including this single-address prefix.
+    definition.prefixes[0].gateway = None;
+    let segment =
+        db::network_segment::persist(definition, &mut txn, NetworkSegmentControllerState::Ready)
+            .await?;
+    let interface = db::machine_interface::create(
+        &mut txn,
+        std::slice::from_ref(&segment),
+        &MacAddress::from_str("aa:bb:cc:dd:42:00")?,
+        true,
+        AddressSelectionStrategy::NextAvailableIp,
+        None,
+    )
+    .await?;
+    let interface_id = interface.id;
+    txn.commit().await?;
+
+    let mut txn = pool.begin().await?;
+    let persisted = db::machine_interface::find_one(txn.as_mut(), interface_id).await?;
+    assert_eq!(persisted.addresses, vec![address]);
+    let error = db::machine_interface::create(
+        &mut txn,
+        std::slice::from_ref(&segment),
+        &MacAddress::from_str("aa:bb:cc:dd:42:01")?,
+        false,
+        AddressSelectionStrategy::NextAvailableIp,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, db::DatabaseError::ResourceExhausted(_)));
     Ok(())
 }
 
@@ -698,6 +743,7 @@ async fn test_allocate_address_for_family_dual_stack_round_trip(
         interface.id,
         &network_segment,
         IpAddressFamily::Ipv4,
+        AllocationType::Dhcp,
     )
     .await?;
     let allocated_v6 = db::machine_interface::allocate_address_for_family(
@@ -705,6 +751,7 @@ async fn test_allocate_address_for_family_dual_stack_round_trip(
         interface.id,
         &network_segment,
         IpAddressFamily::Ipv6,
+        AllocationType::Dhcp,
     )
     .await?;
 

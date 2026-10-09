@@ -17,7 +17,8 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_instrument::emit;
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
@@ -31,13 +32,18 @@ use model::network_segment::{
 };
 use sqlx::{PgConnection, PgTransaction};
 
+use crate::config_drift::{ConfigDefinitionDrifted, ConfigDriftKind, ConfigResourceKind};
 use crate::db_read::DbReader;
 use crate::instance_address::UsedOverlayNetworkIpResolver;
 use crate::ip_allocator::{IpAllocator, UsedIpResolver};
 use crate::machine_interface::UsedAdminNetworkIpResolver;
 use crate::{
-    ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder, ObjectColumnFilter,
+    ColumnInfo, ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult,
+    FilterableQueryBuilder, ObjectColumnFilter,
 };
+
+#[cfg(test)]
+mod test_explicit_columns;
 
 #[derive(Copy, Clone)]
 pub struct IdColumn;
@@ -65,7 +71,11 @@ macro_rules! network_segment_snapshot_query {
     () => {
         r#"
      SELECT
-        ns.*,
+        ns.id, ns.name, ns.subdomain_id, ns.vpc_id, ns.mtu, ns.version,
+        ns.controller_state, ns.controller_state_version, ns.controller_state_outcome,
+        ns.vlan_id, ns.vni_id, ns.network_segment_type, ns.can_stretch,
+        ns.allocation_strategy, ns.infer_slaac_eui64_addresses,
+        ns.created, ns.updated, ns.deleted,
         COALESCE(prefixes_agg.json, '[]'::json) AS prefixes
      FROM network_segments ns
      LEFT JOIN LATERAL (
@@ -83,7 +93,11 @@ macro_rules! network_segment_snapshot_with_history_query {
     () => {
         r#"
      SELECT
-        ns.*,
+        ns.id, ns.name, ns.subdomain_id, ns.vpc_id, ns.mtu, ns.version,
+        ns.controller_state, ns.controller_state_version, ns.controller_state_outcome,
+        ns.vlan_id, ns.vni_id, ns.network_segment_type, ns.can_stretch,
+        ns.allocation_strategy, ns.infer_slaac_eui64_addresses,
+        ns.created, ns.updated, ns.deleted,
         COALESCE(prefixes_agg.json, '[]'::json) AS prefixes,
         COALESCE(history_agg.json, '[]'::json) AS history
      FROM network_segments ns
@@ -110,6 +124,19 @@ pub async fn persist(
     txn: &mut PgConnection,
     initial_state: NetworkSegmentControllerState,
 ) -> Result<NetworkSegment, DatabaseError> {
+    // The DNS views publish records under the segment's subdomain_id. VPC
+    // domains only record ownership, so reject them here even when the
+    // segment belongs to the same VPC.
+    if let Some(domain_id) = value.subdomain_id
+        && crate::dns::domain::find_by_uuid(&mut *txn, domain_id)
+            .await?
+            .is_some_and(|domain| domain.vpc_id.is_some())
+    {
+        return Err(DatabaseError::InvalidArgument(format!(
+            "domain {domain_id} is VPC-owned and cannot be used by a network segment"
+        )));
+    }
+
     let version = ConfigVersion::initial();
 
     let query = "INSERT INTO network_segments (
@@ -147,7 +174,7 @@ pub async fn persist(
         .fetch_one(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
-    crate::network_prefix::create_for(txn, &segment_id, &value.prefixes).await?;
+    crate::network_prefix::create_for(txn, &segment_id, &value.prefixes, None).await?;
     crate::state_history::persist(
         txn,
         crate::state_history::StateHistoryTableId::NetworkSegment,
@@ -530,12 +557,13 @@ pub async fn reconcile_network_defs(
             (Some(stored_def), true) if stored_def == def => {}
             // Declaration has drifted since seed; warn and leave both in place.
             (Some(stored_def), true) => {
-                tracing::warn!(
-                    network_name = name,
-                    stored = ?stored_def,
-                    declared = ?def,
-                    "NetworkDefinition has changed since it was seeded; not re-applying"
-                );
+                emit(ConfigDefinitionDrifted {
+                    resource_kind: ConfigResourceKind::NetworkDefinition,
+                    drift_kind: ConfigDriftKind::Changed,
+                    name: name.clone(),
+                    stored: Some(format!("{stored_def:?}")),
+                    declared: Some(format!("{def:?}")),
+                });
             }
             // Network segment exists, but has no snapshot yet.
             // Pre-migration deployment or a network was re-added after a
@@ -582,10 +610,13 @@ pub async fn reconcile_network_defs(
 
     for name in stored.keys() {
         if !declared.contains_key(name) {
-            tracing::warn!(
-                network_name = name,
-                "Network segment exists in database but is no longer declared in any config file"
-            );
+            emit(ConfigDefinitionDrifted {
+                resource_kind: ConfigResourceKind::NetworkDefinition,
+                drift_kind: ConfigDriftKind::Dropped,
+                name: name.clone(),
+                stored: None,
+                declared: None,
+            });
         }
     }
 
@@ -651,7 +682,7 @@ where
 /// Find network segments attached to a machine through machine_interfaces, optionally of a certain type
 pub async fn find_ids_by_machine_id(
     txn: &mut PgConnection,
-    machine_id: &::carbide_uuid::machine::MachineId,
+    machine_id: &HostMachineId,
     network_segment_type: Option<NetworkSegmentType>,
 ) -> Result<Vec<NetworkSegmentId>, DatabaseError> {
     let result = batch_find_ids_by_machine_ids(txn, &[*machine_id], network_segment_type).await?;
@@ -663,9 +694,9 @@ pub async fn find_ids_by_machine_id(
 /// Returns a HashMap mapping each machine ID to its list of segment IDs.
 pub async fn batch_find_ids_by_machine_ids(
     txn: &mut PgConnection,
-    machine_ids: &[MachineId],
+    machine_ids: &[HostMachineId],
     network_segment_type: Option<NetworkSegmentType>,
-) -> Result<HashMap<MachineId, Vec<NetworkSegmentId>>, DatabaseError> {
+) -> Result<HashMap<HostMachineId, Vec<NetworkSegmentId>>, DatabaseError> {
     if machine_ids.is_empty() {
         return Ok(HashMap::new());
     }
@@ -698,9 +729,9 @@ pub async fn batch_find_ids_by_machine_ids(
         .await
         .map_err(|e| DatabaseError::query(query.sql(), e))?;
 
-    let mut result: HashMap<MachineId, Vec<NetworkSegmentId>> = HashMap::new();
+    let mut result: HashMap<HostMachineId, Vec<NetworkSegmentId>> = HashMap::new();
     for (machine_id_str, segment_id) in rows {
-        if let Ok(machine_id) = machine_id_str.parse::<MachineId>() {
+        if let Ok(machine_id) = machine_id_str.parse::<HostMachineId>() {
             result.entry(machine_id).or_default().push(segment_id);
         }
     }
@@ -782,18 +813,20 @@ where
     Ok(())
 }
 
-/// Updates the network segment state that is owned by the state controller
-/// under the premise that the current controller state version didn't change.
+/// `try_update_controller_state` writes the network segment state and `new_version`
+/// when the version matches `expected_version`.
 ///
-/// Returns `true` if the state could be updated, and `false` if the object
-/// either doesn't exist anymore or is at a different version.
+/// A missing segment or changed version returns
+/// `NotApplied(ControllerStateNotCurrent)`.
+/// `Applied(())` leaves the write in the caller's transaction; database failures
+/// remain errors.
 pub async fn try_update_controller_state(
     txn: &mut PgConnection,
     segment_id: NetworkSegmentId,
     expected_version: ConfigVersion,
     new_version: ConfigVersion,
     new_state: &NetworkSegmentControllerState,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
     let query = "UPDATE network_segments SET controller_state_version=$1, controller_state=$2::json where id=$3::uuid AND controller_state_version=$4 returning id";
     let result = sqlx::query_as::<_, NetworkSegmentId>(query)
         .bind(new_version)
@@ -804,7 +837,10 @@ pub async fn try_update_controller_state(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(result.is_some())
+    Ok(match result {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
 }
 
 pub async fn update_controller_state_outcome(
@@ -1107,6 +1143,47 @@ mod tests {
 
     use super::*;
 
+    #[crate::sqlx_test]
+    async fn rejects_vpc_owned_subdomain_before_inserting_segment(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.expect("begin fixture transaction");
+        let vpc_id = crate::test_support::vpc::insert_vpc(txn.as_mut(), "dns-owner").await;
+        let domain = crate::dns::domain::persist(
+            model::dns::NewDomain {
+                vpc_id: Some(vpc_id),
+                ..model::dns::NewDomain::new("tenant.example")
+            },
+            txn.as_mut(),
+        )
+        .await
+        .expect("create VPC-owned domain");
+        let segment = NewNetworkSegment {
+            subdomain_id: Some(domain.id),
+            vpc_id: Some(vpc_id),
+            segment_type: NetworkSegmentType::Tenant,
+            ..crate::test_support::network_segment::admin_segment(
+                "tenant-dns",
+                "192.0.2.0/24",
+                "192.0.2.1",
+                1,
+            )
+        };
+        let segment_id = segment.id;
+
+        let result = persist(segment, txn.as_mut(), NetworkSegmentControllerState::Ready).await;
+        assert!(
+            matches!(result, Err(DatabaseError::InvalidArgument(ref message)) if message.contains("VPC-owned")),
+            "{result:?}"
+        );
+        let segments = find_by(
+            txn.as_mut(),
+            ObjectColumnFilter::One(IdColumn, &segment_id),
+            NetworkSegmentSearchConfig::default(),
+        )
+        .await
+        .expect("the rejected creation leaves the transaction usable");
+        assert!(segments.is_empty(), "the rejected segment was not inserted");
+    }
+
     // Insert just enough into `network_segments` to make
     // `segment_exists(name)` return true;
     async fn minimum_segment_data(
@@ -1310,7 +1387,7 @@ mod tests {
             segment_type: NetworkDefinitionSegmentType::Admin,
             prefix: "192.168.1.0/24".parse().unwrap(),
             prefix_v6: None,
-            gateway: "192.168.1.1".parse().unwrap(),
+            gateway: Some("192.168.1.1".parse().unwrap()),
             dhcpv6_link_address: None,
             mtu: 1500,
             reserve_first: 5,
@@ -1357,7 +1434,7 @@ mod tests {
             segment_type: NetworkDefinitionSegmentType::Admin,
             prefix: prefix.parse().unwrap(),
             prefix_v6: None,
-            gateway: gateway.parse().unwrap(),
+            gateway: Some(gateway.parse().unwrap()),
             dhcpv6_link_address: None,
             mtu: 1500,
             reserve_first: 3,

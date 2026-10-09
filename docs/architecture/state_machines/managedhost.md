@@ -18,6 +18,8 @@ stateDiagram-v2
     state "Validation" as Validation
     state "Measuring" as Measuring
     state "Ready" as Ready
+    state "Decommissioning" as Decommissioning
+    state "Decommissioned (terminal)" as Decommissioned
     state "Assigned" as Assigned
     state "HostReprovision" as HostReprovision
     state "DPUReprovision" as DPUReprovision
@@ -51,6 +53,7 @@ stateDiagram-v2
     Ready --> Measuring : Redo Measurements Request
     Ready --> BomValidating : BOM Validation Request
     Ready --> Validation : Machine Validation Request
+    Ready --> Decommissioning : Decommission Request
 
     Assigned --> PostAssignedMeasuring : Measurements required
     Assigned --> WaitingForCleanup : Cleanup
@@ -67,6 +70,8 @@ stateDiagram-v2
     WaitingForCleanup --> BomValidating
 
     PostAssignedMeasuring --> WaitingForCleanup : Measurements complete
+
+    Decommissioning --> Decommissioned : Device reset and credential deletion complete
 
     AnyNotAssignedState --> Failed : Any failure condition
     Failed --> AnyNotAssignedState : Recovery
@@ -122,7 +127,8 @@ stateDiagram-v2
     if_state_dpu_nodpu --> HostInit_HI_WaitingForPlatformConfiguration : No DPU
 
     DD_Configuring --> DD_EnableRshim
-    DD_EnableRshim --> if_bfb_supported
+    DD_EnableRshim --> DD_RebootAllDPUS : DPF selected during site exploration
+    DD_EnableRshim --> if_bfb_supported : DPF not selected during site exploration
 
     if_bfb_supported --> DD_SSB_E_CheckSecureBootStatus : BFB install supported
     if_bfb_supported --> DD_SSB_D_CheckSecureBootStatus : BFB install not supported
@@ -182,10 +188,12 @@ stateDiagram-v2
 
     state "WaitingForPlatformConfiguration" as DI_WaitingForPlatformConfiguration
     state "WaitingForNetworkConfig" as DI_WaitingForNetworkConfig
+    state "DpfStates/Provisioning" as DI_DpfStates_Provisioning
     state "HostInit/EnableIpmiOverLan" as HostInit_HI_EnableIpmiOverLan
 
     DpuDiscoveringState_DD_SSB_E_CheckSecureBootStatus --> DI_IDO_InstallingBFB : Security boot is enabled
-    DpuDiscoveringState_DD_RebootAllDPUS --> DI_Init
+    DpuDiscoveringState_DD_RebootAllDPUS --> DI_DpfStates_Provisioning : DPF selected during site exploration
+    DpuDiscoveringState_DD_RebootAllDPUS --> DI_Init : DPF not selected during site exploration
 
     DI_IDO_InstallingBFB --> DI_IDO_WaitForInstallComplete
     DI_IDO_WaitForInstallComplete --> DI_IDO_WaitForInstallComplete : Task Running/New/Starting (wait more)
@@ -415,6 +423,7 @@ stateDiagram-v2
     state "Measuring/WaitingForMeasurements" as Measuring_M_WaitingForMeasurements
     state "DPUReprovision/dr_bfb_check_support" as DPUReprovision_dr_bfb_check_support
     state "HostReprovision/CheckingFirmware" as HostReprovision_HR_CheckingFirmware
+    state "Decommissioning/SuppressingSiteExplorer" as Decommissioning_SuppressingSiteExplorer
 
     HostInit_HI_Discovered --> Ready
     Measuring --> Ready : Measuring completed
@@ -427,7 +436,51 @@ stateDiagram-v2
     Ready --> Assigned_A_WaitingForNetworkSegmentToBeReady : Instance assigned
     Ready --> Measuring_M_WaitingForMeasurements : Redo measuring requested
     Ready --> HostInit_HI_UefiSetup_HI_USS_UnlockHost : Need setup BIOS password
+    Ready --> Decommissioning_SuppressingSiteExplorer : Decommission requested
 ```
+
+## Decommissioning State Details
+
+Decommissioning starts only from `Ready` and follows this top-level sequence:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    state "SuppressingSiteExplorer" as SuppressingSiteExplorer
+    state "DeconfiguringHost" as DeconfiguringHost
+    state "DeconfiguringDpus" as DeconfiguringDpus
+    state "SuppressingOobDhcp" as SuppressingOobDhcp
+    state "PowerCyclingHost" as PowerCyclingHost
+    state "PoweringOnHost" as PoweringOnHost
+    state "WaitingForOobDhcpAcknowledgement" as WaitingForOobDhcpAcknowledgement
+    state "SuppressingBmcDhcp" as SuppressingBmcDhcp
+    state "FactoryResettingBmcs" as FactoryResettingBmcs
+    state "WaitingForBmcDhcpAcknowledgement" as WaitingForBmcDhcpAcknowledgement
+    state "DeletingManagedCredentials" as DeletingManagedCredentials
+    state "Decommissioned (terminal)" as Decommissioned
+
+    [*] --> SuppressingSiteExplorer
+    SuppressingSiteExplorer --> DeconfiguringHost : Site Explorer acknowledges suppressions
+    DeconfiguringHost --> DeconfiguringDpus : Host firmware configuration reset
+    DeconfiguringDpus --> SuppressingOobDhcp : DPUs run preingestion BFB
+    SuppressingOobDhcp --> PowerCyclingHost : OOB DHCP suppressions recorded
+    PowerCyclingHost --> PoweringOnHost : AC power cycle accepted
+    PoweringOnHost --> WaitingForOobDhcpAcknowledgement : Host power state is On after power cycle
+    WaitingForOobDhcpAcknowledgement --> SuppressingBmcDhcp : DHCP acknowledges OOB suppressions
+    SuppressingBmcDhcp --> FactoryResettingBmcs : BMC DHCP suppressions recorded
+    FactoryResettingBmcs --> WaitingForBmcDhcpAcknowledgement : BMC resets accepted
+    WaitingForBmcDhcpAcknowledgement --> DeletingManagedCredentials : DHCP acknowledges BMC suppressions
+    DeletingManagedCredentials --> Decommissioned : Per-device credentials deleted
+```
+
+`DeconfiguringHost` disables lockdown, unlocks managed SuperNICs, resets UEFI
+settings, and clears the host UEFI password. `DeconfiguringDpus` removes DPF
+resources when applicable and installs the vanilla `preingestion.bfb` on every
+DPU.
+
+Refer to [Decommission Managed Hosts and DPUs](../../decommissioning/hosts.md) for the
+operator procedure, platform limitations, and intended post-reset state.
 
 ## Instance Assignment State Details (InstanceState)
 
@@ -802,7 +855,6 @@ stateDiagram-v2
 ```
 
 ## Failed State
-
 
 ```mermaid
 stateDiagram-v2

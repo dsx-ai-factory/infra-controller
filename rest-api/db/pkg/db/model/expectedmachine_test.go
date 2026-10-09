@@ -16,7 +16,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 )
@@ -32,6 +31,8 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 	model := "M1"
 	description := "primary"
 	bmcIP := "10.0.0.1"
+	nicType := "CX9"
+	fixedIP := "192.0.2.9"
 	var slot, trayIdx, host int32 = 1, 2, 3
 
 	t.Run("nil proto leaves receiver unchanged", func(t *testing.T) {
@@ -76,6 +77,7 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 					{Key: "env", Value: cutil.GetPtr("prod")},
 				},
 			},
+			HostNics: []*corev1.ExpectedHostNic{{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIp: &fixedIP}},
 		}, &linkedMachineID)
 
 		assert.Equal(t, id, em.ID)
@@ -96,6 +98,7 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 		assert.Equal(t, &trayIdx, em.TrayIdx)
 		assert.Equal(t, &host, em.HostID)
 		assert.Equal(t, Labels{"env": "prod"}, em.Labels)
+		assert.Equal(t, []ExpectedMachineInterface{{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIP: &fixedIP}}, em.Interfaces)
 	})
 
 	t.Run("populates dpfEnabled from is_dpf_enabled", func(t *testing.T) {
@@ -259,6 +262,26 @@ func TestExpectedMachine_ToProto(t *testing.T) {
 		}
 		assert.False(t, proto.DpfEnabled)
 	})
+
+	t.Run("forwards interfaces in order", func(t *testing.T) {
+		nicType := "CX9"
+		fixedIP := "192.0.2.9"
+		em := &ExpectedMachine{
+			ID:                  id,
+			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
+			ChassisSerialNumber: "CSN-1",
+			Interfaces: []ExpectedMachineInterface{
+				{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIP: &fixedIP},
+				{MacAddress: "02:00:00:00:00:0a"},
+			},
+		}
+		got := em.ToProto(ExpectedMachineCredentials{}).GetHostNics()
+		require.Len(t, got, 2)
+		assert.Equal(t, "02:00:00:00:00:09", got[0].GetMacAddress())
+		assert.Equal(t, "CX9", got[0].GetNicType())
+		assert.Equal(t, "192.0.2.9", got[0].GetFixedIp())
+		assert.Equal(t, "02:00:00:00:00:0a", got[1].GetMacAddress())
+	})
 }
 
 // reset the tables needed for ExpectedMachine tests
@@ -341,7 +364,12 @@ func TestExpectedMachineSQLDAO_Create(t *testing.T) {
 					BmcMacAddress:            "00:1B:44:11:3A:B7",
 					ChassisSerialNumber:      "CHASSIS123",
 					FallbackDpuSerialNumbers: []string{"DPU001", "DPU002"},
-					BmcIpAddress:             cutil.GetPtr("192.168.1.10"),
+					Interfaces: []ExpectedMachineInterface{{
+						MacAddress: "02:00:00:00:00:09",
+						NicType:    cutil.GetPtr("CX9"),
+						FixedIP:    cutil.GetPtr("192.0.2.9"),
+					}},
+					BmcIpAddress: cutil.GetPtr("192.168.1.10"),
 					Labels: map[string]string{
 						"environment": "test",
 						"location":    "datacenter1",
@@ -423,14 +451,17 @@ func TestExpectedMachineSQLDAO_Create(t *testing.T) {
 					assert.Equal(t, input.ChassisSerialNumber, em.ChassisSerialNumber)
 					assert.Equal(t, input.FallbackDpuSerialNumbers, em.FallbackDpuSerialNumbers)
 					assert.Equal(t, input.BmcIpAddress, em.BmcIpAddress)
+					if input.Interfaces == nil {
+						assert.Empty(t, em.Interfaces)
+					} else {
+						assert.Equal(t, input.Interfaces, em.Interfaces)
+					}
 					assert.Equal(t, Labels(input.Labels), em.Labels)
 				}
 
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 
 				if err != nil {
@@ -508,6 +539,100 @@ func testExpectedMachineSQLDAOCreateExpectedMachines(ctx context.Context, t *tes
 	return
 }
 
+func TestExpectedMachineSQLDAO_GetDistinctLabelKeys(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+	created := testExpectedMachineSQLDAOCreateExpectedMachines(ctx, t, dbSession)
+	dao := NewExpectedMachineDAO(dbSession)
+	_, err := dao.Update(ctx, nil, ExpectedMachineUpdateInput{
+		ExpectedMachineID: created[0].ID,
+		Labels: map[string]string{
+			"environment":               "test",
+			"location":                  "datacenter1",
+			"nvidia.com/failure-domain": "fd-a",
+		},
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name      string
+		filter    ExpectedMachineFilterInput
+		page      paginator.PageInput
+		want      []string
+		wantTotal int
+	}{
+		{name: "distinct sorted keys", want: []string{"environment", "location", "nvidia.com/failure-domain"}, wantTotal: 3},
+		{
+			name: "descending second result",
+			page: paginator.PageInput{
+				Offset: cutil.GetPtr(1), Limit: cutil.GetPtr(1),
+				OrderBy: &paginator.OrderBy{Field: LabelKeyOrderByDefault, Order: paginator.OrderDescending},
+			},
+			want: []string{"location"}, wantTotal: 3,
+		},
+		{name: "empty site scope", filter: ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{}}, want: []string{}, wantTotal: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, total, err := dao.GetDistinctLabelKeys(ctx, nil, tt.filter, tt.page)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantTotal, total)
+		})
+	}
+}
+
+func TestExpectedMachineSQLDAO_GetDistinctLabelValues(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+	created := testExpectedMachineSQLDAOCreateExpectedMachines(ctx, t, dbSession)
+	dao := NewExpectedMachineDAO(dbSession)
+	_, err := dao.Update(ctx, nil, ExpectedMachineUpdateInput{
+		ExpectedMachineID: created[0].ID,
+		Labels: map[string]string{
+			"environment":               "test",
+			"location":                  "datacenter1",
+			"nvidia.com/failure-domain": "fd-a",
+		},
+	})
+	assert.NoError(t, err)
+
+	tests := []struct {
+		name      string
+		labelKey  string
+		filter    ExpectedMachineFilterInput
+		page      paginator.PageInput
+		want      []string
+		wantTotal int
+	}{
+		{name: "distinct sorted values", labelKey: "environment", want: []string{"production", "test"}, wantTotal: 2},
+		{name: "missing key", labelKey: "missing", want: []string{}, wantTotal: 0},
+		{name: "slash in key", labelKey: "nvidia.com/failure-domain", want: []string{"fd-a"}, wantTotal: 1},
+		{name: "site scope", labelKey: "location", filter: ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{created[0].SiteID}}, want: []string{"datacenter1"}, wantTotal: 1},
+		{
+			name: "descending second result", labelKey: "environment",
+			page: paginator.PageInput{
+				Offset: cutil.GetPtr(1), Limit: cutil.GetPtr(1),
+				OrderBy: &paginator.OrderBy{Field: LabelValueOrderByDefault, Order: paginator.OrderDescending},
+			},
+			want: []string{"production"}, wantTotal: 2,
+		},
+		{name: "empty site scope", labelKey: "environment", filter: ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{}}, want: []string{}, wantTotal: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, total, err := dao.GetDistinctLabelValues(ctx, nil, tt.labelKey, tt.filter, tt.page)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantTotal, total)
+		})
+	}
+}
+
 func TestExpectedMachineSQLDAO_GetByID(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInitDB(t)
@@ -567,8 +692,6 @@ func TestExpectedMachineSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -793,8 +916,6 @@ func TestExpectedMachineSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1154,8 +1275,6 @@ func TestExpectedMachineSQLDAO_Update(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -1329,8 +1448,6 @@ func TestExpectedMachineSQLDAO_Clear(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1384,8 +1501,6 @@ func TestExpectedMachineSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1505,8 +1620,6 @@ func TestExpectedMachineSQLDAO_CreateMultiple(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1898,14 +2011,15 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 					if tc.inputs[i].Labels != nil {
 						assert.Equal(t, Labels(tc.inputs[i].Labels), em.Labels)
 					}
+					if tc.inputs[i].Interfaces != nil {
+						assert.Equal(t, tc.inputs[i].Interfaces, em.Interfaces)
+					}
 				}
 			}
 
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -2065,4 +2179,41 @@ func TestExpectedMachineSQLDAO_UpdateMultiple_HostLifecycleProfile(t *testing.T)
 	assert.NoError(t, err)
 	assert.Equal(t, Labels{"env": "test"}, gotC.Labels)
 	assert.Nil(t, gotC.HostLifecycleProfile.DisableLockdown, "omitted profile (unset) must stay unset")
+}
+
+func TestExpectedMachineSQLDAO_ReplaceAllAndDeleteAll(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+
+	existing := testExpectedMachineSQLDAOCreateExpectedMachines(ctx, t, dbSession)
+	dao := NewExpectedMachineDAO(dbSession)
+	user, err := NewUserDAO(dbSession).Get(ctx, nil, existing[0].CreatedBy, nil)
+	require.NoError(t, err)
+	otherProvider := TestBuildInfrastructureProvider(t, dbSession, "replacement-provider", "replacement-org", user)
+	otherSite := TestBuildSite(t, dbSession, otherProvider, "replacement-site", user)
+	other, err := dao.Create(ctx, nil, ExpectedMachineCreateInput{ExpectedMachineID: uuid.New(), SiteID: otherSite.ID, BmcMacAddress: "00:1b:44:11:ee:01", ChassisSerialNumber: "other-site", CreatedBy: user.ID})
+	require.NoError(t, err)
+	result, err := dao.ReplaceAll(ctx, nil, ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, []ExpectedMachineCreateInput{
+		{ExpectedMachineID: uuid.New(), SiteID: existing[0].SiteID, BmcMacAddress: "00:1b:44:11:ff:01", ChassisSerialNumber: "replacement-1", CreatedBy: existing[0].CreatedBy},
+		{ExpectedMachineID: uuid.New(), SiteID: existing[0].SiteID, BmcMacAddress: "00:1b:44:11:ff:02", ChassisSerialNumber: "replacement-2", CreatedBy: existing[0].CreatedBy},
+	})
+	require.NoError(t, err)
+	require.Len(t, result, 2)
+	assert.Equal(t, "replacement-1", result[0].ChassisSerialNumber)
+	_, err = dao.Get(ctx, nil, other.ID, nil, false)
+	require.NoError(t, err)
+
+	result, err = dao.ReplaceAll(ctx, nil, ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, result)
+	_, count, err := dao.GetAll(ctx, nil, ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, paginator.PageInput{}, nil)
+	require.NoError(t, err)
+	assert.Zero(t, count)
+	_, err = dao.Get(ctx, nil, other.ID, nil, false)
+	require.NoError(t, err)
+
+	err = dao.DeleteAll(ctx, nil, ExpectedMachineFilterInput{})
+	assert.ErrorIs(t, err, db.ErrInvalidParams)
 }

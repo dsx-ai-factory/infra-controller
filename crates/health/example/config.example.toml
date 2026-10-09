@@ -136,6 +136,15 @@ batch_size = 512
 # identity. Must be greater than zero. Default: 32768. Changes require a service
 # restart.
 queue_capacity = 32768
+# Maximum encoded size, in bytes, of one export request. A larger batch, or one
+# the target rejects with RESOURCE_EXHAUSTED, is split and sent in parts; a
+# single record is always sent on its own. Must be greater than zero. Default:
+# 4194304 (4 MiB), the OpenTelemetry Collector's default gRPC receive limit.
+max_request_bytes = 4194304
+# Maximum export requests in flight to this target for each signal. Batches
+# share one connection and may arrive out of order. Must be greater than zero.
+# Default: 4.
+max_concurrent_exports = 4
 flush_interval = "2s"
 
 # Include Redfish diagnostic payload fields in OTLP logs for this target.
@@ -234,6 +243,9 @@ skip_empty_reports = true
 # Rate Limiting
 # ==============================================================================
 
+# Global token bucket that every collector iteration waits on before it runs.
+# Disabled unless this table is present; omitted fields use their defaults:
+# bucket_burst = 100, bucket_replenish = "30ms", max_jitter = "50ms".
 [rate_limit]
 bucket_burst = 200
 bucket_replenish = "35ms"
@@ -276,6 +288,11 @@ fetch_interval = "2m"
 [collectors.firmware]
 firmware_refresh_interval = "30m"
 
+# Power shelf manager (PMC) status: `manager_status` and `manager_last_reset`.
+# Runs for power shelf endpoints only and is enabled by default with a 5m poll.
+[collectors.manager]
+poll_interval = "2m"
+
 [collectors.leak_detector]
 poll_interval = "1m"
 state_refresh_interval = "30m"
@@ -291,30 +308,46 @@ state_refresh_interval = "30m"
 #  "auto": (default)
 #       - spawn SSE per endpoint
 #       - if SSE not supported, downgrade to periodic collection
-#       - if reconnects exceeds budget, downgrade to periodic collection
-#       - reset downgrades after server restart
+#       - if reconnect failures exceed both configured thresholds, downgrade
+#         to periodic collection
+#       - remain in periodic fallback unless SSE retry is enabled below
 #  "sse": always SSE; retry with exp. backoff on connect failure
 #  "periodic": always poll
 mode = "auto"
 
 # auto-mode downgrade thresholds and periodic fallback; read only when
 # mode = "auto". omit the whole section to use defaults.
+# If [collectors.logs.auto] is omitted, auto fallback uses [collectors.logs.periodic]
+# when present, otherwise defaults. An explicit auto section replaces that fallback.
 [collectors.logs.auto]
 # auto uses [collectors.logs.sse] while attempting SSE, then switches to
 # these periodic fallback parameters after downgrade.
+# Paginated periodic collections require a stable Members@odata.count matching
+# all returned members. Numeric IDs must be distinct; incomplete scans retry without advancing progress.
 sse_not_available_threshold = 1
+# Transient failures must reach this duration and the count threshold below.
 connect_failure_window = "5m"
 connect_failure_threshold = 5
+# Opt in to stopping periodic fallback after 30m and retrying SSE on the next
+# discovery pass. Transitions may duplicate or miss records when SSE and
+# periodic collection cover different LogService endpoints.
+retry_sse_after_downgrade = false
 logs_collection_interval = "5m"
+# Refresh log service discovery; continuity is checked each collection poll.
 state_refresh_interval = "30m"
 logs_state_file = "/tmp/logs_collector_{machine_id}.json"
 # Skip any Redfish LogService whose odata id contains one of these substrings.
 # Applies when auto-mode downgrades to periodic collection. See [collectors.logs.periodic].
 exclude_services = ["Journal"]
-# When true, on first encounter of a LogService with no saved state, anchor at
-# the current highest entry ID without emitting historical entries. Matches
-# SSE real-time behaviour. Default: false (collect all existing entries on
-# first run). Also read by auto-mode after downgrade to periodic.
+# Skip history only during a new service's first successful baseline.
+# Numeric IDs must grow between resets; existing entries remain unchanged.
+# Nonnumeric entries are emitted when collecting or replaying retained history.
+# Incremental scans and completed history-skipping baselines ignore them.
+# A missing saved entry or changed mapped log record triggers replay at the next poll.
+# Changes below an unchanged anchor are not detected.
+# Default: false (emit retained history). Auto reads this after downgrade.
+# Failed baselines and old fingerprint or numeric/SSE checkpoints replay history.
+# Disable this option when rolling back to the numeric-only checkpoint reader.
 # skip_initial_history = false
 
 # SSE reconnect backoff; read when mode = "sse" and during auto-mode SSE attempts.
@@ -322,10 +355,13 @@ exclude_services = ["Journal"]
 initial_backoff = "1s"
 max_backoff = "30s"
 
-# required when
-# mode = "periodic"; must not be set when mode = "sse"
+# Required when mode = "periodic"; ignored when mode = "sse".
 [collectors.logs.periodic]
+# Paginated collections require a stable Members@odata.count matching all returned
+# members. Numeric IDs must be distinct; incomplete scans retry without advancing progress.
+# Single pages may omit count.
 logs_collection_interval = "5m"
+# Refresh log service discovery; continuity is checked each collection poll.
 state_refresh_interval = "30m"
 logs_state_file = "/tmp/logs_collector_{machine_id}.json"
 # Skip any Redfish LogService whose odata id contains one of these substrings.
@@ -333,10 +369,15 @@ logs_state_file = "/tmp/logs_collector_{machine_id}.json"
 # self-referential since polling generates Journal entries). Set to [] to collect
 # from every discovered LogService. Also read by auto-mode after downgrade.
 exclude_services = ["Journal"]
-# When true, on first encounter of a LogService with no saved state, anchor at
-# the current highest entry ID without emitting historical entries. Matches
-# SSE real-time behaviour. Default: false (collect all existing entries on
-# first run).
+# Skip history only during a new service's first successful baseline.
+# Numeric IDs must grow between resets; existing entries remain unchanged.
+# Nonnumeric entries are emitted when collecting or replaying retained history.
+# Incremental scans and completed history-skipping baselines ignore them.
+# A missing saved entry or changed mapped log record triggers replay at the next poll.
+# Changes below an unchanged anchor are not detected.
+# Default: false (emit retained history).
+# Failed baselines and old fingerprint or numeric/SSE checkpoints replay history.
+# Disable this option when rolling back to the numeric-only checkpoint reader.
 # skip_initial_history = false
 
 # ==============================================================================
@@ -485,6 +526,10 @@ platform_environment_status_enabled = true
 # platform_general_enabled is true)
 gnmi_port = 9339
 sample_interval = "5m"
+# Applied independently to connection establishment, opening the Subscribe RPC,
+# and initial synchronization. One attempt may take nearly three times this
+# duration before reconnect backoff. Updates before sync_response=true do not
+# extend the synchronization timeout.
 request_timeout = "30s"
 # Keep strict TLS certificate and hostname verification by default. Set true only
 # for lab/self-signed NVOS gNMI endpoints where that dangerous bypass is required.
@@ -495,12 +540,84 @@ system_events_enabled = true
 [collectors.nvue.gnmi.paths]
 components_enabled = true
 interfaces_enabled = true
+# Optional exact interface leaf paths relative to `/interfaces/interface`.
+# Omit to subscribe to the full interface subtree. A nonempty list subscribes
+# to only these leaves for every interface on an independent SAMPLE stream.
+# Paths must map to built-in interface metrics; an unmapped path is rejected
+# when the switch collector starts. An NVOS rejection reports the requested
+# path set and retries this stream without interrupting components or platform
+# telemetry. Set interfaces_enabled = false to disable interface telemetry.
+# interface_paths = [
+#   ["state", "oper-status"],
+#   ["infiniband", "state", "physical-port-state"],
+#   ["phy-diag", "state", "raw-ber"],
+# ]
 # Switch-level memory, disk utilization, and ambient temperature from
 # `/platform-general/state` (a singleton, not keyed by interface or component name).
 platform_general_enabled = true
 # Per-sensor leakage state from `/platform-general/leak-sensors/leak-sensor[id]/state/state`.
-# Enable only on NVOS releases that support this path. Default: false.
+# The path uses an independent SAMPLE stream, so an unsupported path does not
+# interrupt component, interface, or platform-general telemetry. The leak-sensor
+# stream retries independently. Default: false.
 leak_sensors_enabled = false
+
+# Malformed values in enabled configuration sections fail startup; they do not
+# reset the section to defaults. `enabled = false` disables a section without
+# parsing its payload, including nested sections.
+# Additional subscriptions are optional and default to an empty list. Each
+# entry opens an independent gNMI STREAM RPC for every switch host eligible for
+# NVUE gNMI and can bundle multiple paths. A rejected path affects its bundled
+# subscription; connection and stream failures retry only that subscription.
+# Configuration changes require a service restart.
+#
+# [[collectors.nvue.gnmi.additional_subscriptions]]
+# Required unique lower_snake_case name. The name is emitted as the
+# `subscription` metric label and in stream diagnostics.
+# name = "external_platform"
+# Optional gNMI prefix fields. target defaults to "nvos"; origin and prefix
+# default to empty. Path arrays contain unkeyed element names.
+# target = "nvos"
+# origin = "openconfig-platform"
+# prefix = ["components"]
+# Optional response encoding. Default: "json". Accepted values: "json",
+# "ascii", and "json_ietf". These encodings provide scalar values that the
+# extended metric outputs can project.
+# encoding = "json_ietf"
+# Optional. Default: false. When true, the target omits its initial snapshot.
+# updates_only = false
+# mode defaults to "target_defined" and also accepts "on_change" or "sample".
+# sample_interval is required only for "sample". heartbeat_interval is supported
+# for "sample" and "on_change". Both intervals must be greater than zero.
+# suppress_redundant defaults to false and is supported only for "sample".
+# mode = "sample"
+# sample_interval = "30s"
+# suppress_redundant = true
+# heartbeat_interval = "5m"
+#
+# At least one request path is required. Each path is relative to prefix.
+# paths = [["component"]]
+#
+# Each metric maps one exact response path below prefix. Multiple metrics can
+# map descendant leaves from one request path. Optional labels copy named keys
+# from response path elements; an update without every configured key is
+# ignored. Each selected element must occur exactly once in prefix plus the
+# metric path. Label names cannot use `subscription`, `state`, or the endpoint
+# and hardware metadata labels added by the service. Each distinct key
+# combination creates a metric series. At least one metric is required.
+# [[collectors.nvue.gnmi.additional_subscriptions.metrics]]
+# path = ["component", "state", "reading"]
+# metric_type = "component_reading"
+# labels = [{ name = "component_name", element = "component", key = "name" }]
+# output = { kind = "gauge", unit = "count" }
+#
+# The output can instead use a finite state_set or info domain. Values outside
+# the declared domain, malformed values, and unsupported value encodings do
+# not produce metrics. Delete notifications remove matching Prometheus series.
+# A state_set output uses the reserved `state` label and emits one series per
+# declared state: 1 for the current state and 0 for the others. An info output
+# emits one constant-1 series with the matched value in its configured label.
+# output = { kind = "state_set", states = ["normal", "attention"] }
+# output = { kind = "info", label = "mode", values = ["active", "standby"] }
 
 # ==============================================================================
 # Processors

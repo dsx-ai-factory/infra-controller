@@ -8,7 +8,9 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -19,15 +21,20 @@ import (
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 
+	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
+	workflowtypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/workflow"
 	swu "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
 )
 
 // Orchestrator - Workflow Orchestrator
 func Orchestrator() {
-	defer computils.UpdateState(ManagerAccess.Data.EB)
 	log := ManagerAccess.Data.EB.Log
 	state := ManagerAccess.Data.EB.Managers.Workflow.State
+
+	// Health checks treat the Site Agent as connecting until this attempt finishes.
+	state.SetWorker(nil)
 
 	// Cleanup resources
 	if ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker != nil {
@@ -45,31 +52,59 @@ func Orchestrator() {
 
 	// keep track how many events we've seen.
 	state.ConnectionAttempted.Inc()
-	state.SetConnectionTime(time.Now().String())
+	state.SetConnectionTime(time.Now())
 
-	err := workflowOrchestrator()
+	status, err := workflowOrchestrator()
 	if err != nil {
 		state.HealthStatus.Store(uint64(computils.CompUnhealthy))
 		errMsg := err.Error()
 		state.SetErr(errMsg)
 		log.Error().Msg(errMsg)
+		status = workflowtypes.NewWorkerStatus()
+		status.SetErr(err)
 	} else {
 		// keep track how many succeeded.
 		state.ConnectionSucc.Inc()
 		state.HealthStatus.Store(uint64(computils.CompHealthy))
 	}
+	state.SetWorker(status)
+}
+
+// stopWorker records that the Temporal SDK stopped the worker on an error it
+// does not retry. The SDK never restarts it, so the liveness check fails from
+// here on and Kubernetes restarts the Site Agent.
+func stopWorker(eb *elektratypes.Elektra, status *workflowtypes.WorkerStatus, err error) {
+	status.SetErr(err)
+	state := eb.Managers.Workflow.State
+	// A worker that a reload already replaced has nothing left to report.
+	if state.Worker() != status {
+		return
+	}
+	eb.Log.Error().Err(err).Msg("Workflow: Temporal worker stopped, failing the liveness check")
+	state.HealthStatus.Store(uint64(computils.CompUnhealthy))
+	state.SetErr(err.Error())
 }
 
 // StartWorkflow - Workflow init function
-func workflowOrchestrator() error {
+func workflowOrchestrator() (*workflowtypes.WorkerStatus, error) {
 	// Set the global handle here
 	log := ManagerAccess.Data.EB.Log
 
 	// Initialize Temporal client
 	log.Info().Msg("Workflow: Creating Elektra site agent Temporal workflow orchestrator")
 
+	// The shared interceptor also implements the worker interface, so the
+	// worker built from the subscriber client inherits it and must not
+	// register it again.
 	var clientInterceptors []interceptor.ClientInterceptor
-	var workerInterceptors []interceptor.WorkerInterceptor
+	// otelErr, not err: `var err error` is declared further down.
+	otelInterceptor, otelErr := ctemporal.TracingInterceptor()
+	if otelErr != nil {
+		return nil, fmt.Errorf("creating Temporal tracing interceptor: %w", otelErr)
+	}
+	if otelInterceptor != nil {
+		clientInterceptors = append(clientInterceptors, otelInterceptor)
+	}
 
 	// Create logger for temporal using
 	// zero logger
@@ -99,14 +134,26 @@ func workflowOrchestrator() error {
 			fmt.Sprintf("%v/%v", TemporalClientCertPath, kpFileName[1]))
 		if err != nil {
 			log.Error().Msg("Workflow: Unable to read client certificates")
-			return err
+			return nil, err
+		}
+
+		// Each pod loads its own certificate on startup and reload.
+		leaf := clientcert.Leaf
+		if leaf == nil {
+			// GODEBUG=x509keypairleaf=0 leaves Leaf unset after a successful load.
+			leaf, err = x509.ParseCertificate(clientcert.Certificate[0])
+		}
+		if err == nil && leaf != nil && CertExpirationMetric != nil {
+			CertExpirationMetric.Set(float64(leaf.NotAfter.Unix()))
+		} else {
+			log.Warn().Err(err).Msg("Workflow: Unable to update Temporal certificate expiration metric")
 		}
 
 		// Load server cert
 		caCert, err := os.ReadFile(TemporalCACertPath)
 		if err != nil {
 			log.Error().Msg("Workflow: Unable to read server certificates")
-			return err
+			return nil, err
 		}
 		caCertPool := x509.NewCertPool()
 		caCertPool.AppendCertsFromPEM(caCert)
@@ -137,9 +184,14 @@ func workflowOrchestrator() error {
 	// Initialize client for publish namespace
 	tLogger := logur.LoggerToKV(zlogadapter.New(zerolog.New(os.Stderr)))
 
-	log.Info().Msgf("Workflow: Connecting to Host %v, Port %v", ManagerAccess.Conf.EB.Temporal.Host, ManagerAccess.Conf.EB.Temporal.Port)
+	host := ManagerAccess.Conf.EB.Temporal.Host
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	target := net.JoinHostPort(host, ManagerAccess.Conf.EB.Temporal.Port)
+	log.Info().Msgf("Workflow: Connecting to %s", target)
 	clientOptions := client.Options{
-		HostPort:          fmt.Sprintf("%s:%s", ManagerAccess.Conf.EB.Temporal.Host, ManagerAccess.Conf.EB.Temporal.Port),
+		HostPort:          target,
 		Namespace:         ManagerAccess.Conf.EB.Temporal.TemporalPublishNamespace,
 		ConnectionOptions: publishClientConnOptions,
 		DataConverter:     swu.NewTemporalDataConverter(),
@@ -155,12 +207,12 @@ func workflowOrchestrator() error {
 	}
 	if err != nil {
 		log.Error().Msg("Workflow: Failed to create Temporal client")
-		return err
+		return nil, err
 	}
 
 	// Initialize client for subscribe namespace
 	clientOptions = client.Options{
-		HostPort:          fmt.Sprintf("%s:%s", ManagerAccess.Conf.EB.Temporal.Host, ManagerAccess.Conf.EB.Temporal.Port),
+		HostPort:          target,
 		Namespace:         ManagerAccess.Conf.EB.Temporal.TemporalSubscribeNamespace,
 		ConnectionOptions: subscribeClientConnOptions,
 		DataConverter:     swu.NewTemporalDataConverter(),
@@ -176,15 +228,21 @@ func workflowOrchestrator() error {
 	}
 	if err != nil {
 		log.Error().Msg("Workflow: Failed to create Temporal client")
-		return err
+		return nil, err
 	}
 
+	status := workflowtypes.NewWorkerStatus(
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Publisher,
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Subscriber)
+	eb := ManagerAccess.Data.EB
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker = worker.New(
 		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Subscriber,
 		ManagerAccess.Conf.EB.Temporal.TemporalSubscribeQueue,
 		worker.Options{
-			Interceptors:        workerInterceptors,
 			WorkflowPanicPolicy: worker.FailWorkflow,
+			OnFatalError: func(err error) {
+				stopWorker(eb, status, err)
+			},
 		})
 	log.Info().Msg("Workflow: Registering orchestrator workflows and activities for elektra cluster ")
 
@@ -198,7 +256,7 @@ func workflowOrchestrator() error {
 	// TODO: all RegisterSubscriber calls return an error and we ignore them. Should we?
 	err = ManagerAccess.API.Site.RegisterPublisher()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	ManagerAccess.API.VPC.RegisterSubscriber()
@@ -209,6 +267,12 @@ func workflowOrchestrator() error {
 
 	ManagerAccess.API.VpcPeering.RegisterSubscriber()
 	ManagerAccess.API.VpcPeering.RegisterPublisher()
+
+	// Inventory only: SpectrumX Partition CRUD goes through the generic Core gRPC proxy.
+	err = ManagerAccess.API.SpectrumXPartition.RegisterPublisher()
+	if err != nil {
+		ManagerAccess.Data.EB.Log.Error().Err(err).Msg("SpectrumXPartition: failed to register inventory publisher")
+	}
 
 	ManagerAccess.API.Subnet.RegisterSubscriber()
 	ManagerAccess.API.Subnet.RegisterPublisher()
@@ -253,6 +317,10 @@ func workflowOrchestrator() error {
 
 	ManagerAccess.API.ExpectedRack.RegisterSubscriber()
 	ManagerAccess.API.ExpectedRack.RegisterPublisher()
+	err = ManagerAccess.API.ExpectedRackGroup.RegisterPublisher()
+	if err != nil {
+		ManagerAccess.Data.EB.Log.Error().Err(err).Msg("ExpectedRackGroup: failed to register publisher")
+	}
 
 	ManagerAccess.API.ExpectedSwitch.RegisterSubscriber()
 	ManagerAccess.API.ExpectedSwitch.RegisterPublisher()
@@ -282,8 +350,8 @@ func workflowOrchestrator() error {
 	err = ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.Start()
 	if err != nil {
 		log.Error().Msg("Workflow: Failed to start orchestrator worker")
-		return err
+		return nil, err
 	}
 
-	return nil
+	return status, nil
 }

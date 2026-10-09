@@ -49,9 +49,12 @@ pub fn run(mut interval: Interval, api_client: ApiClient) -> ApiThrottler {
                                 .into_iter()
                                 .collect::<Vec<_>>();
 
-                            // Max of 100 machine IDs at a time
+                            // Page the lookup so each reply stays well under tonic's
+                            // 4 MiB receive limit: a page of 100 machines has exceeded
+                            // it in the field at about 46 KB per machine.
+                            const MACHINES_PAGE_SIZE: usize = 25;
                             let mut machines_by_id = HashMap::new();
-                            for chunk in machine_ids.chunks(100) {
+                            for chunk in machine_ids.chunks(MACHINES_PAGE_SIZE) {
                                 let machines = api_client.get_machines(
                                     chunk.iter().map(|id| **id).collect(),
                                 )

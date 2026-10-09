@@ -91,6 +91,19 @@ func (s *Server) Start(ctx context.Context) {
 	}
 }
 
+// Done returns a channel closed once both HTTP services have stopped serving.
+func (s *Server) Done() <-chan struct{} {
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		<-s.appService.Done()
+		<-s.insecService.Done()
+	}()
+
+	return done
+}
+
 // PKICACertificateHandler returns pkiCACertificateHandler
 func (s *Server) PKICACertificateHandler(_ context.Context) http.Handler {
 	h := &pkiCACertificateHandler{

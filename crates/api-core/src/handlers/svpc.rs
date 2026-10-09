@@ -214,10 +214,9 @@ async fn resolve_rotate_lockdown_key(api: &Api, machine_id: HostMachineId) -> Ca
 /// The two branches resolve their fallback differently on purpose. The site-wide
 /// `lockdown_ikm` target row is seeded for every site by the backfill migration
 /// (and by `set_initial_target_version` on the first `RotateCredential`), so a
-/// missing target is a corrupted invariant we surface rather than paper over --
-/// mirroring `record_device_converged`. A per-card row, by contrast, is created
-/// lazily on first lock and only backfilled for already-locked cards, so a card
-/// with no row / no tracked version legitimately falls back to the seed version.
+/// missing target returns `MissingSitewideRotationTarget`. A per-card row is
+/// created lazily on first lock and only backfilled for already-locked cards,
+/// so a card with no row / no tracked version falls back to the seed version.
 async fn resolve_lock_ikm_version(
     api: &Api,
     mac: MacAddress,
@@ -383,7 +382,7 @@ fn build_apply_firmware_command<'a>(
         carbide_instrument::emit(FirmwareUpdateProgress {
             target: FirmwareUpdateTarget::SuperNic,
             phase: FirmwareUpdatePhase::Started,
-            machine_id: machine_id.into(),
+            machine_id,
             detail: format!(
                 "pci_name={pci_name} part_number={part_number} psid={psid} \
                  observed_fw_version={:?} expected_fw_version={}",
@@ -707,12 +706,31 @@ pub(crate) async fn publish_mlx_device_report(
     request: Request<mlx_device_pb::PublishMlxDeviceReportRequest>,
 ) -> Result<Response<mlx_device_pb::PublishMlxDeviceReportResponse>, Status> {
     log_request_data(&request);
+    let authenticated_machine_id = crate::auth::authenticated_machine_id(&request)?;
     let req = request.into_inner();
+
+    // Generic observations do not depend on SVPC. Legacy admin/simulator
+    // callers can still publish DPA data, but cannot replace host observations.
+    // A failed snapshot statement must not skip independent DPA writes.
+    // Return that error after processing the DPA report; reject invalid input now.
+    let observation_result = if let (Some(machine_id), Some(report)) =
+        (authenticated_machine_id, req.report.as_ref())
+    {
+        match super::mlx_device_report::persist(&api.database_connection, machine_id, report).await
+        {
+            Ok(()) => Ok(()),
+            Err(error @ CarbideError::DBError(_)) => Err(error),
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        Ok(())
+    };
 
     if !api.runtime_config.is_ewethers_enabled() || !api.runtime_config.is_svpc_enabled() {
         tracing::info!(
             "DPA is not enabled or SVPC is not enabled, skipping SVPC publish_mlx_device_report"
         );
+        observation_result?;
         return Ok(Response::new(
             mlx_device_pb::PublishMlxDeviceReportResponse {},
         ));
@@ -857,6 +875,7 @@ pub(crate) async fn publish_mlx_device_report(
         tracing::warn!("no embedded MlxDeviceReport published");
     }
 
+    observation_result?;
     Ok(Response::new(
         mlx_device_pb::PublishMlxDeviceReportResponse {},
     ))

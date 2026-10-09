@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::net::{Ipv4Addr, Ipv6Addr};
 
 use ::rpc::forge as rpc;
 use carbide_rpc_utils::dhcp::HostConfig;
@@ -44,6 +43,11 @@ pub(super) const RELOAD_DHCP_SERVER: &str =
 pub(super) const STOP_DHCP_SERVER: &str =
     "supervisorctl update;supervisorctl stop forge-dhcp-server-default";
 
+/// Preferred lifetime advertised for DPU-side DHCPv6 address bindings.
+pub(super) const DHCPV6_PREFERRED_LIFETIME_SECS: u32 = 3600;
+/// Valid lifetime advertised for DPU-side DHCPv6 address bindings.
+pub(super) const DHCPV6_VALID_LIFETIME_SECS: u32 = 7200;
+
 /// Generate default-forge-dhcp-server.conf
 pub(super) fn build_server_supervisord_config(
     conf: DhcpServerSupervisordConfig,
@@ -58,24 +62,6 @@ pub(super) fn build_server_supervisord_config(
 /// An empty default-isc-dhcp-relay.conf
 pub(super) fn blank() -> String {
     gtmpl::template(TMPL_EMPTY, "").expect("dhcp blank template cannot fail")
-}
-
-pub(super) fn build_server_config(
-    pxe_ip: Ipv4Addr,
-    ntpservers: Vec<Ipv4Addr>,
-    nameservers: Vec<Ipv4Addr>,
-    nameservers_v6: Vec<Ipv6Addr>,
-    loopback_ip: Ipv4Addr,
-) -> Result<String, eyre::Report> {
-    let dhcp_config = carbide_rpc_utils::dhcp::DhcpConfig::from_forge_dhcp_config(
-        pxe_ip,
-        ntpservers,
-        nameservers,
-        nameservers_v6,
-        loopback_ip,
-    )?;
-
-    Ok(serde_yaml::to_string(&dhcp_config)?)
 }
 
 pub(super) fn build_server_host_config(

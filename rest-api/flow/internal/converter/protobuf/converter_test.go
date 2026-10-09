@@ -17,12 +17,14 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/location"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/bmc"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
@@ -38,6 +40,27 @@ func TestLeakStatusTo(t *testing.T) {
 	}
 	for in, want := range cases {
 		assert.Equal(t, want, LeakStatusTo(in), "LeakStatusTo(%q)", in)
+	}
+}
+
+func TestTaskTo(t *testing.T) {
+	appliedRuleID := uuid.New()
+	tests := []struct {
+		name          string
+		appliedRuleID *uuid.UUID
+		wantRuleID    string
+	}{
+		{name: "includes the applied rule", appliedRuleID: &appliedRuleID, wantRuleID: appliedRuleID.String()},
+		{name: "omits an unapplied rule"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			converted := TaskTo(&taskdef.Task{AppliedRuleID: test.appliedRuleID})
+
+			require.NotNil(t, converted)
+			require.Equal(t, test.wantRuleID, converted.GetAppliedRuleId().GetId())
+		})
 	}
 }
 
@@ -526,10 +549,19 @@ func TestBMCFrom(t *testing.T) {
 
 func TestComponentConverter(t *testing.T) {
 	domainID := uuid.New()
+	observedAt := time.Date(2026, time.September, 28, 12, 0, 0, 0, time.UTC)
+	health := &types.HealthReport{
+		Source:     "aggregate-host-health",
+		ObservedAt: &observedAt,
+		Successes:  []types.HealthProbeSuccess{{ID: "FanSpeed"}},
+		Alerts:     []types.HealthProbeAlert{},
+	}
 	shared := component.Component{
 		Type:            devicetypes.ComponentTypeCompute,
 		Info:            deviceinfo.NewRandom("TestComponent", 6),
 		FirmwareVersion: "1.0.0",
+		ComponentID:     "machine-123",
+		RackExternalID:  "rack-external-1",
 		Position: component.InRackPosition{
 			SlotID:    26,
 			TrayIndex: 12,
@@ -537,6 +569,7 @@ func TestComponentConverter(t *testing.T) {
 		},
 		BmcsByType:  make(map[devicetypes.BMCType][]bmc.BMC),
 		NVLDomainID: domainID,
+		Health:      health,
 	}
 
 	sharedP := pb.Component{
@@ -555,8 +588,16 @@ func TestComponentConverter(t *testing.T) {
 			TrayIdx: int32(shared.Position.TrayIndex),
 			HostId:  int32(shared.Position.HostID),
 		},
-		Bmcs:        make([]*pb.BMCInfo, 0),
-		NvlDomainId: &pb.UUID{Id: domainID.String()},
+		Bmcs:           make([]*pb.BMCInfo, 0),
+		ComponentId:    shared.ComponentID,
+		NvlDomainId:    &pb.UUID{Id: domainID.String()},
+		RackExternalId: shared.RackExternalID,
+		Health: &pb.HealthReport{
+			Source:     health.Source,
+			ObservedAt: timestamppb.New(observedAt),
+			Successes:  []*pb.HealthProbeSuccess{{Id: "FanSpeed"}},
+			Alerts:     []*pb.HealthProbeAlert{},
+		},
 	}
 
 	testCases := map[string]struct {
@@ -564,6 +605,7 @@ func TestComponentConverter(t *testing.T) {
 		sourceP    *pb.Component
 		converted  *component.Component
 		convertedP *pb.Component
+		wantErr    string
 	}{
 		"valid": {
 			source:     &shared,
@@ -577,28 +619,105 @@ func TestComponentConverter(t *testing.T) {
 			converted:  nil,
 			convertedP: nil,
 		},
+		"malformed component ID": {
+			sourceP: &pb.Component{
+				Info: &pb.DeviceInfo{Id: &pb.UUID{Id: "not-a-uuid"}},
+			},
+			wantErr: "component info.id",
+		},
+		"malformed domain ID": {
+			sourceP: &pb.Component{
+				NvlDomainId: &pb.UUID{Id: "not-a-uuid"},
+			},
+			wantErr: "component nvl_domain_id",
+		},
 	}
 
 	for name, testCase := range testCases {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, testCase.converted, ComponentFrom(testCase.sourceP))
+			converted, err := ComponentFrom(testCase.sourceP)
+			if testCase.wantErr != "" {
+				require.ErrorContains(t, err, testCase.wantErr)
+				assert.Nil(t, converted)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, testCase.converted, converted)
 			assert.Equal(t, testCase.convertedP, ComponentTo(testCase.source))
+		})
+	}
+}
+
+func TestNVLinkDomainFromInventory(t *testing.T) {
+	for _, tc := range []struct {
+		name, otherProfile, domainName string
+		topology                       *string
+	}{
+		{name: "common topology", otherProfile: "GB200_NVL72R1_C2G4_SMC", topology: new("GB200_NVL72R1_C2G4")},
+		{name: "inconsistent topology", otherProfile: "GB300_NVL72R1_C2G4_SMC", domainName: "group-name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cluster := uuid.New()
+			domain := &nvldomain.NVLDomain{Identifier: identifier.Identifier{ID: uuid.New(), ExternalID: "group-01", Name: tc.domainName}, NMXCClusterID: &cluster}
+			racks := []*rack.Rack{
+				{ExternalID: "rack-a", RackProfileID: new("GB200_NVL72R1_C2G4_NVIDIA"), OperationStatus: types.PhaseReady, Components: []component.Component{{ComponentID: "a"}}},
+				{ExternalID: "rack-b", RackProfileID: &tc.otherProfile, OperationStatus: types.PhaseInUse, Components: []component.Component{{ComponentID: "b"}}},
+			}
+			got := NVLinkDomainFromInventory(domain, racks)
+			assert.Equal(t, "group-01", got.GetId())
+			assert.Equal(t, got.GetId(), got.GetRackGroupId())
+			assert.Equal(t, cluster.String(), got.GetNmxcClusterId())
+			assert.Equal(t, tc.domainName, got.GetName())
+			assert.Equal(t, tc.topology, got.Topology)
+			assert.Equal(t, pb.Phase_PHASE_IN_USE, got.OperationStatus)
+			require.Len(t, got.Components, 2)
+			assert.Equal(t, "a", got.Components[0].GetComponentId())
+			assert.Equal(t, "b", got.Components[1].GetComponentId())
+		})
+	}
+}
+
+func TestRackTopology(t *testing.T) {
+	for _, tc := range []struct{ name, profile, topology string }{
+		{name: "qualified", profile: "GB200_NVL72R1_C2G4_WIWYNN", topology: "GB200_NVL72R1_C2G4"},
+		{name: "without power", profile: "GB300_NVL72R1_C2G4_SMC_NO_POWERSHELF", topology: "GB300_NVL72R1_C2G4"},
+		{name: "legacy", profile: "NVL72"},
+		{name: "unavailable"},
+		{name: "unknown vendor", profile: "GB200_NVL72R1_C2G4_OTHER"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			topology := rackTopology(tc.profile)
+			if tc.topology == "" {
+				assert.Nil(t, topology)
+			} else {
+				assert.Equal(t, &tc.topology, topology)
+			}
 		})
 	}
 }
 
 func TestRackConverter(t *testing.T) {
 	domainID := uuid.New()
+	observedAt := time.Date(2026, time.September, 28, 12, 0, 0, 0, time.UTC)
+	health := &types.HealthReport{
+		Source:     "rack-aggregate-health",
+		ObservedAt: &observedAt,
+		Successes:  []types.HealthProbeSuccess{},
+		Alerts:     []types.HealthProbeAlert{{ID: "RackAlert", Message: "fault"}},
+	}
 	shared := rack.Rack{
-		Info: deviceinfo.NewRandom("TestRack", 12),
+		Info:       deviceinfo.NewRandom("TestRack", 12),
+		ExternalID: "rack-external-1",
 		Loc: location.Location{
 			Region:     "US",
 			DataCenter: "Santa Clara",
 			Room:       "Mars",
 			Position:   "Row 12",
 		},
-		Components:  make([]component.Component, 0),
-		NVLDomainID: domainID,
+		Components:      make([]component.Component, 0),
+		NVLDomainID:     domainID,
+		OperationStatus: types.PhaseError,
+		Health:          health,
 	}
 
 	sharedP := pb.Rack{
@@ -616,19 +735,30 @@ func TestRackConverter(t *testing.T) {
 			Room:       shared.Loc.Room,
 			Position:   shared.Loc.Position,
 		},
-		Components:   make([]*pb.Component, 0),
-		NvlDomainIds: []*pb.UUID{{Id: domainID.String()}},
+		Components:      make([]*pb.Component, 0),
+		NvlDomainIds:    []*pb.UUID{{Id: domainID.String()}},
+		ExternalId:      shared.ExternalID,
+		OperationStatus: pb.Phase_PHASE_ERROR,
+		Health: &pb.HealthReport{
+			Source:     health.Source,
+			ObservedAt: timestamppb.New(observedAt),
+			Successes:  []*pb.HealthProbeSuccess{},
+			Alerts:     []*pb.HealthProbeAlert{{Id: "RackAlert", Message: "fault"}},
+		},
 	}
+	fromProto := shared
+	fromProto.OperationStatus = types.PhaseUnknown
 	testCases := map[string]struct {
 		source     *rack.Rack
 		sourceP    *pb.Rack
 		converted  *rack.Rack
 		convertedP *pb.Rack
+		wantErr    string
 	}{
 		"valid": {
 			source:     &shared,
 			sourceP:    &sharedP,
-			converted:  &shared,
+			converted:  &fromProto,
 			convertedP: &sharedP,
 		},
 		"nil": {
@@ -637,11 +767,41 @@ func TestRackConverter(t *testing.T) {
 			converted:  nil,
 			convertedP: nil,
 		},
+		"malformed rack ID": {
+			sourceP: &pb.Rack{
+				Info: &pb.DeviceInfo{Id: &pb.UUID{Id: "not-a-uuid"}},
+			},
+			wantErr: "rack info.id",
+		},
+		"mixed valid and malformed domain IDs": {
+			sourceP: &pb.Rack{
+				NvlDomainIds: []*pb.UUID{
+					{Id: domainID.String()},
+					{Id: "not-a-uuid"},
+				},
+			},
+			wantErr: "rack nvl_domain_ids entry 1",
+		},
+		"malformed nested component ID": {
+			sourceP: &pb.Rack{
+				Components: []*pb.Component{
+					{Info: &pb.DeviceInfo{Id: &pb.UUID{Id: "not-a-uuid"}}},
+				},
+			},
+			wantErr: "rack component 0: component info.id",
+		},
 	}
 
 	for name, testCase := range testCases {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, testCase.converted, RackFrom(testCase.sourceP))
+			converted, err := RackFrom(testCase.sourceP)
+			if testCase.wantErr != "" {
+				require.ErrorContains(t, err, testCase.wantErr)
+				assert.Nil(t, converted)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, testCase.converted, converted)
 			assert.Equal(t, testCase.convertedP, RackTo(testCase.source))
 		})
 	}
@@ -652,7 +812,7 @@ func TestRackConverterPropagatesDomainToNestedComponents(t *testing.T) {
 	explicitComponentDomainID := uuid.New()
 	componentID := uuid.New()
 
-	fromProto := RackFrom(&pb.Rack{
+	fromProto, err := RackFrom(&pb.Rack{
 		Info:         &pb.DeviceInfo{Id: UUIDTo(uuid.New())},
 		NvlDomainIds: UUIDsTo([]uuid.UUID{domainID, uuid.New()}),
 		Components: []*pb.Component{
@@ -663,6 +823,7 @@ func TestRackConverterPropagatesDomainToNestedComponents(t *testing.T) {
 			},
 		},
 	})
+	require.NoError(t, err)
 	require.Len(t, fromProto.Components, 2)
 	assert.Equal(t, domainID, fromProto.NVLDomainID)
 	assert.Equal(t, domainID, fromProto.Components[0].NVLDomainID)
@@ -680,142 +841,272 @@ func TestRackConverterPropagatesDomainToNestedComponents(t *testing.T) {
 	assert.Equal(t, explicitComponentDomainID.String(), toProto.GetComponents()[1].GetNvlDomainId().GetId())
 }
 
-func TestOrderByConverter(t *testing.T) {
+func TestOrderByTo(t *testing.T) {
 	testCases := map[string]struct {
-		source     *pb.OrderBy
 		sourceDB   *dbquery.OrderBy
 		queryType  QueryType // QueryTypeRack or QueryTypeComponent
-		converted  *dbquery.OrderBy
 		convertedP *pb.OrderBy
 	}{
 		"rack name ASC": {
-			source: &pb.OrderBy{
-				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_NAME},
-				Direction: "ASC",
-			},
 			sourceDB: &dbquery.OrderBy{
 				Column:    "name",
 				Direction: dbquery.OrderAscending,
 			},
 			queryType: QueryTypeRack,
-			converted: &dbquery.OrderBy{
-				Column:    "name",
-				Direction: dbquery.OrderAscending,
-			},
 			convertedP: &pb.OrderBy{
 				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_NAME},
 				Direction: "ASC",
 			},
 		},
 		"rack manufacturer DESC": {
-			source: &pb.OrderBy{
-				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MANUFACTURER},
-				Direction: "DESC",
-			},
 			sourceDB: &dbquery.OrderBy{
 				Column:    "manufacturer",
 				Direction: dbquery.OrderDescending,
 			},
 			queryType: QueryTypeRack,
-			converted: &dbquery.OrderBy{
-				Column:    "manufacturer",
-				Direction: dbquery.OrderDescending,
-			},
 			convertedP: &pb.OrderBy{
 				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MANUFACTURER},
 				Direction: "DESC",
 			},
 		},
 		"component name ASC": {
-			source: &pb.OrderBy{
-				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_NAME},
-				Direction: "ASC",
-			},
 			sourceDB: &dbquery.OrderBy{
 				Column:    "name",
 				Direction: dbquery.OrderAscending,
 			},
 			queryType: QueryTypeComponent,
-			converted: &dbquery.OrderBy{
-				Column:    "name",
-				Direction: dbquery.OrderAscending,
-			},
 			convertedP: &pb.OrderBy{
 				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_NAME},
 				Direction: "ASC",
 			},
 		},
 		"component type DESC": {
-			source: &pb.OrderBy{
-				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_TYPE},
-				Direction: "DESC",
-			},
 			sourceDB: &dbquery.OrderBy{
 				Column:    "type",
 				Direction: dbquery.OrderDescending,
 			},
 			queryType: QueryTypeComponent,
-			converted: &dbquery.OrderBy{
-				Column:    "type",
-				Direction: dbquery.OrderDescending,
-			},
 			convertedP: &pb.OrderBy{
 				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_TYPE},
 				Direction: "DESC",
 			},
 		},
-		"nil protobuf": {
-			source:     nil,
-			sourceDB:   nil,
-			queryType:  QueryTypeRack,
-			converted:  nil,
-			convertedP: nil,
-		},
 		"nil dbquery": {
-			source:     nil,
 			sourceDB:   nil,
 			queryType:  QueryTypeRack,
-			converted:  nil,
 			convertedP: nil,
 		},
 	}
 
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
-			// Test OrderByFrom conversion
-			converted := OrderByFrom(tc.source)
-			assert.Equal(t, tc.converted, converted, "OrderByFrom should return expected OrderBy")
-
-			// Test OrderByTo conversion
 			convertedP := OrderByTo(tc.sourceDB, tc.queryType)
 			assert.Equal(t, tc.convertedP, convertedP, "OrderByTo should return expected protobuf OrderBy")
 		})
 	}
 }
 
+func TestRackOrderByFrom(t *testing.T) {
+	tests := []struct {
+		name    string
+		orderBy *pb.OrderBy
+		want    *dbquery.OrderBy
+		wantErr bool
+	}{
+		{
+			name: "omitted order by",
+		},
+		{
+			name: "model expression",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MODEL},
+				Direction: "ASC",
+			},
+			want: &dbquery.OrderBy{
+				Column: "description->>'model'", Direction: dbquery.OrderAscending, IsExpression: true,
+			},
+		},
+		{
+			name: "name descending",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_NAME},
+				Direction: "DESC",
+			},
+			want: &dbquery.OrderBy{
+				Column: "name", Direction: dbquery.OrderDescending,
+			},
+		},
+		{
+			name: "component field rejected for rack query",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_TYPE},
+				Direction: "ASC",
+			},
+			wantErr: true,
+		},
+		{
+			name: "unknown rack field",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField(99)},
+				Direction: "ASC",
+			},
+			wantErr: true,
+		},
+		{
+			name:    "missing field",
+			orderBy: &pb.OrderBy{Direction: "ASC"},
+			wantErr: true,
+		},
+		{
+			name: "invalid direction",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_NAME},
+				Direction: "SIDEWAYS",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := RackOrderByFrom(test.orderBy)
+			if test.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
+func TestComponentOrderByFrom(t *testing.T) {
+	tests := []struct {
+		name    string
+		orderBy *pb.OrderBy
+		want    *dbquery.OrderBy
+		wantErr bool
+	}{
+		{name: "omitted order by"},
+		{
+			name: "type descending",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_TYPE},
+				Direction: "DESC",
+			},
+			want: &dbquery.OrderBy{Column: "type", Direction: dbquery.OrderDescending},
+		},
+		{
+			name: "rack field rejected for component query",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MODEL},
+				Direction: "ASC",
+			},
+			wantErr: true,
+		},
+		{
+			name: "unknown component field",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField(99)},
+				Direction: "ASC",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ComponentOrderByFrom(test.orderBy)
+			if test.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
 func TestOptionalUUIDFrom(t *testing.T) {
 	testID := uuid.New()
+	tests := map[string]struct {
+		input   *pb.UUID
+		want    *uuid.UUID
+		wantErr bool
+	}{
+		"omitted": {},
+		"valid": {
+			input: &pb.UUID{Id: testID.String()},
+			want:  &testID,
+		},
+		"empty": {
+			input:   &pb.UUID{},
+			wantErr: true,
+		},
+		"malformed": {
+			input:   &pb.UUID{Id: "not-a-uuid"},
+			wantErr: true,
+		},
+		"zero": {
+			input:   &pb.UUID{Id: uuid.Nil.String()},
+			wantErr: true,
+		},
+	}
 
-	t.Run("nil input returns nil", func(t *testing.T) {
-		result := OptionalUUIDFrom(nil)
-		assert.Nil(t, result)
-	})
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			result, err := OptionalUUIDFrom(test.input)
+			if test.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, result)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.want, result)
+		})
+	}
+}
 
-	t.Run("valid UUID returns pointer", func(t *testing.T) {
-		result := OptionalUUIDFrom(&pb.UUID{Id: testID.String()})
-		assert.NotNil(t, result)
-		assert.Equal(t, testID, *result)
-	})
+func TestRequiredUUIDsFrom(t *testing.T) {
+	first := uuid.New()
+	second := uuid.New()
+	tests := map[string]struct {
+		input   []*pb.UUID
+		want    []uuid.UUID
+		wantErr string
+	}{
+		"empty": {
+			input: []*pb.UUID{},
+			want:  []uuid.UUID{},
+		},
+		"all valid": {
+			input: []*pb.UUID{{Id: first.String()}, {Id: second.String()}},
+			want:  []uuid.UUID{first, second},
+		},
+		"nil entry": {
+			input:   []*pb.UUID{{Id: first.String()}, nil},
+			wantErr: "entry 1",
+		},
+		"mixed valid and malformed": {
+			input:   []*pb.UUID{{Id: first.String()}, {Id: "not-a-uuid"}},
+			wantErr: "entry 1",
+		},
+	}
 
-	t.Run("empty string returns nil", func(t *testing.T) {
-		result := OptionalUUIDFrom(&pb.UUID{Id: ""})
-		assert.Nil(t, result)
-	})
-
-	t.Run("invalid UUID returns nil", func(t *testing.T) {
-		result := OptionalUUIDFrom(&pb.UUID{Id: "not-a-uuid"})
-		assert.Nil(t, result)
-	})
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			result, err := RequiredUUIDsFrom(test.input)
+			if test.wantErr != "" {
+				require.ErrorContains(t, err, test.wantErr)
+				assert.Nil(t, result)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.want, result)
+		})
+	}
 }
 
 func TestRackTargetFrom(t *testing.T) {
@@ -832,7 +1123,7 @@ func TestRackTargetFrom(t *testing.T) {
 		},
 		"no identifier set": {
 			input:   &pb.RackTarget{},
-			wantErr: "rack target must have either id or name set",
+			wantErr: "rack target must have either id, external_id, or name set",
 		},
 		"valid UUID": {
 			input: &pb.RackTarget{
@@ -840,11 +1131,29 @@ func TestRackTargetFrom(t *testing.T) {
 			},
 			want: operation.RackTarget{Identifier: identifier.Identifier{ID: rackID}},
 		},
-		"invalid UUID string": {
+		"external rack ID": {
 			input: &pb.RackTarget{
-				Identifier: &pb.RackTarget_Id{Id: &pb.UUID{Id: "not-a-uuid"}},
+				Identifier: &pb.RackTarget_ExternalId{ExternalId: "rack-1"},
 			},
-			wantErr: "invalid rack id",
+			want: operation.RackTarget{Identifier: identifier.Identifier{ExternalID: "rack-1"}},
+		},
+		"invalid UUID": {
+			input: &pb.RackTarget{
+				Identifier: &pb.RackTarget_Id{Id: &pb.UUID{Id: "rack-1"}},
+			},
+			wantErr: "invalid rack uuid",
+		},
+		"empty ID": {
+			input: &pb.RackTarget{
+				Identifier: &pb.RackTarget_Id{Id: &pb.UUID{}},
+			},
+			wantErr: "rack target id must not be empty",
+		},
+		"empty external rack ID": {
+			input: &pb.RackTarget{
+				Identifier: &pb.RackTarget_ExternalId{},
+			},
+			wantErr: "rack target external_id must not be empty",
 		},
 		"valid name": {
 			input: &pb.RackTarget{
@@ -927,7 +1236,12 @@ func TestComponentTargetFrom(t *testing.T) {
 					},
 				},
 			},
-			wantErr: "external component type must not be unknown",
+			want: operation.ComponentTarget{
+				External: &operation.ExternalRef{
+					Type: devicetypes.ComponentTypeUnknown,
+					ID:   "ext-123",
+				},
+			},
 		},
 		"external with empty ID": {
 			input: &pb.ComponentTarget{
@@ -963,12 +1277,20 @@ func TestNVLDomainTargetFrom(t *testing.T) {
 		want    operation.NVLDomainTarget
 		wantErr string
 	}{
+		"external ID": {
+			input: &pb.NVLDomainTarget{Identifier: &pb.NVLDomainTarget_ExternalId{ExternalId: "Rack-01"}},
+			want:  operation.NVLDomainTarget{Identifier: identifier.Identifier{ExternalID: "Rack-01"}},
+		},
+		"blank external ID": {
+			input:   &pb.NVLDomainTarget{Identifier: &pb.NVLDomainTarget_ExternalId{ExternalId: " "}},
+			wantErr: "must not be blank",
+		},
 		"nil input": {
 			wantErr: "NVLink domain target is nil",
 		},
 		"no identifier": {
 			input:   &pb.NVLDomainTarget{},
-			wantErr: "must have either id or name set",
+			wantErr: "must have id, external_id, or name set",
 		},
 		"ID with filter": {
 			input: &pb.NVLDomainTarget{
@@ -1029,6 +1351,7 @@ func TestTargetSpecTo(t *testing.T) {
 	testCases := map[string]struct {
 		input   operation.TargetSpec
 		wantErr string
+		check   func(*testing.T, *pb.OperationTargetSpec)
 	}{
 		"multiple target kinds set": {
 			input: operation.TargetSpec{
@@ -1055,6 +1378,20 @@ func TestTargetSpecTo(t *testing.T) {
 				},
 			},
 		},
+		"rack target by external ID": {
+			input: operation.TargetSpec{
+				Racks: []operation.RackTarget{
+					{Identifier: identifier.Identifier{ExternalID: "rack-1"}},
+				},
+			},
+			check: func(t *testing.T, got *pb.OperationTargetSpec) {
+				t.Helper()
+				targets := got.GetRacks().GetTargets()
+				require.Len(t, targets, 1)
+				assert.Equal(t, "rack-1", targets[0].GetExternalId())
+				assert.Nil(t, targets[0].GetId())
+			},
+		},
 		"component target by UUID": {
 			input: operation.TargetSpec{
 				Components: []operation.ComponentTarget{{UUID: compID}},
@@ -1070,6 +1407,19 @@ func TestTargetSpecTo(t *testing.T) {
 						},
 					},
 				},
+			},
+		},
+		"NVLink domain target by external ID": {
+			input: operation.TargetSpec{NVLDomains: []operation.NVLDomainTarget{
+				{Identifier: identifier.Identifier{ExternalID: "Rack-01"}},
+			}},
+			check: func(t *testing.T, got *pb.OperationTargetSpec) {
+				t.Helper()
+				require.Len(t, got.GetNvlDomains().GetTargets(), 1)
+				assert.Equal(t, "Rack-01", got.GetNvlDomains().GetTargets()[0].GetExternalId())
+				roundtrip, err := NVLDomainTargetFrom(got.GetNvlDomains().GetTargets()[0])
+				require.NoError(t, err)
+				assert.Equal(t, "Rack-01", roundtrip.Identifier.ExternalID)
 			},
 		},
 		"NVLink domain target with unmapped component type": {
@@ -1111,6 +1461,9 @@ func TestTargetSpecTo(t *testing.T) {
 			}
 			assert.NoError(t, err)
 			assert.NotNil(t, got)
+			if tc.check != nil {
+				tc.check(t, got)
+			}
 		})
 	}
 }

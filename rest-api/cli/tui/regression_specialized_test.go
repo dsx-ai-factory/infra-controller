@@ -6,6 +6,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -317,6 +318,1143 @@ func TestSpecializedCommands_MutationsRequireConfirmation(t *testing.T) {
 	}
 }
 
+func TestPromptOperatingSystemTypePrefersTenantRole(t *testing.T) {
+	var providerCalls atomic.Int32
+	var tenantCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v2/org/acme/nico/infrastructure-provider/current":
+			providerCalls.Add(1)
+			_, _ = io.WriteString(w, `{"id":"provider-1"}`)
+		case "/v2/org/acme/nico/tenant/current":
+			tenantCalls.Add(1)
+			_, _ = io.WriteString(w, `{"id":"tenant-1"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := appcli.NewClient(server.URL, "acme", "token", nil, false)
+	session := NewSession(client, "acme", "")
+	output, err := runSpecializedCommandWithInput(t, operatingSystemTypeImage+"\n", func() error {
+		operatingSystemType, promptErr := promptOperatingSystemType(session, context.Background())
+		assert.Equal(t, operatingSystemTypeImage, operatingSystemType)
+		return promptErr
+	})
+
+	require.NoError(t, err)
+	assert.Contains(t, output, "[iPXE/Image/Templated iPXE]")
+	assert.Equal(t, int32(0), providerCalls.Load())
+	assert.Equal(t, int32(1), tenantCalls.Load())
+}
+
+func TestPromptOperatingSystemTypeStopsOnUnexpectedTenantError(t *testing.T) {
+	var providerCalls atomic.Int32
+	var tenantCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v2/org/acme/nico/infrastructure-provider/current":
+			providerCalls.Add(1)
+			_, _ = io.WriteString(w, `{"id":"provider-1"}`)
+		case "/v2/org/acme/nico/tenant/current":
+			tenantCalls.Add(1)
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"message":"unauthorized"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := appcli.NewClient(server.URL, "acme", "token", nil, false)
+	session := NewSession(client, "acme", "")
+	_, err := promptOperatingSystemType(session, context.Background())
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "determining operating system owner type")
+	apiErr := &appcli.APIError{}
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, http.StatusUnauthorized, apiErr.StatusCode)
+	assert.Equal(t, int32(0), providerCalls.Load())
+	assert.Equal(t, int32(1), tenantCalls.Load())
+}
+
+func TestDiscardIPXEInput(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		lineComplete bool
+		wantNext     string
+		wantEOF      bool
+	}{
+		{
+			name:     "partial dot and oversized discarded lines cannot end recovery",
+			input:    ".\r\n" + strings.Repeat("x", maxIPXEScriptBytes+1) + "\n..\n .\n.\r\nnext-answer\n",
+			wantNext: "next-answer",
+		},
+		{
+			name:         "completed rejected line preserves the next terminator",
+			input:        ".\nnext-answer\n",
+			lineComplete: true,
+			wantNext:     "next-answer",
+		},
+		{
+			name:         "complete terminator at EOF is accepted",
+			input:        ".",
+			lineComplete: true,
+		},
+		{
+			name:    "EOF after a partial dot preserves failure",
+			input:   ".\n",
+			wantEOF: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := runSpecializedCommandWithInput(t, test.input, func() error {
+				discardErr := discardIPXEInput(test.lineComplete)
+				if discardErr != nil {
+					return discardErr
+				}
+				if test.wantNext != "" {
+					nextAnswer, readErr := readPromptLine()
+					require.NoError(t, readErr)
+					assert.Equal(t, test.wantNext, nextAnswer)
+				}
+				return nil
+			})
+			if test.wantEOF {
+				require.ErrorIs(t, err, io.EOF)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestPromptRawIPXEOperatingSystem(t *testing.T) {
+	fullScript := "#!ipxe\n" + strings.Repeat("x", maxIPXEScriptBytes-len("#!ipxe\n"))
+	tests := []struct {
+		name          string
+		input         string
+		wantScript    string
+		wantCancelled bool
+		wantInvalid   int
+		wantError     string
+		wantNext      string
+	}{
+		{
+			name: "required URL retries blank and invalid input before reading next answer",
+			input: strings.Join([]string{
+				"", "{}", "boot.ipxe", "//example.test/boot.ipxe",
+				"ftp://example.test/boot.ipxe", "https:///boot.ipxe",
+				"https://example.test/%zz", "https://example.test:invalid/boot.ipxe",
+				"https://example.test/boot.ipxe?token=boot-token", "next-answer", "",
+			}, "\n"),
+			wantScript:  "https://example.test/boot.ipxe?token=boot-token",
+			wantInvalid: 7,
+		},
+		{
+			name:       "absolute HTTP URL is accepted",
+			input:      "http://example.test/boot.ipxe\nnext-answer\n",
+			wantScript: "http://example.test/boot.ipxe",
+		},
+		{
+			name:       "multiline script preserves whitespace and leaves next answer unread",
+			input:      "#!ipxe\n\n  set base https://example.test\nchain ${base}/boot.ipxe\n.\nnext-answer\n",
+			wantScript: "#!ipxe\n\n  set base https://example.test\nchain ${base}/boot.ipxe",
+		},
+		{
+			name:          "unfinished script cancels without setting boot data",
+			input:         "#!ipxe\nboot\n",
+			wantCancelled: true,
+		},
+		{
+			name:       "script at byte limit accepts terminator and preserves next answer",
+			input:      fullScript + "\n.\nnext-answer\n",
+			wantScript: fullScript,
+		},
+		{
+			name:      "oversized initial line fails before newline",
+			input:     strings.Repeat("x", maxIPXEScriptBytes+1),
+			wantError: "input exceeds",
+		},
+		{
+			name:      "oversized initial line discards partial dot and remaining script",
+			input:     strings.Repeat("x", maxIPXEScriptBytes+1) + ".\norg set unintended\n.\nnext-answer\n",
+			wantError: "input exceeds",
+			wantNext:  "next-answer",
+		},
+		{
+			name:      "oversized continuation fails before newline",
+			input:     fullScript + "x",
+			wantError: "input exceeds",
+		},
+		{
+			name:      "line separators count toward total script limit",
+			input:     fullScript + "\n\n.\nnext-answer\n",
+			wantError: "iPXE input exceeds",
+			wantNext:  "next-answer",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := map[string]interface{}{}
+			output, err := runSpecializedCommandWithInput(t, test.input, func() error {
+				promptErr := promptRawIPXEOperatingSystem(body)
+				if test.wantNext != "" {
+					nextAnswer, readErr := readPromptLine()
+					require.NoError(t, readErr)
+					assert.Equal(t, test.wantNext, nextAnswer)
+				}
+				if promptErr != nil {
+					return promptErr
+				}
+				nextAnswer, readErr := readPromptLine()
+				if readErr != nil {
+					return readErr
+				}
+				assert.Equal(t, "next-answer", nextAnswer)
+				return nil
+			})
+			if test.wantCancelled {
+				require.ErrorContains(t, err, "input cancelled")
+				assert.Empty(t, body)
+				return
+			}
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				require.ErrorIs(t, err, errPromptInputLimitExceeded)
+				assert.Empty(t, body)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.wantInvalid, strings.Count(output, "(enter a script starting with #!ipxe or an absolute HTTP(S) URL)"))
+			assert.Equal(t, map[string]interface{}{"ipxeScript": test.wantScript}, body)
+		})
+	}
+}
+
+func TestPromptOperatingSystemOptions(t *testing.T) {
+	tests := []struct {
+		name                 string
+		includeAllowOverride bool
+		input                string
+		expectedBody         map[string]interface{}
+		wantCancelled        bool
+	}{
+		{
+			name:                 "OS context includes override permission",
+			includeAllowOverride: true,
+			input:                "#cloud-config\nn\ny\n",
+			expectedBody: map[string]interface{}{
+				"userData":         "#cloud-config",
+				"allowOverride":    false,
+				"phoneHomeEnabled": true,
+			},
+		},
+		{
+			name:                 "instance context skips override permission",
+			includeAllowOverride: false,
+			input:                " #cloud-config \ny\n",
+			expectedBody: map[string]interface{}{
+				"userData":         "#cloud-config",
+				"phoneHomeEnabled": true,
+			},
+		},
+		{
+			name:                 "blank instance user data is omitted",
+			includeAllowOverride: false,
+			input:                "  \nn\n",
+			expectedBody: map[string]interface{}{
+				"phoneHomeEnabled": false,
+			},
+		},
+		{
+			name:                 "closed input at phone home cancels the prompt",
+			includeAllowOverride: false,
+			input:                "#cloud-config\n",
+			wantCancelled:        true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := map[string]interface{}{}
+			output, err := runSpecializedCommandWithInput(t, test.input, func() error {
+				return promptOperatingSystemOptions(body, test.includeAllowOverride)
+			})
+			if test.wantCancelled {
+				require.ErrorContains(t, err, "input cancelled")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.expectedBody, body)
+			assert.Contains(t, output, "User data (optional)")
+			assert.Contains(t, output, "Enable phone home?")
+			if !test.includeAllowOverride {
+				assert.NotContains(t, output, "Allow override at instance creation?")
+			} else {
+				assert.Contains(t, output, "Allow override at instance creation?")
+			}
+		})
+	}
+}
+
+func TestCmdOSCreate(t *testing.T) {
+	const (
+		siteID         = "497f6eca-6276-4993-bfeb-53cbbbba6f08"
+		templateID     = "6c2ac315-3040-4728-94eb-b66d320206c1"
+		rootFSID       = "666c2eee-193d-42db-a490-4c444342bd4e"
+		imageSHA       = "a1efca12ea51069abb123bf9c77889fcc2a31cc5483fc14d115e44fdf07c7980"
+		createdOSReply = `{"id":"os-1","name":"created-os"}`
+	)
+	tests := []struct {
+		name                      string
+		provider                  bool
+		tenantForbidden           bool
+		input                     string
+		expectedBody              string
+		expectedSiteCalls         int32
+		expectedTemplateCalls     int32
+		templateRequiredParams    []string
+		templateRequiredArtifacts []string
+		expectedOutput            []string
+		unexpectedOutput          []string
+	}{
+		{
+			name:     "tenant raw iPXE prompts for script and shared options",
+			provider: false,
+			input: strings.Join([]string{
+				"raw-ipxe-os",
+				"Raw iPXE description",
+				operatingSystemTypeIPXE,
+				"#!ipxe",
+				".",
+				"#cloud-config",
+				"y",
+				"n",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"name":"raw-ipxe-os",
+				"description":"Raw iPXE description",
+				"ipxeScript":"#!ipxe",
+				"userData":"#cloud-config",
+				"allowOverride":true,
+				"phoneHomeEnabled":false
+			}`,
+			expectedOutput: []string{
+				"[iPXE/Image/Templated iPXE]",
+				"iPXE script or URL",
+				"User data (optional)",
+			},
+			unexpectedOutput: []string{
+				"Site One",
+				"Image URL",
+			},
+		},
+		{
+			name:     "tenant templated iPXE selects site and template then shared options",
+			provider: false,
+			input: strings.Join([]string{
+				"templated-ipxe-os",
+				"Templated iPXE description",
+				operatingSystemTypeTemplatedIPXE,
+				"#cloud-config",
+				"n",
+				"y",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"name":"templated-ipxe-os",
+				"description":"Templated iPXE description",
+				"siteIds":["497f6eca-6276-4993-bfeb-53cbbbba6f08"],
+				"ipxeTemplateId":"6c2ac315-3040-4728-94eb-b66d320206c1",
+				"userData":"#cloud-config",
+				"allowOverride":false,
+				"phoneHomeEnabled":true
+			}`,
+			expectedSiteCalls:     1,
+			expectedTemplateCalls: 1,
+			expectedOutput: []string{
+				"[iPXE/Image/Templated iPXE]",
+				"Site One",
+				"Ubuntu Template",
+				"User data (optional)",
+			},
+			unexpectedOutput: []string{
+				"iPXE script or URL",
+				"Image URL",
+			},
+		},
+		{
+			name:     "tenant templated iPXE collects required parameters and artifacts",
+			provider: false,
+			input: strings.Join([]string{
+				"templated-ipxe-requirements-os",
+				"",
+				operatingSystemTypeTemplatedIPXE,
+				"",
+				"console=ttyS0",
+				"install",
+				"https://example.com/kernel",
+				imageSHA,
+				authTypeBearer,
+				"",
+				"artifact-secret",
+				artifactCacheStrategyAsNeeded,
+				"https://example.com/initrd",
+				"",
+				authTypeNone,
+				artifactCacheStrategyRemoteOnly,
+				"",
+				"n",
+				"y",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"name":"templated-ipxe-requirements-os",
+				"siteIds":["497f6eca-6276-4993-bfeb-53cbbbba6f08"],
+				"ipxeTemplateId":"6c2ac315-3040-4728-94eb-b66d320206c1",
+				"ipxeTemplateParameters":[
+					{"name":"kernel_args","value":"console=ttyS0"},
+					{"name":"mode","value":"install"}
+				],
+				"ipxeTemplateArtifacts":[
+					{
+						"name":"kernel",
+						"url":"https://example.com/kernel",
+						"sha":"a1efca12ea51069abb123bf9c77889fcc2a31cc5483fc14d115e44fdf07c7980",
+						"authType":"Bearer",
+						"authToken":"artifact-secret",
+						"cacheStrategy":"CacheAsNeeded"
+					},
+					{
+						"name":"initrd",
+						"url":"https://example.com/initrd",
+						"cacheStrategy":"RemoteOnly"
+					}
+				],
+				"allowOverride":false,
+				"phoneHomeEnabled":true
+			}`,
+			expectedSiteCalls:         1,
+			expectedTemplateCalls:     1,
+			templateRequiredParams:    []string{"kernel_args", "mode"},
+			templateRequiredArtifacts: []string{"kernel", "initrd"},
+			expectedOutput: []string{
+				"Value for parameter kernel_args",
+				"Value for parameter mode",
+				"URL for artifact kernel",
+				"SHA for artifact kernel (optional)",
+				"Auth type for artifact kernel",
+				"Auth token for artifact kernel",
+				"Cache strategy for artifact kernel",
+				"URL for artifact initrd",
+				"SHA for artifact initrd (optional)",
+				"Auth type for artifact initrd",
+				"Cache strategy for artifact initrd",
+				"(required)",
+				`"name":"templated-ipxe-requirements-os"`,
+				`"authToken":"<redacted>"`,
+				`"cacheStrategy":"CacheAsNeeded"`,
+			},
+			unexpectedOutput: []string{
+				"Auth token for artifact initrd",
+				"artifact-secret",
+				"--data '<redacted>'",
+			},
+		},
+		{
+			name:            "provider defaults to templated iPXE",
+			provider:        true,
+			tenantForbidden: true,
+			input: strings.Join([]string{
+				"provider-template-os",
+				"",
+				"",
+				"y",
+				"n",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"name":"provider-template-os",
+				"siteIds":["497f6eca-6276-4993-bfeb-53cbbbba6f08"],
+				"ipxeTemplateId":"6c2ac315-3040-4728-94eb-b66d320206c1",
+				"allowOverride":true,
+				"phoneHomeEnabled":false
+			}`,
+			expectedSiteCalls:     1,
+			expectedTemplateCalls: 1,
+			expectedOutput: []string{
+				"default for providers",
+				"Site One",
+				"Ubuntu Template",
+				"User data (optional)",
+			},
+			unexpectedOutput: []string{
+				"[iPXE/Image/Templated iPXE]",
+				"iPXE script or URL",
+				"Image URL",
+			},
+		},
+		{
+			name:     "tenant image selects root filesystem ID",
+			provider: false,
+			input: strings.Join([]string{
+				"image-id-os",
+				"Image description",
+				operatingSystemTypeImage,
+				"https://example.com/images/os.qcow2",
+				imageSHA,
+				rootFilesystemTypeID,
+				rootFSID,
+				authTypeNone,
+				"",
+				"hostname: image-host",
+				"y",
+				"y",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"name":"image-id-os",
+				"description":"Image description",
+				"siteIds":["497f6eca-6276-4993-bfeb-53cbbbba6f08"],
+				"imageUrl":"https://example.com/images/os.qcow2",
+				"imageSha":"a1efca12ea51069abb123bf9c77889fcc2a31cc5483fc14d115e44fdf07c7980",
+				"rootFsId":"666c2eee-193d-42db-a490-4c444342bd4e",
+				"userData":"hostname: image-host",
+				"allowOverride":true,
+				"phoneHomeEnabled":true
+			}`,
+			expectedSiteCalls: 1,
+			expectedOutput: []string{
+				"Site One",
+				"Image URL",
+				"Image SHA",
+				"Specify root filesystem by",
+				"Root filesystem ID",
+				"Image authentication type",
+				"Image disk (optional)",
+				"User data (optional)",
+				"Allow override at instance creation?",
+				"Enable phone home?",
+			},
+			unexpectedOutput: []string{
+				"Root filesystem label",
+				"Image auth token",
+			},
+		},
+		{
+			name:     "tenant image selects root filesystem label",
+			provider: false,
+			input: strings.Join([]string{
+				"image-label-os",
+				"",
+				operatingSystemTypeImage,
+				"https://example.com/images/os.qcow2",
+				imageSHA,
+				rootFilesystemTypeLabel,
+				"rootfs",
+				authTypeNone,
+				"",
+				"",
+				"n",
+				"n",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"name":"image-label-os",
+				"siteIds":["497f6eca-6276-4993-bfeb-53cbbbba6f08"],
+				"imageUrl":"https://example.com/images/os.qcow2",
+				"imageSha":"a1efca12ea51069abb123bf9c77889fcc2a31cc5483fc14d115e44fdf07c7980",
+				"rootFsLabel":"rootfs",
+				"allowOverride":false,
+				"phoneHomeEnabled":false
+			}`,
+			expectedSiteCalls: 1,
+			expectedOutput: []string{
+				"Site One",
+				"Root filesystem label",
+				"Image authentication type",
+				"Image disk (optional)",
+				"User data (optional)",
+			},
+			unexpectedOutput: []string{
+				"Root filesystem ID",
+				"Image auth token",
+			},
+		},
+		{
+			name:     "tenant image requires Basic auth token and accepts image disk",
+			provider: false,
+			input: strings.Join([]string{
+				"image-basic-os",
+				"",
+				operatingSystemTypeImage,
+				"https://example.com/images/os.qcow2",
+				imageSHA,
+				rootFilesystemTypeID,
+				rootFSID,
+				authTypeBasic,
+				"",
+				"basic-secret",
+				"/dev/sda",
+				"",
+				"n",
+				"n",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"name":"image-basic-os",
+				"siteIds":["497f6eca-6276-4993-bfeb-53cbbbba6f08"],
+				"imageUrl":"https://example.com/images/os.qcow2",
+				"imageSha":"a1efca12ea51069abb123bf9c77889fcc2a31cc5483fc14d115e44fdf07c7980",
+				"rootFsId":"666c2eee-193d-42db-a490-4c444342bd4e",
+				"imageAuthType":"Basic",
+				"imageAuthToken":"basic-secret",
+				"imageDisk":"/dev/sda",
+				"allowOverride":false,
+				"phoneHomeEnabled":false
+			}`,
+			expectedSiteCalls: 1,
+			expectedOutput: []string{
+				"Image authentication type",
+				"Image auth token",
+				"(required)",
+				"Image disk (optional)",
+				`"name":"image-basic-os"`,
+				`"imageAuthToken":"<redacted>"`,
+				`"imageDisk":"/dev/sda"`,
+			},
+			unexpectedOutput: []string{
+				"basic-secret",
+				"--data '<redacted>'",
+			},
+		},
+		{
+			name:     "tenant image accepts Bearer auth without image disk",
+			provider: false,
+			input: strings.Join([]string{
+				"image-bearer-os",
+				"",
+				operatingSystemTypeImage,
+				"https://example.com/images/os.qcow2",
+				imageSHA,
+				rootFilesystemTypeLabel,
+				"rootfs",
+				authTypeBearer,
+				"bearer-secret",
+				"",
+				"",
+				"n",
+				"n",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"name":"image-bearer-os",
+				"siteIds":["497f6eca-6276-4993-bfeb-53cbbbba6f08"],
+				"imageUrl":"https://example.com/images/os.qcow2",
+				"imageSha":"a1efca12ea51069abb123bf9c77889fcc2a31cc5483fc14d115e44fdf07c7980",
+				"rootFsLabel":"rootfs",
+				"imageAuthType":"Bearer",
+				"imageAuthToken":"bearer-secret",
+				"allowOverride":false,
+				"phoneHomeEnabled":false
+			}`,
+			expectedSiteCalls: 1,
+			expectedOutput: []string{
+				"Image authentication type",
+				"Image auth token",
+				"Image disk (optional)",
+				`"name":"image-bearer-os"`,
+				`"imageAuthToken":"<redacted>"`,
+				`"rootFsLabel":"rootfs"`,
+			},
+			unexpectedOutput: []string{
+				"bearer-secret",
+				"--data '<redacted>'",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var providerCalls atomic.Int32
+			var tenantCalls atomic.Int32
+			var siteCalls atomic.Int32
+			var templateCalls atomic.Int32
+			var createCalls atomic.Int32
+			createdBodies := make(chan string, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/infrastructure-provider/current":
+					providerCalls.Add(1)
+					if test.provider {
+						_, _ = io.WriteString(w, `{"id":"provider-1"}`)
+						return
+					}
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = io.WriteString(w, `{"message":"not a provider"}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/tenant/current":
+					tenantCalls.Add(1)
+					if test.tenantForbidden {
+						w.WriteHeader(http.StatusForbidden)
+						_, _ = io.WriteString(w, `{"message":"not a tenant"}`)
+						return
+					}
+					_, _ = io.WriteString(w, `{"id":"tenant-1"}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/site":
+					siteCalls.Add(1)
+					_, _ = io.WriteString(w, `[{"id":"`+siteID+`","name":"Site One","status":"Registered"}]`)
+				case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/ipxe-template":
+					templateCalls.Add(1)
+					assert.Equal(t, siteID, r.URL.Query().Get("siteId"))
+					templateResponse := map[string]interface{}{
+						"id":                templateID,
+						"name":              "Ubuntu Template",
+						"visibility":        "Public",
+						"requiredParams":    test.templateRequiredParams,
+						"requiredArtifacts": test.templateRequiredArtifacts,
+					}
+					encodeErr := json.NewEncoder(w).Encode([]map[string]interface{}{templateResponse})
+					require.NoError(t, encodeErr)
+				case r.Method == http.MethodPost && r.URL.Path == "/v2/org/acme/nico/operating-system":
+					createCalls.Add(1)
+					requestBody, readErr := io.ReadAll(r.Body)
+					if readErr != nil {
+						http.Error(w, readErr.Error(), http.StatusInternalServerError)
+						return
+					}
+					createdBodies <- string(requestBody)
+					w.WriteHeader(http.StatusCreated)
+					_, _ = io.WriteString(w, createdOSReply)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			session := NewSession(
+				appcli.NewClient(server.URL, "acme", "token", nil, false),
+				"acme",
+				"",
+			)
+			output, err := runSpecializedCommandWithInput(t, test.input, func() error {
+				return cmdOSCreate(session, nil)
+			})
+
+			require.NoError(t, err)
+			assert.Equal(t, int32(1), tenantCalls.Load())
+			if test.tenantForbidden {
+				assert.Equal(t, int32(1), providerCalls.Load())
+			} else {
+				assert.Equal(t, int32(0), providerCalls.Load())
+			}
+			assert.Equal(t, test.expectedSiteCalls, siteCalls.Load())
+			assert.Equal(t, test.expectedTemplateCalls, templateCalls.Load())
+			require.Equal(t, int32(1), createCalls.Load())
+			assert.JSONEq(t, test.expectedBody, <-createdBodies)
+			assert.Contains(t, output, "Operating system created: created-os (os-1)")
+			for _, expected := range test.expectedOutput {
+				assert.Contains(t, output, expected)
+			}
+			for _, unexpected := range test.unexpectedOutput {
+				assert.NotContains(t, output, unexpected)
+			}
+		})
+	}
+}
+
+func TestCmdOSUpdatePromptsForTypeSpecificFields(t *testing.T) {
+	const (
+		operatingSystemID = "9c8f3d62-7c95-4d1c-9f91-924a7e0f31c4"
+		templateID        = "6c2ac315-3040-4728-94eb-b66d320206c1"
+	)
+	tests := []struct {
+		name                  string
+		osType                string
+		templateID            string
+		input                 string
+		expectedBody          string
+		expectedTemplateCalls int32
+		expectedOutput        []string
+		unexpectedOutput      []string
+		noRequiredParameters  bool
+		noRequiredArtifacts   bool
+	}{
+		{
+			name:   "raw iPXE offers script update only",
+			osType: operatingSystemTypeIPXE,
+			input: strings.Join([]string{
+				"",
+				"",
+				"#!ipxe updated",
+				"",
+				"",
+				"",
+				"",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"ipxeScript":"#!ipxe updated"
+			}`,
+			expectedOutput: []string{
+				"iPXE script or URL (optional)",
+			},
+			unexpectedOutput: []string{
+				"Update image authentication?",
+				"Update iPXE template parameters?",
+			},
+		},
+		{
+			name:   "boolean updates accept yes and no while blank keeps the field",
+			osType: operatingSystemTypeIPXE,
+			input: strings.Join([]string{
+				"",
+				"",
+				"",
+				"",
+				"y",
+				"n",
+				"",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"allowOverride":true,
+				"phoneHomeEnabled":false
+			}`,
+			expectedOutput: []string{
+				"Allow override?",
+				"Phone home enabled?",
+				"Set active?",
+				"[y/n, blank to keep]",
+			},
+			unexpectedOutput: []string{
+				`"isActive"`,
+			},
+		},
+		{
+			name:   "image offers supported image-specific update fields",
+			osType: operatingSystemTypeImage,
+			input: strings.Join([]string{
+				"",
+				"",
+				"y",
+				authTypeBasic,
+				"rotated-token",
+				"y",
+				"/dev/sdb",
+				"",
+				"",
+				"",
+				"",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"imageAuthType":"Basic",
+				"imageAuthToken":"rotated-token",
+				"imageDisk":"/dev/sdb"
+			}`,
+			expectedOutput: []string{
+				"Update image authentication?",
+				"Image authentication type",
+				"Image auth token",
+				"Update image disk?",
+				"Image disk (blank to clear)",
+				`"imageAuthToken":"<redacted>"`,
+			},
+			unexpectedOutput: []string{
+				"iPXE script or URL (optional)",
+				"Update iPXE template parameters?",
+				"Update root filesystem?",
+				"Specify root filesystem by",
+				"Root filesystem ID",
+				"Root filesystem label",
+				"rotated-token",
+				"--data '<redacted>'",
+			},
+		},
+		{
+			name:       "templated iPXE offers template parameters and artifacts",
+			osType:     operatingSystemAPITypeTemplatedIPXE,
+			templateID: templateID,
+			input: strings.Join([]string{
+				"",
+				"",
+				"y",
+				"https://example.com/kernel",
+				"y",
+				"https://example.com/initrd",
+				"",
+				authTypeNone,
+				artifactCacheStrategyRemoteOnly,
+				"",
+				"",
+				"",
+				"",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"ipxeTemplateParameters":[
+					{"name":"kernel_url","value":"https://example.com/kernel"}
+				],
+				"ipxeTemplateArtifacts":[
+					{
+						"name":"initrd",
+						"url":"https://example.com/initrd",
+						"cacheStrategy":"RemoteOnly"
+					}
+				]
+			}`,
+			expectedTemplateCalls: 1,
+			expectedOutput: []string{
+				"Update iPXE template parameters?",
+				"Value for parameter kernel_url",
+				"Update iPXE template artifacts?",
+				"URL for artifact initrd",
+				"Cache strategy for artifact initrd",
+			},
+			unexpectedOutput: []string{
+				"iPXE script or URL (optional)",
+				"Update image authentication?",
+			},
+		},
+		{
+			name:       "templated iPXE updates parameters independently",
+			osType:     operatingSystemAPITypeTemplatedIPXE,
+			templateID: templateID,
+			input: strings.Join([]string{
+				"",
+				"",
+				"y",
+				"https://example.com/kernel",
+				"n",
+				"",
+				"",
+				"",
+				"",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"ipxeTemplateParameters":[
+					{"name":"kernel_url","value":"https://example.com/kernel"}
+				]
+			}`,
+			expectedTemplateCalls: 1,
+			expectedOutput: []string{
+				"Update iPXE template parameters?",
+				"Value for parameter kernel_url",
+				"Update iPXE template artifacts?",
+			},
+			unexpectedOutput: []string{
+				"URL for artifact initrd",
+				`"ipxeTemplateArtifacts"`,
+			},
+		},
+		{
+			name:       "templated iPXE updates artifacts independently",
+			osType:     operatingSystemAPITypeTemplatedIPXE,
+			templateID: templateID,
+			input: strings.Join([]string{
+				"",
+				"",
+				"n",
+				"y",
+				"https://example.com/initrd",
+				"",
+				authTypeNone,
+				artifactCacheStrategyRemoteOnly,
+				"",
+				"",
+				"",
+				"",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"ipxeTemplateArtifacts":[
+					{
+						"name":"initrd",
+						"url":"https://example.com/initrd",
+						"cacheStrategy":"RemoteOnly"
+					}
+				]
+			}`,
+			expectedTemplateCalls: 1,
+			expectedOutput: []string{
+				"Update iPXE template parameters?",
+				"Update iPXE template artifacts?",
+				"URL for artifact initrd",
+				"Cache strategy for artifact initrd",
+			},
+			unexpectedOutput: []string{
+				"Value for parameter kernel_url",
+				`"ipxeTemplateParameters"`,
+			},
+		},
+		{
+			name:                 "templated iPXE omits parameter confirmation when none are required",
+			osType:               operatingSystemAPITypeTemplatedIPXE,
+			templateID:           templateID,
+			noRequiredParameters: true,
+			input: strings.Join([]string{
+				"renamed-no-parameter-os",
+				"",
+				"n",
+				"",
+				"",
+				"",
+				"",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"name":"renamed-no-parameter-os"
+			}`,
+			expectedTemplateCalls: 1,
+			expectedOutput: []string{
+				"Update iPXE template artifacts?",
+			},
+			unexpectedOutput: []string{
+				"Update iPXE template parameters?",
+				"Value for parameter kernel_url",
+				"URL for artifact initrd",
+			},
+		},
+		{
+			name:                "templated iPXE omits artifact confirmation when none are required",
+			osType:              operatingSystemAPITypeTemplatedIPXE,
+			templateID:          templateID,
+			noRequiredArtifacts: true,
+			input: strings.Join([]string{
+				"renamed-no-artifact-os",
+				"",
+				"n",
+				"",
+				"",
+				"",
+				"",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"name":"renamed-no-artifact-os"
+			}`,
+			expectedTemplateCalls: 1,
+			expectedOutput: []string{
+				"Update iPXE template parameters?",
+			},
+			unexpectedOutput: []string{
+				"Update iPXE template artifacts?",
+				"Value for parameter kernel_url",
+				"URL for artifact initrd",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var templateCalls atomic.Int32
+			var updateCalls atomic.Int32
+			updatedBodies := make(chan string, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/operating-system":
+					response := map[string]interface{}{
+						"id":     operatingSystemID,
+						"name":   "update-os",
+						"status": "Ready",
+						"type":   test.osType,
+					}
+					if test.templateID != "" {
+						response["ipxeTemplateId"] = test.templateID
+					}
+					encodeErr := json.NewEncoder(w).Encode([]map[string]interface{}{response})
+					require.NoError(t, encodeErr)
+				case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/ipxe-template":
+					templateCalls.Add(1)
+					assert.Empty(t, r.URL.Query().Get("siteId"))
+					requiredParameters := []string{"kernel_url"}
+					if test.noRequiredParameters {
+						requiredParameters = []string{}
+					}
+					requiredArtifacts := []string{"initrd"}
+					if test.noRequiredArtifacts {
+						requiredArtifacts = []string{}
+					}
+					response := map[string]interface{}{
+						"id":                templateID,
+						"name":              "Ubuntu Template",
+						"visibility":        "Public",
+						"requiredParams":    requiredParameters,
+						"requiredArtifacts": requiredArtifacts,
+					}
+					encodeErr := json.NewEncoder(w).Encode([]map[string]interface{}{response})
+					require.NoError(t, encodeErr)
+				case r.Method == http.MethodPatch && r.URL.Path == "/v2/org/acme/nico/operating-system/"+operatingSystemID:
+					updateCalls.Add(1)
+					requestBody, readErr := io.ReadAll(r.Body)
+					require.NoError(t, readErr)
+					updatedBodies <- string(requestBody)
+					_, _ = io.WriteString(w, `{"id":"`+operatingSystemID+`","name":"update-os"}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			session := NewSession(
+				appcli.NewClient(server.URL, "acme", "token", nil, false),
+				"acme",
+				"",
+			)
+			output, err := runSpecializedCommandWithInput(t, test.input, func() error {
+				return cmdOSUpdate(session, []string{"update-os"})
+			})
+
+			require.NoError(t, err)
+			assert.Equal(t, test.expectedTemplateCalls, templateCalls.Load())
+			assert.Equal(t, int32(1), updateCalls.Load())
+			assert.JSONEq(t, test.expectedBody, <-updatedBodies)
+			expectedLogBody, redactErr := redactAuthTokenJSON([]byte(test.expectedBody))
+			require.NoError(t, redactErr)
+			assert.Contains(t, output, "--data "+shellQuoteCLIArg(string(expectedLogBody)))
+			assert.Contains(t, output, "Operating system updated: update-os ("+operatingSystemID+")")
+			for _, expected := range test.expectedOutput {
+				assert.Contains(t, output, expected)
+			}
+			for _, unexpected := range test.unexpectedOutput {
+				assert.NotContains(t, output, unexpected)
+			}
+		})
+	}
+}
+
+func TestRedactAuthTokenJSON(t *testing.T) {
+	original := []byte(`{
+		"name":"visible-name",
+		"imageAuthToken":"image-secret",
+		"unrelated":"image-secret",
+		"ipxeTemplateArtifacts":[
+			{
+				"name":"kernel",
+				"url":"https://example.com/kernel",
+				"authType":"Bearer",
+				"authToken":"artifact-secret"
+			}
+		]
+	}`)
+
+	redacted, err := redactAuthTokenJSON(original)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"name":"visible-name",
+		"imageAuthToken":"<redacted>",
+		"unrelated":"image-secret",
+		"ipxeTemplateArtifacts":[
+			{
+				"name":"kernel",
+				"url":"https://example.com/kernel",
+				"authType":"Bearer",
+				"authToken":"<redacted>"
+			}
+		]
+	}`, string(redacted))
+	assert.Contains(t, string(original), `"imageAuthToken":"image-secret"`)
+	assert.Contains(t, string(original), `"authToken":"artifact-secret"`)
+
+	redacted, err = redactAuthTokenJSON([]byte(`{"name":`))
+	assert.Nil(t, redacted)
+	assert.Error(t, err)
+}
+
 func TestSpecializedScopeSelection_ClearsDependentScopeAndCache(t *testing.T) {
 	t.Run("site selection clears VPC and filtered resources", func(t *testing.T) {
 		var requests atomic.Int32
@@ -496,6 +1634,100 @@ func TestCmdInstanceUpdate_SendsAttributeOnlyPatch(t *testing.T) {
 	assert.Equal(t, "/v2/org/acme/nico/instance/instance-1", request.path)
 	assert.JSONEq(t, `{"name":"new-name"}`, request.body)
 	assert.Contains(t, output, "Instance updated: new-name (instance-1)")
+}
+
+func TestCmdVPCCreate(t *testing.T) {
+	tests := []struct {
+		name                   string
+		routingProfileResponse string
+		createResponse         string
+		input                  string
+		expectedBody           string
+		expectedLog            string
+		unexpectedLog          string
+		expectedConfirmation   string
+	}{
+		{
+			name:                   "sends a selected alternative profile",
+			routingProfileResponse: `{"defaultRoutingProfile":"external","permittedRoutingProfiles":["external","internal"]}`,
+			createResponse:         `{"id":"vpc-1","name":"profile-vpc","routingProfile":"internal"}`,
+			input:                  "profile-vpc\n\ninternal\n",
+			expectedBody:           `{"name":"profile-vpc","routingProfile":"internal","siteId":"site-1"}`,
+			expectedLog:            "--routing-profile internal",
+			expectedConfirmation:   "routing profile: internal",
+		},
+		{
+			name:                   "reports the Core-resolved profile when the inherited default changes",
+			routingProfileResponse: `{"defaultRoutingProfile":"external","permittedRoutingProfiles":["external"]}`,
+			createResponse:         `{"id":"vpc-1","name":"profile-vpc","routingProfile":"internal"}`,
+			input:                  "profile-vpc\n\n\n",
+			expectedBody:           `{"name":"profile-vpc","siteId":"site-1"}`,
+			unexpectedLog:          "--routing-profile",
+			expectedConfirmation:   "routing profile: internal",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var mu sync.Mutex
+			requests := []specializedRequestSnapshot{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				mu.Lock()
+				requests = append(requests, specializedRequestSnapshot{
+					method: r.Method,
+					path:   r.URL.Path,
+					query:  r.URL.RawQuery,
+					body:   string(body),
+				})
+				mu.Unlock()
+
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v2/org/acme/nico/tenant/current/routing-profile":
+					_, _ = io.WriteString(w, test.routingProfileResponse)
+				case "/v2/org/acme/nico/vpc":
+					w.WriteHeader(http.StatusCreated)
+					_, _ = io.WriteString(w, test.createResponse)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+			session.Cache.Set("site", []NamedItem{{
+				Name: "native-site",
+				ID:   "site-1",
+				Raw:  map[string]interface{}{"capabilities": map[string]interface{}{"nativeNetworking": true}},
+			}})
+
+			output, runErr := runSpecializedCommandWithInput(t, test.input, func() error {
+				return specializedRegressionCommand(t, "vpc create").Run(session, nil)
+			})
+
+			require.NoError(t, runErr)
+			mu.Lock()
+			got := append([]specializedRequestSnapshot(nil), requests...)
+			mu.Unlock()
+			require.Len(t, got, 2)
+			assert.Equal(t, http.MethodGet, got[0].method)
+			assert.Equal(t, "/v2/org/acme/nico/tenant/current/routing-profile", got[0].path)
+			assert.Equal(t, "siteId=site-1", got[0].query)
+			assert.Equal(t, http.MethodPost, got[1].method)
+			assert.Equal(t, "/v2/org/acme/nico/vpc", got[1].path)
+			assert.JSONEq(t, test.expectedBody, got[1].body)
+			assert.Contains(t, output, "Routing profile (external (tenant default))")
+			if test.expectedLog != "" {
+				assert.Contains(t, output, test.expectedLog)
+			}
+			if test.unexpectedLog != "" {
+				assert.NotContains(t, output, test.unexpectedLog)
+			}
+			assert.Contains(t, output, test.expectedConfirmation)
+		})
+	}
 }
 
 func specializedRegressionCommand(t *testing.T, name string) Command {

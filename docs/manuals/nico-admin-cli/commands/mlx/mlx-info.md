@@ -1,6 +1,6 @@
 # `nico-admin-cli mlx info`
 
-_[Hardware commands](../../hardware.md) › [mlx](./mlx.md) › **info**_
+*[Hardware commands](../../hardware.md) › [mlx](./mlx.md) › **info***
 
 ## NAME
 
@@ -8,8 +8,10 @@ nico-admin-cli-mlx-info - Device information retrieval
 
 ## SYNOPSIS
 
-**nico-admin-cli mlx info** \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\] \<*subcommands*\>
+```text
+nico-admin-cli mlx info [--extended] [--sort-by]
+[-h|--help] <subcommands>
+```
 
 ## DESCRIPTION
 
@@ -17,24 +19,26 @@ Device information retrieval
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary ID
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
 ## Examples
@@ -42,6 +46,7 @@ Print help (see a summary with -h)
 ```sh
 nico-admin-cli mlx info device 12345678-1234-5678-90ab-cdef01234567 0000:01:00.0
 nico-admin-cli mlx info machine 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli mlx info identities fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
 ```
 
 ## Subcommands
@@ -50,7 +55,8 @@ nico-admin-cli mlx info machine 12345678-1234-5678-90ab-cdef01234567
 |---|---|
 | [`device`](./mlx-info-device.md) | Get MlxDeviceInfo for a device on a machine |
 | [`machine`](./mlx-info-machine.md) | Get an MlxDeviceReport for a machine |
+| [`identities`](./mlx-info-identities.md) | Show stored NIC identity evidence for a host |
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**Related:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)

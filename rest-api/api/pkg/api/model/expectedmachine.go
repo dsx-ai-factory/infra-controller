@@ -5,6 +5,9 @@ package model
 
 import (
 	"errors"
+	"net"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,7 +17,152 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
+
+var expectedMachineInterfaceMACRegexp = regexp.MustCompile(`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`)
+
+// APIExpectedMachineInterface describes REST-managed interface intent for an
+// Expected Machine. Core consumes this shape through ExpectedMachine.host_nics.
+type APIExpectedMachineInterface struct {
+	MacAddress         string                                    `json:"macAddress"`
+	NicType            *string                                   `json:"nicType"`
+	FixedIP            *string                                   `json:"fixedIp"`
+	FixedMask          *string                                   `json:"fixedMask"`
+	FixedGateway       *string                                   `json:"fixedGateway"`
+	Primary            *bool                                     `json:"primary"`
+	NetworkSegmentType *cdbm.ExpectedInterfaceNetworkSegmentType `json:"networkSegmentType"`
+	Role               *cdbm.ExpectedInterfaceRole               `json:"role"`
+	IPAllocation       *cdbm.ExpectedInterfaceIPAllocation       `json:"ipAllocation"`
+}
+
+// Validate checks the interface fields REST can forward to Core.
+func (i APIExpectedMachineInterface) Validate() error {
+	err := validation.ValidateStruct(&i,
+		validation.Field(&i.MacAddress,
+			validation.Required.Error(validationErrorValueRequired),
+			validation.Match(expectedMachineInterfaceMACRegexp).Error("must be a MAC address of six colon- or hyphen-separated octets")),
+		validation.Field(&i.NicType,
+			validation.NilOrNotEmpty.Error("NicType cannot be empty"),
+			validation.When(i.NicType != nil,
+				validation.Match(util.NotAllWhitespaceRegexp).Error("NicType consists only of whitespace"))),
+		validation.Field(&i.FixedIP,
+			validation.NilOrNotEmpty.Error("FixedIP cannot be empty"),
+			validation.When(i.FixedIP != nil, validation.By(func(value interface{}) error {
+				fixedIP, ok := value.(*string)
+				if !ok || fixedIP == nil || net.ParseIP(*fixedIP) == nil {
+					return errors.New("FixedIP must be a valid IPv4 or IPv6 address")
+				}
+				return nil
+			}))),
+		validation.Field(&i.FixedGateway, validationis.IP),
+		validation.Field(&i.NetworkSegmentType, validation.NilOrNotEmpty, validation.In(
+			cdbm.ExpectedInterfaceNetworkSegmentTypeTenant, cdbm.ExpectedInterfaceNetworkSegmentTypeAdmin,
+			cdbm.ExpectedInterfaceNetworkSegmentTypeUnderlay, cdbm.ExpectedInterfaceNetworkSegmentTypeHostInband)),
+		validation.Field(&i.Role, validation.NilOrNotEmpty, validation.In(
+			cdbm.ExpectedInterfaceRoleUnspecified, cdbm.ExpectedInterfaceRoleHost, cdbm.ExpectedInterfaceRoleDpuOs,
+			cdbm.ExpectedInterfaceRoleDpuBmc, cdbm.ExpectedInterfaceRoleHostBmc)),
+		validation.Field(&i.IPAllocation, validation.NilOrNotEmpty, validation.In(
+			cdbm.ExpectedInterfaceIPAllocationUnspecified, cdbm.ExpectedInterfaceIPAllocationDynamic,
+			cdbm.ExpectedInterfaceIPAllocationFixed, cdbm.ExpectedInterfaceIPAllocationRetained)),
+	)
+	if err != nil {
+		return err
+	}
+	if i.IPAllocation != nil {
+		switch *i.IPAllocation {
+		case cdbm.ExpectedInterfaceIPAllocationFixed:
+			if i.FixedIP == nil {
+				return validation.Errors{"fixedIp": errors.New("is required for Fixed allocation")}
+			}
+		case cdbm.ExpectedInterfaceIPAllocationDynamic, cdbm.ExpectedInterfaceIPAllocationRetained:
+			if i.FixedIP != nil {
+				return validation.Errors{"fixedIp": errors.New("cannot be combined with Dynamic or Retained allocation")}
+			}
+		}
+	}
+	if i.Primary != nil && i.Role != nil {
+		switch *i.Role {
+		case cdbm.ExpectedInterfaceRoleDpuOs, cdbm.ExpectedInterfaceRoleDpuBmc:
+			return validation.Errors{"primary": errors.New("must be omitted for DPU interfaces")}
+		case cdbm.ExpectedInterfaceRoleHostBmc:
+			if *i.Primary {
+				return validation.Errors{"primary": errors.New("cannot be true for HostBmc interfaces")}
+			}
+		}
+	}
+	return nil
+}
+
+// ToDBModel converts the public interface shape to its persisted form.
+func (i APIExpectedMachineInterface) ToDBModel() cdbm.ExpectedMachineInterface {
+	return cdbm.ExpectedMachineInterface{
+		MacAddress:         strings.ToUpper(strings.ReplaceAll(i.MacAddress, "-", ":")),
+		NicType:            i.NicType,
+		FixedIP:            i.FixedIP,
+		FixedMask:          i.FixedMask,
+		FixedGateway:       i.FixedGateway,
+		Primary:            i.Primary,
+		NetworkSegmentType: i.NetworkSegmentType,
+		Role:               i.Role,
+		IPAllocation:       i.IPAllocation,
+	}
+}
+
+// NewAPIExpectedMachineInterface converts persisted interface intent to the
+// public REST shape.
+func NewAPIExpectedMachineInterface(i cdbm.ExpectedMachineInterface) APIExpectedMachineInterface {
+	return APIExpectedMachineInterface{
+		MacAddress:         i.MacAddress,
+		NicType:            i.NicType,
+		FixedIP:            i.FixedIP,
+		FixedMask:          i.FixedMask,
+		FixedGateway:       i.FixedGateway,
+		Primary:            i.Primary,
+		NetworkSegmentType: i.NetworkSegmentType,
+		Role:               i.Role,
+		IPAllocation:       i.IPAllocation,
+	}
+}
+
+func expectedMachineInterfacesToDB(interfaces []APIExpectedMachineInterface) []cdbm.ExpectedMachineInterface {
+	if interfaces == nil {
+		return nil
+	}
+	result := make([]cdbm.ExpectedMachineInterface, 0, len(interfaces))
+	for _, expectedInterface := range interfaces {
+		result = append(result, expectedInterface.ToDBModel())
+	}
+	return result
+}
+
+// APIExpectedMachineInterfaces is an ordered replacement list of declarations.
+// Nil preserves the list on PATCH; an explicit empty list clears it.
+type APIExpectedMachineInterfaces []APIExpectedMachineInterface
+
+// Validate checks each declaration and the cardinality constraints shared with Core.
+// Omitted roles may be inherited on PATCH, so Core validates their resolved values.
+func (interfaces APIExpectedMachineInterfaces) Validate() error {
+	if err := validation.Validate([]APIExpectedMachineInterface(interfaces), validation.Each()); err != nil {
+		return err
+	}
+	hostBMCs, primaries := 0, 0
+	for _, expectedInterface := range interfaces {
+		if expectedInterface.Role != nil && *expectedInterface.Role == cdbm.ExpectedInterfaceRoleHostBmc {
+			hostBMCs++
+		}
+		if expectedInterface.Primary != nil && *expectedInterface.Primary {
+			primaries++
+		}
+	}
+	if hostBMCs > 1 {
+		return errors.New("at most one HostBmc interface may be configured")
+	}
+	if primaries > 1 {
+		return errors.New("at most one interface may set primary to true")
+	}
+	return nil
+}
 
 const (
 	// ExpectedMachineMaxBatchItems is the maximum number of ExpectedMachines allowed in a single batch operation
@@ -74,6 +222,8 @@ type APIExpectedMachineCreateRequest struct {
 	ChassisSerialNumber string `json:"chassisSerialNumber"`
 	// FallbackDPUSerialNumbers is the serial numbers of the expected machine's fallback DPUs
 	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers"`
+	// Interfaces are expected host NIC declarations forwarded to Core.
+	Interfaces APIExpectedMachineInterfaces `json:"interfaces"`
 	// SkuId is the optional UUID for an SKU
 	SkuID *string `json:"skuId"`
 	// RackID is the optional rack identifier
@@ -102,9 +252,16 @@ type APIExpectedMachineCreateRequest struct {
 	HostLifecycleProfile *APIHostLifecycleProfile `json:"hostLifecycleProfile"`
 }
 
+// InterfacesToDBModel converts the request's interface collection while
+// preserving its order.
+func (emcr *APIExpectedMachineCreateRequest) InterfacesToDBModel() []cdbm.ExpectedMachineInterface {
+	return expectedMachineInterfacesToDB(emcr.Interfaces)
+}
+
 // Validate ensure the values passed in request are acceptable
 func (emcr *APIExpectedMachineCreateRequest) Validate() error {
 	err := validation.ValidateStruct(emcr,
+		validation.Field(&emcr.Interfaces),
 		validation.Field(&emcr.SiteID,
 			validation.When(emcr.SiteID != "", validationis.UUID.Error(validationErrorInvalidUUID))),
 		validation.Field(&emcr.BmcMacAddress,
@@ -125,7 +282,7 @@ func (emcr *APIExpectedMachineCreateRequest) Validate() error {
 		validation.Field(&emcr.BmcIpAddress,
 			validation.NilOrNotEmpty.Error("BmcIpAddress cannot be empty"),
 			validation.When(emcr.BmcIpAddress != nil && *emcr.BmcIpAddress != "",
-				validationis.IP.Error("BmcIpAddress must be a valid IPv4 or IPv6 address"))),
+				validation.By(util.ValidateExpectedBmcIPAddress))),
 		validation.Field(&emcr.Name,
 			validation.NilOrNotEmpty.Error("Name cannot be empty")),
 		validation.Field(&emcr.Manufacturer,
@@ -149,7 +306,9 @@ func (emcr *APIExpectedMachineCreateRequest) Validate() error {
 
 // APIExpectedMachineUpdateRequest is the data structure to capture user request to update an ExpectedMachine
 type APIExpectedMachineUpdateRequest struct {
-	// ID is required for batch updates (must be empty or match path value for single update)
+	// ID is required and non-null for batch updates. For a single PATCH, it
+	// can be omitted or null; a supplied string must match the path UUID in
+	// lowercase hyphenated form. Empty strings are invalid for both.
 	ID *string `json:"id"`
 	// BmcMacAddress may reassert the ExpectedMachine's current BMC MAC, but
 	// cannot change it after creation.
@@ -162,6 +321,9 @@ type APIExpectedMachineUpdateRequest struct {
 	ChassisSerialNumber *string `json:"chassisSerialNumber"`
 	// FallbackDPUSerialNumbers is the serial numbers of the expected machine's fallback DPUs
 	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers"`
+	// Interfaces replaces the complete interface list when non-nil. An omitted
+	// or null field preserves it, while an explicit empty list clears it.
+	Interfaces APIExpectedMachineInterfaces `json:"interfaces"`
 	// SkuId is the optional UUID for an SKU
 	SkuID *string `json:"skuId"`
 	// RackID is the optional rack identifier
@@ -191,6 +353,12 @@ type APIExpectedMachineUpdateRequest struct {
 	HostLifecycleProfile *APIHostLifecycleProfile `json:"hostLifecycleProfile"`
 }
 
+// InterfacesToDBModel converts the update collection and preserves nil versus
+// an explicit empty list for PATCH semantics.
+func (emur *APIExpectedMachineUpdateRequest) InterfacesToDBModel() []cdbm.ExpectedMachineInterface {
+	return expectedMachineInterfacesToDB(emur.Interfaces)
+}
+
 // Validate ensure the values passed in request are acceptable
 func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 	if emur.ID != nil {
@@ -207,6 +375,7 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 	}
 
 	err := validation.ValidateStruct(emur,
+		validation.Field(&emur.Interfaces),
 		validation.Field(&emur.BmcMacAddress,
 			validation.NilOrNotEmpty.Error("BmcMacAddress cannot be empty"),
 			validation.When(emur.BmcMacAddress != nil && *emur.BmcMacAddress != "",
@@ -232,7 +401,7 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 			validation.NilOrNotEmpty.Error("RackID cannot be empty")),
 		validation.Field(&emur.BmcIpAddress,
 			validation.When(emur.BmcIpAddress != nil && *emur.BmcIpAddress != "",
-				validationis.IP.Error("BmcIpAddress must be a valid IPv4 or IPv6 address"))),
+				validation.By(util.ValidateExpectedBmcIPAddress))),
 		validation.Field(&emur.Name,
 			validation.NilOrNotEmpty.Error("Name cannot be empty")),
 		validation.Field(&emur.Manufacturer,
@@ -254,6 +423,50 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 	return nil
 }
 
+// ToProto builds the Core patch from the updated cloud row and the fields
+// selected by this request. Call Validate before conversion and pass the
+// updated cloud row so derived metadata labels include its retained values.
+// Explicit zero and empty values remain updates.
+func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachine) *corev1.PatchExpectedMachineRequest {
+	resource := entity.ToProto(cdbm.ExpectedMachineCredentials{
+		Username: emur.DefaultBmcUsername,
+		Password: emur.DefaultBmcPassword,
+	})
+
+	// The DB row may still hold an address this PATCH omitted. Core needs
+	// the request value so nil preserves its reservation and "" clears it.
+	resource.BmcIpAddress = emur.BmcIpAddress
+	if emur.Interfaces != nil {
+		resource.HostNics = make([]*corev1.ExpectedHostNic, 0, len(emur.Interfaces))
+		for _, expectedInterface := range emur.Interfaces {
+			resource.HostNics = append(resource.HostNics, expectedInterface.ToDBModel().ToProto())
+		}
+	}
+	setBmcIP := emur.BmcIpAddress != nil && *emur.BmcIpAddress != ""
+	if setBmcIP {
+		resource.BmcIpAllocation = corev1.BmcIpAllocationType_BMC_IP_ALLOCATION_TYPE_AUTO.Enum()
+	}
+	return &corev1.PatchExpectedMachineRequest{
+		ExpectedMachine: resource,
+		UpdateMask: util.ExpectedComponentUpdateMask(
+			util.ExpectedComponentUpdateField{Path: "bmc_username", Present: emur.DefaultBmcUsername != nil},
+			util.ExpectedComponentUpdateField{Path: "bmc_password", Present: emur.DefaultBmcPassword != nil},
+			util.ExpectedComponentUpdateField{Path: "bmc_ip_address", Present: emur.BmcIpAddress != nil},
+			util.ExpectedComponentUpdateField{Path: "bmc_ip_allocation", Present: setBmcIP},
+			util.ExpectedComponentUpdateField{Path: "rack_id", Present: emur.RackID != nil},
+			util.ExpectedComponentUpdateField{Path: "metadata.name", Present: emur.Name != nil},
+			util.ExpectedComponentUpdateField{Path: "metadata.description", Present: emur.Description != nil},
+			util.ExpectedComponentUpdateField{Path: "metadata.labels", Present: emur.Labels != nil || emur.Manufacturer != nil || emur.Model != nil || emur.SlotID != nil || emur.TrayIdx != nil || emur.HostID != nil},
+			util.ExpectedComponentUpdateField{Path: "chassis_serial_number", Present: emur.ChassisSerialNumber != nil},
+			util.ExpectedComponentUpdateField{Path: "fallback_dpu_serial_numbers", Present: emur.FallbackDPUSerialNumbers != nil},
+			util.ExpectedComponentUpdateField{Path: "host_nics", Present: emur.Interfaces != nil},
+			util.ExpectedComponentUpdateField{Path: "sku_id", Present: emur.SkuID != nil},
+			util.ExpectedComponentUpdateField{Path: "is_dpf_enabled", Present: emur.IsDpfEnabled != nil},
+			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.disable_lockdown", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.DisableLockdown != nil},
+		),
+	}
+}
+
 // APIExpectedMachine is the data structure to capture API representation of an ExpectedMachine
 type APIExpectedMachine struct {
 	// ID is the ID of this Expected Machine
@@ -267,7 +480,9 @@ type APIExpectedMachine struct {
 	// ChassisSerialNumber is the serial number of the expected machine's chassis
 	ChassisSerialNumber string `json:"chassisSerialNumber"`
 	// FallbackDPUSerialNumbers is the serial numbers of the expected machine's fallback DPUs
-	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers"`
+	FallbackDPUSerialNumbers APIList[string] `json:"fallbackDPUSerialNumbers"`
+	// Interfaces are the Expected Machine interface declarations stored by REST.
+	Interfaces APIList[APIExpectedMachineInterface] `json:"interfaces"`
 	// SkuID is the ID of the SKU
 	SkuID *string `json:"skuId"`
 	// Sku is the SKU information
@@ -294,10 +509,10 @@ type APIExpectedMachine struct {
 	TrayIdx *int32 `json:"trayIdx"`
 	// HostID is the optional host identifier
 	HostID *int32 `json:"hostId"`
-	// IsDpfEnabled indicates whether this host is eligible for DPF-based provisioning
-	IsDpfEnabled *bool `json:"isDpfEnabled"`
+	// IsDpfEnabled indicates whether this host is eligible for DPF-based provisioning, defaulting to true when unset.
+	IsDpfEnabled bool `json:"isDpfEnabled"`
 	// Labels is the labels of the expected machine
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// HostLifecycleProfile is the optional per-host lifecycle profile
 	HostLifecycleProfile *APIHostLifecycleProfile `json:"hostLifecycleProfile,omitempty"`
 	// Created indicates the ISO datetime string for when the ExpectedMachine was created
@@ -308,12 +523,17 @@ type APIExpectedMachine struct {
 
 // NewAPIExpectedMachine accepts a DB layer ExpectedMachine object and returns an API object
 func NewAPIExpectedMachine(dibp *cdbm.ExpectedMachine) *APIExpectedMachine {
+	interfaces := make(APIList[APIExpectedMachineInterface], 0, len(dibp.Interfaces))
+	for _, expectedInterface := range dibp.Interfaces {
+		interfaces = append(interfaces, NewAPIExpectedMachineInterface(expectedInterface))
+	}
 	apiem := &APIExpectedMachine{
 		ID:                       dibp.ID,
 		BmcMacAddress:            dibp.BmcMacAddress,
 		SiteID:                   dibp.SiteID,
 		ChassisSerialNumber:      dibp.ChassisSerialNumber,
 		FallbackDPUSerialNumbers: dibp.FallbackDpuSerialNumbers,
+		Interfaces:               interfaces,
 		SkuID:                    dibp.SkuID,
 		MachineID:                dibp.MachineID,
 		RackID:                   dibp.RackID,
@@ -325,8 +545,8 @@ func NewAPIExpectedMachine(dibp *cdbm.ExpectedMachine) *APIExpectedMachine {
 		SlotID:                   dibp.SlotID,
 		TrayIdx:                  dibp.TrayIdx,
 		HostID:                   dibp.HostID,
-		IsDpfEnabled:             dibp.IsDpfEnabled,
-		Labels:                   dibp.Labels,
+		IsDpfEnabled:             dibp.IsDpfEnabled == nil || *dibp.IsDpfEnabled,
+		Labels:                   APILabels(dibp.Labels),
 		HostLifecycleProfile:     NewAPIHostLifecycleProfile(dibp.HostLifecycleProfile),
 		Created:                  dibp.Created,
 		Updated:                  dibp.Updated,

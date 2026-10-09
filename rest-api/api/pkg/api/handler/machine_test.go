@@ -18,9 +18,10 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -28,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
 	oteltrace "go.opentelemetry.io/otel/trace"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -413,7 +415,7 @@ func TestMachineHandler_Get(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -619,7 +621,6 @@ func TestMachineHandler_Get(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			mh := GetMachineHandler{
@@ -935,7 +936,7 @@ func TestMachineHandler_GetAll(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1539,7 +1540,6 @@ func TestMachineHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gamh := GetAllMachineHandler{
@@ -1913,7 +1913,7 @@ func TestMachineHandler_Update(t *testing.T) {
 	scp.IDClientMap[site3.ID.String()] = tsc1
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type fields struct {
 		dbSession *cdb.Session
@@ -2720,7 +2720,6 @@ func TestMachineHandler_Update(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqMachine.ID)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if tt.args.beforeHandle != nil {
@@ -2833,7 +2832,7 @@ func TestMachineHandler_Update(t *testing.T) {
 
 				// Verify that Machine labels are updated
 				if tt.args.reqLabels != nil {
-					assert.Equal(t, rst.Labels, tt.args.reqLabels)
+					assert.Equal(t, map[string]string(rst.Labels), tt.args.reqLabels)
 				}
 
 				if tt.args.verifyOnlineRepair != nil {
@@ -2923,7 +2922,7 @@ func TestMachineHandler_GetStatusDetails(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name         string
@@ -2998,7 +2997,6 @@ func TestMachineHandler_GetStatusDetails(t *testing.T) {
 			ec.SetParamValues(tc.reqOrg, tc.reqMachineID)
 			ec.Set("user", tc.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			assert.NoError(t, handler.Handle(ec))
@@ -3144,7 +3142,7 @@ func TestMachineHandler_Delete(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -3227,7 +3225,6 @@ func TestMachineHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			mh := DeleteMachineHandler{
@@ -3448,7 +3445,7 @@ func TestMachineHandler_GetDpuMachines(t *testing.T) {
 	scpTimeout := sc.NewClientPool(tcfg)
 	scpTimeout.IDClientMap[site.ID.String()] = tscTimeout
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -3589,13 +3586,11 @@ func TestMachineHandler_GetDpuMachines(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gadmh := GetAllDpuMachineHandler{
-				dbSession:  dbSession,
-				scp:        tc.scp,
-				tracerSpan: cutil.NewTracerSpan(),
+				dbSession: dbSession,
+				scp:       tc.scp,
 			}
 			err := gadmh.Handle(ec)
 			assert.Nil(t, err)
@@ -3626,4 +3621,145 @@ func TestMachineHandler_GetDpuMachines(t *testing.T) {
 	wrunErr.AssertExpectations(t)
 	tscTimeout.AssertExpectations(t)
 	wrunTimeout.AssertExpectations(t)
+}
+
+func TestResetMachineChassisHandler_Handle(t *testing.T) {
+	tests := []struct {
+		name       string
+		chassisID  string
+		setup      func(*testing.T, *common.TestSetupProviderMachineHandlerFixture)
+		wantStatus int
+		wantProxy  bool
+	}{
+		{
+			name:       "queues reset",
+			chassisID:  "Chassis_0",
+			wantStatus: http.StatusAccepted,
+			wantProxy:  true,
+		},
+		{
+			name:       "rejects missing chassis ID",
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "rejects invalid chassis ID",
+			chassisID:  "../Chassis 0",
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:      "requires Provider Admin",
+			chassisID: "Chassis_0",
+			setup: func(_ *testing.T, fixture *common.TestSetupProviderMachineHandlerFixture) {
+				fixture.User = &cdbm.User{OrgData: cdbm.OrgData{fixture.Org: cdbm.Org{
+					Name:  fixture.Org,
+					Roles: []string{authz.ProviderViewerRole},
+				}}}
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:      "rejects another Provider's Machine",
+			chassisID: "Chassis_0",
+			setup: func(t *testing.T, fixture *common.TestSetupProviderMachineHandlerFixture) {
+				fixture.Org = "other-org"
+				user := common.TestBuildUser(t, fixture.DBSession, "other-starfleet-id", fixture.Org, []string{authz.ProviderAdminRole})
+				common.TestBuildInfrastructureProvider(t, fixture.DBSession, "Other Provider", fixture.Org, user)
+				fixture.User = user
+			},
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:      "rejects Machine missing on Site",
+			chassisID: "Chassis_0",
+			setup: func(t *testing.T, fixture *common.TestSetupProviderMachineHandlerFixture) {
+				_, err := cdbm.NewMachineDAO(fixture.DBSession).Update(context.Background(), nil, cdbm.MachineUpdateInput{
+					MachineID:       fixture.MachineID,
+					IsMissingOnSite: cutil.GetPtr(true),
+				})
+				require.NoError(t, err)
+			},
+			wantStatus: http.StatusPreconditionFailed,
+		},
+		{
+			name:      "rejects Site that is not Registered",
+			chassisID: "Chassis_0",
+			setup: func(t *testing.T, fixture *common.TestSetupProviderMachineHandlerFixture) {
+				_, err := cdbm.NewSiteDAO(fixture.DBSession).Update(context.Background(), nil, cdbm.SiteUpdateInput{
+					SiteID: uuid.MustParse(fixture.SiteID),
+					Status: cutil.GetPtr(cdbm.SiteStatusPending),
+				})
+				require.NoError(t, err)
+			},
+			wantStatus: http.StatusPreconditionFailed,
+		},
+		{
+			name:      "rejects assigned Machine",
+			chassisID: "Chassis_0",
+			setup: func(t *testing.T, fixture *common.TestSetupProviderMachineHandlerFixture) {
+				isAssigned := true
+				_, err := cdbm.NewMachineDAO(fixture.DBSession).Update(context.Background(), nil, cdbm.MachineUpdateInput{
+					MachineID:  fixture.MachineID,
+					IsAssigned: &isAssigned,
+				})
+				require.NoError(t, err)
+			},
+			wantStatus: http.StatusPreconditionFailed,
+		},
+		{
+			name:      "preserves Core failed precondition",
+			chassisID: "Chassis_0",
+			setup: func(t *testing.T, fixture *common.TestSetupProviderMachineHandlerFixture) {
+				wrun := &tmocks.WorkflowRun{}
+				wrun.On("Get", mock.Anything, mock.Anything).Return(tp.NewNonRetryableApplicationError("host must be in maintenance mode", swe.ErrTypeNICoFailedPrecondition, nil))
+				tsc := &tmocks.Client{}
+				tsc.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.MatchedBy(func(req grpcproxy.Request) bool {
+					*fixture.ProxiedReq = req
+					return true
+				})).Return(wrun, nil)
+				fixture.SiteClientPool.IDClientMap[fixture.SiteID] = tsc
+				t.Cleanup(func() {
+					tsc.AssertExpectations(t)
+					wrun.AssertExpectations(t)
+				})
+			},
+			wantStatus: http.StatusPreconditionFailed,
+			wantProxy:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
+			handler := NewResetMachineChassisHandler(fixture.DBSession, fixture.SiteClientPool)
+			if tt.setup != nil {
+				tt.setup(t, &fixture)
+			}
+
+			rec := fixture.Request(t, func(c echo.Context) error {
+				c.SetParamNames("orgName", "id", "chassisId")
+				c.SetParamValues(fixture.Org, fixture.MachineID, tt.chassisID)
+				return handler.Handle(c)
+			}, http.MethodPatch, "/chassis/"+url.PathEscape(tt.chassisID)+"/reset?chassisId=OtherChassis", nil, "")
+			assert.Equal(t, tt.wantStatus, rec.Code)
+			if !tt.wantProxy {
+				assert.Empty(t, fixture.ProxiedReq.FullMethod)
+				return
+			}
+
+			assert.Equal(t, corev1.Forge_AdminChassisReset_FullMethodName, fixture.ProxiedReq.FullMethod)
+			assert.Empty(t, fixture.ProxiedReq.EncryptedSecrets)
+			var coreRequest corev1.AdminChassisResetRequest
+			require.NoError(t, protojson.Unmarshal(fixture.ProxiedReq.RequestJSON, &coreRequest))
+			assert.Equal(t, fixture.MachineID, coreRequest.GetMachineId().GetId())
+			assert.Equal(t, tt.chassisID, coreRequest.GetChassisId())
+			assert.Equal(t, corev1.AdminPowerControlRequest_ForceRestart, coreRequest.GetAction())
+			if tt.wantStatus != http.StatusAccepted {
+				return
+			}
+
+			var response model.APIMessageResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+			assert.Equal(t, "Machine chassis reset request was accepted", response.Message)
+		})
+	}
 }

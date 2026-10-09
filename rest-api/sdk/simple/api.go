@@ -345,7 +345,10 @@ func (am *ApiMetadata) Initialize(ctx context.Context, org string, apiClient *st
 			Message: fmt.Sprintf("Unable to retrieve API version for org %s.", org),
 		}
 	}
-	am.apiVersion = "v" + *metadata.Version
+	am.apiVersion = *metadata.Version
+	if !strings.HasPrefix(am.apiVersion, "v") {
+		am.apiVersion = "v" + am.apiVersion
+	}
 
 	// Fetch Infrastructure Provider
 	logger.Info().Msgf("Fetching Infrastructure Provider for org: %s", org)

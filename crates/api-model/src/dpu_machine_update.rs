@@ -151,9 +151,7 @@ impl DpuMachineUpdate {
 
                         Ok(Some(DpuMachineUpdate {
                             host_machine_id: *machine_id,
-                            dpu_machine_id: dpu.dpu_machine_id().map_err(|error| {
-                                ModelError::DatabaseTypeConversionError(error.to_string())
-                            })?,
+                            dpu_machine_id: dpu.id,
                             firmware_version,
                             dpf_managed: false,
                         }))
@@ -188,14 +186,8 @@ impl DpuMachineUpdate {
 
         let dpu_to_host: HashMap<DpuMachineId, HostMachineId> = snapshots
             .iter()
-            .flat_map(|(host_id, snap)| {
-                snap.dpu_snapshots.iter().map(move |d| {
-                    d.dpu_machine_id()
-                        .map(|id| (id, *host_id))
-                        .map_err(|error| ModelError::DatabaseTypeConversionError(error.to_string()))
-                })
-            })
-            .collect::<Result<_, _>>()?;
+            .flat_map(|(host_id, snap)| snap.dpu_snapshots.iter().map(move |d| (d.id, *host_id)))
+            .collect();
 
         let mut by_host: HashMap<HostMachineId, Vec<DpuMachineUpdate>> = HashMap::new();
         for outdated in dpf_outdated {
@@ -232,14 +224,6 @@ impl OutdatedHost<'_> {
     pub fn is_available_for_updates(&self) -> bool {
         // Skip any machines that have pending health alerts
         if !self.managed_host.aggregate_health.alerts.is_empty() {
-            return false;
-        }
-        // Skip looking at any machines that are marked for updates
-        if self
-            .managed_host
-            .host_snapshot
-            .machine_updates_in_progress()
-        {
             return false;
         }
         // Skip any machines that are not Ready

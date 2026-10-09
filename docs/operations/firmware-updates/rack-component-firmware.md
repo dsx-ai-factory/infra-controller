@@ -66,68 +66,181 @@ bundle. An unfiltered batch request can affect the entire site.
 
 ## Describe the update
 
-The request has four controls in addition to `siteId`:
+The request supports these controls in addition to `siteId`:
 
 | Field | Purpose |
 |---|---|
-| `version` | Target passed to the component backend. For current rack-scale RMS paths, this is a complete SOT firmware-object JSON document serialized as a string. Legacy backends can accept a plain version string. |
-| `targets` | Optional component subset for tray requests. When present, `version` must also be present. Rack handlers do not forward this field, so do not send it with a rack request. |
+| `version` | Optional firmware input. Flow extracts component-specific values from layered JSON. A non-layered value that contains at least one non-whitespace character is forwarded unchanged. For a rack-scale RMS component with an omitted, null, empty, or whitespace-only value, Core fetches the owning rack profile's `firmware_object.url`. See [Choose the firmware object format](#choose-the-firmware-object-format). |
+| `targets` | Optional component subset for tray requests. Rack handlers do not forward this field, so do not send it with a rack request. |
 | `ruleId` | Pins the task to a custom Flow operation rule. When omitted, Flow resolves a rule and falls back to its built-in firmware rule. |
 | `overrideReadinessCheck` | Bypasses Flow's readiness gate and tells Core to bypass its state controller where supported. Use only during supervised maintenance after tenant impact has been accepted. |
+| `overrideVersionCheck` | Defaults to `false`. Requests an update without version-based skip or downgrade checks; enforcement depends on the backend. Does not bypass readiness checks. |
+| `authenticationData` | Optional firmware-download credentials, shared or scoped by component type. See [Firmware authentication](#firmware-authentication). |
 
-Although the API permits `version` to be omitted when `targets` is empty, that
-is not portable across component backends. Rack-scale RMS updates require SOT
-JSON. Supply an explicit version unless the selected backend and operation rule
-are known to resolve one.
+`version` carries the target firmware input. Its representation is a contract
+between the caller and the component backend selected for the target, so the
+REST API does not assign it one universal schema. Flow preserves the string
+except when it unwraps the optional per-component-type mapping described below;
+the selected component manager or its backend validates and interprets the
+value.
 
-### SOT firmware-object JSON
+When using the rack profile's desired firmware, each Core firmware request must
+target a single rack. Flow splits rack, NVLink domain, and tray batch requests
+into one task per rack. The built-in firmware rule batches each component type
+within that rack's task. Batch requests can therefore omit `version` and use
+each rack profile's desired firmware for rack-scale RMS components. An empty
+or whitespace-only value for a selected component type in layered input uses
+the same per-rack resolution.
+
+The REST response remains asynchronous when `version` is omitted. Core resolves
+the desired firmware object when the Flow task reaches each rack-scale RMS
+component. A missing rack assignment, rack profile, or `firmware_object` source,
+or a failed fetch, empty response, or invalid JSON response, fails the Core
+firmware activity and the Flow task.
+
+Non-RMS compute updates retain their existing empty-version behavior.
+
+### Choose the firmware object format
+
+Flow defaults to the `nico` component managers, which route updates through
+Core's Component Manager. For RMS-backed compute, NVSwitch, and power shelf
+updates, an explicit override requires the complete SOT firmware-object JSON
+document produced by the firmware release process, serialized as a string.
+
+For compatibility, when Flow's compute component manager is explicitly set to
+[`nicolegacy`](../../configuration/flow-component-manager.md#selecting-the-compute-implementation),
+use a compute tray endpoint without `version` or `targets` for on-demand host
+updates. Core selects the bundle from the configured
+[host firmware catalog](configuration.md#host-firmware-catalog).
+
+#### SOT firmware-object JSON
 
 RMS firmware is described by a source-of-truth (SOT) firmware object: a JSON
 document containing the bundle identity and the artifacts RMS must apply. The
-document comes from the platform's firmware release process; it is not the
-same as the host firmware catalog described in
-[Configure firmware versions](configuration.md).
+document comes from the platform's firmware release process; it is distinct
+from the [host firmware catalog](configuration.md).
 
-The REST `version` field is a string, so the complete JSON document must be
-serialized into that string. Build the request body with a JSON tool instead
-of escaping the document by hand:
+A SOT export has the following structure. This abbreviated example documents
+the field hierarchy; it is not valid firmware-update input. Always submit the
+complete document produced by the release process.
 
-```sh
-SOT_JSON=$(jq -c . compute-firmware-object.json)
-
-jq -n \
-  --arg siteId "$SITE_ID" \
-  --arg version "$SOT_JSON" \
-  '{siteId: $siteId, version: $version, targets: ["bmc", "bios"]}'
+```json
+{
+  "ProductName": "ExampleRackSystem",
+  "Milestones": [
+    {
+      "Name": "example-release",
+      "State": "Onboarded",
+      "BoardSKUs": [
+        {
+          "Name": "Example-Switch-Tray",
+          "Type": "Switch Tray",
+          "Components": {
+            "Software": [],
+            "Firmware": [
+              {
+                "Component": "BMC+CPLD",
+                "Version": "1.2.3",
+                "Type": "Prod",
+                "FileNames": ["switch-firmware.fwpkg"],
+                "Locations": [
+                  {
+                    "Location": "/firmware/example/switch-firmware.fwpkg",
+                    "LocationType": "FILE",
+                    "PackageName": "",
+                    "Type": "Firmware",
+                    "FileName": "switch-firmware.fwpkg"
+                  }
+                ],
+                "SubComponents": [
+                  {
+                    "Component": "BMC",
+                    "Version": "1.2.3",
+                    "Type": null
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
 ```
+
+To override the rack profile's desired firmware object, serialize the complete
+JSON document into the REST `version` string.
+
+When all selected component backends use RMS, `version` can hold one shared
+SOT document. No additional flag is required. The document must
+contain the board SKUs and artifacts needed by every component type selected
+by the operation rule. Its decoded shape is:
+
+```text
+{
+  "ProductName": "ExampleRackSystem",
+  "Milestones": [{
+    "Name": "example-release",
+    "BoardSKUs": [
+      {"Type": "Compute Node", "Components": { ... }},
+      {"Type": "Switch Tray", "Components": { ... }},
+      {"Type": "Power Shelf", "Components": { ... }}
+    ]
+  }]
+}
+```
+
+The ellipses represent the complete component and artifact metadata from the
+SOT export; they are not literal request content. Because this object has none
+of the reserved top-level keys `compute`, `nvswitch`, and `powershelf`, Flow
+passes the same serialized document unchanged to every component manager
+selected by the operation rule.
 
 For a rack request that needs a different value for each component type,
 `version` can contain a layered JSON document with `compute`, `nvswitch`, and
 `powershelf` keys. Flow extracts the relevant value before calling each
-component manager. For example, this builds a layered value from two complete
-SOT documents:
+component manager. Each value must satisfy that component's backend contract.
+For RMS-backed components, the decoded shape is:
 
-```sh
-COMPUTE_SOT=$(jq -c . compute-firmware-object.json)
-SWITCH_SOT=$(jq -c . switch-firmware-object.json)
-
-LAYERED_VERSION=$(jq -cn \
-  --argjson compute "$COMPUTE_SOT" \
-  --argjson nvswitch "$SWITCH_SOT" \
-  '{compute: $compute, nvswitch: $nvswitch}')
+```text
+{
+  "compute": {"ProductName": "ExampleComputeSystem", "Milestones": [ ... ]},
+  "nvswitch": {"ProductName": "ExampleSwitchSystem", "Milestones": [ ... ]},
+  "powershelf": {"ProductName": "ExamplePowerSystem", "Milestones": [ ... ]}
+}
 ```
 
-If a layered document omits a component-type key, Flow passes an empty target
-to that component manager. Use an operation rule that excludes the component
-instead of relying on an empty value to skip it.
+The ellipses stand for complete SOT documents in this RMS-specific example;
+they are not literal request content. Flow forwards object values as raw JSON and
+unquotes string values before forwarding them. The outer REST `version` field
+remains a string in both the shared and layered forms.
 
-The REST surface does not accept an RMS artifact access token. Core sends
-`NOAUTH` when no token is available, so artifacts referenced by these requests
-must be reachable without a separate token.
+If a layered document omits a component-type key, Flow skips every rule step
+for that component type, including pre/post actions and later stages. Those
+steps are reported as skipped. The component's targets remain available to
+cross-component readiness checks in selected steps.
+
+### Firmware authentication
+
+`authenticationData` accepts exactly one of `shared` (an opaque credential
+string) or `perComponent` (an object with optional `compute`, `nvswitch`, and
+`powershelf` credential strings). Unknown keys are rejected at both levels.
+Omission or `null` supplies no credentials; empty strings or an empty
+`perComponent` object also supply none. Missing component entries do not
+inherit another type's credential. Do not encode component mappings inside
+`shared`. Non-empty credentials are not supported for DPU-only updates or by
+the legacy NICo compute firmware controller.
+
+For RMS-backed updates, the selected credential is the artifact access token.
+Without a token, Core sends `NOAUTH`. Non-empty credentials require Flow's
+[persisted firmware authentication](../../architecture/flow.md#persisted-firmware-authentication)
+encryption configuration. Keep credentials out of shell arguments and logs.
 
 ## Submit an update
 
-This request updates only the BMC and BIOS targets on one compute tray:
+This rack-scale RMS request updates only the BMC and BIOS targets on one
+compute tray:
 
 ```json
 {
@@ -173,7 +286,7 @@ The built-in rule deliberately excludes power shelves and does not perform an
 AC power cycle after flashing. Use an approved custom operation rule for power
 shelves. If firmware activation requires a power cycle, submit the appropriate
 power-recycle task separately or include it in a custom rule. Refer to the
-Flow [Operation Rules Guide](../../../rest-api/flow/docs/operation-rules-guide.md).
+Flow [Operation Rules Guide](../flow/operation-rules.md).
 
 ## Component behavior
 
@@ -199,16 +312,19 @@ workflow and rack-scale compute trays through the configured rack state
 controller or component backend. Consequently, a single REST shape can start
 different internal workflows depending on the hardware model.
 
+For rack-scale RMS updates, Core resolves an omitted version from the owning
+rack profile before state-controller or direct-backend dispatch.
+
 ### NVSwitches
 
 Supported `targets` are `bmc`, `cpld`, `bios`, and `nvos`. Omitting `targets`
 passes an empty component list to Core, which means all supported switch
 components for the selected backend.
 
-When `version` is omitted, Flow first compares the switches' inventory with
-Core's desired switch versions and skips the call if every switch is already
-current. If an update is needed, the backend must still be able to resolve an
-empty target. Supply a target explicitly for predictable behavior.
+When `version` is omitted, Flow calls Core with an empty target. Core resolves
+the owning rack profile's desired firmware object before starting an RMS update.
+Non-RMS direct updates skip dispatch when every switch matches a configured
+desired firmware entry; otherwise Core forwards the empty target to the backend.
 
 ### Power shelves
 
@@ -217,8 +333,8 @@ Flow component manager updates only `pmc`.
 
 Power shelves are not present in the built-in firmware rule, so a power-shelf
 tray request needs an operation rule that contains a `PowerShelf` firmware
-step. Core's power-shelf state-controller path is not implemented; updates are
-currently dispatched through the configured direct backend.
+step. For RMS updates, Core resolves an omitted version from the owning rack
+profile before state-controller or direct-backend dispatch.
 
 ## Monitor and cancel tasks
 
@@ -289,8 +405,8 @@ rack operations because it provides readiness checks, ordering, task reports,
 and cancellation. Direct commands require the operator to provide those
 safeguards.
 
-For RMS-backed compute trays or switches, pass a SOT file rather than embedding
-it on the command line:
+For RMS-backed compute trays, switches, or power shelves, pass a SOT file rather
+than embedding it on the command line:
 
 ```sh
 nico-admin-cli component-manager update-firmware compute-tray \
@@ -304,7 +420,7 @@ nico-admin-cli component-manager update-firmware switch \
 
 nico-admin-cli component-manager update-firmware power-shelf \
   --power-shelf-id <power-shelf-id> \
-  --target-version <target-version> \
+  --sot-json-file ./power-shelf-firmware-object.json \
   --component pmc,psu
 ```
 
@@ -320,7 +436,8 @@ lower-level execution details.
 | No work starts after the REST response | Read the returned task. It may be waiting at the readiness gate or for an earlier rule stage. |
 | Task fails after about 30 minutes | Inspect the error for component IDs blocked by the readiness gate. Confirm tenant state and the persisted component operation status. |
 | Stage times out | Check Core and backend status. The built-in firmware rule polls for 45 minutes per attempt; a backend job can still be running when Flow times out. |
-| Rack-scale update rejects `version` | Confirm that `version` contains a valid SOT JSON object, serialized as a string, and that referenced artifacts are reachable without a REST-supplied access token. |
+| Rack-scale update fails before dispatch with an omitted or empty `version` | Confirm that the failed Core firmware request targets one rack. Verify that the rack profile has a configured, reachable `firmware_object.url` that returns a JSON object. |
+| Rack-scale update rejects an explicit `version` | Confirm that `version` contains a valid SOT JSON object, serialized as a string, and that the selected firmware-download credential can access the referenced artifacts. |
 | Power-shelf request succeeds without updating a shelf | Confirm that the resolved operation rule contains a `PowerShelf` step. The built-in rule excludes power shelves. |
 | Firmware was flashed but is not active | Determine whether the platform requires an AC cycle. The built-in firmware rule does not include one. |
 | Retry begins from an uncertain state | Inspect per-component status and inventory first. A Flow task failure or cancellation does not roll hardware back. |

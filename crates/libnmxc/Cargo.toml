@@ -27,6 +27,10 @@ repository.workspace = true
 name = "libnmxc"
 path = "src/lib.rs"
 
+[features]
+# Also generate the tonic server for `NMX_Controller`, for mocks that serve it.
+server = []
+
 [dependencies]
 async-trait = { workspace = true }
 trace-propagation = { path = "../trace-propagation" }
@@ -45,6 +49,7 @@ thiserror = { workspace = true }
 tonic-prost.workspace = true
 
 [dev-dependencies]
+carbide-test-support = { path = "../test-support" }
 clap = { workspace = true, features = ["derive"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }

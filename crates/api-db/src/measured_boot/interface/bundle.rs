@@ -20,6 +20,7 @@
  *  tables in the database, leveraging the bundle-specific record types.
  */
 
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::measured_boot::{MeasurementBundleId, MeasurementSystemProfileId};
 use measured_boot::pcr::PcrRegisterValue;
@@ -44,8 +45,11 @@ pub async fn insert_measurement_bundle_record(
 ) -> Result<MeasurementBundleRecord, sqlx::Error> {
     match state {
         Some(set_state) => {
-            let query = "insert into measurement_bundles(profile_id, name, state) values($1, $2, $3) returning *";
-            sqlx::query_as(query)
+            let query = format!(
+                "insert into measurement_bundles(profile_id, name, state) values($1, $2, $3) returning {}",
+                MeasurementBundleRecord::db_table_columns(),
+            );
+            sqlx::query_as(sqlx::AssertSqlSafe(query))
                 .bind(profile_id)
                 .bind(&name)
                 .bind(set_state)
@@ -53,9 +57,11 @@ pub async fn insert_measurement_bundle_record(
                 .await
         }
         None => {
-            let query =
-                "insert into measurement_bundles(profile_id, name) values($1, $2) returning *";
-            sqlx::query_as(query)
+            let query = format!(
+                "insert into measurement_bundles(profile_id, name) values($1, $2) returning {}",
+                MeasurementBundleRecord::db_table_columns(),
+            );
+            sqlx::query_as(sqlx::AssertSqlSafe(query))
                 .bind(profile_id)
                 .bind(&name)
                 .fetch_one(txn)
@@ -95,9 +101,12 @@ pub async fn insert_measurement_bundle_value_record(
     pcr_register: i16,
     value: &String,
 ) -> Result<MeasurementBundleValueRecord, DatabaseError> {
-    let query = "insert into measurement_bundles_values(bundle_id, pcr_register, sha_any) values($1, $2, $3) returning *";
+    let query = format!(
+        "insert into measurement_bundles_values(bundle_id, pcr_register, sha_any) values($1, $2, $3) returning {}",
+        MeasurementBundleValueRecord::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(bundle_id)
         .bind(pcr_register)
         .bind(value)
@@ -112,9 +121,12 @@ pub async fn rename_bundle_for_bundle_id(
     bundle_id: MeasurementBundleId,
     new_bundle_name: String,
 ) -> Result<Option<MeasurementBundleRecord>, DatabaseError> {
-    let query = "update measurement_bundles set name = $1 where bundle_id = $2 returning *";
+    let query = format!(
+        "update measurement_bundles set name = $1 where bundle_id = $2 returning {}",
+        MeasurementBundleRecord::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(new_bundle_name)
         .bind(bundle_id)
         .fetch_optional(txn)
@@ -128,8 +140,11 @@ pub async fn rename_bundle_for_bundle_name(
     old_bundle_name: String,
     new_bundle_name: String,
 ) -> Result<Option<MeasurementBundleRecord>, DatabaseError> {
-    let query = "update measurement_bundles set name = $1 where name = $2 returning *";
-    sqlx::query_as(query)
+    let query = format!(
+        "update measurement_bundles set name = $1 where name = $2 returning {}",
+        MeasurementBundleRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(new_bundle_name)
         .bind(old_bundle_name)
         .fetch_optional(txn)
@@ -149,9 +164,12 @@ pub async fn update_state_for_bundle_id(
 ) -> Result<Option<MeasurementBundleRecord>, DatabaseError> {
     match allow_from_revoked {
         true => {
-            let query = "update measurement_bundles set state = $1 where bundle_id = $2 and state != $3 returning *";
+            let query = format!(
+                "update measurement_bundles set state = $1 where bundle_id = $2 and state != $3 returning {}",
+                MeasurementBundleRecord::db_table_columns(),
+            );
 
-            sqlx::query_as(query)
+            sqlx::query_as(sqlx::AssertSqlSafe(query))
                 .bind(state)
                 .bind(bundle_id)
                 .bind(MeasurementBundleState::Revoked)
@@ -160,10 +178,12 @@ pub async fn update_state_for_bundle_id(
                 .map_err(|e| DatabaseError::new("update_state_for_bundle_id", e))
         }
         false => {
-            let query =
-                "update measurement_bundles set state = $1 where bundle_id = $2 returning *";
+            let query = format!(
+                "update measurement_bundles set state = $1 where bundle_id = $2 returning {}",
+                MeasurementBundleRecord::db_table_columns(),
+            );
 
-            sqlx::query_as(query)
+            sqlx::query_as(sqlx::AssertSqlSafe(query))
                 .bind(state)
                 .bind(bundle_id)
                 .fetch_optional(txn)
@@ -321,8 +341,11 @@ pub async fn import_measurement_bundle(
     txn: &mut PgConnection,
     bundle: &MeasurementBundleRecord,
 ) -> Result<MeasurementBundleRecord, DatabaseError> {
-    let query = "insert into measurement_bundles(bundle_id, profile_id, name, ts, state) values($1, $2, $3, $4, $5) returning *";
-    sqlx::query_as(query)
+    let query = format!(
+        "insert into measurement_bundles(bundle_id, profile_id, name, ts, state) values($1, $2, $3, $4, $5) returning {}",
+        MeasurementBundleRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(bundle.bundle_id)
         .bind(bundle.profile_id)
         .bind(&bundle.name)
@@ -357,8 +380,11 @@ pub async fn import_measurement_bundles_value(
     txn: &mut PgConnection,
     bundle: &MeasurementBundleValueRecord,
 ) -> Result<MeasurementBundleValueRecord, DatabaseError> {
-    let query = "insert into measurement_bundles_values(value_id, bundle_id, pcr_register, sha_any, ts) values($1, $2, $3, $4, $5) returning *";
-    sqlx::query_as(query)
+    let query = format!(
+        "insert into measurement_bundles_values(value_id, bundle_id, pcr_register, sha_any, ts) values($1, $2, $3, $4, $5) returning {}",
+        MeasurementBundleValueRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(bundle.value_id)
         .bind(bundle.bundle_id)
         .bind(bundle.pcr_register)

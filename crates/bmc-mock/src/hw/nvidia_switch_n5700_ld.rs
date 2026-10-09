@@ -19,7 +19,7 @@ use std::borrow::Cow;
 
 use mac_address::MacAddress;
 
-use crate::redfish;
+use crate::{Callbacks, redfish};
 
 const BMC_MODEL: &str = "P3809";
 const BMC_PART_NUMBER: &str = "692-13809-4404-000";
@@ -36,6 +36,10 @@ pub(crate) struct NvidiaSwitchN5700Ld<'a> {
 }
 
 impl NvidiaSwitchN5700Ld<'_> {
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         let manager_id = "BMC_0";
         let eth_builder = |eth| {
@@ -68,12 +72,13 @@ impl NvidiaSwitchN5700Ld<'_> {
         }
     }
 
-    pub(crate) fn system_config(&self) -> redfish::computer_system::Config {
+    pub(crate) fn system_config<C: Callbacks>(&self) -> redfish::computer_system::Config<C> {
         redfish::computer_system::Config {
             systems: vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed("System_0"),
                 manufacturer: Some("NVIDIA".into()),
                 model: Some(SWITCH_MODEL.into()),
+                bios_version: None,
                 eth_interfaces: None,
                 serial_number: Some(self.switch_serial_number.to_string().into()),
                 boot_order_mode: redfish::computer_system::BootOrderMode::Generic,

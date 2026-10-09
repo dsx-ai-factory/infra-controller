@@ -89,14 +89,14 @@ pub async fn run_local(
         forge_client_config,
         bmc_mock_certs_dir: Some(repo_root.join("crates/bmc-mock")),
         api_throttler,
-        desired_firmware_versions: desired_firmware,
+        desired_firmware_versions: std::sync::RwLock::new(desired_firmware),
         forge_api_client,
         dhcp_client,
         mac_address_pool,
     });
 
     let mat = MachineATron::new(app_context.clone());
-    let simulators = mat.make_devices(false).await?;
+    let (simulators, _) = mat.make_devices(false).await?;
     let provisionable_handles = simulators.provisionable_handles();
 
     let (stop_tx, stop_rx) = oneshot::channel();

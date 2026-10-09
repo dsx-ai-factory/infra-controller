@@ -37,6 +37,10 @@ impl DgxVrNvl<'_> {
     const BLUEFIELD_NIC_ID: &'static str = "BlueField_NIC_0";
     const BLUEFIELD_PCIE_DEVICE_ID: &'static str = "BlueField_0";
 
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         let bmc_manager_id = "BMC_0";
         let bmc_eth_builder = |eth| {
@@ -62,10 +66,10 @@ impl DgxVrNvl<'_> {
         }
     }
 
-    pub(crate) fn system_config(
+    pub(crate) fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let system_id = "System_0";
         let boot_options = std::iter::once(
             redfish::boot_option::builder(
@@ -115,13 +119,26 @@ impl DgxVrNvl<'_> {
                     log_services: None,
                     manufacturer: Some("NVIDIA".into()),
                     model: Some("VR NVL".into()),
+                    bios_version: None,
                     oem: redfish::computer_system::Oem::Generic,
                     callbacks: None,
                     serial_console: None,
                     secure_boot_available: false,
                     serial_number: None,
                     storage: None,
-                    processors: None,
+                    processors: Some(vec![
+                        redfish::processor::gpu(
+                            "HGX_Baseboard_0",
+                            "GPU_0",
+                            "/redfish/v1/Chassis/HGX_Chassis_0/Sensors/Voltage_1",
+                            &redfish::processor::GpuIdentity {
+                                uuid: "e523fe23-8f32-41d9-97e6-cd5f09d50434",
+                                serial_number: "1821526A74089",
+                                model: "Vera Rubin GPU",
+                            },
+                        )
+                        .with_mnnvlink_topology(26, 16),
+                    ]),
                     memory: None,
                 },
                 redfish::computer_system::SingleSystemConfig {
@@ -135,6 +152,7 @@ impl DgxVrNvl<'_> {
                     log_services: None,
                     manufacturer: Some("NVIDIA".into()),
                     model: Some("VR NVL72".into()),
+                    bios_version: None,
                     oem: redfish::computer_system::Oem::Generic,
                     callbacks: Some(callbacks),
                     serial_console: Some(hw::openbmc::enabled_serial_console()),

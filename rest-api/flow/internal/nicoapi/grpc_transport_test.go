@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
@@ -26,6 +27,33 @@ const (
 	testExpectedMachineCount    = 65
 	testMachineDescriptionBytes = 64 * 1024
 )
+
+func TestGrpcClient_Close(t *testing.T) {
+	for _, alreadyClosed := range []bool{false, true} {
+		name := "open connection"
+		if alreadyClosed {
+			name = "connection already closed"
+		}
+		t.Run(name, func(t *testing.T) {
+			conn, err := grpc.NewClient("passthrough:///core", grpc.WithTransportCredentials(insecure.NewCredentials()))
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = conn.Close() })
+			if alreadyClosed {
+				require.NoError(t, conn.Close())
+			}
+			closedTLS := false
+			client := &grpcClient{conn: conn, closeTLS: func() { closedTLS = true }}
+			err = client.Close()
+			if alreadyClosed {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, connectivity.Shutdown, conn.GetState())
+			assert.True(t, closedTLS, "watcher must close even when connection cleanup fails")
+		})
+	}
+}
 
 type expectedMachineForgeServer struct {
 	corev1.UnimplementedForgeServer

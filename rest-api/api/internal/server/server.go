@@ -28,21 +28,18 @@ import (
 	echoMiddleware "github.com/labstack/echo/v4/middleware"
 
 	tsdkClient "go.temporal.io/sdk/client"
-	tsdkConverter "go.temporal.io/sdk/converter"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api"
 	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
+	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authn "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authentication"
-	otprop "go.opentelemetry.io/contrib/propagators/ot"
-	"go.opentelemetry.io/otel"
-	"go.temporal.io/sdk/contrib/opentelemetry"
-	"go.temporal.io/sdk/interceptor"
 	"golang.org/x/time/rate"
 
 	// Imports for API doc generation
@@ -62,43 +59,17 @@ const (
 	WriteTimeout = 60 * time.Second
 )
 
-func InitTemporalClients(tcfg *cconfig.TemporalConfig, tracingEnabled bool) (tsdkClient.Client, tsdkClient.NamespaceClient, error) {
+func InitTemporalClients(tcfg *cconfig.TemporalConfig) (tsdkClient.Client, tsdkClient.NamespaceClient, error) {
 	var tc tsdkClient.Client
 	var tnc tsdkClient.NamespaceClient
 
 	tLogger := logur.LoggerToKV(zlogadapter.New(zerolog.New(os.Stderr)))
 
-	var (
-		tInterceptors []interceptor.ClientInterceptor
-		err           error
-	)
-
-	if tracingEnabled {
-		otelInterceptor, serr := opentelemetry.NewTracingInterceptor(opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
-		if serr != nil {
-			log.Panic().Err(serr).Msg("unable to get otelInterceptor")
-		}
-		tInterceptors = append(tInterceptors, otelInterceptor)
-	}
-
-	tOptions := tsdkClient.Options{
-		HostPort: fmt.Sprintf("%v:%v", tcfg.Host, tcfg.Port),
-		// This client connects to `cloud` namespace
-		Namespace: tcfg.Namespace,
-		ConnectionOptions: tsdkClient.ConnectionOptions{
-			TLS: tcfg.ClientTLSCfg,
-		},
-		DataConverter: tsdkConverter.NewCompositeDataConverter(
-			tsdkConverter.NewNilPayloadConverter(),
-			tsdkConverter.NewByteSlicePayloadConverter(),
-			tsdkConverter.NewProtoJSONPayloadConverterWithOptions(tsdkConverter.ProtoJSONPayloadConverterOptions{
-				AllowUnknownFields: true,
-			}),
-			tsdkConverter.NewProtoPayloadConverter(),
-			tsdkConverter.NewJSONPayloadConverter(),
-		),
-		Interceptors: tInterceptors,
-		Logger:       tLogger,
+	// This client connects to the cloud namespace; shared options attach the
+	// OpenTelemetry interceptor when transport tracing is configured.
+	tOptions, err := ctemporal.ClientOptions(tcfg.GetHostPort(), tcfg.Namespace, tcfg.ClientTLSCfg, tLogger)
+	if err != nil {
+		return nil, nil, fmt.Errorf("unable to build Temporal client options: %w", err)
 	}
 
 	log.Info().Msg("creating Temporal client")
@@ -111,6 +82,7 @@ func InitTemporalClients(tcfg *cconfig.TemporalConfig, tracingEnabled bool) (tsd
 	log.Info().Msg("creating Temporal namespace client")
 	tnc, err = tsdkClient.NewNamespaceClient(tOptions)
 	if err != nil {
+		tc.Close()
 		log.Error().Err(err).Msg("failed to create Temporal Namespace client")
 		return nil, nil, err
 	}
@@ -188,13 +160,11 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 		log.Info().Msg("Rate limiter disabled")
 	}
 
-	if cfg.GetTracingEnabled() {
-		svcName := cfg.GetTracingServiceName()
-		if svcName != "" {
-			e.Use(otelecho.Middleware(svcName, otelecho.WithSkipper(skipTracingRoutes), otelecho.WithPropagators(otprop.OT{})))
-		} else {
-			log.Warn().Msg("failed to get Tracing Service Name, skipping OTel middleware")
-		}
+	if cotel.TransportEnabled() {
+		// Bootstrap resolves the exported service.name independently, with
+		// OTEL_SERVICE_NAME taking precedence over the config fallback. This name
+		// identifies the HTTP server to the Echo instrumentation only.
+		e.Use(otelecho.Middleware(cfg.GetAPIName(), otelecho.WithSkipper(skipTracingRoutes)))
 	}
 
 	// Sentry middleware
@@ -268,16 +238,16 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 		routeGroup.Use(middleware.AuditLog(dbSession))
 	}
 
-	jwtOriginConfig := cfg.GetOrInitJWTOriginConfig()
-	if jwtOriginConfig == nil {
-		log.Panic().Msg("JWT origin config not initialized, cannot initialize auth middleware")
+	tokenOriginConfig := cfg.GetOrInitTokenOriginConfig()
+	if tokenOriginConfig == nil {
+		log.Panic().Msg("token origin config not initialized, cannot initialize auth middleware")
 	}
 
 	keycloakConfig, _ := cfg.GetOrInitKeycloakConfig()
 	payloadEncryptionConfig := cconfig.NewPayloadEncryptionConfig(cfg.GetTemporalEncryptionKey())
 
 	// Wrap the auth middleware to check readiness (optional, can be removed if panic is sufficient)
-	authMiddleware := authn.Auth(dbSession, tc, jwtOriginConfig, payloadEncryptionConfig, keycloakConfig)
+	authMiddleware := authn.Auth(dbSession, tc, tokenOriginConfig, payloadEncryptionConfig, keycloakConfig)
 	routeGroup.Use(authMiddleware)
 
 	apiRoutes := api.NewAPIRoutes(dbSession, tc, tnc, scp, cfg, dps)

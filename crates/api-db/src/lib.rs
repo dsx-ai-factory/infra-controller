@@ -19,16 +19,20 @@
 #![cfg_attr(test, allow(txn_held_across_await, txn_without_commit))]
 
 pub mod attestation;
+pub mod attestation_profile;
 pub mod bmc_metadata;
 pub mod bmc_redfish_session;
 pub mod bmc_suppression;
 pub mod carbide_version;
 pub mod compute_allocation;
+mod conditional_write;
+mod config_drift;
 pub mod credential_rotation;
 pub mod db_read;
 pub mod desired_firmware;
 pub mod dhcp_entry;
 pub mod dhcp_record;
+pub mod direct_dispatch_firmware_job;
 pub mod dns;
 pub mod dpa_interface;
 pub mod dpu_agent_upgrade_policy;
@@ -37,10 +41,12 @@ pub mod dpu_remediation;
 pub mod expected_machine;
 pub mod expected_power_shelf;
 pub mod expected_rack;
+pub mod expected_rack_group;
 pub mod expected_switch;
 pub mod explored_endpoints;
 pub mod explored_managed_host;
 pub mod extension_service;
+pub mod hardware_class_attesters;
 pub mod health_history;
 pub mod health_report;
 pub mod host_firmware_config;
@@ -57,6 +63,7 @@ pub mod machine_boot_override;
 pub mod machine_desired_boot_interface;
 pub mod machine_interface;
 pub mod machine_interface_address;
+pub mod machine_lldp_neighbor;
 pub mod machine_pending_action;
 pub mod machine_topology;
 pub mod machine_validation;
@@ -71,6 +78,7 @@ pub mod network_devices;
 pub mod network_prefix;
 pub mod network_security_group;
 pub mod network_segment;
+pub mod nic_firmware;
 pub mod nvl_logical_partition;
 pub mod nvl_partition;
 pub mod nvlink_domain_health_report;
@@ -105,6 +113,10 @@ pub mod vpc_dpu_loopback;
 pub mod vpc_peering;
 pub mod vpc_prefix;
 pub mod work_lock_manager;
+
+pub use conditional_write::{
+    ConditionalWrite, ControllerStateNotCurrent, MaintenanceRequestNotCurrent,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -451,11 +463,15 @@ impl DatabaseError {
     }
 
     pub fn is_fqdn_conflict(&self) -> bool {
+        self.violates_constraint("fqdn_must_be_unique")
+    }
+
+    /// Returns `true` if the database error identifies the named constraint
+    /// or unique index as the cause of the failure.
+    pub fn violates_constraint(&self, name: &str) -> bool {
         match self {
             DatabaseError::Sqlx(sqlx_error) => match &sqlx_error.source {
-                sqlx::Error::Database(database_error) => {
-                    database_error.constraint() == Some("fqdn_must_be_unique")
-                }
+                sqlx::Error::Database(database_error) => database_error.constraint() == Some(name),
                 _ => false,
             },
             _ => false,

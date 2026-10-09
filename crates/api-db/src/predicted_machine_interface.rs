@@ -45,8 +45,13 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = PredictedMachineInterface
     txn: &mut PgConnection,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<PredictedMachineInterface>, DatabaseError> {
-    let mut query =
-        FilterableQueryBuilder::new("SELECT * FROM predicted_machine_interfaces").filter(&filter);
+    let mut query = FilterableQueryBuilder::new(
+        "SELECT
+            id, machine_id, mac_address, expected_network_segment_type,
+            boot_interface_id, primary_interface
+        FROM predicted_machine_interfaces",
+    )
+    .filter(&filter);
     query
         .build_query_as()
         .fetch_all(txn)
@@ -146,7 +151,10 @@ pub async fn create(
     value: NewPredictedMachineInterface<'_>,
     txn: &mut PgConnection,
 ) -> Result<PredictedMachineInterface, DatabaseError> {
-    let query = "INSERT INTO predicted_machine_interfaces (machine_id, mac_address, expected_network_segment_type, boot_interface_id, primary_interface) VALUES ($1, $2, $3, $4, $5) RETURNING *";
+    let query = "INSERT INTO predicted_machine_interfaces (machine_id, mac_address, expected_network_segment_type, boot_interface_id, primary_interface) VALUES ($1, $2, $3, $4, $5)
+        RETURNING
+            id, machine_id, mac_address, expected_network_segment_type,
+            boot_interface_id, primary_interface";
     sqlx::query_as(query)
         .bind(value.machine_id)
         .bind(value.mac_address)

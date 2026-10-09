@@ -44,6 +44,7 @@ make test
 Tests require PostgreSQL. The Makefile automatically manages a test container.
 
 Test database configuration:
+
 - Host: `localhost`
 - Port: `30432`
 - User/Password: `postgres` / `postgres`
@@ -57,6 +58,7 @@ make kind-reset
 ```
 
 This deploys the full stack via **Helm charts** (default). It:
+
 1. Creates a Kind Kubernetes cluster
 2. Builds all Docker images
 3. Sets up infrastructure (PostgreSQL, Temporal, Keycloak, cert-manager, etc.)
@@ -74,10 +76,10 @@ Once complete, services are available at:
 
 | Service | URL |
 |---------|-----|
-| API | http://localhost:8388 |
-| Keycloak | http://localhost:8082 |
-| Temporal UI | http://localhost:8233 |
-| Adminer (DB UI) | http://localhost:8081 |
+| API | [http://localhost:8388](http://localhost:8388) |
+| Keycloak | [http://localhost:8082](http://localhost:8082) |
+| Temporal UI | [http://localhost:8233](http://localhost:8233) |
+| Adminer (DB UI) | [http://localhost:8081](http://localhost:8081) |
 
 Other useful commands:
 
@@ -118,6 +120,7 @@ cd ../helm-prereqs
 ```
 
 To tear everything down:
+
 ```bash
 ./clean.sh
 ```
@@ -248,7 +251,6 @@ done
 | `nico-rest-db` | Database migrations (run to completion) |
 | `nico-rest-cert-manager` | Native PKI certificate manager |
 
-
 ## Architecture
 
 | Service | Binary | Description |
@@ -262,6 +264,7 @@ done
 | nico-cli | `nicocli` | [CLI client](cli/README.md) for the REST API |
 
 Supporting modules:
+
 - **common** - Shared utilities and configurations
 - **auth** - Authentication and authorization
 - **ipam** - IP Address Management
@@ -282,6 +285,7 @@ make pre-commit-install
 ```
 
 This will:
+
 1. Install `pre-commit` if not already installed
 2. Install `trufflehog` if not already installed
 3. Configure git hooks for pre-commit and pre-push
@@ -298,7 +302,7 @@ make pre-commit-run
 
 Example output:
 
-```
+```text
 ❯ make pre-commit-run
 pre-commit run --all-files
 [INFO] Initializing environment for https://github.com/trufflesecurity/trufflehog.
@@ -311,13 +315,11 @@ TruffleHog Secret Scan...................................................Passed
 make pre-commit-update  # Update hooks to latest versions
 ```
 
-## Experimental Notice
+## Release Notice
 
-This software is considered *experimental* and is a preview release. Use at
-your own risk in production environments. The software is provided "as is"
-without warranties of any kind. Features, APIs, and configurations may change
-without notice in future releases. For production deployments, thoroughly test
-in non-critical environments first.
+The software is provided "as is" without warranties of any kind. Features,
+APIs, and configurations may change in future releases. For production
+deployments, please test thoroughly in non-critical environments first.
 
 ## License
 

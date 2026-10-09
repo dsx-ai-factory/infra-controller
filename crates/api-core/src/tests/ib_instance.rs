@@ -22,7 +22,7 @@ use carbide_ib_fabric::ib::{Filter, IBFabric, IBFabricManager};
 use carbide_instrument::testing::MetricsCapture;
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, StableHostMachineId};
 use common::api_fixtures::ib_partition::{DEFAULT_TENANT, create_ib_partition};
 use common::api_fixtures::instance::{config_for_ib_config, create_instance_with_ib_config};
 use common::api_fixtures::{TestEnv, create_managed_host};
@@ -802,7 +802,7 @@ async fn test_create_instance_with_ib_config(pool: sqlx::PgPool) {
         "0"
     );
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id.into());
+    assert_eq!(instance.machine_id(), mh.id);
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -1231,7 +1231,7 @@ async fn test_ib_skip_update_infiniband_status(pool: sqlx::PgPool) {
 /// This does not drive the instance state machine until the ready state.
 pub(in crate::tests) async fn try_allocate_instance(
     env: &TestEnv,
-    host_machine_id: &MachineId,
+    host_machine_id: &StableHostMachineId,
     ib_config: rpc::forge::InstanceInfinibandConfig,
 ) -> Result<(uuid::Uuid, rpc::forge::Instance), tonic::Status> {
     let segment_id = env.create_vpc_and_tenant_segment().await;

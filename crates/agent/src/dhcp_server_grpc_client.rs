@@ -51,6 +51,9 @@ impl From<ModelDhcpConfig> for proto::DhcpConfig {
                 .map(|ip| ip.to_string())
                 .collect(),
             carbide_provisioning_server_ipv4: c.carbide_provisioning_server_ipv4.to_string(),
+            carbide_provisioning_server_ipv6: c
+                .carbide_provisioning_server_ipv6
+                .map(|address| address.to_string()),
             carbide_dhcp_server: c.carbide_dhcp_server.to_string(),
             carbide_nameservers_v6: c
                 .carbide_nameservers_v6
@@ -65,6 +68,7 @@ impl From<ModelDhcpConfig> for proto::DhcpConfig {
             carbide_dhcp_server_v6: c.carbide_dhcp_server_v6.map(|ip| ip.to_string()),
             dhcpv6_preferred_lifetime_secs: c.dhcpv6_preferred_lifetime_secs,
             dhcpv6_valid_lifetime_secs: c.dhcpv6_valid_lifetime_secs,
+            dhcpv6_server_preference: c.dhcpv6_server_preference.map(u32::from),
         }
     }
 }
@@ -200,4 +204,72 @@ pub(super) async fn update_and_reload(
         .map_err(|s| eyre::eyre!("UpdateAndReloadConfig gRPC failed: {s}"))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv6Addr;
+
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    #[test]
+    fn provisioning_ipv6_preserves_presence_in_control_request() {
+        value_scenarios!(run = |address: Option<Ipv6Addr>| {
+                proto::DhcpConfig::from(ModelDhcpConfig {
+                    carbide_provisioning_server_ipv6: address,
+                    ..Default::default()
+                }).carbide_provisioning_server_ipv6
+            };
+            "optional IPv6 provisioning source" {
+                None => None,
+                Some("2001:db8::80".parse().unwrap()) => Some("2001:db8::80".to_string()),
+            }
+        );
+    }
+
+    /// Verifies the agent preserves both explicit zero and omission because
+    /// they have different DHCPv6 protocol semantics during rolling upgrades.
+    #[test]
+    fn dhcpv6_preference_preserves_presence_and_bounds() {
+        for preference in [None, Some(0), Some(u8::MAX)] {
+            // Convert through the exact request-side model used by the gRPC client.
+            let wire = proto::DhcpConfig::from(ModelDhcpConfig {
+                dhcpv6_server_preference: preference,
+                ..Default::default()
+            });
+
+            // The control protocol widens the value without changing presence.
+            assert_eq!(wire.dhcpv6_server_preference, preference.map(u32::from));
+        }
+    }
+
+    /// Verifies the control transport retains a tenant's IPv6 binding because
+    /// the out-of-process DHCP server cannot recover it from any other source.
+    #[test]
+    fn tenant_ipv6_binding_survives_control_transport() {
+        // Build the same model-to-protobuf boundary used by UpdateAndReloadConfig.
+        let wire = proto::HostConfig::from(ModelHostConfig {
+            host_interface_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
+            host_ip_addresses: std::collections::BTreeMap::from([(
+                "pf0vf0_sf".to_string(),
+                ModelInterfaceInfo {
+                    ipv6: Some(ModelInterfaceInfoV6 {
+                        address: Some("2001:db8::1".parse().unwrap()),
+                        prefix: "2001:db8::1/128".to_string(),
+                    }),
+                    ..Default::default()
+                },
+            )]),
+        });
+
+        // Inspect the exact protobuf payload sent to the DHCP control service.
+        let ipv6 = wire.host_ip_addresses["pf0vf0_sf"]
+            .ipv6
+            .as_ref()
+            .expect("tenant IPv6 binding must be present");
+        assert_eq!(ipv6.address.as_deref(), Some("2001:db8::1"));
+        assert_eq!(ipv6.prefix, "2001:db8::1/128");
+    }
 }

@@ -65,6 +65,8 @@ rustls-pki-types = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
@@ -88,6 +90,8 @@ nv-redfish = { workspace = true, features = [
   "log-services",
   "managers",
   "memory",
+  "oem-delta",
+  "oem-liteon",
   "oem-nvidia",
   "power-supplies",
   "processors",
@@ -127,7 +131,6 @@ carbide-test-support = { path = "../test-support" }
 criterion = { workspace = true }
 figment = { workspace = true, features = ["test"] }
 rcgen = { workspace = true }
-tempfile = { workspace = true }
 time = { workspace = true }
 
 [[bench]]

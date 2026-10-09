@@ -37,6 +37,36 @@ const DEFAULT_BMC_REQUEST_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturati
 const ENDPOINT_SOURCES_CONFIG_KEY: &str = "endpoint_sources";
 const NICO_API_CONFIG_KEY: &str = "nico_api";
 const CARBIDE_API_CONFIG_ALIAS: &str = "carbide_api";
+/// Label names the Prometheus and OTLP sinks emit themselves; a custom label
+/// with one of these names would collide with the sink-owned value.
+const RESERVED_ENDPOINT_LABELS: &[&str] = &[
+    "bmc_endpoint",
+    "bmc_ip",
+    "collector_type",
+    "component_type",
+    "driver_version",
+    "endpoint_ip",
+    "endpoint_key",
+    "endpoint_mac",
+    "machine_id",
+    "machine_serial",
+    "machine_slot_number",
+    "machine_tray_index",
+    "nvlink_domain_uuid",
+    "power_shelf_id",
+    "power_shelf_serial_number",
+    "rack_id",
+    "serial_number",
+    "switch_endpoint",
+    "switch_endpoint_role",
+    "switch_id",
+    "switch_ip",
+    "switch_is_primary",
+    "switch_serial_number",
+    "switch_slot_number",
+    "switch_tray_index",
+    "system_uuid",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -47,9 +77,16 @@ pub struct Config {
 
     pub sinks: SinksConfig,
 
+    /// Global token bucket that every collector iteration waits on before it
+    /// runs. Disabled by default; a `[rate_limit]` table enables it, with
+    /// defaults for any omitted field.
     pub rate_limit: Configurable<RateLimitConfig>,
 
     pub collectors: CollectorsConfig,
+
+    /// Opt-in attributes attached to emitted telemetry beyond what a collector
+    /// reports on its own.
+    pub attributes: AttributesConfig,
 
     pub processors: ProcessorsConfig,
 
@@ -84,8 +121,9 @@ impl Default for Config {
             endpoint_sources: EndpointSourcesConfig::default(),
             tls: TlsConfig::default(),
             sinks: SinksConfig::default(),
-            rate_limit: Configurable::Enabled(RateLimitConfig::default()),
+            rate_limit: Configurable::Disabled,
             collectors: CollectorsConfig::default(),
+            attributes: AttributesConfig::default(),
             processors: ProcessorsConfig::default(),
             metrics: MetricsConfig::default(),
             shard: 0,
@@ -96,6 +134,28 @@ impl Default for Config {
             bmc_proxy_url: None,
         }
     }
+}
+
+/// Opt-in identity attributes attached to emitted telemetry.
+///
+/// These are attached as log record attributes and metric datapoint attributes
+/// rather than resource attributes: a single BMC endpoint fronts many GPUs, so
+/// per-GPU identity cannot be a property of the resource without changing how
+/// telemetry is grouped.
+///
+/// Defaults to disabled, so a deployment opts in to the added metric labels.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AttributesConfig {
+    /// Attach `gpu_uuid`, `gpu_serial`, `gpu_chassis_serial`, and `gpu_model`,
+    /// read from the Redfish resource that reports each GPU.
+    ///
+    /// On metrics these land on the sensor series that already exist for the
+    /// GPU's processor and chassis. On SSE log records they are resolved by
+    /// matching `origin_of_condition` against the discovered inventory. Both
+    /// read resources discovery already fetches, so no Redfish requests are
+    /// added.
+    pub gpu_identity: bool,
 }
 
 /// Configuration for where BMC endpoints are discovered from.
@@ -259,6 +319,10 @@ pub struct StaticMachineEndpoint {
 pub struct StaticPowerShelfEndpoint {
     pub id: Option<String>,
     pub serial: Option<String>,
+
+    /// Optional non-nil NVLink domain UUID of the rack this shelf powers.
+    /// Invalid or nil values are omitted from telemetry.
+    pub nvlink_domain_uuid: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -343,23 +407,6 @@ impl StaticBmcEndpoint {
             ));
         }
 
-        const RESERVED_LABELS: &[&str] = &[
-            "collector_type",
-            "endpoint_ip",
-            "endpoint_key",
-            "endpoint_mac",
-            "machine_id",
-            "machine_slot_number",
-            "machine_tray_index",
-            "nvlink_domain_uuid",
-            "rack_id",
-            "serial_number",
-            "switch_id",
-            "switch_slot_number",
-            "switch_tray_index",
-            "system_uuid",
-        ];
-
         if self.labels.len() > 32 {
             return Err(format!(
                 "{config_path}[{index}].labels supports at most 32 labels"
@@ -377,7 +424,7 @@ impl StaticBmcEndpoint {
                     "{config_path}[{index}].labels key {name:?} must match [a-zA-Z_][a-zA-Z0-9_]*"
                 ));
             }
-            if RESERVED_LABELS.contains(&name.as_str()) {
+            if RESERVED_ENDPOINT_LABELS.contains(&name.as_str()) {
                 return Err(format!(
                     "{config_path}[{index}].labels key {name:?} is reserved"
                 ));
@@ -625,6 +672,24 @@ pub struct OtlpTargetConfig {
     #[serde(default = "OtlpTargetConfig::default_queue_capacity")]
     pub queue_capacity: usize,
 
+    /// Maximum encoded size, in bytes, of one export request.
+    ///
+    /// A batch whose request would be larger is split and sent in parts, as is
+    /// a batch the target rejects with `RESOURCE_EXHAUSTED`. A single log
+    /// record or metric point is always sent on its own, so the target still
+    /// decides whether to accept it. Defaults to 4 MiB, the default gRPC
+    /// receive limit of the OpenTelemetry Collector, and must be greater than
+    /// zero.
+    #[serde(default = "OtlpTargetConfig::default_max_request_bytes")]
+    pub max_request_bytes: usize,
+
+    /// Maximum number of export requests in flight to this target for each
+    /// signal. Batches are exported concurrently over one connection, so
+    /// their arrival order is not guaranteed. Defaults to 4 and must be
+    /// greater than zero.
+    #[serde(default = "OtlpTargetConfig::default_max_concurrent_exports")]
+    pub max_concurrent_exports: usize,
+
     /// Maximum time to wait before flushing a non-empty batch for either
     /// signal. Defaults to two seconds.
     #[serde(
@@ -654,6 +719,8 @@ pub struct OtlpTargetConfig {
 
 impl OtlpTargetConfig {
     pub(crate) const DEFAULT_QUEUE_CAPACITY: usize = 32_768;
+    pub(crate) const DEFAULT_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+    pub(crate) const DEFAULT_MAX_CONCURRENT_EXPORTS: usize = 4;
 
     fn default_batch_size() -> usize {
         512
@@ -661,6 +728,14 @@ impl OtlpTargetConfig {
 
     fn default_queue_capacity() -> usize {
         Self::DEFAULT_QUEUE_CAPACITY
+    }
+
+    fn default_max_request_bytes() -> usize {
+        Self::DEFAULT_MAX_REQUEST_BYTES
+    }
+
+    fn default_max_concurrent_exports() -> usize {
+        Self::DEFAULT_MAX_CONCURRENT_EXPORTS
     }
 
     fn default_flush_interval() -> std::time::Duration {
@@ -676,6 +751,16 @@ impl OtlpTargetConfig {
 
         if self.queue_capacity == 0 {
             return Err(format!("{path}.queue_capacity must be greater than 0"));
+        }
+
+        if self.max_request_bytes == 0 {
+            return Err(format!("{path}.max_request_bytes must be greater than 0"));
+        }
+
+        if self.max_concurrent_exports == 0 {
+            return Err(format!(
+                "{path}.max_concurrent_exports must be greater than 0"
+            ));
         }
 
         if self.flush_interval.is_zero() {
@@ -961,6 +1046,9 @@ pub struct CollectorsConfig {
     /// Firmware collector configuration (if present, firmware collector is enabled)
     pub firmware: Configurable<FirmwareCollectorConfig>,
 
+    /// Power shelf Manager collector configuration (if present, manager collector is enabled).
+    pub manager: Configurable<ManagerCollectorConfig>,
+
     /// Leak detector collector configuration (if present, leak detector collector is enabled)
     pub leak_detector: Configurable<LeakDetectorCollectorConfig>,
 
@@ -994,6 +1082,7 @@ impl Default for CollectorsConfig {
             metrics: Configurable::Disabled,
             telemetry: Configurable::Disabled,
             firmware: Configurable::Disabled,
+            manager: Configurable::Enabled(ManagerCollectorConfig::default()),
             leak_detector: Configurable::Enabled(LeakDetectorCollectorConfig::default()),
             logs: Configurable::Disabled,
             nmxt: Configurable::Disabled,
@@ -1315,6 +1404,22 @@ impl Default for FirmwareCollectorConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct ManagerCollectorConfig {
+    /// Interval between power-shelf manager (PMC) status polls.
+    #[serde(with = "humantime_serde")]
+    pub poll_interval: Duration,
+}
+
+impl Default for ManagerCollectorConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval: Duration::from_secs(300),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LeakDetectorCollectorConfig {
     /// Interval between thermal subsystem leak detector polls.
     #[serde(with = "humantime_serde")]
@@ -1337,11 +1442,10 @@ impl Default for LeakDetectorCollectorConfig {
 /// How log events are collected from each BMC endpoint.
 ///
 /// - `Auto` (default): tries SSE first, downgrades to periodic per-endpoint
-///   when SSE is unsupported or keeps failing.
+///   when SSE is unsupported or keeps failing. Downgrades remain periodic
+///   unless `retry_sse_after_downgrade` is enabled.
 /// - `Sse`: SSE only, retries forever. Use when every BMC has `/EventService`.
 /// - `Periodic`: polling only, no SSE attempt.
-///
-/// Downgrades are in-memory; restart the health service to retry SSE.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogCollectionMode {
@@ -1421,14 +1525,27 @@ impl SseLogConfig {
     }
 }
 
+/// Periodic log collection settings.
+///
+/// Numeric entry IDs must increase between resets; existing entries must
+/// remain unchanged. Each poll validates the highest saved entry. A missing entry
+/// or changed mapped record triggers replay of retained history. Changes below an
+/// unchanged anchor are not detected.
+/// Nonnumeric entries are emitted when collecting or replaying retained history.
+/// Incremental scans and completed history-skipping baselines ignore them.
+///
+/// Paginated collections must report a stable `Members@odata.count` and return
+/// that many members. Numeric IDs must be distinct. Incomplete scans retry without advancing
+/// progress; records accepted by a sink before a failure can replay on retry.
+/// An unpaginated collection may omit the count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PeriodicLogConfig {
-    /// Interval between log collection.
+    /// Interval between log collection polls. Defaults to 5 minutes.
     #[serde(with = "humantime_serde")]
     pub logs_collection_interval: Duration,
 
-    /// Interval between log service state refresh.
+    /// Interval between log service discovery refreshes. Defaults to 30 minutes.
     #[serde(with = "humantime_serde")]
     pub state_refresh_interval: Duration,
 
@@ -1443,11 +1560,11 @@ pub struct PeriodicLogConfig {
     #[serde(default = "default_excluded_log_services")]
     pub exclude_services: Vec<String>,
 
-    /// When true, on the first encounter of a LogService with no saved state,
-    /// anchor at the current highest entry ID without emitting existing entries.
-    /// Subsequent polls collect only new entries, matching SSE real-time
-    /// behaviour. Defaults to false (existing entries are collected on first
-    /// run). Also applies when auto-mode downgrades to periodic collection.
+    /// Skip retained history only on the first successful baseline without a checkpoint.
+    /// Failed baselines and saved numeric/SSE checkpoints replay retained records.
+    /// Defaults to false. Also applies after auto mode downgrades from SSE.
+    /// Old fingerprint checkpoints replay once. Numeric-only checkpoint readers
+    /// require this option disabled to replay history after rollback.
     #[serde(default)]
     pub skip_initial_history: bool,
 }
@@ -1468,9 +1585,7 @@ fn default_excluded_log_services() -> Vec<String> {
     vec!["Journal".to_string()]
 }
 
-/// downgrade thresholds and periodic fallback for `collectors.logs.mode = "auto"`.
-/// sse_not_available is terminal (defaults to 1), everything else goes
-/// through a rolling window.
+/// Downgrade thresholds and periodic fallback for `collectors.logs.mode = "auto"`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AutoModeConfig {
@@ -1478,6 +1593,13 @@ pub struct AutoModeConfig {
     #[serde(with = "humantime_serde")]
     pub connect_failure_window: Duration,
     pub connect_failure_threshold: u32,
+
+    /// Whether periodic fallback stops after 30 minutes so the next discovery
+    /// pass can retry SSE. Transitions can duplicate records on downgrade or
+    /// miss records on upgrade because SSE and periodic cursors can cover
+    /// different Redfish LogService endpoints. Defaults to false.
+    pub retry_sse_after_downgrade: bool,
+
     #[serde(default, flatten)]
     pub periodic: PeriodicLogConfig,
 }
@@ -1488,6 +1610,7 @@ impl Default for AutoModeConfig {
             sse_not_available_threshold: 1,
             connect_failure_window: Duration::from_secs(300),
             connect_failure_threshold: 5,
+            retry_sse_after_downgrade: false,
             periodic: PeriodicLogConfig::default(),
         }
     }
@@ -1530,9 +1653,13 @@ impl LogsCollectorConfig {
             }
             LogCollectionMode::Periodic => {
                 if self.auto.is_some() {
-                    return Err(
-                        "[collectors.logs.auto] should not be set when mode = \"periodic\""
-                            .to_string(),
+                    tracing::warn!(
+                        "[collectors.logs.auto] is set but ignored when mode = \"periodic\""
+                    );
+                }
+                if self.sse.is_some() {
+                    tracing::warn!(
+                        "[collectors.logs.sse] is set but ignored when mode = \"periodic\""
                     );
                 }
                 if self.periodic.is_none() {
@@ -1541,23 +1668,14 @@ impl LogsCollectorConfig {
                             .to_string(),
                     );
                 }
-                if self.sse.is_some() {
-                    return Err(
-                        "[collectors.logs.sse] should not be set when mode = \"periodic\""
-                            .to_string(),
-                    );
-                }
             }
             LogCollectionMode::Sse => {
                 if self.auto.is_some() {
-                    return Err(
-                        "[collectors.logs.auto] should not be set when mode = \"sse\"".to_string(),
-                    );
+                    tracing::warn!("[collectors.logs.auto] is set but ignored when mode = \"sse\"");
                 }
                 if self.periodic.is_some() {
-                    return Err(
-                        "[collectors.logs.periodic] should not be set when mode = \"sse\""
-                            .to_string(),
+                    tracing::warn!(
+                        "[collectors.logs.periodic] is set but ignored when mode = \"sse\""
                     );
                 }
                 if let Some(sse) = &self.sse {
@@ -1819,7 +1937,12 @@ pub struct NvueGnmiConfig {
     #[serde(with = "humantime_serde")]
     pub sample_interval: Duration,
 
-    /// Timeout for gRPC connection attempts.
+    /// Timeout applied independently to connection establishment, opening the
+    /// Subscribe RPC, and initial stream synchronization.
+    ///
+    /// One attempt may take nearly three times this duration before reconnect
+    /// backoff. Updates before `sync_response=true` do not extend the
+    /// synchronization timeout.
     #[serde(with = "humantime_serde")]
     pub request_timeout: Duration,
 
@@ -1834,6 +1957,12 @@ pub struct NvueGnmiConfig {
 
     /// gNMI SAMPLE subscription paths.
     pub paths: NvueGnmiPaths,
+
+    /// Additional independent gNMI STREAM subscriptions.
+    ///
+    /// Each entry defines its request paths and metric projections. The list is
+    /// loaded at startup; omission leaves only the built-in subscriptions.
+    pub additional_subscriptions: Vec<NvueGnmiSubscriptionConfig>,
 }
 
 impl Default for NvueGnmiConfig {
@@ -1845,8 +1974,481 @@ impl Default for NvueGnmiConfig {
             dangerously_skip_tls_verification: false,
             system_events_enabled: true,
             paths: NvueGnmiPaths::default(),
+            additional_subscriptions: Vec::new(),
         }
     }
+}
+
+impl NvueGnmiConfig {
+    fn validate(&self) -> Result<(), String> {
+        if let Some(interface_paths) = &self.paths.interface_paths {
+            let config_path = "collectors.nvue.gnmi.paths.interface_paths";
+
+            if !self.paths.interfaces_enabled {
+                return Err(format!("{config_path} requires interfaces_enabled = true"));
+            }
+
+            if interface_paths.is_empty()
+                || interface_paths
+                    .iter()
+                    .any(|path| path.is_empty() || path.iter().any(String::is_empty))
+            {
+                return Err(format!(
+                    "{config_path} must contain non-empty paths and elements; use interfaces_enabled = false to disable interface telemetry"
+                ));
+            }
+
+            for (index, path) in interface_paths.iter().enumerate() {
+                if interface_paths
+                    .iter()
+                    .take(index)
+                    .any(|earlier| earlier == path)
+                {
+                    return Err(format!(
+                        "{config_path}[{index}] duplicates another selected interface path"
+                    ));
+                }
+            }
+        }
+
+        let mut names = HashSet::new();
+        let mut exported_metrics = HashMap::new();
+
+        for (index, subscription) in self.additional_subscriptions.iter().enumerate() {
+            if !names.insert(subscription.name.as_str()) {
+                return Err(format!(
+                    "collectors.nvue.gnmi.additional_subscriptions[{index}].name duplicates {:?}",
+                    subscription.name
+                ));
+            }
+
+            subscription.validate(index)?;
+
+            for (metric_index, metric) in subscription.metrics.iter().enumerate() {
+                let metric_type = metric.metric_type.as_str();
+                let unit = metric.output.unit();
+                let output_kind = metric.output.kind();
+                let exported_name = format!("{metric_type}_{unit}");
+
+                if let Some(previous) =
+                    exported_metrics.insert(exported_name.clone(), (metric_type, unit, output_kind))
+                    && previous != (metric_type, unit, output_kind)
+                {
+                    return Err(format!(
+                        "collectors.nvue.gnmi.additional_subscriptions[{index}].metrics[{metric_index}] renders the same metric name {exported_name:?} as another extended metric"
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// One configuration-defined gNMI STREAM subscription.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NvueGnmiSubscriptionConfig {
+    /// Stable name used to identify the subscription in telemetry and logs.
+    pub name: String,
+
+    /// gNMI target placed on the subscription prefix.
+    pub target: String,
+
+    /// Optional gNMI origin placed on the subscription prefix.
+    pub origin: String,
+
+    /// Unkeyed element names prepended to every subscription path.
+    pub prefix: Vec<String>,
+
+    /// Encoding requested from the gNMI target.
+    pub encoding: NvueGnmiEncoding,
+
+    /// Whether the target should omit the initial data snapshot.
+    pub updates_only: bool,
+
+    /// Delivery mode requested for every path in this subscription.
+    pub mode: NvueGnmiSubscriptionMode,
+
+    /// SAMPLE interval. Required only when `mode` is `sample`.
+    #[serde(with = "humantime_serde::option")]
+    pub sample_interval: Option<Duration>,
+
+    /// Suppress unchanged SAMPLE values between heartbeat updates.
+    pub suppress_redundant: bool,
+
+    /// Optional forced update interval for SAMPLE or ON_CHANGE mode.
+    #[serde(with = "humantime_serde::option")]
+    pub heartbeat_interval: Option<Duration>,
+
+    /// Request paths bundled into this subscription.
+    pub paths: Vec<Vec<String>>,
+
+    /// Exact response paths projected into metrics.
+    pub metrics: Vec<NvueGnmiMetricConfig>,
+}
+
+impl Default for NvueGnmiSubscriptionConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            target: "nvos".to_string(),
+            origin: String::new(),
+            prefix: Vec::new(),
+            encoding: NvueGnmiEncoding::default(),
+            updates_only: false,
+            mode: NvueGnmiSubscriptionMode::default(),
+            sample_interval: None,
+            suppress_redundant: false,
+            heartbeat_interval: None,
+            paths: Vec::new(),
+            metrics: Vec::new(),
+        }
+    }
+}
+
+impl NvueGnmiSubscriptionConfig {
+    fn validate(&self, index: usize) -> Result<(), String> {
+        let config_path = format!("collectors.nvue.gnmi.additional_subscriptions[{index}]");
+
+        if !is_gnmi_identifier(&self.name) {
+            return Err(format!(
+                "{config_path}.name must use lower_snake_case and start with a letter"
+            ));
+        }
+
+        if self.prefix.iter().any(|element| element.is_empty()) {
+            return Err(format!(
+                "{config_path} ({:?}).prefix elements must not be empty",
+                self.name
+            ));
+        }
+
+        if self.paths.is_empty()
+            || self
+                .paths
+                .iter()
+                .any(|path| path.is_empty() || path.iter().any(String::is_empty))
+        {
+            return Err(format!(
+                "{config_path} ({:?}).paths must contain non-empty paths and elements",
+                self.name
+            ));
+        }
+
+        if self.metrics.is_empty() {
+            return Err(format!(
+                "{config_path} ({:?}).metrics must not be empty",
+                self.name
+            ));
+        }
+
+        match self.mode {
+            NvueGnmiSubscriptionMode::TargetDefined => {
+                if self.sample_interval.is_some()
+                    || self.suppress_redundant
+                    || self.heartbeat_interval.is_some()
+                {
+                    return Err(format!(
+                        "{config_path} ({:?}) cannot set sample_interval, suppress_redundant, or heartbeat_interval in target_defined mode",
+                        self.name
+                    ));
+                }
+            }
+            NvueGnmiSubscriptionMode::OnChange => {
+                if self.sample_interval.is_some() || self.suppress_redundant {
+                    return Err(format!(
+                        "{config_path} ({:?}) cannot set sample_interval or suppress_redundant in on_change mode",
+                        self.name
+                    ));
+                }
+            }
+            NvueGnmiSubscriptionMode::Sample => {
+                if self.sample_interval.is_none() {
+                    return Err(format!(
+                        "{config_path} ({:?}).sample_interval is required in sample mode",
+                        self.name
+                    ));
+                }
+            }
+        }
+
+        for (field, interval) in [
+            ("sample_interval", self.sample_interval),
+            ("heartbeat_interval", self.heartbeat_interval),
+        ] {
+            if let Some(interval) = interval {
+                if interval.is_zero() {
+                    return Err(format!(
+                        "{config_path} ({:?}).{field} must be greater than 0",
+                        self.name
+                    ));
+                }
+
+                if interval.as_nanos() > u64::MAX as u128 {
+                    return Err(format!(
+                        "{config_path} ({:?}).{field} must fit in gNMI's u64 nanosecond field",
+                        self.name
+                    ));
+                }
+            }
+        }
+
+        let mut metric_paths = HashSet::new();
+
+        for (metric_index, metric) in self.metrics.iter().enumerate() {
+            if !metric_paths.insert(metric.path.as_slice()) {
+                return Err(format!(
+                    "{config_path} ({:?}).metrics[{metric_index}].path is duplicated",
+                    self.name
+                ));
+            }
+
+            metric.validate(&config_path, &self.name, metric_index, &self.prefix)?;
+
+            if !self
+                .paths
+                .iter()
+                .any(|request_path| metric.path.starts_with(request_path))
+            {
+                return Err(format!(
+                    "{config_path} ({:?}).metrics[{metric_index}].path must descend from one of the configured request paths",
+                    self.name
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Encoding requested for one configuration-defined subscription.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NvueGnmiEncoding {
+    /// JSON encoding.
+    #[default]
+    Json,
+
+    /// ASCII encoding.
+    Ascii,
+
+    /// RFC 7951 JSON encoding.
+    JsonIetf,
+}
+
+/// Delivery mode for a configuration-defined STREAM subscription.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NvueGnmiSubscriptionMode {
+    /// Let the target select SAMPLE or ON_CHANGE behavior.
+    #[default]
+    TargetDefined,
+
+    /// Emit an update when the target observes a value change.
+    OnChange,
+
+    /// Emit values at the configured sample interval.
+    Sample,
+}
+
+/// Metric projection for one exact response path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NvueGnmiMetricConfig {
+    /// Exact response path relative to the subscription prefix.
+    pub path: Vec<String>,
+
+    /// Lower-snake-case metric type appended to the extended collector name.
+    pub metric_type: String,
+
+    /// Response path keys copied into explicit metric labels.
+    pub labels: Vec<NvueGnmiResponseKeyLabel>,
+
+    /// Value projection applied to matching updates.
+    pub output: NvueGnmiMetricOutput,
+}
+
+impl NvueGnmiMetricConfig {
+    fn validate(
+        &self,
+        subscription_path: &str,
+        subscription_name: &str,
+        index: usize,
+        prefix: &[String],
+    ) -> Result<(), String> {
+        let config_path = format!("{subscription_path}.metrics[{index}]");
+        let context = format!("{config_path} ({subscription_name:?})");
+
+        if self.path.is_empty() || self.path.iter().any(|element| element.is_empty()) {
+            return Err(format!("{context}.path must contain non-empty elements"));
+        }
+
+        if !is_gnmi_identifier(&self.metric_type) {
+            return Err(format!(
+                "{context}.metric_type must use lower_snake_case and start with a letter"
+            ));
+        }
+
+        let mut label_names = HashSet::new();
+
+        for (index, label) in self.labels.iter().enumerate() {
+            if !is_gnmi_identifier(&label.name) {
+                return Err(format!(
+                    "{context}.labels[{index}].name must use lower_snake_case and start with a letter"
+                ));
+            }
+
+            if is_reserved_extended_metric_label(&label.name)
+                || !label_names.insert(label.name.as_str())
+            {
+                return Err(format!(
+                    "{context}.labels[{index}].name {:?} is reserved or duplicated",
+                    label.name
+                ));
+            }
+
+            if label.element.is_empty() || label.key.is_empty() {
+                return Err(format!(
+                    "{context}.labels[{index}].element and key must not be empty"
+                ));
+            }
+
+            let occurrences = prefix
+                .iter()
+                .chain(&self.path)
+                .filter(|element| element.as_str() == label.element)
+                .count();
+
+            if occurrences != 1 {
+                return Err(format!(
+                    "{context}.labels[{index}].element {:?} must occur exactly once in the combined prefix and metric path",
+                    label.element
+                ));
+            }
+        }
+
+        match &self.output {
+            NvueGnmiMetricOutput::Gauge { unit } => {
+                if !is_gnmi_identifier(unit) {
+                    return Err(format!(
+                        "{context}.output.unit must use lower_snake_case and start with a letter"
+                    ));
+                }
+            }
+            NvueGnmiMetricOutput::StateSet { states } => {
+                validate_finite_values(&context, "states", states)?;
+            }
+            NvueGnmiMetricOutput::Info { label, values } => {
+                if !is_gnmi_identifier(label)
+                    || is_reserved_extended_metric_label(label)
+                    || label_names.contains(label.as_str())
+                {
+                    return Err(format!(
+                        "{context}.output.label must be a unique lower_snake_case label"
+                    ));
+                }
+
+                validate_finite_values(&context, "values", values)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// A metric label read from a named key on one response path element.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NvueGnmiResponseKeyLabel {
+    /// Metric label name.
+    pub name: String,
+
+    /// Response path element containing the key.
+    pub element: String,
+
+    /// Key name read from the response path element.
+    pub key: String,
+}
+
+/// Supported output form for an extended gNMI metric.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NvueGnmiMetricOutput {
+    /// Numeric gauge with an operator-defined unit.
+    Gauge {
+        /// Unit appended to the exported metric name.
+        unit: String,
+    },
+
+    /// One 0 or 1 series for each declared state.
+    StateSet {
+        /// Complete finite state domain.
+        states: Vec<String>,
+    },
+
+    /// Constant 1 gauge carrying one finite information label.
+    Info {
+        /// Label that carries the matched extended value.
+        label: String,
+
+        /// Complete finite set of accepted values.
+        values: Vec<String>,
+    },
+}
+
+impl Default for NvueGnmiMetricOutput {
+    fn default() -> Self {
+        Self::Gauge {
+            unit: String::new(),
+        }
+    }
+}
+
+impl NvueGnmiMetricOutput {
+    fn kind(&self) -> std::mem::Discriminant<Self> {
+        std::mem::discriminant(self)
+    }
+
+    fn unit(&self) -> &str {
+        match self {
+            Self::Gauge { unit } => unit,
+            Self::StateSet { .. } => "state",
+            Self::Info { .. } => "info",
+        }
+    }
+}
+
+fn validate_finite_values(config_path: &str, field: &str, values: &[String]) -> Result<(), String> {
+    if values.is_empty() {
+        return Err(format!("{config_path}.output.{field} must not be empty"));
+    }
+
+    let mut unique = HashSet::new();
+
+    if values
+        .iter()
+        .any(|value| value.is_empty() || !unique.insert(value.as_str()))
+    {
+        return Err(format!(
+            "{config_path}.output.{field} must contain unique non-empty values"
+        ));
+    }
+
+    Ok(())
+}
+
+fn is_gnmi_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+
+    chars.next().is_some_and(|first| first.is_ascii_lowercase())
+        && chars.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        })
+}
+
+fn is_reserved_extended_metric_label(value: &str) -> bool {
+    RESERVED_ENDPOINT_LABELS.contains(&value) || matches!(value, "state" | "subscription")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1856,8 +2458,19 @@ pub struct NvueGnmiPaths {
     pub interfaces_enabled: bool,
     pub platform_general_enabled: bool,
 
-    /// Collect leak sensor state from the NVOS platform-general gNMI tree.
+    /// Interface leaf paths relative to `/interfaces/interface` for every interface.
+    ///
+    /// Omission retains the full interface subtree. A nonempty list selects
+    /// only mapped built-in interface metrics; disable `interfaces_enabled` to
+    /// omit interface telemetry entirely.
+    pub interface_paths: Option<Vec<Vec<String>>>,
+
+    /// Collect leak sensor state from an independent NVOS gNMI SAMPLE stream.
+    ///
     /// Disabled by default because path support depends on the NVOS release.
+    /// When enabled, failures on the leak-sensor path do not interrupt the
+    /// primary component, interface, or platform-general SAMPLE stream; the
+    /// leak-sensor stream retries independently.
     pub leak_sensors_enabled: bool,
 }
 
@@ -1867,6 +2480,7 @@ impl Default for NvueGnmiPaths {
             components_enabled: true,
             interfaces_enabled: true,
             platform_general_enabled: true,
+            interface_paths: None,
             leak_sensors_enabled: false,
         }
     }
@@ -1945,7 +2559,8 @@ impl Default for NvueRestPaths {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetricsConfig {
-    /// Metrics listener.
+    /// Metrics listener (default `[::]:9009`).
+    /// The default listener falls back to IPv4 when IPv6 socket setup is unavailable.
     pub endpoint: String,
     /// Prefix for all metrics, defaults to carbide_hardware_health
     pub prefix: String,
@@ -1972,7 +2587,7 @@ impl Default for RateLimitConfig {
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
-            endpoint: "0.0.0.0:9009".to_string(),
+            endpoint: "[::]:9009".to_string(),
             prefix: "carbide_hardware_health".to_string(),
             enable_bmc_latency_metrics: false,
             bmc_latency_attributes: default_bmc_latency_attributes(),
@@ -2091,7 +2706,9 @@ impl<P: Provider> Provider for CanonicalNicoApiProvider<P> {
 }
 
 impl Config {
-    /// Load configuration from optional path
+    /// Loads defaults, an optional TOML file, and `CARBIDE_HEALTH__` environment
+    /// overrides, in that order, then validates the resulting configuration.
+    /// Malformed enabled sections return an error instead of falling back to defaults.
     pub fn load(config_path: Option<&Path>) -> Result<Self, String> {
         let mut figment = Figment::new().merge(Serialized::defaults(Config::default()));
 
@@ -2103,9 +2720,29 @@ impl Config {
             Env::prefixed("CARBIDE_HEALTH__").split("__"),
         ));
 
-        let config: Config = figment
-            .extract()
-            .map_err(|e| format!("Failed to load configuration: {}", e))?;
+        let config: Config = figment.extract().map_err(|error| {
+            let sources = match config_path {
+                Some(path) => format!(
+                    "{} and CARBIDE_HEALTH__ environment variables",
+                    path.display()
+                ),
+                None => "defaults and CARBIDE_HEALTH__ environment variables".to_string(),
+            };
+
+            let location = if error.path.is_empty() {
+                String::new()
+            } else {
+                format!("{}: ", error.path.join("."))
+            };
+
+            // Buffered sections retain relative field paths in their error
+            // messages, but the enclosing tag does not identify the leaf's
+            // provider. Report the inputs without attributing a leaf origin.
+            format!(
+                "failed to load configuration from {sources}: {location}{}",
+                error.kind
+            )
+        })?;
 
         config.validate()?;
         Ok(config)
@@ -2189,6 +2826,12 @@ impl Config {
 
         if let Configurable::Enabled(logs) = &self.collectors.logs {
             logs.validate()?;
+        }
+
+        if let Configurable::Enabled(nvue) = &self.collectors.nvue
+            && let Configurable::Enabled(gnmi) = &nvue.gnmi
+        {
+            gnmi.validate()?;
         }
 
         if let Some(tls_config) = &self.tls.switch {
@@ -2282,6 +2925,11 @@ impl Config {
     }
 }
 
+/// A configuration table that is enabled unless `enabled = false` is specified.
+///
+/// Null disables the section. An empty enabled table uses `T::default()`;
+/// populated enabled tables follow `T`'s defaults and unknown-field policy.
+/// Disabled payloads are ignored, while malformed enabled payloads return errors.
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum Configurable<T> {
@@ -2310,32 +2958,44 @@ where
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        struct Helper<T> {
-            #[serde(default = "default_true")]
-            enabled: bool,
-            #[serde(flatten)]
-            config: Option<T>,
-        }
+        // Buffer before decoding so `enabled = false` wins regardless of key
+        // order. A payload decoding error must not be interpreted as absence.
+        let Some(value) = Option::<Value>::deserialize(deserializer)? else {
+            return Ok(Self::Disabled);
+        };
 
-        fn default_true() -> bool {
-            true
-        }
+        let Value::Dict(tag, mut fields) = value else {
+            return Err(serde::de::Error::custom("expected a configuration table"));
+        };
 
-        let helper_opt = Option::<Helper<T>>::deserialize(deserializer)?;
+        if let Some(enabled) = fields.remove("enabled") {
+            let enabled: bool = enabled
+                .deserialize()
+                .map_err(|error| serde::de::Error::custom(format!("enabled: {}", error.kind)))?;
 
-        match helper_opt {
-            None => Ok(Configurable::Disabled),
-            Some(helper) => {
-                if !helper.enabled {
-                    Ok(Configurable::Disabled)
-                } else if let Some(cfg) = helper.config {
-                    Ok(Configurable::Enabled(cfg))
-                } else {
-                    Ok(Configurable::Enabled(T::default()))
-                }
+            if !enabled {
+                return Ok(Self::Disabled);
             }
         }
+
+        if fields.is_empty() {
+            return Ok(Self::Enabled(T::default()));
+        }
+
+        // Generic Serde errors do not carry Figment's relative key/index path.
+        // Include it explicitly before crossing another Configurable wrapper.
+        Value::Dict(tag, fields)
+            .deserialize()
+            .map(Self::Enabled)
+            .map_err(|error| {
+                if error.path.is_empty() {
+                    return serde::de::Error::custom(error.kind);
+                }
+
+                let location = error.path.join(".");
+
+                serde::de::Error::custom(format!("{location}: {}", error.kind))
+            })
     }
 }
 
@@ -2398,6 +3058,8 @@ mod tests {
             tls: None,
             batch_size: 512,
             queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+            max_concurrent_exports: OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
             flush_interval: Duration::from_secs(2),
             include_diagnostics: false,
             include_alert_details: false,
@@ -2524,6 +3186,11 @@ mod tests {
 
         assert!(config.collectors.sensors.is_enabled());
         assert!(config.collectors.firmware.is_enabled());
+        if let Configurable::Enabled(ref manager) = config.collectors.manager {
+            assert_eq!(manager.poll_interval, Duration::from_secs(120));
+        } else {
+            panic!("manager collector is disabled")
+        }
         assert!(config.collectors.leak_detector.is_enabled());
         assert!(config.collectors.logs.is_enabled());
         assert!(config.collectors.nvue.is_enabled());
@@ -2548,6 +3215,8 @@ mod tests {
             assert_eq!(auto.sse_not_available_threshold, 1);
             assert_eq!(auto.connect_failure_window, Duration::from_secs(300));
             assert_eq!(auto.connect_failure_threshold, 5);
+            assert!(!auto.retry_sse_after_downgrade);
+
             assert_eq!(
                 auto.periodic.logs_collection_interval,
                 Duration::from_secs(300)
@@ -2611,6 +3280,21 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_table_enables_the_limiter_with_defaults() {
+        let config: Config = Figment::new()
+            .merge(Toml::string("[rate_limit]\n"))
+            .extract()
+            .expect("failed to parse");
+
+        let Configurable::Enabled(rate_limit) = config.rate_limit else {
+            panic!("an empty [rate_limit] table enables the limiter");
+        };
+        assert_eq!(rate_limit.bucket_replenish, Duration::from_millis(30));
+        assert_eq!(rate_limit.bucket_burst, 100);
+        assert_eq!(rate_limit.max_jitter, Duration::from_millis(50));
+    }
+
+    #[test]
     fn test_static_only_config() {
         let toml_content = r#"
 endpoint_discovery_interval = "1m"
@@ -2664,13 +3348,7 @@ cache_size = 50
         assert_eq!(config.metrics.prefix, "carbide_hardware_new_health");
         assert_eq!(config.endpoint_discovery_interval, Duration::from_secs(60));
 
-        if let Configurable::Enabled(ref rate_limit) = config.rate_limit {
-            assert_eq!(rate_limit.bucket_replenish, Duration::from_millis(30));
-            assert_eq!(rate_limit.bucket_burst, 100);
-            assert_eq!(rate_limit.max_jitter, Duration::from_millis(50));
-        } else {
-            panic!("rate limit empty")
-        }
+        assert!(!config.rate_limit.is_enabled());
 
         assert!(config.collectors.sensors.is_enabled());
         if let Configurable::Enabled(ref sensors) = config.collectors.sensors {
@@ -2681,6 +3359,11 @@ cache_size = 50
         }
 
         assert!(!config.collectors.firmware.is_enabled());
+        if let Configurable::Enabled(ref manager) = config.collectors.manager {
+            assert_eq!(manager.poll_interval, Duration::from_secs(300));
+        } else {
+            panic!("manager collector should be enabled by default")
+        }
         assert!(config.collectors.leak_detector.is_enabled());
         assert!(!config.collectors.logs.is_enabled());
         assert!(!config.collectors.nmxc.is_enabled());
@@ -2770,6 +3453,7 @@ username = "root"
                         power_shelf: Some(StaticPowerShelfEndpoint {
                             id: None,
                             serial: None,
+                            nvlink_domain_uuid: None,
                         }),
                         ..static_endpoint()
                     },
@@ -2784,6 +3468,7 @@ username = "root"
                         power_shelf: Some(StaticPowerShelfEndpoint {
                             id: Some("power-shelf-id".to_string()),
                             serial: None,
+                            nvlink_domain_uuid: None,
                         }),
                         ..static_endpoint()
                     },
@@ -3275,6 +3960,26 @@ reload_interval = "30s"
                 IndexedOtlpTarget {
                     index: 2,
                     target: OtlpTargetConfig {
+                        max_request_bytes: 0,
+                        ..otlp_target("http://site.example:4317")
+                    },
+                } => FailsWith(
+                    "sinks.otlp.targets[2].max_request_bytes must be greater than 0".to_string()
+                ),
+
+                IndexedOtlpTarget {
+                    index: 2,
+                    target: OtlpTargetConfig {
+                        max_concurrent_exports: 0,
+                        ..otlp_target("http://site.example:4317")
+                    },
+                } => FailsWith(
+                    "sinks.otlp.targets[2].max_concurrent_exports must be greater than 0".to_string()
+                ),
+
+                IndexedOtlpTarget {
+                    index: 2,
+                    target: OtlpTargetConfig {
                         flush_interval: Duration::ZERO,
                         ..otlp_target("http://site.example:4317")
                     },
@@ -3445,6 +4150,9 @@ reload_interval = "30s"
                             endpoint: "http://localhost:4317".to_string(),
                             batch_size: 512,
                             queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                            max_concurrent_exports:
+                                OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                             flush_interval: Duration::from_secs(2),
                             include_diagnostics: false,
                             include_alert_details: false,
@@ -3484,6 +4192,9 @@ reload_interval = "30s"
                             endpoint: "http://localhost:4317".to_string(),
                             batch_size: 512,
                             queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                            max_concurrent_exports:
+                                OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                             flush_interval: Duration::from_secs(2),
                             include_diagnostics: true,
                             include_alert_details: false,
@@ -3503,6 +4214,9 @@ reload_interval = "30s"
                                 endpoint: "http://site.example:4317".to_string(),
                                 batch_size: 512,
                                 queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                                max_concurrent_exports:
+                                    OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                                 flush_interval: Duration::from_secs(2),
                                 include_diagnostics: false,
                                 include_alert_details: false,
@@ -3512,6 +4226,9 @@ reload_interval = "30s"
                                 endpoint: "http://central.example:4317".to_string(),
                                 batch_size: 512,
                                 queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                                max_concurrent_exports:
+                                    OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                                 flush_interval: Duration::from_secs(2),
                                 include_diagnostics: true,
                                 include_alert_details: false,
@@ -3559,6 +4276,9 @@ reload_interval = "30s"
                             endpoint: "http://localhost:4317".to_string(),
                             batch_size: 512,
                             queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                            max_concurrent_exports:
+                                OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                             flush_interval: Duration::from_secs(2),
                             include_diagnostics: false,
                             include_alert_details: false,
@@ -3593,7 +4313,7 @@ reload_interval = "30s"
         assert_eq!(config.shards_count, 1);
         assert_eq!(config.cache_size, 100);
         assert_eq!(config.bmc_request_concurrency.get(), 4);
-        assert_eq!(config.metrics.endpoint, "0.0.0.0:9009");
+        assert_eq!(config.metrics.endpoint, "[::]:9009");
         assert!(!config.metrics.enable_bmc_latency_metrics);
         assert_eq!(
             config.metrics.bmc_latency_attributes,
@@ -3603,7 +4323,7 @@ reload_interval = "30s"
             config.metrics.bmc_latency_attributes(),
             BmcLatencyAttribute::ATTRIBUTES.to_vec()
         );
-        assert!(config.rate_limit.is_enabled());
+        assert!(!config.rate_limit.is_enabled());
         assert!(config.processors.leak_detection.is_enabled());
         assert!(config.collectors.leak_detector.is_enabled());
         assert!(!config.collectors.nmxc.is_enabled());
@@ -4213,6 +4933,7 @@ platform_environment_leakage_enabled = false
                 interfaces_enabled: bool,
                 platform_general_enabled: bool,
                 leak_sensors_enabled: bool,
+                additional_subscriptions: usize,
             },
         }
 
@@ -4241,6 +4962,7 @@ platform_environment_leakage_enabled = false
                         interfaces_enabled: true,
                         platform_general_enabled: true,
                         leak_sensors_enabled: false,
+                        additional_subscriptions: 0,
                     },
                 },
                 Check {
@@ -4269,6 +4991,7 @@ leak_sensors_enabled = true
                         interfaces_enabled: true,
                         platform_general_enabled: false,
                         leak_sensors_enabled: true,
+                        additional_subscriptions: 0,
                     },
                 },
                 Check {
@@ -4287,6 +5010,7 @@ system_events_subscription_enabled = false
                         interfaces_enabled: true,
                         platform_general_enabled: true,
                         leak_sensors_enabled: false,
+                        additional_subscriptions: 0,
                     },
                 },
                 Check {
@@ -4305,6 +5029,7 @@ events_enabled = false
                         interfaces_enabled: true,
                         platform_general_enabled: true,
                         leak_sensors_enabled: false,
+                        additional_subscriptions: 0,
                     },
                 },
             ],
@@ -4331,9 +5056,541 @@ events_enabled = false
                     interfaces_enabled: gnmi.paths.interfaces_enabled,
                     platform_general_enabled: gnmi.paths.platform_general_enabled,
                     leak_sensors_enabled: gnmi.paths.leak_sensors_enabled,
+                    additional_subscriptions: gnmi.additional_subscriptions.len(),
                 }
             },
         );
+    }
+
+    #[test]
+    fn selective_interface_paths_parse_and_validate() {
+        let config: Config = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string(
+                r#"
+[collectors.nvue.gnmi]
+[collectors.nvue.gnmi.paths]
+interface_paths = [["state", "oper-status"], ["phy-diag", "state", "raw-ber"]]
+"#,
+            ))
+            .extract()
+            .expect("selective interface configuration should parse");
+
+        let Configurable::Enabled(nvue) = config.collectors.nvue else {
+            panic!("NVUE collector should be enabled");
+        };
+
+        let Configurable::Enabled(gnmi) = nvue.gnmi else {
+            panic!("gNMI collector should be enabled");
+        };
+
+        assert_eq!(
+            gnmi.paths.interface_paths,
+            Some(vec![
+                vec!["state".to_string(), "oper-status".to_string()],
+                vec![
+                    "phy-diag".to_string(),
+                    "state".to_string(),
+                    "raw-ber".to_string()
+                ]
+            ])
+        );
+
+        assert!(gnmi.validate().is_ok());
+
+        for (description, paths, enabled, expected) in [
+            ("empty selection", vec![], true, "non-empty paths"),
+            (
+                "empty element",
+                vec![vec![String::new()]],
+                true,
+                "non-empty paths",
+            ),
+            (
+                "disabled interfaces",
+                vec![vec!["state".to_string(), "oper-status".to_string()]],
+                false,
+                "requires interfaces_enabled",
+            ),
+            (
+                "duplicate path",
+                vec![vec!["state".to_string(), "oper-status".to_string()]; 2],
+                true,
+                "duplicates",
+            ),
+        ] {
+            let mut invalid = NvueGnmiConfig::default();
+            invalid.paths.interface_paths = Some(paths);
+            invalid.paths.interfaces_enabled = enabled;
+
+            let error = invalid.validate().expect_err(description);
+
+            assert!(error.contains(expected), "{description}: {error}");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)] // Figment controls the error representation.
+    fn malformed_enabled_sections_fail_configuration_loading() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+
+            let valid = r#"
+[collectors.nvue.gnmi]
+gnmi_port = 19339
+system_events_enabled = false
+
+[[collectors.nvue.gnmi.additional_subscriptions]]
+name = "first"
+paths = [["interfaces"]]
+metrics = [{path = ["interfaces", "state", "counter"], metric_type = "interface_counter", output = {kind = "gauge", unit = "bytes"}}]
+
+[[collectors.nvue.gnmi.additional_subscriptions]]
+name = "second"
+encoding = "json_ietf"
+mode = "sample"
+sample_interval = "10s"
+paths = [["interfaces"]]
+metrics = [{path = ["interfaces", "state", "counter"], metric_type = "interface_counter", output = {kind = "gauge", unit = "count"}}]
+"#;
+
+            // Only the second entry is malformed, so diagnostics must identify
+            // its index rather than blaming or discarding the valid first entry.
+            for (field, from, to, reason) in [
+                (
+                    "encoding",
+                    "encoding = \"json_ietf\"",
+                    "encoding = \"proto\"",
+                    "proto",
+                ),
+                ("mode", "mode = \"sample\"", "mode = \"sampl\"", "sampl"),
+                (
+                    "metrics.0.output",
+                    "kind = \"gauge\", unit = \"count\"",
+                    "kind = \"gaugeh\", unit = \"count\"",
+                    "gaugeh",
+                ),
+                (
+                    "sample_interval",
+                    "sample_interval = \"10s\"",
+                    "sample_interval = \"not-a-duration\"",
+                    "duration",
+                ),
+                (
+                    "unknown",
+                    "encoding = \"json_ietf\"",
+                    "encodign = \"json_ietf\"",
+                    "encodign",
+                ),
+            ] {
+                jail.create_file("health.toml", &valid.replace(from, to))?;
+
+                let error = Config::load(Some(Path::new("health.toml")))
+                    .expect_err("malformed enabled subscription must fail startup");
+
+                for expected in [
+                    "collectors.nvue",
+                    "gnmi",
+                    "additional_subscriptions.1",
+                    "health.toml",
+                    reason,
+                ] {
+                    assert!(
+                        error.contains(expected),
+                        "{field}: missing {expected}: {error}"
+                    );
+                }
+
+                if field != "unknown" {
+                    assert!(error.contains(field), "{field}: {error}");
+                }
+            }
+
+            for (contents, section, field) in [
+                (
+                    "[collectors.nmxt]\nscrape_interval = \"not-a-duration\"",
+                    "collectors.nmxt",
+                    "scrape_interval",
+                ),
+                (
+                    "[collectors.nvue.gnmi]\nenabled = \"sometimes\"",
+                    "collectors.nvue",
+                    "enabled",
+                ),
+            ] {
+                jail.create_file("health.toml", contents)?;
+
+                let error = Config::load(Some(Path::new("health.toml")))
+                    .expect_err("malformed enabled section must fail startup");
+
+                assert!(error.contains(section), "{error}");
+                assert!(error.contains(field), "{error}");
+            }
+
+            jail.create_file("health.toml", valid)?;
+            jail.set_env("CARBIDE_HEALTH__COLLECTORS__NVUE__GNMI__GNMI_PORT", "20339");
+
+            let config = Config::load(Some(Path::new("health.toml")))
+                .expect("valid environment override should preserve the configured payload");
+
+            let gnmi = config
+                .collectors
+                .nvue
+                .as_option()
+                .unwrap()
+                .gnmi
+                .as_option()
+                .unwrap();
+
+            assert_eq!(gnmi.gnmi_port, 20339);
+            assert!(!gnmi.system_events_enabled);
+            assert_eq!(gnmi.additional_subscriptions.len(), 2);
+
+            jail.set_env(
+                "CARBIDE_HEALTH__COLLECTORS__NVUE__GNMI__SAMPLE_INTERVAL",
+                "invalid",
+            );
+
+            let error = Config::load(Some(Path::new("health.toml")))
+                .expect_err("malformed environment override must fail loading");
+
+            for expected in [
+                "health.toml",
+                "CARBIDE_HEALTH__",
+                "sample_interval",
+                "duration",
+            ] {
+                assert!(error.contains(expected), "missing {expected}: {error}");
+            }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn configurable_preserves_defaults_and_explicit_disabling() {
+        value_scenarios!(run = |input: serde_json::Value| {
+            serde_json::from_value::<Configurable<NvueCollectorConfig>>(input)
+                .expect("valid wrapper representation should parse")
+                .is_enabled()
+        };
+            "disabled representations" {
+                serde_json::Value::Null => false,
+                serde_json::json!({"enabled": false, "gnmi": {"sample_interval": "invalid"}}) => false,
+                serde_json::json!({"enabled": false, "rest": {"poll_interval": "invalid"}}) => false,
+            }
+
+            "empty enabled sections" {
+                serde_json::json!({}) => true,
+                serde_json::json!({"enabled": true}) => true,
+            }
+
+            "disabled child under enabled parent" {
+                serde_json::json!({"gnmi": {"enabled": false, "sample_interval": "invalid"}}) => true,
+            }
+        );
+
+        assert!(
+            serde_json::from_value::<Configurable<NvueCollectorConfig>>(serde_json::json!(false))
+                .is_err(),
+            "only null or a configuration table is supported"
+        );
+    }
+
+    #[test]
+    fn nvue_gnmi_additional_subscription_parses_complete_contract() {
+        let config: Config = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string(
+                r#"
+[collectors.nvue.gnmi]
+gnmi_port = 19339
+system_events_enabled = false
+
+[[collectors.nvue.gnmi.additional_subscriptions]]
+name = "external_metrics"
+target = "switch"
+origin = "openconfig"
+prefix = ["interfaces"]
+encoding = "json_ietf"
+updates_only = true
+mode = "sample"
+sample_interval = "10s"
+suppress_redundant = true
+heartbeat_interval = "1m"
+paths = [["interface"]]
+metrics = [
+  { path = ["interface", "state", "health"], metric_type = "interface_health", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "state_set", states = ["healthy", "attention"] } },
+  { path = ["interface", "state", "other-health"], metric_type = "interface_health", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "state_set", states = ["offline"] } },
+  { path = ["interface", "state", "counter"], metric_type = "interface_counter", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "gauge", unit = "count" } },
+  { path = ["interface", "state", "other-counter"], metric_type = "interface_counter", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "gauge", unit = "count" } },
+  { path = ["interface", "lane", "state", "counter"], metric_type = "interface_counter", labels = [{ name = "interface_name", element = "interface", key = "name" }, { name = "lane_id", element = "lane", key = "id" }], output = { kind = "gauge", unit = "count" } },
+]
+"#,
+            ))
+            .extract()
+            .expect("complete additional gNMI subscription should parse");
+
+        config
+            .validate()
+            .expect("complete additional gNMI subscription should validate");
+
+        let Configurable::Enabled(nvue) = &config.collectors.nvue else {
+            panic!("NVUE collector should be enabled");
+        };
+
+        let Configurable::Enabled(gnmi) = &nvue.gnmi else {
+            panic!("NVUE gNMI collector should be enabled");
+        };
+
+        let subscription = gnmi
+            .additional_subscriptions
+            .first()
+            .expect("one additional subscription should be configured");
+
+        assert_eq!(gnmi.gnmi_port, 19339);
+        assert!(!gnmi.system_events_enabled);
+        assert_eq!(subscription.name, "external_metrics");
+        assert_eq!(subscription.target, "switch");
+        assert_eq!(subscription.origin, "openconfig");
+        assert_eq!(subscription.prefix, ["interfaces"]);
+        assert_eq!(subscription.encoding, NvueGnmiEncoding::JsonIetf);
+        assert!(subscription.updates_only);
+        assert_eq!(subscription.paths.len(), 1);
+        assert_eq!(subscription.metrics.len(), 5);
+
+        assert_eq!(subscription.mode, NvueGnmiSubscriptionMode::Sample);
+        assert_eq!(subscription.sample_interval, Some(Duration::from_secs(10)));
+        assert!(subscription.suppress_redundant);
+
+        assert_eq!(
+            subscription.heartbeat_interval,
+            Some(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn nvue_gnmi_additional_subscription_validation_cases() {
+        #[derive(Clone, Copy)]
+        enum InvalidCase {
+            DuplicateName,
+            EmptyPath,
+            EmptyMetricPath,
+            SampleWithoutInterval,
+            OnChangeWithSampleInterval,
+            ZeroHeartbeat,
+            DuplicateMetricPath,
+            MissingResponseKeyElement,
+            MetricNameCollision,
+            OutputKindCollision,
+            ReservedMetricLabel,
+            UnboundedInfoValues,
+            MetricOutsideRequestPaths,
+        }
+
+        struct Case {
+            scenario: &'static str,
+            invalid: InvalidCase,
+            expected: &'static str,
+        }
+
+        let cases = [
+            Case {
+                scenario: "duplicate subscription name",
+                invalid: InvalidCase::DuplicateName,
+                expected: ".name duplicates",
+            },
+            Case {
+                scenario: "empty path",
+                invalid: InvalidCase::EmptyPath,
+                expected: ".paths must contain non-empty paths and elements",
+            },
+            Case {
+                scenario: "empty metric path",
+                invalid: InvalidCase::EmptyMetricPath,
+                expected: ".path must contain non-empty elements",
+            },
+            Case {
+                scenario: "sample interval required",
+                invalid: InvalidCase::SampleWithoutInterval,
+                expected: ".sample_interval is required in sample mode",
+            },
+            Case {
+                scenario: "sample interval rejected for on change",
+                invalid: InvalidCase::OnChangeWithSampleInterval,
+                expected: "cannot set sample_interval or suppress_redundant",
+            },
+            Case {
+                scenario: "zero heartbeat",
+                invalid: InvalidCase::ZeroHeartbeat,
+                expected: ".heartbeat_interval must be greater than 0",
+            },
+            Case {
+                scenario: "duplicate metric path",
+                invalid: InvalidCase::DuplicateMetricPath,
+                expected: ".path is duplicated",
+            },
+            Case {
+                scenario: "response key element absent from path",
+                invalid: InvalidCase::MissingResponseKeyElement,
+                expected: "must occur exactly once",
+            },
+            Case {
+                scenario: "different metric fields render the same exported name",
+                invalid: InvalidCase::MetricNameCollision,
+                expected: "renders the same metric name",
+            },
+            Case {
+                scenario: "different output kinds render the same exported name",
+                invalid: InvalidCase::OutputKindCollision,
+                expected: "renders the same metric name",
+            },
+            Case {
+                scenario: "metric label conflicts with endpoint metadata",
+                invalid: InvalidCase::ReservedMetricLabel,
+                expected: "is reserved or duplicated",
+            },
+            Case {
+                scenario: "info values must be finite",
+                invalid: InvalidCase::UnboundedInfoValues,
+                expected: ".output.values must not be empty",
+            },
+            Case {
+                scenario: "metric path outside requested subtrees",
+                invalid: InvalidCase::MetricOutsideRequestPaths,
+                expected: ".path must descend from one of the configured request paths",
+            },
+        ];
+
+        for case in cases {
+            let metric = NvueGnmiMetricConfig {
+                path: vec![
+                    "interface".to_string(),
+                    "state".to_string(),
+                    "value".to_string(),
+                ],
+                metric_type: "configured_value".to_string(),
+                labels: vec![NvueGnmiResponseKeyLabel {
+                    name: "interface_name".to_string(),
+                    element: "interface".to_string(),
+                    key: "name".to_string(),
+                }],
+                output: NvueGnmiMetricOutput::Gauge {
+                    unit: "count".to_string(),
+                },
+            };
+
+            let subscription = NvueGnmiSubscriptionConfig {
+                name: "external_metrics".to_string(),
+                prefix: vec!["interfaces".to_string()],
+                mode: NvueGnmiSubscriptionMode::OnChange,
+                heartbeat_interval: Some(Duration::from_secs(30)),
+                paths: vec![vec!["interface".to_string()]],
+                metrics: vec![metric],
+                ..Default::default()
+            };
+
+            let mut gnmi = NvueGnmiConfig {
+                additional_subscriptions: vec![subscription],
+                ..Default::default()
+            };
+
+            match case.invalid {
+                InvalidCase::DuplicateName => {
+                    gnmi.additional_subscriptions
+                        .push(gnmi.additional_subscriptions[0].clone());
+                }
+                InvalidCase::EmptyPath => {
+                    gnmi.additional_subscriptions[0].paths[0].clear();
+                }
+                InvalidCase::EmptyMetricPath => {
+                    gnmi.additional_subscriptions[0].metrics[0].path.clear();
+                }
+                InvalidCase::SampleWithoutInterval => {
+                    gnmi.additional_subscriptions[0].mode = NvueGnmiSubscriptionMode::Sample;
+                    gnmi.additional_subscriptions[0].heartbeat_interval = None;
+                }
+                InvalidCase::OnChangeWithSampleInterval => {
+                    gnmi.additional_subscriptions[0].sample_interval =
+                        Some(Duration::from_secs(10));
+                }
+                InvalidCase::ZeroHeartbeat => {
+                    gnmi.additional_subscriptions[0].heartbeat_interval = Some(Duration::ZERO);
+                }
+                InvalidCase::DuplicateMetricPath => {
+                    let metric = gnmi.additional_subscriptions[0].metrics[0].clone();
+                    gnmi.additional_subscriptions[0].metrics.push(metric);
+                }
+                InvalidCase::MissingResponseKeyElement => {
+                    gnmi.additional_subscriptions[0].metrics[0].labels[0].element =
+                        "component".to_string();
+                }
+                InvalidCase::MetricNameCollision => {
+                    let mut metric = gnmi.additional_subscriptions[0].metrics[0].clone();
+
+                    metric.path.push("other".to_string());
+
+                    metric.metric_type = "configured".to_string();
+
+                    metric.output = NvueGnmiMetricOutput::Gauge {
+                        unit: "value_count".to_string(),
+                    };
+
+                    gnmi.additional_subscriptions[0].metrics.push(metric);
+                }
+                InvalidCase::OutputKindCollision => {
+                    gnmi.additional_subscriptions[0].metrics[0].output =
+                        NvueGnmiMetricOutput::Gauge {
+                            unit: "state".to_string(),
+                        };
+
+                    let mut metric = gnmi.additional_subscriptions[0].metrics[0].clone();
+
+                    metric.path.push("other".to_string());
+
+                    metric.output = NvueGnmiMetricOutput::StateSet {
+                        states: vec!["healthy".to_string()],
+                    };
+
+                    gnmi.additional_subscriptions[0].metrics.push(metric);
+                }
+                InvalidCase::ReservedMetricLabel => {
+                    gnmi.additional_subscriptions[0].metrics[0].labels[0].name =
+                        "endpoint_key".to_string();
+                }
+                InvalidCase::UnboundedInfoValues => {
+                    gnmi.additional_subscriptions[0].metrics[0].output =
+                        NvueGnmiMetricOutput::Info {
+                            label: "status".to_string(),
+                            values: Vec::new(),
+                        };
+                }
+                InvalidCase::MetricOutsideRequestPaths => {
+                    gnmi.additional_subscriptions[0].paths[0][0] = "component".to_string();
+                }
+            }
+
+            let error = gnmi
+                .validate()
+                .expect_err("invalid additional gNMI subscription should fail validation");
+
+            assert!(
+                error.contains(case.expected),
+                "{}: expected {error:?} to contain {:?}",
+                case.scenario,
+                case.expected
+            );
+
+            assert!(
+                error.contains(if matches!(case.invalid, InvalidCase::DuplicateName) {
+                    "additional_subscriptions[1]"
+                } else {
+                    "additional_subscriptions[0]"
+                }),
+                "{}: {error}",
+                case.scenario
+            );
+        }
     }
 
     #[test]
@@ -4931,7 +6188,11 @@ machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
 
     #[test]
     fn test_static_endpoint_rejects_invalid_or_reserved_label_names() {
-        for (name, expected) in [("bad-label", "must match"), ("system_uuid", "is reserved")] {
+        for (name, expected) in [
+            ("bad-label", "must match"),
+            ("power_shelf_id", "is reserved"),
+            ("system_uuid", "is reserved"),
+        ] {
             let toml_content = format!(
                 r#"
 [endpoint_sources.nico_api]
@@ -5202,10 +6463,7 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                     periodic: Some(PeriodicLogConfig::default()),
                     auto: Some(AutoModeConfig::default()),
                     ..LogsCollectorConfig::default()
-                } => FailsWith(
-                    "[collectors.logs.auto] should not be set when mode = \"periodic\""
-                        .to_string()
-                ),
+                } => Yields(()), // auto is ignored in periodic mode (warn only)
 
                 LogsCollectorConfig {
                     mode: LogCollectionMode::Periodic,
@@ -5219,9 +6477,7 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                     periodic: Some(PeriodicLogConfig::default()),
                     sse: Some(SseLogConfig::default()),
                     ..LogsCollectorConfig::default()
-                } => FailsWith(
-                    "[collectors.logs.sse] should not be set when mode = \"periodic\"".to_string()
-                ),
+                } => Yields(()), // sse is ignored in periodic mode (warn only)
             }
 
             "SSE mode" {
@@ -5240,17 +6496,13 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                     mode: LogCollectionMode::Sse,
                     auto: Some(AutoModeConfig::default()),
                     ..LogsCollectorConfig::default()
-                } => FailsWith(
-                    "[collectors.logs.auto] should not be set when mode = \"sse\"".to_string()
-                ),
+                } => Yields(()), // auto is ignored in sse mode (warn only)
 
                 LogsCollectorConfig {
                     mode: LogCollectionMode::Sse,
                     periodic: Some(PeriodicLogConfig::default()),
                     ..LogsCollectorConfig::default()
-                } => FailsWith(
-                    "[collectors.logs.periodic] should not be set when mode = \"sse\"".to_string()
-                ),
+                } => Yields(()), // periodic is ignored in sse mode (warn only)
 
                 LogsCollectorConfig {
                     mode: LogCollectionMode::Sse,
@@ -5264,6 +6516,153 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                         .to_string()
                 ),
             }
+        );
+    }
+
+    /// Capture tracing WARN events emitted during a closure.
+    /// Uses a per-call dispatcher so parallel tests don't interfere.
+    fn capture_warnings(f: impl FnOnce()) -> Vec<String> {
+        carbide_instrument::testing::capture_logs(f)
+            .into_iter()
+            .filter(|log| log.level == tracing::Level::WARN)
+            .map(|log| log.message)
+            .collect()
+    }
+
+    #[test]
+    fn capture_warnings_allows_retained_dispatch() {
+        let mut dispatch = None;
+        let warnings = capture_warnings(|| {
+            // Tracing can keep our `Dispatch` alive while another test rebuilds
+            // the callsite cache. Hold it past capture to verify that reading
+            // the warnings doesn't require exclusive ownership of the buffer.
+            dispatch = Some(tracing::dispatcher::get_default(Clone::clone));
+            tracing::info!("not a warning");
+            tracing::warn!("captured warning");
+        });
+
+        assert_eq!(warnings, ["captured warning"]);
+        drop(dispatch);
+    }
+
+    #[test]
+    fn logs_collector_ignored_subsection_warnings() {
+        // periodic mode + auto: warn about auto
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Periodic,
+                periodic: Some(PeriodicLogConfig::default()),
+                auto: Some(AutoModeConfig::default()),
+                ..LogsCollectorConfig::default()
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.auto]") && w.contains("periodic")),
+            "expected auto-ignored warning in periodic mode, got: {warnings:?}"
+        );
+
+        // periodic mode + sse: warn about sse
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Periodic,
+                periodic: Some(PeriodicLogConfig::default()),
+                sse: Some(SseLogConfig::default()),
+                ..LogsCollectorConfig::default()
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.sse]") && w.contains("periodic")),
+            "expected sse-ignored warning in periodic mode, got: {warnings:?}"
+        );
+
+        // periodic mode + auto + sse: warn about both
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Periodic,
+                periodic: Some(PeriodicLogConfig::default()),
+                auto: Some(AutoModeConfig::default()),
+                sse: Some(SseLogConfig::default()),
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.auto]") && w.contains("periodic")),
+            "expected auto warning in periodic+auto+sse: {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.sse]") && w.contains("periodic")),
+            "expected sse warning in periodic+auto+sse: {warnings:?}"
+        );
+
+        // SSE mode + auto: warn about auto
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Sse,
+                auto: Some(AutoModeConfig::default()),
+                ..LogsCollectorConfig::default()
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.auto]") && w.contains("sse")),
+            "expected auto-ignored warning in sse mode, got: {warnings:?}"
+        );
+
+        // SSE mode + periodic: warn about periodic
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Sse,
+                periodic: Some(PeriodicLogConfig::default()),
+                ..LogsCollectorConfig::default()
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.periodic]") && w.contains("sse")),
+            "expected periodic-ignored warning in sse mode, got: {warnings:?}"
+        );
+
+        // SSE mode + auto + periodic: warn about both
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Sse,
+                auto: Some(AutoModeConfig::default()),
+                periodic: Some(PeriodicLogConfig::default()),
+                ..LogsCollectorConfig::default()
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.auto]") && w.contains("sse")),
+            "expected auto warning in sse+auto+periodic: {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.periodic]") && w.contains("sse")),
+            "expected periodic warning in sse+auto+periodic: {warnings:?}"
         );
     }
 
@@ -5408,6 +6807,7 @@ logs_collection_interval = "5m"
 sse_not_available_threshold = 2
 connect_failure_window = "10m"
 connect_failure_threshold = 8
+retry_sse_after_downgrade = true
 "# => Yields(LogsConfigProjection {
                     mode: LogCollectionMode::Auto,
                     validation: Ok(()),
@@ -5417,6 +6817,7 @@ connect_failure_threshold = 8
                         sse_not_available_threshold: 2,
                         connect_failure_window: Duration::from_secs(600),
                         connect_failure_threshold: 8,
+                        retry_sse_after_downgrade: true,
                         periodic: parsed_periodic_defaults(),
                     }),
                     effective_sse: SseLogConfig::default(),
@@ -5442,6 +6843,7 @@ logs_state_file = "/tmp/auto_{machine_id}.json"
                         sse_not_available_threshold: 2,
                         connect_failure_window: Duration::from_secs(600),
                         connect_failure_threshold: 8,
+                        retry_sse_after_downgrade: false,
                         periodic: PeriodicLogConfig {
                             logs_collection_interval: Duration::from_secs(120),
                             state_refresh_interval: Duration::from_secs(1200),
@@ -5492,6 +6894,8 @@ max_backoff = "45s"
         assert_eq!(defaults.sse_not_available_threshold, 1);
         assert_eq!(defaults.connect_failure_window, Duration::from_secs(300));
         assert_eq!(defaults.connect_failure_threshold, 5);
+        assert!(!defaults.retry_sse_after_downgrade);
+
         assert_eq!(
             defaults.periodic.logs_collection_interval,
             Duration::from_secs(300)

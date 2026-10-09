@@ -25,6 +25,359 @@ import (
 // TrayAPIService TrayAPI service
 type TrayAPIService service
 
+type ApiCreateOrUpdateTrayHealthReportRequest struct {
+	ctx                          context.Context
+	ApiService                   *TrayAPIService
+	org                          string
+	id                           string
+	trayHealthReportEntryRequest *TrayHealthReportEntryRequest
+}
+
+func (r ApiCreateOrUpdateTrayHealthReportRequest) TrayHealthReportEntryRequest(trayHealthReportEntryRequest TrayHealthReportEntryRequest) ApiCreateOrUpdateTrayHealthReportRequest {
+	r.trayHealthReportEntryRequest = &trayHealthReportEntryRequest
+	return r
+}
+
+func (r ApiCreateOrUpdateTrayHealthReportRequest) Execute() (*MachineHealthReportEntry, *http.Response, error) {
+	return r.ApiService.CreateOrUpdateTrayHealthReportExecute(r)
+}
+
+/*
+CreateOrUpdateTrayHealthReport Create or update Tray health report
+
+Add or update a health report override for a specific Tray. `Compute` targets the Machine health report, `NVSwitch` targets the Switch health report, and `PowerShelf` targets the Power Shelf health report. If the Tray ID uses a recognized component namespace that conflicts with `type`, the request returns 400. If a valid ID in the selected namespace does not identify an existing resource, the request returns 404.
+
+Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Org
+	@param id Component ID of the Tray
+	@return ApiCreateOrUpdateTrayHealthReportRequest
+*/
+func (a *TrayAPIService) CreateOrUpdateTrayHealthReport(ctx context.Context, org string, id string) ApiCreateOrUpdateTrayHealthReportRequest {
+	return ApiCreateOrUpdateTrayHealthReportRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+		id:         id,
+	}
+}
+
+// Execute executes the request
+//
+//	@return MachineHealthReportEntry
+func (a *TrayAPIService) CreateOrUpdateTrayHealthReportExecute(r ApiCreateOrUpdateTrayHealthReportRequest) (*MachineHealthReportEntry, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodPut
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue *MachineHealthReportEntry
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "TrayAPIService.CreateOrUpdateTrayHealthReport")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/tray/{id}/health-report"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"id"+"}", url.PathEscape(parameterValueToString(r.id, "id")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.trayHealthReportEntryRequest == nil {
+		return localVarReturnValue, nil, reportError("trayHealthReportEntryRequest is required and must be specified")
+	}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{"application/json"}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	// body params
+	localVarPostBody = r.trayHealthReportEntryRequest
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
+type ApiDeleteTrayHealthReportRequest struct {
+	ctx        context.Context
+	ApiService *TrayAPIService
+	siteId     *string
+	type_      *string
+	org        string
+	id         string
+	source     string
+}
+
+// ID of the Site that owns the Tray
+func (r ApiDeleteTrayHealthReportRequest) SiteId(siteId string) ApiDeleteTrayHealthReportRequest {
+	r.siteId = &siteId
+	return r
+}
+
+// Tray type used to select the corresponding component health-report resource
+func (r ApiDeleteTrayHealthReportRequest) Type_(type_ string) ApiDeleteTrayHealthReportRequest {
+	r.type_ = &type_
+	return r
+}
+
+func (r ApiDeleteTrayHealthReportRequest) Execute() (*http.Response, error) {
+	return r.ApiService.DeleteTrayHealthReportExecute(r)
+}
+
+/*
+DeleteTrayHealthReport Delete Tray health report
+
+Remove a health report override for a specific Tray. `Compute` targets the Machine health report, `NVSwitch` targets the Switch health report, and `PowerShelf` targets the Power Shelf health report. If the Tray ID uses a recognized component namespace that conflicts with `type`, the request returns 400. If a valid ID in the selected namespace does not identify an existing resource, the request returns 404.
+
+Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Org
+	@param id Component ID of the Tray
+	@param source Health report source
+	@return ApiDeleteTrayHealthReportRequest
+*/
+func (a *TrayAPIService) DeleteTrayHealthReport(ctx context.Context, org string, id string, source string) ApiDeleteTrayHealthReportRequest {
+	return ApiDeleteTrayHealthReportRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+		id:         id,
+		source:     source,
+	}
+}
+
+// Execute executes the request
+func (a *TrayAPIService) DeleteTrayHealthReportExecute(r ApiDeleteTrayHealthReportRequest) (*http.Response, error) {
+	var (
+		localVarHTTPMethod = http.MethodDelete
+		localVarPostBody   interface{}
+		formFiles          []formFile
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "TrayAPIService.DeleteTrayHealthReport")
+	if err != nil {
+		return nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/tray/{id}/health-report/{source}"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"id"+"}", url.PathEscape(parameterValueToString(r.id, "id")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"source"+"}", url.PathEscape(parameterValueToString(r.source, "source")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.siteId == nil {
+		return nil, reportError("siteId is required and must be specified")
+	}
+	if r.type_ == nil {
+		return nil, reportError("type_ is required and must be specified")
+	}
+
+	parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+	parameterAddToHeaderOrQuery(localVarQueryParams, "type", r.type_, "form", "")
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarHTTPResponse, newErr
+	}
+
+	return localVarHTTPResponse, nil
+}
+
 type ApiFirmwareUpdateTrayRequest struct {
 	ctx                   context.Context
 	ApiService            *TrayAPIService
@@ -45,13 +398,13 @@ func (r ApiFirmwareUpdateTrayRequest) Execute() (*FirmwareUpdateResponse, *http.
 /*
 FirmwareUpdateTray Firmware update a Tray
 
-Update firmware on a Tray identified by Tray UUID.
+Update firmware on a Tray identified by its component ID or component MAC address.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@param id ID of the Tray
+	@param id Component ID or component MAC address
 	@return ApiFirmwareUpdateTrayRequest
 */
 func (a *TrayAPIService) FirmwareUpdateTray(ctx context.Context, org string, id string) ApiFirmwareUpdateTrayRequest {
@@ -153,6 +506,17 @@ func (a *TrayAPIService) FirmwareUpdateTrayExecute(r ApiFirmwareUpdateTrayReques
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -201,8 +565,7 @@ Update firmware on Trays with optional filters. If no filter is specified, targe
 
 **Filter constraints:**
 - `rackId` and `rackName` are mutually exclusive
-- `rackId`/`rackName` cannot be combined with `ids`/`componentIds` (rack-level vs component-level targeting)
-- `componentIds` requires `type` to be specified
+- `rackId`/`rackName` cannot be combined with `ids` (rack-level vs component-level targeting)
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -333,19 +696,18 @@ func (a *TrayAPIService) FirmwareUpdateTraysExecute(r ApiFirmwareUpdateTraysRequ
 }
 
 type ApiGetAllTrayRequest struct {
-	ctx         context.Context
-	ApiService  *TrayAPIService
-	siteId      *string
-	org         string
-	rackId      *string
-	rackName    *string
-	type_       *string
-	componentId *string
-	id          *string
-	slotId      *int32
-	pageNumber  *int32
-	pageSize    *int32
-	orderBy     *string
+	ctx        context.Context
+	ApiService *TrayAPIService
+	siteId     *string
+	org        string
+	rackId     *string
+	rackName   *string
+	type_      *string
+	id         *string
+	slotId     *int32
+	pageNumber *int32
+	pageSize   *int32
+	orderBy    *string
 }
 
 // ID of the Site to retrieve Trays from
@@ -366,19 +728,13 @@ func (r ApiGetAllTrayRequest) RackName(rackName string) ApiGetAllTrayRequest {
 	return r
 }
 
-// Filter by tray type
+// Filter by tray type. When &#x60;id&#x60; is specified, the type disambiguates component IDs shared by different component types.
 func (r ApiGetAllTrayRequest) Type_(type_ string) ApiGetAllTrayRequest {
 	r.type_ = &type_
 	return r
 }
 
-// Filter by component ID. Can be specified multiple times to filter on more than one component ID. Requires &#39;type&#39; parameter.
-func (r ApiGetAllTrayRequest) ComponentId(componentId string) ApiGetAllTrayRequest {
-	r.componentId = &componentId
-	return r
-}
-
-// Filter by tray UUID. Can be specified multiple times to filter on more than one tray ID.
+// Filter by component ID. Can be specified multiple times to filter on more than one Tray ID.
 func (r ApiGetAllTrayRequest) Id(id string) ApiGetAllTrayRequest {
 	r.id = &id
 	return r
@@ -402,7 +758,7 @@ func (r ApiGetAllTrayRequest) PageSize(pageSize int32) ApiGetAllTrayRequest {
 	return r
 }
 
-// Ordering for pagination query
+// Ordering for pagination query. Defaults to &#x60;NAME_ASC&#x60;; equal field values are ordered by an immutable unique identifier to keep page boundaries stable.
 func (r ApiGetAllTrayRequest) OrderBy(orderBy string) ApiGetAllTrayRequest {
 	r.orderBy = &orderBy
 	return r
@@ -421,8 +777,7 @@ Org must have an Infrastructure Provider entity. User must have authorization ro
 
 **Filter constraints:**
 - `rackId` and `rackName` are mutually exclusive
-- `rackId`/`rackName` cannot be combined with `id`/`componentId` (rack-level vs component-level targeting)
-- `componentId` requires `type` to be specified
+- `rackId`/`rackName` cannot be combined with `id` (rack-level vs component-level targeting)
 - `slotId` restricts to trays at that rack slot, requires `rackId` or `rackName`, and composes with the rest of the query via AND
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
@@ -472,9 +827,6 @@ func (a *TrayAPIService) GetAllTrayExecute(r ApiGetAllTrayRequest) ([]Tray, *htt
 	}
 	if r.type_ != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "type", r.type_, "form", "")
-	}
-	if r.componentId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "componentId", r.componentId, "form", "")
 	}
 	if r.id != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "id", r.id, "form", "")
@@ -570,6 +922,192 @@ func (a *TrayAPIService) GetAllTrayExecute(r ApiGetAllTrayRequest) ([]Tray, *htt
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
+type ApiGetAllTrayHealthReportRequest struct {
+	ctx        context.Context
+	ApiService *TrayAPIService
+	siteId     *string
+	type_      *string
+	org        string
+	id         string
+}
+
+// ID of the Site that owns the Tray
+func (r ApiGetAllTrayHealthReportRequest) SiteId(siteId string) ApiGetAllTrayHealthReportRequest {
+	r.siteId = &siteId
+	return r
+}
+
+// Tray type used to select the corresponding component health-report resource
+func (r ApiGetAllTrayHealthReportRequest) Type_(type_ string) ApiGetAllTrayHealthReportRequest {
+	r.type_ = &type_
+	return r
+}
+
+func (r ApiGetAllTrayHealthReportRequest) Execute() ([]MachineHealthReportEntry, *http.Response, error) {
+	return r.ApiService.GetAllTrayHealthReportExecute(r)
+}
+
+/*
+GetAllTrayHealthReport Retrieve all Tray health reports
+
+Get all health report overrides for a specific Tray. `Compute` targets the Machine health report, `NVSwitch` targets the Switch health report, and `PowerShelf` targets the Power Shelf health report. If the Tray ID uses a recognized component namespace that conflicts with `type`, the request returns 400. If a valid ID in the selected namespace does not identify an existing resource, the request returns 404.
+
+Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Org
+	@param id Component ID of the Tray
+	@return ApiGetAllTrayHealthReportRequest
+*/
+func (a *TrayAPIService) GetAllTrayHealthReport(ctx context.Context, org string, id string) ApiGetAllTrayHealthReportRequest {
+	return ApiGetAllTrayHealthReportRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+		id:         id,
+	}
+}
+
+// Execute executes the request
+//
+//	@return []MachineHealthReportEntry
+func (a *TrayAPIService) GetAllTrayHealthReportExecute(r ApiGetAllTrayHealthReportRequest) ([]MachineHealthReportEntry, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodGet
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue []MachineHealthReportEntry
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "TrayAPIService.GetAllTrayHealthReport")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/tray/{id}/health-report"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"id"+"}", url.PathEscape(parameterValueToString(r.id, "id")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.siteId == nil {
+		return localVarReturnValue, nil, reportError("siteId is required and must be specified")
+	}
+	if r.type_ == nil {
+		return localVarReturnValue, nil, reportError("type_ is required and must be specified")
+	}
+
+	parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+	parameterAddToHeaderOrQuery(localVarQueryParams, "type", r.type_, "form", "")
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
 type ApiGetTrayRequest struct {
 	ctx        context.Context
 	ApiService *TrayAPIService
@@ -591,13 +1129,15 @@ func (r ApiGetTrayRequest) Execute() (*Tray, *http.Response, error) {
 /*
 GetTray Retrieve a Tray
 
-Get a Tray by ID.
+Get a Tray by component ID or component MAC address.
+
+The identifier must resolve to exactly one component. An ambiguous component ID returns `412 Precondition Failed`; use the component MAC address to disambiguate it.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@param id ID of the Tray
+	@param id Component ID or component MAC address
 	@return ApiGetTrayRequest
 */
 func (a *TrayAPIService) GetTray(ctx context.Context, org string, id string) ApiGetTrayRequest {
@@ -698,6 +1238,17 @@ func (a *TrayAPIService) GetTrayExecute(r ApiGetTrayRequest) (*Tray, *http.Respo
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -772,7 +1323,7 @@ func (r ApiGetTrayTasksRequest) Execute() ([]Task, *http.Response, error) {
 /*
 GetTrayTasks Retrieve all Tasks for a Tray
 
-List Tasks targeting the specified Tray.
+List Tasks targeting the Tray identified by its component ID or component MAC address.
 
 Tasks are site-scoped; `siteId` must be the Site that owns the Tray. Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -782,7 +1333,7 @@ By default the `report` field is omitted from each task in the response. Set `in
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@param id UUID of the Tray
+	@param id Component ID or component MAC address
 	@return ApiGetTrayTasksRequest
 */
 func (a *TrayAPIService) GetTrayTasks(ctx context.Context, org string, id string) ApiGetTrayTasksRequest {
@@ -918,6 +1469,17 @@ func (a *TrayAPIService) GetTrayTasksExecute(r ApiGetTrayTasksRequest) ([]Task, 
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -963,15 +1525,16 @@ func (r ApiPowerControlTrayRequest) Execute() (*UpdatePowerStateResponse, *http.
 /*
 PowerControlTray Power control a Tray
 
-Power control a Tray identified by Tray UUID.
+Power control a Tray identified by its component ID or component MAC address.
 
-Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@param id ID of the Tray
+	@param id Component ID or component MAC address
 	@return ApiPowerControlTrayRequest
 */
 func (a *TrayAPIService) PowerControlTray(ctx context.Context, org string, id string) ApiPowerControlTrayRequest {
@@ -1073,6 +1636,17 @@ func (a *TrayAPIService) PowerControlTrayExecute(r ApiPowerControlTrayRequest) (
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -1119,12 +1693,12 @@ PowerControlTrays Power control Trays
 
 Power control Trays with optional filters. If no filter is specified, targets all trays in the Site.
 
-Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
 **Filter constraints:**
 - `rackId` and `rackName` are mutually exclusive
-- `rackId`/`rackName` cannot be combined with `ids`/`componentIds` (rack-level vs component-level targeting)
-- `componentIds` requires `type` to be specified
+- `rackId`/`rackName` cannot be combined with `ids` (rack-level vs component-level targeting)
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -1275,7 +1849,7 @@ func (r ApiValidateTrayRequest) Execute() (*RackValidationResult, *http.Response
 /*
 ValidateTray Validate a Tray
 
-Validate a Tray by comparing expected vs actual state.
+Validate a Tray identified by its component ID or component MAC address by comparing expected vs actual state.
 
 Compares the expected component configuration against the actual state. Returns a detailed diff report showing missing, extra, and mismatched components.
 
@@ -1283,7 +1857,7 @@ Org must have an Infrastructure Provider entity. User must have authorization ro
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@param id ID of the Tray
+	@param id Component ID or component MAC address
 	@return ApiValidateTrayRequest
 */
 func (a *TrayAPIService) ValidateTray(ctx context.Context, org string, id string) ApiValidateTrayRequest {
@@ -1384,6 +1958,17 @@ func (a *TrayAPIService) ValidateTrayExecute(r ApiValidateTrayRequest) (*RackVal
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -1419,7 +2004,7 @@ type ApiValidateTraysRequest struct {
 	name         *string
 	manufacturer *string
 	type_        *string
-	componentId  *string
+	id           *string
 	slotId       *int32
 }
 
@@ -1429,7 +2014,7 @@ func (r ApiValidateTraysRequest) SiteId(siteId string) ApiValidateTraysRequest {
 	return r
 }
 
-// Scope to a specific Rack by ID (mutually exclusive with rackName)
+// Scope to a specific Rack by Rack ID (mutually exclusive with rackName)
 func (r ApiValidateTraysRequest) RackId(rackId string) ApiValidateTraysRequest {
 	r.rackId = &rackId
 	return r
@@ -1453,15 +2038,15 @@ func (r ApiValidateTraysRequest) Manufacturer(manufacturer string) ApiValidateTr
 	return r
 }
 
-// Filter trays by type
+// Filter trays by type. When &#x60;id&#x60; is specified, the type disambiguates component IDs shared by different component types.
 func (r ApiValidateTraysRequest) Type_(type_ string) ApiValidateTraysRequest {
 	r.type_ = &type_
 	return r
 }
 
-// Filter by external component ID (requires type; mutually exclusive with rackId/rackName; use repeated params for multiple values)
-func (r ApiValidateTraysRequest) ComponentId(componentId string) ApiValidateTraysRequest {
-	r.componentId = &componentId
+// Filter by component ID (mutually exclusive with rackId/rackName; use repeated params for multiple values)
+func (r ApiValidateTraysRequest) Id(id string) ApiValidateTraysRequest {
+	r.id = &id
 	return r
 }
 
@@ -1540,8 +2125,8 @@ func (a *TrayAPIService) ValidateTraysExecute(r ApiValidateTraysRequest) (*RackV
 	if r.type_ != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "type", r.type_, "form", "")
 	}
-	if r.componentId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "componentId", r.componentId, "form", "")
+	if r.id != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "id", r.id, "form", "")
 	}
 	if r.slotId != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "slotId", r.slotId, "form", "")

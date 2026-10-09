@@ -19,7 +19,6 @@ import (
 	cdmu "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -124,7 +123,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock per-Site client for st1
 	tsc := &tmocks.Client{}
@@ -169,12 +168,22 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 		reqBodyModel                  *model.APIOperatingSystemCreateRequest
 		user                          *cdbm.User
 		expectedErr                   bool
+		expectedUserDataError         string
 		expectedStatus                int
 		expectedOperatingSystemStatus string
 		expectedStatusHistoryCount    int
 		expectedImageURL              bool
 		verifyChildSpanner            bool
 	}{
+		{
+			name:                  "malformed autoinstall user-data returns mapping detail without persistence",
+			reqOrgName:            tnOrg1,
+			reqBody:               `{"name":"invalid-autoinstall-os","ipxeScript":"ipxe","phoneHomeEnabled":true,"userData":"#cloud-config\nautoinstall:\n  user-data: private-value\n"}`,
+			user:                  tnu,
+			expectedErr:           true,
+			expectedStatus:        http.StatusBadRequest,
+			expectedUserDataError: "autoinstall user-data must be a mapping to insert phone-home",
+		},
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     tnOrg1,
@@ -313,7 +322,6 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := CreateOperatingSystemHandler{
@@ -327,6 +335,18 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusCreated)
 			assert.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectedUserDataError != "" {
+				var response struct {
+					Data map[string]string `json:"data"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, map[string]string{"userData": tc.expectedUserDataError}, response.Data)
+				assert.NotContains(t, rec.Body.String(), "private-value")
+				osDAO := cdbm.NewOperatingSystemDAO(dbSession)
+				_, count, queryErr := osDAO.GetAll(ctx, nil, cdbm.OperatingSystemFilterInput{Names: []string{"invalid-autoinstall-os"}}, paginator.PageInput{}, nil)
+				require.NoError(t, queryErr)
+				assert.Zero(t, count)
+			}
 			if !tc.expectedErr {
 				rsp := &model.APIOperatingSystem{}
 				err := json.Unmarshal(rec.Body.Bytes(), rsp)
@@ -552,7 +572,7 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -783,7 +803,6 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			mh := GetAllOperatingSystemHandler{
@@ -949,7 +968,7 @@ func TestOperatingSystemHandler_GetByID(t *testing.T) {
 	)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1066,7 +1085,6 @@ func TestOperatingSystemHandler_GetByID(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := GetOperatingSystemHandler{
@@ -1512,7 +1530,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock per-Site client for st1
 	tsc := &tmocks.Client{}
@@ -1551,14 +1569,15 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 	tsc1.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	tests := []struct {
-		name           string
-		reqOrgName     string
-		user           *cdbm.User
-		reqBody        string
-		reqUpdateModel *model.APIOperatingSystemUpdateRequest
-		osID           string
-		expectedErr    bool
-		expectedStatus int
+		name                  string
+		reqOrgName            string
+		user                  *cdbm.User
+		reqBody               string
+		reqUpdateModel        *model.APIOperatingSystemUpdateRequest
+		osID                  string
+		expectedErr           bool
+		expectedUserDataError string
+		expectedStatus        int
 
 		expectedName             *string
 		expectedDesc             *string
@@ -1572,6 +1591,16 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 		expectedDeactivationNote *string
 		verifyChildSpanner       bool
 	}{
+		{
+			name:                  "malformed autoinstall update returns mapping detail without mutation",
+			reqOrgName:            ipOrg1,
+			user:                  user,
+			reqBody:               `{"name":"rejected-rename","phoneHomeEnabled":true,"userData":"#cloud-config\nautoinstall: private-value\n"}`,
+			osID:                  os1.ID.String(),
+			expectedErr:           true,
+			expectedStatus:        http.StatusBadRequest,
+			expectedUserDataError: "autoinstall must be a mapping to insert phone-home",
+		},
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     ipOrg1,
@@ -1790,7 +1819,6 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := UpdateOperatingSystemHandler{
@@ -1799,10 +1827,28 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 				cfg:       cfg,
 				scp:       scp,
 			}
+			var before *cdbm.OperatingSystem
+			if tc.expectedUserDataError != "" {
+				var readErr error
+				before, readErr = osDAO.GetByID(ctx, nil, uuid.MustParse(tc.osID), nil)
+				require.NoError(t, readErr)
+			}
+
 			err := tah.Handle(ec)
 			assert.Nil(t, err)
 
 			assert.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectedUserDataError != "" {
+				var response struct {
+					Data map[string]string `json:"data"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, map[string]string{"userData": tc.expectedUserDataError}, response.Data)
+				assert.NotContains(t, rec.Body.String(), "private-value")
+				after, readErr := osDAO.GetByID(ctx, nil, before.ID, nil)
+				require.NoError(t, readErr)
+				assert.Equal(t, before, after)
+			}
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
 
 			if !tc.expectedErr {
@@ -2047,7 +2093,7 @@ func TestOperatingSystemHandler_Delete(t *testing.T) {
 	)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Prepare client pool for sync calls
 	// to site(s).
@@ -2231,7 +2277,6 @@ func TestOperatingSystemHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tClient := tempClient
@@ -2331,7 +2376,7 @@ func TestOperatingSystemHandler_Create_Ownership(t *testing.T) {
 	provUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{provOrg}, []string{authz.ProviderAdminRole})
 	testMachineBuildInfrastructureProvider(t, dbSession, provOrg, "own-ip")
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name           string
@@ -2363,7 +2408,7 @@ func TestOperatingSystemHandler_Create_Ownership(t *testing.T) {
 			ec.SetParamNames("orgName")
 			ec.SetParamValues(provOrg)
 			ec.Set("user", provUser)
-			ec.SetRequest(ec.Request().WithContext(context.WithValue(ctx, otelecho.TracerKey, tracer)))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			ch := CreateOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg, scp: scp}
 			require.NoError(t, ch.Handle(ec))
@@ -2399,7 +2444,7 @@ func TestOperatingSystemHandler_Update_Ownership(t *testing.T) {
 	provOSShared := buildRawIpxeProviderOS(t, ctx, osDAO, sharedOrg, ip2.ID, "prov-os-shared-update", sharedProvUser.ID)
 	tnOS := buildRawIpxeTenantOS(t, ctx, osDAO, sharedOrg, tn.ID, "tenant-os-update", tnUser.ID)
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name           string
@@ -2444,7 +2489,7 @@ func TestOperatingSystemHandler_Update_Ownership(t *testing.T) {
 			ec.SetParamNames("orgName", "id")
 			ec.SetParamValues(tc.reqOrgName, tc.os.ID.String())
 			ec.Set("user", tc.user)
-			ec.SetRequest(ec.Request().WithContext(context.WithValue(ctx, otelecho.TracerKey, tracer)))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			uh := UpdateOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg, scp: scp}
 			require.NoError(t, uh.Handle(ec))
@@ -2480,7 +2525,7 @@ func TestOperatingSystemHandler_Delete_Ownership(t *testing.T) {
 	provOSShared := buildRawIpxeProviderOS(t, ctx, osDAO, sharedOrg, ip2.ID, "prov-os-shared-delete", sharedProvUser.ID)
 	tnOS := buildRawIpxeTenantOS(t, ctx, osDAO, sharedOrg, tn.ID, "tenant-os-delete", tnUser.ID)
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name           string
@@ -2522,7 +2567,7 @@ func TestOperatingSystemHandler_Delete_Ownership(t *testing.T) {
 			ec.SetParamNames("orgName", "id")
 			ec.SetParamValues(tc.reqOrgName, tc.os.ID.String())
 			ec.Set("user", tc.user)
-			ec.SetRequest(ec.Request().WithContext(context.WithValue(ctx, otelecho.TracerKey, tracer)))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			dh := DeleteOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg, scp: scp}
 			require.NoError(t, dh.Handle(ec))
@@ -2607,11 +2652,16 @@ func TestOperatingSystemHandler_GetAll_Visibility(t *testing.T) {
 	buildTenantOS(t, ctx, osDAO, tenantOrg, tn.ID, "tenant-os-2", tnUser.ID)
 	provC := buildProviderOS(t, ctx, osDAO, servingProviderOrg, ip2.ID, "prov-os-c", tnUser.ID)
 	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provC.ID, siteC.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, tnUser)
+	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provC.ID, siteD.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, tnUser)
 	provD := buildProviderOS(t, ctx, osDAO, servingProviderOrg, ip2.ID, "prov-os-d", tnUser.ID)
 	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provD.ID, siteD.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, tnUser)
 	buildProviderOS(t, ctx, osDAO, servingProviderOrg, ip2.ID, "prov-os-without-site", tnUser.ID)
+	privOrg := "vis-privileged-org"
+	privUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{privOrg}, []string{authz.TenantAdminRole})
+	privTenant := testMachineBuildTenant(t, dbSession, privOrg, "vis-privileged-tenant")
+	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip2, &privTenant.ID, privOrg, cdbm.TenantAccountStatusReady, privUser)
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name          string
@@ -2619,6 +2669,7 @@ func TestOperatingSystemHandler_GetAll_Visibility(t *testing.T) {
 		user          *cdbm.User
 		target        string
 		expectedNames []string
+		expectedSites map[string][]string
 	}{
 		{
 			name:          "provider admin sees only provider-owned OSes",
@@ -2631,6 +2682,7 @@ func TestOperatingSystemHandler_GetAll_Visibility(t *testing.T) {
 			reqOrgName:    tenantOrg,
 			user:          tnUser,
 			expectedNames: []string{"tenant-os-1", "tenant-os-2", "prov-os-c"},
+			expectedSites: map[string][]string{"prov-os-c": {siteC.ID.String()}},
 		},
 		{
 			name:          "tenant visibility union is paginated after merging",
@@ -2638,6 +2690,21 @@ func TestOperatingSystemHandler_GetAll_Visibility(t *testing.T) {
 			user:          tnUser,
 			target:        "/?pageSize=2&orderBy=NAME_ASC",
 			expectedNames: []string{"prov-os-c", "tenant-os-1"},
+		},
+		{
+			name:          "privileged tenant lists only OSes at its provider sites without memberships",
+			reqOrgName:    privOrg,
+			user:          privUser,
+			expectedNames: []string{"prov-os-c", "prov-os-d"},
+			expectedSites: map[string][]string{"prov-os-c": {siteC.ID.String(), siteD.ID.String()}},
+		},
+		{
+			name:          "privileged tenant can filter by an implicitly authorized site",
+			reqOrgName:    privOrg,
+			user:          privUser,
+			target:        "/?siteId=" + siteC.ID.String(),
+			expectedNames: []string{"prov-os-c"},
+			expectedSites: map[string][]string{"prov-os-c": {siteC.ID.String()}},
 		},
 	}
 	for _, tc := range tests {
@@ -2656,8 +2723,7 @@ func TestOperatingSystemHandler_GetAll_Visibility(t *testing.T) {
 			ec.SetParamValues(tc.reqOrgName)
 			ec.Set("user", tc.user)
 
-			reqCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(reqCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			mh := GetAllOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg}
 			err := mh.Handle(ec)
@@ -2669,6 +2735,15 @@ func TestOperatingSystemHandler_GetAll_Visibility(t *testing.T) {
 			gotNames := make([]string, len(rsp))
 			for i, os := range rsp {
 				gotNames[i] = os.Name
+				wantSites, checkSites := tc.expectedSites[os.Name]
+				if checkSites {
+					gotSites := make([]string, 0, len(os.SiteAssociations))
+					for _, association := range os.SiteAssociations {
+						require.NotNil(t, association.Site)
+						gotSites = append(gotSites, association.Site.ID)
+					}
+					assert.ElementsMatch(t, wantSites, gotSites)
+				}
 			}
 			assert.ElementsMatch(t, tc.expectedNames, gotNames)
 		})
@@ -2688,13 +2763,6 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 	tempClient := &tmocks.Client{}
 	osDAO := cdbm.NewOperatingSystemDAO(dbSession)
 
-	provOrg := "vis-provider-org"
-	provUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{provOrg}, []string{authz.ProviderAdminRole})
-	ip := testMachineBuildInfrastructureProvider(t, dbSession, provOrg, "vis-ip")
-	siteA := testMachineBuildSite(t, dbSession, ip, "vis-site-a", cdbm.SiteStatusRegistered)
-	provOSA := buildProviderOS(t, ctx, osDAO, provOrg, ip.ID, "prov-os-a", provUser.ID)
-	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provOSA.ID, siteA.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, provUser)
-
 	tenantOrg := "vis-tenant-org"
 	servingProviderOrg := "vis-serving-provider-org"
 	tnUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{tenantOrg}, []string{authz.TenantAdminRole})
@@ -2708,10 +2776,38 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 	tnOS := buildTenantOS(t, ctx, osDAO, tenantOrg, tn.ID, "tenant-os-1", tnUser.ID)
 	provC := buildProviderOS(t, ctx, osDAO, servingProviderOrg, ip2.ID, "prov-os-c", tnUser.ID)
 	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provC.ID, siteC.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, tnUser)
+	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provC.ID, siteD.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, tnUser)
 	provD := buildProviderOS(t, ctx, osDAO, servingProviderOrg, ip2.ID, "prov-os-d", tnUser.ID)
 	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provD.ID, siteD.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, tnUser)
+	noSitesOrg := "vis-no-sites-org"
+	noSitesUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{noSitesOrg}, []string{authz.TenantAdminRole})
+	noSitesTenant := testMachineBuildTenant(t, dbSession, noSitesOrg, "vis-no-sites-tenant")
+	noSitesOS := buildTenantOS(t, ctx, osDAO, noSitesOrg, noSitesTenant.ID, "tenant-os-no-sites", noSitesUser.ID)
+	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, noSitesOS.ID, siteD.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, noSitesUser)
+	otherProvider := testMachineBuildInfrastructureProvider(t, dbSession, "vis-other-provider-org", "vis-other-provider")
+	otherSite := testMachineBuildSite(t, dbSession, otherProvider, "vis-other-site", cdbm.SiteStatusRegistered)
+	otherOS := buildProviderOS(t, ctx, osDAO, otherProvider.Org, otherProvider.ID, "other-provider-os", servingProviderUser.ID)
+	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, otherOS.ID, otherSite.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, servingProviderUser)
+	for _, os := range []*cdbm.OperatingSystem{provC, provD, noSitesOS, otherOS} {
+		// Exercise the site-associated template-based definitions.
+		_, err := osDAO.Update(ctx, nil, cdbm.OperatingSystemUpdateInput{
+			OperatingSystemId: os.ID,
+			OsType:            cutil.GetPtr(cdbm.OperatingSystemTypeTemplatedIPXE),
+		})
+		require.NoError(t, err)
+	}
+	dualUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{servingProviderOrg}, []string{authz.ProviderAdminRole, authz.TenantAdminRole})
+	dualTenant := testMachineBuildTenant(t, dbSession, servingProviderOrg, "vis-dual-tenant")
+	testBuildTenantSiteAssociation(t, dbSession, servingProviderOrg, dualTenant.ID, siteC.ID, dualUser.ID)
+	privOrg := "vis-privileged-org"
+	privUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{privOrg}, []string{authz.TenantAdminRole})
+	privTenant := testMachineBuildTenant(t, dbSession, privOrg, "vis-privileged-tenant")
+	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip2, &privTenant.ID, privOrg, cdbm.TenantAccountStatusReady, privUser)
+	// Disabling targeted creation at C does not revoke ordinary membership.
+	// D has no membership and is accessible only through the account default.
+	cdbm.TestBuildTenantSite(t, dbSession, privTenant, siteC, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, privUser)
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name           string
@@ -2719,20 +2815,31 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 		user           *cdbm.User
 		os             *cdbm.OperatingSystem
 		expectedStatus int
+		expectedSites  []string
 	}{
 		{
-			name:           "provider admin can read provider-owned OS",
-			reqOrgName:     provOrg,
-			user:           provUser,
-			os:             provOSA,
+			name:           "provider admin sees all associations of provider-owned OS",
+			reqOrgName:     servingProviderOrg,
+			user:           servingProviderUser,
+			os:             provC,
 			expectedStatus: http.StatusOK,
+			expectedSites:  []string{siteC.ID.String(), siteD.ID.String()},
 		},
 		{
-			name:           "tenant admin can read provider OS at accessible site",
+			name:           "tenant admin sees only accessible associations of provider OS",
 			reqOrgName:     tenantOrg,
 			user:           tnUser,
 			os:             provC,
 			expectedStatus: http.StatusOK,
+			expectedSites:  []string{siteC.ID.String()},
+		},
+		{
+			name:           "dual-role admin retains provider access to all associations",
+			reqOrgName:     servingProviderOrg,
+			user:           dualUser,
+			os:             provC,
+			expectedStatus: http.StatusOK,
+			expectedSites:  []string{siteC.ID.String(), siteD.ID.String()},
 		},
 		{
 			name:           "tenant admin cannot read provider OS at inaccessible site",
@@ -2742,10 +2849,40 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 			expectedStatus: http.StatusForbidden,
 		},
 		{
+			name:           "privileged tenant combines ordinary membership and implicit site access",
+			reqOrgName:     privOrg,
+			user:           privUser,
+			os:             provC,
+			expectedStatus: http.StatusOK,
+			expectedSites:  []string{siteC.ID.String(), siteD.ID.String()},
+		},
+		{
+			name:           "privileged tenant can read OS only at an implicit site",
+			reqOrgName:     privOrg,
+			user:           privUser,
+			os:             provD,
+			expectedStatus: http.StatusOK,
+			expectedSites:  []string{siteD.ID.String()},
+		},
+		{
+			name:           "privileged tenant cannot read OS at another provider",
+			reqOrgName:     privOrg,
+			user:           privUser,
+			os:             otherOS,
+			expectedStatus: http.StatusForbidden,
+		},
+		{
 			name:           "tenant admin can read own OS",
 			reqOrgName:     tenantOrg,
 			user:           tnUser,
 			os:             tnOS,
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "tenant with no authorized sites sees no associations on own OS",
+			reqOrgName:     noSitesOrg,
+			user:           noSitesUser,
+			os:             noSitesOS,
 			expectedStatus: http.StatusOK,
 		},
 		{
@@ -2768,13 +2905,23 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 			ec.SetParamValues(tc.reqOrgName, tc.os.ID.String())
 			ec.Set("user", tc.user)
 
-			reqCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(reqCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gh := GetOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg}
 			err := gh.Handle(ec)
 			assert.Nil(t, err)
 			require.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectedStatus == http.StatusOK {
+				var response model.APIOperatingSystem
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				gotSites := make([]string, 0, len(response.SiteAssociations))
+				for _, association := range response.SiteAssociations {
+					require.NotNil(t, association.Site)
+					gotSites = append(gotSites, association.Site.ID)
+					assert.Equal(t, cdbm.OperatingSystemSiteAssociationStatusSynced, association.Status)
+				}
+				assert.ElementsMatch(t, tc.expectedSites, gotSites)
+			}
 		})
 	}
 }

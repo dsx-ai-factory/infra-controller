@@ -21,7 +21,6 @@
 //! types that must cross the crate boundary while service implementation stays
 //! in `carbide-api-core`.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,7 +52,7 @@ const VAULT_IMPORT_LOCK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 /// Opaque core runtime state initialized before external resources.
 #[doc(hidden)]
 pub struct RuntimePrelude {
-    dynamic_settings: DynamicSettings,
+    pub(crate) dynamic_settings: DynamicSettings,
 }
 
 /// Starts the core runtime work that follows logging initialization and precedes
@@ -124,61 +123,8 @@ pub struct RuntimeInputs<'a> {
     pub db_pool: PgPool,
     pub work_lock_manager_handle: WorkLockManagerHandle,
     pub secrets_context: Option<SecretsContext>,
-    pub admin_ui_routes_builder: Option<AdminUiRoutesBuilder>,
+    pub admin_ui_routes_builder: AdminUiRoutesBuilder,
     pub cancel_token: CancellationToken,
-}
-
-/// Enter api-core's private service runtime with fully prepared resources.
-///
-/// `admin_ui_routes_builder` is how the admin web UI's pages (everything under
-/// `/admin`) get plugged in: pass `Some(Box::new(carbide_api_web::routes))` to
-/// serve them, or `None` to skip the web UI entirely (e.g. in-process test
-/// servers, which only hit the gRPC API). It's passed in rather than called
-/// directly to avoid a dependency cycle — see [`AdminUiRoutesBuilder`] for why.
-///
-/// Note: even when `Some` is passed, the admin UI is only mounted if the
-/// `enable_admin_ui` config flag is true (the default). When it's false, the
-/// core runtime drops the builder and serves gRPC only — so `Some` here means
-/// "offer the UI", not "force it on". The flag also gates the log-stream
-/// layer feeding the UI's live log viewer: with the UI off, no per-event
-/// work is spent collecting lines nothing can read.
-///
-/// Returns the effective API listener address after startup completes.
-#[doc(hidden)]
-pub async fn start_runtime(inputs: RuntimeInputs<'_>) -> eyre::Result<SocketAddr> {
-    let RuntimeInputs {
-        carbide_config,
-        initial_objects,
-        meter,
-        per_object_metrics,
-        join_set,
-        runtime_prelude,
-        credential_manager,
-        certificate_provider,
-        db_pool,
-        work_lock_manager_handle,
-        secrets_context,
-        admin_ui_routes_builder,
-        cancel_token,
-    } = inputs;
-    let RuntimePrelude { dynamic_settings } = runtime_prelude;
-
-    crate::setup::start_runtime(
-        join_set,
-        carbide_config,
-        initial_objects,
-        meter,
-        per_object_metrics,
-        dynamic_settings,
-        credential_manager,
-        certificate_provider,
-        db_pool,
-        work_lock_manager_handle,
-        secrets_context,
-        admin_ui_routes_builder,
-        cancel_token,
-    )
-    .await
 }
 
 /// Wait for the work lock that serializes the one-time Vault import.

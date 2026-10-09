@@ -34,6 +34,10 @@ const (
 	DefaultFlowGrpcCACertPath     = "/etc/core-grpc/ca.crt"
 	DefaultFlowGrpcClientCertPath = "/etc/core-grpc/tls.crt"
 	DefaultFlowGrpcClientKeyPath  = "/etc/core-grpc/tls.key"
+
+	// DefaultBootstrapSecretName is the bootstrap Secret the Site Agent reads and updates when
+	// BOOTSTRAP_SECRET_NAME is unset.
+	DefaultBootstrapSecretName = "bootstrap-info"
 )
 
 // NewElektraConfig reads configurations from env variables and returns
@@ -46,7 +50,6 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 	var enableTLS string
 	var disableBootstrap string
 	var watcherInterval string
-	var podName string
 	var skipCoreGrpcServerAuth string
 
 	// Determine environment in which app is running.
@@ -187,8 +190,9 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 	flag.StringVar(&enableTLS, "enableTLS", os.Getenv("ENABLE_TLS"), "Enable TLS based auth")
 	flag.StringVar(&disableBootstrap, "disableBootstrap", os.Getenv("DISABLE_BOOTSTRAP"), "Disable secret based bootstrap")
 	flag.StringVar(&conf.BootstrapSecret, "bootstrapSecret", os.Getenv("BOOTSTRAP_SECRET"), "Bootstrap secret")
+	flag.StringVar(&conf.BootstrapSecretName, "bootstrapSecretName", os.Getenv("BOOTSTRAP_SECRET_NAME"), "Bootstrap secret name")
 	flag.StringVar(&watcherInterval, "watcherInterval", os.Getenv("WATCHER_INTERVAL"), "Watcher Interval")
-	flag.StringVar(&podName, "podName", os.Getenv("POD_NAME"), "POD Name")
+	flag.StringVar(&conf.PodName, "podName", os.Getenv("POD_NAME"), "POD Name")
 	flag.StringVar(&conf.PodNamespace, "podNamespace", os.Getenv("POD_NAMESPACE"), "POD Namespace")
 	flag.StringVar(&conf.TemporalSecret, "temporalSecret", os.Getenv("TEMPORAL_CERT"), "Temporal cert secret")
 	flag.StringVar(&conf.CloudVersion, "cloudVersion", os.Getenv("CLOUD_WORKFLOW_VERSION"), "Cloud Workflow Proto version")
@@ -210,21 +214,21 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 	if conf.Temporal.Port == "" {
 		log.Fatal().Msg("error loading config, invalid Temporal port")
 	}
-	if podName == "" {
+	if conf.PodName == "" {
 		log.Fatal().Msg("error loading config, empty Pod Name")
 	} else {
 		conf.IsMasterPod = false
-		parts := regexp.MustCompile(`(.*)-(\d+)$`).FindStringSubmatch(podName)
+		parts := regexp.MustCompile(`(.*)-(\d+)$`).FindStringSubmatch(conf.PodName)
 		if len(parts) == 3 {
 			id, err := strconv.Atoi(parts[2])
 			if err != nil {
-				log.Fatal().Msgf("error loading config, invalid Pod Name %v %v", podName, err.Error())
+				log.Fatal().Msgf("error loading config, invalid Pod Name %v %v", conf.PodName, err.Error())
 			}
 			if id == 0 {
 				conf.IsMasterPod = true
 			}
 		} else {
-			log.Fatal().Msgf("error loading config, invalid Pod Name %v", podName)
+			log.Fatal().Msgf("error loading config, invalid Pod Name %v", conf.PodName)
 		}
 	}
 	if conf.PodNamespace == "" {
@@ -252,6 +256,11 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 
 	if conf.BootstrapSecret == "" {
 		conf.BootstrapSecret = "/etc/sitereg/"
+	}
+	if conf.BootstrapSecretName == "" {
+		conf.BootstrapSecretName = DefaultBootstrapSecretName
+		log.Warn().Msgf("BOOTSTRAP_SECRET_NAME is not set, rotated OTPs will be written to the %s Secret",
+			DefaultBootstrapSecretName)
 	}
 
 	// Site ID
@@ -300,6 +309,21 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 	flag.StringVar(&conf.Temporal.TemporalServer, "temporalServer", os.Getenv("TEMPORAL_SERVER"), "Temporal server")
 	flag.StringVar(&conf.Temporal.TemporalInventorySchedule, "temporalInventorySchedule", os.Getenv("TEMPORAL_INVENTORY_SCHEDULE"), "Temporal Inventory schedule")
 
+	inventoryCloudPageSize := conftypes.DefaultInventoryCloudPageSize
+	if v := os.Getenv("INVENTORY_CLOUD_PAGE_SIZE"); v != "" {
+		parsed, perr := strconv.Atoi(v)
+		if perr != nil {
+			log.Fatal().Msgf("error loading config, INVENTORY_CLOUD_PAGE_SIZE %q is not a valid integer", v)
+		}
+		inventoryCloudPageSize = parsed
+	}
+	flag.IntVar(&conf.Temporal.InventoryCloudPageSize, "inventoryCloudPageSize", inventoryCloudPageSize, "Number of inventory items published to Cloud per Temporal workflow page")
+
+	// Must run before validation: flag.XxxVar sets the destination immediately, but a real
+	// CLI flag only overwrites it here, so validating first would let a bad CLI value slip
+	// through unchecked.
+	flag.Parse()
+
 	if conf.Temporal.TemporalPublishQueue == "" {
 		log.Fatal().Msg("error loading config, Temporal publish queue must be specified")
 	}
@@ -313,8 +337,12 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 		log.Fatal().Msgf("error loading config, %v", serr)
 	}
 
+	serr = validateInventoryCloudPageSize(conf.Temporal.InventoryCloudPageSize)
+	if serr != nil {
+		log.Fatal().Msgf("error loading config, %v", serr)
+	}
+
 	log.Info().Interface("config", conf).Msg("Config Manager: Config loaded")
-	flag.Parse()
 
 	// Set default metrics namespace if not specified
 	if conf.MetricsNamespace == "" {
@@ -336,11 +364,27 @@ func validateInventorySchedule(schedule string) error {
 
 	interval, err := swu.InventoryIntervalFromSchedule(schedule)
 	if err != nil {
-		return fmt.Errorf("Temporal inventory %w", err)
+		return fmt.Errorf("invalid Temporal inventory: %w", err)
 	}
 	if interval > cutil.MaxInventoryReceiptInterval {
-		return fmt.Errorf("Temporal inventory schedule %q collects every %v, which is slower than the %v maximum",
+		return fmt.Errorf("invalid Temporal inventory schedule: %q. Collects every %v, which is slower than the %v maximum",
 			schedule, interval, cutil.MaxInventoryReceiptInterval)
+	}
+
+	return nil
+}
+
+// validateInventoryCloudPageSize rejects a page size Temporal cannot carry. Must be >=1 and
+// <=MaxInventoryCloudPageSize (2MB Temporal blob ceiling, see conftypes.go). The page size no
+// longer has to divide the Core fetch page evenly: every inventory now publishes through the
+// shared collector, which buffers items across Core pages instead of chunking each one on its
+// own, so a page size like 30 no longer desyncs the paging totals.
+func validateInventoryCloudPageSize(pageSize int) error {
+	if pageSize < 1 {
+		return fmt.Errorf("INVENTORY_CLOUD_PAGE_SIZE %d must be at least 1", pageSize)
+	}
+	if pageSize > conftypes.MaxInventoryCloudPageSize {
+		return fmt.Errorf("INVENTORY_CLOUD_PAGE_SIZE %d exceeds the %d maximum", pageSize, conftypes.MaxInventoryCloudPageSize)
 	}
 
 	return nil

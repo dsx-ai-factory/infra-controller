@@ -53,6 +53,12 @@ message DhcpConfig {
     optional string carbide_dhcp_server_v6 = 11;
     uint32 dhcpv6_preferred_lifetime_secs = 12;
     uint32 dhcpv6_valid_lifetime_secs = 13;
+    // Absent preserves legacy omission; zero is a distinct explicit value.
+    optional uint32 dhcpv6_server_preference = 14;
+    // IPv6 address used to generate default DHCPv6 HTTP boot URLs. Omission
+    // disables generation; an explicit InterfaceInfo.booturl (even empty)
+    // takes precedence. Invalid or non-IPv6 addresses reject the update.
+    optional string carbide_provisioning_server_ipv6 = 15;
 }
 
 // Mirrors utils::models::dhcp::InterfaceInfo.

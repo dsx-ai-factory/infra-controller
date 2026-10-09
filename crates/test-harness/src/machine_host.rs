@@ -100,7 +100,7 @@ impl TestHostMachine {
         );
         self.id = discovered_id
             .try_into()
-            .expect("host discovery should yield a valid HostMachineId");
+            .expect("host discovery should yield a valid StableHostMachineId");
     }
 
     pub async fn reboot_completed(&self) {

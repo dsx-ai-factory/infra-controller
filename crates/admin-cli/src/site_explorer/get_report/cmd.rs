@@ -212,6 +212,8 @@ pub(crate) async fn show_discovered_managed_host(
 
         Args::ManagedHost(managed_host_info) => {
             if let Some(address) = managed_host_info.address {
+                // Match the API's `IpAddr::to_string()` representation.
+                let address = address.to_string();
                 let exploration_report = get_exploration_report_for_bmc_address(
                     &address,
                     api_client,
@@ -256,6 +258,8 @@ pub(crate) async fn show_discovered_managed_host(
         }
         Args::Endpoint(endpoint_info) => {
             if let Some(address) = endpoint_info.address {
+                // Match the API's `IpAddr::to_string()` representation.
+                let address = address.to_string();
                 let exploration_report = get_exploration_report_for_bmc_address(
                     &address,
                     api_client,

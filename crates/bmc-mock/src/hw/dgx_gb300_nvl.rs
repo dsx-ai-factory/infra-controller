@@ -45,6 +45,45 @@ pub(crate) struct DgxGB300Nvl<'a> {
 }
 
 impl DgxGB300Nvl<'_> {
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
+    /// The tray's ERoTs: the BMC's own, plus one per CPU and GPU this profile
+    /// models. Synthetic, since the scrape the rest of this profile comes from
+    /// does not cover `ComponentIntegrity`; the Ids follow the chassis Ids
+    /// above and the `ERoT_BMC_0` spelling the libredfish simulator uses. Every
+    /// member is SPDM and enabled, which is what a healthy tray reports.
+    pub(crate) fn component_integrity_config(
+        &self,
+    ) -> Vec<redfish::component_integrity::ComponentIntegrity> {
+        let erot = |id: String, target_component_uri: String| {
+            redfish::component_integrity::ComponentIntegrity {
+                id: id.into(),
+                target_component_uri: target_component_uri.into(),
+                integrity_type: "SPDM".into(),
+                enabled: true,
+            }
+        };
+        std::iter::once(erot(
+            "ERoT_BMC_0".to_string(),
+            "/redfish/v1/Managers/BMC_0".to_string(),
+        ))
+        .chain((0..self.cpu.len()).map(|n| {
+            erot(
+                format!("HGX_ERoT_CPU_{n}"),
+                format!("/redfish/v1/Chassis/HGX_CPU_{n}"),
+            )
+        }))
+        .chain((0..self.gpu.len()).map(|n| {
+            erot(
+                format!("HGX_ERoT_GPU_{n}"),
+                format!("/redfish/v1/Chassis/HGX_GPU_{n}"),
+            )
+        }))
+        .collect()
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         let bmc_manager_id = "BMC_0";
         let bmc_eth_builder = |eth| {
@@ -103,10 +142,10 @@ impl DgxGB300Nvl<'_> {
         }
     }
 
-    pub(crate) fn system_config(
+    pub(crate) fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let system_id = "System_0";
         let boot_options = std::iter::once(
             redfish::boot_option::builder(
@@ -170,6 +209,7 @@ impl DgxGB300Nvl<'_> {
                     log_services: None,
                     manufacturer: Some("NVIDIA".into()),
                     model: Some("GB300 1CPU:2GPU Board PC".into()),
+                    bios_version: None,
                     oem: redfish::computer_system::Oem::Generic,
                     callbacks: None,
                     serial_console: None,
@@ -191,6 +231,7 @@ impl DgxGB300Nvl<'_> {
                     // DGX GB300: NVIDIA host system (vs Lenovo's "HG634N_V2").
                     manufacturer: Some("NVIDIA".into()),
                     model: Some("GB300 Titania-Bianca Compute Tray".into()),
+                    bios_version: None,
                     oem: redfish::computer_system::Oem::Generic,
                     callbacks: Some(callbacks),
                     serial_console: None,

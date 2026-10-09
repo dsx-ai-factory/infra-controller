@@ -19,23 +19,74 @@ use std::sync::Arc;
 
 use axum::Router;
 use bmc_mock::injection::InjectionStore;
-use bmc_mock::ipmi_sim::{IpmiSimConfig, IpmiSimHandle};
-use bmc_mock::{BmcState, Callbacks, CombinedServer, HardwareType, HostnameQuerying, MachineInfo};
+use bmc_mock::ipmi_sim::{ConsoleOutputStreamFactory, IpmiSimConfig, IpmiSimHandle};
+use bmc_mock::{
+    ActionError, BmcState, Callbacks, CombinedServer, HardwareType, HostnameQuerying, MachineInfo,
+    ResourceResetType,
+};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::config::MachineATronContext;
+use crate::console_output::ConsoleOutputController;
 use crate::machine_state_machine::MachineStateError;
 use crate::mock_ssh_server;
 use crate::mock_ssh_server::{MockSshServerHandle, PromptBehavior};
 
+/// Snapshot access and startup fallback for an embedded BMC. No independent file writer.
+#[derive(Debug, Default)]
+pub(super) struct BmcPersistence {
+    saved: Option<bmc_mock::persistence::PersistedBmcState>,
+    source: Option<bmc_mock::persistence::BmcSnapshotSource>,
+}
+
+impl BmcPersistence {
+    pub(super) fn from_saved(saved: Option<bmc_mock::persistence::PersistedBmcState>) -> Self {
+        Self {
+            saved,
+            source: None,
+        }
+    }
+
+    pub(super) fn persisted(&self) -> Option<bmc_mock::persistence::PersistedBmcState> {
+        self.source
+            .as_ref()
+            .and_then(|source| source.persisted())
+            .or_else(|| self.saved.clone())
+    }
+
+    pub(super) fn restore<C: Callbacks>(
+        &self,
+        state: &BmcState<C>,
+    ) -> Result<(), bmc_mock::persistence::PersistenceError> {
+        if let Some(snapshot) = self.persisted() {
+            state.restore_persisted(&snapshot)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn attach<C: Callbacks>(&mut self, state: &BmcState<C>) {
+        self.saved = Some(state.persisted());
+        self.source = Some(state.snapshot_source());
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum BmcCommand {
+    SetSystemPower {
+        request: ResourceResetType,
+        reply: Option<tokio::sync::oneshot::Sender<Result<(), ActionError>>>,
+    },
+    StateRefreshIndication,
+}
+
 /// BmcMockWrapper launches a single instance of bmc-mock, configured to mock a single BMC for
 /// either a DPU or a Host. It will rewrite certain responses to customize them for the machines
 /// machine-a-tron is mocking.
-pub(super) struct BmcMockWrapper {
+pub(super) struct BmcMockWrapper<C: Callbacks> {
     app_context: Arc<MachineATronContext>,
     bmc_mock_router: Router,
-    bmc_mock_state: BmcState,
+    bmc_mock_state: BmcState<C>,
     hostname: Arc<dyn HostnameQuerying>,
     needs_ipmi_console: bool,
     requires_ssh_console: bool,
@@ -43,15 +94,15 @@ pub(super) struct BmcMockWrapper {
     ssh_prompt_behavior: PromptBehavior,
 }
 
-impl BmcMockWrapper {
+impl<C: Callbacks> BmcMockWrapper<C> {
     pub(super) fn new(
         machine_info: &MachineInfo,
         app_context: Arc<MachineATronContext>,
-        callbacks: Arc<dyn Callbacks>,
+        callbacks: Arc<C>,
         hostname: Arc<dyn HostnameQuerying>,
         host_id: Uuid,
         injection: Arc<InjectionStore>,
-        bmc_reset: Option<std::time::Duration>,
+        timings: Option<&crate::lifecycle_timings::LifecycleTimings>,
     ) -> Self {
         let (bmc_mock_router, bmc_mock_state) = bmc_mock::machine_router_with_injection_store(
             machine_info,
@@ -60,7 +111,8 @@ impl BmcMockWrapper {
             true,
             injection,
             bmc_mock::MachineRouterOptions {
-                bmc_reset_duration: bmc_reset,
+                bmc_reset_duration: timings.map(|t| t.bmc_reset),
+                firmware_upgrade_duration: timings.map(|t| t.firmware_upgrade),
                 ..Default::default()
             },
         );
@@ -92,19 +144,26 @@ impl BmcMockWrapper {
     /// Starts per-machine console simulators when Redfish is served by a combined BMC mock.
     /// Returns `None` when no simulator is enabled for the hardware profile.
     pub(super) async fn start(&self) -> Result<Option<BmcMockWrapperHandle>, MachineStateError> {
+        let console_output = ConsoleOutputController::new(self.stable_id.clone());
         let ssh_handle = if self.app_context.app_config.mock_bmc_ssh_server
             && (self.requires_ssh_console || self.bmc_mock_state.has_enabled_ssh_serial_console())
         {
             Some(
-                mock_ssh_server::spawn(None, self.hostname.clone(), None, self.ssh_prompt_behavior)
-                    .await
-                    .map_err(|error| MachineStateError::MockSshServer(error.to_string()))?,
+                mock_ssh_server::spawn(
+                    None,
+                    self.hostname.clone(),
+                    None,
+                    self.ssh_prompt_behavior,
+                    Some(console_output.clone()),
+                )
+                .await
+                .map_err(|error| MachineStateError::MockSshServer(error.to_string()))?,
             )
         } else {
             None
         };
         let ipmi_sim_handle = if self.need_ipmi_sim() {
-            Some(self.start_ipmi_sim().await?)
+            Some(self.start_ipmi_sim(&console_output).await?)
         } else {
             None
         };
@@ -122,18 +181,25 @@ impl BmcMockWrapper {
                 ssh_handle,
                 ssh_endpoint_port,
                 _ipmi_sim_handle: ipmi_sim_handle,
+                console_output,
             }),
         )
     }
 
-    async fn start_ipmi_sim(&self) -> Result<IpmiSimHandle, MachineStateError> {
+    async fn start_ipmi_sim(
+        &self,
+        console_output: &ConsoleOutputController,
+    ) -> Result<IpmiSimHandle, MachineStateError> {
         let console_prompt = format!("root@{} # ", self.hostname.get_hostname());
+        let console_output = console_output.clone();
+        let console_output: ConsoleOutputStreamFactory = Box::new(move || console_output.stream());
         bmc_mock::ipmi_sim::start(
             &self.bmc_mock_state,
             IpmiSimConfig {
                 stable_id: self.stable_id.clone(),
                 console_prompt,
             },
+            Some(console_output),
         )
         .await
         .map_err(MachineStateError::IpmiSim)
@@ -143,7 +209,7 @@ impl BmcMockWrapper {
         &self.bmc_mock_router
     }
 
-    pub(super) fn state(&self) -> &BmcState {
+    pub(super) fn state(&self) -> &BmcState<C> {
         &self.bmc_mock_state
     }
 
@@ -158,6 +224,7 @@ pub(super) struct BmcMockWrapperHandle {
     pub(super) ssh_handle: Option<MockSshServerHandle>,
     ssh_endpoint_port: Option<u16>,
     _ipmi_sim_handle: Option<IpmiSimHandle>,
+    console_output: ConsoleOutputController,
 }
 
 impl BmcMockWrapperHandle {
@@ -168,8 +235,67 @@ impl BmcMockWrapperHandle {
     pub(super) fn ssh_endpoint_port(&self) -> Option<u16> {
         self.ssh_endpoint_port
     }
+
+    pub(super) fn console_output_start(&self) {
+        self.console_output.start();
+    }
+
+    pub(super) fn console_output_stop(&self) {
+        self.console_output.stop();
+    }
 }
 
 /// BmcMockRegistry is shared state that MachineATron's mock hosts can use to register their BMC
 /// mock routers, so that a single shared instance of BMC mock can delegate to them.
 pub type BmcMockRegistry = Arc<RwLock<HashMap<String, Router>>>;
+
+#[cfg(test)]
+mod persistence_tests {
+    use bmc_mock::mac_address_pool::{Config, MacAddressPool, PoolConfig};
+    use mac_address::MacAddress;
+
+    use super::*;
+
+    fn state() -> BmcState<bmc_mock::simulated::SimulatedCallbacks> {
+        let base = MacAddress::new([2, 0, 0, 0, 0, 1]);
+        let range = PoolConfig::new(base, 24).unwrap();
+        let mut pool = MacAddressPool::new(Config {
+            pool: Some(range),
+            ranges: None,
+        });
+        let info = MachineInfo::Host(bmc_mock::HostMachineInfo::new(
+            HardwareType::GenericAmi,
+            Vec::new(),
+            &mut pool,
+            range,
+        ));
+        bmc_mock::machine_router(
+            &info,
+            Arc::new(bmc_mock::simulated::SimulatedCallbacks::new()),
+            "test".into(),
+            false,
+            Default::default(),
+        )
+        .1
+    }
+
+    #[test]
+    fn snapshot_survives_an_unstarted_or_dropped_bmc() {
+        let original = state();
+        original
+            .account_service_state
+            .change_factory_default_password("saved-password");
+        let snapshot = original.persisted();
+        let mut holder = BmcPersistence::from_saved(Some(snapshot.clone()));
+        assert_eq!(holder.persisted(), Some(snapshot.clone()));
+        let restored = state();
+        restored
+            .account_service_state
+            .change_factory_default_password("configured-password");
+        holder.restore(&restored).unwrap();
+        assert_eq!(restored.persisted(), snapshot);
+        holder.attach(&restored);
+        drop(restored);
+        assert_eq!(holder.persisted(), Some(snapshot));
+    }
+}

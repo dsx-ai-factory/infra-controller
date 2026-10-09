@@ -219,7 +219,7 @@ async fn test_create_instance_with_nvl_config(pool: sqlx::PgPool) {
     assert_eq!(&machine.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id.into());
+    assert_eq!(instance.machine_id(), mh.id);
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -395,7 +395,7 @@ async fn test_detach_gpus_from_partition_by_clearing_nvlink_config(pool: sqlx::P
     assert_eq!(&machine.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id.into());
+    assert_eq!(instance.machine_id(), mh.id);
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -477,7 +477,11 @@ async fn test_detach_gpus_from_partition_by_clearing_nvlink_config(pool: sqlx::P
         .await
         .unwrap()
         .partition_info_list;
-    assert_eq!(nmxc_partitions.len(), 0);
+    // The tenant partition is gone and the released GPUs are parked in the
+    // tray default partition rather than left outside every partition.
+    assert_eq!(nmxc_partitions.len(), 1);
+    assert_eq!(nmxc_partitions[0].name, "tray_partition_0");
+    assert_eq!(nmxc_partitions[0].gpu_uid_list.len(), gpus.len());
 
     // delete logical partition. As no physical partitions are present, we expect logical partition to be
     // fully deleted after we run one iteration of monitor
@@ -614,7 +618,7 @@ async fn test_with_multiple_nv_link_logical_partitions(pool: sqlx::PgPool) {
     assert_eq!(&machine.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id.into());
+    assert_eq!(instance.machine_id(), mh.id);
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -645,9 +649,11 @@ async fn test_nvl_partition_monitor_adds_successful_partitions_when_some_creates
         nvlink_config.enabled = true;
     }
 
-    // Fail after one create succeeds.
+    // Allow two creates: the first parks the instance's initially unpartitioned
+    // GPUs in the tray default partition, the second is the first tenant
+    // partition. The second tenant partition create then fails.
     let mut overrides = TestEnvOverrides::with_config(config);
-    overrides.nmxc_fail_after_n_creates = Some(1);
+    overrides.nmxc_fail_after_n_creates = Some(2);
 
     let env = common::api_fixtures::create_test_env_with_overrides(pool.clone(), overrides).await;
 
@@ -1198,7 +1204,7 @@ async fn test_instance_delete_with_nvl_config(pool: sqlx::PgPool) {
     assert_eq!(&machine.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id.into());
+    assert_eq!(instance.machine_id(), mh.id);
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -1310,7 +1316,7 @@ async fn test_create_instance_add_to_existing_partition(pool: sqlx::PgPool) {
     assert_eq!(&machine1.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh1.id.into());
+    assert_eq!(instance.machine_id(), mh1.id);
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -1390,7 +1396,7 @@ async fn test_create_instance_add_to_existing_partition(pool: sqlx::PgPool) {
     let machine2 = mh2.host().rpc_machine().await;
     assert_eq!(&machine2.state, "Assigned/Ready");
     let check_instance2 = tinstance2.rpc_instance().await;
-    assert_eq!(instance2.machine_id(), mh2.id.into());
+    assert_eq!(instance2.machine_id(), mh2.id);
     assert_eq!(instance2.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance2, check_instance2);
 
@@ -1503,7 +1509,7 @@ async fn test_logical_partition_delete_with_instance_config(pool: sqlx::PgPool) 
     assert_eq!(&machine.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id.into());
+    assert_eq!(instance.machine_id(), mh.id);
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -1626,6 +1632,113 @@ async fn test_logical_partition_delete_with_instance_config(pool: sqlx::PgPool) 
     assert_eq!(logical_partition_list.partition_ids.len(), 1);
 }
 
+/// An instance allocated before any monitor pass has GPUs in no NMX-C
+/// partition. The ones its NVLink config omits, or lists without a logical
+/// partition, must end up in the tray default partition, not stay unpartitioned.
+#[crate::sqlx_test]
+async fn test_unpartitioned_instance_gpus_are_parked_in_tray_partition(pool: sqlx::PgPool) {
+    let mut config = common::api_fixtures::get_config();
+    if let Some(nvlink_config) = config.nvlink_config.as_mut() {
+        nvlink_config.enabled = true;
+    }
+
+    let env = common::api_fixtures::create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config),
+    )
+    .await;
+
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let NvlLogicalPartitionFixture {
+        id: logical_partition_id,
+        logical_partition: _logical_partition,
+    } = create_nvl_logical_partition(&env, "test_partition".to_string()).await;
+
+    let mh = create_managed_host_with_hardware_info_template(
+        &env,
+        HardwareInfoTemplate::Custom(
+            crate::tests::common::api_fixtures::host::GB200_COMPUTE_TRAY_1_INFO_JSON,
+        ),
+    )
+    .await;
+    let machine = mh.host().rpc_machine().await;
+    let gpus = machine
+        .status
+        .as_ref()
+        .unwrap()
+        .discovery_info
+        .as_ref()
+        .unwrap()
+        .gpus
+        .clone();
+    assert_eq!(gpus.len(), 4);
+
+    let gpu_uid = |gpu: &Gpu| {
+        let guid = &gpu.platform_info.as_ref().unwrap().fabric_guid;
+        let guid = guid
+            .strip_prefix("0x")
+            .or_else(|| guid.strip_prefix("0X"))
+            .unwrap_or(guid);
+        u64::from_str_radix(guid, 16).unwrap()
+    };
+
+    // No monitor pass before allocation: every GPU starts outside any partition.
+    // GPUs 0 and 1 go to the tenant partition, GPU 2 carries an explicit config
+    // with no logical partition, and GPU 3 is omitted from the config entirely.
+    let nvl_config = rpc::forge::InstanceNvLinkConfig {
+        gpu_configs: gpus[..3]
+            .iter()
+            .enumerate()
+            .map(|(index, gpu)| rpc::forge::InstanceNvLinkGpuConfig {
+                device_instance: gpu.platform_info.as_ref().unwrap().module_id - 1,
+                logical_partition_id: (index < 2).then_some(logical_partition_id),
+            })
+            .collect(),
+    };
+    create_instance_with_nvlink_config(&env, &mh, nvl_config, segment_id).await;
+
+    env.run_nvl_partition_monitor_iteration().await;
+    env.run_nvl_partition_monitor_iteration().await;
+
+    let mut nmxc_client = env
+        .nmxc_sim
+        .create_client(libnmxc::Endpoint::new("http://localhost:4010").unwrap())
+        .await
+        .unwrap();
+    let partitions = nmxc_client
+        .get_partition_info_list(GetPartitionInfoListRequest {
+            context: None,
+            partition_id_list: vec![],
+            partition_name_list: vec![],
+            gateway_id: libnmxc::NMX_C_GATEWAY_ID.into(),
+        })
+        .await
+        .unwrap()
+        .partition_info_list;
+    assert_eq!(partitions.len(), 2, "tenant and tray default partitions");
+
+    let tray_partition = partitions
+        .iter()
+        .find(|partition| partition.name == "tray_partition_0")
+        .expect("omitted GPUs are parked in the tray default partition");
+    let tenant_partition = partitions
+        .iter()
+        .find(|partition| partition.name != "tray_partition_0")
+        .expect("tenant partition should be created");
+
+    let mut expected_tenant_uids: Vec<_> = gpus[..2].iter().map(gpu_uid).collect();
+    let mut actual_tenant_uids = tenant_partition.gpu_uid_list.clone();
+    expected_tenant_uids.sort_unstable();
+    actual_tenant_uids.sort_unstable();
+    assert_eq!(actual_tenant_uids, expected_tenant_uids);
+
+    let mut expected_tray_uids: Vec<_> = gpus[2..].iter().map(gpu_uid).collect();
+    let mut actual_tray_uids = tray_partition.gpu_uid_list.clone();
+    expected_tray_uids.sort_unstable();
+    actual_tray_uids.sort_unstable();
+    assert_eq!(actual_tray_uids, expected_tray_uids);
+}
+
 #[crate::sqlx_test]
 async fn test_subset_nvl_config_preserves_unconfigured_gpus_in_tray_partition(pool: sqlx::PgPool) {
     let mut config = common::api_fixtures::get_config();
@@ -1696,54 +1809,62 @@ async fn test_subset_nvl_config_preserves_unconfigured_gpus_in_tray_partition(po
         .expect("tray default partition should exist before instance allocation");
     assert_eq!(tray_partition.gpu_uid_list.len(), 4);
 
+    // GPUs 0 and 1 go to the tenant partition, GPU 2 carries an explicit config
+    // with no logical partition, and GPU 3 is omitted from the config entirely.
     let nvl_config = rpc::forge::InstanceNvLinkConfig {
-        gpu_configs: gpus[..2]
+        gpu_configs: gpus[..3]
             .iter()
-            .map(|gpu| rpc::forge::InstanceNvLinkGpuConfig {
+            .enumerate()
+            .map(|(index, gpu)| rpc::forge::InstanceNvLinkGpuConfig {
                 device_instance: gpu.platform_info.as_ref().unwrap().module_id - 1,
-                logical_partition_id: Some(logical_partition_id),
+                logical_partition_id: (index < 2).then_some(logical_partition_id),
             })
             .collect(),
     };
     create_instance_with_nvlink_config(&env, &mh, nvl_config, segment_id).await;
 
-    // Run additional passes after instance allocation to verify omitted GPUs remain accounted for
-    // after reconciliation converges.
-    env.run_nvl_partition_monitor_iteration().await;
-    env.run_nvl_partition_monitor_iteration().await;
+    // Check after every pass, not only once converged: a GPU wrongly evicted from
+    // the tray partition on the first pass would be parked there again on the
+    // next one, hiding the eviction from a final-state check.
+    for pass in 1..=2 {
+        env.run_nvl_partition_monitor_iteration().await;
 
-    let partitions = nmxc_client
-        .get_partition_info_list(GetPartitionInfoListRequest {
-            context: None,
-            partition_id_list: vec![],
-            partition_name_list: vec![],
-            gateway_id: libnmxc::NMX_C_GATEWAY_ID.into(),
-        })
-        .await
-        .unwrap()
-        .partition_info_list;
-    assert_eq!(partitions.len(), 2);
+        let partitions = nmxc_client
+            .get_partition_info_list(GetPartitionInfoListRequest {
+                context: None,
+                partition_id_list: vec![],
+                partition_name_list: vec![],
+                gateway_id: libnmxc::NMX_C_GATEWAY_ID.into(),
+            })
+            .await
+            .unwrap()
+            .partition_info_list;
+        assert_eq!(partitions.len(), 2, "pass {pass}");
 
-    let tray_partition = partitions
-        .iter()
-        .find(|partition| partition.name == "tray_partition_0")
-        .expect("tray default partition should be preserved");
-    let tenant_partition = partitions
-        .iter()
-        .find(|partition| partition.name != "tray_partition_0")
-        .expect("tenant partition should be created");
+        let tray_partition = partitions
+            .iter()
+            .find(|partition| partition.name == "tray_partition_0")
+            .unwrap_or_else(|| panic!("pass {pass}: tray default partition should be preserved"));
+        let tenant_partition = partitions
+            .iter()
+            .find(|partition| partition.name != "tray_partition_0")
+            .unwrap_or_else(|| panic!("pass {pass}: tenant partition should be created"));
 
-    let mut expected_tenant_uids: Vec<_> = gpus[..2].iter().map(gpu_uid).collect();
-    let mut actual_tenant_uids = tenant_partition.gpu_uid_list.clone();
-    expected_tenant_uids.sort_unstable();
-    actual_tenant_uids.sort_unstable();
-    assert_eq!(actual_tenant_uids, expected_tenant_uids);
+        let mut expected_tenant_uids: Vec<_> = gpus[..2].iter().map(gpu_uid).collect();
+        let mut actual_tenant_uids = tenant_partition.gpu_uid_list.clone();
+        expected_tenant_uids.sort_unstable();
+        actual_tenant_uids.sort_unstable();
+        assert_eq!(actual_tenant_uids, expected_tenant_uids, "pass {pass}");
 
-    let mut expected_tray_uids: Vec<_> = gpus[2..].iter().map(gpu_uid).collect();
-    let mut actual_tray_uids = tray_partition.gpu_uid_list.clone();
-    expected_tray_uids.sort_unstable();
-    actual_tray_uids.sort_unstable();
-    assert_eq!(actual_tray_uids, expected_tray_uids);
+        let mut expected_tray_uids: Vec<_> = gpus[2..].iter().map(gpu_uid).collect();
+        let mut actual_tray_uids = tray_partition.gpu_uid_list.clone();
+        expected_tray_uids.sort_unstable();
+        actual_tray_uids.sort_unstable();
+        assert_eq!(
+            actual_tray_uids, expected_tray_uids,
+            "pass {pass}: explicit-None and omitted GPUs stay in the tray partition"
+        );
+    }
 }
 
 #[crate::sqlx_test]
@@ -1837,7 +1958,7 @@ async fn test_create_instance_gpu_in_unknown_partition(pool: sqlx::PgPool) {
     assert_eq!(&machine1.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh1.id.into());
+    assert_eq!(instance.machine_id(), mh1.id);
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -2047,7 +2168,7 @@ async fn run_create_instance_with_nvl_config_nmxc_simulator_scenario(
     assert_eq!(&machine.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id.into());
+    assert_eq!(instance.machine_id(), mh.id);
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -2247,7 +2368,7 @@ async fn create_rack_switch_for_nmxc_simulator(env: &TestEnv, rack_id: &RackId) 
         .await
         .expect("load switch")
         .expect("switch");
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -2256,6 +2377,7 @@ async fn create_rack_switch_for_nmxc_simulator(env: &TestEnv, rack_id: &RackId) 
     )
     .await
     .expect("set switch ready");
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_fabric_manager_status(
         txn.as_mut(),
         switch_id,
@@ -2389,12 +2511,7 @@ async fn test_rack_switch_create_instance_with_nvl_config_use_nmxc_simulator(poo
         dpu_ids: mh_snapshot
             .dpu_snapshots
             .into_iter()
-            .map(|snapshot| {
-                snapshot
-                    .id
-                    .try_into()
-                    .expect("DPU snapshot ID should be a valid DpuMachineId")
-            })
+            .map(|snapshot| snapshot.id)
             .collect(),
         api: env.api.clone(),
     };
@@ -2443,7 +2560,7 @@ async fn test_rack_switch_create_instance_with_nvl_config_use_nmxc_simulator(poo
     assert_eq!(&machine.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id.into());
+    assert_eq!(instance.machine_id(), mh.id);
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -2529,7 +2646,11 @@ async fn assert_switch_cert_monitor_nmxc_simulator_probe(
     )
     .await
     .expect("set rack ready");
-    assert!(updated, "rack should transition to Ready for rotation");
+    assert_eq!(
+        updated,
+        db::ConditionalWrite::Applied(()),
+        "rack should transition to Ready for rotation"
+    );
     txn.commit().await.expect("commit rack");
 
     let switch_id = create_rack_switch_for_nmxc_simulator(&env, &rack_id).await;
@@ -2906,7 +3027,7 @@ async fn test_instance_delete_with_nvl_config_use_nmxc_simulator(pool: sqlx::PgP
     assert_eq!(&machine.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id.into());
+    assert_eq!(instance.machine_id(), mh.id);
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 

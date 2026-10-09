@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 
+use carbide_uuid::nvlink::NvLinkDomainId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use chrono::prelude::*;
@@ -96,6 +97,11 @@ pub struct PowerShelf {
     /// The rack that this power shelf is associated with.
     pub rack_id: Option<RackId>,
 
+    /// The NVLink domain of the shelf's rack, as last reported by the rack's
+    /// NMX-C endpoint. Written by NVLink Manager alongside the rack's switches;
+    /// `None` until a valid domain has been observed.
+    pub nvlink_domain_uuid: Option<NvLinkDomainId>,
+
     pub power_shelf_maintenance_requested: Option<PowerShelfMaintenanceRequest>,
 
     /// Set by rack maintenance to request power-shelf participation in a
@@ -169,6 +175,7 @@ impl<'r> FromRow<'r, PgRow> for PowerShelf {
             metadata,
             version: row.try_get("version")?,
             rack_id: row.try_get("rack_id").ok().flatten(),
+            nvlink_domain_uuid: row.try_get("nvlink_domain_uuid").ok().flatten(),
             power_shelf_maintenance_requested: power_shelf_maintenance_requested.map(|r| r.0),
             power_shelf_reprovisioning_requested: power_shelf_reprovisioning_requested.map(|r| r.0),
             firmware_upgrade_status: firmware_upgrade_status.map(|j| j.0),
@@ -204,7 +211,10 @@ pub enum PowerShelfMaintenanceOperation {
     /// Power on the PowerShelf.
     PowerOn,
     /// Power off the PowerShelf.
-    PowerOff,
+    PowerOff {
+        #[serde(default)]
+        graceful: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,6 +272,10 @@ pub enum PowerShelfControllerState {
 
     Maintenance {
         operation: PowerShelfMaintenanceOperation,
+        /// The request admitted before external work began. Older saved states
+        /// omit this, so their completion must leave pending requests alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request: Option<PowerShelfMaintenanceRequest>,
     },
 
     /// Rack-driven firmware wait in progress.
@@ -289,6 +303,7 @@ pub enum PowerShelfDecommissioningState {
     /// Issues the BMC factory reset.
     FactoryResetBmc,
     /// Waiting for the pre-reset BMC DHCP suppression to be acknowledged.
+    /// Endpoints with an expected static IP and no recorded DHCP contact skip this wait.
     WaitingForBmcDhcpAcknowledgement,
     /// Managed per-device credentials are being removed after factory reset.
     DeletingManagedCredentials,
@@ -446,23 +461,41 @@ mod tests {
             "maintenance power-on" {
                 PowerShelfControllerState::Maintenance {
                     operation: PowerShelfMaintenanceOperation::PowerOn,
+                    request: None,
                 } => Yields((
                     r#"{"state":"maintenance","operation":{"operation":"poweron"}}"#
                         .to_string(),
                     PowerShelfControllerState::Maintenance {
                         operation: PowerShelfMaintenanceOperation::PowerOn,
+                        request: None,
                     },
                 )),
             }
 
-            "maintenance power-off" {
+            "maintenance power-off (forced, default)" {
                 PowerShelfControllerState::Maintenance {
-                    operation: PowerShelfMaintenanceOperation::PowerOff,
+                    operation: PowerShelfMaintenanceOperation::PowerOff { graceful: false },
+                    request: None,
                 } => Yields((
-                    r#"{"state":"maintenance","operation":{"operation":"poweroff"}}"#
+                    r#"{"state":"maintenance","operation":{"operation":"poweroff","graceful":false}}"#
                         .to_string(),
                     PowerShelfControllerState::Maintenance {
-                        operation: PowerShelfMaintenanceOperation::PowerOff,
+                        operation: PowerShelfMaintenanceOperation::PowerOff { graceful: false },
+                        request: None,
+                    },
+                )),
+            }
+
+            "maintenance graceful power-off" {
+                PowerShelfControllerState::Maintenance {
+                    operation: PowerShelfMaintenanceOperation::PowerOff { graceful: true },
+                    request: None,
+                } => Yields((
+                    r#"{"state":"maintenance","operation":{"operation":"poweroff","graceful":true}}"#
+                        .to_string(),
+                    PowerShelfControllerState::Maintenance {
+                        operation: PowerShelfMaintenanceOperation::PowerOff { graceful: true },
+                        request: None,
                     },
                 )),
             }
@@ -577,10 +610,17 @@ mod tests {
                 )),
             }
 
-            "power off" {
-                PowerShelfMaintenanceOperation::PowerOff => Yields((
-                    r#"{"operation":"poweroff"}"#.to_string(),
-                    PowerShelfMaintenanceOperation::PowerOff,
+            "power off (forced, default)" {
+                PowerShelfMaintenanceOperation::PowerOff { graceful: false } => Yields((
+                    r#"{"operation":"poweroff","graceful":false}"#.to_string(),
+                    PowerShelfMaintenanceOperation::PowerOff { graceful: false },
+                )),
+            }
+
+            "graceful power off" {
+                PowerShelfMaintenanceOperation::PowerOff { graceful: true } => Yields((
+                    r#"{"operation":"poweroff","graceful":true}"#.to_string(),
+                    PowerShelfMaintenanceOperation::PowerOff { graceful: true },
                 )),
             }
         );
@@ -608,7 +648,7 @@ mod tests {
             }
 
             "power off" {
-                PowerShelfMaintenanceOperation::PowerOff => Yields(request(PowerShelfMaintenanceOperation::PowerOff)),
+                PowerShelfMaintenanceOperation::PowerOff { graceful: true } => Yields(request(PowerShelfMaintenanceOperation::PowerOff { graceful: true })),
             }
         );
     }
@@ -617,9 +657,11 @@ mod tests {
     fn maintenance_state_distinguishes_on_and_off() {
         let on = PowerShelfControllerState::Maintenance {
             operation: PowerShelfMaintenanceOperation::PowerOn,
+            request: None,
         };
         let off = PowerShelfControllerState::Maintenance {
-            operation: PowerShelfMaintenanceOperation::PowerOff,
+            operation: PowerShelfMaintenanceOperation::PowerOff { graceful: true },
+            request: None,
         };
         assert_ne!(on, off);
     }
@@ -678,12 +720,14 @@ mod tests {
             "maintenance power-on" {
                 r#"{"state":"maintenance","operation":{"operation":"poweron"}}"# => Yields(PowerShelfControllerState::Maintenance {
                     operation: PowerShelfMaintenanceOperation::PowerOn,
+                    request: None,
                 }),
             }
 
             "maintenance power-off" {
                 r#"{"state":"maintenance","operation":{"operation":"poweroff"}}"# => Yields(PowerShelfControllerState::Maintenance {
-                    operation: PowerShelfMaintenanceOperation::PowerOff,
+                    operation: PowerShelfMaintenanceOperation::PowerOff { graceful: false },
+                    request: None,
                 }),
             }
 
@@ -735,8 +779,12 @@ mod tests {
                 r#"{"operation":"poweron"}"# => Yields(PowerShelfMaintenanceOperation::PowerOn),
             }
 
-            "poweroff tag" {
-                r#"{"operation":"poweroff"}"# => Yields(PowerShelfMaintenanceOperation::PowerOff),
+            "poweroff tag defaults to forced" {
+                r#"{"operation":"poweroff"}"# => Yields(PowerShelfMaintenanceOperation::PowerOff { graceful: false }),
+            }
+
+            "poweroff tag with explicit graceful" {
+                r#"{"operation":"poweroff","graceful":true}"# => Yields(PowerShelfMaintenanceOperation::PowerOff { graceful: true }),
             }
 
             "unknown operation is rejected" {
@@ -904,12 +952,14 @@ mod tests {
             "maintenance power-on has the maintenance SLA" {
                 PowerShelfControllerState::Maintenance {
                     operation: PowerShelfMaintenanceOperation::PowerOn,
+                    request: None,
                 } => (secs(slas::MAINTENANCE), true),
             }
 
             "maintenance power-off has the maintenance SLA" {
                 PowerShelfControllerState::Maintenance {
-                    operation: PowerShelfMaintenanceOperation::PowerOff,
+                    operation: PowerShelfMaintenanceOperation::PowerOff { graceful: true },
+                    request: None,
                 } => (secs(slas::MAINTENANCE), true),
             }
 

@@ -43,10 +43,12 @@ tokio = { features = ["macros"], workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 eyre = { workspace = true }
+futures = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 
 [build-dependencies]
+carbide-proto-compiler = { path = "../proto-compiler" }
 carbide-version = { path = "../version" }
 tonic-prost-build = "0.14"
 

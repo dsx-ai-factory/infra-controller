@@ -28,6 +28,9 @@ use sqlx::{PgConnection, Postgres};
 
 use crate::DatabaseError;
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 /// Creates a new NetworkSecurityGroup DB record.  It enforces a unique `name` by
 /// only creating if there is no active record found with the same name.
 ///
@@ -58,7 +61,8 @@ pub async fn create(
             WHERE NOT EXISTS
                 /* There should be a unique constraint on id.  The condition here is just defensive. */
                 (SELECT id FROM network_security_groups WHERE (id=$1::varchar OR (name=$3::varchar AND tenant_organization_id=$2::varchar)) AND deleted IS NULL)
-            RETURNING *";
+            RETURNING id, tenant_organization_id, stateful_egress, rules, version,
+                      created, deleted, name, description, labels, created_by, updated_by";
 
     match sqlx::query_as::<Postgres, NetworkSecurityGroup>(query)
         .bind(id)
@@ -139,8 +143,11 @@ pub async fn find_by_ids(
     tenant_organization_id: Option<&TenantOrganizationId>,
     for_update: bool,
 ) -> Result<Vec<NetworkSecurityGroup>, DatabaseError> {
-    let mut builder =
-        sqlx::QueryBuilder::new("SELECT * from network_security_groups WHERE deleted is NULL");
+    let mut builder = sqlx::QueryBuilder::new(
+        "SELECT id, tenant_organization_id, stateful_egress, rules, version,
+                created, deleted, name, description, labels, created_by, updated_by
+         from network_security_groups WHERE deleted is NULL",
+    );
 
     builder.push(" AND id = ANY(");
     builder.push_bind(network_security_group_ids);
@@ -213,6 +220,27 @@ pub async fn find_objects_with_attachments(
         .fetch_all(txn)
         .await
         .map_err(|err| DatabaseError::query(builder.sql(), err))
+}
+
+/// `find_retained_attachments` finds resources whose configuration still uses
+/// this NSG, including resources being deleted. Deletion intent does not mean
+/// the DPU has stopped serving their tenant network.
+///
+/// The caller holds the NSG row lock while inspecting and changing its policy.
+pub async fn find_retained_attachments(
+    txn: &mut PgConnection,
+    id: &NetworkSecurityGroupId,
+) -> Result<NetworkSecurityGroupAttachments, DatabaseError> {
+    let query = "SELECT $1::varchar AS id,
+        COALESCE((SELECT json_agg(id) FROM vpcs
+                  WHERE network_security_group_id = $1), '[]') AS vpc_ids,
+        COALESCE((SELECT json_agg(id) FROM instances
+                  WHERE network_security_group_id = $1), '[]') AS instance_ids";
+    sqlx::query_as(query)
+        .bind(id)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
 }
 
 /// Queries the DB for the NSG propagation status across sets of objects
@@ -445,7 +473,8 @@ pub async fn update(
                 AND tenant_organization_id = $9::varchar
                 AND NOT EXISTS
                     (SELECT id FROM network_security_groups WHERE id!=$7::varchar AND name=$1::varchar AND deleted IS NULL)
-            RETURNING *";
+            RETURNING id, tenant_organization_id, stateful_egress, rules, version,
+                      created, deleted, name, description, labels, created_by, updated_by";
 
     match sqlx::query_as::<Postgres, NetworkSecurityGroup>(query)
         .bind(&metadata.name)

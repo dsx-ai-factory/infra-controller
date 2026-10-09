@@ -4,6 +4,7 @@
 package workflow
 
 import (
+	"maps"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -33,6 +34,8 @@ var firmwareControlActivityOptions = workflow.ActivityOptions{
 	},
 }
 
+const firmwareLayeredComponentSelectionChangeID = "firmware-layered-component-selection"
+
 // firmwareControl orchestrates firmware updates using operation rules.
 // The execution sequence is driven by the RuleDefinition attached to the
 // task, falling back to a hardcoded default when no custom rule exists.
@@ -54,10 +57,23 @@ func firmwareControl(
 	}
 
 	typeToTargets := buildTargets(&reqInfo)
+	executionTargets := typeToTargets
+	// Histories without this marker retain every component's rule steps.
+	selectionVersion := workflow.GetVersion(ctx, firmwareLayeredComponentSelectionChangeID, workflow.DefaultVersion, 1)
+	if selectionVersion != workflow.DefaultVersion {
+		executionTargets = maps.Clone(typeToTargets)
+		for componentType := range executionTargets {
+			_, selected := extractComponentTargetVersion(info.TargetVersion, componentType)
+			if !selected {
+				delete(executionTargets, componentType)
+			}
+		}
+	}
 
 	report, err := executeRuleBasedOperation(
 		ctx,
 		reqInfo.TaskID,
+		executionTargets,
 		typeToTargets,
 		info,
 		reqInfo.RuleDefinition,

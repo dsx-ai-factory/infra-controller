@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::time::Duration;
+
 use rpc::admin_cli::OutputFormat;
 
 use crate::cfg::cli_options::SortField;
@@ -35,6 +37,7 @@ pub(crate) struct RuntimeContext {
 // that need to be leveraged by any downstream command handler.
 pub(crate) struct RuntimeConfig {
     pub(crate) format: OutputFormat,
+    pub(crate) request_timeout: Option<Duration>,
     pub(crate) page_size: usize,
     pub(crate) extended: bool,
     pub(crate) cloud_unsafe_op: Option<String>,

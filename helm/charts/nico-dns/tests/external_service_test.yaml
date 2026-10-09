@@ -1,0 +1,53 @@
+suite: External DNS Service address families
+templates:
+  - external-service.yaml
+tests:
+  - it: keeps cluster defaults when family settings are omitted
+    set:
+      replicas: 2
+      externalService:
+        enabled: true
+    asserts:
+      - hasDocuments:
+          count: 4
+      - notExists:
+          path: spec.ipFamilyPolicy
+      - notExists:
+          path: spec.ipFamilies
+
+  - it: selects IPv6 for every external Service
+    set:
+      replicas: 2
+      externalService:
+        enabled: true
+        ipFamilyPolicy: SingleStack
+        ipFamilies: [IPv6]
+        perPodAnnotations:
+          - metallb.io/loadBalancerIPs: "2001:db8::1"
+          - metallb.io/loadBalancerIPs: "2001:db8::2"
+    asserts:
+      - hasDocuments:
+          count: 4
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: SingleStack
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv6]
+
+  - it: preserves the requested primary family for dual-stack allocation
+    set:
+      replicas: 2
+      externalService:
+        enabled: true
+        ipFamilyPolicy: RequireDualStack
+        ipFamilies: [IPv6, IPv4]
+    asserts:
+      - hasDocuments:
+          count: 4
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: RequireDualStack
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv6, IPv4]

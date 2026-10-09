@@ -21,7 +21,7 @@ use std::str::FromStr;
 
 use carbide_uuid::UuidConversionError;
 use carbide_uuid::machine::MachineInterfaceId;
-use ipnetwork::Ipv4Network;
+use ipnetwork::{Ipv4Network, Ipv6Network};
 use rpc::InterfaceFunctionType;
 use rpc::errors::RpcDataConversionError;
 use rpc::forge::ManagedHostNetworkConfigResponse;
@@ -39,17 +39,34 @@ pub struct DhcpConfig {
     pub carbide_api_url: Option<String>,
     pub carbide_ntpservers: Vec<Ipv4Addr>,
     pub carbide_provisioning_server_ipv4: Ipv4Addr,
+    /// IPv6 provisioning address used to generate default DHCPv6 HTTP boot URLs.
+    ///
+    /// Omission disables URL generation. An explicit interface `booturl`,
+    /// including an empty one, takes precedence. DHCPv4 uses its own address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carbide_provisioning_server_ipv6: Option<Ipv6Addr>,
     pub carbide_dhcp_server: Ipv4Addr,
     #[serde(default)]
     pub carbide_nameservers_v6: Vec<Ipv6Addr>,
     #[serde(default)]
     pub carbide_ntpservers_v6: Vec<Ipv6Addr>,
+    /// Optional DHCPv6 server-address configuration.
+    ///
+    /// Listener admission does not depend on it, and sockets bind `[::]:547`
+    /// per interface.
     #[serde(default)]
     pub carbide_dhcp_server_v6: Option<Ipv6Addr>,
     #[serde(default)]
     pub dhcpv6_preferred_lifetime_secs: u32,
     #[serde(default)]
     pub dhcpv6_valid_lifetime_secs: u32,
+    /// Preference emitted only in DHCPv6 ADVERTISE messages.
+    ///
+    /// `None` preserves legacy configuration behavior (effective preference
+    /// zero); `Some(0)` is an explicit configured value and must not collapse
+    /// into omission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dhcpv6_server_preference: Option<u8>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -82,11 +99,13 @@ impl Default for DhcpConfig {
             // These two must be updated with valid values.
             carbide_provisioning_server_ipv4: Ipv4Addr::from([127, 0, 0, 1]),
             carbide_dhcp_server: Ipv4Addr::from([127, 0, 0, 1]),
+            carbide_provisioning_server_ipv6: None,
             carbide_nameservers_v6: vec![],
             carbide_ntpservers_v6: vec![],
             carbide_dhcp_server_v6: None,
             dhcpv6_preferred_lifetime_secs: 0,
             dhcpv6_valid_lifetime_secs: 0,
+            dhcpv6_server_preference: None,
         }
     }
 }
@@ -198,7 +217,8 @@ impl HostConfig {
     }
 }
 
-// This conversion continues to consume the compatibility fields during the address-list rollout.
+// This conversion continues to consume the IPv4 compatibility fields during
+// the address-list rollout.
 #[allow(deprecated)]
 impl TryFrom<::rpc::forge::FlatInterfaceConfig> for InterfaceInfo {
     type Error = DhcpDataError;
@@ -217,6 +237,27 @@ impl TryFrom<::rpc::forge::FlatInterfaceConfig> for InterfaceInfo {
             }
         };
 
+        let ipv6 = value
+            .addresses
+            .iter()
+            .find(|address| address.address_family == i32::from(::rpc::forge::AddressFamily::V6))
+            // Routing-only loopback or SVI data does not configure DHCP on this interface.
+            .filter(|address| !address.ip.is_empty() || !address.interface_prefix.is_empty())
+            .map(|ipv6| -> Result<InterfaceInfoV6, DhcpDataError> {
+                // An empty address preserves an explicitly enabled SLAAC-only
+                // prefix without manufacturing a stateful host binding.
+                let prefix = Ipv6Network::from_str(&ipv6.interface_prefix)?;
+                Ok(InterfaceInfoV6 {
+                    address: if ipv6.ip.is_empty() {
+                        None
+                    } else {
+                        Some(ipv6.ip.parse()?)
+                    },
+                    prefix: prefix.to_string(),
+                })
+            })
+            .transpose()?;
+
         Ok(InterfaceInfo {
             address,
             gateway,
@@ -224,7 +265,7 @@ impl TryFrom<::rpc::forge::FlatInterfaceConfig> for InterfaceInfo {
             fqdn: value.fqdn,
             booturl: value.booturl,
             mtu: value.mtu,
-            ipv6: None,
+            ipv6,
         })
     }
 }
@@ -334,8 +375,8 @@ mod tests {
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{scenarios, value_scenarios};
     use rpc::forge::{
-        FlatInterfaceConfig, InterfaceFunctionType, ManagedHostNetworkConfigResponse,
-        VpcVirtualizationType,
+        AddressFamily, FlatInterfaceConfig, InterfaceAddressConfig, InterfaceFunctionType,
+        ManagedHostNetworkConfigResponse, VpcVirtualizationType,
     };
 
     use super::*;
@@ -398,6 +439,20 @@ mod tests {
         }
     }
 
+    /// Build caller-selected family-neutral IPv6 interface data.
+    fn interface_config_with_ipv6(address: &str, prefix: &str) -> FlatInterfaceConfig {
+        FlatInterfaceConfig {
+            addresses: vec![InterfaceAddressConfig {
+                address_family: AddressFamily::V6.into(),
+                ip: address.to_string(),
+                interface_prefix: prefix.to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Build deprecated compatibility input without IPv4 addressing.
     #[allow(deprecated)]
     fn ipv6_only_interface_config() -> FlatInterfaceConfig {
         let mut config =
@@ -414,6 +469,8 @@ mod tests {
         host_interface_id: Option<String>,
     ) -> ManagedHostNetworkConfigResponse {
         ManagedHostNetworkConfigResponse {
+            service_interfaces: vec![],
+            service_vpc_slot_inventory: None,
             use_admin_network,
             admin_interface,
             tenant_interfaces,
@@ -481,6 +538,15 @@ mod tests {
     ) -> Result<InterfaceSummary, &'static str> {
         InterfaceInfo::try_from(config)
             .map(summarize_interface)
+            .map_err(dhcp_error_kind)
+    }
+
+    /// Convert only the IPv6 sidecar so table cases remain focused on its contract.
+    fn summarize_flat_interface_ipv6(
+        config: FlatInterfaceConfig,
+    ) -> Result<Option<InterfaceInfoV6>, &'static str> {
+        InterfaceInfo::try_from(config)
+            .map(|interface| interface.ipv6)
             .map_err(dhcp_error_kind)
     }
 
@@ -713,17 +779,23 @@ mod tests {
     #[test]
     fn dhcp_config_v6_fields_round_trip_and_default_when_absent() {
         let config = DhcpConfig {
+            carbide_provisioning_server_ipv6: Some("2001:db8::80".parse().unwrap()),
             carbide_nameservers_v6: vec!["2001:db8::53".parse().unwrap()],
             carbide_ntpservers_v6: vec!["2001:db8::123".parse().unwrap()],
             carbide_dhcp_server_v6: Some("2001:db8::1".parse().unwrap()),
             dhcpv6_preferred_lifetime_secs: 3600,
             dhcpv6_valid_lifetime_secs: 7200,
+            dhcpv6_server_preference: Some(0),
             ..Default::default()
         };
 
         // Serialize a populated config and verify the IPv6 fields survive.
         let wire = serde_json::to_string(&config).expect("dhcp config serializes");
         let recovered: DhcpConfig = serde_json::from_str(&wire).expect("dhcp config deserializes");
+        assert_eq!(
+            recovered.carbide_provisioning_server_ipv6,
+            Some(Ipv6Addr::from_str("2001:db8::80").unwrap())
+        );
         assert_eq!(
             recovered.carbide_nameservers_v6,
             vec![Ipv6Addr::from_str("2001:db8::53").unwrap()]
@@ -738,6 +810,7 @@ mod tests {
         );
         assert_eq!(recovered.dhcpv6_preferred_lifetime_secs, 3600);
         assert_eq!(recovered.dhcpv6_valid_lifetime_secs, 7200);
+        assert_eq!(recovered.dhcpv6_server_preference, Some(0));
 
         // Deserialize old-style JSON and verify the new fields default cleanly.
         let old_wire = r#"{
@@ -754,9 +827,16 @@ mod tests {
             serde_json::from_str(old_wire).expect("old dhcp config deserializes");
         assert!(old_config.carbide_nameservers_v6.is_empty());
         assert!(old_config.carbide_ntpservers_v6.is_empty());
+        assert_eq!(old_config.carbide_provisioning_server_ipv6, None);
+        assert!(
+            !serde_json::to_string(&old_config)
+                .expect("legacy dhcp config serializes")
+                .contains("carbide_provisioning_server_ipv6")
+        );
         assert_eq!(old_config.carbide_dhcp_server_v6, None);
         assert_eq!(old_config.dhcpv6_preferred_lifetime_secs, 0);
         assert_eq!(old_config.dhcpv6_valid_lifetime_secs, 0);
+        assert_eq!(old_config.dhcpv6_server_preference, None);
     }
 
     /// Verifies per-interface IPv6 details round-trip and old host configs default them.
@@ -804,6 +884,58 @@ mod tests {
         assert_eq!(ipv6_only_interface.address, None);
         assert_eq!(ipv6_only_interface.gateway, None);
         assert_eq!(ipv6_only_interface.prefix, None);
+    }
+
+    /// Verifies family-neutral IPv6 data is validated before becoming the
+    /// host.yaml sidecar consumed by DHCP.
+    #[test]
+    fn converts_family_neutral_ipv6_config() {
+        scenarios!(summarize_flat_interface_ipv6:
+            "valid IPv6 interface configuration" {
+                // A stateful address and its validated prefix are both retained.
+                interface_config_with_ipv6(
+                    "2001:db8::20",
+                    "2001:db8::/64",
+                ) => Yields(Some(InterfaceInfoV6 {
+                    address: Some("2001:db8::20".parse().unwrap()),
+                    prefix: "2001:db8::/64".to_string(),
+                })),
+                // An explicit prefix without an address remains SLAAC-only.
+                interface_config_with_ipv6(
+                    "",
+                    "2001:db8:1::/64",
+                ) => Yields(Some(InterfaceInfoV6 {
+                    address: None,
+                    prefix: "2001:db8:1::/64".to_string(),
+                })),
+                // An operator loopback alone does not enable DHCPv6 on the host interface.
+                FlatInterfaceConfig {
+                    addresses: vec![InterfaceAddressConfig {
+                        address_family: AddressFamily::V6.into(),
+                        tenant_vrf_loopback_ip: Some("2001:db8::3".to_string()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                } => Yields(None),
+                // An SVI address alone belongs to routing and cannot configure DHCPv6.
+                FlatInterfaceConfig {
+                    addresses: vec![InterfaceAddressConfig {
+                        address_family: AddressFamily::V6.into(),
+                        svi_ip: Some("2001:db8::4".to_string()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                } => Yields(None),
+            }
+
+            "invalid IPv6 interface prefix" {
+                // Malformed prefixes fail conversion instead of reaching packet handling.
+                interface_config_with_ipv6(
+                    "2001:db8::20",
+                    "not-an-ipv6-prefix",
+                ) => FailsWith("ip-network"),
+            }
+        );
     }
 
     #[test]

@@ -21,7 +21,7 @@ use carbide_credential_rotation::BmcEndpoint;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialWriter};
 use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::power_shelf::PowerShelfId;
-use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::power_shelf::{PowerShelf, PowerShelfControllerState, PowerShelfDecommissioningState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -75,6 +75,7 @@ async fn handle_suppressing_site_explorer(
         &NewBmcSuppression {
             bmc_mac_address: bmc_mac,
             subsystem: BmcSuppressionSubsystem::SiteExplorer,
+            source: BmcSuppressionSource::Decommissioning,
             reason: format!("power shelf {power_shelf_id} is being decommissioned"),
         },
     )
@@ -112,6 +113,7 @@ async fn handle_suppressing_bmc_dhcp(
         &NewBmcSuppression {
             bmc_mac_address: bmc_mac,
             subsystem: BmcSuppressionSubsystem::Dhcp,
+            source: BmcSuppressionSource::Decommissioning,
             reason: format!(
                 "power shelf {power_shelf_id} is being decommissioned; suppressing BMC DHCP"
             ),
@@ -188,24 +190,17 @@ async fn handle_waiting_for_bmc_dhcp_acknowledgement(
             object_id: power_shelf_id.to_string(),
             missing: "bmc_mac",
         })?;
-    let suppression = db::bmc_suppression::find(
-        &ctx.services.db_pool,
-        bmc_mac,
-        BmcSuppressionSubsystem::Dhcp,
-    )
-    .await?;
-
-    if suppression.is_some_and(|suppression| suppression.acknowledged_at.is_some()) {
-        Ok(StateHandlerOutcome::transition(
-            PowerShelfControllerState::Decommissioning {
-                decommissioning_state: PowerShelfDecommissioningState::DeletingManagedCredentials,
-            },
-        ))
-    } else {
-        Ok(StateHandlerOutcome::wait(
+    if db::bmc_suppression::is_dhcp_acknowledgement_pending(&ctx.services.db_pool, bmc_mac).await? {
+        return Ok(StateHandlerOutcome::wait(
             "waiting for BMC DHCP suppression acknowledgement".to_string(),
-        ))
+        ));
     }
+
+    Ok(StateHandlerOutcome::transition(
+        PowerShelfControllerState::Decommissioning {
+            decommissioning_state: PowerShelfDecommissioningState::DeletingManagedCredentials,
+        },
+    ))
 }
 
 async fn handle_deleting_managed_credentials(

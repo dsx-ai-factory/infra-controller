@@ -174,7 +174,7 @@ A VPC virtualization type for tenant instances on zero-DPU hosts. A Flat VPC is 
 
 ### Zero-DPU Host
 
-A managed host that NICo operates without a NICo-managed DPU — either a host whose DPU policy is `ignore`, or a host whose BlueField DPU is run as a plain NIC through `nic`. NICo does not build an overlay for a zero-DPU host; its tenant instances attach directly to HostInband underlay segments and belong to Flat VPCs. DPU policy is set site-wide in the API server configuration or per host on its Expected Machine. `rack_management_enabled` does not itself make a host zero-DPU; rack-manager deployments must also resolve the applicable DPU policy to `nic`.
+A managed host that NICo operates without a NICo-managed DPU — either a host whose DPU policy is `ignore`, or a host whose BlueField DPU is run as a plain NIC through `nic`. NICo does not build an overlay for a zero-DPU host; its tenant instances attach directly to HostInband underlay segments and belong to Flat VPCs. DPU policy is set site-wide in the API server configuration or per host on its Expected Machine. Rack-manager deployments must resolve the applicable DPU policy to `nic` to run DPUs as plain NICs.
 
 ### HBN in NICo
 

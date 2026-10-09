@@ -31,7 +31,7 @@ use model::site_explorer::{
 };
 use tokio::sync::Notify;
 
-use crate::{EndpointExplorer, SiteExplorationMetrics};
+use crate::{AuthenticatedBmc, EndpointExplorer, SiteExplorationMetrics};
 
 /// One recorded endpoint exploration and its boot-interface target.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,10 +89,10 @@ pub struct MockEndpointExplorer {
     /// Records each call to `explore_endpoint`.
     pub explore_endpoint_calls: Arc<Mutex<Vec<EndpointExplorationCall>>>,
     next_exploration_blocker: Arc<Mutex<Option<MockEndpointExplorationBlocker>>>,
-    /// Real explorer that `machine_setup`/`set_boot_order_dpu_first` forward to
-    /// (see [`Self::with_redfish_backend`]); `None` for the pure in-memory mock
-    /// used by site-explorer's own tests.
-    redfish_backend: Option<Arc<dyn EndpointExplorer>>,
+    /// Authenticated BMC client that `machine_setup`/`set_boot_order_dpu_first`
+    /// forward to (see [`Self::with_redfish_backend`]); `None` for the pure
+    /// in-memory mock used by site-explorer's own tests.
+    redfish_backend: Option<Arc<dyn AuthenticatedBmc>>,
 }
 
 impl Default for MockEndpointExplorer {
@@ -167,8 +167,9 @@ impl MockEndpointExplorer {
     }
 
     /// Forward `machine_setup`/`set_boot_order_dpu_first` to `backend` (a real,
-    /// `RedfishSim`-backed explorer) instead of no-op'ing them; see the type docs.
-    pub fn with_redfish_backend(mut self, backend: Arc<dyn EndpointExplorer>) -> Self {
+    /// `RedfishSim`-backed authenticated BMC client) instead of no-op'ing them;
+    /// see the type docs.
+    pub fn with_redfish_backend(mut self, backend: Arc<dyn AuthenticatedBmc>) -> Self {
         self.redfish_backend = Some(backend);
         self
     }
@@ -214,7 +215,10 @@ impl EndpointExplorer for MockEndpointExplorer {
         });
         res.clone()
     }
+}
 
+#[async_trait::async_trait]
+impl AuthenticatedBmc for MockEndpointExplorer {
     async fn redfish_reset_bmc(
         &self,
         _address: SocketAddr,

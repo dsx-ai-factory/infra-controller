@@ -31,12 +31,12 @@ use rpc::forge::DhcpRecord;
 /// Data in cache is only valid this long
 const MACHINE_CACHE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How many entries to keep. After that we evict the entry used the longest ago.
-pub(super) const MACHINE_CACHE_SIZE: usize = 1000;
+pub const MACHINE_CACHE_SIZE: usize = 1000;
 /// If the cache key comes out shorter than this something went wrong, don't use it.
 const MIN_KEY_LEN: usize = 10;
 
 #[derive(Debug, Clone)]
-pub(super) struct CacheEntry {
+pub struct CacheEntry {
     pub(super) dhcp_record: DhcpRecord,
     timestamp: Instant,
 }

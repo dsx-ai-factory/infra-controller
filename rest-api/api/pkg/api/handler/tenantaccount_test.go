@@ -17,7 +17,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -278,7 +277,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -425,7 +424,6 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := CreateTenantAccountHandler{
@@ -479,12 +477,14 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 	tnOrg2 := "test-tn-org-2"
 	tnOrg3 := "test-tn-org-3"
 	tnOrg4 := "test-tn-org-4"
+	tnOrg5 := "test-tn-org-5"
+	tnOrg6 := "test-tn-org-6"
 
 	ipOrgRoles := []string{authz.ProviderAdminRole}
 	tnOrgRoles := []string{authz.TenantAdminRole}
 
 	ipUser := testTenantAccountBuildUser(t, dbSession, "test123", []string{ipOrg}, ipOrgRoles, "John", "Doe")
-	tnUser := testTenantAccountBuildUser(t, dbSession, "test456", []string{tnOrg1, tnOrg2, tnOrg3, tnOrg4}, tnOrgRoles, "Jimmy", "Doe")
+	tnUser := testTenantAccountBuildUser(t, dbSession, "test456", []string{tnOrg1, tnOrg2, tnOrg3, tnOrg4, tnOrg5}, tnOrgRoles, "Jimmy", "Doe")
 
 	ip := testTenantAccountBuildInfrastructureProvider(t, dbSession, "Test Infrastructure Provider", ipOrg, ipUser)
 	assert.NotNil(t, ip)
@@ -509,6 +509,22 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 	ta3 := testTenantAccountBuildTenantAccount(t, dbSession, uuid.New().String(), ip, tn3, tnOrg3, cdbm.TenantAccountStatusReady, ipUser.ID, uuid.Nil)
 	assert.NotNil(t, ta3)
 
+	// An invitation created before its org had a Tenant keeps an empty tenantId when the
+	// Tenant is later created without the back-fill, as GET /service-account/current does.
+	// tn5 exists, so accepting taUnlinked has to link it. taForeign is unlinked too, but
+	// was issued to tnOrg6, so no other org may claim it.
+	tn5 := testTenantAccountBuildTenant(t, dbSession, tnOrg5, "Test Tenant Account 5", ipUser)
+	assert.NotNil(t, tn5)
+
+	taUnlinked := testTenantAccountBuildTenantAccount(t, dbSession, uuid.New().String(), ip, nil, tnOrg5, cdbm.TenantAccountStatusInvited, ipUser.ID, uuid.Nil)
+	assert.NotNil(t, taUnlinked)
+	assert.Nil(t, taUnlinked.TenantID)
+	testTenantAccountBuildStatusDetail(t, dbSession, taUnlinked.ID, taUnlinked.Status)
+
+	taForeign := testTenantAccountBuildTenantAccount(t, dbSession, uuid.New().String(), ip, nil, tnOrg6, cdbm.TenantAccountStatusInvited, ipUser.ID, uuid.Nil)
+	assert.NotNil(t, taForeign)
+	assert.Nil(t, taForeign.TenantID)
+
 	errBody1, err := json.Marshal(model.APITenantAccountUpdateRequest{TenantContactID: cutil.GetPtr("non-uuid$!")})
 	assert.Nil(t, err)
 	errBody2, err := json.Marshal(model.APITenantAccountUpdateRequest{TenantContactID: cutil.GetPtr(uuid.New().String())})
@@ -523,19 +539,25 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
-		name               string
-		reqOrgName         string
-		reqBody            string
-		user               *cdbm.User
-		tnID               string
-		taID               string
-		ta                 *cdbm.TenantAccount
-		expectedErr        bool
-		expectedStatus     int
-		verifyChildSpanner bool
+		name           string
+		reqOrgName     string
+		reqBody        string
+		user           *cdbm.User
+		tnID           string
+		taID           string
+		ta             *cdbm.TenantAccount
+		expectedErr    bool
+		expectedStatus int
+		// expectedMessage is asserted where the status alone cannot identify the rejection.
+		expectedMessage string
+		// checkPersistedTenantID reloads the account after the request and asserts its
+		// TenantID equals persistedTenantID, where nil means it must still be unlinked.
+		checkPersistedTenantID bool
+		persistedTenantID      *uuid.UUID
+		verifyChildSpanner     bool
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -604,15 +626,43 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 			expectedStatus: http.StatusNotFound,
 		},
 		{
-			name:           "error when specified org does not have matching tenant in tenant account",
-			reqOrgName:     tnOrg1,
-			reqBody:        string(okBody1),
-			user:           tnUser,
-			tnID:           tn1.ID.String(),
-			taID:           ta2.ID.String(),
-			ta:             ta2,
-			expectedErr:    true,
-			expectedStatus: http.StatusBadRequest,
+			name:            "error when specified org does not have matching tenant in tenant account",
+			reqOrgName:      tnOrg1,
+			reqBody:         string(okBody1),
+			user:            tnUser,
+			tnID:            tn1.ID.String(),
+			taID:            ta2.ID.String(),
+			ta:              ta2,
+			expectedErr:     true,
+			expectedStatus:  http.StatusBadRequest,
+			expectedMessage: "Tenant in org does not match tenant in TenantAccount",
+		},
+		{
+			name:                   "error when unlinked tenant account was issued to another org",
+			reqOrgName:             tnOrg1,
+			reqBody:                string(okBody1),
+			user:                   tnUser,
+			tnID:                   tn1.ID.String(),
+			taID:                   taForeign.ID.String(),
+			ta:                     taForeign,
+			expectedErr:            true,
+			expectedStatus:         http.StatusBadRequest,
+			expectedMessage:        "Tenant in org does not match tenant in TenantAccount",
+			checkPersistedTenantID: true,
+			persistedTenantID:      nil,
+		},
+		{
+			name:                   "success case links unlinked tenant account to the org's tenant",
+			reqOrgName:             tnOrg5,
+			reqBody:                string(okBody1),
+			user:                   tnUser,
+			tnID:                   tn5.ID.String(),
+			taID:                   taUnlinked.ID.String(),
+			ta:                     taUnlinked,
+			expectedErr:            false,
+			expectedStatus:         http.StatusOK,
+			checkPersistedTenantID: true,
+			persistedTenantID:      &tn5.ID,
 		},
 		{
 			name:           "error when specified tenant account doesnt exist",
@@ -677,7 +727,6 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := UpdateTenantAccountHandler{
@@ -694,6 +743,16 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 
 			require.Equal(t, tc.expectedStatus, rec.Code)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
+
+			if tc.expectedMessage != "" {
+				assert.Contains(t, rec.Body.String(), tc.expectedMessage)
+			}
+
+			if tc.checkPersistedTenantID {
+				persisted, gerr := cdbm.NewTenantAccountDAO(dbSession).GetByID(ctx, nil, tc.ta.ID, nil)
+				require.NoError(t, gerr)
+				assert.Equal(t, tc.persistedTenantID, persisted.TenantID)
+			}
 
 			if !tc.expectedErr {
 				rsp := &model.APITenantAccount{}
@@ -893,7 +952,7 @@ func TestTenantAccountHandler_GetByID(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1093,7 +1152,6 @@ func TestTenantAccountHandler_GetByID(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := GetTenantAccountHandler{
@@ -1227,7 +1285,7 @@ func TestTenantAccountHandler_GetAll(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1663,7 +1721,6 @@ func TestTenantAccountHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gatah := GetAllTenantAccountHandler{
@@ -1793,7 +1850,7 @@ func TestTenantAccountHandler_Delete(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -1896,7 +1953,6 @@ func TestTenantAccountHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := DeleteTenantAccountHandler{

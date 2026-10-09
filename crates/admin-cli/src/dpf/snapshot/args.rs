@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -34,5 +34,5 @@ pub(crate) struct Args {
 #[derive(Parser, Debug)]
 pub(super) struct SnapshotQuery {
     /// Host machine id to snapshot. Must be a host (not a DPU) machine id.
-    pub(super) host_machine_id: MachineId,
+    pub(super) host_machine_id: HostMachineId,
 }

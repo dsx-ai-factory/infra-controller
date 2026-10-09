@@ -34,12 +34,12 @@
 //! ## Example
 //!
 //! ```rust,ignore
-//! use dpf::{DpfSdkBuilder, KubeRepository, InitDpfResourcesConfig};
+//! use dpf::{DpfSdkBuilder, KubeRepository, InitDpfResourcesConfigBuilder};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let repo = KubeRepository::new().await?;
-//!     let config = InitDpfResourcesConfig::default();
+//!     let config = InitDpfResourcesConfigBuilder::default().build()?;
 //!     let sdk = DpfSdkBuilder::new(repo, "dpf-operator-system", "secret".to_string())
 //!         .initialize(&config)
 //!         .await?;
@@ -62,6 +62,7 @@ pub mod error;
 pub mod flavor;
 pub mod repository;
 pub mod sdk;
+mod service_vpc_slot;
 pub mod services;
 pub mod types;
 pub mod watcher;
@@ -75,20 +76,25 @@ pub use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 pub use repository::{DpfRepository, KubeRepository};
 pub use sdk::{
     DpfSdk, DpfSdkBuilder, DpuProvisioningSource, NoLabels, ResourceLabeler, build_deployment,
-    build_effective_dpu_interfaces, build_service_configuration, build_service_interface,
-    build_service_nad, build_service_template, calculate_pf_total_sf, dpu_cr_name,
-    dpu_device_cr_name, dpu_node_cr_name, node_id_from_dpu_node_cr_name,
+    build_deployment_dpu_interfaces, build_effective_dpu_interfaces, build_service_configuration,
+    build_service_interface, build_service_nad, build_service_template, calculate_pf_total_sf,
+    dpu_cr_name, dpu_device_cr_name, dpu_node_cr_name, node_id_from_dpu_node_cr_name,
 };
+pub use service_vpc_slot::ServiceVpcSlots;
 pub use services::{DEFAULT_DOCA_HELM_REGISTRY, ServiceRegistryConfig};
 pub use types::{
-    BlueFieldSoftwareParams, BmcPasswordProvider, ConfigPortsServiceType, DEFAULT_DPU_NUM_OF_VFS,
-    DEFAULT_PF_TOTAL_SF_RESERVED, DOCA_WEAVE_DHCP_AGENT_PF_TOTAL_SF, DPU_ENABLED_NODE_LABEL,
-    DetachedDpuServiceDefinition, DetachedHelmChart, DpfInterceptBridge, DpfInterceptBridging,
+    AstraRoutePrefixes, BlueFieldSoftwareParams, BmcPasswordProvider, ConfigPortsServiceType,
+    DEFAULT_DPU_NUM_OF_VFS, DEFAULT_PF_TOTAL_SF_RESERVED, DOCA_WEAVE_DHCP_AGENT_PF_TOTAL_SF,
+    DPU_ENABLED_NODE_LABEL, DetachedDpuServiceDefinition, DetachedDpuServiceSecurity,
+    DetachedHelmChart, DetachedServiceDaemonSet, DetachedServiceDaemonSetRollingUpdate,
+    DetachedServiceDaemonSetUpdateStrategy, DpfInterceptBridge, DpfInterceptBridging,
     DpfInterfaceIdentity, DpuDeploymentType, DpuDeviceInfo, DpuErrorEvent, DpuEvent, DpuMismatch,
-    DpuNodeInfo, DpuPhase, DpuReadyEvent, DpuServiceHelmChartObservation, DpuServiceObservation,
-    DpuServiceVersion, InitDpfResourcesConfig, MaintenanceEvent, PF_TOTAL_SF_BF4_ASTRA_FUDGE,
-    RebootRequiredEvent, ServiceChainSwitch, ServiceConfigPort, ServiceConfigPortProtocol,
-    ServiceDefinition, ServiceInterface, ServiceNAD, ServiceNADResourceType,
+    DpuNodeInfo, DpuPhase, DpuReadyEvent, DpuServiceDaemonSetObservation,
+    DpuServiceHelmChartObservation, DpuServiceObservation, DpuServiceSecurityObservation,
+    DpuServiceVersion, InitDpfResourcesConfig, InitDpfResourcesConfigBuilder, MaintenanceEvent,
+    PF_TOTAL_SF_BF4_ASTRA_FUDGE, RebootRequiredEvent, ServiceChainSwitch, ServiceConfigPort,
+    ServiceConfigPortProtocol, ServiceDefinition, ServiceInterface, ServiceNAD,
+    ServiceNADResourceType,
 };
 pub use watcher::{DpuWatcher, DpuWatcherBuilder};
 

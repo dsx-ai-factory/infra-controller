@@ -56,6 +56,7 @@ func sampleRunCreateRequest() APITaskRunCreateRequest {
 				Version:                "1.2.3",
 				RuleID:                 &ruleID,
 				OverrideReadinessCheck: true,
+				OverrideVersionCheck:   true,
 				SubTargets:             []string{"bmc", "bios"},
 			},
 			ExcludeRunIDs: []string{"prev-1", "prev-2"},
@@ -230,6 +231,7 @@ func TestAPITaskRunCreateRequest_ToProto(t *testing.T) {
 	assert.Equal(t, "1.2.3", fw.GetTargetVersion())
 	assert.Equal(t, "rule-id", fw.GetRuleId().GetId())
 	assert.True(t, fw.GetOverrideReadinessCheck())
+	assert.True(t, fw.GetOverrideVersionCheck())
 	assert.Equal(t, []string{"bmc", "bios"}, fw.GetSubTargets())
 
 	// Target scope excludes.
@@ -366,7 +368,8 @@ func TestAPITaskRunTarget_FromProto(t *testing.T) {
 	target := &flowv1.OperationRunTarget{
 		Id:             &flowv1.UUID{Id: "target-id"},
 		OperationRunId: &flowv1.UUID{Id: "run-id"},
-		RackId:         &flowv1.UUID{Id: "rack-id"},
+		RackId:         &flowv1.UUID{Id: "flow-rack-uuid"},
+		RackExternalId: "core-rack-01",
 		SequenceIndex:  2,
 		PhaseIndex:     1,
 		TaskId:         &flowv1.UUID{Id: "task-id"},
@@ -380,7 +383,7 @@ func TestAPITaskRunTarget_FromProto(t *testing.T) {
 	got.FromProto(target)
 	assert.Equal(t, "target-id", got.ID)
 	assert.Equal(t, "run-id", got.RunID)
-	assert.Equal(t, "rack-id", got.RackID)
+	assert.Equal(t, "core-rack-01", got.RackID)
 	assert.Equal(t, int32(2), got.SequenceIndex)
 	assert.Equal(t, int32(1), got.PhaseIndex)
 	require.NotNil(t, got.TaskID)

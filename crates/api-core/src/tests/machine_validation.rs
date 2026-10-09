@@ -24,7 +24,8 @@ use carbide_machine_controller::config::machine_validation::{
 use carbide_machine_controller::handler::MachineStateHandlerBuilder;
 use carbide_uuid::machine_validation::{MachineValidationId, MachineValidationRunItemId};
 use common::api_fixtures::{
-    create_host_with_machine_validation, create_test_env, get_machine_validation_results,
+    TestEnv, TestEnvOverrides, TestManagedHost, create_host_with_machine_validation,
+    create_test_env, create_test_env_with_overrides, get_config, get_machine_validation_results,
     get_machine_validation_runs, on_demand_machine_validation,
 };
 use config_version::ConfigVersion;
@@ -34,10 +35,42 @@ use model::machine::{
 };
 use rpc::Timestamp;
 use rpc::forge::forge_server::Forge;
-use rpc::forge::{MachineValidationTestNextVersionRequest, MachineValidationTestVerfiedRequest};
+use rpc::forge::{
+    MachineValidationTestFullHostApprovalRequest, MachineValidationTestNextVersionRequest,
+    MachineValidationTestVerfiedRequest,
+};
 
 use crate::handlers::machine_validation::apply_config_on_startup;
 use crate::tests::common;
+
+fn authenticated_machine_request<T>(
+    message: T,
+    machine_id: impl std::fmt::Display,
+) -> tonic::Request<T> {
+    let mut request = tonic::Request::new(message);
+    let mut context = crate::auth::AuthContext::default();
+    context.principals.push(
+        carbide_authn::middleware::Principal::SpiffeMachineIdentifier(machine_id.to_string()),
+    );
+    request.extensions_mut().insert(context);
+    request
+}
+
+fn authenticated_admin_request<T>(message: T) -> tonic::Request<T> {
+    let mut request = tonic::Request::new(message);
+    let mut context = crate::auth::AuthContext::default();
+    context
+        .principals
+        .push(carbide_authn::middleware::Principal::ExternalUser(
+            carbide_authn::middleware::ExternalUserInfo::new(
+                None,
+                "nico-cli-client".to_string(),
+                None,
+            ),
+        ));
+    request.extensions_mut().insert(context);
+    request
+}
 
 #[crate::sqlx_test]
 async fn test_machine_validation_complete_with_error(
@@ -832,6 +865,7 @@ async fn test_machine_validation_add_new_test_case(
         custom_tags: vec!["dgxcloud".to_string()],
         components: vec!["GPU".to_string()],
         is_enabled: Some(true),
+        plugin: None,
     };
     let add_update_response = env
         .api
@@ -1016,6 +1050,143 @@ async fn test_machine_validation_mark_test_as_verfied(
         .tests;
     assert!(tests[0].verified);
     assert_eq!(return_message, "Success");
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn plugin_full_host_approval_and_enablement_are_server_managed(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = get_config();
+    config.machine_validation_config.approved_plugin_registries =
+        vec!["registry.example.com".to_owned()];
+    config.machine_validation_config.allow_privileged_plugins = true;
+    config.machine_validation_config.allow_full_host_plugins = true;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let plugin = rpc::forge::MachineValidationPlugin {
+        r#type: "container".to_owned(),
+        image: "registry.example.com/plugins/gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        entrypoint: vec!["/plugin/entrypoint".to_owned()],
+        parameters_json: "{}".to_owned(),
+        privileged: true,
+        host_access_full: true,
+    };
+    let created = env
+        .api
+        .add_machine_validation_test(tonic::Request::new(
+            rpc::forge::MachineValidationTestAddRequest {
+                name: "gpu-health".to_owned(),
+                contexts: vec!["Discovery".to_owned()],
+                command: String::new(),
+                args: String::new(),
+                timeout: Some(60),
+                plugin: Some(plugin),
+                ..Default::default()
+            },
+        ))
+        .await?
+        .into_inner();
+
+    let enable_before_verification = env
+        .api
+        .machine_validation_test_enable_disable_test(tonic::Request::new(
+            rpc::forge::MachineValidationTestEnableDisableTestRequest {
+                test_id: created.test_id.clone(),
+                version: created.version.clone(),
+                is_enabled: true,
+            },
+        ))
+        .await;
+    assert_eq!(
+        enable_before_verification.unwrap_err().code(),
+        tonic::Code::InvalidArgument
+    );
+
+    env.api
+        .machine_validation_test_verfied(tonic::Request::new(MachineValidationTestVerfiedRequest {
+            test_id: created.test_id.clone(),
+            version: created.version.clone(),
+        }))
+        .await?;
+
+    // Legacy test-selection policy must not bypass plugin approval state.
+    apply_config_on_startup(
+        &env.api,
+        &MachineValidationConfig {
+            test_selection_mode: MachineValidationTestSelectionMode::EnableAll,
+            approved_plugin_registries: vec!["registry.example.com".to_owned()],
+            allow_privileged_plugins: true,
+            allow_full_host_plugins: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    let after_startup_policy = env
+        .api
+        .get_machine_validation_tests(tonic::Request::new(
+            rpc::forge::MachineValidationTestsGetRequest {
+                test_id: Some(created.test_id.clone()),
+                version: Some(created.version.clone()),
+                ..Default::default()
+            },
+        ))
+        .await?
+        .into_inner()
+        .tests
+        .pop()
+        .expect("created plugin revision must be returned");
+    assert!(!after_startup_policy.is_enabled);
+
+    let enable_before_approval = env
+        .api
+        .machine_validation_test_enable_disable_test(tonic::Request::new(
+            rpc::forge::MachineValidationTestEnableDisableTestRequest {
+                test_id: created.test_id.clone(),
+                version: created.version.clone(),
+                is_enabled: true,
+            },
+        ))
+        .await;
+    assert_eq!(
+        enable_before_approval.unwrap_err().code(),
+        tonic::Code::InvalidArgument
+    );
+
+    env.api
+        .machine_validation_test_approve_full_host(tonic::Request::new(
+            MachineValidationTestFullHostApprovalRequest {
+                test_id: created.test_id.clone(),
+                version: created.version.clone(),
+            },
+        ))
+        .await?;
+    env.api
+        .machine_validation_test_enable_disable_test(tonic::Request::new(
+            rpc::forge::MachineValidationTestEnableDisableTestRequest {
+                test_id: created.test_id.clone(),
+                version: created.version.clone(),
+                is_enabled: true,
+            },
+        ))
+        .await?;
+
+    let test = env
+        .api
+        .get_machine_validation_tests(tonic::Request::new(
+            rpc::forge::MachineValidationTestsGetRequest {
+                test_id: Some(created.test_id),
+                version: Some(created.version),
+                ..Default::default()
+            },
+        ))
+        .await?
+        .into_inner()
+        .tests
+        .pop()
+        .expect("created plugin revision must be returned");
+    assert!(test.verified);
+    assert!(test.full_host_approved);
+    assert!(test.is_enabled);
     Ok(())
 }
 
@@ -1277,6 +1448,7 @@ async fn test_machine_validation_get_unverified_tests(
         custom_tags: vec!["dgxcloud".to_string()],
         components: vec!["GPU".to_string()],
         is_enabled: Some(true),
+        plugin: None,
     };
     let add_update_response = env
         .api
@@ -1306,6 +1478,235 @@ async fn test_machine_validation_get_unverified_tests(
     assert!(!test_list[4].verified);
     assert!(!test_list[5].verified);
 
+    Ok(())
+}
+
+/// A validation run of the fixture's `test_id`, started on demand in
+/// `context`, with its run plan materialized by `mh` itself: (its id, its run
+/// items' ids, the selected test).
+async fn on_demand_run(
+    env: &TestEnv,
+    mh: &TestManagedHost,
+    test_id: &str,
+    context: &str,
+) -> (
+    MachineValidationId,
+    Vec<rpc::common::Uuid>,
+    rpc::forge::MachineValidationTest,
+) {
+    let selected_test = env
+        .api
+        .get_machine_validation_tests(tonic::Request::new(
+            rpc::forge::MachineValidationTestsGetRequest {
+                test_id: Some(test_id.to_string()),
+                ..rpc::forge::MachineValidationTestsGetRequest::default()
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .tests
+        .into_iter()
+        .next()
+        .expect("the machine validation fixture should include the test");
+    let validation_id = on_demand_machine_validation(
+        env,
+        mh.host().id.into(),
+        Vec::new(),
+        vec![selected_test.test_id.clone()],
+        true,
+        vec![context.to_string()],
+    )
+    .await
+    .validation_id
+    .unwrap();
+    env.api
+        .update_machine_validation_run(authenticated_machine_request(
+            run_request(validation_id, &selected_test),
+            mh.host().id,
+        ))
+        .await
+        .unwrap();
+    let run_item_ids = env
+        .api
+        .find_machine_validation_run_item_ids(tonic::Request::new(
+            rpc::forge::MachineValidationRunItemSearchFilter {
+                validation_id: Some(validation_id),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .run_item_ids;
+    (validation_id, run_item_ids, selected_test)
+}
+
+fn run_request(
+    validation_id: MachineValidationId,
+    selected_test: &rpc::forge::MachineValidationTest,
+) -> rpc::forge::MachineValidationRunRequest {
+    rpc::forge::MachineValidationRunRequest {
+        validation_id: Some(validation_id),
+        duration_to_complete: Some(rpc::Duration::from(std::time::Duration::from_secs(60))),
+        total: 1,
+        selected_tests: vec![selected_test.clone()],
+    }
+}
+
+fn denied<T>(result: &Result<tonic::Response<T>, tonic::Status>) -> bool {
+    result
+        .as_ref()
+        .is_err_and(|status| status.code() == tonic::Code::PermissionDenied)
+}
+
+/// The machine-validation calls scout makes for a run are allowed only to the
+/// run's own machine: another machine, here the host's own DPU, is denied
+/// each of them, and a lookup that names another host's run items too is
+/// denied to the host. The other host runs a test that sorts after the
+/// host's, so that lookup returns the host's own item first.
+#[crate::sqlx_test(fixtures("create_machine_validation_tests",))]
+async fn machine_validation_calls_are_scoped_to_the_runs_machine(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let mh = create_host_with_machine_validation(&env, None, None).await;
+    let other = create_host_with_machine_validation(&env, None, None).await;
+    let (validation_id, run_item_ids, selected_test) =
+        on_demand_run(&env, &mh, "forge_dcgm_long_test", "OnDemand").await;
+    let (_, others_run_item_ids, _) =
+        on_demand_run(&env, &other, "forge_shoreline_run_book", "Discovery").await;
+    let host = mh.host().id;
+    let dpu = mh.dpu().id;
+
+    let find_ids = || rpc::forge::MachineValidationRunItemSearchFilter {
+        validation_id: Some(validation_id),
+    };
+    let find_items = || rpc::forge::MachineValidationRunItemsByIdsRequest {
+        run_item_ids: run_item_ids.clone(),
+    };
+    let heartbeat = || rpc::forge::MachineValidationHeartbeatRequest {
+        validation_id: Some(validation_id),
+        target: Some(
+            rpc::forge::machine_validation_heartbeat_request::Target::TestId(
+                selected_test.test_id.clone(),
+            ),
+        ),
+    };
+    let result = || rpc::forge::MachineValidationResultPostRequest {
+        result: Some(rpc::forge::MachineValidationResult {
+            validation_id: Some(validation_id),
+            name: selected_test.name.clone(),
+            description: String::new(),
+            command: "echo".to_string(),
+            args: String::new(),
+            std_out: String::new(),
+            std_err: String::new(),
+            context: "OnDemand".to_string(),
+            exit_code: 0,
+            start_time: Some(Timestamp::from(SystemTime::now())),
+            end_time: Some(Timestamp::from(SystemTime::now())),
+            test_id: Some(selected_test.test_id.clone()),
+        }),
+    };
+    let completed = || rpc::forge::MachineValidationCompletedRequest {
+        machine_id: Some(host.into()),
+        validation_id: Some(validation_id),
+        machine_validation_error: None,
+    };
+
+    let api = &env.api;
+    let as_dpu = [
+        denied(
+            &api.find_machine_validation_run_item_ids(authenticated_machine_request(
+                find_ids(),
+                dpu,
+            ))
+            .await,
+        ),
+        denied(
+            &api.find_machine_validation_run_items_by_ids(authenticated_machine_request(
+                find_items(),
+                dpu,
+            ))
+            .await,
+        ),
+        denied(
+            &api.heartbeat_machine_validation_run(authenticated_machine_request(heartbeat(), dpu))
+                .await,
+        ),
+        denied(
+            &api.update_machine_validation_run(authenticated_machine_request(
+                run_request(validation_id, &selected_test),
+                dpu,
+            ))
+            .await,
+        ),
+        denied(
+            &api.persist_validation_result(authenticated_machine_request(result(), dpu))
+                .await,
+        ),
+        denied(
+            &api.machine_validation_completed(authenticated_machine_request(completed(), dpu))
+                .await,
+        ),
+    ];
+    assert_eq!(as_dpu, [true; 6], "every call is denied to another machine");
+
+    // The host's own calls pass the ownership check; whatever else they meet
+    // afterwards, they are not denied.
+    let as_host = [
+        denied(
+            &api.find_machine_validation_run_item_ids(authenticated_machine_request(
+                find_ids(),
+                host,
+            ))
+            .await,
+        ),
+        denied(
+            &api.find_machine_validation_run_items_by_ids(authenticated_machine_request(
+                find_items(),
+                host,
+            ))
+            .await,
+        ),
+        denied(
+            &api.heartbeat_machine_validation_run(authenticated_machine_request(heartbeat(), host))
+                .await,
+        ),
+        denied(
+            &api.update_machine_validation_run(authenticated_machine_request(
+                run_request(validation_id, &selected_test),
+                host,
+            ))
+            .await,
+        ),
+        denied(
+            &api.persist_validation_result(authenticated_machine_request(result(), host))
+                .await,
+        ),
+        denied(
+            &api.machine_validation_completed(authenticated_machine_request(completed(), host))
+                .await,
+        ),
+    ];
+    assert_eq!(
+        as_host, [false; 6],
+        "no call is denied to the run's own machine"
+    );
+
+    let mixed = api
+        .find_machine_validation_run_items_by_ids(authenticated_machine_request(
+            rpc::forge::MachineValidationRunItemsByIdsRequest {
+                run_item_ids: run_item_ids
+                    .iter()
+                    .chain(&others_run_item_ids)
+                    .cloned()
+                    .collect(),
+            },
+            host,
+        ))
+        .await;
+    assert!(denied(&mixed), "another host's run items are denied");
     Ok(())
 }
 
@@ -1423,6 +1824,25 @@ async fn test_machine_validation_m1_persists_selected_test_and_idempotent_result
             .await?;
     assert_eq!(pending_attempts.len(), 1);
     assert_eq!(pending_attempts[0].state.to_string(), "Pending");
+    let listed_attempts = env
+        .api
+        .find_machine_validation_attempts(tonic::Request::new(
+            rpc::forge::MachineValidationAttemptSearchFilter {
+                run_item_id: run_items[0].run_item_id.clone(),
+            },
+        ))
+        .await?
+        .into_inner()
+        .attempts;
+    assert_eq!(listed_attempts.len(), 1);
+    assert_eq!(listed_attempts[0].attempt_number, 1);
+    assert_eq!(
+        listed_attempts[0]
+            .attempt_id
+            .as_ref()
+            .map(|id| id.value.clone()),
+        Some(pending_attempts[0].id.to_string())
+    );
 
     env.run_machine_state_controller_iteration_until_state_matches(
         &mh.host().id,
@@ -1499,6 +1919,187 @@ async fn test_machine_validation_m1_persists_selected_test_and_idempotent_result
     assert_eq!(running_attempts[0].state.to_string(), "Running");
     assert!(running_attempts[0].last_heartbeat_at.is_some());
 
+    let attempt_id = run_items[0]
+        .current_attempt_id
+        .clone()
+        .expect("run item should have an attempt");
+    let wrong_machine = env
+        .api
+        .append_machine_validation_attempt_log(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogAppendRequest {
+                attempt_id: Some(attempt_id.clone()),
+                sequence: 1,
+                stream: rpc::forge::MachineValidationAttemptLogStream::Stdout as i32,
+                content: "not allowed\n".to_string(),
+            },
+            "not-the-validation-machine",
+        ))
+        .await;
+    assert_eq!(
+        wrong_machine
+            .expect_err("different machine must not append logs")
+            .code(),
+        tonic::Code::PermissionDenied
+    );
+
+    let unspecified_stream = env
+        .api
+        .append_machine_validation_attempt_log(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogAppendRequest {
+                attempt_id: Some(attempt_id.clone()),
+                sequence: 1,
+                stream: rpc::forge::MachineValidationAttemptLogStream::Unspecified as i32,
+                content: "invalid stream\n".to_string(),
+            },
+            mh.host().id,
+        ))
+        .await;
+    assert_eq!(
+        unspecified_stream
+            .expect_err("unspecified log stream should fail")
+            .code(),
+        tonic::Code::InvalidArgument
+    );
+
+    let first_log_chunk = env
+        .api
+        .append_machine_validation_attempt_log(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogAppendRequest {
+                attempt_id: Some(attempt_id.clone()),
+                sequence: 1,
+                stream: rpc::forge::MachineValidationAttemptLogStream::Stdout as i32,
+                content: "starting validation\n".to_string(),
+            },
+            mh.host().id,
+        ))
+        .await?
+        .into_inner();
+    assert!(first_log_chunk.accepted);
+    assert!(!first_log_chunk.truncated);
+
+    let second_log_chunk = env
+        .api
+        .append_machine_validation_attempt_log(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogAppendRequest {
+                attempt_id: Some(attempt_id.clone()),
+                sequence: 2,
+                stream: rpc::forge::MachineValidationAttemptLogStream::Stderr as i32,
+                content: "minor warning\n".to_string(),
+            },
+            mh.host().id,
+        ))
+        .await?
+        .into_inner();
+    assert!(second_log_chunk.accepted);
+
+    // Retrying the same chunk is safe, but a gap in the ordered stream is not.
+    let retry = env
+        .api
+        .append_machine_validation_attempt_log(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogAppendRequest {
+                attempt_id: Some(attempt_id.clone()),
+                sequence: 1,
+                stream: rpc::forge::MachineValidationAttemptLogStream::Stdout as i32,
+                content: "starting validation\n".to_string(),
+            },
+            mh.host().id,
+        ))
+        .await?
+        .into_inner();
+    assert!(retry.accepted);
+    let gap = env
+        .api
+        .append_machine_validation_attempt_log(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogAppendRequest {
+                attempt_id: Some(attempt_id.clone()),
+                sequence: 4,
+                stream: rpc::forge::MachineValidationAttemptLogStream::Stdout as i32,
+                content: "out of order\n".to_string(),
+            },
+            mh.host().id,
+        ))
+        .await;
+    assert_eq!(
+        gap.expect_err("gapped sequence should fail").code(),
+        tonic::Code::InvalidArgument
+    );
+
+    let wrong_machine_page = env
+        .api
+        .get_machine_validation_attempt_logs(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogGetRequest {
+                attempt_id: Some(attempt_id.clone()),
+                after_sequence: 0,
+                limit: 1,
+            },
+            "not-the-validation-machine",
+        ))
+        .await;
+    assert_eq!(
+        wrong_machine_page
+            .expect_err("different machine must not read logs")
+            .code(),
+        tonic::Code::PermissionDenied
+    );
+
+    let oversized_page = env
+        .api
+        .get_machine_validation_attempt_logs(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogGetRequest {
+                attempt_id: Some(attempt_id.clone()),
+                after_sequence: 0,
+                limit: 101,
+            },
+            mh.host().id,
+        ))
+        .await;
+    assert_eq!(
+        oversized_page
+            .expect_err("an oversized log page should fail")
+            .code(),
+        tonic::Code::InvalidArgument
+    );
+
+    let first_page = env
+        .api
+        .get_machine_validation_attempt_logs(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogGetRequest {
+                attempt_id: Some(attempt_id.clone()),
+                after_sequence: 0,
+                limit: 1,
+            },
+            mh.host().id,
+        ))
+        .await?
+        .into_inner();
+    assert!(first_page.has_more);
+    assert_eq!(first_page.chunks.len(), 1);
+    assert_eq!(first_page.chunks[0].sequence, 1);
+    assert_eq!(
+        first_page.chunks[0].stream,
+        rpc::forge::MachineValidationAttemptLogStream::Stdout as i32
+    );
+    assert_eq!(first_page.chunks[0].content, "starting validation\n");
+
+    let second_page = env
+        .api
+        .get_machine_validation_attempt_logs(authenticated_admin_request(
+            rpc::forge::MachineValidationAttemptLogGetRequest {
+                attempt_id: Some(attempt_id.clone()),
+                after_sequence: 1,
+                limit: 1,
+            },
+        ))
+        .await?
+        .into_inner();
+    assert!(!second_page.has_more);
+    assert_eq!(second_page.chunks.len(), 1);
+    assert_eq!(second_page.chunks[0].sequence, 2);
+    assert_eq!(
+        second_page.chunks[0].stream,
+        rpc::forge::MachineValidationAttemptLogStream::Stderr as i32
+    );
+
     let terminal_result = rpc::forge::MachineValidationResult {
         validation_id: Some(validation_id),
         name: selected_test.name.clone(),
@@ -1520,6 +2121,44 @@ async fn test_machine_validation_m1_persists_selected_test_and_idempotent_result
             },
         ))
         .await?;
+
+    let late_log_chunk = env
+        .api
+        .append_machine_validation_attempt_log(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogAppendRequest {
+                attempt_id: Some(attempt_id),
+                sequence: 3,
+                stream: rpc::forge::MachineValidationAttemptLogStream::Stdout as i32,
+                content: "too late\n".to_string(),
+            },
+            mh.host().id,
+        ))
+        .await?
+        .into_inner();
+    assert!(!late_log_chunk.accepted);
+    assert!(!late_log_chunk.truncated);
+
+    // A delivery retry can arrive after result persistence; it must not turn a
+    // known, persisted chunk into a failed delivery.
+    let terminal_retry = env
+        .api
+        .append_machine_validation_attempt_log(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogAppendRequest {
+                attempt_id: Some(
+                    run_items[0]
+                        .current_attempt_id
+                        .clone()
+                        .expect("run item should have an attempt"),
+                ),
+                sequence: 2,
+                stream: rpc::forge::MachineValidationAttemptLogStream::Stderr as i32,
+                content: "minor warning\n".to_string(),
+            },
+            mh.host().id,
+        ))
+        .await?
+        .into_inner();
+    assert!(terminal_retry.accepted);
 
     let previous_run_heartbeat =
         db::machine_validation::find_by_id(&env.pool, &validation_id).await?;
@@ -2114,6 +2753,11 @@ async fn test_machine_validation_tests_on_startup_default_mode(
                 enable: true,
             },
         ],
+        approved_plugin_registries: vec![],
+        allowed_plugin_types: vec!["container".to_owned()],
+        allow_privileged_plugins: false,
+        allow_full_host_plugins: false,
+        attempt_logs: Default::default(),
     };
 
     // Apply config
@@ -2190,6 +2834,11 @@ async fn test_machine_validation_tests_enable_all_mode(
             id: initial_tests[0].test_id.clone(),
             enable: false, // Override first test to be disabled
         }],
+        approved_plugin_registries: vec![],
+        allowed_plugin_types: vec!["container".to_owned()],
+        allow_privileged_plugins: false,
+        allow_full_host_plugins: false,
+        attempt_logs: Default::default(),
     };
 
     // Apply config
@@ -2252,6 +2901,11 @@ async fn test_machine_validation_tests_on_startup_disable_all_mode(
             id: initial_tests[0].test_id.clone(),
             enable: true, // Override first test to be enabled
         }],
+        approved_plugin_registries: vec![],
+        allowed_plugin_types: vec!["container".to_owned()],
+        allow_privileged_plugins: false,
+        allow_full_host_plugins: false,
+        attempt_logs: Default::default(),
     };
 
     // Apply config
@@ -2367,6 +3021,11 @@ async fn test_machine_validation_tests_on_startup_missing_tests_config(
         run_interval: std::time::Duration::from_secs(60),
         stale_run_timeout: std::time::Duration::from_secs(24 * 60 * 60),
         tests: vec![], // Empty test configuration
+        approved_plugin_registries: vec![],
+        allowed_plugin_types: vec!["container".to_owned()],
+        allow_privileged_plugins: false,
+        allow_full_host_plugins: false,
+        attempt_logs: Default::default(),
     };
 
     // Apply config
@@ -2398,6 +3057,11 @@ async fn test_machine_validation_tests_on_startup_missing_tests_config(
         run_interval: std::time::Duration::from_secs(60),
         stale_run_timeout: std::time::Duration::from_secs(24 * 60 * 60),
         tests: vec![], // Empty test configuration
+        approved_plugin_registries: vec![],
+        allowed_plugin_types: vec!["container".to_owned()],
+        allow_privileged_plugins: false,
+        allow_full_host_plugins: false,
+        attempt_logs: Default::default(),
     };
 
     // Apply config

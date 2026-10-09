@@ -46,7 +46,7 @@ impl From<PowerOptions> for rpc::forge::PowerOptions {
             desired_state_updated_at: Some(value.desired_power_state_version.timestamp().into()),
             actual_state: rpc::forge::PowerState::from(value.last_fetched_power_state) as i32,
             actual_state_updated_at: Some(value.last_fetched_updated_at.into()),
-            host_id: Some(value.host_id.into()),
+            host_id: Some(value.host_id),
             desired_power_state_version: value.desired_power_state_version.to_string(),
             next_power_state_fetch_at: Some(value.last_fetched_next_try_at.into()),
             off_counter: value.last_fetched_off_counter,

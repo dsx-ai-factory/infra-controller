@@ -491,14 +491,24 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, apimi.Labels, dbm.Labels)
+	assert.Equal(t, map[string]string(apimi.Labels), dbm.Labels)
 	assert.Equal(t, dbm.HwSkuDeviceType, apimi.HwSkuDeviceType)
 	assert.Equal(t, dbm.IsUsableByTenant, apimi.IsUsableByTenant)
+	t.Run("assignment observed after Ready machine snapshot", func(t *testing.T) {
+		ready := *dbm
+		ready.Status = cdbm.MachineStatusReady
+		ready.IsAssigned = false
+		instance := &cdbm.Instance{ID: uuid.New()}
+		response := NewAPIMachine(&ready, dbmcs, dbmis, dbsds, instance, false, true)
+		assert.Equal(t, cdbm.MachineStatusInUse, response.Status)
+		require.NotNil(t, response.InstanceID)
+		assert.Equal(t, instance.ID.String(), *response.InstanceID)
+		assert.Equal(t, cdbm.MachineStatusReady, ready.Status)
+	})
 }
 
 func TestMachine_NewAPIMachineScoutVersion(t *testing.T) {
 	statusVersion := "2.6.1"
-	legacyVersion := "2.5.0"
 
 	tests := []struct {
 		name     string
@@ -509,29 +519,6 @@ func TestMachine_NewAPIMachineScoutVersion(t *testing.T) {
 			name: "uses Machine status value",
 			metadata: &cdbm.SiteControllerMachine{Machine: &corev1.Machine{
 				Status: &corev1.MachineStatus{LastScoutObservedVersion: &statusVersion},
-			}},
-			want: &statusVersion,
-		},
-		{
-			name: "falls back to deprecated Machine value",
-			metadata: &cdbm.SiteControllerMachine{Machine: &corev1.Machine{
-				LastScoutObservedVersion: &legacyVersion,
-			}},
-			want: &legacyVersion,
-		},
-		{
-			name: "falls back when Machine status version is unset",
-			metadata: &cdbm.SiteControllerMachine{Machine: &corev1.Machine{
-				Status:                   &corev1.MachineStatus{},
-				LastScoutObservedVersion: &legacyVersion,
-			}},
-			want: &legacyVersion,
-		},
-		{
-			name: "prefers Machine status value",
-			metadata: &cdbm.SiteControllerMachine{Machine: &corev1.Machine{
-				Status:                   &corev1.MachineStatus{LastScoutObservedVersion: &statusVersion},
-				LastScoutObservedVersion: &legacyVersion,
 			}},
 			want: &statusVersion,
 		},

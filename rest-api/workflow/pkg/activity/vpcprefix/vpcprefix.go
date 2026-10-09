@@ -20,6 +20,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
@@ -168,7 +169,7 @@ func (mvp ManageVpcPrefix) UpdateVpcPrefixesInDB(ctx context.Context, siteID uui
 	vpcPrefixesToDelete := []*cdbm.VpcPrefix{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if vpcPrefixInventory.InventoryPage == nil || vpcPrefixInventory.InventoryPage.TotalPages == 0 || (vpcPrefixInventory.InventoryPage.CurrentPage == vpcPrefixInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(vpcPrefixInventory.GetInventoryPage()) {
 		for _, vpcPrefix := range existingVpcPrefixIDMap {
 			found := false
 
@@ -360,7 +361,8 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 
 		// Get the IP Block for the VPC Prefix
 		// if existingVpcPrefix is not nil, we use the stored IP Block ID
-		// otherwise we need to find the most specific Ready tenant IPBlock that contains its prefix
+		// otherwise we need to find the most specific Ready tenant IP Block created
+		// through Allocation that contains its prefix
 		ipBlockDAO := cdbm.NewIPBlockDAO(mvp.dbSession)
 		var ipBlock *cdbm.IPBlock
 		if existingVpcPrefix != nil {
@@ -393,12 +395,20 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 			}
 		} else {
 			// Site inventory does not report the REST IPBlock ID for a new VPC Prefix.
-			// Find the most specific Ready tenant IPBlock that contains its prefix.
-			ipBlocks, _, ipBlockErr := ipBlockDAO.GetAll(ctx, tx, cdbm.IPBlockFilterInput{
-				SiteIDs:   []uuid.UUID{site.ID},
-				TenantIDs: []uuid.UUID{vpc.TenantID},
-				Statuses:  []string{cdbm.IPBlockStatusReady},
-			}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+			// Find the most specific Ready tenant IP Block created through Allocation
+			// that contains its prefix.
+			filter := cdbm.IPBlockFilterInput{
+				SiteIDs:  []uuid.UUID{site.ID},
+				Statuses: []string{cdbm.IPBlockStatusReady},
+			}
+			filter.TenantAllocated(vpc.TenantID)
+			ipBlocks, _, ipBlockErr := ipBlockDAO.GetAll(
+				ctx,
+				tx,
+				filter,
+				cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+				nil,
+			)
 			if ipBlockErr != nil {
 				return nil, fmt.Errorf("unable to create VPC Prefix found on Site: failed to retrieve IP Blocks, DB error: %w", ipBlockErr)
 			}
@@ -520,7 +530,7 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 			Prefix:       reportedVpcPrefix.Prefix,
 			PrefixLength: reportedPrefixLength,
 			Status:       cdbm.VpcPrefixStatusReady,
-			CreatedBy:    site.CreatedBy,
+			CreatedBy:    vpc.CreatedBy,
 		})
 		if createErr != nil {
 			return nil, fmt.Errorf("unable to create VPC Prefix found on Site: failed to create VPC Prefix, DB error: %w", createErr)

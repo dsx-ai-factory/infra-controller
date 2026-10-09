@@ -32,6 +32,12 @@ Show details for one host (by host or DPU machine ID):
 Show the summary with IP details:
     $ nico-admin-cli managed-host show --ips
 
+Limit the State column so a long error message doesn't wrap every row:
+    $ nico-admin-cli managed-host show --max-width State=40
+
+Limit a column whose header contains spaces (quote the value):
+    $ nico-admin-cli managed-host show --max-width \"Machine IDs (H/D)=40\"
+
 ")]
 pub(crate) struct Args {
     #[clap(long, action = clap::ArgAction::HelpLong)]
@@ -83,4 +89,7 @@ pub(crate) struct Args {
 
     #[clap(long, action, help = "Show only hosts in quarantine")]
     pub(super) quarantine: bool,
+
+    #[clap(flatten)]
+    pub(super) width: crate::table_utils::MaxWidthArgs,
 }

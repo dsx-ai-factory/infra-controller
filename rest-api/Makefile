@@ -3,7 +3,7 @@
 
 .PHONY: test postgres-up postgres-down ensure-postgres postgres-wait clean check-source-headers fix-source-headers check-command-bundle
 .PHONY: build docker-build docker-build-local
-.PHONY: test-ipam test-site-agent test-site-manager test-workflow test-db test-api test-auth test-common test-cert-manager test-site-workflow test-flow test-powershelf-manager test-nvswitch-manager test-proto migrate core-mock-server-build core-mock-server-start core-mock-server-stop flow-mock-server-build flow-mock-server-start flow-mock-server-stop
+.PHONY: test-ipam test-site-agent test-site-manager test-workflow test-db test-api test-auth test-common test-cert-manager test-site-workflow test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple test-mcp migrate core-mock-server-build core-mock-server-start core-mock-server-stop flow-mock-server-build flow-mock-server-start flow-mock-server-stop
 .PHONY: validate-openapi preview-openapi generate-client
 .PHONY: core-proto core-proto-clean core-proto-fetch core-proto-fmt core-protogen flow-proto flow-protogen tools-build tools-clean
 .PHONY: pre-commit-install pre-commit-run pre-commit-update
@@ -260,7 +260,13 @@ test-nvswitch-manager:
 		DB_NAME=$(POSTGRES_DB) \
 		go test -p 1 ./... -count=1
 
-test: test-ipam test-db test-api test-auth test-common test-cert-manager test-site-workflow test-site-manager test-workflow test-site-agent test-flow test-powershelf-manager test-nvswitch-manager test-proto
+test-sdk-simple:
+	go test ./sdk/simple -count=1
+
+test-mcp:
+	cd mcp && go test -p 1 ./... -count=1
+
+test: test-ipam test-db test-api test-auth test-common test-cert-manager test-site-workflow test-site-manager test-workflow test-site-agent test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple test-mcp
 
 build:
 	mkdir -p $(BUILD_DIR)
@@ -475,6 +481,8 @@ kind-redeploy: docker-build-local kind-load
 	kubectl -n nico-rest rollout restart deployment/nico-rest-cert-manager
 	kubectl -n nico-rest rollout restart deployment/nico-rest-site-manager
 	kubectl -n nico-rest rollout restart statefulset/nico-rest-site-agent
+	@# A Site Agent that is not Ready would block its own rollout, so replace the pod.
+	kubectl -n nico-rest delete pod -l app=nico-rest-site-agent --wait=false
 	@echo "Waiting for rollouts..."
 	kubectl -n nico-rest rollout status deployment/nico-rest-api --timeout=120s
 	kubectl -n nico-rest rollout status deployment/nico-rest-cloud-worker --timeout=120s
@@ -630,10 +638,11 @@ kind-reset-kustomize: kind-reset-infra
 			-p '{"data":{"CORE_GRPC_ADDRESS":"nico-rest-mock-core:11079","CORE_GRPC_SEC_OPT":"0"}}' ; \
 		kubectl -n nico-rest rollout restart statefulset/nico-rest-site-agent ; \
 	fi
-	kubectl -n nico-rest rollout status statefulset/nico-rest-site-agent --timeout=240s
 
 	@echo "Setting up Site Agent secrets..."
-	./scripts/setup-local.sh site-agent
+	@# With LOCAL_CORE=true the Site Agent cannot be Ready until
+	@# configure-local-core-site-agent points it at the local Core, which waits instead.
+	$(if $(filter true,$(LOCAL_CORE)),WAIT_FOR_SITE_AGENT=0) ./scripts/setup-local.sh site-agent
 	@if [ "$(LOCAL_CORE)" = "true" ]; then \
 		$(MAKE) configure-local-core-site-agent ; \
 	fi
@@ -719,7 +728,9 @@ helm-deploy-site-agent:
 		$(if $(filter-out true,$(LOCAL_CORE)),--set envConfig.CORE_GRPC_ADDRESS=nico-rest-mock-core:11079 --set envConfig.CORE_GRPC_SEC_OPT=0) \
 		--timeout 1m || true
 	@echo "Running site bootstrap (setup-local.sh site-agent)..."
-	./scripts/setup-local.sh site-agent
+	@# With LOCAL_CORE=true the Site Agent cannot be Ready until
+	@# configure-local-core-site-agent points it at the local Core.
+	$(if $(filter true,$(LOCAL_CORE)),WAIT_FOR_SITE_AGENT=0) ./scripts/setup-local.sh site-agent
 	@if [ "$(LOCAL_CORE)" = "true" ]; then \
 		$(MAKE) configure-local-core-site-agent ; \
 	fi
@@ -789,11 +800,17 @@ configure-local-core-site-agent:
 		echo "Resolved $$CORE_HOST -> $$IPV4 (using IPv4 to avoid Go IPv6-first dialer issue)" ; \
 		CORE_HOST="$$IPV4" ; \
 	fi ; \
-	echo "Patching site-agent ConfigMap: CORE_GRPC_ADDRESS=$$CORE_HOST:$(LOCAL_CORE_PORT), CORE_GRPC_SEC_OPT=1, SKIP_GRPC_SERVER_AUTH=true..." ; \
+	case "$$CORE_HOST" in \
+		\[*\]) ;; \
+		*:*) CORE_HOST="[$$CORE_HOST]" ;; \
+	esac ; \
+	CORE_ADDRESS="$$CORE_HOST:$(LOCAL_CORE_PORT)" ; \
+	echo "Patching site-agent ConfigMap: CORE_GRPC_ADDRESS=$$CORE_ADDRESS, CORE_GRPC_SEC_OPT=1, SKIP_GRPC_SERVER_AUTH=true..." ; \
 	kubectl -n nico-rest patch configmap nico-rest-site-agent-config --type merge \
-		-p "{\"data\":{\"CORE_GRPC_ADDRESS\":\"$$CORE_HOST:$(LOCAL_CORE_PORT)\",\"CORE_GRPC_SEC_OPT\":\"1\",\"CORE_GRPC_CA_CERT_PATH\":\"/etc/core-grpc/ca.crt\",\"CORE_GRPC_CLIENT_CERT_PATH\":\"/etc/core-grpc/tls.crt\",\"CORE_GRPC_CLIENT_KEY_PATH\":\"/etc/core-grpc/tls.key\",\"CARBIDE_ADDRESS\":\"$$CORE_HOST:$(LOCAL_CORE_PORT)\",\"CARBIDE_SEC_OPT\":\"1\",\"SKIP_GRPC_SERVER_AUTH\":\"true\"}}" ; \
+		-p "{\"data\":{\"CORE_GRPC_ADDRESS\":\"$$CORE_ADDRESS\",\"CORE_GRPC_SEC_OPT\":\"1\",\"CORE_GRPC_CA_CERT_PATH\":\"/etc/core-grpc/ca.crt\",\"CORE_GRPC_CLIENT_CERT_PATH\":\"/etc/core-grpc/tls.crt\",\"CORE_GRPC_CLIENT_KEY_PATH\":\"/etc/core-grpc/tls.key\",\"CARBIDE_ADDRESS\":\"$$CORE_ADDRESS\",\"CARBIDE_SEC_OPT\":\"1\",\"SKIP_GRPC_SERVER_AUTH\":\"true\"}}" ; \
 	echo "Restarting site-agent to pick up local core settings..." ; \
 	kubectl -n nico-rest rollout restart statefulset/nico-rest-site-agent ; \
+	kubectl -n nico-rest delete pod -l app=nico-rest-site-agent --wait=false ; \
 	kubectl -n nico-rest rollout status statefulset/nico-rest-site-agent --timeout=120s
 
 # Setup site-agent with a real site created via the API
@@ -881,6 +898,7 @@ generate-sdk: $(OPENAPI_GENERATOR_JAR)
 	python3 scripts/check_source_headers.py --fix \
 		--include-untracked 'sdk/standard/api_*.go' \
 		--include-untracked 'sdk/standard/model_*.go'
+	python3 scripts/format_sdk_comments.py sdk/standard/model_*.go
 	@echo "Client generated in sdk/standard/"
 	cd sdk/standard && go build ./...
 	@echo "Client compiles successfully"
@@ -898,9 +916,6 @@ lint-openapi:
 preview-openapi:
 	@echo "Starting Redoc UI at http://127.0.0.1:8090"
 	docker run -it --rm -p 8090:80 -v ./openapi/spec.yaml:/usr/share/nginx/html/openapi.yaml -e SPEC_URL=openapi.yaml -e REDOC_OPTIONS="expand-responses=200,201 schemas-expansion-level=2" redocly/redoc:v2.5.1
-
-publish-openapi:
-	npx @redocly/cli build-docs --config=./openapi/redocly.yaml ./openapi/spec.yaml -o ./docs/index.html
 
 # =============================================================================
 # Pre-commit Hooks (TruffleHog Secret Detection)

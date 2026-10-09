@@ -92,7 +92,7 @@ func (p *Processor) resolveRack(
 		return p.inventory.RackByID(ctx, resource.ID, false)
 	}
 
-	return p.inventory.RackByName(ctx, resource.ExternalID, false)
+	return p.inventory.RackByExternalID(ctx, resource.ExternalID, false)
 }
 
 func (p *Processor) resolveComponent(

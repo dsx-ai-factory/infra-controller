@@ -4,13 +4,17 @@
 package workflow
 
 import (
-	"fmt"
-
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/rs/zerolog/log"
 	"gopkg.in/fsnotify.v1"
 )
+
+// CertExpirationMetric is a prometheus metric for Site Agent Temporal
+// certificate expiration. Registered in Init rather than here, because the
+// namespace comes from config that is not loaded yet at package init.
+var CertExpirationMetric prometheus.Gauge
 
 const (
 	// MetricTemporalConnAttempted - Metric Temporal Conn Attempted
@@ -24,6 +28,12 @@ const (
 // Init - initialize the workflow orchestrator
 func (wflow *API) Init() {
 	ManagerAccess.Data.EB.Log.Info().Msg("Workflow: Initializing workflow orchestrator")
+
+	CertExpirationMetric = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
+		Name:      "temporal_cert_expiration",
+		Help:      "The expiration date of the Temporal certificate",
+	})
 
 	prometheus.MustRegister(
 		prometheus.NewCounterFunc(prometheus.CounterOpts{
@@ -55,21 +65,6 @@ func (wflow *API) Init() {
 			func() float64 {
 				return float64(ManagerAccess.Data.EB.Managers.Workflow.State.ConnectionSucc.Load())
 			}))
-}
-
-// GetState - handle http request
-func (wflow *API) GetState() []string {
-	wc := ManagerAccess.Conf.EB.Temporal
-	wt := ManagerAccess.Data.EB.Managers.Workflow
-	var strs []string
-	strs = append(strs, fmt.Sprintln("Temporal Host: ", wc.Host, wc.Port))
-	strs = append(strs, fmt.Sprintln("Temporal Connection Attempted: ", wt.State.ConnectionAttempted.Load()))
-	strs = append(strs, fmt.Sprintln("Temporal Connection Succeeded: ", wt.State.ConnectionSucc.Load()))
-	strs = append(strs, fmt.Sprintln("Temporal Status: ", computils.CompStatus(wt.State.HealthStatus.Load()).String()))
-	strs = append(strs, fmt.Sprintln("Temporal Last Error: ", wt.State.Err()))
-	strs = append(strs, fmt.Sprintln("Temporal Connection Time: ", wt.State.ConnectionTime()))
-
-	return strs
 }
 
 // Start the workflow orchestrator

@@ -18,8 +18,8 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bmc_mock::HostMachineInfo;
 use bmc_mock::injection::InjectionStore;
+use bmc_mock::{ActionError, HostMachineInfo, MockPowerState, ResourceResetType};
 use carbide_uuid::machine::MachineId;
 use uuid::Uuid;
 
@@ -68,6 +68,22 @@ impl DeviceHandle {
             DeviceHandleInner::Machine(handle) => handle.mat_id(),
             DeviceHandleInner::Switch(handle) => handle.mat_id(),
             DeviceHandleInner::PowerShelf(handle) => handle.mat_id(),
+        }
+    }
+
+    pub(crate) fn set_system_power(&self, request: ResourceResetType) -> Result<(), ActionError> {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => handle.set_system_power(request),
+            DeviceHandleInner::Switch(handle) => handle.set_system_power(request),
+            DeviceHandleInner::PowerShelf(handle) => handle.set_system_power(request),
+        }
+    }
+
+    pub(crate) fn power_state(&self) -> MockPowerState {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => handle.power_state(),
+            DeviceHandleInner::Switch(handle) => handle.power_state(),
+            DeviceHandleInner::PowerShelf(handle) => handle.power_state(),
         }
     }
 
@@ -221,6 +237,16 @@ impl DeviceHandle {
         }
     }
 
+    /// The address of the device's host-side endpoint: a switch's NVOS
+    /// management address once it has one. Hosts and power shelves have no
+    /// host endpoint that RMS addresses.
+    pub fn host_ip(&self) -> Option<Ipv4Addr> {
+        match &self.0 {
+            DeviceHandleInner::Switch(handle) => handle.nvos_ip(),
+            DeviceHandleInner::Machine(_) | DeviceHandleInner::PowerShelf(_) => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn for_control_test(dpus: Vec<DpuMachineHandle>, ipmi_port: Option<u16>) -> Self {
         Self::machine(MachineHandle::for_control_test(dpus, ipmi_port))
@@ -239,11 +265,59 @@ impl DeviceHandle {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_control_test_bmc_ip(&self, ip: Option<Ipv4Addr>) {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => handle.set_control_test_bmc_ip(ip),
+            DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => {
+                unreachable!("control-test BMC addresses are only set on machines")
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn for_control_test_in_section(machine_config_section: &str) -> Self {
         Self::machine(MachineHandle::for_control_test_in_section(
             Vec::new(),
             None,
             machine_config_section,
         ))
+    }
+
+    /// A host handle for control-router tests, backed by `host_info`.
+    #[cfg(test)]
+    pub(crate) fn for_control_test_host(
+        host_info: HostMachineInfo,
+        machine_config_section: &str,
+    ) -> Self {
+        Self::machine(MachineHandle::for_control_test_host(
+            host_info,
+            Vec::new(),
+            machine_config_section,
+        ))
+    }
+
+    /// A switch handle for control-router tests with an optional NVOS lease.
+    #[cfg(test)]
+    pub(crate) fn for_control_test_switch(
+        host_info: HostMachineInfo,
+        machine_config_section: &str,
+        nvos_ip: Option<Ipv4Addr>,
+    ) -> Self {
+        Self::switch(SwitchHandle::for_control_test(
+            host_info,
+            machine_config_section,
+            nvos_ip,
+        ))
+    }
+
+    /// Sets the simulated NVOS lease of a switch handle; other devices have none.
+    #[cfg(test)]
+    pub(crate) fn set_control_test_nvos_ip(&self, ip: Option<Ipv4Addr>) {
+        match &self.0 {
+            DeviceHandleInner::Switch(handle) => handle.set_control_test_nvos_ip(ip),
+            DeviceHandleInner::Machine(_) | DeviceHandleInner::PowerShelf(_) => {
+                unreachable!("control-test NVOS addresses are only set on switches")
+            }
+        }
     }
 }

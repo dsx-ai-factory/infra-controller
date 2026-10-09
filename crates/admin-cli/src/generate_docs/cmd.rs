@@ -28,9 +28,8 @@
 //! command, and each (flattened) descendant gets `commands/<command>/<command>-<sub>.md`
 //! beside it, cross-linked via a breadcrumb and a Subcommands table. The four
 //! domain index pages (Hardware/Network/Tenant/Admin) are written from
-//! [`crate::cfg::cli_options::domain_for_command`]. Hand-authored pages
-//! (`README.md`, `workflows.md`, `setup.md`, `rest-cli-parity.md`) are not
-//! touched — operator workflows are editorial and cannot be machine-generated.
+//! [`crate::cfg::cli_options::domain_for_command`]. The hand-authored
+//! `README.md` overview is not touched.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -128,6 +127,13 @@ fn render_node(
     // roff mangles — we re-render them from the clap command instead).
     let man_file = man_dir.join(format!("{}.1", path.join("-")));
     let body = strip_sections(&man_to_markdown(&man_file)?, &["SUBCOMMANDS", "EXTRA"]);
+    let body = clean_pandoc_markdown(&format_markdown_links(&body));
+    let body = if is_machine_validation_log_command(&path) {
+        let usage = cmd.clone().render_usage().to_string();
+        replace_synopsis(&body, usage.strip_prefix("Usage: ").unwrap_or(&usage))
+    } else {
+        body
+    };
 
     let children: Vec<&Command> = cmd
         .get_subcommands()
@@ -186,7 +192,7 @@ fn render_command_page(
     let _ = writeln!(s, "---\n");
     let _ = writeln!(
         s,
-        "**See also:** [{} commands](../../{}.md) · [CLI reference index](../../README.md)",
+        "**Related:** [{} commands](../../{}.md) · [CLI reference index](../../README.md)",
         domain.title(),
         slug(domain),
     );
@@ -199,9 +205,8 @@ fn render_domain_index(domain: CliDomain, rows: &[&(String, String, CliDomain)])
     let _ = writeln!(s, "{}\n", intro(domain));
     let _ = writeln!(
         s,
-        "For global flags and setup, see [the overview](./README.md) and \
-         [`setup.md`](./setup.md). For task-oriented sequences see \
-         [`workflows.md`](./workflows.md).\n"
+        "For build and connection setup, refer to the [NICo Admin CLI guide](../nico-admin-cli.md). \
+         Browse all command groups in the [CLI reference index](./README.md).\n"
     );
     let _ = writeln!(s, "| Command | Description |");
     let _ = writeln!(s, "|---|---|");
@@ -247,7 +252,7 @@ fn breadcrumb(path: &[String], domain: CliDomain) -> String {
         path.last()
             .expect("a command path always has at least the binary")
     ));
-    format!("_{}_", parts.join(" › "))
+    format!("*{}*", parts.join(" › "))
 }
 
 /// Removes the named top-level (`## `) sections from pandoc's markdown, heading
@@ -272,6 +277,213 @@ fn strip_sections(md: &str, names: &[&str]) -> String {
     out
 }
 
+/// Turns documentation references used in terminal help into links that render
+/// correctly in generated command-reference pages. Terminal help keeps the
+/// plain reference, while the Markdown reference gains a reader-friendly label.
+fn format_markdown_links(md: &str) -> String {
+    md.replace(
+        "docs/configuration/templated-ipxe-operating-systems.md",
+        "[Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md)",
+    )
+    .replace(
+        "https://docs.rs/duration-str/latest/duration_str/",
+        "[duration-str documentation](https://docs.rs/duration-str/latest/duration_str/)",
+    )
+    .replace(
+        "https://grafana.example.com",
+        "[https://grafana.example.com](https://grafana.example.com)",
+    )
+    .replace(
+        "https://github.com/NVIDIA/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/managed-host/managed-host-set-primary-interface.md",
+        "[primary-interface command documentation](https://github.com/NVIDIA/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/managed-host/managed-host-set-primary-interface.md)",
+    )
+    .replace(
+        "https://github.com/NVIDIA/infra-controller/blob/main/docs/configuration/tenant_management.md#phone-home",
+        "[Phone-home](../../../../configuration/tenant_management.md#phone-home)",
+    )
+    .replace(
+        "https://github.com/dsx-ai-factory/infra-controller/pull/3706",
+        "[PR #3706](https://github.com/dsx-ai-factory/infra-controller/pull/3706)",
+    )
+    .replace(
+        "https://github.com/dsx-ai-factory/infra-controller/pull/6359",
+        "[Core PATCH RPCs](https://github.com/dsx-ai-factory/infra-controller/pull/6359)",
+    )
+    .replace(
+        "https://host:50051",
+        "[https://host:50051](https://host:50051)",
+    )
+}
+
+/// Cleans up Pandoc's literal-oriented GFM rendering of a man page.
+///
+/// Pandoc escapes the brackets, angle brackets, pipes, and backticks used by
+/// clap's command syntax. Those escapes render correctly, but make every page
+/// unnecessarily difficult to read in source form. Render the synopsis and
+/// option signatures as code, where the punctuation is naturally literal,
+/// and remove the remaining safe escapes from prose.
+fn clean_pandoc_markdown(md: &str) -> String {
+    let mut out = String::new();
+    let mut section = "";
+    let mut synopsis_open = false;
+    let mut in_inline_code = false;
+
+    for line in md.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            if synopsis_open {
+                out.push_str("```\n\n");
+                synopsis_open = false;
+            }
+
+            section = heading.trim();
+            out.push_str(line);
+            out.push_str("\n\n");
+            if section.eq_ignore_ascii_case("SYNOPSIS") {
+                out.push_str("```text\n");
+                synopsis_open = true;
+            }
+            continue;
+        }
+
+        if synopsis_open {
+            if !line.is_empty() {
+                out.push_str(&plain_cli_syntax(line));
+                out.push('\n');
+            }
+            continue;
+        }
+
+        if section.eq_ignore_ascii_case("OPTIONS") && line.starts_with("**") && line.ends_with("  ")
+        {
+            let signature = plain_cli_syntax(line.trim_end());
+            let _ = writeln!(out, "`{signature}`\n");
+            continue;
+        }
+
+        let had_hard_break = line.ends_with("  ");
+        let line = line.trim_end_matches(' ');
+        let line = line.strip_suffix('\\').unwrap_or(line);
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str(&clean_pandoc_prose(line, &mut in_inline_code));
+            out.push('\n');
+            if had_hard_break {
+                out.push('\n');
+            }
+        }
+    }
+
+    if synopsis_open {
+        out.push_str("```\n");
+    }
+
+    while out.contains("\n\n\n") {
+        out = out.replace("\n\n\n", "\n\n");
+    }
+    out
+}
+
+fn plain_cli_syntax(line: &str) -> String {
+    line.replace("**", "")
+        .replace('*', "")
+        .replace("\\[", "[")
+        .replace("\\]", "]")
+        .replace("\\<", "<")
+        .replace("\\>", ">")
+        .replace("\\|", "|")
+        .replace("\\`", "`")
+}
+
+/// `clap_mangen` does not preserve the explicit usage for the Machine
+/// Validation log commands. Render their synopsis from clap's runtime command
+/// tree so required values and paired selectors remain visible in the generated
+/// reference.
+fn is_machine_validation_log_command(path: &[String]) -> bool {
+    path.get(1).is_some_and(|part| part == "machine-validation")
+        && path.get(2).is_some_and(|part| part == "logs")
+}
+
+fn replace_synopsis(markdown: &str, usage: &str) -> String {
+    const SYNOPSIS: &str = "## SYNOPSIS\n\n";
+    let Some(start) = markdown.find(SYNOPSIS) else {
+        return markdown.to_owned();
+    };
+    let content_start = start + SYNOPSIS.len();
+    let Some(next_section) = markdown[content_start..].find("\n## ") else {
+        return markdown.to_owned();
+    };
+    let content_end = content_start + next_section;
+    format!(
+        "{}{}{}{}\n```\n{}",
+        &markdown[..start],
+        SYNOPSIS,
+        "```text\n",
+        usage,
+        &markdown[content_end..]
+    )
+}
+
+/// Removes Pandoc escapes that are unnecessary in normal prose. Escaped angle
+/// brackets are converted to code spans so placeholders cannot be interpreted
+/// as HTML. Angle brackets already inside an escaped backtick pair stay in the
+/// surrounding code span.
+fn clean_pandoc_prose(line: &str, in_inline_code: &mut bool) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+
+    while let Some(pos) = rest.find('\\') {
+        out.push_str(&rest[..pos]);
+        rest = &rest[pos..];
+
+        if let Some(after) = rest.strip_prefix("\\`") {
+            out.push('`');
+            *in_inline_code = !*in_inline_code;
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("\\<") {
+            if let Some(end) = after.find("\\>") {
+                let value = after[..end].trim_matches('*').replace("\\|", "|");
+                if *in_inline_code {
+                    let _ = write!(out, "<{value}>");
+                } else {
+                    let _ = write!(out, "`<{value}>`");
+                }
+                rest = &after[end + 2..];
+            } else if *in_inline_code {
+                out.push('<');
+                rest = after;
+            } else {
+                out.push_str("\\<");
+                rest = after;
+            }
+        } else if let Some(after) = rest.strip_prefix("\\>") {
+            out.push('>');
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("\\[") {
+            out.push('[');
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("\\]") {
+            out.push(']');
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("\\|") {
+            out.push('|');
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("\\#") {
+            out.push_str("`#`");
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("\\*") {
+            out.push_str("`*`");
+            rest = after;
+        } else {
+            out.push('\\');
+            rest = &rest[1..];
+        }
+    }
+
+    out.push_str(rest);
+    out
+}
+
 /// Converts a roff man page to GitHub-flavored markdown via pandoc, demoting the
 /// man page's `# NAME`/`# OPTIONS`/… sections to `## ` so each generated page
 /// can own the `# ` title (the full command invocation).
@@ -280,6 +492,8 @@ fn man_to_markdown(man_file: &Path) -> CarbideCliResult<String> {
     pandoc.add_input(man_file);
     pandoc.set_input_format(pandoc::InputFormat::Other("man".to_string()), Vec::new());
     pandoc.set_output_format(pandoc::OutputFormat::Other("gfm".to_string()), Vec::new());
+    // Keep list spacing consistent across Pandoc versions and with Markdown lint.
+    pandoc.add_option(pandoc::PandocOption::TabStop(2));
     pandoc.add_option(pandoc::PandocOption::ShiftHeadingLevelBy(1));
     pandoc.set_output(pandoc::OutputKind::Pipe);
 
@@ -344,5 +558,84 @@ fn intro(d: CliDomain) -> &'static str {
              and OS images, iPXE templates, extension services, and the site explorer."
         }
         CliDomain::Admin => "CLI and system utilities.",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clean_pandoc_markdown, format_markdown_links, replace_synopsis};
+
+    #[test]
+    fn repository_doc_paths_become_links_in_generated_markdown() {
+        let markdown = "See docs/configuration/templated-ipxe-operating-systems.md.";
+        assert_eq!(
+            format_markdown_links(markdown),
+            "See [Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md)."
+        );
+    }
+
+    #[test]
+    fn bare_urls_become_valid_markdown_links() {
+        let markdown = "See https://docs.rs/duration-str/latest/duration_str/, https://grafana.example.com, https://host:50051, or https://github.com/NVIDIA/infra-controller/blob/main/docs/configuration/tenant_management.md#phone-home.";
+        assert_eq!(
+            format_markdown_links(markdown),
+            "See [duration-str documentation](https://docs.rs/duration-str/latest/duration_str/), [https://grafana.example.com](https://grafana.example.com), [https://host:50051](https://host:50051), or [Phone-home](../../../../configuration/tenant_management.md#phone-home)."
+        );
+    }
+
+    #[test]
+    fn pandoc_escapes_are_replaced_with_markdown_code() {
+        let markdown = concat!(
+            r#"## SYNOPSIS
+
+**nico-admin-cli example** \<**--name**\> \[**--kind**\]
+
+## OPTIONS
+
+**--name** *\<NAME\>* \[default: example\]"#,
+            "  \n",
+            r#"Name containing \<VALUE\>.\
+
+\
+*Possible values:*
+
+- a\|b
+
+An inline \`HostInband\` value and \`mac=\<mac\>\` selector.
+"#,
+        );
+
+        assert_eq!(
+            clean_pandoc_markdown(markdown),
+            r#"## SYNOPSIS
+
+```text
+nico-admin-cli example <--name> [--kind]
+```
+
+## OPTIONS
+
+`--name <NAME> [default: example]`
+
+Name containing `<VALUE>`.
+
+*Possible values:*
+
+- a|b
+
+An inline `HostInband` value and `mac=<mac>` selector.
+"#
+        );
+    }
+
+    #[test]
+    fn explicit_usage_replaces_the_man_page_synopsis() {
+        let markdown =
+            "## NAME\n\nlogs\n\n## SYNOPSIS\n\n```text\nold usage\n```\n\n## DESCRIPTION\n\ntext\n";
+
+        assert_eq!(
+            replace_synopsis(markdown, "nico-admin-cli logs --id <ID>"),
+            "## NAME\n\nlogs\n\n## SYNOPSIS\n\n```text\nnico-admin-cli logs --id <ID>\n```\n\n## DESCRIPTION\n\ntext\n"
+        );
     }
 }

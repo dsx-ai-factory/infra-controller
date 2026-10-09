@@ -19,6 +19,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use base64::Engine;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::RackId;
 use mac_address::MacAddress;
@@ -243,6 +244,31 @@ pub struct UfmCredentialMutationBlocker {
     writer: Arc<dyn CredentialWriter>,
 }
 
+/// Blocks persistent mutations of version 0 of the site-wide BMC root while
+/// local sources own it, and delegates every other writer operation.
+pub struct BmcSiteWideRootV0CredentialMutationBlocker {
+    writer: Arc<dyn CredentialWriter>,
+}
+
+impl BmcSiteWideRootV0CredentialMutationBlocker {
+    /// Wraps a writer with the local-ownership policy for the unversioned root.
+    pub fn new(writer: Arc<dyn CredentialWriter>) -> Self {
+        Self { writer }
+    }
+
+    fn ensure_mutation_allowed(key: &CredentialKey) -> Result<(), SecretsError> {
+        if matches!(
+            key,
+            CredentialKey::BmcCredentials {
+                credential_type: BmcCredentialType::SiteWideRoot,
+            }
+        ) {
+            return Err(SecretsError::BmcSiteWideRootV0CredentialMutationBlocked);
+        }
+        Ok(())
+    }
+}
+
 impl UfmCredentialMutationBlocker {
     /// Wraps a writer with the policy that rejects UFM mutations and delegates
     /// every other credential operation.
@@ -262,6 +288,39 @@ impl UfmCredentialMutationBlocker {
 
 #[async_trait]
 impl CredentialWriter for UfmCredentialMutationBlocker {
+    async fn get_credentials_from_writer(
+        &self,
+        key: &CredentialKey,
+    ) -> Result<Option<Credentials>, SecretsError> {
+        self.writer.get_credentials_from_writer(key).await
+    }
+
+    async fn set_credentials(
+        &self,
+        key: &CredentialKey,
+        credentials: &Credentials,
+    ) -> Result<(), SecretsError> {
+        Self::ensure_mutation_allowed(key)?;
+        self.writer.set_credentials(key, credentials).await
+    }
+
+    async fn create_credentials(
+        &self,
+        key: &CredentialKey,
+        credentials: &Credentials,
+    ) -> Result<(), SecretsError> {
+        Self::ensure_mutation_allowed(key)?;
+        self.writer.create_credentials(key, credentials).await
+    }
+
+    async fn delete_credentials(&self, key: &CredentialKey) -> Result<(), SecretsError> {
+        Self::ensure_mutation_allowed(key)?;
+        self.writer.delete_credentials(key).await
+    }
+}
+
+#[async_trait]
+impl CredentialWriter for BmcSiteWideRootV0CredentialMutationBlocker {
     async fn get_credentials_from_writer(
         &self,
         key: &CredentialKey,
@@ -544,6 +603,16 @@ pub enum CredentialKey {
     RackMaintenanceAccessToken {
         rack_id: RackId,
     },
+
+    /// Firmware artifact access token addressed by a non-secret, operator-defined name.
+    ///
+    /// [`CredentialKey::to_key_str`] encodes the name as one path segment, preserving
+    /// its UTF-8 bytes without giving separators or traversal segments path semantics.
+    FirmwareArtifactAccessToken {
+        /// Opaque lookup name supplied through the credential API.
+        name: String,
+    },
+
     ContainerRegistry {
         registry: String,
     },
@@ -589,6 +658,10 @@ pub enum CredentialPrefix {
     MqttAuth,
     MachineIdentityEncryptionKey,
     RackMaintenanceAccessToken,
+
+    /// Prefix used to list all named firmware artifact access tokens.
+    FirmwareArtifactAccessToken,
+
     ContainerRegistry,
 }
 
@@ -613,6 +686,7 @@ impl CredentialPrefix {
             Self::MqttAuth => "mqtt/",
             Self::MachineIdentityEncryptionKey => "machine_identity/",
             Self::RackMaintenanceAccessToken => "racks/",
+            Self::FirmwareArtifactAccessToken => "firmware_artifacts/",
             Self::ContainerRegistry => "container_registries/",
         }
     }
@@ -636,6 +710,7 @@ impl CredentialPrefix {
             Self::MqttAuth,
             Self::MachineIdentityEncryptionKey,
             Self::RackMaintenanceAccessToken,
+            Self::FirmwareArtifactAccessToken,
             Self::ContainerRegistry,
         ]
     }
@@ -714,6 +789,9 @@ impl CredentialKey {
                 CredentialPrefix::MachineIdentityEncryptionKey
             }
             Self::RackMaintenanceAccessToken { .. } => CredentialPrefix::RackMaintenanceAccessToken,
+            Self::FirmwareArtifactAccessToken { .. } => {
+                CredentialPrefix::FirmwareArtifactAccessToken
+            }
             Self::ContainerRegistry { .. } => CredentialPrefix::ContainerRegistry,
         }
     }
@@ -835,6 +913,12 @@ impl CredentialKey {
             CredentialKey::RackMaintenanceAccessToken { rack_id } => {
                 Cow::from(format!("racks/{rack_id}/maintenance/access-token"))
             }
+            CredentialKey::FirmwareArtifactAccessToken { name } => {
+                let encoded_name =
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(name.as_bytes());
+
+                Cow::from(format!("firmware_artifacts/{encoded_name}/access-token"))
+            }
             CredentialKey::ContainerRegistry { registry } => {
                 Cow::from(format!("container_registries/{registry}/auth"))
             }
@@ -874,6 +958,17 @@ mod tests {
         assert!(password.chars().any(|c| c.is_lowercase()));
         assert!(password.chars().any(|c| c.is_ascii_digit()));
         assert!(password.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn firmware_artifact_credential_name_is_encoded_in_store_path() {
+        assert_eq!(
+            CredentialKey::FirmwareArtifactAccessToken {
+                name: "../repo/name".to_string(),
+            }
+            .to_key_str(),
+            "firmware_artifacts/Li4vcmVwby9uYW1l/access-token"
+        );
     }
 
     #[test]
@@ -1117,6 +1212,42 @@ mod tests {
                 .get_credentials_from_writer(&key)
                 .await
                 .expect("read delegated credential"),
+            Some(credentials)
+        );
+    }
+
+    #[tokio::test]
+    async fn bmc_site_wide_root_v0_mutation_blocker_is_exact() {
+        let backend = Arc::new(TestCredentialManager::default());
+        let blocker = BmcSiteWideRootV0CredentialMutationBlocker::new(backend.clone());
+        let credentials = Credentials::new("root", "password");
+        let v0 = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRoot,
+        };
+        let v1 = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRootVersioned { version: 1 },
+        };
+
+        for result in [
+            blocker.set_credentials(&v0, &credentials).await,
+            blocker.create_credentials(&v0, &credentials).await,
+            blocker.delete_credentials(&v0).await,
+        ] {
+            assert!(matches!(
+                result,
+                Err(SecretsError::BmcSiteWideRootV0CredentialMutationBlocked)
+            ));
+        }
+
+        blocker
+            .set_credentials(&v1, &credentials)
+            .await
+            .expect("versioned BMC root mutation must reach the backend");
+        assert_eq!(
+            backend
+                .get_credentials_from_writer(&v1)
+                .await
+                .expect("read versioned BMC root from backend"),
             Some(credentials)
         );
     }
@@ -1439,6 +1570,16 @@ mod tests {
                     expect: PathChecks::all_hold(),
                 },
                 Check {
+                    scenario: "firmware artifact access token",
+                    input: Row {
+                        key: CredentialKey::FirmwareArtifactAccessToken {
+                            name: "repository-a".to_string(),
+                        },
+                        expected_prefix: "firmware_artifacts/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
                     scenario: "rack maintenance access token",
                     input: Row {
                         key: CredentialKey::RackMaintenanceAccessToken { rack_id },
@@ -1531,6 +1672,9 @@ mod tests {
                 key_id: "k".to_string(),
             },
             CredentialKey::RackMaintenanceAccessToken { rack_id },
+            CredentialKey::FirmwareArtifactAccessToken {
+                name: "repository-a".to_string(),
+            },
             CredentialKey::ContainerRegistry {
                 registry: "nvcr.io".to_string(),
             },
@@ -1553,6 +1697,7 @@ mod tests {
     #[test]
     fn prefix_all_is_complete() {
         let all = CredentialPrefix::all();
-        assert_eq!(all.len(), 17);
+
+        assert_eq!(all.len(), 18);
     }
 }

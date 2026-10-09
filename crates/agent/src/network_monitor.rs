@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use ::rpc::forge::{self as rpc};
 use ::rpc::forge_tls_client::{ApiConfig, ForgeClientConfig, ForgeTlsClient};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineId};
 use chrono::Utc;
 use clap::ValueEnum;
 use eyre::{Context, Result};
@@ -49,7 +49,7 @@ const DPU_LIST_FETCH_INTERVAL: u64 = 30 * 60; // Interval in seconds for fetchin
 /// Structure to store peer DPU information
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Serialize)]
 pub struct DpuInfo {
-    pub id: MachineId,
+    pub id: DpuMachineId,
     pub ip: IpAddr,
 }
 
@@ -92,14 +92,14 @@ impl DpuPingResult {
 
 /// Network monitor struct handles network connectivity checks
 pub struct NetworkMonitor {
-    machine_id: MachineId,                            // DPU id
+    machine_id: DpuMachineId,                         // DPU id
     metrics: Option<Arc<NetworkMonitorMetricsState>>, // Metrics for monitoring
     pinger: Arc<dyn Ping>,                            // Pinger that help ping DPUs and get results
 }
 
 impl NetworkMonitor {
     pub fn new(
-        machine_id: MachineId,
+        machine_id: DpuMachineId,
         metrics: Option<Arc<NetworkMonitorMetricsState>>,
         pinger: Arc<dyn Ping>,
     ) -> Self {
@@ -380,7 +380,7 @@ impl NetworkMonitor {
     fn record_error_metrics(
         &self,
         error_type: NetworkMonitorError,
-        dest_dpu_id: Option<MachineId>,
+        dest_dpu_id: Option<DpuMachineId>,
     ) {
         if let Some(metrics) = &self.metrics.clone() {
             match dest_dpu_id {

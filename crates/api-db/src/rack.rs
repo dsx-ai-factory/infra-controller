@@ -25,9 +25,12 @@ use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
 use crate::{
-    ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder, ObjectColumnFilter,
+    ColumnInfo, ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult,
+    FilterableQueryBuilder, ObjectColumnFilter,
 };
 
+#[cfg(test)]
+mod test_explicit_columns;
 #[cfg(test)]
 mod test_metadata;
 
@@ -49,7 +52,13 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = Rack>, DB>(
 where
     for<'db> &'db mut DB: DbReader<'db>,
 {
-    let mut query = FilterableQueryBuilder::new("SELECT * FROM racks").filter(&filter);
+    let mut query = FilterableQueryBuilder::new(
+        "SELECT id, rack_profile_id, rack_group_id, config, controller_state,
+                controller_state_version, controller_state_outcome, health_reports,
+                firmware_upgrade_job, nvos_update_job, created, updated, deleted,
+                name, description, labels, version FROM racks",
+    )
+    .filter(&filter);
 
     query
         .build_query_as()
@@ -110,6 +119,12 @@ pub async fn find_ids(
         }
     }
 
+    match filter.deleted {
+        model::DeletedFilter::Exclude => builder.push(" AND deleted IS NULL"),
+        model::DeletedFilter::Only => builder.push(" AND deleted IS NOT NULL"),
+        model::DeletedFilter::Include => &mut builder,
+    };
+
     let query = builder.build_query_as();
     query
         .fetch_all(txn)
@@ -124,6 +139,42 @@ pub async fn create(
     config: &RackConfig,
     expected_metadata: Option<&Metadata>,
 ) -> DatabaseResult<Rack> {
+    create_with_group(
+        txn,
+        rack_id,
+        rack_profile_id,
+        config,
+        expected_metadata,
+        None,
+    )
+    .await
+}
+
+/// Copies both identities from the same expected-rack snapshot at discovery.
+pub async fn create_from_expected(
+    txn: &mut PgConnection,
+    expected: &model::expected_rack::ExpectedRack,
+    config: &RackConfig,
+) -> DatabaseResult<Rack> {
+    create_with_group(
+        txn,
+        &expected.rack_id,
+        Some(&expected.rack_profile_id),
+        config,
+        Some(&expected.metadata),
+        expected.rack_group_id.as_ref(),
+    )
+    .await
+}
+
+async fn create_with_group(
+    txn: &mut PgConnection,
+    rack_id: &RackId,
+    rack_profile_id: Option<&RackProfileId>,
+    config: &RackConfig,
+    expected_metadata: Option<&Metadata>,
+    rack_group_id: Option<&carbide_uuid::rack::RackGroupId>,
+) -> DatabaseResult<Rack> {
     let controller_state = String::from("{\"state\":\"created\"}");
     let controller_state_outcome = String::from("{}");
     let default_metadata = Metadata::default();
@@ -133,8 +184,12 @@ pub async fn create(
         name => name.to_string(),
     };
     let version = ConfigVersion::initial();
-    let query = "INSERT INTO racks(id, rack_profile_id, config, controller_state, controller_state_version, controller_state_outcome, name, description, labels, version)
-            VALUES($1, $2, $3::json, $4::json, $5, $6::json, $7, $8, $9::jsonb, $10) RETURNING *";
+    let query = "INSERT INTO racks(id, rack_profile_id, config, controller_state, controller_state_version, controller_state_outcome, name, description, labels, version, rack_group_id)
+            VALUES($1, $2, $3::json, $4::json, $5, $6::json, $7, $8, $9::jsonb, $10, $11)
+            RETURNING id, rack_profile_id, rack_group_id, config, controller_state,
+                      controller_state_version, controller_state_outcome, health_reports,
+                      firmware_upgrade_job, nvos_update_job, created, updated, deleted,
+                      name, description, labels, version";
     let rack: Rack = sqlx::query_as(query)
         .bind(rack_id)
         .bind(rack_profile_id)
@@ -146,6 +201,7 @@ pub async fn create(
         .bind(&src_metadata.description)
         .bind(sqlx::types::Json(&src_metadata.labels))
         .bind(version)
+        .bind(rack_group_id)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::new(query, e))?;
@@ -178,7 +234,10 @@ pub async fn update(
         END,
         updated = NOW()
         WHERE id = $2
-        RETURNING *"#;
+        RETURNING id, rack_profile_id, rack_group_id, config, controller_state,
+                  controller_state_version, controller_state_outcome, health_reports,
+                  firmware_upgrade_job, nvos_update_job, created, updated, deleted,
+                  name, description, labels, version"#;
     let rack: Rack = sqlx::query_as(query)
         .bind(sqlx::types::Json(config))
         .bind(rack_id)
@@ -207,7 +266,10 @@ pub async fn consume_maintenance_termination_request(
         WHERE id = $1
           AND COALESCE((config->>'maintenance_termination_requested')::boolean, false)
           AND controller_state->>'state' = 'maintenance'
-        RETURNING *"#;
+        RETURNING id, rack_profile_id, rack_group_id, config, controller_state,
+                  controller_state_version, controller_state_outcome, health_reports,
+                  firmware_upgrade_job, nvos_update_job, created, updated, deleted,
+                  name, description, labels, version"#;
     let rack: Rack = sqlx::query_as(query)
         .bind(rack_id)
         .fetch_one(txn)
@@ -217,18 +279,30 @@ pub async fn consume_maintenance_termination_request(
     Ok(rack)
 }
 
+/// `try_update_controller_state` writes the rack state and `new_version`
+/// when the version matches `expected_version` and maintenance is not terminating.
+///
+/// A missing rack, changed version, or `maintenance_termination_requested`
+/// latch while the persisted state is `Maintenance` returns
+/// `NotApplied(ControllerStateNotCurrent)`. A latch outside `Maintenance` does
+/// not block the write. Successful writes return `Applied(())` and remain in the
+/// caller's transaction; database failures remain errors.
 pub async fn try_update_controller_state(
     txn: &mut PgConnection,
     rack_id: &RackId,
     expected_version: ConfigVersion,
     new_version: ConfigVersion,
     new_state: &RackState,
-) -> DatabaseResult<bool> {
+) -> DatabaseResult<ConditionalWrite<(), ControllerStateNotCurrent>> {
     // A termination request is accepted only while the persisted rack state is
     // Maintenance. Scope the latch guard to that state so an invalid or stale
     // latch cannot freeze transitions in every other rack state.
     let query_result = sqlx::query_as::<_, Rack>(
-            "UPDATE racks SET controller_state = $1, controller_state_version = $2 WHERE id = $3 AND controller_state_version = $4 AND NOT (COALESCE((config->>'maintenance_termination_requested')::boolean, false) AND controller_state->>'state' = 'maintenance') RETURNING *",
+            "UPDATE racks SET controller_state = $1, controller_state_version = $2 WHERE id = $3 AND controller_state_version = $4 AND NOT (COALESCE((config->>'maintenance_termination_requested')::boolean, false) AND controller_state->>'state' = 'maintenance')
+             RETURNING id, rack_profile_id, rack_group_id, config, controller_state,
+                       controller_state_version, controller_state_outcome, health_reports,
+                       firmware_upgrade_job, nvos_update_job, created, updated, deleted,
+                       name, description, labels, version",
         )
             .bind(sqlx::types::Json(new_state))
             .bind(new_version)
@@ -238,7 +312,10 @@ pub async fn try_update_controller_state(
             .await
             .map_err(|e| DatabaseError::new("try_update_controller_state", e))?;
 
-    Ok(query_result.is_some())
+    Ok(match query_result {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
 }
 
 pub async fn update_controller_state_outcome(
@@ -257,7 +334,11 @@ pub async fn update_controller_state_outcome(
 }
 
 pub async fn mark_as_deleted(rack_id: &RackId, txn: &mut PgConnection) -> DatabaseResult<Rack> {
-    let query = "UPDATE racks SET updated=NOW(), deleted=NOW() WHERE id=$1 RETURNING *";
+    let query = "UPDATE racks SET updated=NOW(), deleted=NOW() WHERE id=$1
+                 RETURNING id, rack_profile_id, rack_group_id, config, controller_state,
+                           controller_state_version, controller_state_outcome, health_reports,
+                           firmware_upgrade_job, nvos_update_job, created, updated, deleted,
+                           name, description, labels, version";
     let updated_rack = sqlx::query_as(query)
         .bind(rack_id)
         .fetch_one(txn)

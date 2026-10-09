@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carbide_health_metrics::PerObjectMetricsRegistry;
-use carbide_rack::rms_client::test_support::RmsSim;
+use carbide_rack::test_support::RmsSim;
 use carbide_redfish::libredfish::test_support::RedfishSim;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_switch_controller::context::SwitchStateHandlerServices;
@@ -298,7 +298,7 @@ pub(super) async fn transition_switch_controller_state(
     let switch = db_switch::find_by_id(txn, switch_id)
         .await?
         .expect("switch should exist");
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn,
         *switch_id,
         switch.controller_state.version,
@@ -306,6 +306,7 @@ pub(super) async fn transition_switch_controller_state(
         &new_state,
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     Ok(())
 }
 

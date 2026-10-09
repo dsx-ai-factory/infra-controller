@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +43,8 @@ const (
 
 	// AnnotationBMCIP is the BMC IP address annotation.
 	AnnotationBMCIP = "nvidia-infra-controller/mat-bmc-ip"
+	// AnnotationNvosIP is the switch NVOS IP address annotation.
+	AnnotationNvosIP = "nvidia-infra-controller/mat-nvos-ip"
 	// AnnotationAPIState is the API state annotation.
 	AnnotationAPIState = "nvidia-infra-controller/mat-api-state"
 	// AnnotationPowerState is the power state annotation.
@@ -59,6 +62,9 @@ const (
 	MachineTypeHost = "host"
 	// MachineTypeDPU is the machine type for DPUs.
 	MachineTypeDPU = "dpu"
+	// MachineTypeNvos is the machine type for a switch's NVOS endpoint, which
+	// NICo reaches for NMX-C rather than for the switch's BMC.
+	MachineTypeNvos = "nvos"
 
 	// PortNameRedfish is the name of the Redfish port.
 	PortNameRedfish = "redfish"
@@ -66,6 +72,11 @@ const (
 	PortNameIPMI = "ipmi"
 	// PortNameSSH is the name of the SSH port.
 	PortNameSSH = "ssh"
+	// PortNameNmxc is the name of the NMX-C gRPC port on an NVOS Service.
+	PortNameNmxc = "nmxc"
+
+	// NmxcPort is the port NICo expects NMX-C on at a switch NVOS address.
+	NmxcPort = 9370
 
 	// DefaultConcurrency is the default number of concurrent workers for K8s API calls.
 	DefaultConcurrency = 50
@@ -75,6 +86,10 @@ const (
 type ServiceBuilder struct {
 	Namespace    string
 	BaseSelector map[string]string
+	// EnableStateAnnotations controls whether machine state annotations
+	// (api-state, power-state) are included on Services. When false (default),
+	// these annotations are omitted to reduce K8s API update churn.
+	EnableStateAnnotations bool
 	// OwnerRefs maps pod names to their Deployment's OwnerReference.
 	// Services are owned by the machine-a-tron Deployment they route to.
 	OwnerRefs map[string]metav1.OwnerReference
@@ -87,6 +102,15 @@ func BuildServiceName(machineType, matID string) string {
 		shortID = fmt.Sprintf("%s-%s", matID[:12], shortHash(matID))
 	}
 	return fmt.Sprintf("mat-bmc-%s-%s", machineType, shortID)
+}
+
+// BuildNvosServiceName generates a consistent service name for a switch's NVOS endpoint.
+func BuildNvosServiceName(matID string) string {
+	shortID := matID
+	if len(matID) > 12 {
+		shortID = fmt.Sprintf("%s-%s", matID[:12], shortHash(matID))
+	}
+	return fmt.Sprintf("mat-nvos-%s", shortID)
 }
 
 func shortHash(s string) string {
@@ -113,9 +137,11 @@ func (b *ServiceBuilder) BuildService(machine *matclient.MachineStatus, machineT
 	}
 
 	annotations := map[string]string{
-		AnnotationAPIState:          machine.APIState,
-		AnnotationPowerState:        machine.PowerState,
 		AnnotationRedfishListenPort: strconv.Itoa(int(machine.BMC.Redfish.ListenPort)),
+	}
+	if b.EnableStateAnnotations {
+		annotations[AnnotationAPIState] = machine.APIState
+		annotations[AnnotationPowerState] = machine.PowerState
 	}
 	if machine.BMC.IP != nil {
 		annotations[AnnotationBMCIP] = *machine.BMC.IP
@@ -186,9 +212,73 @@ func (b *ServiceBuilder) BuildService(machine *matclient.MachineStatus, machineT
 		}
 	}
 
-	// Set ClusterIP to BMC IP for direct addressing
+	// Publish the BMC IP as an externalIP; clusterIP is left for the apiserver to allocate.
 	if machine.BMC.IP != nil {
-		svc.Spec.ClusterIP = *machine.BMC.IP
+		svc.Spec.ExternalIPs = []string{*machine.BMC.IP}
+	}
+
+	return svc
+}
+
+// BuildNvosService creates a Kubernetes Service for a switch's NVOS endpoint.
+//
+// NICo reaches a rack's NMX-C at a switch NVOS address on port 9370. The
+// Service publishes the switch's leased NVOS address as an externalIP, as the
+// BMC Service publishes the BMC address, with an apiserver-allocated
+// clusterIP, and forwards that port to machine-a-tron's bmc-mock listener,
+// where the hosted NMX-C mock tells switches apart by the address each
+// request was sent to.
+func (b *ServiceBuilder) BuildNvosService(machine *matclient.MachineStatus, podName string) *corev1.Service {
+	labels := map[string]string{
+		LabelManagedBy:   LabelManagedByValue,
+		LabelMatID:       machine.MatID,
+		LabelMachineType: MachineTypeNvos,
+	}
+
+	annotations := map[string]string{
+		AnnotationAPIState:          machine.APIState,
+		AnnotationPowerState:        machine.PowerState,
+		AnnotationRedfishListenPort: strconv.Itoa(int(machine.BMC.Redfish.ListenPort)),
+		AnnotationNvosIP:            *machine.NvosIP,
+	}
+	if machine.HardwareType != nil {
+		annotations[AnnotationHardwareType] = *machine.HardwareType
+	}
+
+	selector := make(map[string]string)
+	for k, v := range b.BaseSelector {
+		selector[k] = v
+	}
+	if podName != "" {
+		selector[LabelPodName] = podName
+	}
+
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        BuildNvosServiceName(machine.MatID),
+			Namespace:   b.Namespace,
+			Labels:      labels,
+			Annotations: annotations,
+		},
+		Spec: corev1.ServiceSpec{
+			Type:        corev1.ServiceTypeClusterIP,
+			ExternalIPs: []string{*machine.NvosIP},
+			Selector:    selector,
+			Ports: []corev1.ServicePort{
+				{
+					Name:       PortNameNmxc,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       NmxcPort,
+					TargetPort: intstr.FromInt32(int32(machine.BMC.Redfish.ListenPort)),
+				},
+			},
+		},
+	}
+
+	if b.OwnerRefs != nil {
+		if ownerRef, ok := b.OwnerRefs[podName]; ok {
+			svc.OwnerReferences = []metav1.OwnerReference{ownerRef}
+		}
 	}
 
 	return svc
@@ -200,14 +290,24 @@ func (b *ServiceBuilder) BuildServicesFromStatus(status *matclient.MachinesStatu
 	var services []*corev1.Service
 
 	for _, machine := range status.Machines {
-		// Build service for the host
-		svc := b.BuildService(&machine, MachineTypeHost, "", podName)
-		services = append(services, svc)
+		// Build service for the host only after DHCP has assigned its BMC IP,
+		// so every Service publishes a BMC address in spec.externalIPs.
+		if machine.BMC.IP != nil && *machine.BMC.IP != "" {
+			services = append(services, b.BuildService(&machine, MachineTypeHost, "", podName))
+		}
 
-		// Build services for DPUs
+		// Build services for DPUs under the same BMC IP gate.
 		for _, dpu := range machine.DPUs {
-			dpuSvc := b.BuildService(&dpu, MachineTypeDPU, machine.MatID, podName)
-			services = append(services, dpuSvc)
+			if dpu.BMC.IP != nil && *dpu.BMC.IP != "" {
+				services = append(services, b.BuildService(&dpu, MachineTypeDPU, machine.MatID, podName))
+			}
+		}
+
+		// A switch is also reachable at its NVOS address once DHCP has assigned
+		// one; an empty address is withheld like an empty BMC address, so it
+		// never reaches externalIPs or the service diff.
+		if machine.DeviceKind == matclient.DeviceKindSwitch && machine.NvosIP != nil && *machine.NvosIP != "" {
+			services = append(services, b.BuildNvosService(&machine, podName))
 		}
 	}
 
@@ -218,12 +318,13 @@ func (b *ServiceBuilder) BuildServicesFromStatus(status *matclient.MachinesStatu
 type ServiceDiff struct {
 	Create   []*corev1.Service
 	Update   []*corev1.Service
-	Recreate []*corev1.Service // Services that need delete+create due to immutable field changes
+	Recreate []*corev1.Service // Services that need delete+create because the immutable clusterIP must change
 	Delete   []string
+	Errors   []error // desired Services withdrawn because another one publishes the same BMC IP
 }
 
-// ComputeServiceDiff calculates the differences between desired and existing services.
-func ComputeServiceDiff(desired []*corev1.Service, existing []*corev1.Service) ServiceDiff {
+// computeServiceDiff calculates the differences between desired and existing services.
+func computeServiceDiff(desired []*corev1.Service, existing []*corev1.Service, logger zerolog.Logger) ServiceDiff {
 	diff := ServiceDiff{}
 
 	existingMap := make(map[string]*corev1.Service)
@@ -241,27 +342,76 @@ func ComputeServiceDiff(desired []*corev1.Service, existing []*corev1.Service) S
 		deduped = append(deduped, svc)
 	}
 
-	// Find services to create or update
+	// Sort by name so the Service that keeps a duplicated BMC IP does not depend
+	// on the order MAT pods report their machines.
+	slices.SortFunc(deduped, func(a, b *corev1.Service) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	// Report a Service whose BMC IP another Service already publishes and drop it
+	// from desiredMap so an existing one is deleted; the apiserver does not check
+	// externalIPs for uniqueness.
+	bmcIPs := make(map[string]string)
+	publishable := make([]*corev1.Service, 0, len(deduped))
 	for _, svc := range deduped {
+		duplicate := false
+		for _, ip := range svc.Spec.ExternalIPs {
+			if owner, claimed := bmcIPs[ip]; claimed {
+				logger.Warn().
+					Str("service", svc.Name).
+					Str("other_service", owner).
+					Str("bmc_ip", ip).
+					Msg("BMC IP already published by another service, withdrawing")
+				diff.Errors = append(diff.Errors,
+					fmt.Errorf("service %s publishes BMC IP %s already published by %s", svc.Name, ip, owner))
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			delete(desiredMap, svc.Name)
+			continue
+		}
+		for _, ip := range svc.Spec.ExternalIPs {
+			bmcIPs[ip] = svc.Name
+		}
+		publishable = append(publishable, svc)
+	}
+
+	// Find services to create or update
+	collisions := 0
+	for _, svc := range publishable {
 		existingSvc, exists := existingMap[svc.Name]
 		if !exists {
 			diff.Create = append(diff.Create, svc)
+		} else if _, collides := bmcIPs[existingSvc.Spec.ClusterIP]; collides {
+			// clusterIP is immutable, so recreate with an apiserver-allocated one.
+			logger.Warn().
+				Str("service", svc.Name).
+				Str("cluster_ip", existingSvc.Spec.ClusterIP).
+				Msg("clusterIP is a published BMC IP, recreating service")
+			preserveForeignMetadata(svc, existingSvc)
+			diff.Recreate = append(diff.Recreate, svc)
+			collisions++
+		} else if isLegacyClusterIPService(existingSvc) {
+			// Legacy Service with the BMC IP as clusterIP: recreate once with it in externalIPs.
+			preserveForeignMetadata(svc, existingSvc)
+			diff.Recreate = append(diff.Recreate, svc)
 		} else if needsUpdate(svc, existingSvc) {
+			// Carry over the immutable, apiserver-allocated clusterIP.
 			svc.ResourceVersion = existingSvc.ResourceVersion
-			// Check if ClusterIP is changing (immutable field)
-			if svc.Spec.ClusterIP != "" && existingSvc.Spec.ClusterIP != "" &&
-				svc.Spec.ClusterIP != existingSvc.Spec.ClusterIP {
-				// ClusterIP changed - need to delete and recreate
-				diff.Recreate = append(diff.Recreate, svc)
-			} else {
-				// Preserve existing ClusterIP if not explicitly set
-				if svc.Spec.ClusterIP == "" {
-					svc.Spec.ClusterIP = existingSvc.Spec.ClusterIP
-				}
-				preserveForeignMetadata(svc, existingSvc)
-				diff.Update = append(diff.Update, svc)
-			}
+			svc.Spec.ClusterIP = existingSvc.Spec.ClusterIP
+			svc.Spec.ClusterIPs = existingSvc.Spec.ClusterIPs
+			preserveForeignMetadata(svc, existingSvc)
+			diff.Update = append(diff.Update, svc)
 		}
+	}
+
+	// Recreates repeat every pass until the BMC network is moved outside the ServiceCIDR.
+	if collisions > 0 {
+		logger.Warn().
+			Int("services", collisions).
+			Msg("BMC network overlaps the ServiceCIDR; move it outside (chart README, Requirements)")
 	}
 
 	// Find services to delete (managed by us but no longer desired)
@@ -334,9 +484,8 @@ func needsUpdate(desired, existing *corev1.Service) bool {
 		}
 	}
 
-	// Check ClusterIP change
-	if desired.Spec.ClusterIP != "" && existing.Spec.ClusterIP != "" &&
-		desired.Spec.ClusterIP != existing.Spec.ClusterIP {
+	// Check the published BMC IP; clusterIP is apiserver-allocated and not compared.
+	if !slices.Equal(desired.Spec.ExternalIPs, existing.Spec.ExternalIPs) {
 		return true
 	}
 
@@ -358,6 +507,17 @@ func needsUpdate(desired, existing *corev1.Service) bool {
 	}
 
 	return false
+}
+
+// isLegacyClusterIPService reports whether a previous controller version built
+// existing with the BMC IP, or a switch's NVOS IP, as clusterIP, which the
+// matching address annotation records.
+func isLegacyClusterIPService(existing *corev1.Service) bool {
+	if len(existing.Spec.ExternalIPs) != 0 || existing.Spec.ClusterIP == "" {
+		return false
+	}
+	return existing.Annotations[AnnotationBMCIP] == existing.Spec.ClusterIP ||
+		existing.Annotations[AnnotationNvosIP] == existing.Spec.ClusterIP
 }
 
 func preserveForeignMetadata(desired, existing *corev1.Service) {
@@ -387,9 +547,11 @@ func isControllerLabel(k string) bool {
 	}
 }
 
+// isControllerAnnotation reports whether k is one of the annotations this
+// controller owns on device Pods.
 func isControllerAnnotation(k string) bool {
 	switch k {
-	case AnnotationBMCIP, AnnotationAPIState, AnnotationPowerState, AnnotationHardwareType, AnnotationRedfishListenPort, AnnotationIPMIListenPort, AnnotationSSHListenPort:
+	case AnnotationBMCIP, AnnotationNvosIP, AnnotationAPIState, AnnotationPowerState, AnnotationHardwareType, AnnotationRedfishListenPort, AnnotationIPMIListenPort, AnnotationSSHListenPort:
 		return true
 	default:
 		return false
@@ -609,7 +771,8 @@ func (r *Reconciler) Reconcile(ctx context.Context) ReconcileResult {
 	}
 
 	// Compute and apply diff
-	diff := ComputeServiceDiff(allDesired, existing)
+	diff := computeServiceDiff(allDesired, existing, r.logger)
+	result.Errors = append(result.Errors, diff.Errors...)
 
 	r.logger.Info().
 		Int("create", len(diff.Create)).
@@ -630,7 +793,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) ReconcileResult {
 		result.Deleted = deleted
 	}
 
-	// Process recreates (delete then create for immutable field changes like ClusterIP)
+	// Process recreates (delete then create for Services whose immutable clusterIP must change)
 	// Skip recreates if any fetch failed to prevent spurious Service removal
 	if !fetchFailed && len(diff.Recreate) > 0 {
 		recreated := r.processRecreatesConcurrently(ctx, diff.Recreate, &result)

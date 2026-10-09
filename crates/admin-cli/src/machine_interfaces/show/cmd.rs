@@ -20,7 +20,7 @@ use std::fmt::Write;
 
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge as forgerpc;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::MachineInterfaceId;
 use prettytable::{Cell, Row, Table};
 use rpc::forge::InterfaceAssociationType;
 use tracing::warn;
@@ -133,7 +133,7 @@ fn convert_machines_to_nice_table(
             machine_interface
                 .machine_id
                 .as_ref()
-                .map(MachineId::to_string)
+                .map(ToString::to_string)
                 .unwrap_or_default()
                 .into(),
             machine_interface.hostname.into(),
@@ -189,7 +189,7 @@ fn convert_machine_to_nice_format(
             machine_interface
                 .attached_dpu_machine_id
                 .as_ref()
-                .map(MachineId::to_string)
+                .map(ToString::to_string)
                 .unwrap_or_default()
                 .into(),
         ),

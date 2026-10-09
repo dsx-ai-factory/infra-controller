@@ -103,6 +103,10 @@ pub struct ManagedHostConfig {
     /// Default: Dell. Override to exercise vendor-dependent paths
     /// (e.g. the post-`set_nic_mode` host power cycle).
     pub vendor: Option<bmc_vendor::BMCVendor>,
+    /// The hardware class the host's exploration report presents, in the shape
+    /// exploration derives. Attestation keys a profile on this, so set `None`
+    /// to model an endpoint no successful exploration has recorded one for.
+    pub hardware_class: Option<String>,
 }
 
 impl ManagedHostConfig {
@@ -286,7 +290,10 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
+            component_integrities: None,
+            component_integrity_unavailable: false,
             vendor: value.vendor,
+            hardware_class: value.hardware_class,
             managers: vec![Manager {
                 id: "iDRAC.Embedded.1".to_string(),
                 ipmi_port: None,
@@ -311,7 +318,9 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                 power_state: PowerState::On,
                 sku: None,
                 boot_order: None,
+                bios_version: None,
                 serial_console_ssh_port: None,
+                processors: None,
             }],
             chassis: vec![Chassis {
                 id: "System.Embedded.1".to_string(),
@@ -350,11 +359,8 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            physical_slot_number: None,
-            compute_tray_index: None,
-            revision_id: None,
-            topology_id: None,
             remediation_error: None,
+            ..Default::default()
         }
     }
 }

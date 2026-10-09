@@ -72,11 +72,14 @@ pub(super) fn register_external_connection_metric(meter: &Meter) -> Arc<AtomicBo
 }
 
 impl FmdsUpdater {
+    /// Pushes the given instance/network config to FMDS and reports whether the
+    /// push succeeded, so callers (the readiness gate) can tell a real apply
+    /// from a dropped one.
     pub(super) async fn update(
         &mut self,
         instance_data: Option<Arc<InstanceMetadata>>,
         network_config: Option<Arc<ManagedHostNetworkConfigResponse>>,
-    ) {
+    ) -> bool {
         match self {
             FmdsUpdater::External {
                 address,
@@ -96,6 +99,7 @@ impl FmdsUpdater {
 
                 // A failed push is dropped: the next main-loop iteration
                 // reconnects and pushes again.
+                let succeeded = result.is_ok();
                 match result {
                     Ok(()) => FmdsPush::Succeeded.emit(),
                     Err(err) => FmdsPush::Failed {
@@ -104,10 +108,12 @@ impl FmdsUpdater {
                     }
                     .emit(),
                 }
+                succeeded
             }
             FmdsUpdater::Embedded(state) => {
                 state.update_instance_data(instance_data);
                 state.update_network_configuration(network_config);
+                true
             }
         }
     }
@@ -219,13 +225,16 @@ impl FmdsGrpcClient {
 
 #[cfg(test)]
 mod test {
-    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+    use std::net::{Ipv4Addr, SocketAddr};
 
+    use carbide_instrument::testing::MetricsCapture;
     use config_version::ConfigVersion;
     use rpc::fmds::UpdateConfigResponse;
     use rpc::fmds::fmds_config_service_server::{FmdsConfigService, FmdsConfigServiceServer};
+    use tokio::net::{TcpListener, TcpSocket};
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
+    use tokio_stream::wrappers::TcpListenerStream;
     use tonic::{Request, Response, Status};
 
     use super::*;
@@ -256,12 +265,18 @@ mod test {
         }
     }
 
-    /// Serves [`RecordingFmdsServer`] on `addr`. The caller owns the returned
-    /// handle and aborts it at the end of the test.
+    /// Serves [`RecordingFmdsServer`] on an already-bound listener. The caller
+    /// owns the returned handle and aborts it at the end of the test.
     fn serve_fmds(
-        addr: SocketAddr,
+        listener: TcpListener,
         reject_updates: bool,
-    ) -> (JoinHandle<()>, mpsc::UnboundedReceiver<FmdsConfigUpdate>) {
+    ) -> (
+        SocketAddr,
+        JoinHandle<()>,
+        mpsc::UnboundedReceiver<FmdsConfigUpdate>,
+    ) {
+        let addr = listener.local_addr().expect("FMDS test server address");
+
         let (updates, received) = mpsc::unbounded_channel();
         let handle = tokio::spawn(async move {
             tonic::transport::Server::builder()
@@ -269,32 +284,12 @@ mod test {
                     updates,
                     reject_updates,
                 }))
-                .serve(addr)
+                .serve_with_incoming(TcpListenerStream::new(listener))
                 .await
                 .expect("FMDS test server");
         });
-        (handle, received)
-    }
 
-    /// Picks a free port. The listener is dropped, so the port is unbound when
-    /// this returns and the caller can serve on it.
-    fn free_addr() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-        let addr = listener.local_addr().expect("local_addr");
-        drop(listener);
-        addr
-    }
-
-    /// [`serve_fmds`] binds on a spawned task, so it is not necessarily
-    /// listening when it returns. Waits until it is.
-    async fn wait_until_listening(addr: SocketAddr) {
-        for _ in 0..100 {
-            if tokio::net::TcpStream::connect(addr).await.is_ok() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("FMDS test server never started listening on {addr}");
+        (addr, handle, received)
     }
 
     fn test_instance_metadata() -> InstanceMetadata {
@@ -329,19 +324,25 @@ mod test {
         )
     }
 
+    async fn update_with_metrics_capture(updater: &mut FmdsUpdater) -> bool {
+        let _metrics = MetricsCapture::start();
+        updater
+            .update(Some(Arc::new(test_instance_metadata())), None)
+            .await
+    }
+
     /// The happy path through [`FmdsUpdater::update`]: it dials the external
     /// FMDS on every call and the update lands on the server.
     #[tokio::test]
     async fn external_updater_connects_and_pushes_every_update() {
-        let addr = free_addr();
-        let (server, mut received) = serve_fmds(addr, false);
-        wait_until_listening(addr).await;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind FMDS test server");
+        let (addr, server, mut received) = serve_fmds(listener, false);
 
         let (mut updater, _) = test_external_updater(format!("http://{addr}"));
 
-        updater
-            .update(Some(Arc::new(test_instance_metadata())), None)
-            .await;
+        assert!(update_with_metrics_capture(&mut updater).await);
 
         let update = received.recv().await.expect("server received an update");
         assert_eq!(update.hostname, "test-host");
@@ -349,9 +350,7 @@ mod test {
         assert!(update.machine_identity.is_some());
 
         // A second iteration reconnects and pushes again.
-        updater
-            .update(Some(Arc::new(test_instance_metadata())), None)
-            .await;
+        assert!(update_with_metrics_capture(&mut updater).await);
 
         let update = received
             .recv()
@@ -364,14 +363,13 @@ mod test {
 
     #[tokio::test]
     async fn external_updater_reports_connection_when_update_is_rejected() {
-        let addr = free_addr();
-        let (server, _) = serve_fmds(addr, true);
-        wait_until_listening(addr).await;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind FMDS test server");
+        let (addr, server, _) = serve_fmds(listener, true);
 
         let (mut updater, last_connect_succeeded) = test_external_updater(format!("http://{addr}"));
-        updater
-            .update(Some(Arc::new(test_instance_metadata())), None)
-            .await;
+        assert!(!update_with_metrics_capture(&mut updater).await);
 
         assert!(last_connect_succeeded.load(Ordering::Relaxed));
 
@@ -383,23 +381,23 @@ mod test {
     /// for its whole lifetime.
     #[tokio::test]
     async fn external_updater_recovers_once_fmds_comes_up() {
-        let addr = free_addr();
+        let socket = TcpSocket::new_v4().expect("create FMDS test socket");
+        socket
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind FMDS test socket");
+        let addr = socket.local_addr().expect("FMDS test server address");
         let (mut updater, last_connect_succeeded) = test_external_updater(format!("http://{addr}"));
         last_connect_succeeded.store(true, Ordering::Relaxed);
 
         // Nothing is listening yet. The push fails and is dropped, but the
         // updater stays usable rather than latching onto a degraded mode.
-        updater
-            .update(Some(Arc::new(test_instance_metadata())), None)
-            .await;
+        assert!(!update_with_metrics_capture(&mut updater).await);
         assert!(!last_connect_succeeded.load(Ordering::Relaxed));
 
         // FMDS shows up, and the next iteration reaches it.
-        let (server, mut received) = serve_fmds(addr, false);
-        wait_until_listening(addr).await;
-        updater
-            .update(Some(Arc::new(test_instance_metadata())), None)
-            .await;
+        let listener = socket.listen(1024).expect("listen on FMDS test socket");
+        let (_, server, mut received) = serve_fmds(listener, false);
+        assert!(update_with_metrics_capture(&mut updater).await);
         assert!(last_connect_succeeded.load(Ordering::Relaxed));
 
         let update = received.recv().await.expect("server received an update");

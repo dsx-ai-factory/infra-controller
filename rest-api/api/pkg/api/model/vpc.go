@@ -6,7 +6,6 @@ package model
 import (
 	"errors"
 	"fmt"
-	"math"
 	"net/netip"
 	"regexp"
 	"slices"
@@ -56,7 +55,9 @@ func NormalizeAPIVpcRoutingProfileForSite(routingProfile string) string {
 	return routingProfile
 }
 
-func normalizeAPIVpcRoutingProfileFromSite(routingProfile string) string {
+// NormalizeAPIVpcRoutingProfileFromSite converts known site-controller routing
+// profile values to the REST API spelling.
+func NormalizeAPIVpcRoutingProfileFromSite(routingProfile string) string {
 	if mapped, ok := apiVpcRoutingProfileFromSiteMap[routingProfile]; ok {
 		return mapped
 	}
@@ -282,8 +283,8 @@ type APIVpcCreateRequest struct {
 	// RoutingProfile specifies the routing profile for the VPC.
 	// This is only supported when `networkVirtualizationType` is `FNN`, or when
 	// `networkVirtualizationType` is omitted and the Site has native networking enabled.
-	// This requires the Tenant to have elevated privileges. Current accepted values
-	// are `privileged-internal`, `internal`, and `external`.
+	// This requires the Tenant to have elevated privileges. The selected value must
+	// be one of the Site-configured profiles returned for the Tenant.
 	RoutingProfile *string `json:"routingProfile"`
 	// RoutingProfileOverrides replaces selected properties from the VPC's named routing profile.
 	RoutingProfileOverrides *APIVpcRoutingProfileOverrides `json:"routingProfileOverrides"`
@@ -304,6 +305,7 @@ func (ascr APIVpcCreateRequest) Validate() error {
 		),
 		validation.Field(&ascr.RoutingProfile,
 			validation.When(ascr.RoutingProfile != nil,
+				validation.Required.Error("`routingProfile` must not be empty"),
 				validation.Length(3, 64).Error("`routingProfile` must contain at least 3 characters and a maximum of 64 characters"),
 				validation.Match(vpcRoutingProfileStartsWithLetterRegexp).Error("`routingProfile` must start with a letter"),
 				validation.Match(vpcRoutingProfileAllowedCharsRegexp).Error("`routingProfile` may only contain letters, numbers, or dashes"),
@@ -334,12 +336,6 @@ func (ascr APIVpcCreateRequest) Validate() error {
 	}
 
 	if ascr.RoutingProfile != nil {
-		if _, ok := apiVpcRoutingProfileToSiteMap[*ascr.RoutingProfile]; !ok {
-			return validation.Errors{
-				"routingProfile": fmt.Errorf("`routingProfile` must be one of %s, %s, or %s", APIVpcRoutingProfilePrivilegedInternal, APIVpcRoutingProfileInternal, APIVpcRoutingProfileExternal),
-			}
-		}
-
 		if ascr.NetworkVirtualizationType != nil && !cdbm.VpcTypeSupportsRoutingProfile(ascr.NetworkVirtualizationType) {
 			return validation.Errors{
 				"routingProfile": errors.New("`routingProfile` is only supported when `networkVirtualizationType` is FNN"),
@@ -353,9 +349,9 @@ func (ascr APIVpcCreateRequest) Validate() error {
 		}
 	}
 
-	if ascr.Vni != nil && (*ascr.Vni < 0 || *ascr.Vni > math.MaxUint16) {
+	if ascr.Vni != nil && (*ascr.Vni < 0 || *ascr.Vni > maxVpcRoutingVni) {
 		return validation.Errors{
-			"vni": fmt.Errorf("VNI must be an integer between 0 and %d", math.MaxUint16),
+			"vni": fmt.Errorf("VNI must be an integer between 0 and %d", maxVpcRoutingVni),
 		}
 	}
 
@@ -377,7 +373,7 @@ func (ascr APIVpcCreateRequest) Validate() error {
 // that the handler has performed any cross-context checks Validate
 // cannot see (e.g. resolved network-virtualization against site
 // config). Specifically, the VNI cast is safe because Validate
-// bounds `Vni` to `[0, MaxUint16]`.
+// bounds `Vni` to `[0, maxVpcRoutingVni]`.
 func (ascr APIVpcCreateRequest) ToProto(vpc *cdbm.Vpc) *corev1.VpcCreationRequest {
 	var vni *uint32
 	if ascr.Vni != nil {
@@ -537,7 +533,7 @@ type APIVpc struct {
 	// ControllerVpcID is the ID of the corresponding VPC in Site Controller
 	ControllerVpcID *string `json:"controllerVpcId"`
 	// Labels is VPC labels specified by user
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// NVLinkLogicalPartitionID is the ID of the NVLinkLogicalPartition
 	NVLinkLogicalPartitionID *string `json:"nvLinkLogicalPartitionId"`
 	// NVLinkLogicalPartitionSummary is the summary of the NVLinkLogicalPartition
@@ -583,7 +579,7 @@ func NewAPIVpc(dbVpc cdbm.Vpc, dbsds []cdbm.StatusDetail, includeEffectiveRoutin
 		InfrastructureProviderID:               util.GetUUIDPtrToStrPtr(&dbVpc.InfrastructureProviderID),
 		TenantID:                               util.GetUUIDPtrToStrPtr(&dbVpc.TenantID),
 		SiteID:                                 util.GetUUIDPtrToStrPtr(&dbVpc.SiteID),
-		Labels:                                 dbVpc.Labels,
+		Labels:                                 APILabels(dbVpc.Labels),
 		Status:                                 dbVpc.Status,
 		NetworkSecurityGroupID:                 dbVpc.NetworkSecurityGroupID,
 		NetworkSecurityGroupPropagationDetails: NewAPINetworkSecurityGroupPropagationDetails(dbVpc.NetworkSecurityGroupPropagationDetails),
@@ -600,7 +596,7 @@ func NewAPIVpc(dbVpc cdbm.Vpc, dbsds []cdbm.StatusDetail, includeEffectiveRoutin
 	}
 
 	if dbVpc.RoutingProfile != nil {
-		routingProfile := normalizeAPIVpcRoutingProfileFromSite(*dbVpc.RoutingProfile)
+		routingProfile := NormalizeAPIVpcRoutingProfileFromSite(*dbVpc.RoutingProfile)
 		apivpc.RoutingProfile = &routingProfile
 	}
 

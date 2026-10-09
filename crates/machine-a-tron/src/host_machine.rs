@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    BmcCommand, HostFirmwareVersions, HostMachineInfo, MachineInfo, SetSystemPowerResult,
-    SystemPowerControl,
+    ActionError, HostFirmwareVersions, HostMachineInfo, MachineInfo, MockPowerState,
+    ResourceResetType,
 };
 use carbide_utils::test_support::certs::create_random_self_signed_cert;
 use carbide_uuid::machine::MachineId;
@@ -35,10 +35,13 @@ use tracing::instrument;
 use uuid::Uuid;
 
 use crate::api_client::ApiClient;
+use crate::bmc_mock_wrapper::BmcCommand;
 use crate::config::{self, MachineATronContext, MachineConfig, PersistedDevice};
 use crate::dhcp_wrapper::{DhcpRelayResult, DhcpResponseInfo, DpuDhcpRelay};
 use crate::dpu_machine::{DpuMachine, DpuMachineHandle};
-use crate::machine_state_machine::{LiveState, MachineStateMachine, PersistedMachine};
+use crate::machine_state_machine::{
+    LiveState, LiveStateCallbacks, MachineStateMachine, PersistedMachine,
+};
 use crate::status::{
     BmcStatus, DeviceKind, DeviceStatus, DeviceStatusConfig, EndpointStatus, InfinibandPortStatus,
 };
@@ -56,6 +59,8 @@ pub(super) struct HostMachine {
     dpus: Vec<DpuMachineHandle>,
 
     bmc_control_rx: mpsc::UnboundedReceiver<BmcCommand>,
+    /// Kept so the handle can drive power the way the BMC mock does.
+    bmc_control_tx: mpsc::UnboundedSender<BmcCommand>,
     // This will be populated with callers waiting for the host to be MachineUp/Ready
     state_waiters: HashMap<String, Vec<oneshot::Sender<()>>>,
     paused: bool,
@@ -76,8 +81,12 @@ fn firmware_entry_matches_host_hw_type(
     match hw_type {
         DellPowerEdgeR750 => vendor.contains("dell") && model.contains("r750"),
         DellPowerEdgeR760Bf4 => vendor.contains("dell") && model.contains("r760"),
-        WiwynnGB200Nvl => vendor.contains("wiwynn") && model.contains("gb200"),
-        LenovoGB300Nvl => vendor.contains("lenovo") && model.contains("gb300"),
+        WiwynnGB200Nvl => {
+            (vendor.contains("wiwynn") || vendor.contains("nvidia")) && model.contains("gb200")
+        }
+        LenovoGB300Nvl => {
+            vendor.contains("lenovo") && (model.contains("gb300") || model == "hg635n_v2")
+        }
         NvidiaDgxGb300 => vendor.contains("nvidia") && model.contains("gb300"),
         NvidiaDgxVr => vendor.contains("nvidia") && model.contains("dgx vr"),
         SupermicroGb300Nvl => vendor.contains("supermicro") && model.contains("gb300"),
@@ -101,8 +110,8 @@ fn desired_host_firmware(
     hw_type: bmc_mock::HardwareType,
     app_context: &MachineATronContext,
 ) -> Option<HostFirmwareVersions> {
-    let entry = app_context
-        .desired_firmware_versions
+    let versions = app_context.desired_firmware_versions.read().unwrap();
+    let entry = versions
         .iter()
         .find(|e| firmware_entry_matches_host_hw_type(hw_type, e))?;
     let bmc = entry
@@ -187,7 +196,7 @@ impl HostMachine {
             MachineInfo::Host(host_info.clone()),
             config,
             app_context.clone(),
-            bmc_control_tx,
+            bmc_control_tx.clone(),
             if !dpus.is_empty() && !dpus_in_nic_mode {
                 Some(DpuDhcpRelay::HostEnd(dpu_dhcp_tx))
             } else {
@@ -206,6 +215,7 @@ impl HostMachine {
             api_state: "Unknown".to_owned(),
 
             bmc_control_rx,
+            bmc_control_tx,
             state_waiters: HashMap::new(),
             paused: true,
             sleep_until: Instant::now(),
@@ -268,7 +278,7 @@ impl HostMachine {
             MachineInfo::Host(host_info.clone()),
             config,
             app_context.clone(),
-            bmc_control_tx,
+            bmc_control_tx.clone(),
             Some(create_random_self_signed_cert()),
             if !dpus.is_empty() && !dpus_in_nic_mode {
                 Some(DpuDhcpRelay::HostEnd(dpu_dhcp_tx))
@@ -288,6 +298,7 @@ impl HostMachine {
             api_state: "Unknown".to_owned(),
 
             bmc_control_rx,
+            bmc_control_tx,
             state_waiters: HashMap::new(),
             paused: true,
             sleep_until: Instant::now(),
@@ -308,6 +319,7 @@ impl HostMachine {
         let dpus = self.dpus.clone();
         let machine_config_section = self.machine_config_section.clone();
         let bmc_injection = self.state_machine.bmc_injection_store();
+        let bmc_control_tx = self.bmc_control_tx.clone();
 
         if !paused {
             self.resume_dpus();
@@ -335,6 +347,7 @@ impl HostMachine {
             dpus,
             machine_config_section,
             bmc_injection,
+            bmc_control_tx,
 
             join_handle: Mutex::new(Some(join_handle)),
         }))
@@ -359,6 +372,7 @@ impl HostMachine {
         tokio::select! {
             _ = tokio::time::sleep_until(self.sleep_until.into()) => {}
             _ = self.api_refresh_interval.tick() => {
+                self.refresh_desired_host_firmware();
                 // Wake up to refresh the API state
                 if DeviceKind::from(self.host_info.hw_type) == DeviceKind::Machine
                     && let Some(machine_id) = self.live_state.read().unwrap().observed_machine_id
@@ -439,6 +453,22 @@ impl HostMachine {
         }
     }
 
+    /// Pick up refreshed desired firmware versions and re-stage the pending upgrades.
+    fn refresh_desired_host_firmware(&mut self) {
+        let desired = desired_host_firmware(self.host_info.hw_type, &self.app_context);
+        if desired == self.host_info.desired_host_firmware {
+            return;
+        }
+        tracing::info!(
+            machine_config_section = %self.machine_config_section,
+            previous_desired_host_firmware = ?self.host_info.desired_host_firmware,
+            desired_host_firmware = ?desired,
+            "Desired host firmware changed; re-staging pending upgrades",
+        );
+        self.host_info.desired_host_firmware = desired.clone();
+        self.state_machine.set_desired_host_firmware(desired);
+    }
+
     fn handle_actor_message(&mut self, message: HostMachineMessage) -> HandleMessageResult {
         match message {
             HostMachineMessage::WaitUntilMachineUpWithApiState(state, reply) => {
@@ -469,16 +499,16 @@ impl HostMachine {
         }
     }
 
-    fn set_system_power(&mut self, request: SystemPowerControl) -> SetSystemPowerResult {
+    fn set_system_power(&mut self, request: ResourceResetType) -> Result<(), ActionError> {
         tracing::debug!(?request, "Received host system-power request",);
 
         match request {
             // Force-restart does not restart DPUs
-            SystemPowerControl::ForceRestart => {}
+            ResourceResetType::ForceRestart => {}
             // Other power actions happen on the DPUs too (power cycle, force-off, etc.)
             _ => {
                 // Graceful restart might not restart DPUs if an OS is running (let's emulate that)
-                if matches!(request, SystemPowerControl::GracefulRestart)
+                if matches!(request, ResourceResetType::GracefulRestart)
                     && self.live_state.read().unwrap().booted_os.0.is_some()
                 {
                     tracing::debug!(
@@ -554,51 +584,74 @@ struct HostMachineActor {
     dpus: Vec<DpuMachineHandle>,
     machine_config_section: String,
     bmc_injection: Arc<InjectionStore>,
+    bmc_control_tx: mpsc::UnboundedSender<BmcCommand>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct MachineHandle(Arc<HostMachineActor>);
 
 impl MachineHandle {
+    /// Drive power through the guard the BMC mock uses, so an RMS power
+    /// request obeys the same rules as a Redfish one.
+    pub(crate) fn set_system_power(&self, request: ResourceResetType) -> Result<(), ActionError> {
+        LiveStateCallbacks::new(self.0.live_state.clone(), self.0.bmc_control_tx.clone())
+            .set_power_state(request)
+    }
+
+    pub(crate) fn power_state(&self) -> MockPowerState {
+        self.0.live_state.read().unwrap().power_state
+    }
+
     #[cfg(test)]
     pub(crate) fn for_control_test(dpus: Vec<DpuMachineHandle>, ipmi_port: Option<u16>) -> Self {
         Self::for_control_test_in_section(dpus, ipmi_port, "test")
     }
 
+    /// A host handle for control-router tests configured by `machine_config_section`.
     #[cfg(test)]
     pub(crate) fn for_control_test_in_section(
         dpus: Vec<DpuMachineHandle>,
         ipmi_port: Option<u16>,
         machine_config_section: &str,
     ) -> Self {
-        let (message_tx, _message_rx) = mpsc::unbounded_channel();
         let mac = mac_address::MacAddress::new([2, 0, 0, 0, 0, 2]);
-        let live_state = LiveState {
-            ipmi_port,
-            ..LiveState::default()
+        let host_info = HostMachineInfo {
+            hw_type: Default::default(),
+            rack_placement: None,
+            bmc_mac_address: mac,
+            serial: "test-host".to_string(),
+            dpus: Vec::new(),
+            non_dpu_mac_address: None,
+            nvos_mac_addresses: Vec::new(),
+            switch_serial_number: None,
+            hw_mac_addr_pool: MacAddressPoolConfig::new(mac, 24).unwrap(),
+            delta_psu_power: None,
+            initial_host_firmware: None,
+            desired_host_firmware: None,
         };
+        let handle = Self::for_control_test_host(host_info, dpus, machine_config_section);
+        handle.0.live_state.write().unwrap().ipmi_port = ipmi_port;
+        handle
+    }
+
+    /// A handle for `host_info` with no actor behind it.
+    #[cfg(test)]
+    pub(crate) fn for_control_test_host(
+        host_info: HostMachineInfo,
+        dpus: Vec<DpuMachineHandle>,
+        machine_config_section: &str,
+    ) -> Self {
+        let (message_tx, _message_rx) = mpsc::unbounded_channel();
         Self(Arc::new(HostMachineActor {
             message_tx,
             join_handle: Mutex::new(None),
-            live_state: Arc::new(RwLock::new(live_state)),
+            live_state: Arc::new(RwLock::new(LiveState::default())),
             mat_id: Uuid::new_v4(),
-            host_info: HostMachineInfo {
-                hw_type: Default::default(),
-                rack_placement: None,
-                bmc_mac_address: mac,
-                serial: "test-host".to_string(),
-                dpus: Vec::new(),
-                non_dpu_mac_address: None,
-                nvos_mac_addresses: Vec::new(),
-                switch_serial_number: None,
-                hw_mac_addr_pool: MacAddressPoolConfig::new(mac, 24).unwrap(),
-                delta_psu_power: None,
-                initial_host_firmware: None,
-                desired_host_firmware: None,
-            },
+            host_info,
             dpus,
             machine_config_section: machine_config_section.to_string(),
             bmc_injection: Arc::new(InjectionStore::new()),
+            bmc_control_tx: mpsc::unbounded_channel().0,
         }))
     }
 
@@ -606,6 +659,12 @@ impl MachineHandle {
     pub(crate) fn with_control_test_ssh_endpoint(self, port: u16) -> Self {
         self.0.live_state.write().unwrap().ssh_endpoint_port = Some(port);
         self
+    }
+
+    /// Stand in for the DHCP lease the actor would otherwise record.
+    #[cfg(test)]
+    pub(crate) fn set_control_test_bmc_ip(&self, ip: Option<Ipv4Addr>) {
+        self.0.live_state.write().unwrap().bmc_ip = ip;
     }
 
     pub(super) fn mat_id(&self) -> Uuid {
@@ -728,6 +787,7 @@ impl MachineHandle {
 
     pub(super) fn persisted(&self) -> PersistedDevice {
         let live_state = self.0.live_state.read().unwrap();
+        let bmc_state = live_state.bmc_persistence.persisted();
         PersistedDevice {
             hw_type: self.0.host_info.hw_type,
             mat_id: self.0.mat_id,
@@ -746,6 +806,7 @@ impl MachineHandle {
                 host_bits: self.0.host_info.hw_mac_addr_pool.host_bits(),
             }),
             active_host_firmware: live_state.active_host_firmware.clone(),
+            bmc_state,
         }
     }
 
@@ -830,5 +891,93 @@ impl MachineHandle {
 
     pub(super) fn bmc_ip(&self) -> Option<Ipv4Addr> {
         self.0.live_state.read().unwrap().bmc_ip
+    }
+}
+
+#[cfg(test)]
+mod firmware_catalog_tests {
+    use carbide_test_support::{Check, check_values};
+
+    use super::*;
+
+    #[test]
+    fn gb300_matches_host_and_hgx_model_names() {
+        check_values(
+            [
+                Check {
+                    scenario: "host system model",
+                    input: ("LenovoAMI", "HG635N_V2"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "HGX system model",
+                    input: ("LenovoAMI", "GB300 1CPU:2GPU Board PC"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "different Lenovo platform",
+                    input: ("Lenovo", "ThinkSystem HS350X V3"),
+                    expect: false,
+                },
+                Check {
+                    scenario: "different GB300 vendor",
+                    input: ("Nvidia", "GB300"),
+                    expect: false,
+                },
+            ],
+            |(vendor, model)| {
+                firmware_entry_matches_host_hw_type(
+                    bmc_mock::HardwareType::LenovoGB300Nvl,
+                    &rpc::forge::DesiredFirmwareVersionEntry {
+                        vendor: vendor.to_string(),
+                        model: model.to_string(),
+                        component_versions: Default::default(),
+                    },
+                )
+            },
+        );
+    }
+
+    #[test]
+    fn gb200_matches_explored_vendor_and_retains_configured_vendor() {
+        check_values(
+            [
+                Check {
+                    scenario: "explored Nvidia vendor",
+                    input: ("Nvidia", "GB200 NVL"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "configured Wiwynn vendor",
+                    input: ("Wiwynn", "GB200 NVL"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "case and separator normalization",
+                    input: ("NVIDIA", "GB200-NVL"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "different Nvidia platform",
+                    input: ("Nvidia", "GB300 NVL"),
+                    expect: false,
+                },
+                Check {
+                    scenario: "different vendor",
+                    input: ("Dell", "GB200 NVL"),
+                    expect: false,
+                },
+            ],
+            |(vendor, model)| {
+                firmware_entry_matches_host_hw_type(
+                    bmc_mock::HardwareType::WiwynnGB200Nvl,
+                    &rpc::forge::DesiredFirmwareVersionEntry {
+                        vendor: vendor.to_string(),
+                        model: model.to_string(),
+                        component_versions: Default::default(),
+                    },
+                )
+            },
+        );
     }
 }

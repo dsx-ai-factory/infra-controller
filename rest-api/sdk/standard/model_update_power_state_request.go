@@ -26,7 +26,7 @@ var _ MappedNullable = &UpdatePowerStateRequest{}
 type UpdatePowerStateRequest struct {
 	// ID of the Site
 	SiteId string `json:"siteId"`
-	// Power control state to apply: - `on`: Power on the target(s) - `off`: Graceful power off - `cycle`: Graceful power cycle (restart) - `forceoff`: Forced power off (immediate) - `forcecycle`: Forced power cycle (immediate restart)
+	// Power control state to apply: - `On`: Power on the target(s) - `Off`: Graceful power off - `Cycle`: Graceful power cycle (restart) - `ForceOff`: Forced power off (immediate) - `ForceCycle`: Forced power cycle (immediate restart) - `ACPowerCycle`: Remove and restore AC power (unsupported on Viking systems)  Exact lowercase forms are also accepted for compatibility.
 	State string `json:"state"`
 	// Optional Operation Rule UUID. When set, pins this operation to the named rule and overrides Flow's default rule resolution.
 	RuleId *string `json:"ruleId,omitempty"`

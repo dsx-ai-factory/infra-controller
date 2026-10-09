@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::StableHostMachineId;
 use clap::Parser;
 
 /// Start the managed-host decommissioning workflow.
@@ -29,5 +29,5 @@ Start decommissioning a ready managed host:
 ")]
 pub(crate) struct Args {
     #[clap(help = "ID of the ready managed host to decommission")]
-    pub(crate) machine_id: MachineId,
+    pub(crate) machine_id: StableHostMachineId,
 }

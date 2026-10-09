@@ -52,6 +52,9 @@ fn dpu_report(nic_mode: BlueFieldOperatingMode) -> EndpointExplorationReport {
 /// we just need a row that `set_pause_remediation` can update.
 fn host_bmc_report() -> EndpointExplorationReport {
     EndpointExplorationReport {
+        component_integrities: None,
+        component_integrity_unavailable: false,
+        hardware_class: None,
         endpoint_type: EndpointType::Bmc,
         vendor: Some(bmc_vendor::BMCVendor::Dell),
         last_exploration_error: None,
@@ -72,7 +75,9 @@ fn host_bmc_report() -> EndpointExplorationReport {
             power_state: PowerState::On,
             sku: None,
             boot_order: None,
+            bios_version: None,
             serial_console_ssh_port: None,
+            processors: None,
         }],
         chassis: vec![Chassis {
             id: String::new(),
@@ -103,11 +108,8 @@ fn host_bmc_report() -> EndpointExplorationReport {
         lockdown_status: None,
         power_shelf_id: None,
         switch_id: None,
-        compute_tray_index: None,
-        physical_slot_number: None,
-        revision_id: None,
-        topology_id: None,
         remediation_error: None,
+        ..Default::default()
     }
 }
 

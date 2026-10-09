@@ -257,6 +257,8 @@ message MlxDeviceInfo {
   string base_mac = 11;
   // status is the status string returned by mlxfwmanager.
   string status = 12;
+  // base_guid is the base GUID reported by MFT, if available.
+  optional string base_guid = 13;
 }
 
 // DeviceFilterSet represents a collection of filters that must all match.
@@ -940,6 +942,33 @@ message MlxAdminDeviceReportRequest {
 // MlxAdminDeviceReportResponse is the response to a device report request.
 message MlxAdminDeviceReportResponse {
   MlxDeviceReport device_report = 1;
+}
+
+// MlxDeviceIdentity retains a device's reported facts and Core's associations.
+message MlxDeviceIdentity {
+  MlxDeviceInfo device_info = 1;
+  // Distinct current managed-DPU associations matching the reported base MAC,
+  // sorted by machine ID. Empty means unknown ownership, not an unmanaged NIC;
+  // more than one means conflicting ownership. These associations do not prove
+  // that an old Scout observation still describes the installed hardware.
+  repeated common.MachineId managed_dpu_machine_ids = 3;
+}
+
+// MlxDeviceIdentityReport derives identity evidence from the stored whole-host
+// Scout observation. Device order is preserved; no functions or chips are merged.
+message MlxDeviceIdentityReport {
+  google.protobuf.Timestamp observed_at = 1;
+  repeated MlxDeviceIdentity devices = 2;
+}
+
+message MlxAdminDeviceIdentitiesRequest {
+  // Required host machine ID. DPU IDs are rejected.
+  common.MachineId machine_id = 1;
+}
+
+message MlxAdminDeviceIdentitiesResponse {
+  // Absent until a whole-host observation is stored. Scout need not be connected.
+  MlxDeviceIdentityReport report = 1;
 }
 
 // ProfileSummary contains summary information about a profile.

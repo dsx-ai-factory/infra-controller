@@ -11,7 +11,10 @@ import (
 	"os"
 	"strconv"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
@@ -28,6 +31,7 @@ import (
 	eventrulestore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/store/postgres"
 	inventorymanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/manager"
 	inventorystore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/store"
+	flowmetrics "github.com/NVIDIA/infra-controller/rest-api/flow/internal/metrics"
 	operationrunmanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun/manager"
 	operationrundispatcher "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun/manager/dispatcher"
 	operationrunplanner "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun/manager/planner"
@@ -270,7 +274,8 @@ func (s *Service) Start(ctx context.Context) (retErr error) {
 		s.session.Close()
 	}()
 
-	certOpt, secure := s.certOption()
+	certOpt, secure, closeTLS := s.certOption()
+	defer closeTLS()
 	authorizer, err := s.newAuthorizer(secure)
 	if err != nil {
 		return err
@@ -333,6 +338,7 @@ func (s *Service) Start(ctx context.Context) (retErr error) {
 		s.taskScheduleStore,
 		dispatcher,
 		s.operationRunManager,
+		s.eventRuleManager,
 		s.conf.DataCipher,
 	)
 	if err != nil {
@@ -362,11 +368,17 @@ func (s *Service) Start(ctx context.Context) (retErr error) {
 	// same completion log as accepted calls. Recovery runs on both sides of
 	// authorization: the outer layer catches authorization panics, while the
 	// inner layer can enrich downstream panic logs with the resolved identity.
-	s.grpcServer = grpc.NewServer(
+	grpcServerOptions := []grpc.ServerOption{
 		certOpt,
-		grpc.ChainUnaryInterceptor(unaryServerInterceptors(authorizer)...),
-		grpc.ChainStreamInterceptor(streamServerInterceptors(authorizer)...),
-	)
+		grpc.ChainUnaryInterceptor(unaryServerInterceptors(authorizer, s.conf.Metrics)...),
+		grpc.ChainStreamInterceptor(streamServerInterceptors(authorizer, s.conf.Metrics)...),
+	}
+	if cotel.TransportEnabled() {
+		// Extract the caller's traceparent before interceptors run so access
+		// logs and authorization decisions join the inbound trace.
+		grpcServerOptions = append(grpcServerOptions, grpc.StatsHandler(otelgrpc.NewServerHandler()))
+	}
+	s.grpcServer = grpc.NewServer(grpcServerOptions...)
 
 	log.Info().Msg("gRPC server is running")
 
@@ -390,21 +402,43 @@ func (s *Service) Start(ctx context.Context) (retErr error) {
 	return nil
 }
 
-func unaryServerInterceptors(authorizer *authz.Authorizer) []grpc.UnaryServerInterceptor {
-	return []grpc.UnaryServerInterceptor{
+func unaryServerInterceptors(
+	authorizer *authz.Authorizer,
+	serverMetrics *flowmetrics.RPCServerMetrics,
+) []grpc.UnaryServerInterceptor {
+	interceptors := []grpc.UnaryServerInterceptor{
 		grpclog.UnaryServerInterceptor(),
 		grpcrecovery.UnaryServerInterceptor(nil),
 		authz.UnaryServerInterceptor(authorizer),
 		grpcrecovery.UnaryServerInterceptor(authz.ServiceIdentityFromContext),
 	}
+	if serverMetrics != nil {
+		interceptors = append(
+			[]grpc.UnaryServerInterceptor{serverMetrics.UnaryServerInterceptor()},
+			interceptors...,
+		)
+	}
+
+	return interceptors
 }
 
-func streamServerInterceptors(authorizer *authz.Authorizer) []grpc.StreamServerInterceptor {
-	return []grpc.StreamServerInterceptor{
+func streamServerInterceptors(
+	authorizer *authz.Authorizer,
+	serverMetrics *flowmetrics.RPCServerMetrics,
+) []grpc.StreamServerInterceptor {
+	interceptors := []grpc.StreamServerInterceptor{
 		grpcrecovery.StreamServerInterceptor(nil),
 		authz.StreamServerInterceptor(authorizer),
 		grpcrecovery.StreamServerInterceptor(authz.ServiceIdentityFromContext),
 	}
+	if serverMetrics != nil {
+		interceptors = append(
+			[]grpc.StreamServerInterceptor{serverMetrics.StreamServerInterceptor()},
+			interceptors...,
+		)
+	}
+
+	return interceptors
 }
 
 // Stop gracefully shuts down the service in dependency order:
@@ -468,13 +502,13 @@ func (s *Service) Stop(ctx context.Context) {
 // If explicit certificate paths are set in the config they take precedence;
 // otherwise CERTDIR / the k8s SPIFFE default is used. The service refuses to
 // start without certificates unless ALLOW_INSECURE_GRPC=true is set.
-func (s *Service) certOption() (grpc.ServerOption, bool) {
-	tlsConfig, source, err := certs.ResolveServer(s.conf.CertConfig)
+func (s *Service) certOption() (grpc.ServerOption, bool, func()) {
+	tlsConfig, source, dynamicConfig, err := certs.ResolveDynamicServer(s.conf.CertConfig)
 	if err != nil {
 		if errors.Is(err, certs.ErrNotPresent) {
 			if os.Getenv("ALLOW_INSECURE_GRPC") == "true" {
 				log.Warn().Msg("TLS certs not present, running without mTLS")
-				return grpc.EmptyServerOption{}, false
+				return grpc.EmptyServerOption{}, false, func() {}
 			}
 			log.Fatal().Msg("TLS certificates required but not found; set ALLOW_INSECURE_GRPC=true for local development")
 		}
@@ -482,7 +516,7 @@ func (s *Service) certOption() (grpc.ServerOption, bool) {
 	}
 
 	log.Info().Msgf("Using certificates from %s", source)
-	return grpc.Creds(credentials.NewTLS(tlsConfig)), true
+	return grpc.Creds(credentials.NewTLS(tlsConfig)), true, dynamicConfig.Close
 }
 
 func (s *Service) newAuthorizer(secure bool) (*authz.Authorizer, error) {

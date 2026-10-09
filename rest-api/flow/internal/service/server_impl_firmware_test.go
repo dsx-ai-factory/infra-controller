@@ -29,8 +29,6 @@ func TestUpgradeFirmwareEncryptsAuthenticationDataBeforeSubmittingTask(t *testin
 	authenticationData := perComponentServiceAuthenticationData(
 		proto.String("compute-token"), nil, nil,
 	)
-	targetVersion := "1.2.3"
-
 	_, err := server.UpgradeFirmware(
 		context.Background(),
 		&pb.UpgradeFirmwareRequest{
@@ -47,8 +45,8 @@ func TestUpgradeFirmwareEncryptsAuthenticationDataBeforeSubmittingTask(t *testin
 					},
 				},
 			},
-			TargetVersion:      &targetVersion,
-			AuthenticationData: authenticationData,
+			AuthenticationData:   authenticationData,
+			OverrideVersionCheck: true,
 		},
 	)
 
@@ -58,6 +56,8 @@ func TestUpgradeFirmwareEncryptsAuthenticationDataBeforeSubmittingTask(t *testin
 
 	var info operations.FirmwareControlTaskInfo
 	require.NoError(t, info.Unmarshal(manager.request.Operation.Info))
+	require.True(t, info.OverrideVersionCheck)
+	require.Empty(t, info.TargetVersion)
 	got, err := firmwareauth.DecryptFor(
 		cipher,
 		info.AuthenticationData,

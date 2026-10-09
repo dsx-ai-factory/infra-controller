@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strconv"
 
@@ -29,7 +30,9 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/vpcprefix"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -43,21 +46,19 @@ import (
 
 // CreateVpcPrefixHandler is the API Handler for creating new VPC prefix
 type CreateVpcPrefixHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateVpcPrefixHandler initializes and returns a new handler for creating VPC prefix
 func NewCreateVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) CreateVpcPrefixHandler {
 	return CreateVpcPrefixHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -73,7 +74,7 @@ func NewCreateVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Success 201 {object} model.APIVpcPrefix
 // @Router /v2/org/{org}/nico/vpcprefix [post]
 func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "Create", c, csh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -157,35 +158,29 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "The Site where the VPC prefix is being created must be in Registered state in order to proceed", nil)
 	}
 
-	// Validate IPBlocks in request
-	// NOTE: model validation ensures non-nil IPv4BlockID
-	ipBlockFilter := cdbm.IPBlockFilterInput{}
-	ipBlockFilter.TenantAllocated(tenant.ID)
-	ipBlock, err := common.GetIPBlockFromIDString(ctx, nil, *apiRequest.IPBlockID, ipBlockFilter, csh.dbSession)
+	// Model validation ensures IPBlockID is not nil and is a UUID. Parse it
+	// before starting the transaction so the allocation lock can be derived
+	// without using a stale IP Block record.
+	ipBlockID, err := uuid.Parse(*apiRequest.IPBlockID)
 	if err != nil {
-		logger.Warn().Err(err).Msg("error getting IPv4 IPBlock in request")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error retrieving ipv4 IPBlock from request", nil)
+		logger.Warn().Err(err).Msg("error parsing IP Block ID in request")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid IP Block ID in request", nil)
 	}
-	if vpc.SiteID != ipBlock.SiteID {
-		logger.Warn().Msg("IPv4 Block specified in request and VPC do not belong to the same Site")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "IPv4 Block specified in request and VPC do not belong to the same Site", nil)
+	requestedPrefixLength, err := apiRequest.GetPrefixLength()
+	if err != nil {
+		logger.Warn().Err(err).Msg("error resolving VPC prefix length")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid Prefix Length: %v in request", requestedPrefixLength), err)
+	}
+	requestedPrefix := netip.Prefix{}
+	if apiRequest.Prefix != nil {
+		requestedPrefix, err = netip.ParsePrefix(*apiRequest.Prefix)
+		if err != nil {
+			logger.Warn().Err(err).Msg("error parsing explicit VPC prefix")
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid Prefix: %v in request", *apiRequest.Prefix), err)
+		}
 	}
 
-	// Check for name uniqueness for the tenant, ie, Tenant cannot have another VPC prefix with same name at the Site
-	// TODO consider doing this with an advisory lock for correctness
 	vpcPrefixDAO := cdbm.NewVpcPrefixDAO(csh.dbSession)
-	vps, tot, err := vpcPrefixDAO.GetAll(ctx, nil, cdbm.VpcPrefixFilterInput{Names: []string{apiRequest.Name}, SiteIDs: []uuid.UUID{vpc.SiteID}, TenantIDs: []uuid.UUID{tenant.ID}}, cdbp.PageInput{}, nil)
-	if err != nil {
-		logger.Error().Err(err).Msg("db error checking for name uniqueness of tenant VPC prefix")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create VPC prefix due to DB error", nil)
-	}
-	if tot > 0 {
-		logger.Warn().Str("tenantId", tenant.ID.String()).Str("name", apiRequest.Name).Msg("VPC prefix with same name already exists for tenant")
-		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "A VPC prefix with specified name already exists for Tenant at this Site", validation.Errors{
-			"id": errors.New(vps[0].ID.String()),
-		})
-	}
-
 	sdDAO := cdbm.NewStatusDetailDAO(csh.dbSession)
 
 	var ssd *cdbm.StatusDetail
@@ -198,17 +193,86 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 	err = cdb.WithTx(ctx, csh.dbSession, func(tx *cdb.Tx) error {
 		// acquire an advisory lock on the parent IP block ID on which there could be contention
 		// this lock is released when the transaction commits or rollsback
-		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(fmt.Sprintf("%s-%s", tenant.ID.String(), ipBlock.ID.String())), nil)
+		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(fmt.Sprintf("%s-%s", tenant.ID.String(), ipBlockID.String())), nil)
 		if derr != nil {
 			// TODO add a retry here
 			logger.Error().Err(derr).Msg("Failed to acquire advisory lock on ipblock")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Error creating VPC prefix, detected multiple parallel request on IP Block by Tenant", nil)
 		}
 
+		// Load and validate the authoritative block state only after acquiring
+		// the allocation lock. A full grant does not create an IPAM child row,
+		// so using a block read before this lock could allow an overlapping
+		// allocation from stale FullGrant state.
+		ipBlockFilter := cdbm.IPBlockFilterInput{Statuses: []string{cdbm.IPBlockStatusReady}}
+		ipBlockFilter.TenantAllocated(tenant.ID)
+		ipBlock, derr := common.GetIPBlockFromIDString(ctx, tx, ipBlockID.String(), ipBlockFilter, csh.dbSession)
+		if derr != nil {
+			logger.Warn().Err(derr).Msg("error getting IP Block in request")
+			return cutil.NewAPIError(http.StatusBadRequest, "Could not find a Ready tenant IP Block specified by ipBlockId", nil)
+		}
+		if vpc.SiteID != ipBlock.SiteID {
+			logger.Warn().Msg("IP Block specified in request and VPC do not belong to the same Site")
+			return cutil.NewAPIError(http.StatusBadRequest, "IP Block specified in request and VPC do not belong to the same Site", nil)
+		}
+
+		family := vpcprefix.IPFamily(ipBlock.ProtocolVersion)
+		maxPrefixLength, knownFamily := family.MaximumPrefixLength(vpc.SlaacEnabled)
+		if !knownFamily {
+			logger.Error().Str("protocolVersion", ipBlock.ProtocolVersion).Msg("IP Block has unsupported protocol version")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Could not determine VPC Prefix length limit", nil)
+		}
+
+		verr = apiRequest.ValidatePrefixLength(maxPrefixLength)
+		if verr != nil {
+			logger.Warn().Err(verr).Msg("error validating VPC prefix length for IP Block and VPC")
+			return cutil.NewAPIError(http.StatusBadRequest, "Error validating VPC prefix creation request data", verr)
+		}
+
+		if apiRequest.Prefix != nil {
+			familyMatches := (family == vpcprefix.IPFamilyIPv4 && requestedPrefix.Addr().Is4()) ||
+				(family == vpcprefix.IPFamilyIPv6 && requestedPrefix.Addr().Is6())
+			if !familyMatches {
+				logger.Warn().Str("prefix", requestedPrefix.String()).Str("protocolVersion", ipBlock.ProtocolVersion).Msg("explicit VPC prefix family does not match IP Block")
+				return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Prefix %s does not match the selected IP Block address family", requestedPrefix.String()), nil)
+			}
+			if !ipBlock.ContainsPrefix(requestedPrefix) {
+				logger.Warn().Str("prefix", requestedPrefix.String()).Str("ipBlockId", ipBlock.ID.String()).Msg("explicit VPC prefix is not contained by IP Block")
+				return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Prefix %s is not contained by the selected IP Block", requestedPrefix.String()), nil)
+			}
+		}
+
+		// Check for name uniqueness for the tenant, ie, Tenant cannot have another VPC prefix with same name at the Site
+		// TODO consider doing this with an advisory lock for correctness
+		vps, tot, derr := vpcPrefixDAO.GetAll(ctx, tx, cdbm.VpcPrefixFilterInput{Names: []string{apiRequest.Name}, SiteIDs: []uuid.UUID{vpc.SiteID}, TenantIDs: []uuid.UUID{tenant.ID}}, cdbp.PageInput{}, nil)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("db error checking for name uniqueness of tenant VPC prefix")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create VPC prefix due to DB error", nil)
+		}
+		if tot > 0 {
+			logger.Warn().Str("tenantId", tenant.ID.String()).Str("name", apiRequest.Name).Msg("VPC prefix with same name already exists for tenant")
+			return cutil.NewAPIError(http.StatusConflict, "A VPC prefix with specified name already exists for Tenant at this Site", validation.Errors{
+				"id": errors.New(vps[0].ID.String()),
+			})
+		}
+
 		// create an IPAM allocation for the VPC prefix
-		// allocate a child prefix in ipam
 		ipamStorage := ipam.NewIpamStorage(csh.dbSession.DB, tx.GetBunTx())
-		childPrefix, derr := ipam.CreateChildIpamEntryForIPBlock(ctx, tx, csh.dbSession, ipamStorage, ipBlock, apiRequest.PrefixLength)
+		var childPrefix *cip.Prefix
+		if apiRequest.PrefixLength != nil {
+			childPrefix, derr = ipam.CreateChildIpamEntryForIPBlock(ctx, tx, csh.dbSession, ipamStorage, ipBlock, requestedPrefixLength)
+		} else {
+			parentPrefix, perr := netip.ParsePrefix(ipam.GetCidrForIPBlock(ctx, ipBlock.Prefix, ipBlock.PrefixLength))
+			if perr != nil {
+				logger.Error().Err(perr).Str("ipBlockId", ipBlock.ID.String()).Msg("failed to parse parent IP Block prefix")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Could not parse selected IP Block prefix", nil)
+			}
+			if requestedPrefix == parentPrefix {
+				childPrefix, derr = ipam.CreateChildIpamEntryForIPBlock(ctx, tx, csh.dbSession, ipamStorage, ipBlock, requestedPrefixLength)
+			} else {
+				childPrefix, derr = ipam.AcquireSpecificChildIpamEntryForIPBlock(ctx, tx, csh.dbSession, ipamStorage, ipBlock, requestedPrefix.String())
+			}
+		}
 		if derr != nil {
 			// printing parent prefix usage to debug the child prefix failure
 			parentPrefix, serr := ipamStorage.ReadPrefix(ctx, ipBlock.Prefix, ipam.GetIpamNamespaceForIPBlock(ctx, ipBlock.RoutingType, ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String()))
@@ -217,6 +281,9 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 			}
 
 			logger.Warn().Err(derr).Msg("failed to create IPAM entry for VPC prefix")
+			if apiRequest.Prefix != nil {
+				return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Could not reserve requested prefix %s", requestedPrefix.String()), nil)
+			}
 			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Could not create IPAM entry for VPC prefix. Details: %s", derr.Error()), nil)
 		}
 		logger.Info().Str("childCidr", childPrefix.Cidr).Msg("created child cidr for VPC prefix")
@@ -224,7 +291,7 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 		// Create VPC prefix in DB with the initial Core lifecycle state.
 		status := cdbm.VpcPrefixStatusProvisioning
 		statusMsg := "VPC Prefix is being provisioned on Site"
-		vpcPrefix, derr := vpcPrefixDAO.Create(ctx, tx, cdbm.VpcPrefixCreateInput{Name: apiRequest.Name, TenantOrg: org, SiteID: site.ID, VpcID: vpc.ID, TenantID: tenant.ID, IpBlockID: &ipBlock.ID, Prefix: childPrefix.Cidr, PrefixLength: apiRequest.PrefixLength, Status: status, CreatedBy: dbUser.ID})
+		vpcPrefix, derr := vpcPrefixDAO.Create(ctx, tx, cdbm.VpcPrefixCreateInput{Name: apiRequest.Name, TenantOrg: org, SiteID: site.ID, VpcID: vpc.ID, TenantID: tenant.ID, IpBlockID: &ipBlock.ID, Prefix: childPrefix.Cidr, PrefixLength: requestedPrefixLength, Status: status, CreatedBy: dbUser.ID})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("unable to create VPC prefix record in DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed creating VPC prefix record", nil)
@@ -280,7 +347,7 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 			if errors.As(wferr, &timeoutErr) || wferr == context.DeadlineExceeded || workflowCtx.Err() != nil {
 				logger.Error().Err(wferr).Msg("failed to create VPC prefix, timeout occurred executing workflow on Site.")
 				timeoutResp = func() error {
-					return common.TerminateWorkflowOnTimeOut(c, logger, stc, wid, wferr, "VPCPrefix", "Create")
+					return common.TerminateWorkflowOnTimeOut(c, logger, stc, wid, wferr, "VPCPrefix", "CreateVpcPrefix")
 				}
 				return cutil.NewAPIError(http.StatusInternalServerError, "VPC Prefix create workflow timed out", nil)
 			}
@@ -318,19 +385,17 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 
 // GetAllVpcPrefixHandler is the API Handler for getting all VpcPrefixs
 type GetAllVpcPrefixHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllVpcPrefixHandler initializes and returns a new handler for getting all VpcPrefixs
 func NewGetAllVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllVpcPrefixHandler {
 	return GetAllVpcPrefixHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -353,7 +418,7 @@ func NewGetAllVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Success 200 {object} []model.APIVpcPrefix
 // @Router /v2/org/{org}/nico/vpcprefix [get]
 func (gash GetAllVpcPrefixHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "GetAll", c, gash.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -465,7 +530,7 @@ func (gash GetAllVpcPrefixHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gash.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Create response
@@ -562,19 +627,17 @@ func (gash GetAllVpcPrefixHandler) Handle(c echo.Context) error {
 
 // GetVpcPrefixHandler is the API Handler for retrieving VPC prefix
 type GetVpcPrefixHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetVpcPrefixHandler initializes and returns a new handler to retrieve VPC prefix
 func NewGetVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetVpcPrefixHandler {
 	return GetVpcPrefixHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -592,7 +655,7 @@ func NewGetVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Success 200 {object} model.APIVpcPrefix
 // @Router /v2/org/{org}/nico/vpcprefix/{id} [get]
 func (gsh GetVpcPrefixHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "Get", c, gsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -643,7 +706,7 @@ func (gsh GetVpcPrefixHandler) Handle(c echo.Context) error {
 	// Get VPC prefix ID from URL param
 	sStrID := c.Param("id")
 
-	gsh.tracerSpan.SetAttribute(handlerSpan, attribute.String("VpcPrefixId", sStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("VpcPrefixId", sStrID))
 
 	sID, err := uuid.Parse(sStrID)
 	if err != nil {
@@ -663,10 +726,11 @@ func (gsh GetVpcPrefixHandler) Handle(c echo.Context) error {
 	// Check that VPC prefix exists
 	vpcPrefix, err := vpDAO.GetByID(ctx, nil, sID, queryIncludeRelations)
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		if err == cdb.ErrDoesNotExist {
+			logger.Warn().Err(err).Msg("VPC prefix not found")
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve VPC prefix to update", nil)
 		}
+		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Could not retrieve VPC prefix to update", nil)
 	}
 
@@ -697,8 +761,10 @@ func (gsh GetVpcPrefixHandler) Handle(c echo.Context) error {
 		}
 		var ok bool
 		vpusage, ok = prefixUsageMap[vpcPrefix.ID]
-		if !ok {
-			logger.Error().Str("vpcPrefixId", vpcPrefix.ID.String()).Msg("VPC prefix missing CIDR for usage stats")
+		// REST usage stats model IPv4 Interface allocations. IPv6 prefixes
+		// intentionally have no usage entry and remain valid responses.
+		if !ok && vpcPrefix.IPBlock.ProtocolVersion != cdbm.IPBlockProtocolVersionV6 {
+			logger.Error().Str("vpcPrefixId", vpcPrefix.ID.String()).Msg("IPv4 VPC prefix missing usage stats")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Usage Stats for VPC prefix", nil)
 		}
 	}
@@ -713,21 +779,19 @@ func (gsh GetVpcPrefixHandler) Handle(c echo.Context) error {
 
 // UpdateVpcPrefixHandler is the API Handler for updating a VPC prefix
 type UpdateVpcPrefixHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateVpcPrefixHandler initializes and returns a new handler for updating VPC prefix
 func NewUpdateVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateVpcPrefixHandler {
 	return UpdateVpcPrefixHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -744,7 +808,7 @@ func NewUpdateVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Success 200 {object} model.APIVpcPrefix
 // @Router /v2/org/{org}/nico/vpcprefix/{id} [patch]
 func (ush UpdateVpcPrefixHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "Update", c, ush.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -773,7 +837,7 @@ func (ush UpdateVpcPrefixHandler) Handle(c echo.Context) error {
 	// Get VPC prefix ID from URL param
 	sStrID := c.Param("id")
 
-	ush.tracerSpan.SetAttribute(handlerSpan, attribute.String("VpcPrefixId", sStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("VpcPrefixId", sStrID))
 
 	sID, err := uuid.Parse(sStrID)
 	if err != nil {
@@ -808,10 +872,11 @@ func (ush UpdateVpcPrefixHandler) Handle(c echo.Context) error {
 	// Check that VPC prefix exists
 	vpcPrefix, err := vpDAO.GetByID(ctx, nil, sID, nil)
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		if err == cdb.ErrDoesNotExist {
+			logger.Warn().Err(err).Msg("VPC prefix not found")
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve VPC prefix to update", nil)
 		}
+		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Could not retrieve VPC prefix to update", nil)
 	}
 
@@ -934,21 +999,19 @@ func (ush UpdateVpcPrefixHandler) Handle(c echo.Context) error {
 
 // DeleteVpcPrefixHandler is the API Handler for deleting a VPC prefix
 type DeleteVpcPrefixHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteVpcPrefixHandler initializes and returns a new handler for deleting VPC prefix
 func NewDeleteVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteVpcPrefixHandler {
 	return DeleteVpcPrefixHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -964,7 +1027,7 @@ func NewDeleteVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Success 202
 // @Router /v2/org/{org}/nico/vpcprefix/{id} [delete]
 func (dsh DeleteVpcPrefixHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "Delete", c, dsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -993,7 +1056,7 @@ func (dsh DeleteVpcPrefixHandler) Handle(c echo.Context) error {
 	// Get VPC prefix ID from URL param
 	sStrID := c.Param("id")
 
-	dsh.tracerSpan.SetAttribute(handlerSpan, attribute.String("VpcPrefixId", sStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("VpcPrefixId", sStrID))
 
 	sID, err := uuid.Parse(sStrID)
 	if err != nil {
@@ -1005,10 +1068,11 @@ func (dsh DeleteVpcPrefixHandler) Handle(c echo.Context) error {
 	vpDAO := cdbm.NewVpcPrefixDAO(dsh.dbSession)
 	vpcPrefix, err := vpDAO.GetByID(ctx, nil, sID, []string{cdbm.IPBlockRelationName, cdbm.TenantRelationName, cdbm.SiteRelationName})
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		if err == cdb.ErrDoesNotExist {
+			logger.Warn().Err(err).Msg("VPC prefix not found")
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find VPC prefix to delete", nil)
 		}
+		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed not retrieve VPC prefix for deletion, DB error", nil)
 	}
 

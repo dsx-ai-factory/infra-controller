@@ -92,8 +92,8 @@ func TestInjectExpectation(t *testing.T) {
 			m := New(tc.client, 0, nil)
 
 			target := common.Target{
-				Type:         devicetypes.ComponentTypeCompute,
-				ComponentIDs: []string{"machine-1"},
+				Type:        devicetypes.ComponentTypeCompute,
+				Identifiers: []string{"machine-1"},
 			}
 
 			err := m.InjectExpectation(context.Background(), target, tc.info)
@@ -155,6 +155,25 @@ func TestFirmwareControlRejectsAuthenticationData(t *testing.T) {
 	require.ErrorContains(t, err, "not supported by the nicolegacy compute manager")
 }
 
+type firmwareStateClient struct {
+	nicoapi.Client
+	desired   []*corev1.DesiredFirmwareVersionEntry
+	endpoints []*corev1.ExploredEndpoint
+}
+
+func (c *firmwareStateClient) GetDesiredFirmwareVersions(
+	context.Context,
+) ([]*corev1.DesiredFirmwareVersionEntry, error) {
+	return c.desired, nil
+}
+
+func (c *firmwareStateClient) FindExploredEndpointsByIds(
+	context.Context,
+	[]string,
+) ([]*corev1.ExploredEndpoint, error) {
+	return c.endpoints, nil
+}
+
 func TestFirmwareControl_SubTargetsAccepted(t *testing.T) {
 	tests := map[string]struct {
 		subTargets []string
@@ -168,8 +187,8 @@ func TestFirmwareControl_SubTargetsAccepted(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			m := New(nicoapi.NewMockClient(), 0, nil)
 			target := common.Target{
-				Type:         devicetypes.ComponentTypeCompute,
-				ComponentIDs: []string{"machine-1"},
+				Type:        devicetypes.ComponentTypeCompute,
+				Identifiers: []string{"machine-1"},
 			}
 
 			err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
@@ -207,8 +226,8 @@ func TestFirmwareControl_DpuTarget_Nicolegacy(t *testing.T) {
 
 			m := withFastDpuReprovLegacy(New(client, 0, nil), client, "machine-1")
 			target := common.Target{
-				Type:         devicetypes.ComponentTypeCompute,
-				ComponentIDs: []string{"machine-1"},
+				Type:        devicetypes.ComponentTypeCompute,
+				Identifiers: []string{"machine-1"},
 			}
 
 			err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
@@ -636,8 +655,8 @@ func TestPowerControl_RefusesInUseMachine(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -655,8 +674,8 @@ func TestPowerControl_AllowsReadyMachine(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -671,8 +690,8 @@ func TestBringUpControl_RefusesInUseMachine(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.BringUpControl(context.Background(), target, operations.BringUpTaskInfo{})
@@ -687,8 +706,8 @@ func TestFirmwareControl_RefusesInUseMachine(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
@@ -711,8 +730,8 @@ func TestPowerControl_OverrideBypassesReadinessCheck(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -730,8 +749,8 @@ func TestBringUpControl_OverrideBypassesReadinessCheck(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 
 	err := m.BringUpControl(context.Background(), target, operations.BringUpTaskInfo{

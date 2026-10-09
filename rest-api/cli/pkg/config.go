@@ -30,8 +30,11 @@ type ConfigAuth struct {
 	APIKey       *ConfigAPIKey `yaml:"api_key,omitempty"`
 }
 
+// ConfigOIDC holds the OIDC login settings. Realm is consulted only when the token
+// endpoint is built from --keycloak-url, because TokenURL already contains the realm.
 type ConfigOIDC struct {
 	TokenURL         string            `yaml:"token_url,omitempty"`
+	Realm            string            `yaml:"realm,omitempty"`
 	ClientID         string            `yaml:"client_id,omitempty"`
 	ClientSecret     string            `yaml:"client_secret,omitempty"`
 	ClientAuthMethod string            `yaml:"client_auth_method,omitempty"`

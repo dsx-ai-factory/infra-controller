@@ -13,14 +13,15 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
@@ -34,6 +35,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"go.temporal.io/api/enums/v1"
 	tmocks "go.temporal.io/sdk/mocks"
@@ -41,6 +43,26 @@ import (
 
 	"go4.org/netipx"
 )
+
+type testVpcPrefixLockAttemptHook struct {
+	once      sync.Once
+	attempted chan<- struct{}
+	release   <-chan struct{}
+}
+
+func (h *testVpcPrefixLockAttemptHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (h *testVpcPrefixLockAttemptHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if event.Err != nil || !strings.Contains(event.Query, "pg_try_advisory_xact_lock") {
+		return
+	}
+	h.once.Do(func() {
+		close(h.attempted)
+		<-h.release
+	})
+}
 
 func testVPCPrefixCIDREntity(t *testing.T, vp *cdbm.VpcPrefix) string {
 	t.Helper()
@@ -179,6 +201,11 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 	vpc6 := testVpcPrefixBuildVpc(t, dbSession, ip, tenant2, site, tnOrg1, "testVPC", cutil.GetPtr(cdbm.VpcFNN), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
 	vpc7 := testVpcPrefixBuildVpc(t, dbSession, ip, tenant2, site4, tnOrg2, "testVPC", cutil.GetPtr(cdbm.VpcFNN), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
 	vpc8 := testVpcPrefixBuildVpc(t, dbSession, ip, tenant2, site4, tnOrg2, "testVPC8", cutil.GetPtr(cdbm.VpcEthernetVirtualizer), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
+	vpcSLAAC := testVpcPrefixBuildVpc(t, dbSession, ip, tenant1, site, tnOrg1, "testVPCSLAAC", cutil.GetPtr(cdbm.VpcFNN), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
+	vpcMixedAllocation := testVpcPrefixBuildVpc(t, dbSession, ip, tenant1, site, tnOrg1, "testVPCMixedAllocation", cutil.GetPtr(cdbm.VpcFNN), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
+	vpcDAO := cdbm.NewVpcDAO(dbSession)
+	_, err := vpcDAO.Update(ctx, nil, cdbm.VpcUpdateInput{VpcID: vpcSLAAC.ID, SlaacEnabled: cutil.GetPtr(true)})
+	require.NoError(t, err)
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
@@ -227,6 +254,14 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, parentPref1)
 
+	ipbV6 := testIPBlockBuildIPBlock(t, dbSession, "testipbv6", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "2001:db8:100::", 48, cdbm.IPBlockProtocolVersionV6, false, cdbm.IPBlockStatusReady, ipu)
+	parentPrefV6, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipbV6.Prefix, ipbV6.PrefixLength, ipbV6.RoutingType, ipbV6.InfrastructureProviderID.String(), ipbV6.SiteID.String())
+	assert.Nil(t, err)
+	assert.NotNil(t, parentPrefV6)
+
+	ipbPending := testIPBlockBuildIPBlock(t, dbSession, "testipbpending", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.172.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusPending, ipu)
+	ipbInvalidProtocol := testIPBlockBuildIPBlock(t, dbSession, "testipbinvalidprotocol", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.173.0.0", 16, "invalid", false, cdbm.IPBlockStatusReady, ipu)
+
 	ipb2 := testIPBlockBuildIPBlock(t, dbSession, "testipb", site2, ip2, &tenant2.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.168.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 	parentPref2, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipb2.Prefix, ipb2.PrefixLength, ipb2.RoutingType, ipb2.InfrastructureProviderID.String(), ipb2.SiteID.String())
 	assert.Nil(t, err)
@@ -242,8 +277,15 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, parentPref4)
 
-	okBodyTimeout, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "oktimeout", VpcID: vpc7.ID.String(), IPBlockID: cutil.GetPtr(ipb4.ID.String()), PrefixLength: 24})
+	okBodyTimeout, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "oktimeout", VpcID: vpc7.ID.String(), IPBlockID: cutil.GetPtr(ipb4.ID.String()), PrefixLength: cutil.GetPtr(24)})
 	assert.Nil(t, err)
+
+	ipb4FullGrant := testIPBlockBuildIPBlock(t, dbSession, "testipb-full-grant-timeout", site4, ip2, &tenant2.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "168.176.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
+	parentPref4FullGrant, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipb4FullGrant.Prefix, ipb4FullGrant.PrefixLength, ipb4FullGrant.RoutingType, ipb4FullGrant.InfrastructureProviderID.String(), ipb4FullGrant.SiteID.String())
+	require.NoError(t, err)
+	require.NotNil(t, parentPref4FullGrant)
+	fullGrantTimeoutBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "full-grant-timeout", VpcID: vpc7.ID.String(), IPBlockID: cutil.GetPtr(ipb4FullGrant.ID.String()), Prefix: cutil.GetPtr("168.176.0.0/16")})
+	require.NoError(t, err)
 
 	ipbFG := testIPBlockBuildIPBlock(t, dbSession, "testipbfg", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.170.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 	parentPrefFG, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipbFG.Prefix, ipbFG.PrefixLength, ipbFG.RoutingType, ipbFG.InfrastructureProviderID.String(), ipbFG.SiteID.String())
@@ -253,55 +295,100 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 	// what makes it a SitePrefix rather than an Allocation IPBlock.
 	tenantSitePrefix := testIPBlockBuildTenantSitePrefix(t, dbSession, "private-site-prefix", site, ip, tenant1, "192.171.0.0", 16, cdbm.IPBlockStatusReady, ipu)
 
-	okBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: 24})
+	ipbExplicit := testIPBlockBuildIPBlock(t, dbSession, "explicit-allocation", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "10.20.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
+	parentPrefExplicit, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipbExplicit.Prefix, ipbExplicit.PrefixLength, ipbExplicit.RoutingType, ipbExplicit.InfrastructureProviderID.String(), ipbExplicit.SiteID.String())
+	require.NoError(t, err)
+	require.NotNil(t, parentPrefExplicit)
+
+	ipbExplicitFG := testIPBlockBuildIPBlock(t, dbSession, "explicit-full-grant", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "10.30.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
+	parentPrefExplicitFG, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipbExplicitFG.Prefix, ipbExplicitFG.PrefixLength, ipbExplicitFG.RoutingType, ipbExplicitFG.InfrastructureProviderID.String(), ipbExplicitFG.SiteID.String())
+	require.NoError(t, err)
+	require.NotNil(t, parentPrefExplicitFG)
+
+	ipbOccupied := testIPBlockBuildIPBlock(t, dbSession, "occupied-full-grant", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "10.31.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
+	parentPrefOccupied, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipbOccupied.Prefix, ipbOccupied.PrefixLength, ipbOccupied.RoutingType, ipbOccupied.InfrastructureProviderID.String(), ipbOccupied.SiteID.String())
+	require.NoError(t, err)
+	require.NotNil(t, parentPrefOccupied)
+
+	okBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(24)})
 	assert.Nil(t, err)
 
-	okBodyFG, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "okFG", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbFG.ID.String()), PrefixLength: 16})
+	okBodyFG, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "okFG", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbFG.ID.String()), PrefixLength: cutil.GetPtr(16)})
 	assert.Nil(t, err)
 
-	okBodySlash31, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok31", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: 31})
+	okBodySlash31, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok31", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(31)})
 	assert.Nil(t, err)
 
-	errBodySlash32, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "err32", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: 32})
+	errBodySlash32, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "err32", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(32)})
 	assert.Nil(t, err)
 
-	okBodyNameClash, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc2.ID.String(), IPBlockID: cutil.GetPtr(ipb3.ID.String()), PrefixLength: 24})
+	okBodyIPv6, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok-v6", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbV6.ID.String()), PrefixLength: cutil.GetPtr(64)})
 	assert.Nil(t, err)
-	errBodyNameClash, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: 24})
+
+	errBodySLAAC64, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "err-slaac-64", VpcID: vpcSLAAC.ID.String(), IPBlockID: cutil.GetPtr(ipbV6.ID.String()), PrefixLength: cutil.GetPtr(64)})
+	assert.Nil(t, err)
+
+	errBodyPendingIPBlock, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "err-pending-ip-block", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbPending.ID.String()), PrefixLength: cutil.GetPtr(24)})
+	assert.Nil(t, err)
+	errBodyInvalidIPBlockProtocol, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "err-invalid-ip-block-protocol", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbInvalidProtocol.ID.String()), PrefixLength: cutil.GetPtr(24)})
+	assert.Nil(t, err)
+
+	okBodyNameClash, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc2.ID.String(), IPBlockID: cutil.GetPtr(ipb3.ID.String()), PrefixLength: cutil.GetPtr(24)})
+	assert.Nil(t, err)
+	errBodyNameClash, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(24)})
 	assert.Nil(t, err)
 
 	errBodyDoesntValidate, err := json.Marshal(struct{ Name string }{Name: "test"})
 	assert.Nil(t, err)
-	errBodyBadVpcID, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: 24})
+	errBodyBadVpcID, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(24)})
 	assert.Nil(t, err)
-	errBodyBadVpcTenantMismatch, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc6.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: 24})
+	errBodyBadVpcTenantMismatch, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc6.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(24)})
 	assert.Nil(t, err)
-	errBodyBadVpcNotFNN, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc8.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: 24})
+	errBodyBadVpcNotFNN, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc8.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(24)})
 	assert.Nil(t, err)
-	errBodyBadIPBlockID, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: 24})
+	errBodyBadIPBlockID, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: cutil.GetPtr(24)})
 	assert.Nil(t, err)
-	errBodyTenantSitePrefixID, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "private-prefix", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(tenantSitePrefix.ID.String()), PrefixLength: 24})
+	errBodyTenantSitePrefixID, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "private-prefix", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(tenantSitePrefix.ID.String()), PrefixLength: cutil.GetPtr(24)})
 	assert.Nil(t, err)
-	errBodyNoIPv4, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), PrefixLength: 25})
-	assert.Nil(t, err)
-
-	errBodyBadIPBlockIDTenantMismatch, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb2.ID.String()), PrefixLength: 24})
+	errBodyNoIPBlock, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), PrefixLength: cutil.GetPtr(25)})
 	assert.Nil(t, err)
 
-	errBodyBadIPBlockIDSiteMismatch, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc3.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: 24})
+	errBodyBadIPBlockIDTenantMismatch, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb2.ID.String()), PrefixLength: cutil.GetPtr(24)})
 	assert.Nil(t, err)
 
-	errBodyIpamFail, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: 15})
+	errBodyBadIPBlockIDSiteMismatch, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc3.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(24)})
 	assert.Nil(t, err)
 
-	errVpcNotReady, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok4", VpcID: vpc4.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: 24})
+	errBodyIpamFail, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(15)})
 	assert.Nil(t, err)
 
-	errSiteNotReady, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok5", VpcID: vpc5.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: 24})
+	errVpcNotReady, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok4", VpcID: vpc4.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(24)})
 	assert.Nil(t, err)
+
+	errSiteNotReady, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok5", VpcID: vpc5.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(24)})
+	assert.Nil(t, err)
+
+	explicitBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "explicit-cidr", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbExplicit.ID.String()), Prefix: cutil.GetPtr("10.20.10.0/24")})
+	require.NoError(t, err)
+	automaticAfterExplicitBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "automatic-after-explicit", VpcID: vpcMixedAllocation.ID.String(), IPBlockID: cutil.GetPtr(ipbExplicit.ID.String()), PrefixLength: cutil.GetPtr(24)})
+	require.NoError(t, err)
+	explicitDuplicateBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "explicit-duplicate", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbExplicit.ID.String()), Prefix: cutil.GetPtr("10.20.10.0/24")})
+	require.NoError(t, err)
+	explicitFullGrantBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "explicit-full-grant", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbExplicitFG.ID.String()), Prefix: cutil.GetPtr("10.30.0.0/16")})
+	require.NoError(t, err)
+	automaticOccupiedBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "automatic-occupied", VpcID: vpcMixedAllocation.ID.String(), IPBlockID: cutil.GetPtr(ipbOccupied.ID.String()), PrefixLength: cutil.GetPtr(24)})
+	require.NoError(t, err)
+	explicitAutomaticOverlapBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "explicit-automatic-overlap", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbOccupied.ID.String()), Prefix: cutil.GetPtr("10.31.0.0/24")})
+	require.NoError(t, err)
+	explicitOccupiedFullGrantBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "explicit-occupied-full-grant", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbOccupied.ID.String()), Prefix: cutil.GetPtr("10.31.0.0/16")})
+	require.NoError(t, err)
+	explicitOutsideBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "explicit-outside", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbExplicit.ID.String()), Prefix: cutil.GetPtr("10.99.0.0/24")})
+	require.NoError(t, err)
+	explicitFamilyMismatchBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "explicit-family-mismatch", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbV6.ID.String()), Prefix: cutil.GetPtr("10.40.0.0/24")})
+	require.NoError(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -313,6 +400,8 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		expectedIpam       bool
 		expectedErrMsg     string
 		expectedPrefix     string
+		unexpectedPrefix   string
+		expectedFullGrant  *cdbm.IPBlock
 		verifyChildSpanner bool
 	}{
 		{
@@ -390,7 +479,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when ipblock is not present in request",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyNoIPv4),
+			reqBody:        string(errBodyNoIPBlock),
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -410,7 +499,25 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
-			expectedErrMsg: "Error retrieving ipv4 IPBlock from request",
+			expectedErrMsg: "Could not find a Ready tenant IP Block specified by ipBlockId",
+		},
+		{
+			name:           "error when IP Block is not Ready",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(errBodyPendingIPBlock),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrMsg: "Could not find a Ready tenant IP Block specified by ipBlockId",
+		},
+		{
+			name:           "error when IP Block protocol version is unsupported",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(errBodyInvalidIPBlockProtocol),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusInternalServerError,
+			expectedErrMsg: "Could not determine VPC Prefix length limit",
 		},
 		{
 			name:           "error when ipblock in request is not derived for tenant",
@@ -434,7 +541,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 			reqBody:        string(errBodyIpamFail),
 			user:           tnu,
 			expectedErr:    true,
-			expectedErrMsg: "Could not create IPAM entry for VPC prefix. Details: given length:15 must be greater than prefix length:16",
+			expectedErrMsg: "Could not create IPAM entry for VPC prefix. Details: child prefix length must be at least the source prefix length: got 15, minimum 16",
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
@@ -466,12 +573,111 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 			expectedPrefix: "192.168.1.0/31",
 		},
 		{
+			name:           "success case with IPv6 prefix",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(okBodyIPv6),
+			user:           tnu,
+			expectedErr:    false,
+			expectedStatus: http.StatusCreated,
+			expectedPrefix: "2001:db8:100::/64",
+		},
+		{
+			name:           "success with explicit CIDR",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(explicitBody),
+			user:           tnu,
+			expectedStatus: http.StatusCreated,
+			expectedIpam:   true,
+			expectedPrefix: "10.20.10.0/24",
+		},
+		{
+			name:             "automatic allocation avoids explicit reservation across VPCs",
+			reqOrgName:       tnOrg1,
+			reqBody:          string(automaticAfterExplicitBody),
+			user:             tnu,
+			expectedStatus:   http.StatusCreated,
+			expectedIpam:     true,
+			unexpectedPrefix: "10.20.10.0/24",
+		},
+		{
+			name:           "explicit allocation rejects duplicate explicit reservation",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(explicitDuplicateBody),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrMsg: "Could not reserve requested prefix 10.20.10.0/24",
+		},
+		{
+			name:              "success with explicit whole-block full grant",
+			reqOrgName:        tnOrg1,
+			reqBody:           string(explicitFullGrantBody),
+			user:              tnu,
+			expectedStatus:    http.StatusCreated,
+			expectedPrefix:    "10.30.0.0/16",
+			expectedFullGrant: ipbExplicitFG,
+		},
+		{
+			name:           "automatic allocation occupies block before explicit full grant",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(automaticOccupiedBody),
+			user:           tnu,
+			expectedStatus: http.StatusCreated,
+			expectedIpam:   true,
+			expectedPrefix: "10.31.0.0/24",
+		},
+		{
+			name:           "explicit allocation rejects automatic reservation overlap",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(explicitAutomaticOverlapBody),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrMsg: "Could not reserve requested prefix 10.31.0.0/24",
+		},
+		{
+			name:           "explicit whole-block allocation rejects occupied block",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(explicitOccupiedFullGrantBody),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrMsg: "Could not reserve requested prefix 10.31.0.0/16",
+		},
+		{
+			name:           "explicit allocation rejects prefix outside block",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(explicitOutsideBody),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrMsg: "Prefix 10.99.0.0/24 is not contained by the selected IP Block",
+		},
+		{
+			name:           "explicit allocation rejects address family mismatch",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(explicitFamilyMismatchBody),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrMsg: "Prefix 10.40.0.0/24 does not match the selected IP Block address family",
+		},
+		{
 			name:           "error case with /32",
 			reqOrgName:     tnOrg1,
 			reqBody:        string(errBodySlash32),
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "error when SLAAC IPv6 prefix is /64",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(errBodySLAAC64),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrMsg: "prefixLength must be at most 63",
 		},
 		{
 			name:           "error when vpcprefix with same name already exists",
@@ -514,6 +720,14 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
 		},
+		{
+			name:           "explicit full grant rolls back on workflow timeout",
+			reqOrgName:     tnOrg2,
+			reqBody:        string(fullGrantTimeoutBody),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusInternalServerError,
+		},
 	}
 
 	tscCallCount := 0
@@ -534,7 +748,6 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cipbh := CreateVpcPrefixHandler{
@@ -565,7 +778,22 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 			assert.Equal(t, cdbm.VpcPrefixStatusProvisioning, resp.StatusHistory[0].Status)
 			// Validate prefix
 			assert.NotNil(t, resp.Prefix)
-			assert.Equal(t, tc.expectedPrefix, *resp.Prefix)
+			actualPrefix := *resp.Prefix
+			if tc.expectedPrefix != "" {
+				assert.Equal(t, tc.expectedPrefix, actualPrefix)
+			}
+			if tc.unexpectedPrefix != "" {
+				assert.NotEqual(t, tc.unexpectedPrefix, actualPrefix)
+			}
+			expectedPrefix := netip.MustParsePrefix(actualPrefix)
+			assert.Equal(t, expectedPrefix.Bits(), resp.PrefixLength)
+
+			vpcPrefixID, err := uuid.Parse(resp.ID)
+			require.NoError(t, err)
+			persistedVpcPrefix, err := cdbm.NewVpcPrefixDAO(dbSession).GetByID(ctx, nil, vpcPrefixID, nil)
+			require.NoError(t, err)
+			assert.Equal(t, actualPrefix, persistedVpcPrefix.Prefix)
+			assert.Equal(t, expectedPrefix.Bits(), persistedVpcPrefix.PrefixLength)
 
 			// Validate ipam exists for vpcprefix
 			if tc.expectedIpam {
@@ -577,8 +805,13 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 				assert.Nil(t, err)
 				ipamer := cipam.NewWithStorage(ipamStorage)
 				ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(ctx, parentIPB.RoutingType, parentIPB.InfrastructureProviderID.String(), parentIPB.SiteID.String()))
-				pref := ipamer.PrefixFrom(ctx, ipam.GetCidrForIPBlock(ctx, *resp.Prefix, resp.PrefixLength))
+				pref := ipamer.PrefixFrom(ctx, *resp.Prefix)
 				assert.NotNil(t, pref)
+			}
+			if tc.expectedFullGrant != nil {
+				persistedIPBlock, err := cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, tc.expectedFullGrant.ID, nil)
+				require.NoError(t, err)
+				assert.True(t, persistedIPBlock.FullGrant)
 			}
 
 			require.Equal(t, tscCallCount+1, len(tsc.Calls))
@@ -598,6 +831,122 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("workflow failures roll back reservations for reuse", func(t *testing.T) {
+		ipamer := cipam.NewWithStorage(ipamStorage)
+		ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(ctx, ipb4.RoutingType, ipb4.InfrastructureProviderID.String(), ipb4.SiteID.String()))
+		assert.Nil(t, ipamer.PrefixFrom(ctx, "168.175.0.0/24"))
+
+		persistedFullGrantBlock, err := cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, ipb4FullGrant.ID, nil)
+		require.NoError(t, err)
+		assert.False(t, persistedFullGrantBlock.FullGrant)
+
+		// Replace the timing-out Site client and prove that both reservations
+		// can be acquired using the same CIDRs after transaction rollback.
+		scp.IDClientMap[site4.ID.String()] = tsc
+		explicitRetryBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{
+			Name:      "explicit-retry-after-timeout",
+			VpcID:     vpc7.ID.String(),
+			IPBlockID: cutil.GetPtr(ipb4.ID.String()),
+			Prefix:    cutil.GetPtr("168.175.0.0/24"),
+		})
+		require.NoError(t, err)
+		explicitRetry := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg2, string(explicitRetryBody))
+		require.NotNil(t, explicitRetry.Prefix)
+		assert.Equal(t, "168.175.0.0/24", *explicitRetry.Prefix)
+
+		fullGrantRetry := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg2, string(fullGrantTimeoutBody))
+		require.NotNil(t, fullGrantRetry.Prefix)
+		assert.Equal(t, "168.176.0.0/16", *fullGrantRetry.Prefix)
+		persistedFullGrantBlock, err = cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, ipb4FullGrant.ID, nil)
+		require.NoError(t, err)
+		assert.True(t, persistedFullGrantBlock.FullGrant)
+	})
+
+	t.Run("reloads full-grant state after acquiring allocation lock", func(t *testing.T) {
+		concurrentIPBlock := testIPBlockBuildIPBlock(t, dbSession, "concurrent-full-grant", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "10.50.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
+		parentPrefix, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, concurrentIPBlock.Prefix, concurrentIPBlock.PrefixLength, concurrentIPBlock.RoutingType, concurrentIPBlock.InfrastructureProviderID.String(), concurrentIPBlock.SiteID.String())
+		require.NoError(t, err)
+		require.NotNil(t, parentPrefix)
+
+		lockID := cdb.GetAdvisoryLockIDFromString(fmt.Sprintf("%s-%s", tenant1.ID, concurrentIPBlock.ID))
+		lockingTx, err := cdb.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		lockingTxOpen := true
+		t.Cleanup(func() {
+			if lockingTxOpen {
+				assert.NoError(t, lockingTx.Rollback())
+			}
+		})
+		require.NoError(t, lockingTx.AcquireAdvisoryLock(ctx, lockID, false))
+
+		lockAttempted := make(chan struct{})
+		releaseHandler := make(chan struct{})
+		dbSession.DB.AddQueryHook(&testVpcPrefixLockAttemptHook{
+			attempted: lockAttempted,
+			release:   releaseHandler,
+		})
+
+		requestBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{
+			Name:         "stale-full-grant",
+			VpcID:        vpc1.ID.String(),
+			IPBlockID:    cutil.GetPtr(concurrentIPBlock.ID.String()),
+			PrefixLength: cutil.GetPtr(24),
+		})
+		require.NoError(t, err)
+
+		e := echo.New()
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(requestBody)))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		rec := httptest.NewRecorder()
+		ec := e.NewContext(req, rec)
+		ec.SetParamNames("orgName")
+		ec.SetParamValues(tnOrg1)
+		ec.Set("user", tnu)
+
+		handlerDone := make(chan error, 1)
+		go func() {
+			handlerDone <- (CreateVpcPrefixHandler{
+				dbSession: dbSession,
+				tc:        tempClient,
+				cfg:       cfg,
+				scp:       scp,
+			}).Handle(ec)
+		}()
+
+		select {
+		case <-lockAttempted:
+		case <-time.After(10 * time.Second):
+			t.Fatal("handler did not attempt to acquire the allocation lock")
+		}
+
+		transactionalIPAM := ipam.NewIpamStorage(dbSession.DB, lockingTx.GetBunTx())
+		_, err = ipam.CreateChildIpamEntryForIPBlock(ctx, lockingTx, dbSession, transactionalIPAM, concurrentIPBlock, concurrentIPBlock.PrefixLength)
+		if err != nil {
+			close(releaseHandler)
+			require.NoError(t, err)
+		}
+		err = lockingTx.Commit()
+		close(releaseHandler)
+		require.NoError(t, err)
+		lockingTxOpen = false
+
+		select {
+		case err = <-handlerDone:
+			require.NoError(t, err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("handler did not finish after the allocation lock was released")
+		}
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "already has a full grant")
+
+		persistedIPBlock, err := cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, concurrentIPBlock.ID, nil)
+		require.NoError(t, err)
+		assert.True(t, persistedIPBlock.FullGrant)
+		ipamer := cipam.NewWithStorage(ipamStorage)
+		ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(ctx, concurrentIPBlock.RoutingType, concurrentIPBlock.InfrastructureProviderID.String(), concurrentIPBlock.SiteID.String()))
+		assert.Nil(t, ipamer.PrefixFrom(ctx, "10.50.0.0/24"))
+	})
 }
 
 func testCreateVpcPrefix(t *testing.T, dbSession *cdb.Session, scp *sc.ClientPool, ipamStorage cipam.Storage, user *cdbm.User, reqOrgName, reqBody string) *model.APIVpcPrefix {
@@ -614,9 +963,8 @@ func testCreateVpcPrefix(t *testing.T, dbSession *cdb.Session, scp *sc.ClientPoo
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
-	ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 	ec.SetRequest(ec.Request().WithContext(ctx))
 
 	tc := &tmocks.Client{}
@@ -736,7 +1084,7 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 			ipbID = ipb2.ID
 		}
 		prefixLen := 24
-		vpcprefixBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: fmt.Sprintf("vpcprefix-%02d", i), VpcID: vpcID.String(), IPBlockID: cutil.GetPtr(ipbID.String()), PrefixLength: prefixLen})
+		vpcprefixBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: fmt.Sprintf("vpcprefix-%02d", i), VpcID: vpcID.String(), IPBlockID: cutil.GetPtr(ipbID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 		assert.Nil(t, err)
 		apiVpcPrefix := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(vpcprefixBody))
 		assert.NotNil(t, apiVpcPrefix)
@@ -749,7 +1097,7 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                   string
@@ -1017,7 +1365,6 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gash := GetAllVpcPrefixHandler{
@@ -1141,15 +1488,24 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, parentPref1)
 	prefixLen := 24
-	parentIpbBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
+	parentIpbBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 	assert.Nil(t, err)
 
 	vpcprefix := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(parentIpbBody))
 
 	ifaceWorkloadBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{
-		Name: "iface-usage-stats", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
+		Name: "iface-usage-stats", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 	require.NoError(t, err)
 	vpcprefixWithIfaceWorkload := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(ifaceWorkloadBody))
+
+	ipbV6 := testIPBlockBuildIPBlock(t, dbSession, "testipbv6", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "2001:db8:200::", 48, cdbm.IPBlockProtocolVersionV6, false, cdbm.IPBlockStatusReady, ipu)
+	parentPrefV6, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipbV6.Prefix, ipbV6.PrefixLength, ipbV6.RoutingType, ipbV6.InfrastructureProviderID.String(), ipbV6.SiteID.String())
+	require.NoError(t, err)
+	require.NotNil(t, parentPrefV6)
+	ipv6Body, err := json.Marshal(model.APIVpcPrefixCreateRequest{
+		Name: "ipv6-usage-stats", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbV6.ID.String()), PrefixLength: cutil.GetPtr(64)})
+	require.NoError(t, err)
+	vpcprefixIPv6 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(ipv6Body))
 
 	alWorkload := common.TestBuildAllocation(t, dbSession, site, tenant1, "get-vpfx-usage-iface-alloc", ipu)
 	itWorkload := common.TestBuildInstanceType(t, dbSession, "get-vpfx-iface-it", cutil.GetPtr(uuid.New()), site, nil, ipu)
@@ -1175,7 +1531,7 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 	require.NoError(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                            string
@@ -1191,6 +1547,7 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 		expectedVpcName                 *string
 		expectetIPName                  *string
 		expectUsageStatsNonNil          bool
+		expectUsageStatsNil             bool
 		verifyUsageAcquisitionFromIface bool
 		verifyChildSpanner              bool
 	}{
@@ -1301,6 +1658,16 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 			expectUsageStatsNonNil:          true,
 			verifyUsageAcquisitionFromIface: true,
 		},
+		{
+			name:                   "success case when includeUsageStats true for IPv6 prefix",
+			reqOrgName:             tnOrg1,
+			user:                   tnu,
+			id:                     vpcprefixIPv6.ID,
+			expectedErr:            false,
+			expectedStatus:         http.StatusOK,
+			queryIncludeUsageStats: cutil.GetPtr("true"),
+			expectUsageStatsNil:    true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1334,7 +1701,6 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := GetVpcPrefixHandler{
@@ -1353,7 +1719,7 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 				// validate response fields
 				assert.Equal(t, 1, len(rsp.StatusHistory))
 
-				expanded := tc.queryIncludeRelations1 != nil || tc.queryIncludeRelations2 != nil || tc.queryIncludeRelations3 != nil || tc.expectUsageStatsNonNil
+				expanded := tc.queryIncludeRelations1 != nil || tc.queryIncludeRelations2 != nil || tc.queryIncludeRelations3 != nil || tc.expectUsageStatsNonNil || tc.expectUsageStatsNil
 				if expanded {
 					if tc.expectedVpcName != nil {
 						assert.Equal(t, *tc.expectedVpcName, rsp.Vpc.Name)
@@ -1364,6 +1730,10 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 					if tc.expectUsageStatsNonNil {
 						require.NotNil(t, rsp.IPBlock)
 						require.NotNil(t, rsp.UsageStats)
+					}
+					if tc.expectUsageStatsNil {
+						require.NotNil(t, rsp.IPBlock)
+						assert.Nil(t, rsp.UsageStats)
 					}
 					if tc.verifyUsageAcquisitionFromIface {
 						require.NotNil(t, rsp.UsageStats)
@@ -1466,10 +1836,10 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, parentPref1)
 	prefixLen := 24
-	vpcprefixBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "test-vpcprefix-1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
+	vpcprefixBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "test-vpcprefix-1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 	assert.Nil(t, err)
 
-	vpcprefixBody2, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "test-vpcprefix-2", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
+	vpcprefixBody2, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "test-vpcprefix-2", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 	assert.Nil(t, err)
 
 	tscCallCount := 0
@@ -1486,6 +1856,12 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 	errBodyNameClash, err := json.Marshal(model.APIVpcPrefixUpdateRequest{Name: cutil.GetPtr("test-vpcprefix-2")})
 	assert.Nil(t, err)
 
+	errBodyPrefixModification, err := json.Marshal(model.APIVpcPrefixUpdateRequest{
+		Name:   cutil.GetPtr("must-not-be-applied"),
+		Prefix: vpcprefix.Prefix,
+	})
+	require.NoError(t, err)
+
 	okBody1, err := json.Marshal(model.APIVpcPrefixUpdateRequest{Name: cutil.GetPtr("test-vpcprefix-updated-1")})
 	assert.Nil(t, err)
 
@@ -1493,7 +1869,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -1505,6 +1881,8 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 		expectedStatus     int
 		expectedName       string
 		expectedDesc       *string
+		expectedStoredName string
+		expectedPrefix     string
 		verifyChildSpanner bool
 	}{
 		{
@@ -1585,6 +1963,17 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 			expectedStatus: http.StatusConflict,
 		},
 		{
+			name:               "prefix modification is rejected without applying name",
+			reqOrgName:         tnOrg1,
+			reqBody:            string(errBodyPrefixModification),
+			user:               tnu,
+			id:                 vpcprefix.ID,
+			expectedErr:        true,
+			expectedStatus:     http.StatusBadRequest,
+			expectedStoredName: "test-vpcprefix-1",
+			expectedPrefix:     *vpcprefix.Prefix,
+		},
+		{
 			name:           "success when name is updated with non-clashing value",
 			reqOrgName:     tnOrg1,
 			reqBody:        string(okBody1),
@@ -1625,7 +2014,6 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := UpdateVpcPrefixHandler{
@@ -1640,6 +2028,14 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 			require.Equal(t, tc.expectedStatus, rec.Code, rec.Body.String())
 
 			if tc.expectedErr {
+				if tc.expectedStoredName != "" {
+					vpcPrefixID, err := uuid.Parse(tc.id)
+					require.NoError(t, err)
+					persisted, err := cdbm.NewVpcPrefixDAO(dbSession).GetByID(ctx, nil, vpcPrefixID, nil)
+					require.NoError(t, err)
+					assert.Equal(t, tc.expectedStoredName, persisted.Name)
+					assert.Equal(t, tc.expectedPrefix, persisted.Prefix)
+				}
 				return
 			}
 
@@ -1794,15 +2190,15 @@ func TestVpcPrefixHandler_Delete(t *testing.T) {
 
 	prefixLen := 24
 
-	okBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "test-vpc-prefix-1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
+	okBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "test-vpc-prefix-1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 	assert.Nil(t, err)
 
-	okBody2, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "test-vpc-prefix-2", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
+	okBody2, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "test-vpc-prefix-2", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 	assert.Nil(t, err)
-	okBody3, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "test-vpc-prefix-3", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
+	okBody3, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "test-vpc-prefix-3", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 	assert.Nil(t, err)
 
-	okBodyFG, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "test-vpc-prefix-full-grant", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbFG.ID.String()), PrefixLength: prefixLen})
+	okBodyFG, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "test-vpc-prefix-full-grant", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbFG.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 	assert.Nil(t, err)
 
 	vpcp1 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(okBody))
@@ -1823,7 +2219,7 @@ func TestVpcPrefixHandler_Delete(t *testing.T) {
 	require.NoError(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -1964,7 +2360,6 @@ func TestVpcPrefixHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tClient := tempClient

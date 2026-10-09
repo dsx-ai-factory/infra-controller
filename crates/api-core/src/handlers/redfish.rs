@@ -22,13 +22,16 @@ use arc_swap::ArcSwap;
 use carbide_instrument::emit;
 use carbide_secrets::credentials::CredentialReader;
 use carbide_utils::HostPortPair;
-use carbide_utils::redfish::{format_forwarded_host_parameter, parse_uri_host_ip};
-use chrono::{DateTime, Local};
-use db::Transaction;
-use db::redfish_actions::{
-    approve_request, delete_request, fetch_request, find_serials, insert_request, list_requests,
-    set_applied, update_response,
+use carbide_utils::redfish::{
+    format_forwarded_host_parameter, log_redfish_http_error, parse_uri_host_ip,
+    redact_redfish_response_body, redfish_basic_authorization_context,
 };
+use chrono::{DateTime, Local};
+use db::redfish_actions::{
+    ActionNotClaimed, ApprovalNotRecorded, approve_request, delete_request, fetch_request,
+    find_serials, insert_request, list_requests, set_applied, update_response,
+};
+use db::{ConditionalWrite, Transaction, TransactionVending};
 use http::header::CONTENT_TYPE;
 use http::uri::Authority;
 use http::{HeaderMap, HeaderValue, Uri};
@@ -66,6 +69,9 @@ struct RedfishActionResultPersistenceFailed {
     error: String,
 }
 
+/// Performs a Core-mediated Redfish GET, diagnoses upstream HTTP 4xx/5xx responses,
+/// and redacts known direct-authentication credentials from readable error bodies
+/// while preserving the existing browse-response and RPC-error contracts.
 pub(crate) async fn redfish_browse(
     api: &crate::api::Api,
     request: tonic::Request<::rpc::forge::RedfishBrowseRequest>,
@@ -73,28 +79,25 @@ pub(crate) async fn redfish_browse(
     log_request_data(&request);
 
     let request = request.into_inner();
-    let uri: http::Uri = match request.uri.clone().parse() {
+    let requested_uri = request.uri;
+    let uri: http::Uri = match requested_uri.parse() {
         Ok(uri) => uri,
         Err(err) => {
             return Err(CarbideError::internal(format!("parsing uri failed: {err}")).into());
         }
     };
 
-    let (metadata, new_uri, headers, http_client) = create_client(
+    let (new_uri, headers, http_client, auth) = create_client(
         uri,
         &api.database_connection,
         api.credential_manager.as_ref(),
         &api.dynamic_settings.bmc_proxy,
+        api.bmc_proxy_passthrough.as_deref(),
     )
     .await?;
 
-    let response = match http_client
-        .request(http::Method::GET, new_uri.to_string())
-        .basic_auth(metadata.user.clone(), Some(metadata.password.clone()))
-        .headers(headers)
-        .send()
-        .await
-    {
+    let request = auth.apply(http_client.request(http::Method::GET, new_uri.to_string()));
+    let response = match request.headers(headers).send().await {
         Ok(response) => response,
         Err(e) => {
             return Err(CarbideError::internal(format!("http request failed: {e:?}")).into());
@@ -113,11 +116,45 @@ pub(crate) async fn redfish_browse(
         .collect::<HashMap<String, String>>();
 
     let status = response.status();
-    let text = response.text().await.map_err(|e| {
-        CarbideError::internal(format!(
-            "error reading response body: {e}, status: {status}"
-        ))
-    })?;
+    let is_http_error = status.is_client_error() || status.is_server_error();
+    let text = match response.text().await {
+        Ok(text) => text,
+        Err(e) => {
+            // The known status remains useful even when no untrusted body can
+            // be read; the shared logger supplies its safe fallback message.
+            if is_http_error {
+                log_redfish_http_error(
+                    "redfish",
+                    "redfish_browse",
+                    &requested_uri,
+                    status.as_u16(),
+                    "",
+                    std::iter::empty(),
+                );
+            }
+            return Err(CarbideError::internal(format!(
+                "error reading response body: {e}, status: {status}"
+            ))
+            .into());
+        }
+    };
+
+    // Keep readable HTTP failures in the browse response contract while
+    // preventing a directly contacted BMC from echoing reusable credentials.
+    let text = if is_http_error {
+        let sensitive_values = auth.http_error_sensitive_values();
+        log_redfish_http_error(
+            "redfish",
+            "redfish_browse",
+            &requested_uri,
+            status.as_u16(),
+            &text,
+            sensitive_values.iter().map(String::as_str),
+        );
+        redact_redfish_response_body(&text, sensitive_values.iter().map(String::as_str))
+    } else {
+        text
+    };
 
     Ok(tonic::Response::new(::rpc::forge::RedfishBrowseResponse {
         text,
@@ -196,11 +233,16 @@ pub(crate) async fn redfish_approve_action(
         );
     }
 
-    let is_approved = approve_request(approver, request, &mut txn).await?;
-    if !is_approved {
-        return Err(
-            CarbideError::InvalidArgument("user already approved request".to_owned()).into(),
-        );
+    match approve_request(approver, request, &mut txn).await? {
+        ConditionalWrite::Applied(()) => {}
+        ConditionalWrite::NotApplied(ApprovalNotRecorded) => {
+            // Another request can record this user's approval or cancel the
+            // action after our read.
+            return Err(CarbideError::InvalidArgument(
+                "request no longer exists or user already approved it".to_owned(),
+            )
+            .into());
+        }
     }
     txn.commit().await?;
 
@@ -234,9 +276,15 @@ pub(crate) async fn redfish_apply_action(
 
     let ip_to_serial = find_serials(&action_request.machine_ips, &mut txn).await?;
 
-    let is_applied = set_applied(applier, request, &mut txn).await?;
-    if !is_applied {
-        return Err(CarbideError::InvalidArgument("request was already applied".to_owned()).into());
+    match set_applied(applier, request, &mut txn).await? {
+        ConditionalWrite::Applied(()) => {}
+        ConditionalWrite::NotApplied(ActionNotClaimed) => {
+            // Another request can apply or cancel the action after our read.
+            return Err(CarbideError::InvalidArgument(
+                "request no longer exists or was already applied".to_owned(),
+            )
+            .into());
+        }
     }
 
     let mut uris: Vec<(Uri, usize)> = Vec::with_capacity(action_request.machine_ips.len());
@@ -265,12 +313,17 @@ pub(crate) async fn redfish_apply_action(
         }
     }
 
+    // A failed claim commit must not leave requests running against the BMC.
+    // Commit the claim and serial-mismatch results before starting any POST task.
+    txn.commit().await?;
+
     for (uri, index) in uris {
         // Spawn off the task to send the request, open a transaction, and store the result.
         tokio::spawn({
             let pool = api.database_connection.clone();
             let credential_reader = api.credential_manager.clone();
             let bmc_proxy = api.dynamic_settings.bmc_proxy.clone();
+            let core_proxy = api.bmc_proxy_passthrough.clone();
             let mut parameters = action_request.parameters.clone();
             async move {
                 // Allow tests to trigger mock behavior by inserting a `"__TEST_BEHAVIOR__": "..."`
@@ -283,6 +336,7 @@ pub(crate) async fn redfish_apply_action(
                     &pool,
                     credential_reader.as_ref(),
                     bmc_proxy.as_ref(),
+                    core_proxy.as_deref(),
                     test_behavior,
                 )
                 .await;
@@ -301,8 +355,6 @@ pub(crate) async fn redfish_apply_action(
             }
         });
     }
-
-    txn.commit().await?;
 
     Ok(tonic::Response::new(
         ::rpc::forge::RedfishApplyActionResponse {},
@@ -327,11 +379,12 @@ async fn handle_request(
     pool: &PgPool,
     credential_reader: &dyn CredentialReader,
     bmc_proxy: &ArcSwap<Option<HostPortPair>>,
+    core_proxy: Option<&crate::bmc_proxy::PassthroughClient>,
     test_behavior: Option<TestBehavior>,
 ) -> BMCResponse {
     // Allow test mocks for returning errors at defined points
-    let (metadata, new_uri, mut headers, http_client) = match (
-        create_client(uri, pool, credential_reader, bmc_proxy).await,
+    let (new_uri, mut headers, http_client, auth) = match (
+        create_client(uri, pool, credential_reader, bmc_proxy, core_proxy).await,
         test_behavior.and_then(TestBehavior::into_client_creation_error),
     ) {
         (Ok(tuple), None) => tuple,
@@ -363,14 +416,8 @@ async fn handle_request(
     } else if let Some(mock_response) = test_behavior.and_then(TestBehavior::into_mock_success) {
         Ok(mock_response)
     } else {
-        match http_client
-            .request(http::Method::POST, new_uri.to_string())
-            .basic_auth(metadata.user.clone(), Some(metadata.password.clone()))
-            .body(parameters)
-            .headers(headers)
-            .send()
-            .await
-        {
+        let request = auth.apply(http_client.request(http::Method::POST, new_uri.to_string()));
+        match request.body(parameters).headers(headers).send().await {
             Ok(response) => {
                 let headers = response
                     .headers()
@@ -481,20 +528,110 @@ fn redfish_action_uri(machine_ip: &str, target: &str) -> Result<Uri, CarbideErro
         .map_err(|error| CarbideError::internal(format!("invalid uri from machine_ip: {error}")))
 }
 
+/// How the raw Redfish passthrough authenticates to what it dials. Carrying
+/// the credentials inside the variant makes "Basic auth without credentials"
+/// unrepresentable.
+enum PassthroughAuth {
+    /// Direct to the BMC (possibly via the dev bmc-mock redirect): send the
+    /// stored BMC credentials as Basic auth.
+    BmcBasic(Box<rpc::forge::BmcMetaDataGetResponse>),
+    /// Via nico-bmc-proxy, which authenticates upstream itself: send no
+    /// credentials at all.
+    CoreProxy,
+}
+
+impl PassthroughAuth {
+    /// Returns reusable Basic-auth credential forms only when Core owns them.
+    ///
+    /// The core-proxy path deliberately returns no context because the proxy,
+    /// rather than this handler, owns and applies the upstream credentials.
+    fn http_error_sensitive_values(&self) -> Vec<String> {
+        match self {
+            Self::BmcBasic(metadata) => {
+                let (_, sensitive_values) =
+                    redfish_basic_authorization_context(&metadata.user, Some(&metadata.password));
+                sensitive_values
+            }
+            Self::CoreProxy => Vec::new(),
+        }
+    }
+
+    fn apply(
+        &self,
+        request: reqwest_middleware::RequestBuilder,
+    ) -> reqwest_middleware::RequestBuilder {
+        match self {
+            Self::BmcBasic(metadata) => {
+                request.basic_auth(metadata.user.clone(), Some(metadata.password.clone()))
+            }
+            Self::CoreProxy => request,
+        }
+    }
+}
+
 async fn create_client(
     uri: http::Uri,
     pool: &PgPool,
     credential_reader: &dyn CredentialReader,
     bmc_proxy: &ArcSwap<Option<HostPortPair>>,
+    core_proxy: Option<&crate::bmc_proxy::PassthroughClient>,
 ) -> Result<
     (
-        rpc::forge::BmcMetaDataGetResponse,
         http::Uri,
         HeaderMap,
         reqwest_middleware::ClientWithMiddleware,
+        PassthroughAuth,
     ),
     CarbideError,
 > {
+    // Via nico-bmc-proxy: the proxy resolves the BMC's credentials itself,
+    // so no credential lookup happens here (a BMC with no stored root
+    // credential fails at the proxy instead). The proxy dials the BMC's standard
+    // https port; this handler never had per-machine port knowledge (the
+    // metadata lookup on the direct path returns no port either). The
+    // static [bmc_proxy] routing also wins over the dev-only dynamic
+    // bmc-mock redirect.
+    if let Some(passthrough) = core_proxy {
+        let bmc_ip = metadata_host(&uri);
+        // Keep the direct path's inventory check: the proxy forwards IP
+        // targets without any lookup of its own, so skipping this would
+        // let the admin passthrough relay requests to arbitrary addresses
+        // from the proxy's network position.
+        let mut txn = pool.txn_begin().await?;
+        // Errors on an unparseable address or an IP with no inventoried BMC
+        // interface -- that `Err` is the gate.
+        crate::handlers::bmc_endpoint_explorer::validate_and_complete_bmc_endpoint_request(
+            txn.as_mut(),
+            Some(rpc::forge::BmcEndpointRequest {
+                ip_address: bmc_ip.clone(),
+                mac_address: None,
+            }),
+            None,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let (new_authority, _) = client_authority(&bmc_ip, None, Some(passthrough.target()))
+            .map_err(|error| CarbideError::internal(format!("creating url {error}")))?;
+        let mut parts = uri.into_parts();
+        parts.authority = Some(new_authority);
+        let new_uri = http::Uri::from_parts(parts)
+            .map_err(|e| CarbideError::internal(format!("invalid url parts {e}")))?;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "forwarded",
+            format_forwarded_host_parameter(&bmc_ip)
+                .parse()
+                .map_err(|e| CarbideError::internal(format!("invalid forwarded header: {e}")))?,
+        );
+        return Ok((
+            new_uri,
+            headers,
+            passthrough.client().await,
+            PassthroughAuth::CoreProxy,
+        ));
+    }
+
     let bmc_metadata_request = rpc::forge::BmcMetaDataGetRequest {
         machine_id: None,
         bmc_endpoint_request: Some(rpc::forge::BmcEndpointRequest {
@@ -549,7 +686,12 @@ async fn create_client(
             .with(reqwest_tracing::TracingMiddleware::default())
             .build()
     };
-    Ok((metadata, new_uri, headers, http_client))
+    Ok((
+        new_uri,
+        headers,
+        http_client,
+        PassthroughAuth::BmcBasic(Box::new(metadata)),
+    ))
 }
 
 pub(crate) async fn redfish_cancel_action(
@@ -626,7 +768,7 @@ impl TestBehavior {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn from_parameters_if_testing(parameters: &mut String) -> Option<TestBehavior> {
         let mut param_obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(parameters).expect("invalid parameters");
@@ -641,13 +783,13 @@ impl TestBehavior {
         }
     }
 
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     fn from_parameters_if_testing(_parameters: &mut String) -> Option<TestBehavior> {
         None
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_behavior {
     use super::TestBehavior;
 
@@ -690,14 +832,18 @@ impl From<reqwest_middleware::Error> for RequestErrorInfo {
 
 #[cfg(test)]
 mod tests {
+    use arc_swap::ArcSwap;
     use carbide_instrument::emit;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
+    use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_test_support::value_scenarios;
     use carbide_utils::HostPortPair;
 
     use super::{
-        RedfishActionResultPersistenceFailed, client_authority, metadata_host, redfish_action_uri,
+        PassthroughAuth, RedfishActionResultPersistenceFailed, client_authority, create_client,
+        metadata_host, redfish_action_uri,
     };
+    use crate::bmc_proxy::{PassthroughClient, test_config_with_generated_pems};
 
     #[test]
     fn redfish_action_result_persistence_failure_logs_and_counts() {
@@ -850,6 +996,125 @@ mod tests {
                 "2001:db8::10" =>
                     "https://[2001:db8::10]/redfish/v1/Systems/1/Actions/Reset".to_string(),
             }
+        );
+    }
+
+    // --- passthrough via nico-bmc-proxy ------------------------------------
+
+    /// The proxied passthrough keeps the direct path's inventory gate: a
+    /// target that is not an IP, or an IP with no inventoried BMC interface,
+    /// is rejected before any request is built -- the proxy itself forwards
+    /// IP targets with no lookup of its own, so this gate is what stops the
+    /// admin passthrough from relaying to arbitrary addresses.
+    #[crate::sqlx_test]
+    async fn passthrough_via_core_proxy_rejects_uninventoried_targets(pool: sqlx::PgPool) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let passthrough = PassthroughClient::new(&test_config_with_generated_pems(&dir))
+            .expect("passthrough client builds from generated PEMs");
+        let reader = TestCredentialManager::default();
+        let dynamic = ArcSwap::from_pointee(None);
+
+        for (scenario, target) in [
+            ("an uninventoried IP", "https://192.0.2.99/redfish/v1"),
+            ("a non-IP host", "https://bmc.example/redfish/v1"),
+        ] {
+            let result = create_client(
+                target.parse().unwrap(),
+                &pool,
+                &reader,
+                &dynamic,
+                Some(&passthrough),
+            )
+            .await;
+            assert!(result.is_err(), "{scenario} must be rejected by the gate");
+        }
+    }
+
+    /// Via the core proxy, an inventoried BMC target is rewritten to the
+    /// static proxy authority -- winning over the dynamic dev redirect --
+    /// with the original path and query preserved, the Forwarded header
+    /// naming the BMC, and no BMC credentials attached.
+    #[crate::sqlx_test]
+    async fn passthrough_via_core_proxy_targets_the_proxy_for_inventoried_bmcs(pool: sqlx::PgPool) {
+        let mut conn = pool.acquire().await.expect("acquire");
+        let segment_id: carbide_uuid::network::NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version, network_segment_type) \
+             VALUES ('passthrough-admin', 'V1-T0', 'admin') RETURNING id",
+        )
+        .fetch_one(conn.as_mut())
+        .await
+        .expect("segment seeds");
+        let machine_id = carbide_uuid::machine::MachineId::new(
+            carbide_uuid::machine::MachineIdSource::ProductBoardChassisSerial,
+            [0x77; 32],
+            carbide_uuid::machine::MachineType::Host,
+        );
+        sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+            .bind(machine_id)
+            .execute(conn.as_mut())
+            .await
+            .expect("machine seeds");
+        let interface_id: carbide_uuid::machine::MachineInterfaceId = sqlx::query_scalar(
+            "INSERT INTO machine_interfaces \
+                    (segment_id, mac_address, primary_interface, hostname, machine_id, \
+                     interface_type, association_type) \
+                 VALUES ($1, '00:11:22:33:44:55', false, 'passthrough-bmc', $2, 'Bmc', 'Machine') \
+                 RETURNING id",
+        )
+        .bind(segment_id)
+        .bind(machine_id)
+        .fetch_one(conn.as_mut())
+        .await
+        .expect("interface seeds");
+        sqlx::query(
+            "INSERT INTO machine_interface_addresses (interface_id, address, allocation_type) \
+             VALUES ($1, '192.0.2.10'::inet, 'static')",
+        )
+        .bind(interface_id)
+        .execute(conn.as_mut())
+        .await
+        .expect("address seeds");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let passthrough = PassthroughClient::new(&test_config_with_generated_pems(&dir))
+            .expect("passthrough client builds from generated PEMs");
+        let reader = TestCredentialManager::default();
+        // The dynamic dev redirect is set; the static proxy must still win.
+        let dynamic = ArcSwap::from_pointee(Some(HostPortPair::HostAndPort(
+            "bmc-mock.example".to_string(),
+            8000,
+        )));
+
+        let (new_uri, headers, _client, auth) = create_client(
+            "https://192.0.2.10/redfish/v1/Systems?only=self"
+                .parse()
+                .unwrap(),
+            &pool,
+            &reader,
+            &dynamic,
+            Some(&passthrough),
+        )
+        .await
+        .expect("an inventoried BMC should pass the gate");
+
+        assert_eq!(
+            new_uri.authority().map(|a| a.as_str()),
+            Some("bmc-proxy.example:1079"),
+            "the request must target the static proxy, not the BMC or the dynamic redirect"
+        );
+        assert_eq!(
+            new_uri.path_and_query().map(|pq| pq.as_str()),
+            Some("/redfish/v1/Systems?only=self"),
+            "the original path and query must survive the authority rewrite"
+        );
+        assert_eq!(
+            headers.get("forwarded").and_then(|v| v.to_str().ok()),
+            Some("host=192.0.2.10"),
+            "the Forwarded header routes the proxy to the BMC"
+        );
+        assert!(
+            matches!(auth, PassthroughAuth::CoreProxy),
+            "the proxy authenticates upstream itself; no BMC credentials are attached"
         );
     }
 }

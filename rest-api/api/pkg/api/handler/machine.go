@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"time"
@@ -43,6 +44,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
@@ -141,19 +143,17 @@ func getAPIMachines(ctx context.Context, ms []cdbm.Machine, logger zerolog.Logge
 
 // GetAllMachineHandler is the API Handler for getting all Machines
 type GetAllMachineHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllMachineHandler initializes and returns a new handler for getting all Machines
 func NewGetAllMachineHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllMachineHandler {
 	return GetAllMachineHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -184,7 +184,7 @@ func NewGetAllMachineHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Success 200 {object} []model.APIMachine
 // @Router /v2/org/{org}/nico/machine [get]
 func (gamh GetAllMachineHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "GetAll", c, gamh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -294,7 +294,7 @@ func (gamh GetAllMachineHandler) Handle(c echo.Context) error {
 	// Validate InstanceType ID if provided
 	qInstanceTypeID := qParams["instanceTypeId"]
 	if len(qInstanceTypeID) > 0 {
-		gamh.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("instanceTypeId", qInstanceTypeID), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("instanceTypeId", qInstanceTypeID))
 		for _, instanceTypeID := range qInstanceTypeID {
 			instanceType, serr := common.GetInstanceTypeFromIDString(ctx, nil, instanceTypeID, gamh.dbSession)
 
@@ -319,7 +319,7 @@ func (gamh GetAllMachineHandler) Handle(c echo.Context) error {
 	// Check if `hasInstanceType` query params
 	qHasInstanceType := c.QueryParam("hasInstanceType")
 	if qHasInstanceType != "" {
-		gamh.tracerSpan.SetAttribute(handlerSpan, attribute.String("hasInstanceType", qHasInstanceType), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("hasInstanceType", qHasInstanceType))
 		hiType, serr := strconv.ParseBool(qHasInstanceType)
 		if serr != nil {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid value specified for hasInstanceType in query", nil)
@@ -345,13 +345,13 @@ func (gamh GetAllMachineHandler) Handle(c echo.Context) error {
 	// Get Machine ID from query param
 	idQuery := qParams["id"]
 	if len(idQuery) > 0 {
-		gamh.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("id", idQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("id", idQuery))
 		filterInput.MachineIDs = append(filterInput.MachineIDs, idQuery...)
 	}
 
 	qTenantIDStrs := qParams["tenantId"]
 	if len(qTenantIDStrs) > 0 {
-		gamh.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("tenantId", qTenantIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("tenantId", qTenantIDStrs))
 		tenantIDs := make([]uuid.UUID, 0, len(qTenantIDStrs))
 		for _, tenantIDStr := range qTenantIDStrs {
 			tenantID, err := uuid.Parse(tenantIDStr)
@@ -408,7 +408,7 @@ func (gamh GetAllMachineHandler) Handle(c echo.Context) error {
 	//	Check if `hasInstance` query params
 	qHasInstance := c.QueryParam("hasInstance")
 	if qHasInstance != "" {
-		gamh.tracerSpan.SetAttribute(handlerSpan, attribute.String("hasInstance", qHasInstance), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("hasInstance", qHasInstance))
 		hi, serr := strconv.ParseBool(qHasInstance)
 		if serr != nil {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid value specified for `hasInstance` in query", nil)
@@ -439,7 +439,7 @@ func (gamh GetAllMachineHandler) Handle(c echo.Context) error {
 	// Validate capability name from query param if it is provided
 	capNameQuery := qParams["capabilityName"]
 	if len(capNameQuery) > 0 {
-		gamh.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("capabilityName", capNameQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("capabilityName", capNameQuery))
 		filterInput.CapabilityNames = append(filterInput.CapabilityNames, capNameQuery...)
 	}
 
@@ -447,13 +447,13 @@ func (gamh GetAllMachineHandler) Handle(c echo.Context) error {
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
 		filterInput.SearchQuery = searchQuery
-		gamh.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get status from query param
 	statusQuery := qParams["status"]
 	if len(statusQuery) > 0 {
-		gamh.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("status", statusQuery))
 		for _, status := range statusQuery {
 			_, ok := cdbm.MachineStatusMap[status]
 			if !ok {
@@ -467,7 +467,7 @@ func (gamh GetAllMachineHandler) Handle(c echo.Context) error {
 	// Get isMissingOnSite from query param
 	qIsMissingOnSite := c.QueryParam("isMissingOnSite")
 	if qIsMissingOnSite != "" {
-		gamh.tracerSpan.SetAttribute(handlerSpan, attribute.String("isMissingOnSite", qIsMissingOnSite), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("isMissingOnSite", qIsMissingOnSite))
 		isMissingOnSite, err := strconv.ParseBool(qIsMissingOnSite)
 		if err != nil {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid value specified for `isMissingOnSite` query param", nil)
@@ -479,7 +479,7 @@ func (gamh GetAllMachineHandler) Handle(c echo.Context) error {
 	// Get hwSkuDeviceType from query param
 	hwSkuDeviceTypeQuery := qParams["hwSkuDeviceType"]
 	if len(hwSkuDeviceTypeQuery) > 0 {
-		gamh.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("hwSkuDeviceType", hwSkuDeviceTypeQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("hwSkuDeviceType", hwSkuDeviceTypeQuery))
 		for _, hwSkuDeviceType := range hwSkuDeviceTypeQuery {
 			// HwSkuDeviceType is a free-form string field, no validation needed
 			filterInput.HwSkuDeviceTypes = append(filterInput.HwSkuDeviceTypes, hwSkuDeviceType)
@@ -524,19 +524,17 @@ func (gamh GetAllMachineHandler) Handle(c echo.Context) error {
 
 // GetMachineHandler is the API Handler for retrieving Machine
 type GetMachineHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetMachineHandler initializes and returns a new handler to retrieve Machine
 func NewGetMachineHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetMachineHandler {
 	return GetMachineHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -553,7 +551,7 @@ func NewGetMachineHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg 
 // @Success 200 {object} model.APIMachine
 // @Router /v2/org/{org}/nico/machine/{id} [get]
 func (gmh GetMachineHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "Get", c, gmh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -599,7 +597,7 @@ func (gmh GetMachineHandler) Handle(c echo.Context) error {
 	// Get machine ID from URL param
 	mID := c.Param("id")
 
-	gmh.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_id", mID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_id", mID))
 
 	mDAO := cdbm.NewMachineDAO(gmh.dbSession)
 	// Check that Machine exists
@@ -671,21 +669,19 @@ func (gmh GetMachineHandler) Handle(c echo.Context) error {
 
 // UpdateMachineHandler is the API Handler for updating a Machine
 type UpdateMachineHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateMachineHandler initializes and returns a new handler to update Machine
 func NewUpdateMachineHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateMachineHandler {
 	return UpdateMachineHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -702,7 +698,7 @@ func NewUpdateMachineHandler(dbSession *cdb.Session, tc temporalClient.Client, s
 // @Success 200 {object} model.APIMachine
 // @Router /v2/org/{org}/nico/machine/{id} [patch]
 func (umh UpdateMachineHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "Update", c, umh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -724,7 +720,7 @@ func (umh UpdateMachineHandler) Handle(c echo.Context) error {
 	// Get machine ID from URL param
 	mID := c.Param("id")
 
-	umh.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_id", mID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_id", mID))
 
 	mDAO := cdbm.NewMachineDAO(umh.dbSession)
 	// Check that Machine exists
@@ -1579,15 +1575,13 @@ func (umh UpdateMachineHandler) Handle(c echo.Context) error {
 
 // GetMachineStatusDetailsHandler is the API Handler for getting Machine StatusDetail records
 type GetMachineStatusDetailsHandler struct {
-	dbSession  *cdb.Session
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
 }
 
 // NewGetMachineStatusDetailsHandler initializes and returns a new handler to retrieve Machine StatusDetail records
 func NewGetMachineStatusDetailsHandler(dbSession *cdb.Session) GetMachineStatusDetailsHandler {
 	return GetMachineStatusDetailsHandler{
-		dbSession:  dbSession,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }
 
@@ -1603,7 +1597,7 @@ func NewGetMachineStatusDetailsHandler(dbSession *cdb.Session) GetMachineStatusD
 // @Success 200 {object} []model.APIStatusDetail
 // @Router /v2/org/{org}/nico/machine/{id}/status-history [get]
 func (gmsdh GetMachineStatusDetailsHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "Get", c, gmsdh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1625,7 +1619,7 @@ func (gmsdh GetMachineStatusDetailsHandler) Handle(c echo.Context) error {
 	// Get machine ID from URL param
 	machineID := c.Param("id")
 
-	gmsdh.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_id", machineID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_id", machineID))
 
 	mDAO := cdbm.NewMachineDAO(gmsdh.dbSession)
 	// Check that Machine exists
@@ -1704,19 +1698,17 @@ func (gmsdh GetMachineStatusDetailsHandler) Handle(c echo.Context) error {
 
 // DeleteMachineHandler is the API Handler for updating a Machine
 type DeleteMachineHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewDeleteMachineHandler initializes and returns a new handler to update Machine
 func NewDeleteMachineHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) DeleteMachineHandler {
 	return DeleteMachineHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -1732,7 +1724,7 @@ func NewDeleteMachineHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Success 202 {object}
 // @Router /v2/org/{org}/nico/machine/{id} [delete]
 func (umh DeleteMachineHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "Delete", c, umh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1763,7 +1755,7 @@ func (umh DeleteMachineHandler) Handle(c echo.Context) error {
 
 	logger = log.With().Str("Machine", mID).Logger()
 
-	umh.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_id", mID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_id", mID))
 
 	err = cdb.WithTx(ctx, umh.dbSession, func(tx *cdb.Tx) error {
 		mDAO := cdbm.NewMachineDAO(umh.dbSession)
@@ -1964,17 +1956,15 @@ func (umh DeleteMachineHandler) Handle(c echo.Context) error {
 
 // GetAllDpuMachineHandler is the API Handler for retrieving DPU machines attached to a host Machine.
 type GetAllDpuMachineHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewGetAllDpuMachineHandler initializes and returns a new handler to retrieve Machine DPU machines.
 func NewGetAllDpuMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetAllDpuMachineHandler {
 	return GetAllDpuMachineHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -1990,7 +1980,7 @@ func NewGetAllDpuMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetA
 // @Success 200 {object} []model.APIDpuMachine
 // @Router /v2/org/{org}/nico/machine/{machineId}/dpu [get]
 func (gadmh GetAllDpuMachineHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "GetDpu", c, gadmh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "GetDpu", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -2010,7 +2000,7 @@ func (gadmh GetAllDpuMachineHandler) Handle(c echo.Context) error {
 	}
 
 	mID := c.Param("id")
-	gadmh.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_id", mID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_id", mID))
 
 	// Get Machine with Site relation
 	mDAO := cdbm.NewMachineDAO(gadmh.dbSession)
@@ -2155,17 +2145,15 @@ func (gadmh GetAllDpuMachineHandler) Handle(c echo.Context) error {
 
 // DecommissionMachineHandler starts decommissioning a Machine.
 type DecommissionMachineHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewDecommissionMachineHandler returns a new Machine decommissioning handler.
 func NewDecommissionMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool, _ *config.Config) DecommissionMachineHandler {
 	return DecommissionMachineHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -2180,7 +2168,7 @@ func NewDecommissionMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool, _
 // @Success 202 {object} model.APIMessageResponse
 // @Router /v2/org/{org}/nico/machine/{machineId}/decommission [post]
 func (h DecommissionMachineHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "Decommission", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "Decommission", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -2254,4 +2242,112 @@ func (h DecommissionMachineHandler) Handle(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusAccepted, model.APIMessageResponse{Message: "Machine decommissioning request was accepted"})
+}
+
+var machineChassisIDRegexp = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]*$`)
+
+// ResetMachineChassisHandler queues a chassis reset for a Machine.
+type ResetMachineChassisHandler struct {
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+}
+
+// NewResetMachineChassisHandler returns a new ResetMachineChassisHandler.
+func NewResetMachineChassisHandler(dbSession *cdb.Session, scp *sc.ClientPool) ResetMachineChassisHandler {
+	return ResetMachineChassisHandler{
+		dbSession: dbSession,
+		scp:       scp,
+	}
+}
+
+// Handle godoc
+// @Summary Reset Machine Chassis
+// @Description Queue a Redfish chassis reset through the Machine Maintenance state.
+// @Tags Machine
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param machineId path string true "ID of Machine"
+// @Param chassisId path string true "Case-sensitive Redfish chassis identifier"
+// @Success 202 {object} model.APIMessageResponse
+// @Router /v2/org/{org}/nico/machine/{machineId}/chassis/{chassisId}/reset [patch]
+func (h ResetMachineChassisHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "ResetChassis", c)
+	if handlerSpan != nil {
+		defer handlerSpan.End()
+	}
+
+	if dbUser == nil {
+		logger.Error().Msg("Invalid User object found in request context")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	machineID := c.Param("id")
+	if machineID == "" {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Machine ID was not specified in URL", nil)
+	}
+
+	chassisID := c.Param("chassisId")
+	if !machineChassisIDRegexp.MatchString(chassisID) {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "chassisId is required and may only contain letters, numbers, dots, underscores, or dashes", nil)
+	}
+
+	provider, apiError := common.IsProvider(ctx, logger, h.dbSession, org, dbUser, false)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
+	machine, err := cdbm.NewMachineDAO(h.dbSession).GetByID(ctx, nil, machineID, []string{cdbm.SiteRelationName}, false)
+	if err != nil {
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Machine with specified ID", nil)
+		}
+		logger.Error().Err(err).Msg("failed to retrieve Machine details from DB")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Machine details, DB error", nil)
+	}
+
+	if machine.InfrastructureProviderID != provider.ID {
+		logger.Error().Msg("Machine doesn't belong to org's Infrastructure provider")
+		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Machine with specified ID", nil)
+	}
+	if machine.IsMissingOnSite {
+		logger.Error().Msg("Machine is missing on site, unable to reset chassis")
+		return cutil.NewAPIErrorResponse(c, http.StatusPreconditionFailed, "Machine is missing on site, unable to reset chassis", nil)
+	}
+	if machine.IsAssigned {
+		logger.Error().Msg("Machine is currently in use by an Instance and cannot have its chassis reset")
+		return cutil.NewAPIErrorResponse(c, http.StatusPreconditionFailed, "Machine is currently in use by an Instance and cannot have its chassis reset", nil)
+	}
+	if machine.Site == nil {
+		logger.Error().Msg("Related Site was not returned for Machine DB entity")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for Machine, DB error", nil)
+	}
+
+	site := machine.Site
+	if site.Status != cdbm.SiteStatusRegistered {
+		logger.Warn().Msg("Site specified in request data is not in Registered state")
+		return cutil.NewAPIErrorResponse(c, http.StatusPreconditionFailed, "Site specified in request data is not in Registered state, cannot execute admin operation", nil)
+	}
+
+	stc, err := h.scp.GetClientByID(site.ID)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve workflow client for Site", nil)
+	}
+
+	coreReq := &corev1.AdminChassisResetRequest{
+		MachineId: &corev1.MachineId{Id: machineID},
+		ChassisId: chassisID,
+		Action:    corev1.AdminPowerControlRequest_ForceRestart,
+	}
+	logger.Info().Str("machine_id", machineID).Str("chassis_id", chassisID).Str("site_id", site.ID.String()).Msg("Queueing chassis reset via Core gRPC proxy")
+	apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_AdminChassisReset_FullMethodName, coreReq, nil, site.ID.String())
+	if apiErr != nil {
+		logAPIError(logger, apiErr, "Failed to queue chassis reset via Core gRPC proxy")
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
+
+	return c.JSON(http.StatusAccepted, model.APIMessageResponse{
+		Message: "Machine chassis reset request was accepted",
+	})
 }

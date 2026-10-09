@@ -19,9 +19,202 @@ use std::collections::HashMap;
 
 use model::expected_switch::ExpectedSwitch;
 use model::metadata::Metadata;
+use model::rack::RackConfig;
+use sqlx::Connection;
 
 use super::*;
 use crate as db;
+
+#[crate::sqlx_test]
+async fn bmc_credential_length_migration_preserves_rows(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // The harness applies all migrations; restore the populated predecessor.
+    sqlx::raw_sql(
+        "ALTER TABLE expected_switches
+             ALTER COLUMN bmc_username TYPE VARCHAR(16),
+             ALTER COLUMN bmc_password TYPE VARCHAR(16);
+         INSERT INTO expected_switches
+             (serial_number, bmc_mac_address, bmc_username, bmc_password)
+         VALUES ('existing-switch', '02:00:00:00:01:01', 'admin', repeat('a', 16));",
+    )
+    .execute(&pool)
+    .await?;
+    let snapshot =
+        "SELECT to_jsonb(expected_switches) FROM expected_switches ORDER BY expected_switch_id";
+    let before: Vec<serde_json::Value> = sqlx::query_scalar(snapshot).fetch_all(&pool).await?;
+
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261005160144_expected_switch_bmc_password_length.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    let after: Vec<serde_json::Value> = sqlx::query_scalar(snapshot).fetch_all(&pool).await?;
+    assert_eq!(after, before);
+
+    let mut txn = pool.begin().await?;
+    let existing = find_by_serial_number(&mut txn, "existing-switch")
+        .await?
+        .unwrap();
+    let new_switch = ExpectedSwitch {
+        expected_switch_id: None,
+        bmc_mac_address: expected_switch_bmc_mac_address(1),
+        serial_number: "long-credentials-switch".to_string(),
+        bmc_username: "u".repeat(256),
+        bmc_password: "b".repeat(17),
+        ..existing
+    };
+    let mut switch = create(&mut txn, new_switch).await?;
+    assert_eq!(switch.bmc_username, "u".repeat(256));
+    assert_eq!(switch.bmc_password, "b".repeat(17));
+    switch.bmc_username = "v".repeat(512);
+    switch.bmc_password = "c".repeat(255);
+    update(&mut txn, &switch).await?;
+    txn.commit().await?;
+
+    let mut connection = pool.acquire().await?;
+    let stored = find_by_id(&mut connection, switch.expected_switch_id.unwrap())
+        .await?
+        .unwrap();
+    assert_eq!(stored.bmc_username, "v".repeat(512));
+    assert_eq!(stored.bmc_password, "c".repeat(255));
+    let error =
+        sqlx::query("UPDATE expected_switches SET bmc_password = $1 WHERE expected_switch_id = $2")
+            .bind("d".repeat(256))
+            .bind(switch.expected_switch_id)
+            .execute(&pool)
+            .await
+            .unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("22001")
+    );
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn expected_switch_queries_survive_added_columns(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut api_connection = pool.acquire().await?;
+    exercise_expected_switch_queries(&mut api_connection).await?;
+    assert!(api_connection.cached_statements_size() > 0);
+
+    // Keep the API's prepared statements while another connection applies DDL.
+    let mut migration = pool.begin().await?;
+    sqlx::raw_sql(
+        "SET LOCAL lock_timeout = '5s';
+         ALTER TABLE expected_switches ADD COLUMN test_added_column text;",
+    )
+    .execute(&mut *migration)
+    .await?;
+    migration.commit().await?;
+
+    exercise_expected_switch_queries(&mut api_connection).await?;
+    Ok(())
+}
+
+async fn exercise_expected_switch_queries(
+    connection: &mut PgConnection,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = connection.begin().await?;
+    let id = Uuid::new_v4();
+    let rack_id = RackId::new("projection-rack");
+    let nvos_mac = "02:00:00:00:02:02".parse()?;
+    let expected = ExpectedSwitch {
+        expected_switch_id: Some(id),
+        bmc_mac_address: "02:00:00:00:02:01".parse()?,
+        nvos_mac_addresses: vec![nvos_mac],
+        bmc_username: "test-user".to_string(),
+        bmc_password: "test-password".to_string(),
+        serial_number: "projection-switch".to_string(),
+        nvos_username: Some("nvos-user".to_string()),
+        nvos_password: Some("nvos-password".to_string()),
+        bmc_ip_address: Some("192.0.2.20".parse()?),
+        nvos_ip_address: Some("192.0.2.21".parse()?),
+        rack_id: Some(rack_id.clone()),
+        bmc_retain_credentials: Some(true),
+        metadata: Metadata {
+            name: "expected switch".to_string(),
+            description: "populated projection fixture".to_string(),
+            labels: HashMap::from([("location".to_string(), "rack-1".to_string())]),
+        },
+    };
+    assert_switch(&create(&mut txn, expected.clone()).await?, &expected);
+
+    for found in [
+        find_by_bmc_mac_address(&mut txn, expected.bmc_mac_address).await?,
+        find_by_nvos_mac_address(&mut txn, nvos_mac).await?,
+        find_by_serial_number(&mut txn, &expected.serial_number).await?,
+        find_by_id(&mut txn, id).await?,
+        find_by_rack_id(&mut txn, rack_id.to_string()).await?,
+        find_for_update(
+            &mut txn,
+            &ExpectedSwitchRequest {
+                expected_switch_id: Some(id),
+                bmc_mac_address: None,
+            },
+        )
+        .await?,
+        find_for_update(
+            &mut txn,
+            &ExpectedSwitchRequest {
+                expected_switch_id: None,
+                bmc_mac_address: Some(expected.bmc_mac_address),
+            },
+        )
+        .await?,
+    ] {
+        assert_switch(&found.expect("the expected switch exists"), &expected);
+    }
+    for found in [
+        find_all(&mut txn).await?,
+        find_all_by_rack_id(&mut txn, &rack_id).await?,
+    ] {
+        assert_eq!(found.len(), 1);
+        assert_switch(&found[0], &expected);
+    }
+    let found = find_many_by_bmc_mac_address(&mut txn, &[expected.bmc_mac_address]).await?;
+    assert_eq!(found.len(), 1);
+    assert_switch(&found[&expected.bmc_mac_address], &expected);
+
+    // Request a different MAC first so the fallback cannot hide a missing
+    // `nvos_mac_addresses` column in either selector.
+    let different_mac = "02:00:00:00:02:04".parse()?;
+    for expected_switch_id in [Some(Uuid::new_v4()), None] {
+        let other = ExpectedSwitch {
+            expected_switch_id,
+            bmc_mac_address: "02:00:00:00:02:03".parse()?,
+            ..expected.clone()
+        };
+        assert_eq!(
+            find_nvos_mac_claimed_elsewhere(&mut txn, &[different_mac, nvos_mac], &other).await?,
+            Some(nvos_mac)
+        );
+    }
+
+    txn.rollback().await?;
+    Ok(())
+}
+
+fn assert_switch(actual: &ExpectedSwitch, expected: &ExpectedSwitch) {
+    assert_eq!(actual.expected_switch_id, expected.expected_switch_id);
+    assert_eq!(actual.bmc_mac_address, expected.bmc_mac_address);
+    assert_eq!(actual.nvos_mac_addresses, expected.nvos_mac_addresses);
+    assert_eq!(actual.bmc_username, expected.bmc_username);
+    assert_eq!(actual.bmc_password, expected.bmc_password);
+    assert_eq!(actual.serial_number, expected.serial_number);
+    assert_eq!(actual.nvos_username, expected.nvos_username);
+    assert_eq!(actual.nvos_password, expected.nvos_password);
+    assert_eq!(actual.bmc_ip_address, expected.bmc_ip_address);
+    assert_eq!(actual.nvos_ip_address, expected.nvos_ip_address);
+    assert_eq!(actual.rack_id, expected.rack_id);
+    assert_eq!(
+        actual.bmc_retain_credentials,
+        expected.bmc_retain_credentials
+    );
+    assert_eq!(actual.metadata, expected.metadata);
+}
 
 fn expected_switch_bmc_mac_address(index: u32) -> mac_address::MacAddress {
     mac_address::MacAddress::new([0x44, 0x44, 0x11, 0x11, 0x00, index as u8])
@@ -296,4 +489,103 @@ async fn test_delete(pool: sqlx::PgPool) -> () {
         async |txn, mac| db::expected_switch::find_by_bmc_mac_address(txn, mac).await,
     )
     .await;
+}
+
+/// Every switch is rack-scale, so the pre-ingestion RMS identity resolver
+/// requires a declared `rack_id` and takes its rack profile from the live
+/// `racks` row when present, otherwise the `expected_racks` declaration.
+/// A switch missing a `rack_id` is a misconfiguration and is omitted.
+#[crate::sqlx_test]
+async fn test_find_rms_identities_by_bmc_macs(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = pool.begin().await?;
+
+    let bmc_expected_only = "02:00:00:00:0d:01";
+    let bmc_live_rack = "02:00:00:00:0d:02";
+    let bmc_no_rack = "02:00:00:00:0d:03";
+
+    let rack_expected: RackId = "rack-expected-only".parse().unwrap();
+    let rack_live: RackId = "rack-live".parse().unwrap();
+    let profile_expected = RackProfileId::new("NVL72-EXPECTED");
+    let profile_live = RackProfileId::new("NVL72-LIVE");
+
+    // Both racks are declared in expected_racks; only rack_live also has a
+    // live racks row (with a different profile) to prove COALESCE precedence.
+    sqlx::query("INSERT INTO expected_racks (rack_id, rack_profile_id) VALUES ($1, $2), ($3, $4)")
+        .bind(rack_expected.to_string())
+        .bind(profile_expected.to_string())
+        .bind(rack_live.to_string())
+        .bind("NVL72-EXPECTED-IGNORED")
+        .execute(txn.as_mut())
+        .await?;
+
+    crate::rack::create(
+        txn.as_mut(),
+        &rack_live,
+        Some(&profile_live),
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO expected_switches
+             (serial_number, bmc_mac_address, bmc_username, bmc_password, rack_id)
+         VALUES ('SW-EXP', $1::macaddr, 'admin', 'pw', $2),
+                ('SW-LIVE', $3::macaddr, 'admin', 'pw', $4),
+                ('SW-NORACK', $5::macaddr, 'admin', 'pw', NULL)",
+    )
+    .bind(bmc_expected_only)
+    .bind(rack_expected.to_string())
+    .bind(bmc_live_rack)
+    .bind(rack_live.to_string())
+    .bind(bmc_no_rack)
+    .execute(txn.as_mut())
+    .await?;
+
+    let identities = find_rms_identities_by_bmc_macs(
+        txn.as_mut(),
+        &[
+            bmc_expected_only.parse()?,
+            bmc_live_rack.parse()?,
+            bmc_no_rack.parse()?,
+        ],
+    )
+    .await?;
+
+    let by_mac: HashMap<_, _> = identities
+        .iter()
+        .map(|id| (id.bmc_mac_address, id))
+        .collect();
+
+    assert_eq!(by_mac.len(), 2, "the no-rack switch must be omitted");
+
+    let expected_only = by_mac
+        .get(&bmc_expected_only.parse()?)
+        .expect("expected-only switch resolves");
+    assert_eq!(expected_only.rack_id, rack_expected);
+    assert_eq!(
+        expected_only.rack_profile_id.as_ref(),
+        Some(&profile_expected),
+        "rack profile falls back to expected_racks when no live rack exists"
+    );
+
+    let live = by_mac
+        .get(&bmc_live_rack.parse()?)
+        .expect("live-rack switch resolves");
+    assert_eq!(live.rack_id, rack_live);
+    assert_eq!(
+        live.rack_profile_id.as_ref(),
+        Some(&profile_live),
+        "a live racks row takes precedence over the expected_racks declaration"
+    );
+
+    assert!(
+        !by_mac.contains_key(&bmc_no_rack.parse()?),
+        "a switch without a rack_id cannot resolve an RMS identity"
+    );
+
+    txn.rollback().await?;
+    Ok(())
 }

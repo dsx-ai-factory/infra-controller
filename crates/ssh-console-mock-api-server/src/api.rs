@@ -95,15 +95,19 @@ impl Forge for MockApiServer {
                     .find(|h| {
                         h.instance_id.to_string().to_lowercase() == instance_id.value.to_lowercase()
                     })
-                    .map(|h| (instance_id, h))
+                    .and_then(|h| {
+                        carbide_uuid::machine::StableHostMachineId::try_from(h.machine_id)
+                            .ok()
+                            .map(|machine_id| (instance_id, machine_id))
+                    })
             })
             .collect::<Vec<_>>();
 
         let instances = mock_instances
             .into_iter()
-            .map(|(instance_id, mock_host)| forge::Instance {
+            .map(|(instance_id, machine_id)| forge::Instance {
                 id: Some(instance_id.clone()),
-                machine_id: Some(mock_host.machine_id),
+                machine_id: Some(machine_id),
                 ..Default::default()
             })
             .collect::<Vec<_>>();

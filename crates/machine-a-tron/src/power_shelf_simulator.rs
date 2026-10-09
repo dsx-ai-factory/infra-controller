@@ -20,22 +20,22 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use bmc_mock::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    BmcCommand, Callbacks, HardwareType, HostMachineInfo, HostnameQuerying, MachineInfo,
-    MockPowerState, POWER_CYCLE_DELAY, SetSystemPowerError, SetSystemPowerResult,
-    SystemPowerControl,
+    ActionError, Callbacks, HardwareType, HostMachineInfo, HostnameQuerying, MachineInfo,
+    MockPowerState, POWER_CYCLE_DELAY, ResourceResetType,
 };
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
-use crate::bmc_mock_wrapper::{BmcMockWrapper, BmcMockWrapperHandle};
+use crate::bmc_mock_wrapper::{BmcCommand, BmcMockWrapper, BmcMockWrapperHandle};
 use crate::config::{self, MachineATronContext, MachineConfig, PersistedDevice};
 use crate::dhcp_wrapper::{DhcpRequestInfo, DhcpRequester, DhcpResponseInfo, vendor_class};
 use crate::machine_state_machine::{MachineStateError, OsImage};
 use crate::power_shelf_fsm::{Action, Event, PowerShelfFsm, Timer};
+use crate::run_jitter::{first_run_offset, jitter_interval};
 use crate::saturating_add_duration_to_instant;
 use crate::status::{BmcStatus, DeviceKind, DeviceStatus, DeviceStatusConfig, EndpointStatus};
 
@@ -68,21 +68,28 @@ struct PowerShelfCallbacks {
     mailbox: ActorMailbox<PowerShelfMessage>,
 }
 
-impl Callbacks for PowerShelfCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        self.state.read().unwrap().power_state
-    }
-
-    fn send_power_command(
-        &self,
-        reset_type: SystemPowerControl,
-    ) -> Result<(), SetSystemPowerError> {
+impl PowerShelfCallbacks {
+    fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
+        self.get_power_state().validate_reset_type(reset_type)?;
         self.mailbox
             .send(PowerShelfMessage::Bmc(BmcCommand::SetSystemPower {
                 request: reset_type,
                 reply: None,
             }))
-            .map_err(|error| SetSystemPowerError::CommandSendError(error.to_string()))
+            .map_err(|error| ActionError::Internal(error.into()))
+    }
+}
+
+impl Callbacks for PowerShelfCallbacks {
+    fn get_power_state(&self) -> MockPowerState {
+        self.state.read().unwrap().power_state
+    }
+
+    async fn computer_system_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        self.set_power_state(reset_type)
     }
 
     fn state_refresh_indication(&self) {
@@ -113,6 +120,8 @@ pub(crate) struct PowerShelfActor {
     bmc_dhcp_info: Option<DhcpResponseInfo>,
     fsm: PowerShelfFsm,
     actions: VecDeque<Action>,
+    /// Spreads a fleet that starts together over the idle interval.
+    first_run_delay: Option<Duration>,
     run_alarm: Option<AlarmId>,
     power_cycle_alarm: Option<AlarmId>,
     dhcp_retry_alarm: Option<AlarmId>,
@@ -127,6 +136,7 @@ impl PowerShelfActor {
         hw_mac_addr_pool: MacAddressPoolConfig,
     ) -> Self {
         let (fsm, actions) = PowerShelfFsm::init(false);
+        let first_run_delay = Some(first_run_offset(config.run_interval_idle));
         Self {
             mat_id: Uuid::new_v4(),
             machine_config_section,
@@ -142,6 +152,7 @@ impl PowerShelfActor {
             bmc_dhcp_info: None,
             fsm,
             actions: actions.into_iter().collect(),
+            first_run_delay,
             run_alarm: None,
             power_cycle_alarm: None,
             dhcp_retry_alarm: None,
@@ -170,6 +181,7 @@ impl PowerShelfActor {
             desired_host_firmware: None,
         };
         let (fsm, actions) = PowerShelfFsm::init(true);
+        let first_run_delay = Some(first_run_offset(config.run_interval_idle));
         Self {
             mat_id: persisted.mat_id,
             machine_config_section,
@@ -182,6 +194,7 @@ impl PowerShelfActor {
             bmc_dhcp_info: None,
             fsm,
             actions: actions.into_iter().collect(),
+            first_run_delay,
             run_alarm: None,
             power_cycle_alarm: None,
             dhcp_retry_alarm: None,
@@ -195,12 +208,13 @@ impl PowerShelfActor {
         let host_info = self.host_info.clone();
         let machine_config_section = self.machine_config_section.clone();
         let bmc_injection = self.bmc_injection.clone();
-        let (actor, mailbox) = Actor::new(self, PowerShelfMessage::Run);
+        let (actor, mailbox) = Actor::new();
 
         let join_handle = tokio::task::Builder::new()
             .name(&format!("Power shelf {mat_id}"))
-            .spawn(actor.run())
+            .spawn(actor.run(self))
             .unwrap();
+        let _ = mailbox.send(PowerShelfMessage::Run);
 
         PowerShelfHandle(Arc::new(PowerShelfActorHandle {
             mailbox,
@@ -220,13 +234,17 @@ impl PowerShelfActor {
             }
             return ActorResult::Noop;
         }
+        if let Some(delay) = self.first_run_delay.take() {
+            self.schedule_run(mailbox, delay);
+            return ActorResult::Noop;
+        }
 
         let sleep_duration = if let Some(duration) = self.process_actions(mailbox).await {
             duration
         } else {
             self.config.run_interval_idle
         };
-        self.schedule_run(mailbox, sleep_duration);
+        self.schedule_run(mailbox, jitter_interval(sleep_duration));
         ActorResult::Noop
     }
 
@@ -396,16 +414,20 @@ impl PowerShelfActor {
         Ok(())
     }
 
-    fn set_system_power(&mut self, request: SystemPowerControl) -> SetSystemPowerResult {
-        use SystemPowerControl::*;
+    fn set_system_power(&mut self, request: ResourceResetType) -> Result<(), ActionError> {
+        use ResourceResetType::*;
 
         match request {
             On | ForceOn => self.fsm_event(Event::PowerOn),
             GracefulShutdown | ForceOff => self.fsm_event(Event::PowerOff),
-            GracefulRestart | ForceRestart | PowerCycle => self.fsm_event(Event::PowerCycle),
-            PushPowerButton | Nmi | Suspend | Pause | Resume => {
-                return Err(SetSystemPowerError::BadRequest(format!(
-                    "Machine-a-tron mock: unsupported power request {request:?}"
+            GracefulRestart | ForceRestart | PowerCycle | FullPowerCycle => {
+                self.fsm_event(Event::PowerCycle)
+            }
+            PushPowerButton | Nmi | Suspend | Pause | Resume | Sleep | Hibernate
+            | UnsupportedValue => {
+                return Err(ActionError::BadRequest(eyre::eyre!(
+                    "machine-a-tron mock: unsupported power request {:?}",
+                    request
                 )));
             }
         }
@@ -497,6 +519,20 @@ impl PowerShelfHandle {
         self.0.mat_id
     }
 
+    /// Drive power through the guard the BMC mock uses, so an RMS power
+    /// request obeys the same rules as a Redfish one.
+    pub(crate) fn set_system_power(&self, request: ResourceResetType) -> Result<(), ActionError> {
+        PowerShelfCallbacks {
+            state: self.0.live_state.clone(),
+            mailbox: self.0.mailbox.clone(),
+        }
+        .set_power_state(request)
+    }
+
+    pub(crate) fn power_state(&self) -> MockPowerState {
+        self.0.live_state.read().unwrap().power_state
+    }
+
     pub(crate) fn pause(&self) -> eyre::Result<()> {
         self.0.mailbox.send(PowerShelfMessage::SetPaused(true))?;
         Ok(())
@@ -558,6 +594,9 @@ impl PowerShelfHandle {
                 host_bits: self.0.host_info.hw_mac_addr_pool.host_bits(),
             }),
             active_host_firmware: None,
+            // Power shelves always accept factory-default logins, so there is
+            // no rotated credential to persist (issue #5966).
+            bmc_state: None,
         }
     }
 
@@ -590,5 +629,39 @@ impl PowerShelfHandle {
 
     pub(crate) fn bmc_ip(&self) -> Option<Ipv4Addr> {
         self.0.live_state.read().unwrap().bmc_ip
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mac_address::MacAddress;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn first_run_offset_waits_for_resume() {
+        let app_context = MachineATronContext::for_test();
+        let config = app_context.app_config.machines["config"].clone();
+        let mac = MacAddress::new([2, 0, 0, 0, 0, 0]);
+        let mut mac_pool = MacAddressPool::new_pool(MacAddressPoolConfig::new(mac, 24).unwrap());
+        let mut actor = PowerShelfActor::new(
+            app_context,
+            "config".to_string(),
+            config,
+            &mut mac_pool,
+            MacAddressPoolConfig::new(mac, 24).unwrap(),
+        );
+        let (_actor_task, mailbox) = Actor::new();
+
+        actor.fsm_event(Event::Pause);
+        actor.process_state(&mailbox).await;
+        assert!(actor.first_run_delay.is_some());
+        assert!(actor.run_alarm.is_none());
+
+        actor.fsm_event(Event::Resume);
+        actor.process_state(&mailbox).await;
+        assert!(actor.first_run_delay.is_none());
+        assert!(actor.run_alarm.is_some());
+        assert_eq!(actor.actions.front(), Some(&Action::Dhcp));
     }
 }

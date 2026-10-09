@@ -22,8 +22,10 @@ pub mod health;
 pub(crate) mod ib_fabric;
 pub(crate) mod ib_guid_pool;
 pub mod mac_address_pool;
+pub mod metadata;
 pub mod network;
 pub mod network_segment;
+pub mod redfish;
 
 use std::sync::Arc;
 use std::time::Duration;

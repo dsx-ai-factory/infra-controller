@@ -22,6 +22,7 @@ use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_ipmi::IPMITool;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
 use carbide_secrets::credentials::CredentialManager;
+use carbide_uuid::machine::MachineIdSubtypeTrait;
 use component_manager::component_manager::ComponentManager;
 use db::db_read::PgPoolReader;
 use libredfish::Redfish;
@@ -95,7 +96,7 @@ pub struct MachineStateHandlerServices {
 impl MachineStateHandlerServices {
     pub async fn create_redfish_client_from_machine(
         &self,
-        machine: &Machine,
+        machine: &Machine<impl MachineIdSubtypeTrait>,
     ) -> Result<Box<dyn Redfish>, StateHandlerError> {
         let bmc_access_info = self.bmc_access_info_for_machine(machine).await?;
         self.redfish_client_pool
@@ -108,7 +109,7 @@ impl MachineStateHandlerServices {
     /// hand this to [`BmcCredentialOps`], which builds its own direct client.
     pub(crate) async fn bmc_access_info_for_machine(
         &self,
-        machine: &Machine,
+        machine: &Machine<impl MachineIdSubtypeTrait>,
     ) -> Result<carbide_utils::redfish::BmcAccessInfo, StateHandlerError> {
         let addr = machine
             .bmc_addr()

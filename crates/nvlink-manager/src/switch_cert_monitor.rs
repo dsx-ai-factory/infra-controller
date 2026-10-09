@@ -23,6 +23,7 @@ use std::{fmt, io};
 use carbide_instrument::Event;
 use carbide_utils::metrics::SharedMetricsHolder;
 use carbide_utils::periodic_timer::PeriodicTimer;
+use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
 use chrono::Utc;
@@ -686,7 +687,11 @@ impl SwitchCertificateMonitor {
                     tracing::info!("SwitchCertificateMonitor stop was requested");
                     return Ok(());
                 }
-                observed_cert = self.probe_endpoint_certificate(&target.endpoint_url, cancel_token) => {
+                observed_cert = Self::probe_endpoint_certificate(
+                    &self.config,
+                    &target.endpoint_url,
+                    cancel_token,
+                ) => {
                     observed_cert
                 }
             };
@@ -845,7 +850,7 @@ impl SwitchCertificateMonitor {
             .filter_map(|target| target.rack_id.clone())
             .collect::<HashSet<_>>();
         let legacy_endpoints_result = async {
-            let machine_ids = db::machine::find_machine_ids(
+            let machine_ids = db::machine::find_machine_ids::<MachineId>(
                 &mut db_reader,
                 MachineSearchConfig {
                     mnnvl_only: true,
@@ -1006,7 +1011,7 @@ impl SwitchCertificateMonitor {
     }
 
     async fn probe_endpoint_certificate(
-        &self,
+        config: &NvLinkConfig,
         endpoint_url: &str,
         cancel_token: &CancellationToken,
     ) -> Result<CertificateProbeOutcome, String> {
@@ -1021,25 +1026,28 @@ impl SwitchCertificateMonitor {
             ));
         }
 
+        // URI hosts retain IPv6 brackets, but TLS names and TCP host/port
+        // tuples need the bare address. Leave an explicit TLS authority alone.
         let host = uri
             .host()
             .ok_or_else(|| format!("NMX-C endpoint {endpoint_url} has no host"))?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
             .to_string();
         let port = uri.port_u16().unwrap_or(443);
-        let tls_authority = self
-            .config
+        let tls_authority = config
             .nmx_c_tls_authority
             .clone()
             .unwrap_or_else(|| host.clone());
         let server_name = ServerName::try_from(tls_authority.clone())
             .map_err(|error| format!("invalid NMX-C TLS authority {tls_authority}: {error}"))?;
 
-        let probe_timeout = self.config.nmx_c_certificate_rotation.probe_timeout;
+        let probe_timeout = config.nmx_c_certificate_rotation.probe_timeout;
         let client_config = tokio::select! {
             _ = cancel_token.cancelled() => {
                 return Err(Self::PROBE_CANCELLED_ERROR.to_string());
             }
-            client_config = build_tls_client_config(&self.config) => client_config?,
+            client_config = build_tls_client_config(config) => client_config?,
         };
         let connector = TlsConnector::from(Arc::new(client_config));
         let tcp_stream = tokio::select! {
@@ -1051,9 +1059,9 @@ impl SwitchCertificateMonitor {
                 TcpStream::connect((host.as_str(), port)),
             ) => tcp_stream
                 .map_err(|_| {
-                    format!("connection to {host}:{port} timed out after {probe_timeout:?}")
+                    format!("connection to {endpoint_url} timed out after {probe_timeout:?}")
                 })?
-                .map_err(|error| format!("failed to connect to {host}:{port}: {error}"))?,
+                .map_err(|error| format!("failed to connect to {endpoint_url}: {error}"))?,
         };
         let tls_stream = tokio::select! {
             _ = cancel_token.cancelled() => {
@@ -1276,11 +1284,18 @@ fn switch_cert_monitor_error_kind(error: &str) -> SwitchCertMonitorErrorKind {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv6Addr;
+
     use carbide_instrument::emit;
-    use carbide_instrument::testing::{MetricsCapture, capture_logs};
-    use carbide_test_support::{Check, check_values};
+    use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::{Case, Check, check_cases_async, check_values};
     use rcgen::{CertifiedKey, generate_simple_self_signed};
+    use rustls::ServerConfig;
     use rustls_pki_types::UnixTime;
+    use tempfile::NamedTempFile;
+    use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
 
     use super::*;
 
@@ -1379,6 +1394,121 @@ mod tests {
             ],
             |error| tls_error_is_expired_certificate(&error),
         );
+    }
+
+    #[tokio::test]
+    async fn certificate_probe_dials_ipv6_and_verifies_the_selected_identity() {
+        check_cases_async(
+            [
+                Case {
+                    scenario: "IPv6 identity from endpoint",
+                    input: ("::1", None),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "DNS authority while dialing IPv6",
+                    input: ("nmxc.example.test", Some("nmxc.example.test")),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "explicit authority does not match certificate",
+                    input: ("::1", Some("nmxc.example.test")),
+                    expect: Fails,
+                },
+            ],
+            |(certificate_name, authority)| async move {
+                let CertifiedKey { cert, signing_key } =
+                    generate_simple_self_signed(vec![certificate_name.to_string()]).unwrap();
+                let expected_certificate = certificate_info_from_der(cert.der()).unwrap();
+                let ca_file = NamedTempFile::new().unwrap();
+                std::fs::write(ca_file.path(), cert.pem()).unwrap();
+                let config = NvLinkConfig {
+                    nmx_c_tls_ca_cert_path: Some(ca_file.path().to_str().unwrap().to_string()),
+                    nmx_c_tls_authority: authority.map(str::to_string),
+                    ..Default::default()
+                };
+                let server_config = ServerConfig::builder_with_provider(Arc::new(
+                    rustls::crypto::aws_lc_rs::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![cert.der().clone()],
+                    PrivateKeyDer::Pkcs8(signing_key.serialize_der().into()),
+                )
+                .unwrap();
+                let acceptor = TlsAcceptor::from(Arc::new(server_config));
+                let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
+                    .await
+                    .expect("IPv6 loopback listener binds");
+                let endpoint = format!("https://{}", listener.local_addr().unwrap());
+                let cancel_token = CancellationToken::new();
+                let (probe, server) = tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::join!(
+                        SwitchCertificateMonitor::probe_endpoint_certificate(
+                            &config,
+                            &endpoint,
+                            &cancel_token,
+                        ),
+                        async {
+                            let (stream, _) = listener.accept().await.unwrap();
+                            acceptor.accept(stream).await
+                        },
+                    )
+                })
+                .await
+                .expect("local certificate probe finishes within five seconds");
+
+                match probe {
+                    Ok(certificate) => {
+                        server.expect("server completes the verified TLS handshake");
+                        assert_eq!(
+                            certificate,
+                            CertificateProbeOutcome::Observed(expected_certificate),
+                        );
+                        Ok(())
+                    }
+                    Err(error) => {
+                        assert!(error.starts_with("TLS handshake failed"), "{error}");
+                        assert!(server.is_err(), "server must reject the failed handshake");
+                        Err(error)
+                    }
+                }
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn certificate_probe_rejects_invalid_explicit_authorities() {
+        check_cases_async(
+            [
+                ("empty authority", ""),
+                ("bracketed IPv6 authority", "[::1]"),
+            ]
+            .map(|(scenario, authority)| Case {
+                scenario,
+                input: authority,
+                expect: Fails,
+            }),
+            |authority| async move {
+                let config = NvLinkConfig {
+                    nmx_c_tls_authority: Some(authority.to_string()),
+                    ..Default::default()
+                };
+                SwitchCertificateMonitor::probe_endpoint_certificate(
+                    &config,
+                    "https://[::1]:9370",
+                    &CancellationToken::new(),
+                )
+                .await
+                .inspect_err(|error| {
+                    assert!(error.starts_with("invalid NMX-C TLS authority"), "{error}");
+                })
+            },
+        )
+        .await;
     }
 
     #[test]
@@ -1491,7 +1621,7 @@ mod tests {
             log_count: usize,
             log: Option<LogObservation>,
             histogram_count_delta: u64,
-            histogram_sum_delta: f64,
+            histogram_sum_delta: ApproxHistogramSum,
         }
 
         check_values(
@@ -1506,7 +1636,7 @@ mod tests {
                         log_count: 0,
                         log: None,
                         histogram_count_delta: 1,
-                        histogram_sum_delta: 225.0,
+                        histogram_sum_delta: ApproxHistogramSum(225.0),
                     },
                 },
                 Check {
@@ -1529,7 +1659,7 @@ mod tests {
                             error: Some("certificate query failed".to_string()),
                         }),
                         histogram_count_delta: 1,
-                        histogram_sum_delta: 425.0,
+                        histogram_sum_delta: ApproxHistogramSum(425.0),
                     },
                 },
             ],

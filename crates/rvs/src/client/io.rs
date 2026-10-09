@@ -83,7 +83,9 @@ impl NicoClient {
         machine_id: &str,
         os_uri: &str,
     ) -> Result<String, RvsError> {
-        let machine_id = machine_id.parse()?;
+        let machine_id = machine_id
+            .parse()
+            .map_err(|error| RvsError::InvalidId(format!("{error}")))?;
         tracing::info!(%os_uri, "validation: allocating instance (os_image_id stubbed)");
         let response = self
             .inner

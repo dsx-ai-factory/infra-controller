@@ -23,9 +23,10 @@ use carbide_dpa::DpaInfo;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::{HostMachineId, MachineId};
 use chrono::TimeDelta;
+use db::ConditionalWrite::{Applied, NotApplied};
 use db::db_read::PgPoolReader;
 use db::work_lock_manager::WorkLockManagerHandle;
-use db::{self, TransactionVending};
+use db::{self, ControllerStateNotCurrent, TransactionVending};
 use metrics::{DpaMonitorIterationFinished, DpaMonitorMetrics};
 use model::dpa_interface::{DpaInterface, DpaInterfaceControllerState, DpaSearchConfig};
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -238,25 +239,25 @@ impl DpaMonitor {
                             })?,
                         };
 
-                    let applied = db::dpa_interface::try_update_controller_state(
+                    match db::dpa_interface::try_update_controller_state(
                         &mut txn,
                         mh.dpa_interface_snapshots[idx].id,
                         controller_state.version,
                         new_version,
                         &new_state,
                     )
-                    .await?;
-
-                    if applied {
-                        txn.commit().await.map_err(|e| {
-                            db::AnnotatedSqlxError::new("dpa_monitor commit txn", e)
-                        })?;
-                    } else {
-                        // Lost the controller-state CAS: another writer advanced
-                        // this interface since the snapshot loaded. The transition did not apply, so
-                        // drop the txn to roll back any bookkeeping the handler
-                        // staged in it. re-read on the next tick
-                        drop(txn);
+                    .await?
+                    {
+                        Applied(()) => {
+                            txn.commit().await.map_err(|e| {
+                                db::AnnotatedSqlxError::new("dpa_monitor commit txn", e)
+                            })?;
+                        }
+                        NotApplied(ControllerStateNotCurrent) => {
+                            // The interface changed or disappeared. Roll back the
+                            // handler's bookkeeping and reload on the next tick.
+                            drop(txn);
+                        }
                     }
                 } else if let Some(txn) = txn {
                     txn.commit()
@@ -367,16 +368,7 @@ impl DpaMonitor {
         // in the slice are harmless for `= ANY($1)`, and the non-consuming
         // `get` keeps the assignment correct even when two entries resolve to
         // the same host snapshot.
-        let machine_ids: Vec<HostMachineId> = res
-            .values()
-            .map(|mh| {
-                mh.host_snapshot
-                    .host_machine_id()
-                    .map_err(|error| DpaManagerError::Internal {
-                        message: error.to_string(),
-                    })
-            })
-            .collect::<Result<_, _>>()?;
+        let machine_ids: Vec<HostMachineId> = res.values().map(|mh| mh.host_snapshot.id).collect();
         let dpa_search_config = DpaSearchConfig {
             only_svpc: false,
             only_astra: false,
@@ -388,11 +380,7 @@ impl DpaMonitor {
 
         for mh in res.values_mut() {
             mh.dpa_interface_snapshots = dpa_snapshots_by_machine
-                .get(&mh.host_snapshot.host_machine_id().map_err(|error| {
-                    DpaManagerError::Internal {
-                        message: error.to_string(),
-                    }
-                })?)
+                .get(&mh.host_snapshot.id)
                 .cloned()
                 .unwrap_or_default();
         }

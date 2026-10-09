@@ -111,8 +111,9 @@ impl Endpoint {
 /// for mutual TLS. `ca_cert_path` adds an extra CA bundle for verifying the server (system roots
 /// are still used unless configured otherwise by tonic).
 ///
-/// `authority` sets the TLS server name (SNI / certificate verification hostname). If unset, the
-/// host portion of the gRPC endpoint URL is used.
+/// `authority` sets the TLS server name (SNI / certificate verification hostname).
+/// A non-empty value overrides the endpoint host. If absent or empty, the endpoint
+/// host is used without IPv6 brackets.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NmxcTlsConfig {
     pub ca_cert_path: Option<PathBuf>,
@@ -298,14 +299,12 @@ impl NmxcClientPool {
 }
 
 impl TlsChannelConnector {
-    async fn build_https_tls_config(
-        &self,
-        uri: &Uri,
-        t: &NmxcTlsConfig,
-    ) -> Result<ClientTlsConfig, NmxcError> {
+    async fn build_https_tls_config(&self, uri: &Uri) -> Result<ClientTlsConfig, NmxcError> {
+        let default_tls = NmxcTlsConfig::default();
+        let tls = self.tls.as_ref().unwrap_or(&default_tls);
         let mut config = ClientTlsConfig::new();
 
-        if let Some(ref path) = t.ca_cert_path {
+        if let Some(ref path) = tls.ca_cert_path {
             let pem = tokio::fs::read(path).await.map_err(|e| {
                 NmxcError::InvalidEndpoint(format!(
                     "read NMX-C TLS CA cert {}: {e}",
@@ -315,7 +314,7 @@ impl TlsChannelConnector {
             config = config.ca_certificate(Certificate::from_pem(pem));
         }
 
-        match (&t.client_cert_path, &t.client_key_path) {
+        match (&tls.client_cert_path, &tls.client_key_path) {
             (Some(cert_path), Some(key_path)) => {
                 let cert = tokio::fs::read(cert_path).await.map_err(|e| {
                     NmxcError::InvalidEndpoint(format!(
@@ -339,11 +338,11 @@ impl TlsChannelConnector {
             }
         }
 
-        let domain = t
-            .authority
-            .clone()
-            .or_else(|| uri.host().map(|h| h.to_string()))
-            .filter(|s| !s.is_empty());
+        let domain = tls.authority.clone().filter(|s| !s.is_empty()).or_else(|| {
+            // uri.host() retains IPv6 brackets; a TLS server name needs the bare address.
+            uri.host()
+                .map(|host| host.trim_matches(['[', ']']).to_string())
+        });
         if let Some(d) = domain {
             config = config.domain_name(d);
         }
@@ -371,10 +370,7 @@ impl ChannelConnector for TlsChannelConnector {
                 .http2_keep_alive_interval(KEEP_ALIVE_INTERVAL)
                 .keep_alive_timeout(KEEP_ALIVE_TIMEOUT);
 
-            let tls_config = match &self.tls {
-                Some(t) => self.build_https_tls_config(uri, t).await?,
-                None => ClientTlsConfig::new(),
-            };
+            let tls_config = self.build_https_tls_config(uri).await?;
             endpoint_builder
                 .tls_config(tls_config)
                 .map_err(|e| NmxcError::InvalidEndpoint(e.to_string()))?
@@ -504,6 +500,9 @@ pub trait Nmxc: Send + Sync + 'static {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::{Case, check_cases_async};
+
     use super::*;
 
     /// A [`ChannelConnector`] that counts connects and hands out lazy channels,
@@ -545,6 +544,76 @@ mod tests {
                 None => false,
             }
         }
+    }
+
+    #[tokio::test]
+    async fn https_tls_accepts_endpoint_hosts_and_preserves_authority_precedence() {
+        check_cases_async(
+            [
+                Case {
+                    scenario: "IPv6 without custom TLS configuration",
+                    input: ("https://[2001:db8::1]:50051", None),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "IPv6 with custom TLS configuration and no authority",
+                    input: (
+                        "https://[2001:db8::1]:50051",
+                        Some(NmxcTlsConfig::default()),
+                    ),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "IPv6 with an empty authority uses the endpoint host",
+                    input: (
+                        "https://[2001:db8::1]:50051",
+                        Some(NmxcTlsConfig {
+                            authority: Some(String::new()),
+                            ..NmxcTlsConfig::default()
+                        }),
+                    ),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "IPv4 endpoint",
+                    input: ("https://192.0.2.1:50051", None),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "hostname endpoint",
+                    input: ("https://nmxc.example:50051", None),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "invalid explicit authority is not replaced by the endpoint host",
+                    input: (
+                        "https://[2001:db8::1]:50051",
+                        Some(NmxcTlsConfig {
+                            authority: Some("invalid server name".to_string()),
+                            ..NmxcTlsConfig::default()
+                        }),
+                    ),
+                    expect: Fails,
+                },
+            ],
+            |(url, tls)| async move {
+                let uri: Uri = url.parse().expect("endpoint URI");
+                let connector = TlsChannelConnector {
+                    timeout: DEFAULT_TIMEOUT,
+                    tls,
+                };
+                let config = connector
+                    .build_https_tls_config(&uri)
+                    .await
+                    .expect("TLS configuration");
+
+                tonic::transport::Endpoint::from(uri)
+                    .tls_config(config)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            },
+        )
+        .await;
     }
 
     #[tokio::test]

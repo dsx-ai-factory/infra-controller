@@ -39,8 +39,14 @@ spec:
           command:
             - /bin/sh
             - -c
-            # yamllint disable-line rule:line-length
-            - /opt/carbide/carbide-api migrate --datastore="postgres://${DATASTORE_USER}:${DATASTORE_PASSWORD}@${DATASTORE_HOST}:${DATASTORE_PORT}/${DATASTORE_NAME}"
+            - |
+              DATASTORE_URL_HOST="$DATASTORE_HOST"
+              case "$DATASTORE_URL_HOST" in
+                \[*\]) ;;
+                *:*) DATASTORE_URL_HOST="[$DATASTORE_URL_HOST]" ;;
+              esac
+              DATASTORE_URL="postgres://${DATASTORE_USER}:${DATASTORE_PASSWORD}@${DATASTORE_URL_HOST}:${DATASTORE_PORT}/${DATASTORE_NAME}"
+              exec /opt/carbide/carbide-api migrate --datastore="$DATASTORE_URL"
           env:
             - name: DATASTORE_USER
               valueFrom:

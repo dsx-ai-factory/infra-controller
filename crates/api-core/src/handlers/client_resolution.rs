@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 
 use ::rpc::forge as rpc;
-use carbide_uuid::machine::DpuMachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineIdSubtypeTrait};
 use carbide_uuid::network::NetworkSegmentId;
 use db::ObjectColumnFilter;
 use db::db_read::DbReader;
@@ -138,7 +138,7 @@ pub(super) fn is_same_host_inband_interface(
     machine_interface: &MachineInterfaceSnapshot,
     owner: &OverlayAddressOwner,
 ) -> bool {
-    machine_interface.machine_id == Some(owner.instance.machine_id)
+    machine_interface.machine_id == Some(owner.instance.machine_id.into())
         && machine_interface.interface_type == InterfaceType::Data
         && machine_interface.network_segment_type == Some(NetworkSegmentType::HostInband)
         && owner.segment_ids.contains(&machine_interface.segment_id)
@@ -193,9 +193,10 @@ async fn resolve_client_ip(
 }
 
 /// Resolve a client IP to the host's `machine_interface` for PXE-script
-/// generation. For direct-interface IPs this returns the matching
-/// interface; for tenant-allocated IPs it resolves through the instance
-/// to the host's machine_interfaces, and prefers an admin-segment one.
+/// generation and discovery cloud-init. For direct-interface IPs this returns
+/// the matching interface. For tenant-allocated IPs it resolves through the
+/// instance to the host's primary interface, falling back to an admin-segment
+/// interface and then the first host interface if no primary is set.
 pub(super) async fn resolve_machine_interface(
     conn: &mut PgConnection,
     client_ip: IpAddr,
@@ -222,9 +223,16 @@ pub(super) async fn resolve_machine_interface(
                 .map(|s| s.id)
                 .collect();
 
+            // During release Scout boots over tenant networking. Other DPU-backed
+            // admin interfaces may have no address or domain, so prefer the primary.
             host_interfaces
                 .iter()
-                .find(|i| admin_segment_ids.contains(&i.segment_id))
+                .find(|i| i.primary_interface)
+                .or_else(|| {
+                    host_interfaces
+                        .iter()
+                        .find(|i| admin_segment_ids.contains(&i.segment_id))
+                })
                 .or_else(|| host_interfaces.first())
                 .cloned()
                 .ok_or_else(|| {
@@ -242,7 +250,7 @@ pub(super) async fn resolve_machine_interface(
 async fn resolve_host_product_family(
     api: &Api,
     conn: &mut PgConnection,
-    host: &Machine,
+    host: &Machine<impl MachineIdSubtypeTrait>,
 ) -> Result<Option<RackProductFamily>, CarbideError> {
     if let Some(host_bmc_ip) = host.status.bmc_info.ip {
         let endpoints = db::explored_endpoints::find_by_ips(&mut *conn, vec![host_bmc_ip]).await?;
@@ -329,7 +337,8 @@ pub(super) async fn resolve_cloud_init_instructions(
         // Is this an instance IP? If so, we use its cloud-init config *only* if it's Assigned/Ready.
         if let ResolvedClient::Instance(instance) = &resolved
             && let Some(managed_host_state) =
-                db::machine::lookup_managed_host_state(&mut *conn, instance.machine_id).await?
+                db::machine::lookup_managed_host_state(&mut *conn, instance.machine_id.into())
+                    .await?
         {
             let is_assigned_and_ready = matches!(
                 managed_host_state,

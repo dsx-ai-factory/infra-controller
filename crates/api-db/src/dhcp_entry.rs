@@ -44,8 +44,10 @@ pub async fn find_by<'a, C: super::ColumnInfo<'a, TableType = DhcpEntry>>(
     txn: &mut PgConnection,
     filter: super::ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<DhcpEntry>, DatabaseError> {
-    let mut query =
-        super::FilterableQueryBuilder::new("SELECT * FROM dhcp_entries").filter(&filter);
+    let mut query = super::FilterableQueryBuilder::new(
+        "SELECT machine_interface_id, vendor_string FROM dhcp_entries",
+    )
+    .filter(&filter);
 
     query
         .build_query_as()

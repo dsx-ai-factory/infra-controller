@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"fmt"
 	"testing"
+	"time"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
 )
 
@@ -291,8 +291,6 @@ func TestMachineSQLDAO_Create(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 
 				if err != nil {
@@ -493,8 +491,6 @@ func TestMachineSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -703,8 +699,6 @@ func TestMachineSQLDAO_GetCountByStatus(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1263,8 +1257,6 @@ func TestMachineSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1297,6 +1289,115 @@ func TestMachineSQLDAO_GetAll(t *testing.T) {
 		assert.Equal(t, 1, totalWithDeleted)
 		assert.NotNil(t, withDeleted[0].Deleted)
 	})
+}
+
+func TestMachineSQLDAO_GetDistinctLabelKeys(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceTypeInitDB(t)
+	defer dbSession.Close()
+	testMachineInstanceTypeSetupSchema(t, dbSession)
+	dao := NewMachineDAO(dbSession)
+	ip, site, instanceType := testMachineInstanceTypeBuildInstanceType(t, dbSession, "label-keys")
+
+	for i, labels := range []map[string]string{
+		{"failure-domain": "fd-b", "nvidia.com/failure-domain": "fd-b"},
+		{"failure-domain": "fd-a"},
+		{"power-domain": "pd-1"},
+		nil,
+	} {
+		machineID := fmt.Sprintf("label-keys-%d", i)
+		_, err := dao.Create(ctx, nil, MachineCreateInput{
+			MachineID: machineID, InfrastructureProviderID: ip.ID, SiteID: site.ID,
+			InstanceTypeID: &instanceType.ID, ControllerMachineID: machineID,
+			ControllerMachineType: instanceType.ControllerMachineType,
+			Labels:                labels, Status: MachineStatusInitializing,
+		})
+		require.NoError(t, err)
+	}
+
+	tests := []struct {
+		name      string
+		filter    MachineFilterInput
+		page      paginator.PageInput
+		want      []string
+		wantTotal int
+	}{
+		{name: "distinct sorted keys", want: []string{"failure-domain", "nvidia.com/failure-domain", "power-domain"}, wantTotal: 3},
+		{
+			name: "descending second result",
+			page: paginator.PageInput{
+				Offset: cutil.GetPtr(1), Limit: cutil.GetPtr(1),
+				OrderBy: &paginator.OrderBy{Field: LabelKeyOrderByDefault, Order: paginator.OrderDescending},
+			},
+			want: []string{"nvidia.com/failure-domain"}, wantTotal: 3,
+		},
+		{name: "empty site scope", filter: MachineFilterInput{SiteIDs: []uuid.UUID{}}, want: []string{}, wantTotal: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, total, err := dao.GetDistinctLabelKeys(ctx, nil, tt.filter, tt.page)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantTotal, total)
+		})
+	}
+}
+
+func TestMachineSQLDAO_GetDistinctLabelValues(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceTypeInitDB(t)
+	defer dbSession.Close()
+	testMachineInstanceTypeSetupSchema(t, dbSession)
+	dao := NewMachineDAO(dbSession)
+	ip, site, instanceType := testMachineInstanceTypeBuildInstanceType(t, dbSession, "label-values")
+
+	for i, labels := range []map[string]string{
+		{"failure-domain": "fd-b", "nvidia.com/failure-domain": "fd-b"},
+		{"failure-domain": "fd-a"},
+		{"failure-domain": "fd-b", "power-domain": "pd-1"},
+		nil,
+	} {
+		machineID := fmt.Sprintf("label-values-%d", i)
+		_, err := dao.Create(ctx, nil, MachineCreateInput{
+			MachineID: machineID, InfrastructureProviderID: ip.ID, SiteID: site.ID,
+			InstanceTypeID: &instanceType.ID, ControllerMachineID: machineID,
+			ControllerMachineType: instanceType.ControllerMachineType,
+			Labels:                labels, Status: MachineStatusInitializing,
+		})
+		assert.NoError(t, err)
+	}
+
+	tests := []struct {
+		name      string
+		labelKey  string
+		filter    MachineFilterInput
+		page      paginator.PageInput
+		want      []string
+		wantTotal int
+	}{
+		{name: "distinct sorted values", labelKey: "failure-domain", want: []string{"fd-a", "fd-b"}, wantTotal: 2},
+		{name: "different key", labelKey: "power-domain", want: []string{"pd-1"}, wantTotal: 1},
+		{name: "missing key", labelKey: "missing", want: []string{}, wantTotal: 0},
+		{name: "slash in key", labelKey: "nvidia.com/failure-domain", want: []string{"fd-b"}, wantTotal: 1},
+		{name: "provider scope", labelKey: "failure-domain", filter: MachineFilterInput{InfrastructureProviderIDs: []uuid.UUID{ip.ID}}, want: []string{"fd-a", "fd-b"}, wantTotal: 2},
+		{
+			name: "descending second result", labelKey: "failure-domain",
+			page: paginator.PageInput{
+				Offset: cutil.GetPtr(1), Limit: cutil.GetPtr(1),
+				OrderBy: &paginator.OrderBy{Field: LabelValueOrderByDefault, Order: paginator.OrderDescending},
+			},
+			want: []string{"fd-a"}, wantTotal: 2,
+		},
+		{name: "empty site scope", labelKey: "failure-domain", filter: MachineFilterInput{SiteIDs: []uuid.UUID{}}, want: []string{}, wantTotal: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, total, err := dao.GetDistinctLabelValues(ctx, nil, tt.labelKey, tt.filter, tt.page)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantTotal, total)
+		})
+	}
 }
 
 func TestMachineSQLDAO_Update(t *testing.T) {
@@ -1504,8 +1605,6 @@ func TestMachineSQLDAO_Update(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -1658,8 +1757,6 @@ func TestMachineSQLDAO_Clear(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1751,8 +1848,6 @@ func TestMachineSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -2249,8 +2344,6 @@ func TestMachineSQLDAO_UpdateMultiple(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -2350,6 +2443,90 @@ func TestMachineSQLDAO_UpdateMultiple_AllFields(t *testing.T) {
 	assert.True(t, updated.IsMissingOnSite, "IsMissingOnSite not updated")
 }
 
+// Machine inventory anchors every write of one reconcile to the time that reconcile started, so
+// the staleness guard reading the same column does not treat the reconciler's own write as an
+// external change. Both write paths have to honor the anchor and both have to keep stamping the
+// current time when the caller does not supply one.
+func TestMachineSQLDAO_WriteTimeAnchor(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceTypeInitDB(t)
+	defer dbSession.Close()
+	testMachineSetupSchema(t, dbSession)
+
+	mcsExp := testMachineSQLDAOCreateMachines(ctx, t, dbSession)
+	msd := NewMachineDAO(dbSession)
+	anchor := db.GetCurTime().Add(-30 * time.Second)
+
+	tests := []struct {
+		desc  string
+		write func(machineID string) (*Machine, error)
+		want  func(t *testing.T, before time.Time, got *Machine)
+	}{
+		{
+			desc: "Update stamps the supplied anchor",
+			write: func(machineID string) (*Machine, error) {
+				return msd.Update(ctx, nil, MachineUpdateInput{
+					MachineID: machineID,
+					Status:    cutil.GetPtr(MachineStatusReady),
+					Updated:   &anchor,
+				})
+			},
+			want: func(t *testing.T, _ time.Time, got *Machine) {
+				assert.Equal(t, anchor.UTC(), got.Updated.UTC())
+			},
+		},
+		{
+			desc: "Update without an anchor stamps the write time",
+			write: func(machineID string) (*Machine, error) {
+				return msd.Update(ctx, nil, MachineUpdateInput{
+					MachineID: machineID,
+					Status:    cutil.GetPtr(MachineStatusReady),
+				})
+			},
+			want: func(t *testing.T, before time.Time, got *Machine) {
+				assert.False(t, got.Updated.Before(before), "want a write time at or after the call")
+			},
+		},
+		{
+			desc: "Clear stamps the supplied anchor",
+			write: func(machineID string) (*Machine, error) {
+				return msd.Clear(ctx, nil, MachineClearInput{
+					MachineID: machineID,
+					Hostname:  true,
+					Updated:   &anchor,
+				})
+			},
+			want: func(t *testing.T, _ time.Time, got *Machine) {
+				assert.Equal(t, anchor.UTC(), got.Updated.UTC())
+			},
+		},
+		{
+			desc: "Clear without an anchor stamps the write time",
+			write: func(machineID string) (*Machine, error) {
+				return msd.Clear(ctx, nil, MachineClearInput{
+					MachineID: machineID,
+					Vendor:    true,
+				})
+			},
+			want: func(t *testing.T, before time.Time, got *Machine) {
+				assert.False(t, got.Updated.Before(before), "want a write time at or after the call")
+			},
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			before := db.GetCurTime()
+
+			got, err := tc.write(mcsExp[i].ID)
+			assert.NoError(t, err)
+			assert.NotNil(t, got)
+
+			tc.want(t, before, got)
+		})
+	}
+}
+
 func TestSiteControllerMachine_GetNormalizedState(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -2432,4 +2609,34 @@ func TestMachine_ToMetadataUpdateRequestProto(t *testing.T) {
 		req := m.ToMetadataUpdateRequestProto(labels)
 		assert.Equal(t, "stored-name", req.Metadata.Name)
 	})
+}
+
+func TestMachine_StatusForAssignment(t *testing.T) {
+	cases := []struct {
+		name        string
+		status      string
+		wasAssigned bool
+		assigned    bool
+		coreState   string
+		want        string
+	}{
+		{"claim Ready", MachineStatusReady, false, true, "", MachineStatusInUse},
+		{"unassigned Ready", MachineStatusReady, false, false, "", MachineStatusReady},
+		{"release observed Ready", MachineStatusInUse, true, false, ControllerMachineStateReady, MachineStatusReady},
+		{"release before Core readiness", MachineStatusInUse, true, false, "Assigned/Ready", MachineStatusInUse},
+		{"release without inventory", MachineStatusInUse, true, false, "", MachineStatusInUse},
+		{"assigned error", MachineStatusError, false, true, ControllerMachineStateReady, MachineStatusError},
+		{"release during maintenance", MachineStatusMaintenance, true, false, ControllerMachineStateReady, MachineStatusMaintenance},
+		{"assigned cleanup", MachineStatusInitializing, true, true, "WaitingForCleanup", MachineStatusInitializing},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			machine := Machine{Status: tc.status, IsAssigned: tc.wasAssigned}
+			if tc.coreState != "" {
+				machine.Metadata = &SiteControllerMachine{Machine: &corev1.Machine{State: tc.coreState}}
+			}
+			assert.Equal(t, tc.want, machine.StatusForAssignment(tc.assigned))
+			assert.Equal(t, tc.status, machine.Status, "projection must not mutate the snapshot")
+		})
+	}
 }

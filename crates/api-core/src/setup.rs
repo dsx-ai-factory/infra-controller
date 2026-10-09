@@ -19,11 +19,13 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use carbide_dpa::DpaInfo;
 use carbide_dpa_manager::DpaMonitor;
 use carbide_dpf::DpuDeploymentType;
+use carbide_dpf::repository::DpuServiceInterfaceRepository;
 use carbide_extension_service_controller::context::ExtensionServiceStateHandlerServices;
 use carbide_extension_service_controller::handler::ExtensionServiceStateHandler;
 use carbide_extension_service_controller::io::ExtensionServiceStateControllerIO;
@@ -53,12 +55,12 @@ use carbide_preingestion_manager::PreingestionManager;
 use carbide_rack::bms_client::BmsDsxExchangeHandle;
 use carbide_rack_controller::config::RackConfig;
 use carbide_rack_controller::context::RackStateHandlerServices;
+use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::io::RackStateControllerIO;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
-use carbide_secrets::certificates::CertificateProvider;
 use carbide_secrets::credentials::{CredentialManager, CredentialReader};
-use carbide_site_explorer::{EndpointExplorationService, SiteExplorer};
+use carbide_site_explorer::{AuthenticatedBmcClient, EndpointExplorationService, SiteExplorer};
 use carbide_spdm_controller::context::SpdmStateHandlerServices;
 use carbide_spdm_controller::handler::SpdmAttestationStateHandler;
 use carbide_spdm_controller::io::SpdmStateControllerIO;
@@ -66,14 +68,12 @@ use carbide_switch_controller::context::SwitchStateHandlerServices;
 use carbide_switch_controller::handler::SwitchStateHandler;
 use carbide_switch_controller::io::SwitchStateControllerIO;
 use carbide_utils::HostPortPair;
-use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_vpc_prefix_controller::context::VpcPrefixStateHandlerServices;
 use carbide_vpc_prefix_controller::handler::VpcPrefixStateHandler;
 use carbide_vpc_prefix_controller::io::VpcPrefixStateControllerIO;
 use db::Transaction;
 use db::machine::{update_dpu_asns, update_dpu_loopback_ips_v6};
 use db::resource_pool::DefineResourcePoolError;
-use db::work_lock_manager::WorkLockManagerHandle;
 use eyre::WrapErr;
 use futures_util::TryFutureExt;
 use itertools::Itertools;
@@ -97,12 +97,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::api::Api;
 use crate::api::metrics::ApiMetricsEmitter;
-use crate::cfg::file::{CarbideConfig, InitialObjectsConfig, ListenMode, VmaasConfig};
+use crate::bootstrap::{RuntimeInputs, RuntimePrelude};
+use crate::cfg::file::{
+    CarbideConfig, DpfExtraService, InitialObjectsConfig, ListenMode, VmaasConfig,
+};
 use crate::cfg::load::all_configuration_files;
 use crate::dpa::handler::start_svpc_handler;
-use crate::dynamic_settings::DynamicSettings;
 use crate::handlers::machine_validation::apply_config_on_startup;
-use crate::listener::{AdminUiRoutesBuilder, ApiListenMode};
+use crate::listener::ApiListenMode;
 use crate::logging::log_limiter::LogLimiter;
 use crate::logging::service_health_metrics::{
     ServiceHealthContext, start_export_service_health_metrics,
@@ -135,6 +137,62 @@ fn create_ipmi_tool(
             carbide_ipmi::tool(credential_reader, carbide_config.dpu_ipmi_reboot_attempts)
         }
     }
+}
+
+/// The Redfish pools `[bmc_proxy]` selects, built together so site-explorer's
+/// proxied handle is the general pool itself and can never be the direct
+/// pool by a call-site mistake.
+struct BmcProxyPools {
+    /// The pool for ordinary BMC traffic: nico-bmc-proxy when `[bmc_proxy]`
+    /// is enabled, otherwise the direct pool itself. Credential-lifecycle
+    /// work never uses this handle -- that is what the [`BmcCredentialOps`]
+    /// handle is for.
+    general: Arc<dyn RedfishClientPool>,
+    /// The pools site-explorer uses for established-endpoint traffic via
+    /// nico-bmc-proxy. `None` (section absent or disabled) leaves every
+    /// site-explorer operation on the direct pools, unchanged.
+    site_explorer: Option<carbide_site_explorer::ProxiedPools>,
+}
+
+fn create_bmc_proxy_pools(
+    carbide_config: &CarbideConfig,
+    credential_manager: Arc<dyn CredentialManager>,
+    direct_pool: &Arc<dyn RedfishClientPool>,
+) -> eyre::Result<BmcProxyPools> {
+    let Some(proxy_config) = enabled_bmc_proxy_config(carbide_config) else {
+        return Ok(BmcProxyPools {
+            general: direct_pool.clone(),
+            site_explorer: None,
+        });
+    };
+    let proxy = proxy_config
+        .proxy_target()
+        .map_err(|err| eyre::eyre!(err))?;
+    let proxied: Arc<dyn RedfishClientPool> = Arc::new(crate::bmc_proxy::ProxiedRedfishPool::new(
+        proxy_config,
+        credential_manager,
+    )?);
+    Ok(BmcProxyPools {
+        general: proxied.clone(),
+        site_explorer: Some(carbide_site_explorer::ProxiedPools {
+            redfish: proxied,
+            nv_redfish: carbide_redfish::nv_redfish::new_proxied_pool(
+                proxy,
+                proxy_config.client_cert.as_str(),
+                proxy_config.client_key.as_str(),
+                proxy_config.root_ca.as_str(),
+            ),
+        }),
+    })
+}
+
+fn enabled_bmc_proxy_config(
+    carbide_config: &CarbideConfig,
+) -> Option<&crate::cfg::file::BmcProxyConfig> {
+    carbide_config
+        .bmc_proxy
+        .as_ref()
+        .filter(|proxy_config| proxy_config.enabled)
 }
 
 fn create_redfish_pool(
@@ -191,25 +249,49 @@ fn create_redfish_pool(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Enter api-core's private service runtime with fully prepared resources.
+///
+/// `admin_ui_routes_builder` is how the admin web UI's pages (everything under
+/// `/admin`) get plugged in, particularly via `Box::new(carbide_api_web::routes)`.
+/// It's passed in rather than called directly to avoid a dependency cycle — see
+/// [`AdminUiRoutesBuilder`] for why.
+///
+/// The admin UI is only mounted if the `enable_admin_ui` config flag is true (the default).
+///
+/// Returns the effective API listener address after startup completes.
 #[tracing::instrument(skip_all)]
-pub(crate) async fn start_runtime(
-    join_set: &mut JoinSet<()>,
-    carbide_config: Arc<CarbideConfig>,
-    initial_objects: Option<InitialObjectsConfig>,
-    meter: Meter,
-    per_object_prometheus_registry: Option<prometheus::Registry>,
-    dynamic_settings: DynamicSettings,
-    credential_manager: Arc<dyn CredentialManager>,
-    certificate_provider: Arc<dyn CertificateProvider>,
-    db_pool: PgPool,
-    work_lock_manager_handle: WorkLockManagerHandle,
-    secrets_context: Option<crate::secrets::SecretsContext>,
-    admin_ui_routes_builder: Option<AdminUiRoutesBuilder>,
-    cancel_token: CancellationToken,
-) -> eyre::Result<SocketAddr> {
+pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<SocketAddr> {
+    // Destructure inputs
+    let RuntimeInputs {
+        carbide_config,
+        initial_objects,
+        meter,
+        per_object_metrics,
+        join_set,
+        runtime_prelude: RuntimePrelude { dynamic_settings },
+        credential_manager,
+        certificate_provider,
+        db_pool,
+        work_lock_manager_handle,
+        secrets_context,
+        admin_ui_routes_builder,
+        cancel_token,
+    } = runtime_inputs;
+
     let (shared_redfish_pool, bmc_credential_ops) =
         create_redfish_pool(&carbide_config, credential_manager.clone())?;
+    // Ordinary BMC traffic goes through nico-bmc-proxy when configured,
+    // including site-explorer's established-endpoint traffic.
+    // Credential-lifecycle work (credential setup, session minting, rotation)
+    // stays on the direct ops handle, which authenticates to BMCs itself.
+    let BmcProxyPools {
+        general: general_redfish_pool,
+        site_explorer: site_explorer_proxied_pools,
+    } = create_bmc_proxy_pools(
+        &carbide_config,
+        credential_manager.clone(),
+        &shared_redfish_pool,
+    )?;
     let shared_nv_redfish_pool =
         carbide_redfish::nv_redfish::new_pool(carbide_config.site_explorer.bmc_proxy.clone());
 
@@ -219,23 +301,44 @@ pub(crate) async fn start_runtime(
         dynamic_settings.bmc_proxy.clone(),
     );
 
-    let (rms_client, switch_system_image_rms_api) = match carbide_config.rms.api_url.clone() {
-        Some(url) if !url.is_empty() => {
-            let rms_client_config = librms::client_config::RmsClientConfig::new(
-                carbide_config.rms.root_ca_path.clone(),
-                carbide_config.rms.client_cert.clone(),
-                carbide_config.rms.client_key.clone(),
-                carbide_config.rms.enforce_tls,
-            );
-            let rms_api_config = librms::client::RmsApiConfig::new(&url, &rms_client_config);
-            let rms_client_pool = librms::RmsClientPool::new(&rms_api_config);
-            let shared_rms_client = rms_client_pool.create_client().await;
-            let switch_system_image_rms_api =
-                Arc::new(librms::RackManagerApi::new(&rms_api_config));
-            (Some(shared_rms_client), Some(switch_system_image_rms_api))
-        }
-        _ => (None, None),
-    };
+    let (rms_client, site_explorer_machine_info_provider, switch_system_image_rms_api) =
+        match carbide_config.rms.api_url.clone() {
+            Some(url) if !url.is_empty() => {
+                let rms_client_config = librms::client_config::RmsClientConfig::new(
+                    carbide_config.rms.root_ca_path.clone(),
+                    carbide_config.rms.client_cert.clone(),
+                    carbide_config.rms.client_key.clone(),
+                    carbide_config.rms.enforce_tls,
+                );
+                let rms_api_config = librms::client::RmsApiConfig::new(&url, &rms_client_config);
+                let rms_client_pool = librms::RmsClientPool::new(&rms_api_config);
+                let shared_rms_client = rms_client_pool.create_client().await;
+                let site_explorer_rms_api_config =
+                    rms_api_config.with_retry_config(librms::client::RetryConfig {
+                        retries: 0,
+                        interval: Duration::ZERO,
+                    });
+                let site_explorer_rms_client =
+                    librms::RmsClientPool::new(&site_explorer_rms_api_config)
+                        .create_client()
+                        .await;
+
+                let site_explorer_machine_info_provider = Arc::new(
+                    component_manager::rms::rms_machine_info_provider(site_explorer_rms_client),
+                )
+                    as Arc<dyn component_manager::MachineInfoProvider>;
+
+                let switch_system_image_rms_api =
+                    Arc::new(librms::RackManagerApi::new(&rms_api_config));
+
+                (
+                    Some(shared_rms_client),
+                    Some(site_explorer_machine_info_provider),
+                    Some(switch_system_image_rms_api),
+                )
+            }
+            _ => (None, None, None),
+        };
     let ib_config = carbide_config.ib_config.clone().unwrap_or_default();
     let fabric_manager_type = match ib_config.enabled {
         true => ib::IBFabricManagerType::Rest,
@@ -294,13 +397,23 @@ pub(crate) async fn start_runtime(
         db::site_prefix::reconcile_configured(&mut txn, &carbide_config.site_fabric_prefixes)
             .await?;
 
-        if !carbide_config.site_fabric_prefixes.is_empty() {
+        // Persisted roots can be retiring after the final configured root is
+        // removed, so current configuration alone cannot decide whether
+        // legacy VpcPrefix lineage must be repaired and validated.
+        if db::site_prefix::operator_managed_prefixes_exist(&mut txn).await? {
             let lineage =
                 db::site_prefix::backfill_vpc_prefix_site_prefix_lineage(&mut txn).await?;
+            let require_parent_for_every_vpc_prefix =
+                !carbide_config.site_fabric_prefixes.is_empty();
+            let blocking_missing_vpc_prefix_ids = if require_parent_for_every_vpc_prefix {
+                lineage.missing_vpc_prefix_ids.as_slice()
+            } else {
+                &[]
+            };
             eyre::ensure!(
-                lineage.unresolved_vpc_prefix_count() == 0,
+                lineage.is_safe_for_startup(require_parent_for_every_vpc_prefix),
                 "VpcPrefix SitePrefix lineage preflight failed: missing VpcPrefix IDs: {:?}; ambiguous VpcPrefixes: {:?}",
-                lineage.missing_vpc_prefix_ids,
+                blocking_missing_vpc_prefix_ids,
                 lineage.ambiguous,
             );
         }
@@ -309,9 +422,15 @@ pub(crate) async fn start_runtime(
 
         // Idempotently seed the dedicated site-wide lockdown IKM (v0) from the
         // site-wide BMC root, so existing sites converge onto the decoupled
-        // lockdown key without operator action. No-op once seeded or if the BMC
-        // root is not yet configured.
-        crate::dpa::lockdown::ensure_lockdown_ikm_seeded(&*credential_manager).await?;
+        // lockdown key without operator action. No-op once seeded; if the BMC
+        // root is not yet configured, retry in the background until it appears.
+        if !crate::dpa::lockdown::ensure_lockdown_ikm_seeded(&*credential_manager).await? {
+            crate::dpa::lockdown::start_lockdown_ikm_seed_retry(
+                join_set,
+                credential_manager.clone(),
+                cancel_token.clone(),
+            )?;
+        }
 
         // Initial credential-rotation bookkeeping is backfilled by the
         // `*_credential_rotation_backfill` data migration (see its header for the
@@ -319,11 +438,17 @@ pub(crate) async fn start_runtime(
     };
 
     // A listen-only replica trusts another instance to reconcile configuration,
-    // but it still must not serve a configured-root site with unresolved
-    // VpcPrefix lineage.
-    if carbide_config.listen_only && !carbide_config.site_fabric_prefixes.is_empty() {
-        let unassigned =
-            db::site_prefix::find_unassigned_vpc_prefix_site_prefix_ids(&db_pool).await?;
+    // but it must reject every unassigned row that the corresponding
+    // authoritative startup would require to be repaired.
+    if carbide_config.listen_only {
+        let unassigned = if carbide_config.site_fabric_prefixes.is_empty() {
+            db::site_prefix::find_unassigned_vpc_prefix_ids_with_operator_parent_candidates(
+                &db_pool,
+            )
+            .await?
+        } else {
+            db::site_prefix::find_unassigned_vpc_prefix_site_prefix_ids(&db_pool).await?
+        };
         eyre::ensure!(
             unassigned.is_empty(),
             "VpcPrefix SitePrefix lineage preflight failed: unassigned VpcPrefix IDs: {:?}",
@@ -399,11 +524,17 @@ pub(crate) async fn start_runtime(
         carbide_config.bmc_max_sessions_per_caller,
     ));
 
-    let bmc_explorer = carbide_site_explorer::new_bmc_explorer(
+    let bmc_client = Arc::new(AuthenticatedBmcClient::new(
         bmc_credential_ops.clone(),
         shared_nv_redfish_pool,
+        // Established-endpoint traffic goes through nico-bmc-proxy when
+        // enabled; credential setup stays on the direct handle above.
+        site_explorer_proxied_pools,
         ipmi_tool.clone(),
         credential_manager.clone(),
+    ));
+    let bmc_explorer = carbide_site_explorer::new_bmc_explorer(
+        bmc_client.clone(),
         carbide_config
             .site_explorer
             .rotate_switch_nvos_credentials
@@ -435,6 +566,10 @@ pub(crate) async fn start_runtime(
     // Validate unconditionally; when explicitly enabled, missing prerequisites
     // fail rather than silently degrading.
     carbide_config.node_auth.validate()?;
+    carbide_config
+        .machine_validation_config
+        .validate()
+        .map_err(|error| eyre::eyre!("machine_validation_config.{error}"))?;
     let node_jwt_validator = if carbide_config.node_auth.enabled {
         // Bearer tokens must never be accepted over plaintext, and the
         // validator trusts the same roots the TLS listener uses for client
@@ -475,6 +610,10 @@ pub(crate) async fn start_runtime(
                 client as Arc<dyn component_manager::rms::RmsSwitchSystemImageStatusApi>
             }),
             Some(db_pool.clone()),
+            // The core compute-tray backend authenticates with explicit
+            // per-endpoint credentials (RedfishAuth::Direct), which the
+            // proxied pool rejects by design -- keep it on the direct pool
+            // until it moves to credential-key auth.
             Some(shared_redfish_pool.clone()),
         )
         .await
@@ -513,6 +652,31 @@ pub(crate) async fn start_runtime(
         None
     };
 
+    let console_log_source = crate::console_logs::build_source(
+        carbide_config.ssh_console_url.as_ref(),
+        carbide_config.tls.as_ref(),
+        join_set,
+        cancel_token.clone(),
+    )
+    .await?;
+
+    let default_redirect_policy = reqwest::redirect::Policy::default();
+
+    let firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher> = Arc::new(
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                let initial_origin = attempt.previous().first().map(reqwest::Url::origin);
+
+                if initial_origin == Some(attempt.url().origin()) {
+                    default_redirect_policy.redirect(attempt)
+                } else {
+                    attempt.error("firmware-object redirect changed the configured origin")
+                }
+            }))
+            .build()
+            .wrap_err("failed to build the firmware-object HTTP client")?,
+    );
+
     let api_service = Arc::new(Api {
         certificate_provider,
         common_pools,
@@ -522,11 +686,16 @@ pub(crate) async fn start_runtime(
         dpu_health_log_limiter: LogLimiter::default(),
         dynamic_settings,
         endpoint_explorer: bmc_explorer,
+        bmc_client,
         endpoint_exploration_service: endpoint_exploration_service.clone(),
         eth_data,
         ib_fabric_manager,
-        redfish_pool: shared_redfish_pool,
+        redfish_pool: general_redfish_pool,
         bmc_credential_ops: bmc_credential_ops.clone(),
+        bmc_proxy_passthrough: enabled_bmc_proxy_config(&carbide_config)
+            .map(crate::bmc_proxy::PassthroughClient::new)
+            .transpose()?
+            .map(Arc::new),
         bmc_session_manager,
         runtime_config: carbide_config.clone(),
         scout_stream_registry: ConnectionRegistry::new(),
@@ -537,18 +706,22 @@ pub(crate) async fn start_runtime(
         machine_state_handler_enqueuer: Enqueuer::new(db_pool),
         metric_emitter: ApiMetricsEmitter::new(&meter),
         component_manager,
+        firmware_object_fetcher,
         bms_client: std::sync::OnceLock::new(),
         secrets_context,
+        console_log_source,
     });
 
     if carbide_config.listen_only {
+        crate::handlers::tenant_prefix_overlap::validate_retained_state(&api_service).await?;
         tracing::info!("Not starting background services, as listen_only=true");
     } else {
         initialize_and_start_controllers(
             join_set,
             api_service.clone(),
+            site_explorer_machine_info_provider,
             meter.clone(),
-            per_object_prometheus_registry,
+            per_object_metrics,
             ipmi_tool.clone(),
             seed_data,
             cancel_token.clone(),
@@ -561,7 +734,7 @@ pub(crate) async fn start_runtime(
     // top-level binary always supplies the builder; the decision to use it lives
     // here, next to the parsed config.
     let admin_ui_routes_builder = if carbide_config.enable_admin_ui {
-        admin_ui_routes_builder
+        Some(admin_ui_routes_builder)
     } else {
         tracing::info!("admin web UI disabled via enable_admin_ui=false");
         None
@@ -629,6 +802,57 @@ fn normalize_dpf_intercept_bridging(
         .map_err(|error| eyre::eyre!("invalid DPF intercept-bridging configuration: {error}"))
 }
 
+/// This function rejects setting deployment_scoped_service_interfaces
+/// to false if there are scoped interfaces present.
+async fn reject_unscoped_initialization_with_scoped_interfaces<R: DpuServiceInterfaceRepository>(
+    repo: &R,
+) -> eyre::Result<()> {
+    tracing::info!(
+        namespace = carbide_dpf::NAMESPACE,
+        "Checking for scoped DPUServiceInterfaces before initializing unscoped interfaces"
+    );
+    let scoped_interfaces = scoped_service_interface_names(
+        DpuServiceInterfaceRepository::list(repo, carbide_dpf::NAMESPACE)
+            .await
+            .map_err(|error| eyre::eyre!("failed to list DPF service interfaces: {error}"))?
+            .into_iter()
+            .map(|interface| {
+                (
+                    interface.metadata.name,
+                    interface.spec.template.spec.node_selector.is_some(),
+                )
+            }),
+    );
+    if !scoped_interfaces.is_empty() {
+        tracing::warn!(
+            service_interfaces = ?scoped_interfaces,
+            "Rejecting unscoped DPF initialization because scoped service interfaces exist"
+        );
+        return Err(eyre::eyre!(
+            "dpf.deployment_scoped_service_interfaces cannot be disabled while scoped DPUServiceInterfaces exist: {}",
+            scoped_interfaces.join(", "),
+        ));
+    }
+
+    Ok(())
+}
+
+fn scoped_service_interface_names(
+    interfaces: impl IntoIterator<Item = (Option<String>, bool)>,
+) -> Vec<String> {
+    interfaces
+        .into_iter()
+        .filter_map(|(name, has_node_selector)| {
+            let name = name?;
+            (has_node_selector
+                && ["bf3", "bf3gb200", "bf4", "astra"]
+                    .iter()
+                    .any(|suffix| name.ends_with(&format!("-{suffix}"))))
+            .then_some(name)
+        })
+        .collect()
+}
+
 /// Initialize the DPF SDK and create all required Kubernetes CRs.
 ///
 /// Returns `None` (with a deprecation warning) when DPF is disabled.
@@ -642,6 +866,8 @@ async fn initialize_dpf_sdk(
     // Reject unsafe global ServiceInterfaces even when DPF is disabled so a dormant Astra
     // configuration cannot become unsafe merely by enabling DPF later.
     carbide_config.dpf.validate_service_interface_scoping()?;
+    // Reject incompatible service-VPC topology even when DPF is disabled.
+    carbide_config.validate_service_vpc_slots()?;
 
     if !carbide_config.dpf.enabled {
         tracing::warn!(
@@ -671,38 +897,63 @@ async fn initialize_dpf_sdk(
         carbide_config.vmaas_config.as_ref(),
         carbide_config.dpu_config.num_of_vfs,
     )?;
-    let effective_interfaces = carbide_dpf::build_effective_dpu_interfaces(
+
+    // BF3 interface vector drops pf1hpf from the static interface list
+    // because the flavor hides port 2. However, if user has configured
+    // pf1 explicitly for VMaaS, we accept it for compatibility, but log
+    // a warning regards this.
+    if let Some(identity) = carbide_config
+        .vmaas_config
+        .as_ref()
+        .and_then(|config| config.bridging.as_ref())
+        .and_then(|bridging| {
+            bridging
+                .host_representor_intercept_bridging
+                .values()
+                .find_map(|interface| {
+                    let identity = interface.dpf_interface?;
+                    (identity.pf_id == 1).then_some(identity)
+                })
+        })
+    {
+        tracing::warn!(
+            controller_id = identity.controller_id,
+            pf_id = identity.pf_id,
+            "VMaaS intercept-bridging configuration added PF1 for BF3 although the BF3 flavor hides port 2"
+        );
+    }
+
+    // Build interfaces vector for each deployment type.
+    // For Astra we only build the static interfaces vector here, and
+    // the function resolve_initialization_inventory() adds the required
+    // xplane patch interfaces before it applies DPF CRs. In theory, we
+    // could have augmented the patch interfaces here also.
+    let bf3_interfaces = carbide_dpf::build_deployment_dpu_interfaces(
+        DpuDeploymentType::Bf3,
         carbide_config.dpu_config.num_of_vfs,
         intercept_bridging.as_ref(),
     );
-
+    let bf4_interfaces = carbide_dpf::build_deployment_dpu_interfaces(
+        DpuDeploymentType::Bf4Generic,
+        carbide_config.dpu_config.num_of_vfs,
+        intercept_bridging.as_ref(),
+    );
     let astra_interfaces = carbide_dpf::sdk::build_dpu_interfaces_vec();
 
-    // SDK construction writes the shared BMC Secret, so capacity validation must remain on the
-    // pure configuration path and finish before Kubernetes repository construction.
-    let service_vpc_interfaces = crate::dpf_services::service_vpc_interfaces(
-        &effective_interfaces,
-        carbide_config.dpu_config.service_vpc_slot_count,
-    )
-    .map_err(|error| eyre::eyre!("invalid DPF HBN interface configuration: {error}"))?;
-    let additional_managed_sf = carbide_config
-        .dpu_config
-        .service_vpc_slot_count
-        .checked_add(carbide_config.dpu_config.additional_managed_sf)
-        .ok_or_else(|| eyre::eyre!("dpu_config managed SF count exceeds u32"))?;
-    carbide_dpf::calculate_pf_total_sf(
-        &effective_interfaces,
-        intercept_bridging.as_ref(),
-        carbide_config.dpf.pf_total_sf_reserved,
-        additional_managed_sf,
-    )
-    .map_err(|error| eyre::eyre!("invalid DPF SF configuration: {error}"))?;
+    let service_vpc_slots =
+        carbide_dpf::ServiceVpcSlots::new(carbide_config.dpu_config.service_vpc_slot_count)
+            .map_err(|error| eyre::eyre!("invalid DPF service-VPC configuration: {error}"))?;
+    let additional_managed_sf = carbide_config.dpu_config.additional_managed_sf;
 
     let repo = carbide_dpf::KubeRepository::new()
         .await
         .map_err(|e| eyre::eyre!("failed to create DPF repository: {e}"))?;
 
-    let provider = CarbideBmcPasswordProvider::new(credential_manager, db_pool.clone());
+    // Scoped interfaces are authoritative: their presence means unscoped initialization would
+    // recreate global resources that can bind deployments incorrectly.
+    if !carbide_config.dpf.deployment_scoped_service_interfaces {
+        reject_unscoped_initialization_with_scoped_interfaces(&repo).await?;
+    }
 
     carbide_config
         .dpf
@@ -720,7 +971,138 @@ async fn initialize_dpf_sdk(
     // Soon v2 flag will be removed and will become only mode for dpf handling.
     let deployment_type_labels = build_deployment_type_labels(carbide_config);
 
-    let sdk = carbide_dpf::DpfSdkBuilder::new(repo, carbide_dpf::NAMESPACE, provider)
+    // Builds the SDK init config for one DPUDeployment. BF4 uses a single
+    // `BlueFieldSoftware` source whose CR carries the complete PSID→PLDM mapping.
+    let make_init_config =
+        |deployment: &crate::cfg::file::DpfDeploymentConfig,
+         deployment_type: DpuDeploymentType,
+         bluefield_software: Option<carbide_dpf::BlueFieldSoftwareParams>| {
+            let services = carbide_config
+                .dpf
+                .resolved_services_for(deployment, deployment_type);
+            // Warn when an Astra deployment has Weave services but no ewethers config.
+            if deployment_type == DpuDeploymentType::Bf4Astra
+                && carbide_config.ewethers_config.is_none()
+                && services.extra.keys().any(|service| {
+                    matches!(
+                        service,
+                        DpfExtraService::DocaWeaveDhcpAgent
+                            | DpfExtraService::DocaWeaveFlowController
+                    )
+                })
+            {
+                tracing::warn!(
+                    deployment = %deployment.deployment_name,
+                    "Weave services are configured without ewethers_config; NICo's DPA/Astra paths remain disabled. Configure ewethers with the appropriate enable flags and overlay subnet values"
+                );
+            }
+            let interfaces = match deployment_type {
+                DpuDeploymentType::Bf4Astra => &astra_interfaces,
+                DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 => &bf3_interfaces,
+                DpuDeploymentType::Bf4Generic => &bf4_interfaces,
+            };
+            let (service_vpc_slots, additional_managed_sf) = match deployment_type {
+                DpuDeploymentType::Bf4Astra => (carbide_dpf::ServiceVpcSlots::default(), 0),
+                DpuDeploymentType::Bf3
+                | DpuDeploymentType::Bf3Gb200
+                | DpuDeploymentType::Bf4Generic => (service_vpc_slots, additional_managed_sf),
+            };
+            let mut builder = carbide_dpf::InitDpfResourcesConfigBuilder::default()
+                .bfb_url(deployment.bfb_url.clone().unwrap_or_default())
+                .flavor_name(deployment.flavor_name.clone())
+                .deployment_name(deployment.deployment_name.clone())
+                .deployment_scoped_service_interfaces(
+                    carbide_config.dpf.deployment_scoped_service_interfaces,
+                )
+                .services(crate::dpf_services::mandatory_services(
+                    &services,
+                    &carbide_config.dpf.dpu_agent_bootstrap_ca,
+                    interfaces,
+                    service_vpc_slots,
+                    &carbide_config.node_auth,
+                    carbide_config.ewethers_config.as_ref(),
+                ))
+                .num_of_vfs(carbide_config.dpu_config.num_of_vfs)
+                .pf_total_sf_reserved(carbide_config.dpf.pf_total_sf_reserved)
+                .additional_managed_sf(additional_managed_sf)
+                .service_vpc_slots(service_vpc_slots)
+                .interfaces(interfaces.clone())
+                .extra_bfcfg_parameters(
+                    carbide_config.dpf.resolved_bfcfg_parameters_for(deployment),
+                )
+                .enable_delay_host_init(deployment.enable_delay_host_init)
+                .deployment_type(deployment_type);
+            if let Some(bluefield_software) = bluefield_software {
+                builder = builder.bluefield_software(bluefield_software);
+            }
+            if let Some(intercept_bridging) = match deployment_type {
+                DpuDeploymentType::Bf4Astra => None,
+                DpuDeploymentType::Bf3
+                | DpuDeploymentType::Bf3Gb200
+                | DpuDeploymentType::Bf4Generic => intercept_bridging.clone(),
+            } {
+                builder = builder.intercept_bridging(intercept_bridging);
+            }
+            if let Some(proxy) = carbide_config.dpf.proxy.clone() {
+                builder = builder.proxy(proxy);
+            }
+            builder.build().map_err(|err| {
+                eyre::eyre!(
+                    "invalid {} DPF initialization configuration: {err}",
+                    deployment.deployment_name
+                )
+            })
+        };
+
+    let bf3 = &carbide_config.dpf.deployments.bf3;
+    let bf3_gb200 = bf3.bf3_gb200();
+    let mut init_configs = vec![
+        ("bf3", make_init_config(bf3, DpuDeploymentType::Bf3, None)?),
+        (
+            "bf3 GB200",
+            make_init_config(&bf3_gb200, DpuDeploymentType::Bf3Gb200, None)?,
+        ),
+    ];
+
+    if let Some(bf4) = &carbide_config.dpf.deployments.bf4_generic {
+        // Validation guarantees `bluefield_software` has at least one PSID entry.
+        let bfs = bf4.bluefield_software.as_ref().ok_or_else(|| {
+            eyre::eyre!("bf4_generic DPF deployment is missing bluefield_software")
+        })?;
+        let params = carbide_dpf::BlueFieldSoftwareParams {
+            os_iso: bfs.os_iso.clone(),
+            pldm_fw_bundle: Some(bfs.pldm_fw_bundle.clone()),
+        };
+        init_configs.push((
+            "bf4_generic",
+            make_init_config(bf4, DpuDeploymentType::Bf4Generic, Some(params))?,
+        ));
+    }
+
+    if let Some(bf4_astra) = &carbide_config.dpf.deployments.bf4_astra {
+        let bfs = bf4_astra
+            .bluefield_software
+            .as_ref()
+            .ok_or_else(|| eyre::eyre!("bf4_astra DPF deployment is missing bluefield_software"))?;
+        let params = carbide_dpf::BlueFieldSoftwareParams {
+            os_iso: bfs.os_iso.clone(),
+            pldm_fw_bundle: Some(bfs.pldm_fw_bundle.clone()),
+        };
+        init_configs.push((
+            "bf4_astra",
+            make_init_config(bf4_astra, DpuDeploymentType::Bf4Astra, Some(params))?,
+        ));
+    }
+
+    // Build every validated configuration before SDK construction writes the shared BMC Secret.
+    let provider = CarbideBmcPasswordProvider::new(
+        credential_manager,
+        db_pool.clone(),
+        carbide_config
+            .credentials
+            .uses_authoritative_local_bmc_site_wide_root(),
+    );
+    let sdk = carbide_dpf::DpfSdkBuilder::new(repo.clone(), carbide_dpf::NAMESPACE, provider)
         .with_labeler(
             CarbideDPFLabeler::new(carbide_config.dpf.deployments.bf3.node_label_key.clone())
                 .with_deployment_type_labels(deployment_type_labels),
@@ -731,124 +1113,46 @@ async fn initialize_dpf_sdk(
         .await
         .map_err(|err| eyre::eyre!("failed to initialize DPF SDK: {err}"))?;
 
-    // Builds the SDK init config for one DPUDeployment. BF4 uses a single
-    // `BlueFieldSoftware` source (the CR itself carries the PSID→PLDM mapping);
-    // config validation guarantees exactly one PSID entry.
-    let make_init_config =
-        |deployment: &crate::cfg::file::DpfDeploymentConfig,
-         deployment_type: DpuDeploymentType,
-         bluefield_software: Option<carbide_dpf::BlueFieldSoftwareParams>| {
-            let services = carbide_config
-                .dpf
-                .resolved_services_for(deployment, deployment_type);
-            let interfaces = match deployment_type {
-                DpuDeploymentType::Bf4Astra => &astra_interfaces,
-                DpuDeploymentType::Bf3
-                | DpuDeploymentType::Bf3Gb200
-                | DpuDeploymentType::Bf4Generic => &effective_interfaces,
-            };
-            let (service_vpc_interfaces, additional_managed_sf) = match deployment_type {
-                DpuDeploymentType::Bf4Astra => (&[][..], 0),
-                DpuDeploymentType::Bf3
-                | DpuDeploymentType::Bf3Gb200
-                | DpuDeploymentType::Bf4Generic => {
-                    (service_vpc_interfaces.as_slice(), additional_managed_sf)
-                }
-            };
-            carbide_dpf::InitDpfResourcesConfig {
-                bfb_url: deployment.bfb_url.clone().unwrap_or_default(),
-                bluefield_software,
-                flavor_name: deployment.flavor_name.clone(),
-                deployment_name: deployment.deployment_name.clone(),
-                deployment_scoped_service_interfaces: carbide_config
-                    .dpf
-                    .deployment_scoped_service_interfaces,
-                services: crate::dpf_services::mandatory_services(
-                    &services,
-                    &carbide_config.dpf.dpu_agent_bootstrap_ca,
-                    interfaces,
-                    service_vpc_interfaces,
-                    &carbide_config.node_auth,
-                ),
-                num_of_vfs: carbide_config.dpu_config.num_of_vfs,
-                pf_total_sf_reserved: carbide_config.dpf.pf_total_sf_reserved,
-                additional_managed_sf,
-                intercept_bridging: match deployment_type {
-                    DpuDeploymentType::Bf4Astra => None,
-                    DpuDeploymentType::Bf3
-                    | DpuDeploymentType::Bf3Gb200
-                    | DpuDeploymentType::Bf4Generic => intercept_bridging.clone(),
-                },
-                interfaces: interfaces.clone(),
-                proxy: carbide_config.dpf.proxy.clone(),
-                extra_bfcfg_parameters: carbide_config
-                    .dpf
-                    .resolved_bfcfg_parameters_for(deployment),
-                deployment_type,
-            }
-        };
-
-    let bf3 = &carbide_config.dpf.deployments.bf3;
-    sdk.create_initialization_objects(&make_init_config(bf3, DpuDeploymentType::Bf3, None))
-        .await
-        .map_err(|err| eyre::eyre!("failed to initialize bf3 DPF deployment: {err}"))?;
-
-    let bf3_gb200 = bf3.bf3_gb200();
-    sdk.create_initialization_objects(&make_init_config(
-        &bf3_gb200,
-        DpuDeploymentType::Bf3Gb200,
-        None,
-    ))
-    .await
-    .map_err(|err| eyre::eyre!("failed to initialize bf3 GB200 DPF deployment: {err}"))?;
-
-    if let Some(bf4) = &carbide_config.dpf.deployments.bf4_generic {
-        // Validation guarantees `bluefield_software` is set with exactly one PSID
-        // entry for a BF4 deployment.
-        let bfs = bf4.bluefield_software.as_ref().ok_or_else(|| {
-            eyre::eyre!("bf4_generic DPF deployment is missing bluefield_software")
-        })?;
-        let pldm_url =
-            bfs.pldm_fw_bundle.values().next().ok_or_else(|| {
-                eyre::eyre!("bf4_generic DPF deployment has an empty pldm_fw_bundle")
-            })?;
-        let params = carbide_dpf::BlueFieldSoftwareParams {
-            os_iso: bfs.os_iso.clone(),
-            pldm_fw_bundle: Some(pldm_url.clone()),
-        };
-        sdk.create_initialization_objects(&make_init_config(
-            bf4,
-            DpuDeploymentType::Bf4Generic,
-            Some(params),
-        ))
-        .await
-        .map_err(|err| eyre::eyre!("failed to initialize bf4_generic DPF deployment: {err}"))?;
+    for (name, config) in &init_configs {
+        sdk.create_initialization_objects(config)
+            .await
+            .map_err(|err| eyre::eyre!("failed to initialize {name} DPF deployment: {err}"))?;
     }
 
-    if let Some(bf4_astra) = &carbide_config.dpf.deployments.bf4_astra {
-        let bfs = bf4_astra
-            .bluefield_software
-            .as_ref()
-            .ok_or_else(|| eyre::eyre!("bf4_astra DPF deployment is missing bluefield_software"))?;
-        let pldm_url =
-            bfs.pldm_fw_bundle.values().next().ok_or_else(|| {
-                eyre::eyre!("bf4_astra DPF deployment has an empty pldm_fw_bundle")
-            })?;
-        let params = carbide_dpf::BlueFieldSoftwareParams {
-            os_iso: bfs.os_iso.clone(),
-            pldm_fw_bundle: Some(pldm_url.clone()),
-        };
-        sdk.create_initialization_objects(&make_init_config(
-            bf4_astra,
-            DpuDeploymentType::Bf4Astra,
-            Some(params),
-        ))
+    // Cleanup stale PF1 interfaces for BF3. For scoped deployment this is
+    // unconditional, for unscoped we only cleanup if BF4 is not present.
+    let bf4_configured = carbide_config.dpf.deployments.bf4_generic.is_some()
+        || carbide_config.dpf.deployments.bf4_astra.is_some();
+    let cleanup_configs = init_configs
+        .iter()
+        .filter(|(_, config)| {
+            matches!(
+                config.deployment_type(),
+                DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200
+            )
+        })
+        .map(|(_, config)| config)
+        .collect::<Vec<_>>();
+    if let Err(error) = sdk
+        .cleanup_stale_pf1_interfaces(&cleanup_configs, bf4_configured)
         .await
-        .map_err(|err| eyre::eyre!("failed to initialize bf4_astra DPF deployment: {err}"))?;
+    {
+        tracing::warn!(error = %error, "Failed to clean up obsolete PF1 interfaces");
     }
+
+    // Get astra config route prefixes for dpu device registration.
+    let astra_config = carbide_config
+        .ewethers_config
+        .as_ref()
+        .map(|config| config.astra.clone())
+        .unwrap_or_default();
 
     Ok(Some(Arc::new(DpfSdkOps::new(
         Arc::new(sdk),
+        carbide_dpf::AstraRoutePrefixes {
+            rail_route_prefix_len: astra_config.underlay_rail_route_prefix_len,
+            software_plane_route_prefix_len: astra_config.underlay_software_plane_route_prefix_len,
+        },
         db_pool,
         join_set,
     )?)))
@@ -1090,9 +1394,11 @@ impl<'a> SeedData<'a> {
 ///
 /// All background tasks will be spawned into `join_set`, which can be awaited with
 /// [`JoinSet::join_all`] to wait for them to complete.
+#[allow(clippy::too_many_arguments)]
 async fn initialize_and_start_controllers<'a>(
     join_set: &mut JoinSet<()>,
     api_service: Arc<Api>,
+    site_explorer_machine_info_provider: Option<Arc<dyn component_manager::MachineInfoProvider>>,
     meter: Meter,
     per_object_prometheus_registry: Option<prometheus::Registry>,
     ipmi_tool: Arc<dyn IPMITool>,
@@ -1110,10 +1416,23 @@ async fn initialize_and_start_controllers<'a>(
         work_lock_manager_handle,
         rms_client,
         component_manager,
+        firmware_object_fetcher,
         dpf_sdk,
         credential_manager,
         ..
     } = api_service.as_ref();
+
+    let nvos_update_manager = rms_client.clone().map(|client| {
+        Arc::new(component_manager::rms::rms_nvos_update_manager(client))
+            as Arc<dyn component_manager::NvosUpdateManager>
+    });
+
+    let rack_firmware_update_manager = rms_client.clone().map(|client| {
+        Arc::new(component_manager::rms::rms_rack_firmware_update_manager(
+            client,
+        )) as Arc<dyn component_manager::RackFirmwareUpdateManager>
+    });
+
     // As soon as we get the database up, observe this version of forge so that we know when it was
     // first deployed
     {
@@ -1241,7 +1560,9 @@ async fn initialize_and_start_controllers<'a>(
         && let Some(admin) = fnn_config.admin_vpc.as_ref()
         && admin.enabled
     {
-        db_init::create_admin_vpc(db_pool, admin.vpc_vni).await?;
+        db_init::create_admin_vpc(&api_service, admin.vpc_vni).await?;
+    } else {
+        crate::handlers::tenant_prefix_overlap::validate_retained_state(&api_service).await?;
     }
     // Update SVI IP to segments which have VPC attached and type is FNN.
     db_init::update_network_segments_svi_ip(db_pool).await?;
@@ -1365,24 +1686,6 @@ async fn initialize_and_start_controllers<'a>(
 
         emitter_builder.build()
     };
-
-    let switch_system_image_rms_client =
-        carbide_config
-            .rms
-            .api_url
-            .as_deref()
-            .none_if_empty()
-            .map(|url| {
-                let rms_client_config = librms::client_config::RmsClientConfig::new(
-                    carbide_config.rms.root_ca_path.clone(),
-                    carbide_config.rms.client_cert.clone(),
-                    carbide_config.rms.client_key.clone(),
-                    carbide_config.rms.enforce_tls,
-                );
-                let rms_api_config = librms::client::RmsApiConfig::new(url, &rms_client_config);
-                Arc::new(librms::RackManagerApi::new(&rms_api_config))
-                    as Arc<dyn carbide_rack::rms_client::SwitchSystemImageRmsClient>
-            });
 
     // Use the hostname as cluster-wide state controller ID
     // The expectation here is that either the host only runs a single
@@ -1618,6 +1921,24 @@ async fn initialize_and_start_controllers<'a>(
         .build_and_spawn(join_set, cancel_token.clone())
         .expect("Unable to build NetworkSegmentController");
 
+    StateController::<crate::site_prefix_controller::SitePrefixReadiness>::builder()
+        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .processor_id(state_controller_id.clone())
+        .services(Arc::new(db_pool.clone()))
+        .state_handler(Arc::new(
+            crate::site_prefix_controller::SitePrefixReadiness {
+                vpc_isolation_behavior: carbide_config.vpc_isolation_behavior,
+            },
+        ))
+        .build_and_spawn(join_set, cancel_token.clone())?;
+
+    StateController::<crate::vpc_peering_controller::VpcPeeringDeletion>::builder()
+        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .processor_id(state_controller_id.clone())
+        .services(Arc::new(db_pool.clone()))
+        .state_handler(Arc::new(crate::vpc_peering_controller::VpcPeeringDeletion))
+        .build_and_spawn(join_set, cancel_token.clone())?;
+
     StateController::<VpcPrefixStateControllerIO>::builder()
         .database(db_pool.clone(), work_lock_manager_handle.clone())
         .meter("carbide_vpc_prefixes", meter.clone())
@@ -1731,21 +2052,6 @@ async fn initialize_and_start_controllers<'a>(
         .build_and_spawn(join_set, cancel_token.clone())
         .expect("Unable to build PowerShelfStateController");
 
-    let default_redirect_policy = reqwest::redirect::Policy::default();
-
-    let firmware_object_fetcher = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            let initial_origin = attempt.previous().first().map(reqwest::Url::origin);
-
-            if initial_origin == Some(attempt.url().origin()) {
-                default_redirect_policy.redirect(attempt)
-            } else {
-                attempt.error("firmware-object redirect changed the configured origin")
-            }
-        }))
-        .build()
-        .wrap_err("failed to build the firmware-object HTTP client")?;
-
     StateController::<RackStateControllerIO>::builder()
         .database(db_pool.clone(), work_lock_manager_handle.clone())
         .meter("carbide_racks", meter.clone())
@@ -1753,20 +2059,21 @@ async fn initialize_and_start_controllers<'a>(
         .services(
             RackStateHandlerServices {
                 db_pool: db_pool.clone(),
-                rms_client: rms_client.clone(),
                 site_config: RackConfig {
                     rms: carbide_config.rms.clone(),
                     rack_validation_config: carbide_config.rack_validation_config.clone(),
                     rack_profiles: carbide_config.rack_profiles.clone(),
                 }
                 .into(),
-                switch_system_image_rms_client,
+                nvos_update_manager: nvos_update_manager.clone(),
+                rack_firmware_update_manager: rack_firmware_update_manager.clone(),
                 credential_manager: credential_manager.clone(),
                 component_manager: component_manager.clone().map(Arc::new),
-                nmx_cluster_switch_mtls_services: carbide_config
-                    .rack_state_controller
-                    .effective_nmx_cluster_switch_mtls_services_as_i32(),
-                firmware_object_fetcher: Arc::new(firmware_object_fetcher),
+                switch_mtls_services: carbide_config
+                    .switch_state_controller
+                    .switch_mtls_services
+                    .clone(),
+                firmware_object_fetcher: firmware_object_fetcher.clone(),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
             }
             .into(),
@@ -1902,11 +2209,13 @@ async fn initialize_and_start_controllers<'a>(
         site_explorer_config,
         meter.clone(),
         endpoint_exploration_service.clone(),
+        api_service.bmc_client.clone(),
         common_pools.clone(),
         work_lock_manager_handle.clone(),
         carbide_config.rack_profiles.clone(),
-        rms_client.clone(),
+        site_explorer_machine_info_provider,
         credential_manager.clone(),
+        carbide_config.dpf.enabled && dpf_sdk.is_some(),
     )
     .start(join_set, cancel_token.clone())?;
 
@@ -1919,7 +2228,7 @@ async fn initialize_and_start_controllers<'a>(
     )
     .start(join_set, cancel_token.clone())?;
 
-    PreingestionManager::new(
+    let preingestion_manager = PreingestionManager::new(
         db_pool.clone(),
         carbide_config.preingestion_manager(),
         shared_redfish_pool.clone(),
@@ -1929,8 +2238,23 @@ async fn initialize_and_start_controllers<'a>(
         Some(api_service.credential_manager.clone()),
         work_lock_manager_handle.clone(),
         carbide_config.ntp_servers.clone(),
-    )
-    .start(join_set, cancel_token.clone())?;
+    );
+
+    let preingestion_manager = match component_manager.as_ref() {
+        Some(manager)
+            if manager.compute_tray.backend()
+                == component_manager::compute_tray_manager::Backend::Rms =>
+        {
+            preingestion_manager.with_rack_firmware(
+                carbide_config.rack_profiles.clone(),
+                manager.compute_tray.clone(),
+                firmware_object_fetcher.clone(),
+            )
+        }
+        _ => preingestion_manager,
+    };
+
+    preingestion_manager.start(join_set, cancel_token.clone())?;
 
     MeasuredBootMetricsCollector::new(
         db_pool.clone(),
@@ -2002,6 +2326,21 @@ mod tests {
         InitialObjectsConfig, VmaasConfig, default_hbn_bridge,
     };
     use crate::cfg::load::{merged_carbide_config_figment, parse_carbide_config};
+
+    #[test]
+    fn scoped_service_interface_detection_requires_a_scoped_name_and_selector() {
+        assert_eq!(
+            scoped_service_interface_names([
+                (Some("p0-bf3".to_string()), true),
+                (Some("p1-bf3gb200".to_string()), true),
+                (Some("p2-bf4".to_string()), false),
+                (Some("p3".to_string()), true),
+                (Some("p4-astra".to_string()), true),
+                (None, true),
+            ]),
+            vec!["p0-bf3", "p1-bf3gb200", "p4-astra"],
+        );
+    }
 
     /// Provides one intercept-bridging config entry for DPF normalization tests.
     fn test_intercept_config(interface: HostInterceptBridging) -> VmaasConfig {
@@ -2293,7 +2632,7 @@ mod tests {
             segment_type: NetworkDefinitionSegmentType::Admin,
             prefix,
             prefix_v6: None,
-            gateway: prefix.network(),
+            gateway: Some(prefix.network()),
             dhcpv6_link_address: None,
             mtu,
             reserve_first: 0,
@@ -2911,6 +3250,103 @@ attributes = { attribute1 = "site", additional_attribute3 = "site" }
         assert_eq!(
             classify_config_validation_error(&error),
             ResolveFailure::Unexpected(error.to_string())
+        );
+    }
+
+    // --- [bmc_proxy] pool selection ---------------------------------------
+
+    fn selection_fixtures() -> (
+        CarbideConfig,
+        Arc<dyn CredentialManager>,
+        Arc<dyn RedfishClientPool>,
+    ) {
+        let config = crate::test_support::default_config::get();
+        let credential_manager: Arc<dyn CredentialManager> =
+            Arc::new(carbide_secrets::test_support::credentials::TestCredentialManager::default());
+        let (direct, _ops) = create_redfish_pool(&config, credential_manager.clone())
+            .expect("direct pool builds from the default test config");
+        (config, credential_manager, direct)
+    }
+
+    /// With `[bmc_proxy]` absent or disabled, the general pool IS the direct
+    /// pool -- the identical `Arc` -- and site-explorer gets no proxied
+    /// pools, so disabled mode cannot change behavior.
+    #[test]
+    fn pools_are_direct_unless_bmc_proxy_is_enabled() {
+        let (mut config, credential_manager, direct) = selection_fixtures();
+
+        assert!(
+            config.bmc_proxy.is_none(),
+            "default test config has no section"
+        );
+        let pools = create_bmc_proxy_pools(&config, credential_manager.clone(), &direct)
+            .expect("absent section selects pools");
+        assert!(
+            Arc::ptr_eq(&pools.general, &direct),
+            "an absent [bmc_proxy] must alias the direct pool"
+        );
+        assert!(
+            pools.site_explorer.is_none(),
+            "an absent [bmc_proxy] must leave site-explorer direct"
+        );
+
+        config.bmc_proxy = Some(
+            serde_json::from_value(serde_json::json!({ "enabled": false }))
+                .expect("a disabled section parses without a url"),
+        );
+        let pools = create_bmc_proxy_pools(&config, credential_manager, &direct)
+            .expect("disabled section selects pools");
+        assert!(
+            Arc::ptr_eq(&pools.general, &direct),
+            "a disabled [bmc_proxy] must alias the direct pool"
+        );
+        assert!(
+            pools.site_explorer.is_none(),
+            "a disabled [bmc_proxy] must leave site-explorer direct"
+        );
+    }
+
+    /// With `[bmc_proxy]` enabled, the general pool is a distinct proxied
+    /// pool built from the configured certificates, and site-explorer's
+    /// proxied Redfish handle is that same pool -- never the direct one,
+    /// which is left for credential-lifecycle work.
+    #[test]
+    fn pools_are_proxied_when_bmc_proxy_is_enabled() {
+        let (mut config, credential_manager, direct) = selection_fixtures();
+        let dir = tempfile::tempdir().expect("tempdir");
+        config.bmc_proxy = Some(crate::bmc_proxy::test_config_with_generated_pems(&dir));
+
+        let pools = create_bmc_proxy_pools(&config, credential_manager, &direct)
+            .expect("an enabled section with readable certs builds the proxied pools");
+        assert!(
+            !Arc::ptr_eq(&pools.general, &direct),
+            "an enabled [bmc_proxy] must select a distinct proxied pool"
+        );
+        let site_explorer = pools
+            .site_explorer
+            .expect("an enabled [bmc_proxy] must build site-explorer's proxied pools");
+        assert!(
+            Arc::ptr_eq(&site_explorer.redfish, &pools.general),
+            "site-explorer's proxied Redfish handle must be the general (proxied) pool"
+        );
+    }
+
+    /// An enabled section without a url is a startup error, never a pool
+    /// that silently dials BMCs directly.
+    #[test]
+    fn enabled_bmc_proxy_without_url_fails_startup() {
+        let (mut config, credential_manager, direct) = selection_fixtures();
+        config.bmc_proxy = Some(
+            serde_json::from_value(serde_json::json!({ "enabled": true }))
+                .expect("the section parses; the empty default address is rejected later"),
+        );
+
+        let Err(err) = create_bmc_proxy_pools(&config, credential_manager, &direct) else {
+            panic!("an enabled section with no address must fail startup");
+        };
+        assert!(
+            err.to_string().contains("required"),
+            "the error should name the missing address, got: {err}"
         );
     }
 }

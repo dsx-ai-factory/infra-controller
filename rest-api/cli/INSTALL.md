@@ -47,7 +47,7 @@ If any of those are not true, the task is not complete.
 3. Clone the upstream repo (shallow clone is fine; this is a build workspace, not a development checkout):
 
    ```bash
-   git clone --depth 1 https://github.com/NVIDIA/infra-controller.git
+   git clone --depth 1 https://github.com/dsx-ai-factory/infra-controller.git
    cd infra-controller/rest-api
    ```
 
@@ -83,7 +83,7 @@ If any of those are not true, the task is not complete.
 
 ### Common failures
 
-- **`command not found: go`** — Go is not installed. Stop and tell the user to install Go 1.26.4 or newer from <https://go.dev/dl/>. Do not auto-install Go.
+- **`command not found: go`** — Go is not installed. Stop and tell the user to install Go 1.26.4 or newer from [https://go.dev/dl/](https://go.dev/dl/). Do not auto-install Go.
 
 - **`go: go.mod requires go >= 1.26.4`** — Installed Go is too old. Stop and ask the user to upgrade.
 
@@ -125,7 +125,9 @@ If any of those are not true, the task is not complete.
 
 - **`fatal: unable to access 'https://github.com/...': ...` or `go mod download` network errors** — confirm the user has internet access and (if behind a corporate proxy) that `HTTPS_PROXY` / `GOPROXY` are set. Surface the exact error to the user; do not retry indefinitely.
 
-- **Repo not found at `NVIDIA/infra-controller`** — the repo may have been renamed. Check <https://github.com/NVIDIA> for a repo whose name contains `infra-controller` or `nico`. If you cannot find it, stop and ask the user for the current location.
+- **Repo not found at `dsx-ai-factory/infra-controller`** — confirm that the
+  clone URL is [https://github.com/dsx-ai-factory/infra-controller.git](https://github.com/dsx-ai-factory/infra-controller.git). If the
+  repository is unavailable, stop and surface the exact Git error.
 
 - **`go: cannot find main module`** — you are not inside the cloned repo. Re-run `cd` into the cloned directory.
 
@@ -155,4 +157,4 @@ Once `nicocli --version` works, you may leave the cloned repo in place at `$WORK
 
 To install via your agent, paste the URL of this file as a prompt. Example phrasings:
 
-- "Install nicocli following the instructions at <https://github.com/NVIDIA/infra-controller/blob/main/rest-api/cli/INSTALL.md>"
+- "Install nicocli following the instructions at [https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/cli/INSTALL.md](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/cli/INSTALL.md)"

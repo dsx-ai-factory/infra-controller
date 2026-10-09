@@ -43,7 +43,28 @@ This is a security benefit: the DPU enforces host isolation before the host rece
 
 ### NICo Metadata Service
 
-The NICo Metadata Service (MDS) exposes instance metadata to tenants from the DPU. Tenants can use MDS to retrieve information such as the Machine ID and boot or operating system metadata for their instance. MDS runs on the DPU rather than on the host, so its responses are trusted independently of the host OS.
+The NICo Metadata Service (MDS) exposes instance metadata to tenants from the DPU. It runs on the DPU rather than on the host, so its responses are trusted independently of the host OS. The integrated endpoint in `dpu-agent` and the standalone FMDS service expose the same metadata paths and status behavior.
+
+List the available categories at `/latest/meta-data` or `/latest/meta-data/`. The response contains these names:
+
+| Metadata path | Value |
+|---|---|
+| `/latest/meta-data/hostname` | Hostname selected for the instance. |
+| `/latest/meta-data/instance-name` | The instance's `metadata.name` value. |
+| `/latest/meta-data/sitename` | NICo site name. |
+| `/latest/meta-data/machine-id` | Managed machine identifier. |
+| `/latest/meta-data/instance-id` | Instance identifier. |
+| `/latest/meta-data/asn` | Autonomous system number assigned to the instance. |
+| `/latest/meta-data/public-ipv4` | Public IPv4 metadata. |
+| `/latest/meta-data/public-ipv6` | Public IPv6 metadata. |
+
+For example, from a tenant instance:
+
+```bash
+curl -fsS http://169.254.169.254/latest/meta-data/instance-name
+```
+
+`instance-name` is independent of `hostname`; adding or changing the instance name does not change the hostname endpoint. If the instance metadata has no nonempty name, both the integrated and standalone services return HTTP 404 with `instance name not available`. The category remains present in the metadata index so clients can discover the supported contract.
 
 ### HBN and Containerized Cumulus
 
@@ -62,7 +83,7 @@ DPU OS installation happens as part of the managed host state machine after Site
 NICo uses two different BFB images. They are not interchangeable:
 
 - **NICo BFB**: The image installed during the managed host state machine and reprovisioning. It is built from the vanilla DOCA BFB and customized with NICo services: `dpu-agent`, the DPU DHCP server, MDS, HBN installer and configuration, NICo root CA, and scout. This is the image that makes the DPU a fully managed component. For build instructions, see [Building NICo Containers](../manuals/building_nico_containers.md#building-the-dpu-bfb).
-- **Preingestion BFB** (`preingestion.bfb`): The unmodified vanilla DOCA BFB, saved as-is during the build process before any NICo customization is applied. It does **not** contain `dpu-agent`, HBN, MDS, or any other NICo services. This image is used only for pre-ingestion recovery via rshim (`copy-bfb-to-dpu-rshim`) to return a DPU to a clean factory state so that NICo can discover and pair it. After the preingestion BFB is installed, the normal state machine installs the NICo BFB.
+- **Preingestion BFB** (`preingestion.bfb`): The unmodified vanilla DOCA BFB, saved as-is during the build process before any NICo customization is applied. It does **not** contain `dpu-agent`, HBN, MDS, or any other NICo services. This image is used for pre-ingestion recovery using rshim (`copy-bfb-to-dpu-rshim`) or [between-install decommissioning](../decommissioning/hosts.md) to return a DPU to a clean pre-ingestion state so that NICo can discover and pair it. After the preingestion BFB is installed, the normal state machine installs the NICo BFB.
 
 ### How NICo Chooses the Install Method
 

@@ -64,10 +64,13 @@ NICo provides **health visibility and allocation protection** for leak-related c
 
 - `PreventAllocations`
 - `SensorCritical`
+- `Hardware`
 
 `PreventAllocations` blocks new allocations for hosts affected by the active tray- or rack-health condition. When the health alert clears later, NICo recalculates aggregate health; allocation eligibility can recover when no other active health condition prevents allocation.
 
-Current operational visibility is provided through NICo's health data, health alert details, logs, and metrics. To obtain a machine's current health reports, use the `GET /v2/org/{org}/nico/machine/{id}/health-report` [REST API endpoint](api:GET/v2/org/:org/nico/machine/:machineId/health-report).
+Tray list and detail responses expose `leakStatus` (`Unknown`, `Leaking`, or `NoLeak`) and `leakHandlingStatus` (`Unknown`, `None`, `ShuttingDown`, `Down`, or `Failed`). Rack responses expose these fields on objects in `components[]` only when `includeComponents=true`, not on the rack itself. These summarize detection and handling separately; `Unknown` is not confirmation that no leak exists. See [Rack-Level Administration](../manuals/rack_level_admin.md) for the inventory endpoints.
+
+For diagnostic details, use NICo's health reports, logs, and metrics. To obtain a machine's health reports, use the `GET /v2/org/{org}/nico/machine/{id}/health-report` [REST API endpoint](api:GET/v2/org/:org/nico/machine/:machineId/health-report).
 
 ### Three Tiers of Automated Leak Handling
 
@@ -97,7 +100,7 @@ The overall focus for the next phase of NICo leak detection and handling is to m
 
 ### Dedicated leak status and leak handling status API
 
-Instead of relying on low-level APIs for health report and task, [issue #5018](https://github.com/NVIDIA/infra-controller/issues/5018) aims to provide a set of dedicated, easier-to-use leak status and leak handling status reporting API, such as
+Dedicated leak-reporting endpoints could consolidate the existing inventory status fields, health reports, and tasks. The following paths are proposed, not available APIs:
 
 ```http
 GET /nico/rack/{id}/leak
@@ -116,7 +119,7 @@ These endpoints should report:
 
 ### Customizable leak handling policies
 
-NICo's current default general leak handling uses the NICo policy and automation engine. [Issue #2076](https://github.com/NVIDIA/infra-controller/issues/2076) aims to provide a set of APIs to allow you to create and manage customized general leakage-handling policies at runtime. This is critical for fine-tuning for site-specific needs, especially as hardware becomes denser and more complex.
+NICo's current default general leak handling uses the NICo policy and automation engine. [Issue #2076](https://github.com/dsx-ai-factory/infra-controller/issues/2076) aims to provide a set of APIs to allow you to create and manage customized general leakage-handling policies at runtime. This is critical for fine-tuning for site-specific needs, especially as hardware becomes denser and more complex.
 
 The following are examples of _potential_ customized future policies:
 
@@ -129,17 +132,16 @@ The following are examples of _potential_ customized future policies:
 
 Currently, NICo only detects from in-tray BMC sensors of _ingested_ machines and switches. This does not cover the full lifecycle of liquid-cooled hardware, which not only exposes risks, but will eventually become a blocker for scaling AI factories.
 
-For trays with a BMC powered on and visible from NICo, but that have not yet been fully ingested, [issue #5391](https://github.com/NVIDIA/infra-controller/issues/5391) aims to expand the collection, detection, reporting, and handling of leakage to those trays. This not only expands leak detection and handling coverage, but is also a dependency for the following enhancement.
+For trays with a BMC powered on and visible from NICo, but that have not yet been fully ingested, [issue #5391](https://github.com/dsx-ai-factory/infra-controller/issues/5391) aims to expand the collection, detection, reporting, and handling of leakage to those trays. This not only expands leak detection and handling coverage, but is also a dependency for the following enhancement.
 
-For hosts known to be leaking before being turned off, and for hosts in a previously known-leaking rack, [issue #5510](https://github.com/NVIDIA/infra-controller/issues/5510) aims to prevent these hosts from being automatically turned on until their BMCs (or the whole rack's BMCs) can give a definitive clearance of leakage. This will complete the coverage of the full lifecycle of liquid-cooled hardware.
+For hosts known to be leaking before being turned off, and for hosts in a previously known-leaking rack, [issue #5510](https://github.com/dsx-ai-factory/infra-controller/issues/5510) aims to prevent these hosts from being automatically turned on until their BMCs (or the whole rack's BMCs) can give a definitive clearance of leakage. This will complete the coverage of the full lifecycle of liquid-cooled hardware.
 
 ## Related documentation and implementation
 
 - [Monitoring and Health](monitoring-health.md)
-- [`crates/dsx-exchange-consumer/README.md`](https://github.com/NVIDIA/infra-controller/blob/main/crates/dsx-exchange-consumer/README.md)
-- [`crates/dsx-exchange-consumer/src/health_updater.rs`](https://github.com/NVIDIA/infra-controller/blob/main/crates/dsx-exchange-consumer/src/health_updater.rs)
-- [`helm/README.md`](https://github.com/NVIDIA/infra-controller/blob/main/helm/README.md)
-- [Issue #2076](https://github.com/NVIDIA/infra-controller/issues/2076)
-- [Issue #5018](https://github.com/NVIDIA/infra-controller/issues/5018)
-- [Issue #5391](https://github.com/NVIDIA/infra-controller/issues/5391)
-- [Issue #5510](https://github.com/NVIDIA/infra-controller/issues/5510)
+- [`crates/dsx-exchange-consumer/README.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/dsx-exchange-consumer/README.md)
+- [`crates/dsx-exchange-consumer/src/health_updater.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/dsx-exchange-consumer/src/health_updater.rs)
+- [`helm/README.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md)
+- [Issue #2076](https://github.com/dsx-ai-factory/infra-controller/issues/2076)
+- [Issue #5391](https://github.com/dsx-ai-factory/infra-controller/issues/5391)
+- [Issue #5510](https://github.com/dsx-ai-factory/infra-controller/issues/5510)

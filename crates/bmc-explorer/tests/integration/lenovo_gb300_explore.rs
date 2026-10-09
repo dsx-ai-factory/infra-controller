@@ -50,6 +50,42 @@ async fn explore_lenovo_gb300() {
     assert!(!report.systems.is_empty(), "systems must be present");
     assert!(!report.chassis.is_empty(), "chassis must be present");
 
+    let system_0 = report
+        .systems
+        .iter()
+        .find(|system| system.id == "System_0")
+        .expect("Lenovo GB300 must expose the host System_0 resource");
+    assert_eq!(
+        system_0.model.as_deref(),
+        Some("HG635N_V2"),
+        "System_0 must report the Lenovo GB300 host model"
+    );
+    assert_eq!(
+        system_0.bios_version.as_deref(),
+        Some("GBHC01A_01.05.0"),
+        "System_0 must report the host BIOS/UEFI version"
+    );
+    assert_eq!(
+        report.observed_host_bmc_version(),
+        Some("1.0.0"),
+        "the representative BMC version must be read from the exact BMC inventory entry"
+    );
+    assert_eq!(
+        report.system_bios_version(),
+        Some("GBHC01A_01.05.0"),
+        "the observed host BIOS accessor must select System_0"
+    );
+
+    let inventory = report.get_inventory_map();
+    assert!(
+        inventory.contains_key("BMC"),
+        "Lenovo GB300 firmware inventory must contain the exact BMC entry"
+    );
+    assert!(
+        !inventory.contains_key("UEFI"),
+        "Lenovo GB300 firmware inventory must not synthesize a UEFI entry"
+    );
+
     let lockdown = report
         .lockdown_status
         .expect("GB300 lockdown status must be populated");

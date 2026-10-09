@@ -51,11 +51,30 @@ pub async fn weave_ew_vpc_create_virtual_network(
 ) -> eyre::Result<proto::CreateVirtualNetworkResponse> {
     let channel = weave_ew_vpc_connect_uds(socket_path).await?;
     let mut client = NetworkIsolationServiceClient::new(channel);
+    tracing::info!(?request, "CreateVirtualNetwork request");
     let response = client
         .create_virtual_network(request)
         .await
-        .map_err(|s| eyre::eyre!("CreateVirtualNetwork gRPC failed: {s}"))?;
-    Ok(response.into_inner())
+        .map_err(|s| eyre::eyre!("CreateVirtualNetwork gRPC failed: {s}"))?
+        .into_inner();
+    tracing::info!(?response, "CreateVirtualNetwork response");
+    Ok(response)
+}
+
+pub async fn weave_ew_vpc_update_virtual_network(
+    socket_path: &str,
+    request: proto::UpdateVirtualNetworkRequest,
+) -> eyre::Result<proto::UpdateVirtualNetworkResponse> {
+    let channel = weave_ew_vpc_connect_uds(socket_path).await?;
+    let mut client = NetworkIsolationServiceClient::new(channel);
+    tracing::info!(?request, "UpdateVirtualNetwork request");
+    let response = client
+        .update_virtual_network(request)
+        .await
+        .map_err(|s| eyre::eyre!("UpdateVirtualNetwork gRPC failed: {s}"))?
+        .into_inner();
+    tracing::info!(?response, "UpdateVirtualNetwork response");
+    Ok(response)
 }
 
 pub async fn weave_ew_vpc_delete_virtual_network(
@@ -64,11 +83,14 @@ pub async fn weave_ew_vpc_delete_virtual_network(
 ) -> eyre::Result<proto::DeleteVirtualNetworkResponse> {
     let channel = weave_ew_vpc_connect_uds(socket_path).await?;
     let mut client = NetworkIsolationServiceClient::new(channel);
+    tracing::info!(?request, "DeleteVirtualNetwork request");
     let response = client
         .delete_virtual_network(request)
         .await
-        .map_err(|s| eyre::eyre!("DeleteVirtualNetwork gRPC failed: {s}"))?;
-    Ok(response.into_inner())
+        .map_err(|s| eyre::eyre!("DeleteVirtualNetwork gRPC failed: {s}"))?
+        .into_inner();
+    tracing::info!(?response, "DeleteVirtualNetwork response");
+    Ok(response)
 }
 
 pub async fn weave_ew_vpc_get_virtual_network(
@@ -77,11 +99,14 @@ pub async fn weave_ew_vpc_get_virtual_network(
 ) -> eyre::Result<proto::GetVirtualNetworkResponse> {
     let channel = weave_ew_vpc_connect_uds(socket_path).await?;
     let mut client = NetworkIsolationServiceClient::new(channel);
+    tracing::info!(?request, "GetVirtualNetwork request");
     let response = client
         .get_virtual_network(request)
         .await
-        .map_err(|s| eyre::eyre!("GetVirtualNetwork gRPC failed: {s}"))?;
-    Ok(response.into_inner())
+        .map_err(|s| eyre::eyre!("GetVirtualNetwork gRPC failed: {s}"))?
+        .into_inner();
+    tracing::info!(?response, "GetVirtualNetwork response");
+    Ok(response)
 }
 
 pub async fn weave_ew_vpc_list_virtual_networks(
@@ -90,11 +115,14 @@ pub async fn weave_ew_vpc_list_virtual_networks(
 ) -> eyre::Result<proto::ListVirtualNetworksResponse> {
     let channel = weave_ew_vpc_connect_uds(socket_path).await?;
     let mut client = NetworkIsolationServiceClient::new(channel);
+    tracing::info!(?request, "ListVirtualNetworks request");
     let response = client
         .list_virtual_networks(request)
         .await
-        .map_err(|s| eyre::eyre!("ListVirtualNetworks gRPC failed: {s}"))?;
-    Ok(response.into_inner())
+        .map_err(|s| eyre::eyre!("ListVirtualNetworks gRPC failed: {s}"))?
+        .into_inner();
+    tracing::info!(?response, "ListVirtualNetworks response");
+    Ok(response)
 }
 
 pub async fn weave_ew_vpc_create_virtual_network_attachment(
@@ -103,11 +131,30 @@ pub async fn weave_ew_vpc_create_virtual_network_attachment(
 ) -> eyre::Result<proto::CreateVirtualNetworkAttachmentResponse> {
     let channel = weave_ew_vpc_connect_uds(socket_path).await?;
     let mut client = NetworkIsolationServiceClient::new(channel);
+    tracing::info!(?request, "CreateVirtualNetworkAttachment request");
     let response = client
         .create_virtual_network_attachment(request)
         .await
-        .map_err(|s| eyre::eyre!("CreateVirtualNetworkAttachment gRPC failed: {s}"))?;
-    Ok(response.into_inner())
+        .map_err(|s| eyre::eyre!("CreateVirtualNetworkAttachment gRPC failed: {s}"))?
+        .into_inner();
+    tracing::info!(?response, "CreateVirtualNetworkAttachment response");
+    Ok(response)
+}
+
+pub async fn weave_ew_vpc_update_virtual_network_attachment(
+    socket_path: &str,
+    request: proto::UpdateVirtualNetworkAttachmentRequest,
+) -> eyre::Result<proto::UpdateVirtualNetworkAttachmentResponse> {
+    let channel = weave_ew_vpc_connect_uds(socket_path).await?;
+    let mut client = NetworkIsolationServiceClient::new(channel);
+    tracing::info!(?request, "UpdateVirtualNetworkAttachment request");
+    let response = client
+        .update_virtual_network_attachment(request)
+        .await
+        .map_err(|s| eyre::eyre!("UpdateVirtualNetworkAttachment gRPC failed: {s}"))?
+        .into_inner();
+    tracing::info!(?response, "UpdateVirtualNetworkAttachment response");
+    Ok(response)
 }
 
 pub async fn weave_ew_vpc_delete_virtual_network_attachment(
@@ -116,11 +163,14 @@ pub async fn weave_ew_vpc_delete_virtual_network_attachment(
 ) -> eyre::Result<proto::DeleteVirtualNetworkAttachmentResponse> {
     let channel = weave_ew_vpc_connect_uds(socket_path).await?;
     let mut client = NetworkIsolationServiceClient::new(channel);
+    tracing::info!(?request, "DeleteVirtualNetworkAttachment request");
     let response = client
         .delete_virtual_network_attachment(request)
         .await
-        .map_err(|s| eyre::eyre!("DeleteVirtualNetworkAttachment gRPC failed: {s}"))?;
-    Ok(response.into_inner())
+        .map_err(|s| eyre::eyre!("DeleteVirtualNetworkAttachment gRPC failed: {s}"))?
+        .into_inner();
+    tracing::info!(?response, "DeleteVirtualNetworkAttachment response");
+    Ok(response)
 }
 
 pub async fn weave_ew_vpc_get_virtual_network_attachment(
@@ -129,11 +179,14 @@ pub async fn weave_ew_vpc_get_virtual_network_attachment(
 ) -> eyre::Result<proto::GetVirtualNetworkAttachmentResponse> {
     let channel = weave_ew_vpc_connect_uds(socket_path).await?;
     let mut client = NetworkIsolationServiceClient::new(channel);
+    tracing::info!(?request, "GetVirtualNetworkAttachment request");
     let response = client
         .get_virtual_network_attachment(request)
         .await
-        .map_err(|s| eyre::eyre!("GetVirtualNetworkAttachment gRPC failed: {s}"))?;
-    Ok(response.into_inner())
+        .map_err(|s| eyre::eyre!("GetVirtualNetworkAttachment gRPC failed: {s}"))?
+        .into_inner();
+    tracing::info!(?response, "GetVirtualNetworkAttachment response");
+    Ok(response)
 }
 
 pub async fn weave_ew_vpc_list_virtual_network_attachments(
@@ -142,11 +195,14 @@ pub async fn weave_ew_vpc_list_virtual_network_attachments(
 ) -> eyre::Result<proto::ListVirtualNetworkAttachmentsResponse> {
     let channel = weave_ew_vpc_connect_uds(socket_path).await?;
     let mut client = NetworkIsolationServiceClient::new(channel);
+    tracing::info!(?request, "ListVirtualNetworkAttachments request");
     let response = client
         .list_virtual_network_attachments(request)
         .await
-        .map_err(|s| eyre::eyre!("ListVirtualNetworkAttachments gRPC failed: {s}"))?;
-    Ok(response.into_inner())
+        .map_err(|s| eyre::eyre!("ListVirtualNetworkAttachments gRPC failed: {s}"))?
+        .into_inner();
+    tracing::info!(?response, "ListVirtualNetworkAttachments response");
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -268,7 +324,7 @@ mod tests {
                         pf_id: "02:aa:bb:cc:dd:ee".to_string(),
                     }),
                     attachment_vf: None,
-                    attachment_ovn: None,
+                    attachment_ovs: None,
                 }),
             },
         )

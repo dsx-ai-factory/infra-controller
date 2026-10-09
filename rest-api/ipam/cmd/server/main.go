@@ -13,8 +13,14 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
+	"strings"
 
+	"time"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	goipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
 	"github.com/metal-stack/v"
 	"github.com/urfave/cli/v2"
@@ -22,6 +28,24 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+// run returns an exit code instead of calling log.Fatalf so the deferred
+// trace flush runs on every exit path.
+func run() int {
+	otelShutdown, otelErr := cotel.Bootstrap(context.Background(), cotel.ExporterConfigured(), "nico-ipam")
+	if otelErr != nil {
+		log.Printf("failed to initialize tracing: %v", otelErr)
+	}
+
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := otelShutdown(shutdownCtx); err != nil {
+			log.Printf("failed to shut down tracing: %v", err)
+		}
+	}()
 
 	app := &cli.App{
 		Name:    "go-ipam server",
@@ -348,7 +372,7 @@ func main() {
 					dbname := ctx.String("db-name")
 
 					opts := options.Client()
-					opts.ApplyURI(fmt.Sprintf(`mongodb://%s:%s`, host, port))
+					opts.ApplyURI(mongoURI(host, port))
 					opts.Auth = &options.Credential{
 						AuthMechanism: `SCRAM-SHA-1`,
 						Username:      user,
@@ -372,11 +396,24 @@ func main() {
 		},
 	}
 
-	err := app.Run(os.Args)
-	if err != nil {
-		log.Fatalf("Error in cli: %v", err)
+	if err := app.Run(os.Args); err != nil {
+		log.Printf("Error in cli: %v", err)
+		return 1
 	}
 
+	return 0
+}
+
+func mongoURI(host, port string) string {
+	// JoinHostPort adds IPv6 brackets; accept hosts that already include them.
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	u := url.URL{
+		Scheme: "mongodb",
+		Host:   net.JoinHostPort(host, port),
+	}
+	return u.String()
 }
 
 func getConfig(ctx *cli.Context) config {

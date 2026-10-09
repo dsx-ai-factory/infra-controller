@@ -12,6 +12,13 @@ metadata:
   {{- end }}
 spec:
   type: {{ .Values.externalService.type | default "LoadBalancer" }}
+  {{- with .Values.externalService.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ . }}
+  {{- end }}
+  {{- with .Values.externalService.ipFamilies }}
+  ipFamilies:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   {{- if .Values.externalService.externalTrafficPolicy }}
   externalTrafficPolicy: {{ .Values.externalService.externalTrafficPolicy }}
   {{- end }}

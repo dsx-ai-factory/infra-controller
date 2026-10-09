@@ -65,15 +65,13 @@ Use percentage-based thresholds for IP availability, not absolute counts.
 | Warning |  < 10 stuck | 60m |
 | Critical | >= 10 stuck | 60m |
 
-### State-handler latency
+### State-controller iteration latency
 
-Alert when average iteration latency exceeds the threshold.
-
-| Metric | Threshold | Duration |
-|--------|-----------|----------|
-| State-handler latency | > 120 seconds | 10m |
-
-Applies to machine, network-segment and IB-partition state handlers.
+The `NicoStateHandlerLatency` alert fires when average iteration latency exceeds 120 seconds
+(120000ms) for 10 minutes, or if any of the iteration latency metrics are absent. It monitors
+`carbide_machines_iteration_latency_milliseconds`, `carbide_network_segments_iteration_latency_milliseconds`,
+and `carbide_ib_partitions_iteration_latency_milliseconds` histograms using `rate(_sum)/rate(_count)`
+because the default histogram buckets max at 10 seconds.
 
 ### API availability
 
@@ -81,12 +79,6 @@ Applies to machine, network-segment and IB-partition state handlers.
 |-------|------------|----------|
 | NicoAPIDown | `max(carbide_api_ready) == 0 or absent(carbide_api_ready)` | 15m |
 | NicoAPIFluctuating | `changes(carbide_api_ready[15m]) > 5` | 15m |
-
-### DPU metrics
-
-| Alert | Condition | Duration |
-|-------|-----------|----------|
-| DPU metrics missing | Scrape target down or absent | 10m |
 
 ## 2. SLO targets
 
@@ -102,11 +94,11 @@ These are operational SLO targets, separate from alert thresholds:
 ### Metrics for SLO monitoring
 
 **API availability** uses `carbide_api_grpc_server_duration_milliseconds` histogram. Compute
-error rate from the `_count` series split by gRPC status:
+availability as one minus the error rate from the `_count` series split by gRPC status:
 
 ```text
 1 - (
-  sum(rate(carbide_api_grpc_server_duration_milliseconds_count{grpc_status!="OK"}[5m]))
+  sum(rate(carbide_api_grpc_server_duration_milliseconds_count{grpc_status_code!="Ok"}[5m]))
   /
   sum(rate(carbide_api_grpc_server_duration_milliseconds_count[5m]))
 )
@@ -121,11 +113,10 @@ histogram_quantile(0.95,
 ) / 1000 < 1
 ```
 
-**State update / reconciliation** uses `carbide_machines_handler_latency_in_state_milliseconds`
-histogram. The production alert threshold (120s) is more lenient than the SLO target (60s) to
-reduce noise. Related metrics include `carbide_machines_iteration_latency_milliseconds` for
-full iteration time and `carbide_machines_per_state_above_sla` for objects exceeding configured
-per-state thresholds.
+**State controller iteration latency** is covered by `NicoStateHandlerLatency` described
+[above](#state-controller-iteration-latency). Related metrics include
+`carbide_machines_handler_latency_in_state_milliseconds` for per-state handler time and
+`carbide_machines_per_state_above_sla` for objects exceeding configured per-state thresholds.
 
 ## 3. Site-related thresholds
 
@@ -142,7 +133,7 @@ Use these as starting points and tune based on your site characteristics:
 ## 4. Deploying alert rules
 
 A start set of alert rules with production-validated thresholds is available at
-[`helm/observability/alerts/nico-alerts.yaml`](https://github.com/NVIDIA/infra-controller/blob/main/helm/observability/alerts/nico-alerts.yaml).
+[`helm/observability/alerts/nico-alerts.yaml`](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/observability/alerts/nico-alerts.yaml).
 
 The file uses `PrometheusRule` as the CRD kind. For VictoriaMetrics Operator deployments,
 change `apiVersion` to `operator.victoriametrics.com/v1beta1` and `kind` to `VMRule` -
@@ -170,7 +161,7 @@ The alert rules include these groups:
 | `nico-api` | API down, API fluctuating, state-handler latency |
 | `nico-sla` | Machines stuck, network segments stuck, IB partitions stuck |
 | `nico-capacity` | Low IP availability |
-| `nico-health` | Hosts unhealthy, DPU metrics missing |
+| `nico-health` | Hosts unhealthy |
 
 ## 5. Per-object alerting
 
@@ -288,7 +279,7 @@ For detailed troubleshooting of health alerts, see the
 
 ## 7. References
 
-- [NICo alerting rules](https://github.com/NVIDIA/infra-controller/blob/main/helm/observability/alerts/nico-alerts.yaml) - Prometheus-compatible rule examples
+- [NICo alerting rules](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/observability/alerts/nico-alerts.yaml) - Prometheus-compatible rule examples
 - [Health alerts playbook](../playbooks/stuck_objects/health_alerts.md)
 - [Health alert classifications](../architecture/health/health_alert_classifications.md)
 - [Full metrics reference](core_metrics.md)

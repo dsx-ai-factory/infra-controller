@@ -64,6 +64,13 @@ type manageInventoryImpl[K any, R any, P any] struct {
 	internalFindIDs        func(context.Context, *cClient.CoreGrpcClient) ([]K, error)
 	internalFindByIDs      func(context.Context, *cClient.CoreGrpcClient, []K) ([]R, error)
 	internalPagedInventory func([]K, []R, *pagedInventoryInput) P
+	// itemIDsOnEveryPage keeps the reported ID list on every page for a resource whose Cloud
+	// consumer may still read it outside the deletion sweep. Only SSH Key Group sets it, and
+	// only until every Cloud worker requires a populated list before sweeping.
+	itemIDsOnEveryPage bool
+	// A resource-specific publisher owns completion and cancellation for both
+	// inventory pages and status messages. Unset callers keep the shared publisher.
+	internalPublish func(ctx context.Context, workflowID, workflowName string, page P) error
 	// post-processing function that can optionally be used to attach additional inventory data
 	// based on the data in the inventory.  This will only be called for pages with inventory.
 	internalPagedInventoryPostProcess func(context.Context, *cClient.CoreGrpcClient, P) (P, error)
@@ -249,7 +256,7 @@ type inventoryCollector[K any, R any, P any] struct {
 	pagesPublished   int
 	itemsPublished   int
 	// itemsMissing counts IDs that FindIDs reported but FindByIDs did not return, which is what
-	// a delete landing between the two calls looks like.
+	// a delete arriving between the two calls looks like.
 	itemsMissing int
 	// pending holds items fetched but not yet published. It never exceeds one page, because the
 	// tail stays here until the caller flushes it.
@@ -408,7 +415,12 @@ func (col *inventoryCollector[K, R, P]) buildInventoryPage(ctx context.Context, 
 	remainingItems := input.totalItems - col.itemsMissing - col.itemsPublished - pageItems
 	input.totalPages = input.pageNumber + ceilDiv(remainingItems, col.cloudPageSize)
 
-	page := col.impl.internalPagedInventory(col.allIDs, items, input)
+	reportedIDs := col.allIDs
+	if !col.impl.itemIDsOnEveryPage {
+		reportedIDs = itemIDsForPage(input.pageNumber, input.totalPages, col.allIDs)
+	}
+
+	page := col.impl.internalPagedInventory(reportedIDs, items, input)
 
 	// Handle any requested post processing
 	if col.impl.internalPagedInventoryPostProcess != nil {
@@ -428,14 +440,12 @@ func (col *inventoryCollector[K, R, P]) payloadSize(page P) (int, error) {
 }
 
 // publishStatusOnly publishes a single page carrying a status and no items, used when the Site
-// reported nothing and when collection failed before any page went out. It keeps the unpaged
-// workflow ID and reports the configured page size, which is what Cloud has always received for
-// these two cases.
+// reported nothing and when collection failed before any page went out. The shared publisher
+// keeps the unpaged workflow ID and configured page size that Cloud already receives.
 //
 // The failure it reports is often the activity deadline expiring, which would leave the caller's
-// context already dead, so this detaches from cancellation and takes its own deadline. Otherwise
-// the one case where Cloud most needs to hear that collection failed is the case where the
-// message could never be sent.
+// context already dead, so the shared publisher detaches from cancellation and takes its own
+// deadline. A resource-specific publisher instead applies its own cancellation and wait policy.
 func (col *inventoryCollector[K, R, P]) publishStatusOnly(ctx context.Context, inventoryStatus corev1.InventoryStatus,
 	statusMessage string) error {
 	page := col.impl.internalPagedInventory([]K{}, []R{}, &pagedInventoryInput{
@@ -444,6 +454,9 @@ func (col *inventoryCollector[K, R, P]) publishStatusOnly(ctx context.Context, i
 		status:        inventoryStatus,
 		statusMessage: statusMessage,
 	})
+	if col.impl.internalPublish != nil {
+		return col.impl.internalPublish(ctx, col.workflowID, col.workflowName, page)
+	}
 
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), statusPublishTimeout)
 	defer cancel()
@@ -457,11 +470,26 @@ func (col *inventoryCollector[K, R, P]) publishStatusOnly(ctx context.Context, i
 
 // execute starts the Cloud workflow for one published page.
 func (col *inventoryCollector[K, R, P]) execute(ctx context.Context, page P) error {
+	workflowID := fmt.Sprintf("%v-%v", col.workflowID, col.pagesPublished+1)
+	if col.impl.internalPublish != nil {
+		return col.impl.internalPublish(ctx, workflowID, col.workflowName, page)
+	}
 	_, err := col.impl.config.TemporalPublishClient.ExecuteWorkflow(ctx, tClient.StartWorkflowOptions{
-		ID:        fmt.Sprintf("%v-%v", col.workflowID, col.pagesPublished+1),
+		ID:        workflowID,
 		TaskQueue: col.impl.config.TemporalPublishQueue,
 	}, col.workflowName, col.impl.config.SiteID, page)
 	return err
+}
+
+// itemIDsForPage returns the reported ID list for the page that carries it and nothing for the
+// rest. Cloud reads the list only where it runs its deletion sweep, on the page reporting itself
+// last, so sending it earlier repeats the whole Site once per page: at 1,664 Machines a page
+// spends more on IDs than on the 25 Machines it exists to deliver.
+func itemIDsForPage[T any](pageNumber, totalPages int, allItemIDs []T) []T {
+	if pageNumber != totalPages {
+		return nil
+	}
+	return allItemIDs
 }
 
 // ceilDiv divides and rounds up, reporting zero for a non-positive dividend or divisor.

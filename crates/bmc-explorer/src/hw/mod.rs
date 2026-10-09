@@ -28,9 +28,13 @@ pub mod lenovo_ami;
 pub mod lenovo_gb300;
 pub mod supermicro;
 pub mod supermicro_gb300;
+pub mod sushy;
 pub mod vera_rubin;
 pub mod viking;
 
+/// Every kind of hardware this crate can recognise from a BMC's Redfish
+/// service root and chassis signatures. Which variant an endpoint is decides
+/// what else is worth fetching from it and how to read what comes back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HwType {
     Ami,
@@ -48,6 +52,7 @@ pub enum HwType {
     LiteonPowerShelf,
     DeltaPowerShelf,
     NvSwitch,
+    Sushy,
     VeraRubin,
 }
 
@@ -69,12 +74,16 @@ impl HwType {
             Self::LiteonPowerShelf => Some(bmc_vendor::BMCVendor::Liteon),
             Self::DeltaPowerShelf => Some(bmc_vendor::BMCVendor::Delta),
             Self::NvSwitch => Some(bmc_vendor::BMCVendor::Nvidia),
+            Self::Sushy => Some(bmc_vendor::BMCVendor::Sushy),
             Self::Supermicro => Some(bmc_vendor::BMCVendor::Supermicro),
             Self::Viking => Some(bmc_vendor::BMCVendor::Nvidia),
             Self::VeraRubin => Some(bmc_vendor::BMCVendor::Nvidia),
         }
     }
 
+    /// The BIOS attribute, and the value it has to hold, for this hardware to
+    /// retry booting indefinitely. `None` where the platform has no such
+    /// attribute or its polarity is not yet characterized.
     pub const fn infinite_boot_enabled_attr(&self) -> Option<BiosAttr<'static>> {
         match self {
             Self::Ami => Some(BiosAttr::new_str("EndlessBoot", "Enabled")),
@@ -95,6 +104,7 @@ impl HwType {
             Self::LiteonPowerShelf => None,
             Self::DeltaPowerShelf => None,
             Self::NvSwitch => None,
+            Self::Sushy => None,
             Self::Supermicro => None,
             Self::Viking => Some(BiosAttr::new_str("NvidiaInfiniteboot", "Enable")),
             // Same EmbeddedUefiShell polarity as GB200 / libredfish NvidiaGBx00.
@@ -187,6 +197,7 @@ mod tests {
                 HwType::LiteonPowerShelf => Some(BMCVendor::Liteon),
                 HwType::DeltaPowerShelf => Some(BMCVendor::Delta),
                 HwType::NvSwitch => Some(BMCVendor::Nvidia),
+                HwType::Sushy => Some(BMCVendor::Sushy),
                 HwType::VeraRubin => Some(BMCVendor::Nvidia),
             }
         );

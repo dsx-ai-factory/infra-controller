@@ -237,7 +237,10 @@ func TestGeneratedCommandInfosExposeBodyFormSchema(t *testing.T) {
 
 	rackPower := byName["rack power-control-racks power-control-racks"]
 	state := requireGeneratedBodyFormField(t, rackPower, "state")
-	assert.Equal(t, []string{"on", "off", "cycle", "forceoff", "forcecycle"}, state.Enum)
+	assert.Equal(t, []string{
+		"On", "Off", "Cycle", "ForceOff", "ForceCycle", "ACPowerCycle",
+		"on", "off", "cycle", "forceoff", "forcecycle", "acpowercycle",
+	}, state.Enum)
 }
 
 func TestGeneratedBodyFormRealSchemaPersistsSiteBeforeVPCSelectors(t *testing.T) {
@@ -550,7 +553,7 @@ func TestGeneratedBodyFormTrayFilterResourceMappings(t *testing.T) {
 
 	cache := NewCache()
 	resolver := NewResolver(cache)
-	for _, resourceType := range []string{"tray", "tray-component", "rack"} {
+	for _, resourceType := range []string{"tray", "rack"} {
 		resourceType := resourceType
 		resolver.RegisterFetcher(resourceType, func(context.Context) ([]NamedItem, error) {
 			return []NamedItem{{Name: resourceType, ID: resourceType + "-1"}}, nil
@@ -562,7 +565,6 @@ func TestGeneratedBodyFormTrayFilterResourceMappings(t *testing.T) {
 		resourceType string
 	}{
 		{field: "ids", resourceType: "tray"},
-		{field: "componentIds", resourceType: "tray-component"},
 		{field: "rackId", resourceType: "rack"},
 	} {
 		field := requireNestedGeneratedBodyFormField(t, filter, testCase.field)
@@ -606,7 +608,7 @@ func TestGeneratedBodyFormRealSchemaUnscopedTrayFlowUsesSelectedSite(t *testing.
 		siteScopeAtTrayFetch = session.Scope.SiteID
 		return []NamedItem{{Name: "tray-one", ID: "tray-1"}}, nil
 	})
-	for _, resourceType := range []string{"tray-component", "rack", "rule"} {
+	for _, resourceType := range []string{"rack", "rule"} {
 		resourceType := resourceType
 		resolver.RegisterFetcher(resourceType, func(context.Context) ([]NamedItem, error) {
 			return []NamedItem{{Name: resourceType, ID: resourceType + "-1"}}, nil
@@ -615,7 +617,6 @@ func TestGeneratedBodyFormRealSchemaUnscopedTrayFlowUsesSelectedSite(t *testing.
 	prompter := &queuedGeneratedBodyPrompter{
 		choices: []string{"guided", "on"},
 		confirms: []bool{
-			false, // filter.componentIds
 			true,  // filter.ids
 			false, // filter.rackId
 			false, // filter.type

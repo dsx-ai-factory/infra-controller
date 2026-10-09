@@ -15,6 +15,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
@@ -188,8 +189,7 @@ func (mit ManageIpxeTemplate) UpdateIpxeTemplatesInDB(ctx context.Context, siteI
 	}
 
 	// Reconcile deletions only on the final page of an inventory run.
-	if inventory.InventoryPage == nil || inventory.InventoryPage.TotalPages == 0 ||
-		inventory.InventoryPage.CurrentPage == inventory.InventoryPage.TotalPages {
+	if util.ShouldReconcileDeletions(inventory.GetInventoryPage()) {
 		for _, existing := range existingITSAs {
 			if reportedTemplateIDs[existing.IpxeTemplateID] {
 				continue

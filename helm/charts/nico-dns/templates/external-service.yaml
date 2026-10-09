@@ -20,6 +20,13 @@ metadata:
     {{- end }}
 spec:
   type: {{ $.Values.externalService.type | default "LoadBalancer" }}
+  {{- with $.Values.externalService.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ . }}
+  {{- end }}
+  {{- with $.Values.externalService.ipFamilies }}
+  ipFamilies:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     app.kubernetes.io/name: {{ include "nico-dns.name" $ }}
     statefulset.kubernetes.io/pod-name: {{ include "nico-dns.name" $ }}-{{ $i }}
@@ -47,6 +54,13 @@ metadata:
     {{- end }}
 spec:
   type: {{ $.Values.externalService.type | default "LoadBalancer" }}
+  {{- with $.Values.externalService.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ . }}
+  {{- end }}
+  {{- with $.Values.externalService.ipFamilies }}
+  ipFamilies:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     app.kubernetes.io/name: {{ include "nico-dns.name" $ }}
     statefulset.kubernetes.io/pod-name: {{ include "nico-dns.name" $ }}-{{ $i }}

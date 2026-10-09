@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -175,6 +177,7 @@ func TestNewAPIInstance(t *testing.T) {
 		IsPhysical:  true,
 		MacAddress:  cutil.GetPtr("test-mac-address"),
 		IPAddresses: []string{"12.70.0.1"},
+		IPPrefixes:  []string{"12.70.0.0/24", "2001:db8::/64"},
 		Status:      cdbm.InterfaceStatusPending,
 		Created:     time.Now(),
 		Updated:     time.Now(),
@@ -363,7 +366,7 @@ func TestNewAPIInstance(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := NewAPIInstance(tt.args.dbic, tt.args.dbs, tt.args.dbis, tt.args.dbibi, tt.args.dbdesd, tt.args.dbnvl, tt.args.dbskg, tt.args.dbsds)
+			got := NewAPIInstance(tt.args.dbic, tt.args.dbs, tt.args.dbis, tt.args.dbibi, nil, tt.args.dbdesd, tt.args.dbnvl, tt.args.dbskg, tt.args.dbsds)
 			marshalled, err := json.Marshal(got)
 			assert.NoError(t, err)
 			var roundTripped APIInstance
@@ -392,7 +395,7 @@ func TestNewAPIInstance(t *testing.T) {
 			}
 
 			if got.Labels != nil {
-				assert.Equal(t, tt.args.dbic.Labels, got.Labels)
+				assert.Equal(t, tt.args.dbic.Labels, map[string]string(got.Labels))
 			}
 
 			if tt.args.expectedSecondaryVpcIDs != nil {
@@ -411,11 +414,6 @@ func TestNewAPIInstance(t *testing.T) {
 			assert.Equal(t, tt.args.dbic.Created, got.Created)
 			assert.Equal(t, tt.args.dbic.Updated, got.Updated)
 
-			serialConsoleURL := fmt.Sprintf("ssh://%s@%s", tt.args.dbic.ControllerInstanceID.String(), *dbs.SerialConsoleHostname)
-
-			assert.Equal(t, serialConsoleURL, *got.SerialConsoleURL)
-
-			assert.Equal(t, serialConsoleURL, *got.SerialConsoleURL)
 			assert.Equal(t, len(tt.args.dbsds), len(got.StatusHistory))
 
 			assert.Equal(t, len(tt.args.dbis), len(got.Interfaces))
@@ -427,6 +425,7 @@ func TestNewAPIInstance(t *testing.T) {
 				assert.Equal(t, *tt.args.dbis[0].MacAddress, *got.Interfaces[0].MacAddress)
 			}
 			assert.Equal(t, tt.args.dbis[0].IPAddresses, got.Interfaces[0].IPAddresses)
+			assert.Equal(t, append([]string{}, tt.args.dbis[0].IPPrefixes...), got.Interfaces[0].IPPrefixes)
 			assert.Equal(t, tt.args.dbis[0].Status, got.Interfaces[0].Status)
 			assert.Equal(t, tt.args.dbis[0].Created, got.Interfaces[0].Created)
 			assert.Equal(t, tt.args.dbis[0].Updated, got.Interfaces[0].Updated)
@@ -466,13 +465,39 @@ func TestNewAPIInstance(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
+
+	controllerInstanceID := uuid.New()
+	urlPrefix := "ssh://" + controllerInstanceID.String() + "@"
+	serialConsoleTests := []struct {
+		name    string
+		host    string
+		wantURL string
+	}{
+		{name: "DNS", host: "test-hostname", wantURL: urlPrefix + "test-hostname"},
+		{name: "IPv4", host: "192.0.2.1", wantURL: urlPrefix + "192.0.2.1"},
+		{name: "IPv6", host: "2001:db8::1", wantURL: urlPrefix + "[2001:db8::1]"},
+	}
+	for _, tt := range serialConsoleTests {
+		t.Run("serial console URL/"+tt.name, func(t *testing.T) {
+			instance := &cdbm.Instance{ControllerInstanceID: &controllerInstanceID}
+			site := &cdbm.Site{SerialConsoleHostname: &tt.host}
+			got := NewAPIInstance(instance, site, nil, nil, nil, nil, nil, nil, nil)
+			require.NotNil(t, got.SerialConsoleURL)
+			assert.Equal(t, tt.wantURL, *got.SerialConsoleURL)
+
+			parsed, err := url.Parse(*got.SerialConsoleURL)
+			require.NoError(t, err)
+			assert.Equal(t, tt.host, parsed.Hostname())
+			assert.Empty(t, parsed.Port())
+		})
+	}
 }
 
 func TestAPIInstancePowerProfile(t *testing.T) {
 	profile := "performance"
 	instance := &cdbm.Instance{PowerProfile: &profile}
 
-	got := NewAPIInstance(instance, nil, nil, nil, nil, nil, nil, nil)
+	got := NewAPIInstance(instance, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.NotNil(t, got.PowerProfile)
 	assert.Equal(t, profile, *got.PowerProfile)
 	assert.True(t, (&APIInstanceUpdateRequest{PowerProfile: &profile}).IsUpdateRequest())
@@ -578,7 +603,7 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 				MachineLabelSelector: map[string]string{"custom-machine-label": "required\x00value"},
 			},
 			wantErr:          true,
-			wantErrorMessage: "machineLabelSelector: machine label selector keys and values must not contain NUL characters",
+			wantErrorMessage: "machineLabelSelector: machine label selector keys and values must not contain the Unicode NUL character (U+0000)",
 		},
 		{
 			name: "test invalid Instance with too many Machine label selector",
@@ -1133,7 +1158,24 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 						SpectrumXPartitionID: uuid.NewString(),
 						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 						DeviceInstance:       cutil.GetPtr(0),
-						AttachmentType:       SpectrumXAttachmentTypePhysical,
+						AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "test valid Instance create request with userData at max length",
+			fields: fields{
+				Name:              "test-name",
+				TenantID:          uuid.NewString(),
+				InstanceTypeID:    uuid.NewString(),
+				VpcID:             uuid.NewString(),
+				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
+				UserData:          cutil.GetPtr(strings.Repeat("a", util.MaxUserDataBytes)),
+				Interfaces: []APIInterfaceCreateOrUpdateRequest{
+					{
+						SubnetID: cutil.GetPtr(uuid.NewString()),
 					},
 				},
 			},
@@ -1162,6 +1204,24 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 				},
 			},
 			wantErr: true,
+		},
+		{
+			name: "test invalid Instance create request with userData exceeding max length",
+			fields: fields{
+				Name:              "test-name",
+				TenantID:          uuid.NewString(),
+				InstanceTypeID:    uuid.NewString(),
+				VpcID:             uuid.NewString(),
+				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
+				UserData:          cutil.GetPtr(strings.Repeat("a", util.MaxUserDataBytes+1)),
+				Interfaces: []APIInterfaceCreateOrUpdateRequest{
+					{
+						SubnetID: cutil.GetPtr(uuid.NewString()),
+					},
+				},
+			},
+			wantErr:          true,
+			wantErrorMessage: "userData: " + validationErrorUserDataLength,
 		},
 	}
 	for _, tt := range tests {
@@ -1256,7 +1316,7 @@ func TestAPIBatchInstanceCreateRequest_Validate(t *testing.T) {
 				MachineLabelSelector: map[string]string{"custom\x00machine-label": "required-value"},
 			},
 			wantErr:          true,
-			wantErrorMessage: "machineLabelSelector: machine label selector keys and values must not contain NUL characters",
+			wantErrorMessage: "machineLabelSelector: machine label selector keys and values must not contain the Unicode NUL character (U+0000)",
 		},
 		{
 			name: "fails with too many Machine label selector",
@@ -1309,7 +1369,7 @@ func TestAPIBatchInstanceCreateRequest_Validate(t *testing.T) {
 						SpectrumXPartitionID: uuid.NewString(),
 						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 						DeviceInstance:       cutil.GetPtr(0),
-						AttachmentType:       SpectrumXAttachmentTypePhysical,
+						AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 					},
 				},
 			},
@@ -1337,6 +1397,21 @@ func TestAPIBatchInstanceCreateRequest_Validate(t *testing.T) {
 				},
 			},
 			wantErr: true,
+		},
+		{
+			name: "fails with userData exceeding max length",
+			req: APIBatchInstanceCreateRequest{
+				NamePrefix:     "test-batch",
+				Count:          2,
+				TenantID:       uuid.NewString(),
+				InstanceTypeID: uuid.NewString(),
+				VpcID:          uuid.NewString(),
+				IpxeScript:     cutil.GetPtr("test ipxe"),
+				UserData:       cutil.GetPtr(strings.Repeat("a", util.MaxUserDataBytes+1)),
+				Interfaces:     []APIInterfaceCreateOrUpdateRequest{{SubnetID: cutil.GetPtr(uuid.NewString())}},
+			},
+			wantErr:          true,
+			wantErrorMessage: "userData: " + validationErrorUserDataLength,
 		},
 	}
 
@@ -1667,6 +1742,32 @@ phone_home:
 			os:      osNoOverride,
 			cfg:     cfg1,
 			wantErr: false,
+		},
+		{
+			name: "ipxe os selected, os user-data over max length, user-data not specified, should fail",
+			fields: fields{
+				Name:              "test-name",
+				Description:       cutil.GetPtr("Test description"),
+				TenantID:          uuid.NewString(),
+				InstanceTypeID:    uuid.NewString(),
+				VpcID:             uuid.NewString(),
+				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
+				UserData:          nil,
+			},
+			os: &cdbm.OperatingSystem{
+				ID:               uuid.New(),
+				Name:             "ab",
+				IpxeScript:       cutil.GetPtr("original ipxe"),
+				UserData:         cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes)),
+				PhoneHomeEnabled: false,
+				IsActive:         true,
+				Status:           cdbm.OperatingSystemStatusReady,
+				AllowOverride:    true,
+				Type:             cdbm.OperatingSystemTypeIPXE,
+				CreatedBy:        uuid.New(),
+			},
+			cfg:     cfg1,
+			wantErr: true,
 		},
 		{
 			name: "image os selected, iPXE specified, should fail",
@@ -2114,6 +2215,26 @@ phone_home:
 			userDataNegativeSearches: []string{"169.254.169.254"},
 		},
 		{
+			name: "os user-data over max length inherited fails",
+			request: &APIBatchInstanceCreateRequest{
+				NamePrefix:     "worker",
+				Count:          2,
+				TenantID:       uuid.NewString(),
+				InstanceTypeID: uuid.NewString(),
+				VpcID:          uuid.NewString(),
+			},
+			os: &cdbm.OperatingSystem{
+				ID:            uuid.New(),
+				Name:          "ab",
+				Type:          cdbm.OperatingSystemTypeIPXE,
+				IpxeScript:    cutil.GetPtr("original ipxe"),
+				UserData:      cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes)),
+				IsActive:      true,
+				AllowOverride: true,
+			},
+			wantErr: true,
+		},
+		{
 			name: "no OS and no iPXE script fails",
 			request: &APIBatchInstanceCreateRequest{
 				NamePrefix:     "worker",
@@ -2363,7 +2484,8 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 						SpectrumXPartitionID: uuid.NewString(),
 						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 						DeviceInstance:       cutil.GetPtr(0),
-						AttachmentType:       SpectrumXAttachmentTypeOVN,
+						AttachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+						BridgeName:           cutil.GetPtr("br-spx0"),
 					},
 				},
 			},
@@ -2377,9 +2499,17 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 					{
 						SpectrumXPartitionID: uuid.NewString(),
 						DeviceInstance:       cutil.GetPtr(0),
-						AttachmentType:       SpectrumXAttachmentTypePhysical,
+						AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 					},
 				},
+			},
+			wantErr:           true,
+			wantUpdateRequest: cutil.GetPtr(true),
+		},
+		{
+			name: "test invalid Instance update request, userData exceeding max length",
+			fields: fields{
+				UserData: cutil.GetPtr(strings.Repeat("a", util.MaxUserDataBytes+1)),
 			},
 			wantErr:           true,
 			wantUpdateRequest: cutil.GetPtr(true),
@@ -2737,6 +2867,41 @@ func TestAPIInstanceUpdateRequest_ValidateAndSetOperatingSystemData(t *testing.T
 			instance: instanceNoVals,
 			wantErr:  false,
 		},
+		{
+			name: "os nil, instance user-data over max length inherited, expect failure",
+			request: &APIInstanceUpdateRequest{
+				Name:        cutil.GetPtr("test-name"),
+				Description: cutil.GetPtr("Test description"),
+			},
+			cfg: cfg1,
+			os:  nil,
+			instance: &cdbm.Instance{
+				ID:               uuid.New(),
+				IpxeScript:       cutil.GetPtr("#!ipxe"),
+				PhoneHomeEnabled: false,
+				UserData:         cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes)),
+			},
+			wantErr: true,
+		},
+		{
+			// Same request as the case above, but the Instance has a base OS,
+			// which takes the merge branch that leaves the request's user-data
+			// nil. The stored blob still reaches the Site either way.
+			name: "os nonnil, no OS change, instance user-data over max length inherited, expect failure",
+			request: &APIInstanceUpdateRequest{
+				Name:        cutil.GetPtr("test-name"),
+				Description: cutil.GetPtr("Test description"),
+			},
+			cfg: cfg1,
+			os:  osPxe,
+			instance: &cdbm.Instance{
+				ID:               uuid.New(),
+				IpxeScript:       cutil.GetPtr("#!ipxe"),
+				PhoneHomeEnabled: false,
+				UserData:         cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes)),
+			},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2761,7 +2926,7 @@ func TestAPIInstanceUpdateRequest_ValidateAndSetOperatingSystemData_Phonehome(t 
 		ID:               uuid.New(),
 		Name:             "ab",
 		IpxeScript:       cutil.GetPtr("original ipxe"),
-		UserData:         cutil.GetPtr("#cloud-config\n{'hostname': 'd2def8d8-29b2-11ef-81e6-07a09293ef16'}"),
+		UserData:         cutil.GetPtr("{'hostname': 'd2def8d8-29b2-11ef-81e6-07a09293ef16'}"),
 		PhoneHomeEnabled: true,
 		IsActive:         true,
 		Status:           cdbm.OperatingSystemStatusReady,
@@ -2776,7 +2941,7 @@ func TestAPIInstanceUpdateRequest_ValidateAndSetOperatingSystemData_Phonehome(t 
 		IpxeScript:               cutil.GetPtr("#!ipxe 9ea0c946-29af-11ef-b798-df4626ad0292"),
 		AlwaysBootWithCustomIpxe: true,
 		PhoneHomeEnabled:         true,
-		UserData:                 cutil.GetPtr("#cloud-config\n{'hostname': '815f5bd8-29b2-11ef-b3b1-ab4be50a4e4d'}"),
+		UserData:                 cutil.GetPtr("{'hostname': '815f5bd8-29b2-11ef-b3b1-ab4be50a4e4d'}"),
 	}
 
 	// Instance with ipxe and user-data.
@@ -2977,11 +3142,12 @@ phone_home:
 				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
 				UserData:          cutil.GetPtr(""),
 			},
-			wantErr:            false,
-			cfg:                cfg1,
-			instance:           instance1,
-			os:                 os1,
-			userDataExactMatch: cutil.GetPtr(fmt.Sprintf(SitePhoneHomeCloudInit, cfg1.GetSitePhoneHomeUrl())),
+			wantErr:  false,
+			cfg:      cfg1,
+			instance: instance1,
+			os:       os1,
+			userDataExactMatch: cutil.GetPtr("#cloud-config\nphone_home:\n  post: all\n  url: " +
+				cfg1.GetSitePhoneHomeUrl() + "\n"),
 		},
 		{
 			name: "PhoneHome enabled in instance and request updates only base OS",
@@ -3559,18 +3725,24 @@ func TestValidateInfiniBandRequestForMachineCapability(t *testing.T) {
 
 func TestValidateSpectrumXAttachments(t *testing.T) {
 	device := "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC"
-	attachment := func(deviceInstance int, attachmentType SpectrumXAttachmentType, virtualFunctionID *int) APISpectrumXAttachmentCreateOrUpdateRequest {
-		return APISpectrumXAttachmentCreateOrUpdateRequest{
+	attachment := func(deviceInstance int, attachmentType cdbm.SpectrumXAttachmentType, virtualFunctionID *int) APISpectrumXAttachmentCreateOrUpdateRequest {
+		req := APISpectrumXAttachmentCreateOrUpdateRequest{
 			SpectrumXPartitionID: uuid.NewString(),
 			Device:               device,
 			DeviceInstance:       cutil.GetPtr(deviceInstance),
 			AttachmentType:       attachmentType,
 			VirtualFunctionID:    virtualFunctionID,
 		}
+		// bridgeName is required for OVS, so a helper-built OVS attachment carries one to
+		// isolate these cases from the per-attachment OVS validation.
+		if attachmentType == cdbm.SpectrumXAttachmentTypeOVS {
+			req.BridgeName = cutil.GetPtr("br-spx0")
+		}
+		return req
 	}
 	overCap := make([]APISpectrumXAttachmentCreateOrUpdateRequest, 0, MaxSpectrumXAttachmentCount+1)
 	for i := range MaxSpectrumXAttachmentCount + 1 {
-		overCap = append(overCap, attachment(i, SpectrumXAttachmentTypePhysical, nil))
+		overCap = append(overCap, attachment(i, cdbm.SpectrumXAttachmentTypePhysical, nil))
 	}
 
 	tests := []struct {
@@ -3585,23 +3757,23 @@ func TestValidateSpectrumXAttachments(t *testing.T) {
 		{
 			name: "distinct device instances are valid",
 			attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
-				attachment(0, SpectrumXAttachmentTypePhysical, nil),
-				attachment(1, SpectrumXAttachmentTypePhysical, nil),
+				attachment(0, cdbm.SpectrumXAttachmentTypePhysical, nil),
+				attachment(1, cdbm.SpectrumXAttachmentTypePhysical, nil),
 			},
 		},
 		{
 			name: "duplicate device instance is rejected",
 			attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
-				attachment(0, SpectrumXAttachmentTypePhysical, nil),
-				attachment(0, SpectrumXAttachmentTypeOVN, nil),
+				attachment(0, cdbm.SpectrumXAttachmentTypePhysical, nil),
+				attachment(0, cdbm.SpectrumXAttachmentTypeOVS, nil),
 			},
 			wantErr: true,
 		},
 		{
 			name: "same device at distinct device instances is valid",
 			attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
-				attachment(0, SpectrumXAttachmentTypePhysical, nil),
-				attachment(1, SpectrumXAttachmentTypeOVN, nil),
+				attachment(0, cdbm.SpectrumXAttachmentTypePhysical, nil),
+				attachment(1, cdbm.SpectrumXAttachmentTypeOVS, nil),
 			},
 		},
 		{

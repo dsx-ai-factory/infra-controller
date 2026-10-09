@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
+	"slices"
 	"strconv"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -29,6 +31,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
 )
@@ -37,19 +40,17 @@ import (
 
 // CreateIPBlockHandler is the API Handler for creating new IPBlock
 type CreateIPBlockHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewCreateIPBlockHandler initializes and returns a new handler for creating IPBlock
 func NewCreateIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) CreateIPBlockHandler {
 	return CreateIPBlockHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -65,7 +66,7 @@ func NewCreateIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Success 201 {object} model.APIIPBlock
 // @Router /v2/org/{org}/nico/ipblock [post]
 func (cipbh CreateIPBlockHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "Create", c, cipbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -126,62 +127,102 @@ func (cipbh CreateIPBlockHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site Infrastructure Provider does not match Org", nil)
 	}
 
-	// Check if an ipblock already exists for the provider with given name at the site
-	// TODO consider doing this with an advisory lock for correctness
 	ipbDAO := cdbm.NewIPBlockDAO(cipbh.dbSession)
-	ipbs, tot, err := ipbDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.IPBlockFilterInput{
-			SiteIDs:                   []uuid.UUID{site.ID},
-			InfrastructureProviderIDs: []uuid.UUID{ip.ID},
-			Names:                     []string{apiRequest.Name},
-			ExcludeDerived:            true,
-		},
-		cdbp.PageInput{},
-		nil,
-	)
-	if err != nil {
-		logger.Error().Err(err).Msg("db error checking for name uniqueness of ip block")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create IPBlock due to db error", nil)
-	}
-	if tot > 0 {
-		logger.Warn().Str("providerId", ip.ID.String()).Str("name", apiRequest.Name).Msg("ip block with same name already exists")
-		return cutil.NewAPIErrorResponse(c, http.StatusConflict, fmt.Sprintf("IPBlock with name: %s for Site: %s already exists for provider", apiRequest.Name, apiRequest.SiteID), validation.Errors{
-			"id": errors.New(ipbs[0].ID.String()),
-		})
-	}
-
-	// Check if an ipblock already exists for the provider with given prefix/prefixLength at the site
-	ipbp, totp, err := ipbDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.IPBlockFilterInput{
-			SiteIDs:                   []uuid.UUID{site.ID},
-			InfrastructureProviderIDs: []uuid.UUID{ip.ID},
-			Names:                     []string{apiRequest.Name},
-			Prefixes:                  []string{apiRequest.Prefix},
-			PrefixLengths:             []int{apiRequest.PrefixLength},
-			ExcludeDerived:            true,
-		},
-		cdbp.PageInput{},
-		nil,
-	)
-
-	if err != nil {
-		logger.Error().Err(err).Msg("db error checking for prefix and prefixlength uniqueness of ip block")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create IPBlock due to db error", nil)
-	}
-	if totp > 0 {
-		logger.Warn().Str("providerId", ip.ID.String()).Str("prefix", apiRequest.Prefix).Int("prefix_length", apiRequest.PrefixLength).Msg("ip block with same prefix and prefix_length already exists")
-		return cutil.NewAPIErrorResponse(c, http.StatusConflict, fmt.Sprintf("IPBlock with prefix: %s and prefix_length: %d for Site: %s already exists for provider", apiRequest.Prefix, apiRequest.PrefixLength, apiRequest.SiteID), validation.Errors{
-			"id": errors.New(ipbp[0].ID.String()),
-		})
-	}
 
 	var ipb *cdbm.IPBlock
 	var ssd *cdbm.StatusDetail
 	err = cdb.WithTx(ctx, cipbh.dbSession, func(tx *cdb.Tx) error {
+		// Site Config prefix import and IP Block creation share this lock;
+		// SitePrefix inventory reconciliation will use it too. Every routing
+		// type takes it, since the overlap check below spans routing types. Run
+		// uniqueness checks after successful acquisition so a retried loser sees
+		// the root that committed first.
+		derr := tx.TryAcquireAdvisoryLock(
+			ctx,
+			cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, site.ID),
+			nil,
+		)
+		if derr != nil {
+			if errors.Is(derr, cdb.ErrXactAdvisoryLockFailed) {
+				logger.Warn().Err(derr).Msg("Site fabric IP Block lock is held by another writer")
+				return cutil.NewAPIError(http.StatusConflict, "Site fabric IP Blocks are being updated; retry the request", nil)
+			}
+			logger.Error().Err(derr).Msg("failed to acquire Site fabric IP Block lock")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create IP Block", nil)
+		}
+
+		ipbs, total, derr := ipbDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.IPBlockFilterInput{
+				SiteIDs:                   []uuid.UUID{site.ID},
+				InfrastructureProviderIDs: []uuid.UUID{ip.ID},
+				Names:                     []string{apiRequest.Name},
+				ExcludeDerived:            true,
+			},
+			cdbp.PageInput{},
+			nil,
+		)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("db error checking for name uniqueness of ip block")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create IPBlock due to db error", nil)
+		}
+		if total > 0 {
+			logger.Warn().Str("providerId", ip.ID.String()).Str("name", apiRequest.Name).Msg("ip block with same name already exists")
+			return cutil.NewAPIError(http.StatusConflict, fmt.Sprintf("IPBlock with name: %s for Site: %s already exists for provider", apiRequest.Name, apiRequest.SiteID), validation.Errors{
+				"id": errors.New(ipbs[0].ID.String()),
+			})
+		}
+
+		// IPAM only checks overlaps within the namespace of one routing type, so
+		// compare the range with every root IP Block of the Site.
+		requestedPrefix, derr := netip.ParsePrefix(ipam.GetCidrForIPBlock(ctx, apiRequest.Prefix, apiRequest.PrefixLength))
+		if derr != nil {
+			logger.Warn().Err(derr).Msg("error parsing IP Block prefix in request")
+			return cutil.NewAPIError(http.StatusBadRequest, "Invalid prefix or prefix length in request", nil)
+		}
+		requestedPrefix = requestedPrefix.Masked()
+
+		ipbs, _, derr = ipbDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.IPBlockFilterInput{
+				SiteIDs:                   []uuid.UUID{site.ID},
+				InfrastructureProviderIDs: []uuid.UUID{ip.ID},
+				ExcludeDerived:            true,
+			},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("db error retrieving root ip blocks for site")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create IPBlock due to db error", nil)
+		}
+		rootPrefixes := make([]netip.Prefix, 0, len(ipbs))
+		for _, rootIPBlock := range ipbs {
+			rootPrefix, perr := netip.ParsePrefix(ipam.GetCidrForIPBlock(ctx, rootIPBlock.Prefix, rootIPBlock.PrefixLength))
+			if perr != nil {
+				logger.Error().Err(perr).Str("ipBlockId", rootIPBlock.ID.String()).Msg("failed to parse root IP Block prefix")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Could not parse existing IP Block prefix", nil)
+			}
+			rootPrefixes = append(rootPrefixes, rootPrefix.Masked())
+		}
+
+		match := slices.Index(rootPrefixes, requestedPrefix)
+		if match >= 0 {
+			logger.Warn().Str("providerId", ip.ID.String()).Str("prefix", apiRequest.Prefix).Int("prefix_length", apiRequest.PrefixLength).Msg("ip block with same prefix and prefix_length already exists")
+			return cutil.NewAPIError(http.StatusConflict, fmt.Sprintf("IPBlock with prefix: %s and prefix_length: %d for Site: %s already exists for provider", apiRequest.Prefix, apiRequest.PrefixLength, apiRequest.SiteID), validation.Errors{
+				"id": errors.New(ipbs[match].ID.String()),
+			})
+		}
+		match = slices.IndexFunc(rootPrefixes, requestedPrefix.Overlaps)
+		if match >= 0 {
+			logger.Warn().Str("providerId", ip.ID.String()).Str("prefix", apiRequest.Prefix).Int("prefix_length", apiRequest.PrefixLength).Str("overlappingIpBlockId", ipbs[match].ID.String()).Msg("ip block overlaps an existing root ip block")
+			return cutil.NewAPIError(http.StatusConflict, fmt.Sprintf("IPBlock with prefix: %s and prefix_length: %d for Site: %s overlaps %s IPBlock with prefix: %s and prefix_length: %d", apiRequest.Prefix, apiRequest.PrefixLength, apiRequest.SiteID, ipbs[match].RoutingType, ipbs[match].Prefix, ipbs[match].PrefixLength), validation.Errors{
+				"id": errors.New(ipbs[match].ID.String()),
+			})
+		}
+
 		ipamStorage := ipam.NewIpamStorage(cipbh.dbSession.DB, tx.GetBunTx())
 		// Create the prefix in IPAM
 		prefix, derr := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, apiRequest.Prefix, apiRequest.PrefixLength, apiRequest.RoutingType, ip.ID.String(), site.ID.String())
@@ -241,19 +282,17 @@ func (cipbh CreateIPBlockHandler) Handle(c echo.Context) error {
 
 // GetAllIPBlockHandler is the API Handler for getting all IPBlocks
 type GetAllIPBlockHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllIPBlockHandler initializes and returns a new handler for getting all IPBlocks
 func NewGetAllIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllIPBlockHandler {
 	return GetAllIPBlockHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -278,7 +317,7 @@ func NewGetAllIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Success 200 {object} []model.APIIPBlock
 // @Router /v2/org/{org}/nico/ipblock [get]
 func (gaipbh GetAllIPBlockHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "GetAll", c, gaipbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -353,7 +392,7 @@ func (gaipbh GetAllIPBlockHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gaipbh.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get status from query param
@@ -361,7 +400,7 @@ func (gaipbh GetAllIPBlockHandler) Handle(c echo.Context) error {
 
 	statusQuery := c.QueryParam("status")
 	if statusQuery != "" {
-		gaipbh.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 		_, ok := cdbm.IPBlockStatusMap[statusQuery]
 		if !ok {
 			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
@@ -469,7 +508,7 @@ func (gaipbh GetAllIPBlockHandler) Handle(c echo.Context) error {
 	// get status details
 	for _, ipb := range ipbs {
 		cipb := ipb
-		cipu, _ := puipbMap[ipb.ID]
+		cipu := puipbMap[ipb.ID]
 		apiIpb := model.NewAPIIPBlock(&cipb, ssdMap[cipb.ID.String()], cipu)
 		apiIpbs = append(apiIpbs, apiIpb)
 	}
@@ -493,19 +532,17 @@ func (gaipbh GetAllIPBlockHandler) Handle(c echo.Context) error {
 
 // GetAllDerivedIPBlockHandler is the API Handler for getting details of derived IPBlocks from a parent IPBlock
 type GetAllDerivedIPBlockHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllDerivedIPBlockHandler initializes and returns a new handler for getting derived IPBlocks
 func NewGetAllDerivedIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllDerivedIPBlockHandler {
 	return GetAllDerivedIPBlockHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -524,7 +561,7 @@ func NewGetAllDerivedIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Cl
 // @Success 200 {object} model.APIIPBlock
 // @Router /v2/org/{org}/nico/ipblock/{id}/derived [get]
 func (gadipbh GetAllDerivedIPBlockHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "GetAllDerived", c, gadipbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "GetAllDerived", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -583,7 +620,7 @@ func (gadipbh GetAllDerivedIPBlockHandler) Handle(c echo.Context) error {
 	// Get ipBlock ID from URL param
 	ipbStrID := c.Param("id")
 
-	gadipbh.tracerSpan.SetAttribute(handlerSpan, attribute.String("ipblock_id", ipbStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("ipblock_id", ipbStrID))
 
 	ipbID, err := uuid.Parse(ipbStrID)
 	if err != nil {
@@ -594,7 +631,7 @@ func (gadipbh GetAllDerivedIPBlockHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gadipbh.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get status from query param
@@ -602,7 +639,7 @@ func (gadipbh GetAllDerivedIPBlockHandler) Handle(c echo.Context) error {
 
 	statusQuery := c.QueryParam("status")
 	if statusQuery != "" {
-		gadipbh.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 		_, ok := cdbm.IPBlockStatusMap[statusQuery]
 		if !ok {
 			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
@@ -712,19 +749,17 @@ func (gadipbh GetAllDerivedIPBlockHandler) Handle(c echo.Context) error {
 
 // GetIPBlockHandler is the API Handler for retrieving IPBlock
 type GetIPBlockHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetIPBlockHandler initializes and returns a new handler to retrieve IPBlock
 func NewGetIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetIPBlockHandler {
 	return GetIPBlockHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -744,7 +779,7 @@ func NewGetIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg 
 // @Success 200 {object} model.APIIPBlock
 // @Router /v2/org/{org}/nico/ipblock/{id} [get]
 func (gipbh GetIPBlockHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "Get", c, gipbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -763,7 +798,7 @@ func (gipbh GetIPBlockHandler) Handle(c echo.Context) error {
 	// Get ipBlock ID from URL param
 	ipbStrID := c.Param("id")
 
-	gipbh.tracerSpan.SetAttribute(handlerSpan, attribute.String("ipblock_id", ipbStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("ipblock_id", ipbStrID))
 
 	ipbID, err := uuid.Parse(ipbStrID)
 	if err != nil {
@@ -847,19 +882,17 @@ func (gipbh GetIPBlockHandler) Handle(c echo.Context) error {
 
 // UpdateIPBlockHandler is the API Handler for updating a IPBlock
 type UpdateIPBlockHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewUpdateIPBlockHandler initializes and returns a new handler for updating IPBlock
 func NewUpdateIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateIPBlockHandler {
 	return UpdateIPBlockHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -876,7 +909,7 @@ func NewUpdateIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Success 200 {object} model.APIIPBlock
 // @Router /v2/org/{org}/nico/ipblock/{id} [patch]
 func (uipbh UpdateIPBlockHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "Update", c, uipbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -905,7 +938,7 @@ func (uipbh UpdateIPBlockHandler) Handle(c echo.Context) error {
 	// Get ipBlock ID from URL param
 	ipbStrID := c.Param("id")
 
-	uipbh.tracerSpan.SetAttribute(handlerSpan, attribute.String("ipblock_id", ipbStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("ipblock_id", ipbStrID))
 
 	ipbID, err := uuid.Parse(ipbStrID)
 	if err != nil {
@@ -1022,19 +1055,17 @@ func (uipbh UpdateIPBlockHandler) Handle(c echo.Context) error {
 
 // DeleteIPBlockHandler is the API Handler for deleting a IPBlock
 type DeleteIPBlockHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewDeleteIPBlockHandler initializes and returns a new handler for deleting IPBlock
 func NewDeleteIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) DeleteIPBlockHandler {
 	return DeleteIPBlockHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -1050,7 +1081,7 @@ func NewDeleteIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Success 202
 // @Router /v2/org/{org}/nico/ipblock/{id} [delete]
 func (dipbh DeleteIPBlockHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "Delete", c, dipbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1079,7 +1110,7 @@ func (dipbh DeleteIPBlockHandler) Handle(c echo.Context) error {
 	// Get ipBlock ID from URL param
 	ipbStrID := c.Param("id")
 
-	dipbh.tracerSpan.SetAttribute(handlerSpan, attribute.String("ipblock_id", ipbStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("ipblock_id", ipbStrID))
 
 	ipbID, err := uuid.Parse(ipbStrID)
 	if err != nil {
@@ -1108,32 +1139,51 @@ func (dipbh DeleteIPBlockHandler) Handle(c echo.Context) error {
 		logger.Error().Str("IP Block ID", ipbID.String()).Err(err).Msg("error retrieving provider IP Block DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve IPBlock, DB error", nil)
 	}
-
-	// Verify that the IPBlock does not have any allocations associated with it
-	acDAO := cdbm.NewAllocationConstraintDAO(dipbh.dbSession)
-	_, acCount, err := acDAO.GetAll(ctx, nil, cdbm.AllocationConstraintFilterInput{
-		ResourceType:    cutil.GetPtr(cdbm.AllocationResourceTypeIPBlock),
-		ResourceTypeIDs: []uuid.UUID{ipb.ID},
-	}, cdbp.PageInput{}, nil)
-	if err != nil {
-		logger.Error().Err(err).Msg("error getting allocation constraints")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Error retrieving Allocations for IP Block", nil)
-	}
-	if acCount > 0 {
-		logger.Warn().Msg("allocation constraints exist for ipBlock")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("%v Allocations exist for IP Block, unable to delete", acCount), nil)
+	const coreLinkedDeleteMessage = "This IP Block is linked to an OperatorManaged SitePrefix; remove the corresponding prefix from Core's site_fabric_prefixes configuration instead"
+	if ipb.SitePrefixID != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, coreLinkedDeleteMessage, nil)
 	}
 
 	err = cdb.WithTx(ctx, dipbh.dbSession, func(tx *cdb.Tx) error {
+		lockedIPBlock, derr := ipbDAO.GetByIDForUpdate(ctx, tx, ipbID)
+		if derr != nil {
+			if errors.Is(derr, cdb.ErrDoesNotExist) {
+				return cutil.NewAPIError(http.StatusNotFound, "Specified IP Block does not exist, or has been deleted", nil)
+			}
+			logger.Error().Err(derr).Msg("error locking IP Block in DB")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Error locking IP Block, DB error", nil)
+		}
+		if lockedIPBlock.SitePrefixID != nil {
+			return cutil.NewAPIError(http.StatusConflict, coreLinkedDeleteMessage, nil)
+		}
+
+		// Check for allocations while holding the root's lock. A child that
+		// commits first is visible here; a later child must wait for deletion.
+		acDAO := cdbm.NewAllocationConstraintDAO(dipbh.dbSession)
+		_, acCount, derr := acDAO.GetAll(ctx, tx, cdbm.AllocationConstraintFilterInput{
+			ResourceType:    cutil.GetPtr(cdbm.AllocationResourceTypeIPBlock),
+			ResourceTypeIDs: []uuid.UUID{lockedIPBlock.ID},
+		}, cdbp.PageInput{}, nil)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("error getting allocation constraints")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Error retrieving Allocations for IP Block", nil)
+		}
+		if acCount > 0 {
+			logger.Warn().Msg("allocation constraints exist for ipBlock")
+			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("%v Allocations exist for IP Block, unable to delete", acCount), nil)
+		}
+
 		// Delete IPBlock in DB
-		if derr := ipbDAO.Delete(ctx, tx, ipbID); derr != nil {
+		derr = ipbDAO.Delete(ctx, tx, ipbID)
+		if derr != nil {
 			logger.Error().Err(derr).Msg("error deleting IP Block in DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Error deleting IP Block, DB error", nil)
 		}
 
 		// delete IPAM entry for this ipBlock
 		ipamStorage := ipam.NewIpamStorage(dipbh.dbSession.DB, tx.GetBunTx())
-		if derr := ipam.DeleteIpamEntryForIPBlock(ctx, ipamStorage, ipb.Prefix, ipb.PrefixLength, ipb.RoutingType, ipb.InfrastructureProviderID.String(), ipb.SiteID.String()); derr != nil {
+		derr = ipam.DeleteIpamEntryForIPBlock(ctx, ipamStorage, lockedIPBlock.Prefix, lockedIPBlock.PrefixLength, lockedIPBlock.RoutingType, lockedIPBlock.InfrastructureProviderID.String(), lockedIPBlock.SiteID.String())
+		if derr != nil {
 			logger.Error().Err(derr).Msg("failed to delete IPAM record for IP Block")
 			return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Could not delete IPAM entry for IP Block. Details: %s", derr.Error()), nil)
 		}

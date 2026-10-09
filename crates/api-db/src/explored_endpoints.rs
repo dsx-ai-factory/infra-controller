@@ -23,14 +23,17 @@ use mac_address::MacAddress;
 use model::firmware::FirmwareComponentType;
 use model::machine_boot_interface::MachineBootInterface;
 use model::site_explorer::{
-    EndpointExplorationReport, ExploredEndpoint, InitialBmcResetPhase, InitialResetPhase,
-    PowerDrainState, PreingestionState, TimeSyncResetPhase,
+    EndpointExplorationReport, ExploredEndpoint, HardwareClassCount, InitialBmcResetPhase,
+    InitialResetPhase, PowerDrainState, PreingestionState, TimeSyncResetPhase,
 };
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, PgConnection, Row};
 
 use crate::db_read::DbReader;
-use crate::{BIND_LIMIT, DatabaseError};
+use crate::{BIND_LIMIT, ConditionalWrite, DatabaseError};
+
+#[cfg(test)]
+mod test_explicit_columns;
 
 #[derive(Debug)]
 struct DbExploredEndpoint {
@@ -121,15 +124,20 @@ impl From<DbExploredEndpoint> for ExploredEndpoint {
     }
 }
 
+/// Returns endpoint IPs whose exploration reports match `filter`.
 pub async fn find_ips(
     txn: impl DbReader<'_>,
-    // filter is currently is empty, so it is a placeholder for the future
-    _filter: model::site_explorer::ExploredEndpointSearchFilter,
+    filter: model::site_explorer::ExploredEndpointSearchFilter,
 ) -> Result<Vec<IpAddr>, DatabaseError> {
     #[derive(Debug, Clone, Copy, FromRow)]
     struct ExploredEndpointIp(IpAddr);
     // grab list of IPs
     let mut builder = sqlx::QueryBuilder::new("SELECT address FROM explored_endpoints");
+    if let Some(machine_id) = filter.machine_id {
+        builder
+            .push(" WHERE exploration_report->>'MachineId' = ")
+            .push_bind(machine_id);
+    }
     let query = builder.build_query_as();
     let ids: Vec<ExploredEndpointIp> = query
         .fetch_all(txn)
@@ -143,7 +151,13 @@ pub async fn find_by_ips(
     db: impl DbReader<'_>,
     ips: Vec<IpAddr>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
-    let query = "SELECT * FROM explored_endpoints WHERE address=ANY($1)";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE address=ANY($1)";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .bind(ips)
@@ -167,9 +181,14 @@ pub async fn find_by_dpu_serial_numbers(
     db: impl DbReader<'_>,
     serials: Vec<String>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
-    let query = "SELECT * FROM explored_endpoints \
-                 WHERE exploration_report->'Systems'->0->>'SerialNumber' = ANY($1) \
-                 AND exploration_report->'Systems'->0->>'Id' = 'Bluefield'";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE exploration_report->'Systems'->0->>'SerialNumber' = ANY($1)
+          AND exploration_report->'Systems'->0->>'Id' = 'Bluefield'";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .bind(serials)
@@ -181,7 +200,12 @@ pub async fn find_by_dpu_serial_numbers(
 
 /// find_all returns all explored endpoints that site explorer has been able to probe
 pub async fn find_all(txn: impl DbReader<'_>) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
-    let query = "SELECT * FROM explored_endpoints";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .fetch_all(txn)
@@ -207,8 +231,13 @@ pub async fn find_preingest_not_waiting_not_error(
     txn: impl DbReader<'_>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
     const QUERY: &str = concatcp!(
-        "SELECT * FROM explored_endpoints
-                        WHERE ",
+        "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE ",
         PREINGEST_NOT_WAITING_NOT_ERROR_WHERE
     );
 
@@ -262,7 +291,13 @@ pub async fn find_preingest_installing(
     txn: impl DbReader<'_>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
     const QUERY: &str = concatcp!(
-        "SELECT * FROM explored_endpoints WHERE ",
+        "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE ",
         PREINGEST_INSTALLING_WHERE
     );
 
@@ -297,8 +332,13 @@ pub async fn count_preingest_installing(txn: impl DbReader<'_>) -> Result<i64, D
 pub async fn find_all_preingestion_complete(
     txn: &mut PgConnection,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
-    let query =
-        "SELECT * FROM explored_endpoints WHERE preingestion_state->'state' = '\"complete\"'";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE preingestion_state->'state' = '\"complete\"'";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .fetch_all(txn)
@@ -312,7 +352,13 @@ pub async fn find_all_by_ip(
     address: IpAddr,
     txn: &mut PgConnection,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
-    let query = "SELECT * FROM explored_endpoints WHERE address = $1";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE address = $1";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .bind(address)
@@ -356,46 +402,151 @@ pub async fn lookup_bmc_metadata_by_ip(
     ))
 }
 
-/// Updates the explored information about a node
+/// Reads the hardware class recorded for an endpoint, distinguishing a class
+/// that was recorded from one that never was.
 ///
-/// This operation will return `Ok(false)` if the entry had been deleted in
-/// the meantime or otherwise modified. It will not fail.
+/// The outer `Option` is absence of the endpoint row, the inner one a row whose
+/// column is still `NULL`. Both mean no exploration has recorded a class, so
+/// callers treat them alike; keeping them apart here costs nothing and leaves
+/// the query honest about what it read.
+pub async fn lookup_hardware_class_by_ip(
+    address: IpAddr,
+    db_reader: impl DbReader<'_>,
+) -> Result<Option<Option<String>>, DatabaseError> {
+    let query = "SELECT hardware_class FROM explored_endpoints WHERE address = $1";
+
+    sqlx::query_scalar(query)
+        .bind(address)
+        .fetch_optional(db_reader)
+        .await
+        .map_err(|e| DatabaseError::new("explored_endpoints lookup_hardware_class_by_ip", e))
+}
+
+/// Counts the explored endpoints under each hardware class, so a caller can
+/// see which classes a site actually has before deciding what to profile.
+///
+/// The endpoints carrying no class come last, since `NULL` sorts last
+/// ascending, and they are the ones no profile can cover.
+///
+/// A class that only `hardware_class_attesters` still names arrives at zero
+/// rather than being left out. That table is append-only, so a class whose
+/// endpoints were re-keyed or removed keeps its sets with nothing reporting
+/// them, and counting endpoints alone would drop it from coverage entirely.
+pub async fn hardware_class_counts(
+    db_reader: impl DbReader<'_>,
+) -> Result<Vec<HardwareClassCount>, DatabaseError> {
+    // `IS NOT DISTINCT FROM` so the endpoints carrying no class join their own
+    // `NULL` group, which plain equality would drop.
+    let query = r#"
+        SELECT classes.hardware_class, COUNT(endpoints.address) AS endpoints
+        FROM (
+            SELECT hardware_class FROM explored_endpoints
+            UNION
+            SELECT hardware_class FROM hardware_class_attesters
+        ) classes
+        LEFT JOIN explored_endpoints endpoints
+            ON endpoints.hardware_class IS NOT DISTINCT FROM classes.hardware_class
+        GROUP BY classes.hardware_class
+        ORDER BY classes.hardware_class
+    "#;
+
+    sqlx::query_as(query)
+        .fetch_all(db_reader)
+        .await
+        .map_err(|e| DatabaseError::new("explored_endpoints hardware_class_counts", e))
+}
+
+/// Whether any explored endpoint reports this hardware class.
+///
+/// Creating a profile is gated on this, because resolution reads the class off
+/// an explored endpoint, so a profile keyed to a class nothing reports would sit
+/// there looking applied while never being read.
+pub async fn hardware_class_recorded(
+    db_reader: impl DbReader<'_>,
+    hardware_class: &str,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT EXISTS (SELECT 1 FROM explored_endpoints WHERE hardware_class = $1)";
+
+    sqlx::query_scalar(query)
+        .bind(hardware_class)
+        .fetch_one(db_reader)
+        .await
+        .map_err(|e| DatabaseError::new("explored_endpoints hardware_class_recorded", e))
+}
+
+/// The digest of the attester set a report carries, which is what the
+/// endpoint's own column holds.
+///
+/// A report recording no `ComponentIntegrity` collection clears the column,
+/// since the row mirrors the last exploration and a kept digest would count
+/// the endpoint under a set its BMC no longer reports. A collection the BMC
+/// advertised but could not serve is not that: the caller keeps the previous
+/// digest, so a transient failure does not read as hardware losing its
+/// attesters. An exploration that failed outright keeps its previous report,
+/// and with it its digest, through [`try_update_last_exploration_error`].
+fn attester_digest(report: &EndpointExplorationReport) -> Option<String> {
+    report.attester_set().map(|set| set.digest)
+}
+
+/// Replaces an endpoint's report if its version still matches.
+///
+/// An applied write advances the report version, stores the supplied
+/// `waiting_for_explorer_refresh`, and clears `exploration_requested` in the
+/// caller's transaction. A missing endpoint or changed report version returns
+/// `NotApplied(EndpointReportNotCurrent)`; database failures remain errors.
 pub async fn try_update(
     address: IpAddr,
     old_version: ConfigVersion,
     exploration_report: &EndpointExplorationReport,
     waiting_for_explorer_refresh: bool,
     txn: &mut PgConnection,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), EndpointReportNotCurrent>, DatabaseError> {
     let new_version = old_version.increment();
+    let attester_digest = attester_digest(exploration_report);
     let query = "
-UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false
-WHERE address=$4 AND version=$5";
+UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false, hardware_class=$4,
+    attester_digest = CASE WHEN $5 THEN attester_digest ELSE $6 END
+WHERE address=$7 AND version=$8";
     let query_result = sqlx::query(query)
         .bind(new_version)
         .bind(sqlx::types::Json(exploration_report))
         .bind(waiting_for_explorer_refresh)
+        .bind(exploration_report.hardware_class.as_deref())
+        .bind(exploration_report.component_integrity_unavailable)
+        .bind(attester_digest)
         .bind(address)
         .bind(old_version)
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(query_result.rows_affected() > 0)
+    Ok(if query_result.rows_affected() > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(EndpointReportNotCurrent)
+    })
 }
 
-/// Updates only the last exploration error and latency in an endpoint's report.
+/// `EndpointReportNotCurrent` means the endpoint is missing or its report version
+/// no longer matches the version supplied by the caller. The write does not
+/// distinguish these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EndpointReportNotCurrent;
+
+/// `try_update_last_exploration_error` records a failure and its latency without
+/// replacing the last successful exploration report.
 ///
-/// This preserves the rest of the last successful exploration report while recording
-/// an exploration failure. Returns `Ok(false)` if the entry had been deleted in the
-/// meantime or otherwise modified. It will not fail for version mismatches.
+/// An applied write advances the report version, sets `waiting_for_explorer_refresh`,
+/// and clears `exploration_requested` in the caller's transaction. A missing
+/// endpoint or changed report version returns `NotApplied(EndpointReportNotCurrent)`;
+/// database failures remain errors.
 pub async fn try_update_last_exploration_error(
     address: IpAddr,
     old_version: ConfigVersion,
     error: &model::site_explorer::EndpointExplorationError,
     latency: std::time::Duration,
     txn: &mut PgConnection,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), EndpointReportNotCurrent>, DatabaseError> {
     let new_version = old_version.increment();
     let query = "UPDATE explored_endpoints
 SET version=$1,
@@ -416,7 +567,11 @@ WHERE address=$4 AND version=$5";
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(query_result.rows_affected() > 0)
+    Ok(if query_result.rows_affected() > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(EndpointReportNotCurrent)
+    })
 }
 
 /// Clears the last known error in `explored_endpoints` for the BMC identified by IP.
@@ -428,7 +583,13 @@ pub async fn clear_last_known_error(
     address: IpAddr,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
-    let query = "SELECT * FROM explored_endpoints WHERE address = $1 FOR UPDATE";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE address = $1 FOR UPDATE";
     let Some(row) = sqlx::query_as::<_, DbExploredEndpoint>(query)
         .bind(address)
         .fetch_optional(&mut *txn)
@@ -440,25 +601,30 @@ pub async fn clear_last_known_error(
 
     let mut report = row.report;
     report.last_exploration_error = None;
-    if !try_update(address, row.report_version, &report, true, txn).await? {
-        return Err(DatabaseError::ConcurrentModificationError(
-            "ExploredEndpoint",
-            row.report_version.version_string(),
-        ));
+    match try_update(address, row.report_version, &report, true, txn).await? {
+        ConditionalWrite::Applied(()) => {}
+        ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
+            return Err(DatabaseError::ConcurrentModificationError(
+                "ExploredEndpoint",
+                row.report_version.version_string(),
+            ));
+        }
     }
 
     Ok(())
 }
 
-/// Sets the `exploration_requested` flag on an explored_endpoint
+/// `re_explore_if_version_matches` requests exploration without advancing the
+/// report version, so an in-flight report can still be published.
 ///
-/// Returns Ok(`true`) if the endpoint record is updated and Ok(`false`) if no
-/// record with the given version exists.
+/// Returns `Applied(())` when `exploration_requested` is set, including when it
+/// was already set. A missing endpoint or changed report version returns
+/// `NotApplied(EndpointReportNotCurrent)`; database failures remain errors.
 pub async fn re_explore_if_version_matches(
     address: IpAddr,
     version: ConfigVersion,
     txn: &mut PgConnection,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), EndpointReportNotCurrent>, DatabaseError> {
     let query = "UPDATE explored_endpoints SET exploration_requested = true WHERE address = $1 AND version = $2 RETURNING address";
     let query_result: Result<(IpAddr,), _> = sqlx::query_as(query)
         .bind(address)
@@ -467,9 +633,9 @@ pub async fn re_explore_if_version_matches(
         .await;
 
     match query_result {
-        Ok((_address,)) => Ok(true),
+        Ok((_address,)) => Ok(ConditionalWrite::Applied(())),
         Err(e) => match e {
-            sqlx::Error::RowNotFound => Ok(false),
+            sqlx::Error::RowNotFound => Ok(ConditionalWrite::NotApplied(EndpointReportNotCurrent)),
             e => Err(DatabaseError::query(query, e)),
         },
     }
@@ -522,6 +688,31 @@ async fn set_preingestion(
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(())
+}
+
+/// Set one preingestion state on every explored address for a physical BMC.
+///
+/// A BMC can have IPv4 and IPv6 endpoint rows. Rack firmware workflow state is
+/// device-scoped, so callers update all known aliases together.
+pub async fn set_preingestion_for_addresses(
+    addresses: &[IpAddr],
+    state: PreingestionState,
+    txn: &mut PgConnection,
+) -> Result<(), DatabaseError> {
+    if addresses.is_empty() {
+        return Ok(());
+    }
+
+    let query = "UPDATE explored_endpoints SET preingestion_state = $1 WHERE address = ANY($2)";
+
+    sqlx::query(query)
+        .bind(sqlx::types::Json(&state))
+        .bind(addresses)
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
     Ok(())
 }
 
@@ -731,14 +922,19 @@ pub async fn set_preingestion_failed(
     set_preingestion(address, state, txn).await
 }
 
-/// If the endpoint's preingestion is in the terminal `Failed` state, reset it
-/// back to `Initial` so preingestion runs again from the top. States other than
-/// `Failed` are left untouched, so this is safe to call unconditionally when an
-/// operator clears an error. Returns true if a `Failed` state was actually reset.
+/// `PreingestionResetNotApplicable` means the endpoint is missing or its
+/// preingestion state is not `Failed`. The reset does not distinguish these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreingestionResetNotApplicable;
+
+/// `reset_failed_preingestion` resets `Failed` to `Initial` so preingestion can
+/// run again when an operator clears an error. Other states remain untouched.
+/// A missing or non-failed endpoint returns
+/// `NotApplied(PreingestionResetNotApplicable)`; database failures remain errors.
 pub async fn reset_failed_preingestion(
     address: IpAddr,
     txn: &mut PgConnection,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), PreingestionResetNotApplicable>, DatabaseError> {
     let query = "
 UPDATE explored_endpoints
 SET preingestion_state = '{\"state\":\"initial\"}'
@@ -748,7 +944,11 @@ WHERE address = $1 AND preingestion_state->>'state' = 'failed'";
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
-    Ok(result.rows_affected() > 0)
+    Ok(if result.rows_affected() > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(PreingestionResetNotApplicable)
+    })
 }
 
 pub async fn insert(
@@ -758,19 +958,38 @@ pub async fn insert(
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
     let query = "
-        INSERT INTO explored_endpoints (address, exploration_report, version, exploration_requested, preingestion_state, pause_ingestion_and_poweron)
-        VALUES ($1, $2::json, $3, false, '{\"state\":\"initial\"}', $4)
+        INSERT INTO explored_endpoints (address, exploration_report, version, exploration_requested, preingestion_state, pause_ingestion_and_poweron, hardware_class, attester_digest)
+        VALUES ($1, $2::json, $3, false, '{\"state\":\"initial\"}', $4, $5, $6)
         ON CONFLICT DO NOTHING";
     sqlx::query(query)
         .bind(address)
         .bind(sqlx::types::Json(&exploration_report))
         .bind(ConfigVersion::initial())
         .bind(pause_ingestion_and_poweron)
+        .bind(exploration_report.hardware_class.as_deref())
+        .bind(attester_digest(exploration_report))
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
     Ok(())
+}
+
+/// `lock_by_address` locks an existing endpoint until the caller's transaction
+/// completes. The connection must be in a transaction. It returns whether the
+/// row was locked; `false` does not prevent a later insert. Query failures
+/// propagate to the caller.
+pub async fn lock_by_address(
+    txn: &mut PgConnection,
+    address: IpAddr,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT address FROM explored_endpoints WHERE address = $1 FOR UPDATE";
+    let address: Option<IpAddr> = sqlx::query_scalar(query)
+        .bind(address)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(address.is_some())
 }
 
 pub async fn delete(txn: &mut PgConnection, address: IpAddr) -> Result<(), DatabaseError> {
@@ -810,14 +1029,19 @@ pub async fn find_by_mac_address(
     mac: MacAddress,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
     let query = r#"
-            SELECT * FROM explored_endpoints
-            WHERE (
-                jsonb_path_query_array(exploration_report, '$.Systems[*].EthernetInterfaces[*].MACAddress')
-                ||
-                jsonb_path_query_array(exploration_report, '$.Managers[*].EthernetInterfaces[*].MACAddress')
-                ||
-                jsonb_path_query_array(exploration_report, '$.Chassis[*].NetworkAdapters[*].PortMacAddresses[*]')
-            ) @> to_jsonb(ARRAY[$1]);
+        SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE (
+            jsonb_path_query_array(exploration_report, '$.Systems[*].EthernetInterfaces[*].MACAddress')
+            ||
+            jsonb_path_query_array(exploration_report, '$.Managers[*].EthernetInterfaces[*].MACAddress')
+            ||
+            jsonb_path_query_array(exploration_report, '$.Chassis[*].NetworkAdapters[*].PortMacAddresses[*]')
+        ) @> to_jsonb(ARRAY[$1]);
         "#;
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         // NOTE: Don't just pass mac here, do our own string conversion. Postgres's string
@@ -935,6 +1159,113 @@ mod tests {
 
     use super::*;
 
+    #[crate::sqlx_test]
+    async fn reset_failed_preingestion_reports_applied_or_not_applicable(pool: sqlx::PgPool) {
+        struct Case {
+            scenario: &'static str,
+            state: Option<PreingestionState>,
+            expected: ConditionalWrite<(), PreingestionResetNotApplicable>,
+            expected_state: Option<PreingestionState>,
+        }
+
+        let cases = [
+            Case {
+                scenario: "failed preingestion resets",
+                state: Some(PreingestionState::Failed {
+                    reason: "firmware installation failed".to_string(),
+                }),
+                expected: ConditionalWrite::Applied(()),
+                expected_state: Some(PreingestionState::Initial),
+            },
+            Case {
+                scenario: "firmware installation stays in progress",
+                state: Some(installing_state()),
+                expected: ConditionalWrite::NotApplied(PreingestionResetNotApplicable),
+                expected_state: Some(installing_state()),
+            },
+            Case {
+                scenario: "missing endpoint is not created",
+                state: None,
+                expected: ConditionalWrite::NotApplied(PreingestionResetNotApplicable),
+                expected_state: None,
+            },
+        ];
+
+        for case in cases {
+            let mut txn = pool.begin().await.unwrap();
+            let address = "10.0.4.1".parse().unwrap();
+            if let Some(state) = case.state {
+                seed_endpoint(&mut txn, "10.0.4.1", state).await;
+            }
+
+            assert_eq!(
+                reset_failed_preingestion(address, &mut txn).await.unwrap(),
+                case.expected,
+                "{}",
+                case.scenario,
+            );
+            let endpoints = find_all_by_ip(address, &mut txn).await.unwrap();
+            assert_eq!(
+                endpoints.first().map(|ep| &ep.preingestion_state),
+                case.expected_state.as_ref(),
+                "{}",
+                case.scenario,
+            );
+            txn.rollback().await.unwrap();
+        }
+    }
+
+    #[crate::sqlx_test]
+    async fn reset_failed_preingestion_propagates_database_errors(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        sqlx::query("SET TRANSACTION READ ONLY")
+            .execute(&mut *txn)
+            .await
+            .unwrap();
+
+        let error = reset_failed_preingestion("10.0.4.1".parse().unwrap(), &mut txn)
+            .await
+            .unwrap_err();
+        let DatabaseError::Sqlx(query_error) = error else {
+            panic!("expected a database error, got {error:?}");
+        };
+        let code = query_error.source.as_database_error().unwrap().code();
+        assert_eq!(code.as_deref(), Some("25006"));
+        txn.rollback().await.unwrap();
+    }
+
+    #[crate::sqlx_test]
+    async fn re_exploration_request_preserves_report_version(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        let address = "10.0.3.1".parse().unwrap();
+        assert_eq!(
+            re_explore_if_version_matches(address, ConfigVersion::initial(), &mut txn)
+                .await
+                .unwrap(),
+            ConditionalWrite::NotApplied(EndpointReportNotCurrent)
+        );
+        insert(
+            address,
+            &EndpointExplorationReport::default(),
+            false,
+            &mut txn,
+        )
+        .await
+        .unwrap();
+        let endpoint = find_all_by_ip(address, &mut txn).await.unwrap().remove(0);
+
+        assert_eq!(
+            re_explore_if_version_matches(address, endpoint.report_version, &mut txn)
+                .await
+                .unwrap(),
+            ConditionalWrite::Applied(())
+        );
+
+        let requested = find_all_by_ip(address, &mut txn).await.unwrap().remove(0);
+        assert!(requested.exploration_requested);
+        assert_eq!(requested.report_version, endpoint.report_version);
+    }
+
     /// An `UpgradeFirmwareWait` state — the one the "installing" predicate keys
     /// on. Built from the real enum so the row-returning path can deserialize it.
     fn installing_state() -> PreingestionState {
@@ -1015,6 +1346,300 @@ mod tests {
         assert_eq!(rows.len(), 2, "two endpoints are installing firmware");
         assert_eq!(count, 2, "count agrees with the row count");
         assert_eq!(count, rows.len() as i64);
+    }
+
+    async fn read_hardware_class(txn: &mut PgConnection, address: IpAddr) -> Option<String> {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT hardware_class FROM explored_endpoints WHERE address = $1",
+        )
+        .bind(address)
+        .fetch_one(txn)
+        .await
+        .expect("read hardware_class")
+    }
+
+    async fn read_version(txn: &mut PgConnection, address: IpAddr) -> ConfigVersion {
+        sqlx::query_scalar::<_, ConfigVersion>(
+            "SELECT version FROM explored_endpoints WHERE address = $1",
+        )
+        .bind(address)
+        .fetch_one(txn)
+        .await
+        .expect("read version")
+    }
+
+    /// Two classes in the shape exploration derives, so the tests key on what
+    /// the column actually holds.
+    const HARDWARE_CLASS: &str = "dell-inc_poweredge-r750";
+    const OTHER_HARDWARE_CLASS: &str = "nvidia_dgx-gb200";
+
+    fn report_with_class(hardware_class: Option<&str>) -> EndpointExplorationReport {
+        EndpointExplorationReport {
+            hardware_class: hardware_class.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// The column has to carry the class from the report on both write paths,
+    /// and hold no class where exploration determined none — absent is what
+    /// tells an unclassified endpoint apart from one classified as
+    /// unrecognised.
+    #[crate::sqlx_test]
+    async fn hardware_class_is_written_from_the_report(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        let classified: IpAddr = "10.0.2.1".parse().unwrap();
+        let unclassified: IpAddr = "10.0.2.2".parse().unwrap();
+
+        insert(
+            classified,
+            &report_with_class(Some(HARDWARE_CLASS)),
+            false,
+            &mut txn,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_hardware_class(&mut txn, classified).await.as_deref(),
+            Some(HARDWARE_CLASS),
+        );
+
+        // Re-exploring the endpoint as different hardware replaces the class.
+        let version = read_version(&mut txn, classified).await;
+        assert_eq!(
+            try_update(
+                classified,
+                version,
+                &report_with_class(Some(OTHER_HARDWARE_CLASS)),
+                false,
+                &mut txn,
+            )
+            .await
+            .unwrap(),
+            ConditionalWrite::Applied(()),
+        );
+        assert_eq!(
+            read_hardware_class(&mut txn, classified).await.as_deref(),
+            Some(OTHER_HARDWARE_CLASS),
+        );
+
+        insert(unclassified, &report_with_class(None), false, &mut txn)
+            .await
+            .unwrap();
+        assert_eq!(read_hardware_class(&mut txn, unclassified).await, None);
+    }
+
+    /// The column counts endpoints per variant of a class, so it has to follow
+    /// the report on both write paths. A BMC that stops reporting a collection
+    /// clears it: keeping the old digest would count the endpoint under a set
+    /// it no longer reports.
+    #[crate::sqlx_test]
+    async fn the_attester_digest_follows_the_report(pool: sqlx::PgPool) {
+        fn report_with_attesters(ids: Option<&[&str]>) -> EndpointExplorationReport {
+            EndpointExplorationReport {
+                component_integrities: ids.map(|ids| {
+                    ids.iter()
+                        .map(|id| model::site_explorer::ComponentIntegrityEntry {
+                            id: (*id).to_string(),
+                            component_integrity_type: "SPDM".to_string(),
+                            component_integrity_enabled: true,
+                        })
+                        .collect()
+                }),
+                ..Default::default()
+            }
+        }
+
+        async fn read_attester_digest(txn: &mut PgConnection, address: IpAddr) -> Option<String> {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT attester_digest FROM explored_endpoints WHERE address = $1",
+            )
+            .bind(address)
+            .fetch_one(txn)
+            .await
+            .expect("read attester_digest")
+        }
+
+        let mut txn = pool.begin().await.unwrap();
+        let address: IpAddr = "10.0.6.1".parse().unwrap();
+        let eight_gpus = report_with_attesters(Some(&[
+            "HGX_ERoT_GPU_0",
+            "HGX_ERoT_GPU_1",
+            "HGX_ERoT_GPU_2",
+            "HGX_ERoT_GPU_3",
+        ]));
+
+        insert(address, &eight_gpus, false, &mut txn).await.unwrap();
+        assert_eq!(
+            read_attester_digest(&mut txn, address).await,
+            eight_gpus.attester_set().map(|set| set.digest),
+        );
+
+        let version = read_version(&mut txn, address).await;
+        assert_eq!(
+            try_update(
+                address,
+                version,
+                &report_with_attesters(None),
+                false,
+                &mut txn,
+            )
+            .await
+            .unwrap(),
+            ConditionalWrite::Applied(()),
+        );
+        assert_eq!(read_attester_digest(&mut txn, address).await, None);
+    }
+
+    /// A BMC that advertises the collection and then fails to serve it has
+    /// reported nothing about its attesters, so the endpoint has to keep the
+    /// digest it last observed. Clearing it would drop the endpoint out of its
+    /// set's count and read as hardware losing its roots of trust.
+    ///
+    /// The same report re-keys the class, which is a change in how the BMC
+    /// spells its manufacturer (§5.2) and not a statement about attesters.
+    /// Retention therefore does not depend on the class holding still: the
+    /// re-keyed class is the case where the endpoint most needs to stay
+    /// counted under the set it still carries.
+    #[crate::sqlx_test]
+    async fn an_unavailable_collection_keeps_the_last_observed_digest(pool: sqlx::PgPool) {
+        async fn read_class_and_digest(
+            txn: &mut PgConnection,
+            address: IpAddr,
+        ) -> (Option<String>, Option<String>) {
+            sqlx::query_as(
+                "SELECT hardware_class, attester_digest FROM explored_endpoints WHERE address = $1",
+            )
+            .bind(address)
+            .fetch_one(txn)
+            .await
+            .expect("read the class and digest")
+        }
+
+        let mut txn = pool.begin().await.unwrap();
+        let address: IpAddr = "10.0.6.2".parse().unwrap();
+        let observed = EndpointExplorationReport {
+            hardware_class: Some(HARDWARE_CLASS.to_string()),
+            component_integrities: Some(vec![model::site_explorer::ComponentIntegrityEntry {
+                id: "HGX_ERoT_GPU_0".to_string(),
+                component_integrity_type: "SPDM".to_string(),
+                component_integrity_enabled: true,
+            }]),
+            ..Default::default()
+        };
+
+        insert(address, &observed, false, &mut txn).await.unwrap();
+        let (class, recorded) = read_class_and_digest(&mut txn, address).await;
+        assert_eq!(class.as_deref(), Some(HARDWARE_CLASS));
+        assert_eq!(recorded, observed.attester_set().map(|set| set.digest));
+
+        let version = read_version(&mut txn, address).await;
+        let unavailable = EndpointExplorationReport {
+            hardware_class: Some(OTHER_HARDWARE_CLASS.to_string()),
+            component_integrities: None,
+            component_integrity_unavailable: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            try_update(address, version, &unavailable, false, &mut txn)
+                .await
+                .unwrap(),
+            ConditionalWrite::Applied(()),
+        );
+
+        assert_eq!(
+            read_class_and_digest(&mut txn, address).await,
+            (Some(OTHER_HARDWARE_CLASS.to_string()), recorded),
+            "the re-keyed class moves and the digest it last observed survives"
+        );
+    }
+
+    /// An operator reads this to decide what to profile, so every class the
+    /// site has must arrive with an exact tally, and the endpoints carrying no
+    /// class have to stay their own entry rather than joining one.
+    ///
+    /// A class only the append-only attester inventory still names has to
+    /// arrive too, at zero, rather than dropping out of coverage entirely.
+    #[crate::sqlx_test]
+    async fn hardware_class_counts_tally_each_class_and_the_endpoints_without_one(
+        pool: sqlx::PgPool,
+    ) {
+        const DEPARTED_HARDWARE_CLASS: &str = "lenovo_thinksystem-sr680a-v3";
+
+        let mut txn = pool.begin().await.unwrap();
+        for (address, class) in [
+            ("10.0.3.1", Some(HARDWARE_CLASS)),
+            ("10.0.3.2", Some(HARDWARE_CLASS)),
+            ("10.0.3.3", Some(OTHER_HARDWARE_CLASS)),
+            ("10.0.3.4", None),
+            ("10.0.3.5", None),
+        ] {
+            insert(
+                address.parse().unwrap(),
+                &report_with_class(class),
+                false,
+                &mut txn,
+            )
+            .await
+            .unwrap();
+        }
+
+        // A set recorded for a class no endpoint reports any more, which is
+        // what an endpoint re-keyed by a firmware update leaves behind.
+        let departed_set = EndpointExplorationReport {
+            component_integrities: Some(vec![model::site_explorer::ComponentIntegrityEntry {
+                id: "ERoT_BMC_0".to_string(),
+                component_integrity_type: "SPDM".to_string(),
+                component_integrity_enabled: true,
+            }]),
+            ..Default::default()
+        }
+        .attester_set()
+        .expect("a reported collection yields a set");
+        crate::hardware_class_attesters::record(&mut txn, DEPARTED_HARDWARE_CLASS, &departed_set)
+            .await
+            .unwrap();
+
+        let counts = hardware_class_counts(&mut *txn).await.unwrap();
+
+        let tallied: Vec<_> = counts
+            .iter()
+            .map(|count| (count.hardware_class.as_deref(), count.endpoints))
+            .collect();
+        assert_eq!(
+            tallied,
+            [
+                (Some(HARDWARE_CLASS), 2),
+                (Some(DEPARTED_HARDWARE_CLASS), 0),
+                (Some(OTHER_HARDWARE_CLASS), 1),
+                (None, 2),
+            ]
+        );
+    }
+
+    /// Creating a profile is gated on this, so it has to answer for the exact
+    /// class an endpoint recorded and for nothing else.
+    #[crate::sqlx_test]
+    async fn hardware_class_recorded_answers_for_the_classes_endpoints_carry(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        insert(
+            "10.0.4.1".parse().unwrap(),
+            &report_with_class(Some(HARDWARE_CLASS)),
+            false,
+            &mut txn,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            hardware_class_recorded(&mut *txn, HARDWARE_CLASS)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !hardware_class_recorded(&mut *txn, OTHER_HARDWARE_CLASS)
+                .await
+                .unwrap()
+        );
     }
 
     #[crate::sqlx_test]

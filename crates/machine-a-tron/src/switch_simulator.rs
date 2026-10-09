@@ -20,20 +20,21 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use bmc_mock::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    BmcCommand, Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, MockPowerState,
-    POWER_CYCLE_DELAY, SetSystemPowerError, SetSystemPowerResult, SystemPowerControl,
+    ActionError, Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, MockPowerState,
+    POWER_CYCLE_DELAY, ResourceResetType,
 };
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
-use crate::bmc_mock_wrapper::{BmcMockWrapper, BmcMockWrapperHandle};
+use crate::bmc_mock_wrapper::{BmcCommand, BmcMockWrapper, BmcMockWrapperHandle};
 use crate::config::{self, MachineATronContext, MachineConfig, PersistedDevice};
 use crate::dhcp_wrapper::{DhcpRequestInfo, DhcpRequester, DhcpResponseInfo, vendor_class};
 use crate::machine_state_machine::{MachineStateError, OsImage};
+use crate::run_jitter::{first_run_offset, jitter_interval};
 use crate::saturating_add_duration_to_instant;
 use crate::status::{BmcStatus, DeviceKind, DeviceStatus, DeviceStatusConfig, EndpointStatus};
 use crate::switch_fsm::{Action, DhcpEndpoint, Event, SwitchFsm, Timer};
@@ -51,6 +52,7 @@ struct SwitchLiveState {
     ssh_endpoint_port: Option<u16>,
     ssh_host_key: Option<String>,
     state: &'static str,
+    bmc_persistence: crate::bmc_mock_wrapper::BmcPersistence,
 }
 
 impl SwitchLiveState {
@@ -63,6 +65,7 @@ impl SwitchLiveState {
             ssh_endpoint_port: None,
             ssh_host_key: None,
             state: fsm.state_string(),
+            bmc_persistence: Default::default(),
         }
     }
 }
@@ -73,21 +76,28 @@ struct SwitchCallbacks {
     mailbox: ActorMailbox<SwitchMessage>,
 }
 
-impl Callbacks for SwitchCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        self.state.read().unwrap().power_state
-    }
-
-    fn send_power_command(
-        &self,
-        reset_type: SystemPowerControl,
-    ) -> Result<(), SetSystemPowerError> {
+impl SwitchCallbacks {
+    pub(crate) fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
+        self.get_power_state().validate_reset_type(reset_type)?;
         self.mailbox
             .send(SwitchMessage::Bmc(BmcCommand::SetSystemPower {
                 request: reset_type,
                 reply: None,
             }))
-            .map_err(|error| SetSystemPowerError::CommandSendError(error.to_string()))
+            .map_err(|error| ActionError::Internal(error.into()))
+    }
+}
+
+impl Callbacks for SwitchCallbacks {
+    fn get_power_state(&self) -> MockPowerState {
+        self.state.read().unwrap().power_state
+    }
+
+    async fn computer_system_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        self.set_power_state(reset_type)
     }
 
     fn state_refresh_indication(&self) {
@@ -118,6 +128,8 @@ pub(crate) struct SwitchActor {
     bmc_dhcp_info: Option<DhcpResponseInfo>,
     fsm: SwitchFsm,
     actions: VecDeque<Action>,
+    /// Spreads a fleet that starts together over the idle interval.
+    first_run_delay: Option<Duration>,
     run_alarm: Option<AlarmId>,
     power_cycle_alarm: Option<AlarmId>,
     dhcp_retry_alarm: Option<AlarmId>,
@@ -133,6 +145,7 @@ impl SwitchActor {
     ) -> Self {
         // Simulated switches start powered so NVOS can boot and expose its management interface.
         let (fsm, actions) = SwitchFsm::init(true);
+        let first_run_delay = Some(first_run_offset(config.run_interval_idle));
         Self {
             mat_id: Uuid::new_v4(),
             machine_config_section,
@@ -148,6 +161,7 @@ impl SwitchActor {
             bmc_dhcp_info: None,
             fsm,
             actions: actions.into_iter().collect(),
+            first_run_delay,
             run_alarm: None,
             power_cycle_alarm: None,
             dhcp_retry_alarm: None,
@@ -176,18 +190,23 @@ impl SwitchActor {
             desired_host_firmware: None,
         };
         let (fsm, actions) = SwitchFsm::init(true);
+        let first_run_delay = Some(first_run_offset(config.run_interval_idle));
+        let mut live_state = SwitchLiveState::new(&fsm);
+        live_state.bmc_persistence =
+            crate::bmc_mock_wrapper::BmcPersistence::from_saved(persisted.bmc_state);
         Self {
             mat_id: persisted.mat_id,
             machine_config_section,
             host_info,
             app_context,
             config,
-            live_state: Arc::new(RwLock::new(SwitchLiveState::new(&fsm))),
+            live_state: Arc::new(RwLock::new(live_state)),
             bmc_injection: Arc::new(InjectionStore::new()),
             _bmc_mock: None,
             bmc_dhcp_info: None,
             fsm,
             actions: actions.into_iter().collect(),
+            first_run_delay,
             run_alarm: None,
             power_cycle_alarm: None,
             dhcp_retry_alarm: None,
@@ -201,12 +220,13 @@ impl SwitchActor {
         let host_info = self.host_info.clone();
         let machine_config_section = self.machine_config_section.clone();
         let bmc_injection = self.bmc_injection.clone();
-        let (actor, mailbox) = Actor::new(self, SwitchMessage::Run);
+        let (actor, mailbox) = Actor::new();
 
         let join_handle = tokio::task::Builder::new()
             .name(&format!("Switch {mat_id}"))
-            .spawn(actor.run())
+            .spawn(actor.run(self))
             .unwrap();
+        let _ = mailbox.send(SwitchMessage::Run);
 
         SwitchHandle(Arc::new(SwitchActorHandle {
             mailbox,
@@ -226,13 +246,17 @@ impl SwitchActor {
             }
             return ActorResult::Noop;
         }
+        if let Some(delay) = self.first_run_delay.take() {
+            self.schedule_run(mailbox, delay);
+            return ActorResult::Noop;
+        }
 
         let sleep_duration = if let Some(duration) = self.process_actions(mailbox).await {
             duration
         } else {
             self.config.run_interval_idle
         };
-        self.schedule_run(mailbox, sleep_duration);
+        self.schedule_run(mailbox, jitter_interval(sleep_duration));
         ActorResult::Noop
     }
 
@@ -409,6 +433,12 @@ impl SwitchActor {
                 .change_factory_default_password(password);
         }
 
+        {
+            let mut live_state = self.live_state.write().unwrap();
+            live_state.bmc_persistence.restore(bmc_mock.state())?;
+            live_state.bmc_persistence.attach(bmc_mock.state());
+        }
+
         let bmc_handle = {
             self.app_context
                 .bmc_registry
@@ -438,16 +468,17 @@ impl SwitchActor {
         Ok(())
     }
 
-    fn set_system_power(&mut self, request: SystemPowerControl) -> SetSystemPowerResult {
-        use SystemPowerControl::*;
+    fn set_system_power(&mut self, request: ResourceResetType) -> Result<(), ActionError> {
+        use ResourceResetType::*;
 
         match request {
             On | ForceOn => self.fsm_event(Event::PowerOn),
             GracefulShutdown | ForceOff => self.fsm_event(Event::PowerOff),
             GracefulRestart | ForceRestart | PowerCycle => self.fsm_event(Event::PowerCycle),
-            PushPowerButton | Nmi | Suspend | Pause | Resume => {
-                return Err(SetSystemPowerError::BadRequest(format!(
-                    "Machine-a-tron mock: unsupported power request {request:?}"
+            _ => {
+                return Err(ActionError::BadRequest(eyre::eyre!(
+                    "machine-a-tron mock: unsupported power request {:?}",
+                    request
                 )));
             }
         }
@@ -539,8 +570,50 @@ struct SwitchActorHandle {
 pub(crate) struct SwitchHandle(Arc<SwitchActorHandle>);
 
 impl SwitchHandle {
+    /// A handle for `host_info` with no actor behind it, already holding an
+    /// NVOS lease when `nvos_ip` is given.
+    #[cfg(test)]
+    pub(crate) fn for_control_test(
+        host_info: HostMachineInfo,
+        machine_config_section: &str,
+        nvos_ip: Option<Ipv4Addr>,
+    ) -> Self {
+        let (fsm, _actions) = SwitchFsm::init(true);
+        let mut live_state = SwitchLiveState::new(&fsm);
+        live_state.nvos_ip = nvos_ip;
+        Self(Arc::new(SwitchActorHandle {
+            mailbox: ActorMailbox::detached(),
+            join_handle: Mutex::new(None),
+            mat_id: Uuid::new_v4(),
+            live_state: Arc::new(RwLock::new(live_state)),
+            host_info,
+            machine_config_section: machine_config_section.to_string(),
+            bmc_injection: Arc::new(InjectionStore::new()),
+        }))
+    }
+
+    /// Overrides the switch's NVOS lease for control-router tests.
+    #[cfg(test)]
+    pub(crate) fn set_control_test_nvos_ip(&self, ip: Option<Ipv4Addr>) {
+        self.0.live_state.write().unwrap().nvos_ip = ip;
+    }
+
     pub(crate) fn mat_id(&self) -> Uuid {
         self.0.mat_id
+    }
+
+    /// Drive power through the guard the BMC mock uses, so an RMS power
+    /// request obeys the same rules as a Redfish one.
+    pub(crate) fn set_system_power(&self, request: ResourceResetType) -> Result<(), ActionError> {
+        SwitchCallbacks {
+            state: self.0.live_state.clone(),
+            mailbox: self.0.mailbox.clone(),
+        }
+        .set_power_state(request)
+    }
+
+    pub(crate) fn power_state(&self) -> MockPowerState {
+        self.0.live_state.read().unwrap().power_state
     }
 
     pub(crate) fn pause(&self) -> eyre::Result<()> {
@@ -586,6 +659,13 @@ impl SwitchHandle {
     }
 
     pub(crate) fn persisted(&self) -> PersistedDevice {
+        let bmc_state = self
+            .0
+            .live_state
+            .read()
+            .unwrap()
+            .bmc_persistence
+            .persisted();
         PersistedDevice {
             hw_type: self.0.host_info.hw_type,
             mat_id: self.0.mat_id,
@@ -603,6 +683,7 @@ impl SwitchHandle {
                 base: self.0.host_info.hw_mac_addr_pool.base(),
                 host_bits: self.0.host_info.hw_mac_addr_pool.host_bits(),
             }),
+            bmc_state,
             active_host_firmware: None,
         }
     }
@@ -637,13 +718,48 @@ impl SwitchHandle {
     pub(crate) fn bmc_ip(&self) -> Option<Ipv4Addr> {
         self.0.live_state.read().unwrap().bmc_ip
     }
+
+    pub(crate) fn nvos_ip(&self) -> Option<Ipv4Addr> {
+        self.0.live_state.read().unwrap().nvos_ip
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use carbide_test_support::{Check, check_values};
+    use mac_address::MacAddress;
 
     use super::*;
+
+    #[tokio::test]
+    async fn first_run_offset_waits_for_resume() {
+        let app_context = MachineATronContext::for_test();
+        let config = app_context.app_config.machines["config"].clone();
+        let mac = MacAddress::new([2, 0, 0, 0, 0, 0]);
+        let mut mac_pool = MacAddressPool::new_pool(MacAddressPoolConfig::new(mac, 24).unwrap());
+        let mut actor = SwitchActor::new(
+            app_context,
+            "config".to_string(),
+            config,
+            &mut mac_pool,
+            MacAddressPoolConfig::new(mac, 24).unwrap(),
+        );
+        let (_actor_task, mailbox) = Actor::new();
+
+        actor.fsm_event(Event::Pause);
+        actor.process_state(&mailbox).await;
+        assert!(actor.first_run_delay.is_some());
+        assert!(actor.run_alarm.is_none());
+
+        actor.fsm_event(Event::Resume);
+        actor.process_state(&mailbox).await;
+        assert!(actor.first_run_delay.is_none());
+        assert!(actor.run_alarm.is_some());
+        assert_eq!(
+            actor.actions.front(),
+            Some(&Action::Dhcp(DhcpEndpoint::Bmc))
+        );
+    }
 
     #[test]
     fn power_change_abandons_queued_nvos_dhcp() {

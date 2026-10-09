@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use carbide_instrument::testing::capture_logs_async;
 use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_test_harness::prelude::*;
 use config_version::ConfigVersion;
@@ -137,6 +138,9 @@ async fn test_site_explorer_power_shelf_discovery(
     explorer.insert_endpoint_result(
         power_shelf.ip.parse().unwrap(),
         Ok(EndpointExplorationReport {
+            component_integrities: None,
+            component_integrity_unavailable: false,
+            hardware_class: None,
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
@@ -163,11 +167,8 @@ async fn test_site_explorer_power_shelf_discovery(
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            compute_tray_index: None,
-            physical_slot_number: None,
-            revision_id: None,
-            topology_id: None,
             remediation_error: None,
+            ..Default::default()
         }),
     );
     let test_meter = &env.test_harness.test_meter;
@@ -248,6 +249,9 @@ async fn test_site_explorer_power_shelf_discovery_with_static_ip(
     explorer.insert_endpoint_result(
         power_shelf.ip.parse().unwrap(),
         Ok(EndpointExplorationReport {
+            component_integrities: None,
+            component_integrity_unavailable: false,
+            hardware_class: None,
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
@@ -274,11 +278,8 @@ async fn test_site_explorer_power_shelf_discovery_with_static_ip(
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            compute_tray_index: None,
-            physical_slot_number: None,
-            revision_id: None,
-            topology_id: None,
             remediation_error: None,
+            ..Default::default()
         }),
     );
     let test_meter = &env.test_harness.test_meter;
@@ -402,11 +403,16 @@ async fn power_shelf_skips_creation_when_bmc_mac_already_used(
         rack_id: None,
         bmc_retain_credentials: None,
     };
+    let (created, logs) = capture_logs_async(explorer.create_power_shelf(
+        explored_endpoint.clone(),
+        &expected_first,
+        &env.pool,
+    ))
+    .await;
+    assert!(created?, "first discovery must create a power_shelves row");
     assert!(
-        explorer
-            .create_power_shelf(explored_endpoint.clone(), &expected_first, &env.pool)
-            .await?,
-        "first discovery must create a power_shelves row"
+        logs.iter().any(|log| log.message == "Creating power shelf"),
+        "first discovery must log that it is creating the power shelf"
     );
 
     let mut txn = env.pool.begin().await?;
@@ -430,11 +436,24 @@ async fn power_shelf_skips_creation_when_bmc_mac_already_used(
         },
         ..expected_first
     };
+    let (created, logs) = capture_logs_async(explorer.create_power_shelf(
+        explored_endpoint,
+        &expected_second,
+        &env.pool,
+    ))
+    .await;
     assert!(
-        !explorer
-            .create_power_shelf(explored_endpoint, &expected_second, &env.pool)
-            .await?,
+        !created?,
         "second discovery with same BMC MAC must not create a duplicate row"
+    );
+    assert!(
+        logs.iter()
+            .any(|log| log.message == "Power shelf already exists; skipping discovery"),
+        "second discovery must log that it skipped the existing power shelf"
+    );
+    assert!(
+        logs.iter().all(|log| log.message != "Creating power shelf"),
+        "second discovery must not log that it is creating a power shelf"
     );
 
     let mut txn = env.pool.begin().await?;
@@ -498,6 +517,9 @@ async fn test_site_explorer_power_shelf_with_expected_config(
     explorer.insert_endpoint_result(
         power_shelf.ip.parse().unwrap(), // Use expected IP address, not DHCP-assigned IP
         Ok(EndpointExplorationReport {
+            component_integrities: None,
+            component_integrity_unavailable: false,
+            hardware_class: None,
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
@@ -524,11 +546,8 @@ async fn test_site_explorer_power_shelf_with_expected_config(
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            compute_tray_index: None,
-            physical_slot_number: None,
-            revision_id: None,
-            topology_id: None,
             remediation_error: None,
+            ..Default::default()
         }),
     );
 
@@ -610,6 +629,9 @@ async fn test_site_explorer_power_shelf_creation_limit(
         explorer.insert_endpoint_result(
             power_shelf.ip.parse().unwrap(), // Use expected IP address, not DHCP-assigned IP
             Ok(EndpointExplorationReport {
+                component_integrities: None,
+                component_integrity_unavailable: false,
+                hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 last_exploration_error: None,
                 last_exploration_latency: None,
@@ -636,12 +658,8 @@ async fn test_site_explorer_power_shelf_creation_limit(
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                compute_tray_index: None,
-                physical_slot_number: None,
-                revision_id: None,
-                topology_id: None,
-
                 remediation_error: None,
+                ..Default::default()
             }),
         );
     }
@@ -717,6 +735,9 @@ async fn test_site_explorer_power_shelf_disabled(
     explorer.insert_endpoint_result(
         power_shelf.ip.parse().unwrap(),
         Ok(EndpointExplorationReport {
+            component_integrities: None,
+            component_integrity_unavailable: false,
+            hardware_class: None,
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
@@ -739,12 +760,8 @@ async fn test_site_explorer_power_shelf_disabled(
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            compute_tray_index: None,
-            physical_slot_number: None,
-            revision_id: None,
-            topology_id: None,
-
             remediation_error: None,
+            ..Default::default()
         }),
     );
     let test_meter = &env.test_harness.test_meter;
@@ -893,6 +910,9 @@ async fn test_power_shelf_state_history_error_handling(
 
     // Create exploration report for power shelf
     let exploration_report = EndpointExplorationReport {
+        component_integrities: None,
+        component_integrity_unavailable: false,
+        hardware_class: None,
         endpoint_type: EndpointType::Bmc,
         last_exploration_error: None,
         last_exploration_latency: None,
@@ -915,12 +935,8 @@ async fn test_power_shelf_state_history_error_handling(
         lockdown_status: None,
         power_shelf_id: None,
         switch_id: None,
-        compute_tray_index: None,
-        physical_slot_number: None,
-        revision_id: None,
-        topology_id: None,
-
         remediation_error: None,
+        ..Default::default()
     };
 
     let explored_endpoint = ExploredEndpoint {

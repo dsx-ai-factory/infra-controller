@@ -19,9 +19,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	oteltrace "go.opentelemetry.io/otel/trace"
 	tClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
+	tp "go.temporal.io/sdk/temporal"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
@@ -29,9 +29,9 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
 func TestGetTaskHandler_Handle(t *testing.T) {
@@ -73,7 +73,6 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 		Message:     "Processing",
 	}
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -175,7 +174,6 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.taskUUID)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -220,7 +218,6 @@ type GetTasksHandlerTestCase struct {
 func ExecuteGetTasksHandlerTestCases(t *testing.T, pathFmt string, handle func(echo.Context) error, scp *sc.ClientPool, siteID string, testCases []GetTasksHandlerTestCase) {
 	t.Helper()
 	e := echo.New()
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
@@ -271,9 +268,6 @@ func ExecuteGetTasksHandlerTestCases(t *testing.T, pathFmt string, handle func(e
 				ec.SetParamValues(tt.reqOrg, tt.pathParam)
 			}
 			ec.Set("user", tt.user)
-
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handle(ec)
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s err=%v", rec.Body.String(), err)
@@ -333,18 +327,18 @@ func TestGetAllTaskHandler_Handle(t *testing.T) {
 	}}
 	defaultPageNumber, defaultPageSize := 1, 20
 	filteredPageNumber, filteredPageSize := 2, 10
-	defaultFlowID := common.FlowWorkflowID(fmt.Sprintf("task-get-all-%s", common.QueryParamHash(
+	defaultFlowID := fmt.Sprintf("task-get-all-%s", common.QueryParamHash(
 		(&model.APIGetTasksRequest{SiteID: site.ID.String()}).QueryValues(pagination.PageRequest{
 			PageNumber: &defaultPageNumber,
 			PageSize:   &defaultPageSize,
 		}),
-	)))
-	filteredFlowID := common.FlowWorkflowID(fmt.Sprintf("task-get-all-%s", common.QueryParamHash(
+	))
+	filteredFlowID := fmt.Sprintf("task-get-all-%s", common.QueryParamHash(
 		(&model.APIGetTasksRequest{SiteID: site.ID.String(), ActiveOnly: true, IncludeReport: true}).QueryValues(pagination.PageRequest{
 			PageNumber: &filteredPageNumber,
 			PageSize:   &filteredPageSize,
 		}),
-	)))
+	))
 
 	cases := []GetTasksHandlerTestCase{
 		{
@@ -460,7 +454,7 @@ func TestGetRackTasksHandler_Handle(t *testing.T) {
 	tenantUser := testRackBuildUser(t, dbSession, "tenant-user-task-list-rack", org, []string{authz.TenantAdminRole})
 
 	handler := NewGetRackTasksHandler(dbSession, nil, scp, cfg)
-	rackID := uuid.New().String()
+	rackID := "core-rack-01"
 	taskUUID := uuid.New().String()
 	listed := []*flowv1.Task{{
 		Id:          &flowv1.UUID{Id: taskUUID},
@@ -481,7 +475,6 @@ func TestGetRackTasksHandler_Handle(t *testing.T) {
 			expectedPage:   &pagination.PageResponse{PageNumber: 1, PageSize: 20, Total: 1},
 			assertFlowReq: func(t *testing.T, req *flowv1.ListTasksRequest, pathParam string) {
 				t.Helper()
-				require.NotNil(t, req.GetRackId())
 				assert.Equal(t, pathParam, req.GetRackId().GetId())
 				assert.Nil(t, req.GetComponentId())
 				assert.False(t, req.GetActiveOnly())
@@ -498,21 +491,12 @@ func TestGetRackTasksHandler_Handle(t *testing.T) {
 			expectedPage:   &pagination.PageResponse{PageNumber: 2, PageSize: 10, Total: 1},
 			assertFlowReq: func(t *testing.T, req *flowv1.ListTasksRequest, pathParam string) {
 				t.Helper()
-				require.NotNil(t, req.GetRackId())
 				assert.Equal(t, pathParam, req.GetRackId().GetId())
 				assert.True(t, req.GetActiveOnly())
 				require.NotNil(t, req.GetPagination())
 				assert.Equal(t, int32(10), req.GetPagination().GetOffset())
 				assert.Equal(t, int32(10), req.GetPagination().GetLimit())
 			},
-		},
-		{
-			name:           "failure - invalid rack UUID",
-			reqOrg:         org,
-			user:           providerUser,
-			pathParam:      "not-a-uuid",
-			queryParams:    map[string]string{"siteId": site.ID.String()},
-			expectedStatus: http.StatusBadRequest,
 		},
 		{
 			name:           "failure - missing siteId",
@@ -550,7 +534,7 @@ func TestGetTrayTasksHandler_Handle(t *testing.T) {
 	tenantUser := testRackBuildUser(t, dbSession, "tenant-user-task-list-tray", org, []string{authz.TenantAdminRole})
 
 	handler := NewGetTrayTasksHandler(dbSession, nil, scp, cfg)
-	trayID := uuid.New().String()
+	trayID := "core-machine-01"
 	taskUUID := uuid.New().String()
 	listed := []*flowv1.Task{{
 		Id:          &flowv1.UUID{Id: taskUUID},
@@ -571,21 +555,12 @@ func TestGetTrayTasksHandler_Handle(t *testing.T) {
 			expectedPage:   &pagination.PageResponse{PageNumber: 1, PageSize: 5, Total: 1},
 			assertFlowReq: func(t *testing.T, req *flowv1.ListTasksRequest, pathParam string) {
 				t.Helper()
-				require.NotNil(t, req.GetComponentId())
 				assert.Equal(t, pathParam, req.GetComponentId().GetId())
 				assert.Nil(t, req.GetRackId())
 				require.NotNil(t, req.GetPagination())
 				assert.Equal(t, int32(0), req.GetPagination().GetOffset())
 				assert.Equal(t, int32(5), req.GetPagination().GetLimit())
 			},
-		},
-		{
-			name:           "failure - invalid tray UUID",
-			reqOrg:         org,
-			user:           providerUser,
-			pathParam:      "not-a-uuid",
-			queryParams:    map[string]string{"siteId": site.ID.String()},
-			expectedStatus: http.StatusBadRequest,
 		},
 		{
 			name:           "failure - missing siteId",
@@ -647,7 +622,6 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 		Message:     "Cancelled by user",
 	}
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -658,7 +632,9 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 		body           any
 		mockTask       *flowv1.Task
 		mockExecErr    error
+		mockResultErr  error
 		expectedStatus int
+		expectNullData bool
 	}{
 		{
 			name:           "success - cancel task returns 202 Accepted",
@@ -718,6 +694,20 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 			mockExecErr:    errors.New("temporal scheduling failed"),
 			expectedStatus: http.StatusInternalServerError,
 		},
+		{
+			name:     "failure - completed task cannot be cancelled",
+			reqOrg:   org,
+			user:     providerUser,
+			taskUUID: taskUUID,
+			body:     model.APICancelTaskRequest{SiteID: site.ID.String()},
+			mockResultErr: tp.NewNonRetryableApplicationError(
+				"task cannot be cancelled",
+				swe.ErrTypeNICoFailedPrecondition,
+				errors.New("task cannot be cancelled (status: failed)"),
+			),
+			expectedStatus: http.StatusPreconditionFailed,
+			expectNullData: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -727,6 +717,8 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
 			if tt.mockTask != nil {
 				testFlowProxyReply(t, mockWorkflowRun, &flowv1.CancelTaskResponse{Task: tt.mockTask})
+			} else if tt.mockResultErr != nil {
+				mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(tt.mockResultErr)
 			}
 			testFlowProxyDispatch(t, mockTemporalClient, mockWorkflowRun, flowv1.Flow_CancelTask_FullMethodName, tt.mockExecErr)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
@@ -745,7 +737,6 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.taskUUID)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err = handler.Handle(ec)
@@ -755,7 +746,15 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			require.Equal(t, tt.expectedStatus, ec.Response().Status)
 			if tt.expectedStatus != http.StatusAccepted {
+				var apiErr map[string]any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiErr))
+				require.NotEmpty(t, apiErr["message"])
+				if tt.expectNullData {
+					require.Contains(t, apiErr, "data")
+					assert.Nil(t, apiErr["data"])
+				}
 				return
 			}
 

@@ -71,6 +71,18 @@ jobs:
       - name: Test secret-scan range resolver
         run: bash .github/ci/test-resolve-secret-scan-range.sh
 
+      - name: Test DevSpace REST integration addresses
+        run: bash dev/deployment/devspace/setup-rest-integration_test.sh
+
+      - name: Test development bootstrap addresses
+        run: python3 -B dev/bin/test_bootstrap_addresses.py
+
+      - name: Test HBN management startup patches
+        run: python3 -B pxe/tests/test_hbn_management.py
+
+      - name: Test Scout interface readiness
+        run: python3 -B pxe/tests/test_scout_network.py
+
       - name: Check Core CI final-gate inventory
         run: python3 -B .github/ci/check_ci_gate.py inventory --policy core .github/workflows/ci.yaml
 
@@ -160,6 +172,8 @@ jobs:
       proto_files_changed: ${{ steps.base-container-gate.outputs.proto_files_changed }}
       core_rpc_proto_files_changed: ${{ steps.base-container-gate.outputs.core_rpc_proto_files_changed }}
       source_files_changed: ${{ steps.base-container-gate.outputs.source_files_changed }}
+      machine_lifecycle_changed: ${{ steps.base-container-gate.outputs.machine_lifecycle_changed }}
+      kea_version: ${{ steps.kea-version.outputs.version }}
       release_build_args: ${{ steps.release-metadata.outputs.build_args }}
       release_build_args_aarch64: ${{ steps.release-metadata.outputs.build_args_aarch64 }}
     steps:
@@ -169,6 +183,10 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
           fetch-tags: true
+
+      - name: Load Kea version
+        id: kea-version
+        run: echo "version=$(cat dev/docker/kea.version)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python for CI helpers
         uses: actions/setup-python@v5
@@ -185,12 +203,16 @@ jobs:
           filters: |
             build_container:
               - 'dev/docker/Dockerfile.build-container-x86_64'
+              - 'dev/docker/kea.version'
             runtime_container:
               - 'dev/docker/Dockerfile.runtime-container-x86_64'
+              - 'dev/docker/kea.version'
             runtime_container_aarch64:
               - 'dev/docker/Dockerfile.runtime-container-aarch64'
+              - 'dev/docker/kea.version'
             build_container_aarch64:
               - 'dev/docker/Dockerfile.build-container-aarch64'
+              - 'dev/docker/kea.version'
             build_artifacts_x86_64:
               - 'dev/docker/Dockerfile.build-artifacts-container-x86_64'
             build_artifacts_aarch64:
@@ -203,10 +225,14 @@ jobs:
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.cargo/**'
               - 'Makefile.toml'
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yaml'
               - 'dev/k8s/machine-a-tron-controller/**'
+            machine_lifecycle:
+              - 'tests/machine-lifecycle/**'
+              - '.github/workflows/ci.yaml'
       - name: Calculate version
         id: version
         run: |
@@ -215,6 +241,10 @@ jobs:
 
           SHORT_SHA=$(git rev-parse --short=7 HEAD)
           echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          # The release Dockerfiles compile without the repository history, so
+          # the committer date the binaries report as build_date comes from here.
+          COMMIT_TIMESTAMP=$(git log -1 --format=%cI)
+          echo "commit_timestamp=${COMMIT_TIMESTAMP}" >> $GITHUB_OUTPUT
           echo "Using Git describe to extract version as VERSION and HELM_VERSION"
           # On a tagged commit this collapses to the clean tag (ex v2.0.0-rc.1);
           # otherwise it is the long form (ex v2.0.0-3-gabc1234) for dev builds.
@@ -282,14 +312,14 @@ jobs:
               exit 1
             fi
           done
-          if [[ "${GITHUB_REPOSITORY}" == "NVIDIA/infra-controller" ]]; then
+          if [[ "${GITHUB_REPOSITORY}" == "dsx-ai-factory/infra-controller" ]]; then
             # canonical endpoints are constants: repository variables must not
             # be able to redirect canonical credentials without a workflow diff
             TARGET="${CANONICAL_DEV}"
             PROD="${CANONICAL_PROD}"
           else
             if [[ -z "${TARGET_OVERRIDE}" ]]; then
-              echo "::error::NICO_TARGET_IMAGE_REGISTRY repository variable is required outside NVIDIA/infra-controller"
+              echo "::error::NICO_TARGET_IMAGE_REGISTRY repository variable is required outside dsx-ai-factory/infra-controller"
               exit 1
             fi
             TARGET="${TARGET_OVERRIDE}"
@@ -311,7 +341,7 @@ jobs:
           fi
           TARGET="${TARGET%/}"
           PROD="${PROD%/}"
-          if [[ "${GITHUB_REPOSITORY}" == "NVIDIA/infra-controller" ]]; then
+          if [[ "${GITHUB_REPOSITORY}" == "dsx-ai-factory/infra-controller" ]]; then
             SOURCE="${CANONICAL_DEV}"
             EXTRAS="${SOURCE}/nvmetal-carbide-extras:latest"
           else
@@ -323,7 +353,7 @@ jobs:
             echo "::error::NICO_EXTRAS_IMAGE must live on the source registry host (${SOURCE%%/*}); refusing to send source credentials to ${EXTRAS%%/*}"
             exit 1
           fi
-          if [[ "${GITHUB_REPOSITORY}" == "NVIDIA/infra-controller" ]]; then
+          if [[ "${GITHUB_REPOSITORY}" == "dsx-ai-factory/infra-controller" ]]; then
             NGC_PATH="${TARGET#*/}"
           else
             NGC_PATH="${NGC_PATH_OVERRIDE:-}"
@@ -394,6 +424,7 @@ jobs:
           PROTO_FILES_CHANGED: ${{ steps.build-container-changes.outputs.proto_files }}
           CORE_RPC_PROTO_FILES_CHANGED: ${{ steps.build-container-changes.outputs.core_rpc_proto_files }}
           SOURCE_FILES_CHANGED: ${{ steps.build-container-changes.outputs.source_files }}
+          MACHINE_LIFECYCLE_CHANGED: ${{ steps.build-container-changes.outputs.machine_lifecycle }}
         run: |
           build_container_x86_64_run=false
           runtime_container_x86_64_run=false
@@ -404,6 +435,7 @@ jobs:
           proto_files_changed=false
           core_rpc_proto_files_changed=false
           source_files_changed=false
+          machine_lifecycle_changed=false
 
           if [[ "${COMMIT_MESSAGE}" =~ ci-rebuild-base-containers ]]; then
             build_container_x86_64_run=true
@@ -426,6 +458,10 @@ jobs:
 
           if [[ "${SOURCE_FILES_CHANGED}" == "true" ]]; then
              source_files_changed=true
+          fi
+
+          if [[ "${MACHINE_LIFECYCLE_CHANGED}" == "true" ]]; then
+             machine_lifecycle_changed=true
           fi
 
           if [[ "${RUNTIME_CONTAINER_X86_64_DOCKERFILE_CHANGED}" == "true" ]]; then
@@ -457,6 +493,7 @@ jobs:
           echo "proto_files_changed=${proto_files_changed}" >> "$GITHUB_OUTPUT"
           echo "core_rpc_proto_files_changed=${core_rpc_proto_files_changed}" >> "$GITHUB_OUTPUT"
           echo "source_files_changed=${source_files_changed}" >> "$GITHUB_OUTPUT"
+          echo "machine_lifecycle_changed=${machine_lifecycle_changed}" >> "$GITHUB_OUTPUT"
 
           MAJOR_MINOR=$(echo "${VERSION}" | cut -d. -f1,2)
           echo "major_minor_version=${MAJOR_MINOR}" >> "$GITHUB_OUTPUT"
@@ -550,7 +587,7 @@ jobs:
           echo "publish_built_container=${PUBLISH}" >> "$GITHUB_OUTPUT"
           # job containers log in before any step runs, so the lint job must
           # never point at a target ref that was not published (mirror PRs)
-          if [[ "${BUILD_X86_RUN}" == "true" && "${GITHUB_REPOSITORY}" != "NVIDIA/infra-controller" && "${PUBLISH}" != "true" ]]; then
+          if [[ "${BUILD_X86_RUN}" == "true" && "${GITHUB_REPOSITORY}" != "dsx-ai-factory/infra-controller" && "${PUBLISH}" != "true" ]]; then
             echo "lint_container_ref=${SOURCE_REGISTRY}/build-container-x86_64:latest" >> "$GITHUB_OUTPUT"
           else
             echo "lint_container_ref=${BUILD_X86_REF}" >> "$GITHUB_OUTPUT"
@@ -565,6 +602,7 @@ jobs:
           RUNTIME_REF_AARCH64: ${{ steps.base-container-gate.outputs.runtime_container_aarch64_ref }}
           VERSION: ${{ steps.version.outputs.version }}
           SHORT_SHA: ${{ steps.version.outputs.short_sha }}
+          COMMIT_TIMESTAMP: ${{ steps.version.outputs.commit_timestamp }}
           HELM_VERSION: ${{ steps.version.outputs.helm_version }}
           BUILD_VERSION: ${{ steps.base-container-gate.outputs.build_container_x86_64_version }}
           RUNTIME_VERSION: ${{ steps.base-container-gate.outputs.runtime_container_x86_64_version }}
@@ -578,10 +616,11 @@ jobs:
           BUILD_ARGS=$(jq -n -c \
             --arg VERSION "$VERSION" \
             --arg SHORT_SHA "$SHORT_SHA" \
+            --arg COMMIT_TIMESTAMP "$COMMIT_TIMESTAMP" \
             --arg BUILD "$BUILD_REF" \
             --arg RUNTIME "$RUNTIME_REF" \
             --arg HELM_VERSION "$HELM_VERSION" \
-            '{VERSION: $VERSION, CI_COMMIT_SHORT_SHA: $SHORT_SHA, CONTAINER_BUILD_X86_64: $BUILD, CONTAINER_RUNTIME_X86_64: $RUNTIME, CARBIDE_BUILD_HELM_VERSION: $HELM_VERSION}')
+            '{VERSION: $VERSION, CI_COMMIT_SHORT_SHA: $SHORT_SHA, CI_COMMIT_TIMESTAMP: $COMMIT_TIMESTAMP, CONTAINER_BUILD_X86_64: $BUILD, CONTAINER_RUNTIME_X86_64: $RUNTIME, CARBIDE_BUILD_HELM_VERSION: $HELM_VERSION}')
 
           echo "build_args=${BUILD_ARGS}" >> "$GITHUB_OUTPUT"
 
@@ -590,10 +629,11 @@ jobs:
           BUILD_ARGS_AARCH64=$(jq -n -c \
             --arg VERSION "$VERSION" \
             --arg SHORT_SHA "$SHORT_SHA" \
+            --arg COMMIT_TIMESTAMP "$COMMIT_TIMESTAMP" \
             --arg BUILD "$BUILD_REF_AARCH64" \
             --arg RUNTIME "$RUNTIME_REF_AARCH64" \
             --arg HELM_VERSION "$HELM_VERSION" \
-            '{VERSION: $VERSION, CI_COMMIT_SHORT_SHA: $SHORT_SHA, CONTAINER_BUILD_AARCH64: $BUILD, CONTAINER_RUNTIME_AARCH64: $RUNTIME, CARBIDE_BUILD_HELM_VERSION: $HELM_VERSION}')
+            '{VERSION: $VERSION, CI_COMMIT_SHORT_SHA: $SHORT_SHA, CI_COMMIT_TIMESTAMP: $COMMIT_TIMESTAMP, CONTAINER_BUILD_AARCH64: $BUILD, CONTAINER_RUNTIME_AARCH64: $RUNTIME, CARBIDE_BUILD_HELM_VERSION: $HELM_VERSION}')
 
           echo "build_args_aarch64=${BUILD_ARGS_AARCH64}" >> "$GITHUB_OUTPUT"
 
@@ -609,12 +649,13 @@ jobs:
     with:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
       dockerfile_path: dev/docker/Dockerfile.build-container-x86_64
+      build_args: '{"KEA_VERSION":"${{ needs.prepare.outputs.kea_version }}"}'
       image_name: ${{ needs.prepare.outputs.image_registry }}/build-container-x86_64
       image_tag: ${{ needs.prepare.outputs.build_container_x86_64_version }}
       additional_tags: ${{ needs.prepare.outputs.build_container_x86_64_version_latest }}
       platforms: linux/amd64
       runner: linux-amd64-cpu4
-      push: ${{ github.repository == 'NVIDIA/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+      push: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
       load: true
       tag_latest: ${{ github.ref == 'refs/heads/main' }}
     secrets: inherit
@@ -627,12 +668,13 @@ jobs:
     with:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
       dockerfile_path: dev/docker/Dockerfile.build-container-aarch64
+      build_args: '{"KEA_VERSION":"${{ needs.prepare.outputs.kea_version }}"}'
       image_name: ${{ needs.prepare.outputs.image_registry }}/build-container-aarch64
       image_tag: ${{ needs.prepare.outputs.build_container_aarch64_version }}
       additional_tags: ${{ needs.prepare.outputs.build_container_aarch64_version_latest }}
       platforms: linux/arm64
       runner: linux-arm64-cpu4
-      push: ${{ github.repository == 'NVIDIA/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+      push: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
       load: false
       tag_latest: ${{ github.ref == 'refs/heads/main' }}
     secrets: inherit
@@ -645,12 +687,13 @@ jobs:
     with:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
       dockerfile_path: dev/docker/Dockerfile.runtime-container-x86_64
+      build_args: '{"KEA_VERSION":"${{ needs.prepare.outputs.kea_version }}"}'
       image_name: ${{ needs.prepare.outputs.image_registry }}/runtime-container-x86_64
       image_tag: ${{ needs.prepare.outputs.runtime_container_x86_64_version }}
       additional_tags: ${{ needs.prepare.outputs.runtime_container_x86_64_version_latest }}
       platforms: linux/amd64
       runner: linux-amd64-cpu4
-      push: ${{ github.repository == 'NVIDIA/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+      push: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
       load: true
       tag_latest: ${{ github.ref == 'refs/heads/main' }}
     secrets: inherit
@@ -663,12 +706,13 @@ jobs:
     with:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
       dockerfile_path: dev/docker/Dockerfile.runtime-container-aarch64
+      build_args: '{"KEA_VERSION":"${{ needs.prepare.outputs.kea_version }}"}'
       image_name: ${{ needs.prepare.outputs.image_registry }}/runtime-container-aarch64
       image_tag: ${{ needs.prepare.outputs.runtime_container_aarch64_version }}
       additional_tags: ${{ needs.prepare.outputs.runtime_container_aarch64_version_latest }}
       platforms: linux/arm64
       runner: linux-arm64-cpu4
-      push: ${{ github.repository == 'NVIDIA/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+      push: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
       load: false
       tag_latest: ${{ github.ref == 'refs/heads/main' }}
     secrets: inherit
@@ -686,7 +730,7 @@ jobs:
       additional_tags: ${{needs.prepare.outputs.build_artifacts_container_x86_64_version_latest }}
       platforms: linux/amd64
       runner: linux-amd64-cpu4
-      push: ${{ github.repository == 'NVIDIA/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+      push: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
       load: true
       tag_latest: ${{ github.ref == 'refs/heads/main' }}
     secrets: inherit
@@ -704,7 +748,7 @@ jobs:
       additional_tags: ${{ needs.prepare.outputs.build_artifacts_container_aarch64_version_latest }}
       platforms: linux/arm64
       runner: linux-arm64-cpu4
-      push: ${{ github.repository == 'NVIDIA/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+      push: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
       load: false
       tag_latest: ${{ github.ref == 'refs/heads/main' }}
     secrets: inherit
@@ -887,7 +931,7 @@ jobs:
     uses: ./.github/workflows/docker-build.yml
     with:
       dockerfile_path: dev/k8s/machine-a-tron-controller/Dockerfile
-      context_path: dev/k8s/machine-a-tron-controller
+      context_path: .
       image_name: ${{ needs.prepare.outputs.image_registry }}/mat-k8s-controller
       image_tag: ${{ needs.prepare.outputs.version }}
       additional_tags: ${{ needs.prepare.outputs.image_registry }}/mat-k8s-controller:${{ needs.prepare.outputs.major_minor_version }}-latest
@@ -900,9 +944,72 @@ jobs:
       timeout_minutes: 30
     secrets: inherit
 
+  build-site-health-probe:
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.source_files_changed == 'true'
+      }}
+    needs:
+      - prepare
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      dockerfile_path: crates/site-health-probe/Dockerfile
+      context_path: .
+      # No layer cache, same reasoning as machine-a-tron above: the Dockerfile
+      # does `COPY . .` before the cargo build, so any new commit invalidates
+      # the builder layer and nothing expensive can ever be restored.
+      cache: false
+      build_args: >-
+        ${{ format('{{"VERSION":"{0}","CI_COMMIT_SHORT_SHA":"{1}"}}',
+          needs.prepare.outputs.version,
+          needs.prepare.outputs.short_sha) }}
+      image_name: ${{ needs.prepare.outputs.image_registry }}/site-health-probe
+      image_tag: ${{ needs.prepare.outputs.version }}
+      additional_tags: ${{ needs.prepare.outputs.image_registry }}/site-health-probe:${{ needs.prepare.outputs.major_minor_version }}-latest
+      platforms: linux/amd64,linux/arm64
+      runner: linux-amd64-cpu16
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: false
+      scan: true
+      tag_latest: false
+      timeout_minutes: 60
+    secrets: inherit
+
   # Like the release-container builds above, deliberately not gated on
   # `check-rest-core-proto-sync`: the tests do not read anything it produces,
   # and `core-ci-pass` still fails the merge when the protos are out of sync.
+  test-mat-k8s-controller:
+    name: test-mat-k8s-controller
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.source_files_changed == 'true'
+      }}
+    needs:
+      - prepare
+    runs-on: linux-amd64-cpu4
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: dev/k8s/machine-a-tron-controller/go.mod
+          cache: true
+          cache-dependency-path: dev/k8s/machine-a-tron-controller/go.sum
+
+      - name: Run the mat-k8s-controller unit tests
+        run: make -C dev/k8s/machine-a-tron-controller test
+
   test-release-container-services:
     if: >-
       ${{
@@ -992,6 +1099,9 @@ jobs:
               /etc/init.d/postgresql start
               sudo -u postgres psql -c "ALTER USER root WITH SUPERUSER;"
               createdb root
+              # Test IPv6 with a separate login without changing the SQLx build database.
+              sudo -u postgres psql -c "CREATE ROLE nico_ipv6_test LOGIN PASSWORD \$\$nico_ipv6_test\$\$;"
+              export NICO_TEST_POSTGRES_URL="postgresql://nico_ipv6_test:nico_ipv6_test@[::1]:5432/postgres?sslmode=disable"
               cargo make test-release-container-services
               sccache --show-stats || true
               echo "sccache directory holds $(du -sh /sccache | cut -f1)"
@@ -1428,6 +1538,89 @@ jobs:
       scan: true
     secrets: inherit
 
+  build-release-machine-validation-basic-plugin-x86:
+    needs:
+      - prepare
+      - build-artifacts-container-x86_64
+      - build-runtime-container-x86_64
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && contains('success,skipped', needs.build-artifacts-container-x86_64.result) && contains('success,skipped', needs.build-runtime-container-x86_64.result) }}
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
+      target_prebuild_login: ${{ needs.prepare.outputs.bases_rebuilt == 'true' && needs.prepare.outputs.publish_images == 'true' }}
+      dockerfile_path: dev/docker/Dockerfile.machine-validation-default-plugin
+      image_name: ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin
+      image_tag: ${{ needs.prepare.outputs.version }}
+      additional_tags: ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin:${{ needs.prepare.outputs.major_minor_version }}-latest
+      build_args: '{"CONTAINER_BUILD":"${{ needs.prepare.outputs.build_artifacts_container_x86_64_ref }}","CONTAINER_RUNTIME_X86_64":"${{ needs.prepare.outputs.runtime_container_x86_64_ref }}"}'
+      platforms: linux/amd64
+      runner: linux-amd64-cpu4
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: true
+      scan: true
+    secrets: inherit
+
+  build-release-machine-validation-basic-plugin-arm:
+    needs:
+      - prepare
+      - build-artifacts-container-aarch64
+      - build-runtime-container-aarch64
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && contains('success,skipped', needs.build-artifacts-container-aarch64.result) && contains('success,skipped', needs.build-runtime-container-aarch64.result) }}
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
+      target_prebuild_login: ${{ needs.prepare.outputs.bases_rebuilt == 'true' && needs.prepare.outputs.publish_images == 'true' }}
+      dockerfile_path: dev/docker/Dockerfile.machine-validation-default-plugin-aarch64
+      image_name: ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin-aarch64
+      image_tag: ${{ needs.prepare.outputs.version }}
+      additional_tags: ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin-aarch64:${{ needs.prepare.outputs.major_minor_version }}-latest
+      build_args: '{"CONTAINER_BUILD_AARCH64":"${{ needs.prepare.outputs.build_artifacts_container_aarch64_ref }}","CONTAINER_RUNTIME_AARCH64":"${{ needs.prepare.outputs.runtime_container_aarch64_ref }}"}'
+      platforms: linux/arm64
+      runner: linux-arm64-cpu4
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: true
+      scan: true
+    secrets: inherit
+
+  merge-manifests-machine-validation-basic-plugin:
+    needs:
+      - prepare
+      - build-release-machine-validation-basic-plugin-x86
+      - build-release-machine-validation-basic-plugin-arm
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.outputs.publish_images == 'true' && needs.build-release-machine-validation-basic-plugin-x86.result == 'success' && needs.build-release-machine-validation-basic-plugin-arm.result == 'success' }}
+    runs-on: linux-amd64-cpu4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to NVCR
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ needs.prepare.outputs.registry_host }}
+          username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+      - name: Create and push multi-arch manifest
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 20
+          command: |
+            set -euo pipefail
+
+            docker buildx imagetools create -t \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin:${{ needs.prepare.outputs.version }} \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin@${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_digest }} \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin-aarch64@${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_digest }}
+
+            docker buildx imagetools create -t \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin:${{ needs.prepare.outputs.major_minor_version }}-latest \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin@${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_digest }} \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin-aarch64@${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_digest }}
+
   build-release-machine-validation-artifacts-x86-host:
     needs:
       - prepare
@@ -1629,7 +1822,7 @@ jobs:
       # The PR mirror's `github.sha` is the submitted head commit. Keep lint on
       # the same revision as the other PR checks and builds. Validation of the
       # exact queued revision is tracked at:
-      # https://github.com/NVIDIA/infra-controller/issues/4587
+      # https://github.com/dsx-ai-factory/infra-controller/issues/4587
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -1687,6 +1880,144 @@ jobs:
         run: bash scripts/check-repo-clean.sh "Core pre-build checks"
 
   # ============================================================================
+  # BUILD STAGE - Machine Lifecycle Test
+  # ============================================================================
+  # The hardware lifecycle test under tests/machine-lifecycle is a Python
+  # project with its own lockfile and runtime image. These jobs run only when
+  # that directory (or this workflow) changes; the image is published on the
+  # same terms as every other image here.
+  test-machine-lifecycle-unit:
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.machine_lifecycle_changed == 'true'
+      }}
+    needs:
+      - prepare
+    runs-on: linux-amd64-cpu4
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: tests/machine-lifecycle
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Same uv release the runtime image pins, so the lockfile resolves the
+      # same way in both places.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.11.32"
+          enable-cache: false
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      - name: Run unit tests
+        run: uv run --frozen pytest tests/unit -p no:cacheprovider
+
+      - name: Lint
+        run: uv run --frozen ruff check lib tests tools
+
+  # The Dockerfile installs packages and syncs the lockfile inside the image,
+  # so each architecture builds natively rather than under emulation, and the
+  # two are joined into one manifest below.
+  build-machine-lifecycle-test-x86_64:
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.machine_lifecycle_changed == 'true'
+      }}
+    needs:
+      - prepare
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      dockerfile_path: tests/machine-lifecycle/docker/mlt_image.Dockerfile
+      context_path: tests/machine-lifecycle
+      image_name: ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-x86_64
+      image_tag: ${{ needs.prepare.outputs.version }}
+      platforms: linux/amd64
+      runner: linux-amd64-cpu4
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: true
+      scan: true
+      tag_latest: false
+      timeout_minutes: 30
+    secrets: inherit
+
+  build-machine-lifecycle-test-aarch64:
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.machine_lifecycle_changed == 'true'
+      }}
+    needs:
+      - prepare
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      dockerfile_path: tests/machine-lifecycle/docker/mlt_image.Dockerfile
+      context_path: tests/machine-lifecycle
+      image_name: ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-aarch64
+      image_tag: ${{ needs.prepare.outputs.version }}
+      platforms: linux/arm64
+      runner: linux-arm64-cpu4
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: true
+      tag_latest: false
+      timeout_minutes: 30
+    secrets: inherit
+
+  merge-manifests-machine-lifecycle-test:
+    needs:
+      - prepare
+      - build-machine-lifecycle-test-x86_64
+      - build-machine-lifecycle-test-aarch64
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.outputs.publish_images == 'true' && needs.build-machine-lifecycle-test-x86_64.result == 'success' && needs.build-machine-lifecycle-test-aarch64.result == 'success' }}
+    runs-on: linux-amd64-cpu4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to NVCR
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ needs.prepare.outputs.registry_host }}
+          username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      - name: Create and push multi-arch manifest
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 20
+          command: |
+            set -euo pipefail
+            docker buildx imagetools create -t \
+              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test:${{ needs.prepare.outputs.version }} \
+              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-x86_64:${{ needs.prepare.outputs.version }} \
+              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-aarch64:${{ needs.prepare.outputs.version }}
+
+            docker buildx imagetools create -t \
+              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test:${{ needs.prepare.outputs.major_minor_version }}-latest \
+              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-x86_64:${{ needs.prepare.outputs.version }} \
+              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-aarch64:${{ needs.prepare.outputs.version }}
+
+  # ============================================================================
   # BUILD STAGE - Helm Chart
   # ============================================================================
 
@@ -1708,6 +2039,36 @@ jobs:
           lint: 'true'
           template: 'true'
 
+      - name: Validate IPv6 Prometheus scrape configuration
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml
+          # Use upstream promtool with Kubernetes discovery, matching kube-prometheus-stack 59.1.0.
+          prometheus_version=2.52.0
+          prometheus_archive="prometheus-${prometheus_version}.linux-amd64.tar.gz"
+          curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v${prometheus_version}/${prometheus_archive}" \
+            -o "${RUNNER_TEMP}/${prometheus_archive}"
+          printf '%s  %s\n' '7f31c5d6474bbff3e514e627e0b7a7fbbd4e5cea3f315fd0b76cad50be4c1ba3' "${RUNNER_TEMP}/${prometheus_archive}" \
+            | sha256sum --check --status
+          tar -xzf "${RUNNER_TEMP}/${prometheus_archive}" -C "${RUNNER_TEMP}" \
+            "prometheus-${prometheus_version}.linux-amd64/promtool"
+          /usr/bin/python3 - <<'PYCONFIG' | "${RUNNER_TEMP}/prometheus-${prometheus_version}.linux-amd64/promtool" check config /dev/stdin
+          import yaml
+          with open("helm-prereqs/observability/values-nico-ipv6-scraping.yaml") as stream:
+              values = yaml.safe_load(stream)
+          print(yaml.safe_dump({"scrape_configs": values["prometheus"]["prometheusSpec"]["additionalScrapeConfigs"]}))
+          PYCONFIG
+          PROMTOOL="${RUNNER_TEMP}/prometheus-${prometheus_version}.linux-amd64/promtool" \
+            /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_ipv6_scraping.py'
+
+      - name: Check Core VIP preflight
+        run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_external_service_vips.py'
+
+      # Uses python3-yaml installed by the configuration check above.
+      - name: Test DevSpace bootstrap manifests
+        run: /usr/bin/python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
+
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
@@ -1715,23 +2076,30 @@ jobs:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_TOKEN }}
           charts: >-
+            bluefield/charts/nico-dpu-agent
+            bluefield/charts/nico-fmds
+            bluefield/charts/nico-otelcol
             helm
             helm/charts/nico-api
             helm/charts/nico-bmc-proxy
             helm/charts/nico-dhcp
             helm/charts/nico-dns
             helm/charts/nico-dsx-exchange-consumer
-            helm/charts/nico-flow
+            helm/nico-flow
             helm/charts/nico-hardware-health
             helm/charts/nico-machine-a-tron
             helm/charts/nico-machine-a-tron/charts/mat-k8s-controller
+            helm/charts/nico-machine-a-tron/charts/nico-site-health-probe
+            helm/charts/nico-ntp
             helm/charts/nico-pxe
             helm/charts/nico-ssh-console-rs
             helm/charts/unbound
             helm/rest/nico-mcp
             helm/rest/nico-rest-site-agent
+            helm/rest/nico-rest/charts/nico-rest-api
             helm/rest/nico-rest/charts/nico-rest-common
             helm/rest/nico-rest/charts/nico-rest-site-manager
+            helm/rest/nico-rest/charts/nico-rest-workflow
 
   build-push-helm-chart:
     needs:
@@ -1774,6 +2142,58 @@ jobs:
           chart-path: helm-prereqs
           lint: 'true'
           template: 'true'
+
+      - name: Run Helm unit tests
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
+        with:
+          plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
+          registry-password: ${{ secrets.NVCR_TOKEN }}
+          charts: helm-prereqs
+
+      - name: Test observability release status
+        run: bash helm-prereqs/tests/install-observability-release-status_test.sh
+
+      - name: Test observability setup gate
+        run: bash helm-prereqs/tests/setup-observability-core-gate_test.sh
+
+      - name: Test legacy Flow upgrade guard
+        run: bash helm-prereqs/tests/setup-legacy-flow-upgrade-guard_test.sh
+
+      - name: Test Flow cleanup order
+        run: bash helm-prereqs/tests/setup-flow-cleanup-order_test.sh
+
+      - name: Test legacy Flow manager cleanup
+        run: bash helm-prereqs/tests/cleanup-legacy-flow-managers_test.sh
+
+      - name: Test REST postgres StatefulSet recreation
+        run: bash helm-prereqs/tests/setup-rest-postgres-statefulset-recreate_test.sh
+
+      - name: Test Vault Kubernetes URLs
+        run: bash helm-prereqs/tests/vault-kubernetes-url_test.sh
+
+      - name: Test health check namespaces
+        run: bash helm-prereqs/tests/health-check-namespaces_test.sh
+
+      - name: Test health check external VIPs
+        run: bash helm-prereqs/tests/health-check-external-vips_test.sh
+
+      - name: Test observability installer DPU output
+        run: bash helm-prereqs/tests/install-observability-dpu-output_test.sh
+
+      - name: Test observability collector addresses
+        run: bash helm-prereqs/tests/observability-collector-addresses_test.sh
+
+      - name: Test observability install summary
+        run: bash helm-prereqs/tests/install-observability-summary_test.sh
+
+      - name: Test DPF single Core deployment
+        run: bash helm-prereqs/tests/setup-dpf-single-core-deploy_test.sh
+
+      - name: Test pinned submodule sync
+        run: bash helm-prereqs/tests/setup-pinned-submodule-sync_test.sh
+
+      - name: Test doca-platform pin
+        run: bash helm-prereqs/tests/doca-platform-pin_test.sh
 
   build-push-helm-prereqs-chart:
     needs:
@@ -2016,12 +2436,33 @@ jobs:
           lint: 'true'
           template: 'true'
 
+      - name: Test nico-dhcp-server listener command
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml busybox
+          /usr/bin/python3 -B bluefield/charts/nico-dhcp-server/tests/test_listener_command.py
+
       - name: Validate nico-fmds chart
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@94bde998f5d7965576b0c663db7d5d709c918167
         with:
           chart-path: bluefield/charts/nico-fmds
           lint: 'true'
           template: 'true'
+
+      - name: Test nico-fmds listener command
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml busybox
+          /usr/bin/python3 -B bluefield/charts/nico-fmds/tests/test_listener_command.py
+
+      - name: Test site-controller OTEL configuration
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml jq
+          /usr/bin/python3 -B bluefield/otel/site-controller/otel-agent/test_render_pod.py
+          /usr/bin/python3 -B bluefield/otel/site-controller/otel-agent/test_resolve_host.py
+          /usr/bin/python3 -B bluefield/otel/site-controller/scripts/test_map_endpoints.py
+          /usr/bin/python3 -B bluefield/otel/site-controller/scripts/test_otel_post_install.py
 
   build-push-bluefield-helm-charts:
     needs:
@@ -2098,6 +2539,8 @@ jobs:
       - build-release-container-aarch64
       - build-machine-a-tron
       - build-mat-k8s-controller
+      - build-site-health-probe
+      - test-mat-k8s-controller
       - test-release-container-services
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
@@ -2108,6 +2551,9 @@ jobs:
       - build-forge-cli-aarch64
       - merge-manifests-forge-cli
       - build-release-machine-validation-runner
+      - build-release-machine-validation-basic-plugin-x86
+      - build-release-machine-validation-basic-plugin-arm
+      - merge-manifests-machine-validation-basic-plugin
       - build-release-machine-validation-artifacts-x86-host
       - build-validate-helm-chart
       - build-push-helm-chart
@@ -2134,7 +2580,7 @@ jobs:
           echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
           echo "$NEEDS" | jq -r '
             to_entries[]
-            | select((.key | startswith("build-")) or (.key | startswith("test-")))
+            | select((.key | startswith("build-")) or (.key | startswith("test-")) or (.key | startswith("merge-manifests-")))
             | "| \(.key) | \(if .value.result == "failure" then "**\(.value.result)**" else .value.result end) |"
           ' >> "$GITHUB_STEP_SUMMARY"
 
@@ -2157,10 +2603,13 @@ jobs:
           IMAGES["build-forge-cli-x86_64"]="${{ needs.build-forge-cli-x86_64.outputs.image_ref }}"
           IMAGES["build-forge-cli-aarch64"]="${{ needs.build-forge-cli-aarch64.outputs.image_ref }}"
           IMAGES["build-release-machine-validation-runner"]="${{ needs.build-release-machine-validation-runner.outputs.image_ref }}"
+          IMAGES["build-release-machine-validation-basic-plugin-x86"]="${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_ref }}"
+          IMAGES["build-release-machine-validation-basic-plugin-arm"]="${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_ref }}"
           IMAGES["build-release-machine-validation-artifacts-x86-host"]="${{ needs.build-release-machine-validation-artifacts-x86-host.outputs.image_ref }}"
           IMAGES["build-release-artifacts-x86-host"]="${{ needs.build-release-artifacts-x86-host.outputs.image_ref }}"
           IMAGES["build-release-artifacts-arm-host"]="${{ needs.build-release-artifacts-arm-host.outputs.image_ref }}"
           IMAGES["build-mat-k8s-controller"]="${{ needs.build-mat-k8s-controller.outputs.image_ref }}"
+          IMAGES["build-site-health-probe"]="${{ needs.build-site-health-probe.outputs.image_ref }}"
 
           for job in "${!IMAGES[@]}"; do
             image="${IMAGES[$job]}"
@@ -2171,7 +2620,7 @@ jobs:
 
   promote-to-be-scanned-image:
     # Skip for pull-request/* branches (main, release/*, and tags are allowed by workflow trigger)
-    if: ${{ !cancelled() && github.repository == 'NVIDIA/infra-controller' && needs.build-release-container-x86_64.result == 'success' && github.event_name != 'schedule' && needs.prepare.outputs.publish_images == 'true' }}
+    if: ${{ !cancelled() && github.repository == 'dsx-ai-factory/infra-controller' && needs.build-release-container-x86_64.result == 'success' && github.event_name != 'schedule' && needs.prepare.outputs.publish_images == 'true' }}
     needs:
       - prepare
       - build-release-container-x86_64
@@ -2205,6 +2654,7 @@ jobs:
       - build-release-container-aarch64
       - build-machine-a-tron
       - build-mat-k8s-controller
+      - build-site-health-probe
       - test-release-container-services
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
@@ -2215,6 +2665,9 @@ jobs:
       - build-forge-cli-aarch64
       - merge-manifests-forge-cli
       - build-release-machine-validation-runner
+      - build-release-machine-validation-basic-plugin-x86
+      - build-release-machine-validation-basic-plugin-arm
+      - merge-manifests-machine-validation-basic-plugin
       - build-release-machine-validation-artifacts-x86-host
       - build-validate-helm-chart
       - build-push-helm-chart
@@ -2248,10 +2701,9 @@ jobs:
   # ============================================================================
   # FINAL CORE CI GATE
   # ============================================================================
-  # Passes only when every required job reports `success` or `skipped`.
-  # `skipped` counts as pass — that's how rest-only PRs unblock when the
-  # `changes` gate intentionally skips the core pipeline.
-  # Any other result, plus missing or malformed data, fails closed.
+  # This is the final required Core check. A skip passes only when `changes`,
+  # `prepare`, the current ref, or the repository says that job did not need to
+  # run. Failures, cancellations, malformed decisions, and other skips fail.
   # Every job that can determine Core CI health is listed so an upstream
   # failure cannot be hidden when its downstream jobs become `skipped`.
   # Reporting-only jobs are explicitly exempted, and the checker in `changes`
@@ -2259,6 +2711,7 @@ jobs:
   # The checker also protects `if: always()` so a failed dependency cannot skip
   # this required check.
   # Branch protection should require only this gate and `rest-ci-pass`.
+  # Update `.github/ci/check_ci_gate.py` when a job gains an allowed skip.
   core-ci-pass:
     name: core-ci-pass
     runs-on: linux-amd64-cpu4
@@ -2282,6 +2735,8 @@ jobs:
       - merge-manifests-nvmetal-carbide
       - build-machine-a-tron
       - build-mat-k8s-controller
+      - build-site-health-probe
+      - test-mat-k8s-controller
       - test-release-container-services
 
       # CLI images
@@ -2304,9 +2759,18 @@ jobs:
 
       # Machine validation images
       - build-release-machine-validation-runner
+      - build-release-machine-validation-basic-plugin-x86
+      - build-release-machine-validation-basic-plugin-arm
+      - merge-manifests-machine-validation-basic-plugin
       - build-release-machine-validation-artifacts-x86-host
       - build-release-machine-validation-artifacts-arm-host
       - merge-manifests-machine-validation
+
+      # Machine lifecycle test
+      - test-machine-lifecycle-unit
+      - build-machine-lifecycle-test-x86_64
+      - build-machine-lifecycle-test-aarch64
+      - merge-manifests-machine-lifecycle-test
 
       # Source and repository policy checks
       - proto-police
@@ -2343,4 +2807,4 @@ jobs:
       - name: Decide pass/fail
         env:
           NEEDS_JSON: ${{ toJson(needs) }}
-        run: python3 -B .github/ci/check_ci_gate.py results
+        run: python3 -B .github/ci/check_ci_gate.py results --workflow core

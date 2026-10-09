@@ -144,7 +144,7 @@ impl<B: Bmc + 'static> GpuInventoryCollector<B> {
             return false;
         };
         let raw = entity.raw();
-        let id = &raw.base.id;
+        let id = &raw.id;
         let state = raw
             .status
             .as_ref()
@@ -176,7 +176,8 @@ impl<B: Bmc + 'static> GpuInventoryCollector<B> {
 
     fn emit_alert(&self, message: String) {
         tracing::warn!(
-            bmc_mac_address = %self.endpoint.addr.mac,
+            bmc_mac_address = self.endpoint.addr.mac.as_ref().map(tracing::field::display),
+            bmc_ip_address = %self.endpoint.addr.ip,
             reason = %message,
             rack_id = self.event_context.rack_id().map(tracing::field::display),
             "GPU inventory alert"
@@ -187,6 +188,7 @@ impl<B: Bmc + 'static> GpuInventoryCollector<B> {
             observed_at: Some(chrono::Utc::now()),
             successes: Vec::new(),
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::GpuInventory,
                 target: None,
                 message,
@@ -233,6 +235,7 @@ fn gpu_count_report(expected: u32, actual: u32) -> HealthReport {
             observed_at: Some(chrono::Utc::now()),
             successes: Vec::new(),
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::GpuInventory,
                 target: None,
                 message: format!(
@@ -248,6 +251,7 @@ fn gpu_count_report(expected: u32, actual: u32) -> HealthReport {
             target: Some(HealthReportTarget::Machine),
             observed_at: Some(chrono::Utc::now()),
             successes: vec![HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::GpuInventory,
                 target: None,
             }],
@@ -311,7 +315,8 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for GpuInventoryCollector<B> {
         // skip this iteration rather than false-alerting on a not-yet-known count.
         let Some(actual) = self.count_gpus() else {
             tracing::debug!(
-                bmc_mac_address = %self.endpoint.addr.mac,
+                bmc_mac_address = self.endpoint.addr.mac.as_ref().map(tracing::field::display),
+                bmc_ip_address = %self.endpoint.addr.ip,
                 rack_id = self.event_context.rack_id().map(tracing::field::display),
                 "Entity inventory not ready yet; skipping GPU inventory iteration"
             );
@@ -325,7 +330,8 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for GpuInventoryCollector<B> {
         let report = gpu_count_report(expected_count, actual);
         if !report.alerts.is_empty() {
             tracing::warn!(
-                bmc_mac_address = %self.endpoint.addr.mac,
+                bmc_mac_address = self.endpoint.addr.mac.as_ref().map(tracing::field::display),
+                bmc_ip_address = %self.endpoint.addr.ip,
                 expected_gpu_count = expected_count,
                 actual_gpu_count = actual,
                 rack_id = self.event_context.rack_id().map(tracing::field::display),
@@ -386,6 +392,7 @@ mod bmc_mock_integration_tests {
                         entity: Arc::new(processor),
                         system: system.clone(),
                         sensors: Vec::new(),
+                        gpu: None,
                     });
                 }
             }
@@ -396,6 +403,8 @@ mod bmc_mock_integration_tests {
                 entities.push(DiscoveredEntity::Chassis {
                     entity: Arc::new(chassis),
                     sensors: Vec::new(),
+                    shelf_power: None,
+                    gpu: None,
                 });
             }
         }

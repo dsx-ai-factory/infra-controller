@@ -29,8 +29,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use carbide_dpf::repository::{DpuRepository, K8sConfigRepository};
 use carbide_dpf::{
     DpfError, DpfSdk, DpfSdkBuilder, DpuDeploymentType, DpuDeviceInfo, DpuNodeInfo,
-    InitDpfResourcesConfig, KubeRepository, NAMESPACE, ServiceDefinition, dpu_node_cr_name,
+    InitDpfResourcesConfigBuilder, KubeRepository, NAMESPACE, ServiceDefinition, dpu_node_cr_name,
 };
+use carbide_utils::redfish::parse_uri_host_ip;
 use clap::{Parser, Subcommand};
 use libredfish::model::BootProgressTypes;
 use libredfish::{Redfish, SystemPowerControl};
@@ -70,7 +71,8 @@ enum Commands {
         #[arg(long)]
         node_id: String,
 
-        /// Comma-separated list of DPU configurations: device_name:dpu_bmc_ip:serial
+        /// Comma-separated list of DPU configurations: device_name:dpu_bmc_ip:serial.
+        /// IPv6 BMC addresses may be bare or enclosed in brackets
         #[arg(long)]
         dpus: String,
 
@@ -246,19 +248,20 @@ fn load_services_from_file(path: &std::path::Path) -> Result<Vec<ServiceDefiniti
 fn parse_dpus(dpus: &str) -> Result<Vec<DpuConfig>, String> {
     dpus.split(',')
         .map(|s| {
-            let parts: Vec<&str> = s.trim().split(':').collect();
-            if parts.len() != 3 {
-                return Err(format!(
-                    "Invalid DPU config '{}', expected device_name:dpu_bmc_ip:serial",
-                    s
-                ));
-            }
+            let (device_name, dpu_bmc_ip, serial_number) = s
+                .trim()
+                .split_once(':')
+                .and_then(|(name, rest)| {
+                    rest.rsplit_once(':').map(|(ip, serial)| (name, ip, serial))
+                })
+                .ok_or_else(|| {
+                    format!("invalid DPU config '{s}', expected device_name:dpu_bmc_ip:serial")
+                })?;
             Ok(DpuConfig {
-                device_name: parts[0].to_string(),
-                dpu_bmc_ip: parts[1]
-                    .parse()
-                    .map_err(|_| format!("Invalid DPU BMC IP '{}'", parts[1]))?,
-                serial_number: parts[2].to_string(),
+                device_name: device_name.to_string(),
+                dpu_bmc_ip: parse_uri_host_ip(dpu_bmc_ip)
+                    .ok_or_else(|| format!("invalid DPU BMC IP '{dpu_bmc_ip}'"))?,
+                serial_number: serial_number.to_string(),
             })
         })
         .collect()
@@ -713,11 +716,10 @@ async fn run_provisioning_flow(
     tracing::info!(host_bmc_ip_address = %host_bmc_ip, dpu_count = dpus.len(), timeout_seconds = timeout_secs, "Starting provisioning");
 
     tracing::info!("[1/4] Initializing DPF resources...");
-    let init_config = InitDpfResourcesConfig {
-        bfb_url: bfb_url.to_string(),
-        services: services.to_vec(),
-        ..Default::default()
-    };
+    let init_config = InitDpfResourcesConfigBuilder::default()
+        .bfb_url(bfb_url)
+        .services(services.to_vec())
+        .build()?;
     sdk.create_initialization_objects(&init_config).await?;
     tracing::info!("BFB, DPUFlavor, and DPUDeployment created");
 
@@ -1076,4 +1078,44 @@ async fn run_watcher(sdk: Arc<DpfSdk<KubeRepository>>) -> Result<(), Box<dyn std
     drop(watcher);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::{Fails, FailsWith};
+    use carbide_test_support::scenarios;
+
+    use super::*;
+
+    #[test]
+    fn parse_dpus_accepts_bare_and_bracketed_ipv6() {
+        let configs =
+            parse_dpus(" bf3-a:192.0.2.10:MT123, bf3-b:2001:db8::10:MT456, bf3-c:[::1]:MT789 ")
+                .unwrap();
+        let expected = [
+            ("bf3-a", "192.0.2.10", "MT123"),
+            ("bf3-b", "2001:db8::10", "MT456"),
+            ("bf3-c", "::1", "MT789"),
+        ];
+        assert_eq!(configs.len(), expected.len());
+        for (config, (name, ip, serial)) in configs.iter().zip(expected) {
+            assert_eq!(config.device_name, name);
+            assert_eq!(config.dpu_bmc_ip, ip.parse::<IpAddr>().unwrap());
+            assert_eq!(config.serial_number, serial);
+        }
+
+        scenarios!(run = |input| parse_dpus(input).map(|_| ());
+            "missing delimiters" {
+                "bf3-a" => Fails,
+                "bf3-a:192.0.2.10" => Fails,
+            }
+            "invalid BMC address" {
+                "bf3-a:[not-an-ip]:MT123" => FailsWith(
+                    "invalid DPU BMC IP '[not-an-ip]'".to_string(),
+                ),
+                "bf3-a:[2001:db8::10:MT123" => Fails,
+                "bf3-a:2001:db8::10]:MT123" => Fails,
+            }
+        );
+    }
 }

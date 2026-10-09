@@ -64,6 +64,7 @@ pub(in crate::extension_service) fn convert_extension_services_to_table(
         "Service ID",
         "Name",
         "Type",
+        "DPU Target",
         "Tenant Organization ID",
         "Version Counter",
         "Active Versions",
@@ -94,6 +95,15 @@ pub(in crate::extension_service) fn convert_extension_services_to_table(
             service.service_id,
             service.service_name,
             service_type_name,
+            match service
+                .dpu_target
+                .and_then(|value| ::rpc::forge::DpuExtensionServiceDpuTarget::try_from(value).ok())
+            {
+                Some(::rpc::forge::DpuExtensionServiceDpuTarget::Primary) => "primary",
+                Some(::rpc::forge::DpuExtensionServiceDpuTarget::AllActive) => "all-active",
+                Some(::rpc::forge::DpuExtensionServiceDpuTarget::All) => "all",
+                _ => "",
+            },
             service.tenant_organization_id,
             service.version_ctr,
             active_versions,

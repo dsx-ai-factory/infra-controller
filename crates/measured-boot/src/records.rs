@@ -31,7 +31,6 @@ use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
 
-use carbide_uuid::DbTable;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::measured_boot::{
     MeasurementApprovedMachineId, MeasurementApprovedProfileId, MeasurementBundleId,
@@ -70,8 +69,9 @@ impl Error for StringToEnumError {}
 ///
 /// Impls DbTable trait for generic selects defined in db/interface/common.rs,
 /// as well as ToTable for printing out details via prettytable.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, carbide_macros::DbTable)]
 #[cfg_attr(feature = "sqlx", derive(FromRow))]
+#[db_table(name = "measurement_system_profiles")]
 pub struct MeasurementSystemProfileRecord {
     // profile_id is the auto-generated UUID assigned to the profile,
     // and internally typed as a MeasurementSystemProfileId.
@@ -87,12 +87,6 @@ pub struct MeasurementSystemProfileRecord {
     pub ts: DateTime<Utc>,
 }
 
-impl DbTable for MeasurementSystemProfileRecord {
-    fn db_table_name() -> &'static str {
-        "measurement_system_profiles"
-    }
-}
-
 impl DisplayName for MeasurementSystemProfileRecord {
     fn display_name() -> &'static str {
         "system profile record"
@@ -103,8 +97,9 @@ impl DisplayName for MeasurementSystemProfileRecord {
 /// the measurement_system_profiles_attrs table in the database.
 ///
 /// Impls DbTable trait for generic selects defined in db/interface/common.rs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, carbide_macros::DbTable)]
 #[cfg_attr(feature = "sqlx", derive(FromRow))]
+#[db_table(name = "measurement_system_profiles_attrs")]
 pub struct MeasurementSystemProfileAttrRecord {
     // attribute_id is the auto-generated UUID assigned to this
     // specific attribute record for its profile attributes.
@@ -137,12 +132,6 @@ pub struct MeasurementSystemProfileAttrRecord {
         serde(skip_serializing_if = "serde_just_print_summary")
     )]
     pub ts: chrono::DateTime<Utc>,
-}
-
-impl DbTable for MeasurementSystemProfileAttrRecord {
-    fn db_table_name() -> &'static str {
-        "measurement_system_profiles_attrs"
-    }
 }
 
 impl DisplayName for MeasurementSystemProfileAttrRecord {
@@ -234,8 +223,9 @@ pub struct MeasurementBundleStateRecord {
 ///
 /// Impls DbTable trait for generic selects defined in db/interface/common.rs,
 /// as well as ToTable for printing out details via prettytable.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, carbide_macros::DbTable)]
 #[cfg_attr(feature = "sqlx", derive(FromRow))]
+#[db_table(name = "measurement_bundles")]
 pub struct MeasurementBundleRecord {
     // bundle_id is the auto-generated UUID for a measurement bundle,
     // and is used as a reference ID for all measurement_bundle_value
@@ -261,12 +251,6 @@ pub struct MeasurementBundleRecord {
     pub ts: chrono::DateTime<Utc>,
 }
 
-impl DbTable for MeasurementBundleRecord {
-    fn db_table_name() -> &'static str {
-        "measurement_bundles"
-    }
-}
-
 impl DisplayName for MeasurementBundleRecord {
     fn display_name() -> &'static str {
         "bundle record"
@@ -277,8 +261,9 @@ impl DisplayName for MeasurementBundleRecord {
 /// from the measurement_bundles_values table.
 ///
 /// Impls DbTable trait for generic selects defined in db/interface/common.rs.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, carbide_macros::DbTable)]
 #[cfg_attr(feature = "sqlx", derive(FromRow))]
+#[db_table(name = "measurement_bundles_values")]
 pub struct MeasurementBundleValueRecord {
     // value_id is the auto-generated UUID for this record.
     #[cfg_attr(
@@ -310,12 +295,6 @@ pub struct MeasurementBundleValueRecord {
     pub ts: chrono::DateTime<Utc>,
 }
 
-impl DbTable for MeasurementBundleValueRecord {
-    fn db_table_name() -> &'static str {
-        "measurement_bundles_values"
-    }
-}
-
 impl DisplayName for MeasurementBundleValueRecord {
     fn display_name() -> &'static str {
         "bundle value record"
@@ -327,8 +306,9 @@ impl DisplayName for MeasurementBundleValueRecord {
 ///
 /// Impls DbTable trait for generic selects defined in db/interface/common.rs,
 /// as well as ToTable for printing out details via prettytable.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, carbide_macros::DbTable)]
 #[cfg_attr(feature = "sqlx", derive(FromRow))]
+#[db_table(name = "measurement_reports")]
 pub struct MeasurementReportRecord {
     // report_id is the auto-generated UUID specific to this report.
     pub report_id: MeasurementReportId,
@@ -338,12 +318,6 @@ pub struct MeasurementReportRecord {
 
     // ts is the timestamp the report record was created.
     pub ts: chrono::DateTime<Utc>,
-}
-
-impl DbTable for MeasurementReportRecord {
-    fn db_table_name() -> &'static str {
-        "measurement_reports"
-    }
 }
 
 impl DisplayName for MeasurementReportRecord {
@@ -357,8 +331,9 @@ impl DisplayName for MeasurementReportRecord {
 ///
 /// Impls DbTable trait for generic selects defined in db/interface/common.rs,
 /// as well as a self-implementation for converting into a PcrRegisterValue.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, carbide_macros::DbTable)]
 #[cfg_attr(feature = "sqlx", derive(FromRow))]
+#[db_table(name = "measurement_reports_values")]
 pub struct MeasurementReportValueRecord {
     // value_id is the auto-generated UUID for this value record.
     #[cfg_attr(
@@ -391,12 +366,6 @@ pub struct MeasurementReportValueRecord {
     pub ts: chrono::DateTime<Utc>,
 }
 
-impl DbTable for MeasurementReportValueRecord {
-    fn db_table_name() -> &'static str {
-        "measurement_reports_values"
-    }
-}
-
 impl DisplayName for MeasurementReportValueRecord {
     fn display_name() -> &'static str {
         "report value record"
@@ -408,8 +377,9 @@ impl DisplayName for MeasurementReportValueRecord {
 ///
 /// Impls DbTable trait for generic selects defined in db/interface/common.rs,
 /// as well as ToTable for printing out details via prettytable.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, carbide_macros::DbTable)]
 #[cfg_attr(feature = "sqlx", derive(FromRow))]
+#[db_table(name = "measurement_journal")]
 pub struct MeasurementJournalRecord {
     // journal is the auto-generated UUID specific to this
     // journal entry.
@@ -451,12 +421,6 @@ pub struct MeasurementJournalRecord {
 
     // ts is the timestamp the journal record was created.
     pub ts: chrono::DateTime<Utc>,
-}
-
-impl DbTable for MeasurementJournalRecord {
-    fn db_table_name() -> &'static str {
-        "measurement_journal"
-    }
 }
 
 impl DisplayName for MeasurementJournalRecord {
@@ -568,7 +532,8 @@ impl fmt::Display for MeasurementApprovedType {
 ///
 /// Impls DbTable trait for generic selects defined in db/interface/common.rs,
 /// as well as ToTable for printing out details via prettytable.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, carbide_macros::DbTable)]
+#[db_table(name = "measurement_approved_machines")]
 pub struct MeasurementApprovedMachineRecord {
     // approval_id is the auto-generated UUID for this approval record.
     pub approval_id: MeasurementApprovedMachineId,
@@ -618,12 +583,6 @@ impl DisplayName for MeasurementApprovedMachineRecord {
     }
 }
 
-impl DbTable for MeasurementApprovedMachineRecord {
-    fn db_table_name() -> &'static str {
-        "measurement_approved_machines"
-    }
-}
-
 #[cfg(feature = "cli")]
 impl ToTable for MeasurementApprovedMachineRecord {
     fn into_table(self) -> eyre::Result<String> {
@@ -650,8 +609,9 @@ impl ToTable for MeasurementApprovedMachineRecord {
 ///
 /// Impls DbTable trait for generic selects defined in db/interface/common.rs,
 /// as well as ToTable for printing out details via prettytable.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, carbide_macros::DbTable)]
 #[cfg_attr(feature = "sqlx", derive(FromRow))]
+#[db_table(name = "measurement_approved_profiles")]
 pub struct MeasurementApprovedProfileRecord {
     // approval_id is the auto-generated UUID for this approval record.
     pub approval_id: MeasurementApprovedProfileId,
@@ -675,12 +635,6 @@ pub struct MeasurementApprovedProfileRecord {
 
     // ts is the timestamp the approval record was created.
     pub ts: chrono::DateTime<Utc>,
-}
-
-impl DbTable for MeasurementApprovedProfileRecord {
-    fn db_table_name() -> &'static str {
-        "measurement_approved_profiles"
-    }
 }
 
 impl DisplayName for MeasurementApprovedProfileRecord {

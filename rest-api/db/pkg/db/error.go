@@ -37,4 +37,8 @@ var (
 	// underlying tx.Commit call fails. HandleTxError detects this sentinel via
 	// errors.Is and renders a user-facing message about transaction commit.
 	ErrTransactionCommit = errors.New("DB transaction commit error")
+	// ErrTransactionSavepoint is returned by Tx.WithSavepoint when creating,
+	// rolling back to, or releasing the savepoint fails. The enclosing
+	// transaction is no longer reliable, so callers should abort it.
+	ErrTransactionSavepoint = errors.New("DB transaction savepoint error")
 )
