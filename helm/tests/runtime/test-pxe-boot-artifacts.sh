@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Exercise the real PXE server through the rendered chart in a disposable kind
+# Manual developer regression using the real PXE server in a disposable kind
 # cluster. PXE_TEST_IMAGE must contain the PXE binary, templates, and coreutils.
 set -euo pipefail
 
@@ -82,7 +82,9 @@ initContainers:
   - name: customize-artifacts
     image: ${fixture_image}
     imagePullPolicy: Never
-    command: ["sh", "-ec", "chmod 0600 /forge-boot-artifacts/blobs/internal/x86_64/restricted.bin"]
+    # Preserve another UID's restrictive tree to exercise the permissions
+    # init's CHOWN, FOWNER, and DAC_OVERRIDE capabilities.
+    command: ["sh", "-ec", "chown -R 20001 /forge-boot-artifacts/blobs/internal/x86_64; chmod 0700 /forge-boot-artifacts/blobs/internal/x86_64; chmod 0600 /forge-boot-artifacts/blobs/internal/x86_64/restricted.bin"]
     volumeMounts:
       - name: boot-artifacts
         mountPath: /forge-boot-artifacts/blobs/internal
@@ -131,13 +133,15 @@ VALUES
   if [[ "$scenario" != bundled ]]; then
     serve_path=/forge-boot-artifacts
     [[ "$scenario" != copied-restrictive ]] || serve_path=/custom-boot-path
+    artifact_owner=0
+    [[ "$scenario" != copied-restrictive ]] || artifact_owner=20001
     [[ "$(kubectl exec -n pxe-test deployment/nico-pxe -c nico-pxe -- \
-      stat -c '%a %u %g' "${serve_path}/blobs/internal/x86_64/restricted.bin")" == '640 0 10001' ]]
+      stat -c '%a %u %g' "${serve_path}/blobs/internal/x86_64/restricted.bin")" == "640 ${artifact_owner} 10001" ]]
     directory_stat="$(kubectl exec -n pxe-test deployment/nico-pxe -c nico-pxe -- \
       stat -c '%a %u %g' "${serve_path}/blobs/internal/x86_64")"
     if [[ "$scenario" == copied-restrictive ]]; then
       # fsGroup sets setgid on volume directories; copied directories can inherit it.
-      [[ "$directory_stat" == '750 0 10001' || "$directory_stat" == '2750 0 10001' ]]
+      [[ "$directory_stat" == '750 20001 10001' || "$directory_stat" == '2750 20001 10001' ]]
     else
       # The legacy Kustomize copier can create the destination with mkdir's 0755
       # before cp runs. It must still normalize the directory's group ownership.

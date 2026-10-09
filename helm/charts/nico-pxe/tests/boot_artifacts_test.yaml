@@ -67,6 +67,15 @@ tests:
       - equal:
           path: spec.template.spec.initContainers[2].securityContext.runAsNonRoot
           value: false
+      - equal:
+          path: spec.template.spec.initContainers[2].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.initContainers[2].securityContext.capabilities.drop
+          value: ["ALL"]
+      - equal:
+          path: spec.template.spec.initContainers[2].securityContext.capabilities.add
+          value: ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
       - matchRegex:
           path: spec.template.spec.initContainers[2].command[2]
           pattern: 'chmod -R g\+rX /forge-boot-artifacts/blobs/internal'
