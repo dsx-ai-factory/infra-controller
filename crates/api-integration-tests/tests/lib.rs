@@ -757,6 +757,7 @@ async fn test_force_delete_waits_for_instance_dpu(
                 delete_interfaces: true,
                 delete_bmc_interfaces: true,
                 wait_for_instance_dpu: true,
+                allow_delete_with_instance: true,
                 ..Default::default()
             };
             let response =

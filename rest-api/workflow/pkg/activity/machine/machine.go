@@ -492,6 +492,16 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				}
 			}
 
+			// A retained deletion record belongs to its owners. Present inventory may
+			// predate completion and must not restore usability or erase associations.
+			if !wasDeleted && existingCloudMachine.IsForceDeletionRequested {
+				terr := txn.Rollback()
+				if terr != nil {
+					slogger.Error().Err(terr).Msg("failed to rollback retained Machine inventory transaction")
+				}
+				continue
+			}
+
 			// If the machine was updated at all since this inventory was received, we
 			// should consider the inventory details stale for this machine.
 			if !wasDeleted && site.IsTimeWithinStaleInventoryThreshold(existingCloudMachine.Updated) {
@@ -532,6 +542,12 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				Status:                &machineStatus,
 				IsMissingOnSite:       cwutil.GetPtr(false),
 				Updated:               &reconcileStamp,
+			}
+
+			if wasDeleted {
+				// Deliberate REST cleanup releases the retained marker. A subsequent
+				// authoritative reappearance can restore the Machine normally.
+				updateInput.IsForceDeletionRequested = cwutil.GetPtr(false)
 			}
 
 			_, serr := mDAO.Update(ctx, txn, updateInput)

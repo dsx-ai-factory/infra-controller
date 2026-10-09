@@ -855,6 +855,9 @@ type ForgeClient interface {
 	UpdateMachineHardwareInfo(ctx context.Context, in *UpdateMachineHardwareInfoRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Force deletes a Machine and the associated DPU from NICo databases,
 	// with the intention of rediscovering the host later on.
+	// The attached-Instance override removes the attached Instance control-plane
+	// record without first requesting a graceful workload shutdown. Force-delete
+	// cleanup may forcibly restart the host.
 	// By default, cleanup does not wait for DPU network acknowledgement. Set
 	// wait_for_instance_dpu to request Admin networking when an Instance exists
 	// and retain the records until every attached DPU acknowledges it. While
@@ -7177,6 +7180,9 @@ type ForgeServer interface {
 	UpdateMachineHardwareInfo(context.Context, *UpdateMachineHardwareInfoRequest) (*emptypb.Empty, error)
 	// Force deletes a Machine and the associated DPU from NICo databases,
 	// with the intention of rediscovering the host later on.
+	// The attached-Instance override removes the attached Instance control-plane
+	// record without first requesting a graceful workload shutdown. Force-delete
+	// cleanup may forcibly restart the host.
 	// By default, cleanup does not wait for DPU network acknowledgement. Set
 	// wait_for_instance_dpu to request Admin networking when an Instance exists
 	// and retain the records until every attached DPU acknowledges it. While

@@ -97,6 +97,35 @@ type APIMachineOnlineRepair struct {
 	Acknowledgments *APIMachineOnlineRepairAcknowledgments `json:"acknowledgments,omitempty"`
 }
 
+// APIMachineDeleteRequest contains the query options for Machine deletion.
+type APIMachineDeleteRequest struct {
+	Force                       bool `query:"force"`
+	AllowDeleteWithInstanceType bool `query:"allowDeleteWithInstanceType"`
+	AllowDeleteWithInstance     bool `query:"allowDeleteWithInstance"`
+	AllowDeleteWithAllocation   bool `query:"allowDeleteWithAllocation"`
+}
+
+// Validate requires force mode for destructive overrides.
+func (r APIMachineDeleteRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.AllowDeleteWithInstanceType, validation.When(!r.Force, validation.Empty.Error("requires force=true"))),
+		validation.Field(&r.AllowDeleteWithInstance, validation.When(!r.Force, validation.Empty.Error("requires force=true"))),
+		validation.Field(&r.AllowDeleteWithAllocation, validation.When(!r.Force, validation.Empty.Error("requires force=true"))),
+	)
+}
+
+// ToProto builds the Core force-delete request. The Instance override also
+// permits removing its Instance Type, matching the administrative CLI.
+func (r APIMachineDeleteRequest) ToProto(machineID string) *corev1.AdminForceDeleteMachineRequest {
+	return &corev1.AdminForceDeleteMachineRequest{
+		HostQuery:                   machineID,
+		DeleteInterfaces:            true,
+		DeleteBmcInterfaces:         true,
+		AllowDeleteWithInstanceType: r.AllowDeleteWithInstanceType || r.AllowDeleteWithInstance,
+		AllowDeleteWithInstance:     r.AllowDeleteWithInstance,
+	}
+}
+
 // APIMachineUpdateRequest is the data structure to capture request to update a Machine
 type APIMachineUpdateRequest struct {
 	// InstanceTypeID is the ID of the InstanceType to set for the Machine

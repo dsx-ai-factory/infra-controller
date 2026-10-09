@@ -370,6 +370,9 @@ service Forge {
 
   // Force deletes a Machine and the associated DPU from NICo databases,
   // with the intention of rediscovering the host later on.
+  // The attached-Instance override removes the attached Instance control-plane
+  // record without first requesting a graceful workload shutdown. Force-delete
+  // cleanup may forcibly restart the host.
   // By default, cleanup does not wait for DPU network acknowledgement. Set
   // wait_for_instance_dpu to request Admin networking when an Instance exists
   // and retain the records until every attached DPU acknowledges it. While
@@ -5737,6 +5740,17 @@ message AdminForceDeleteMachineRequest {
   // so a retry during a rolling upgrade or after a downgrade can delete without
   // acknowledgement.
   bool wait_for_instance_dpu = 9;
+
+  // False or omitted rejects deletion while the Machine is associated with an
+  // Instance Type. True permits deletion and removes that association with the
+  // Machine.
+  bool allow_delete_with_instance_type = 10;
+
+  // False or omitted rejects deletion while an Instance is attached to the
+  // Machine. True permits deletion and removes the attached Instance
+  // control-plane record without first requesting a graceful workload
+  // shutdown; later cleanup may forcibly restart the host.
+  bool allow_delete_with_instance = 11;
 }
 
 // A parked address reservation owned by its MAC with no active interface row.

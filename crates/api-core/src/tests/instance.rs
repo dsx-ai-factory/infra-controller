@@ -4297,6 +4297,8 @@ async fn test_auto_vpc_prefix_selection_force_delete_marks_generated_segment_del
         .unwrap();
 
     let request = AdminForceDeleteMachineRequest {
+        allow_delete_with_instance_type: false,
+        allow_delete_with_instance: true,
         host_query: managed_host.id.to_string(),
         delete_interfaces: false,
         delete_bmc_interfaces: false,

@@ -30395,8 +30395,17 @@ type AdminForceDeleteMachineRequest struct {
 	// so a retry during a rolling upgrade or after a downgrade can delete without
 	// acknowledgement.
 	WaitForInstanceDpu bool `protobuf:"varint,9,opt,name=wait_for_instance_dpu,json=waitForInstanceDpu,proto3" json:"wait_for_instance_dpu,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// False or omitted rejects deletion while the Machine is associated with an
+	// Instance Type. True permits deletion and removes that association with the
+	// Machine.
+	AllowDeleteWithInstanceType bool `protobuf:"varint,10,opt,name=allow_delete_with_instance_type,json=allowDeleteWithInstanceType,proto3" json:"allow_delete_with_instance_type,omitempty"`
+	// False or omitted rejects deletion while an Instance is attached to the
+	// Machine. True permits deletion and removes the attached Instance
+	// control-plane record without first requesting a graceful workload
+	// shutdown; later cleanup may forcibly restart the host.
+	AllowDeleteWithInstance bool `protobuf:"varint,11,opt,name=allow_delete_with_instance,json=allowDeleteWithInstance,proto3" json:"allow_delete_with_instance,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *AdminForceDeleteMachineRequest) Reset() {
@@ -30488,6 +30497,20 @@ func (x *AdminForceDeleteMachineRequest) GetReleasePreservedAddresses() bool {
 func (x *AdminForceDeleteMachineRequest) GetWaitForInstanceDpu() bool {
 	if x != nil {
 		return x.WaitForInstanceDpu
+	}
+	return false
+}
+
+func (x *AdminForceDeleteMachineRequest) GetAllowDeleteWithInstanceType() bool {
+	if x != nil {
+		return x.AllowDeleteWithInstanceType
+	}
+	return false
+}
+
+func (x *AdminForceDeleteMachineRequest) GetAllowDeleteWithInstance() bool {
+	if x != nil {
+		return x.AllowDeleteWithInstance
 	}
 	return false
 }
@@ -73067,7 +73090,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x1dDpuAgentUpgradePolicyResponse\x12>\n" +
 	"\ractive_policy\x18\x01 \x01(\x0e2\x19.forge.AgentUpgradePolicyR\factivePolicy\x12\x1d\n" +
 	"\n" +
-	"did_change\x18\x02 \x01(\bR\tdidChange\"\x95\x04\n" +
+	"did_change\x18\x02 \x01(\bR\tdidChange\"\x98\x05\n" +
 	"\x1eAdminForceDeleteMachineRequest\x12\x1d\n" +
 	"\n" +
 	"host_query\x18\x01 \x01(\tR\thostQuery\x12+\n" +
@@ -73078,7 +73101,10 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x17delete_bmc_suppressions\x18\x06 \x01(\bR\x15deleteBmcSuppressions\x12E\n" +
 	"\x1fdelete_retained_boot_interfaces\x18\a \x01(\bR\x1cdeleteRetainedBootInterfaces\x12>\n" +
 	"\x1brelease_preserved_addresses\x18\b \x01(\bR\x19releasePreservedAddresses\x121\n" +
-	"\x15wait_for_instance_dpu\x18\t \x01(\bR\x12waitForInstanceDpu\"\x81\x01\n" +
+	"\x15wait_for_instance_dpu\x18\t \x01(\bR\x12waitForInstanceDpu\x12D\n" +
+	"\x1fallow_delete_with_instance_type\x18\n" +
+	" \x01(\bR\x1ballowDeleteWithInstanceType\x12;\n" +
+	"\x1aallow_delete_with_instance\x18\v \x01(\bR\x17allowDeleteWithInstance\"\x81\x01\n" +
 	"\x0fReservedAddress\x12\x1d\n" +
 	"\n" +
 	"ip_address\x18\x01 \x01(\tR\tipAddress\x12&\n" +
