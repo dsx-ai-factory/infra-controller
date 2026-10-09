@@ -607,7 +607,6 @@ async fn serve_console(
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::Arc;
     use std::time::Duration;
 
     use bytes::Bytes;
@@ -620,7 +619,6 @@ mod tests {
         validate_executable_in_path,
     };
     use crate::ResourceResetType;
-    use crate::test_support::TestCallbacks;
 
     #[test]
     fn ipmi_sim_executable_is_required() {
@@ -696,10 +694,14 @@ mod tests {
 
     #[tokio::test]
     async fn real_ipmitool_resets_chassis() {
-        let callbacks = Arc::new(TestCallbacks::default());
-        let bmc =
-            crate::test_support::generic_supermicro_bmc_with_callbacks(callbacks.clone()).await;
-        let state = bmc.state;
+        let (_, state) = crate::test_support::create_test_bmc(
+            &crate::test_support::host_info(crate::HardwareType::GenericSupermicro),
+            crate::test_support::TestBmcConfig::default(),
+            "test-host-id".to_string(),
+            false,
+            crate::MachineRouterOptions::default(),
+        );
+        let callbacks = state.callbacks.as_ref().unwrap();
         state
             .account_service_state
             .change_factory_default_password("password");

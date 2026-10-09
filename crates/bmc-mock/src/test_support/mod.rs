@@ -16,50 +16,198 @@
  */
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use axum::routing::get;
 use axum::{Json, Router};
 use axum_http_client::AxumRouterHttpClient;
 use mac_address::MacAddress;
 use nv_redfish::bmc_http::{BmcCredentials, CacheSettings, HttpBmc};
-use tokio::sync::Notify;
+use nv_redfish::schema::resource::PowerState;
+use tokio::sync::{Notify, oneshot};
 use url::Url;
 
+use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult};
 use crate::injection::{Action, Rule, RuleId, Selector};
 use crate::mac_address_pool::{
     Config as MacAddressConfig, MacAddressPool, PoolConfig as MacAddressPoolConfig,
     RangesConfig as MacAddressRangesConfig,
 };
 use crate::machine_info::DpuSettings;
+use crate::redfish::computer_system::SystemState;
 use crate::{
     ActionError, BmcState, Callbacks, CombinedServer, DpuMachineInfo, HardwareType,
     HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions, MockPowerState,
-    ResourceResetType, machine_router,
+    POWER_CYCLE_DELAY, ResourceResetType,
 };
 
 pub mod axum_http_client;
 
-/// Records power commands and refresh notifications without external effects.
-/// Power reads return the configured state (On by default); commands do not change it.
+/// Test backend handle. Reset commands are applied by its paired actor;
+/// successful commands and refresh notifications remain available for assertions.
 #[derive(Debug, Default)]
 pub struct TestCallbacks {
-    power_state: MockPowerState,
     pub(crate) commands: Mutex<Vec<ResourceResetType>>,
     pub(crate) refresh_count: AtomicUsize,
     command_received: Notify,
+    actor: Mutex<Option<TestActorHandle>>,
 }
 
-impl TestCallbacks {
-    #[cfg(test)]
-    pub(crate) fn new(power_state: MockPowerState) -> Self {
-        Self {
-            power_state,
-            ..Default::default()
+#[derive(Debug)]
+struct TestActorHandle {
+    mailbox: ActorMailbox<TestMessage>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for TestActorHandle {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[derive(Debug)]
+enum TestMessage {
+    Reset {
+        reset_type: ResourceResetType,
+        reply: oneshot::Sender<Result<(), ActionError>>,
+    },
+    PowerCycleCompleted,
+}
+
+/// Owns power transitions and publishes observations to the controlled system.
+struct TestActor {
+    power_state: PowerState,
+    power_cycle_pending: bool,
+    state: Weak<SystemState<TestCallbacks>>,
+    callbacks: Weak<TestCallbacks>,
+}
+
+impl TestActor {
+    fn publish(&mut self, power_state: PowerState) {
+        self.power_state = power_state;
+        if let Some(state) = self.state.upgrade() {
+            state.set_power_state(power_state);
         }
     }
 
-    /// Waits up to five seconds for the expected number of recorded commands.
+    fn reset(
+        &mut self,
+        mailbox: &ActorMailbox<TestMessage>,
+        reset_type: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        if self.power_cycle_pending {
+            return Err(ActionError::BadRequest(eyre::eyre!(
+                "test backend is in the middle of power cycling",
+            )));
+        }
+        use ResourceResetType::*;
+        match (reset_type, self.power_state) {
+            (GracefulShutdown | ForceOff | GracefulRestart | ForceRestart, PowerState::Off) => {
+                return Err(ActionError::BadRequest(eyre::eyre!(
+                    "machine is already off"
+                )));
+            }
+            (On | ForceOn, PowerState::On) => {
+                return Err(ActionError::BadRequest(eyre::eyre!(
+                    "machine is already on"
+                )));
+            }
+            _ => {}
+        }
+        match reset_type {
+            On | ForceOn | GracefulRestart | ForceRestart | PushPowerButton | Pause | Resume => {
+                self.publish(PowerState::On);
+            }
+            GracefulShutdown | ForceOff | Nmi | Suspend | Sleep | Hibernate => {
+                self.publish(PowerState::Off);
+            }
+            PowerCycle | FullPowerCycle => {
+                mailbox
+                    .send_at(
+                        (tokio::time::Instant::now() + POWER_CYCLE_DELAY).into(),
+                        TestMessage::PowerCycleCompleted,
+                    )
+                    .map_err(|error| ActionError::Internal(error.into()))?;
+                self.power_cycle_pending = true;
+                self.publish(PowerState::Off);
+            }
+            UnsupportedValue => {}
+        }
+        if let Some(callbacks) = self.callbacks.upgrade() {
+            callbacks.commands.lock().unwrap().push(reset_type);
+            callbacks.command_received.notify_one();
+        }
+        Ok(())
+    }
+}
+
+impl ActorCallbacks<TestMessage> for TestActor {
+    async fn message(
+        &mut self,
+        mailbox: &ActorMailbox<TestMessage>,
+        message: TestMessage,
+    ) -> ActorResult {
+        match message {
+            TestMessage::Reset { reset_type, reply } => {
+                let result = self.reset(mailbox, reset_type);
+                reply.send(result).ok();
+            }
+            TestMessage::PowerCycleCompleted => {
+                self.power_cycle_pending = false;
+                self.publish(PowerState::On);
+            }
+        }
+        ActorResult::Noop
+    }
+}
+
+/// Initial configuration owned by the test backend actor.
+pub(crate) struct TestBmcConfig {
+    pub(crate) power_state: PowerState,
+}
+
+impl Default for TestBmcConfig {
+    fn default() -> Self {
+        Self {
+            power_state: PowerState::On,
+        }
+    }
+}
+
+/// Builds the router and state, and starts the configured power actor.
+/// Dropping the callbacks stops the task.
+pub(crate) fn create_test_bmc(
+    machine_info: &MachineInfo,
+    config: TestBmcConfig,
+    machine_id: String,
+    redfish_auth: bool,
+    options: MachineRouterOptions,
+) -> (Router, BmcState<TestCallbacks>) {
+    let callbacks = Arc::new(TestCallbacks::default());
+    let (router, state) = crate::machine_router(
+        machine_info,
+        callbacks.clone(),
+        machine_id,
+        redfish_auth,
+        options,
+    );
+    let (actor, mailbox) = Actor::new();
+    let mut backend = TestActor {
+        power_state: config.power_state,
+        power_cycle_pending: false,
+        state: Arc::downgrade(&state.system_state),
+        callbacks: Arc::downgrade(&callbacks),
+    };
+    backend.publish(config.power_state);
+    *callbacks.actor.lock().unwrap() = Some(TestActorHandle {
+        mailbox,
+        task: tokio::spawn(actor.run(backend)),
+    });
+    (router, state)
+}
+
+impl TestCallbacks {
+    /// Waits up to five seconds for the expected number of applied commands.
     #[cfg(test)]
     pub(crate) async fn wait_for_command_count(&self, expected_count: usize) {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -78,17 +226,27 @@ impl TestCallbacks {
 
 impl Callbacks for TestCallbacks {
     fn get_power_state(&self) -> MockPowerState {
-        self.power_state
+        panic!("test backend publishes power state instead of using the legacy callback")
     }
 
     async fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,
     ) -> Result<(), ActionError> {
-        self.power_state.validate_reset_type(reset_type)?;
-        self.commands.lock().unwrap().push(reset_type);
-        self.command_received.notify_one();
-        Ok(())
+        let (reply, response) = oneshot::channel();
+        let mailbox = self
+            .actor
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|actor| actor.mailbox.clone())
+            .ok_or_else(|| ActionError::Internal(eyre::eyre!("test power actor is not running")))?;
+        mailbox
+            .send(TestMessage::Reset { reset_type, reply })
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))?
     }
 
     fn state_refresh_indication(&self) {
@@ -164,9 +322,9 @@ pub async fn bmc_for_machine(machine_info: MachineInfo) -> TestBmcHandle {
         MachineInfo::Host(_) => "test-host-id",
         MachineInfo::Dpu(_) => "test-dpu-id",
     };
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &machine_info,
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         machine_id.to_string(),
         false,
         MachineRouterOptions::default(),
@@ -189,9 +347,9 @@ pub(super) fn host_info(hw_type: HardwareType) -> MachineInfo {
 }
 
 pub async fn wiwynn_gb200_bmc() -> TestBmcHandle {
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &host_info(HardwareType::WiwynnGB200Nvl),
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -211,9 +369,9 @@ pub async fn wiwynn_gb200_bmc_at_rack_position(position: u8) -> TestBmcHandle {
         .placement(position),
     );
 
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &machine_info,
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -222,9 +380,9 @@ pub async fn wiwynn_gb200_bmc_at_rack_position(position: u8) -> TestBmcHandle {
 }
 
 pub async fn lenovo_gb300_bmc() -> TestBmcHandle {
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &host_info(HardwareType::LenovoGB300Nvl),
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -233,9 +391,9 @@ pub async fn lenovo_gb300_bmc() -> TestBmcHandle {
 }
 
 pub async fn nvidia_dgx_h100_bmc() -> TestBmcHandle {
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &host_info(HardwareType::NvidiaDgxH100),
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -244,9 +402,9 @@ pub async fn nvidia_dgx_h100_bmc() -> TestBmcHandle {
 }
 
 pub async fn dgx_gb300_bmc() -> TestBmcHandle {
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &host_info(HardwareType::NvidiaDgxGb300),
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -260,9 +418,9 @@ pub async fn dgx_gb300_bmc() -> TestBmcHandle {
 /// (`nvidia_dgx_vr_bluefield4_dpu_bmc`), so there was no way to test exploring
 /// it as a host tray at all. Added while investigating #3159.
 pub async fn nvidia_dgx_vr_host_bmc() -> TestBmcHandle {
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &host_info(HardwareType::NvidiaDgxVr),
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -271,9 +429,9 @@ pub async fn nvidia_dgx_vr_host_bmc() -> TestBmcHandle {
 }
 
 pub async fn supermicro_gb300_bmc() -> TestBmcHandle {
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &host_info(HardwareType::SupermicroGb300Nvl),
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -281,16 +439,23 @@ pub async fn supermicro_gb300_bmc() -> TestBmcHandle {
     .await
 }
 
-/// Creates a generic Supermicro test BMC with a fixed On power state.
+/// Creates a generic Supermicro test BMC that is initially powered on.
 pub async fn generic_supermicro_bmc() -> TestBmcHandle {
-    generic_supermicro_bmc_with_callbacks(Arc::new(TestCallbacks::default())).await
+    test_bmc(create_test_bmc(
+        &host_info(HardwareType::GenericSupermicro),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
 }
 
 /// Creates a generic Supermicro test BMC with the supplied backend callbacks.
 pub async fn generic_supermicro_bmc_with_callbacks<C: Callbacks>(
     callbacks: Arc<C>,
 ) -> TestBmcHandle<C> {
-    test_bmc(machine_router(
+    test_bmc(crate::machine_router(
         &host_info(HardwareType::GenericSupermicro),
         callbacks,
         "test-host-id".to_string(),
@@ -301,9 +466,9 @@ pub async fn generic_supermicro_bmc_with_callbacks<C: Callbacks>(
 }
 
 pub async fn liteon_powershelf_bmc() -> TestBmcHandle {
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &host_info(HardwareType::LiteOnPowerShelf),
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -312,9 +477,9 @@ pub async fn liteon_powershelf_bmc() -> TestBmcHandle {
 }
 
 pub async fn delta_powershelf_bmc() -> TestBmcHandle {
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &host_info(HardwareType::DeltaPowerShelf),
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -330,9 +495,9 @@ pub async fn delta_powershelf_bmc_with_psu_power(states: Vec<bool>) -> TestBmcHa
         MachineInfo::Host(host) => MachineInfo::Host(host.with_delta_psu_power(states)),
         MachineInfo::Dpu(_) => unreachable!("Delta power shelf must be a host"),
     };
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &machine_info,
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -341,9 +506,9 @@ pub async fn delta_powershelf_bmc_with_psu_power(states: Vec<bool>) -> TestBmcHa
 }
 
 pub async fn nvidia_switch_nd5200_ld_bmc() -> TestBmcHandle {
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &host_info(HardwareType::NvidiaSwitchNd5200Ld),
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -352,9 +517,9 @@ pub async fn nvidia_switch_nd5200_ld_bmc() -> TestBmcHandle {
 }
 
 pub async fn nvidia_switch_n5700_ld_bmc() -> TestBmcHandle {
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &host_info(HardwareType::NvidiaSwitchN5700Ld),
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -363,9 +528,9 @@ pub async fn nvidia_switch_n5700_ld_bmc() -> TestBmcHandle {
 }
 
 pub async fn dell_poweredge_r750_bmc() -> TestBmcHandle {
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &host_info(HardwareType::DellPowerEdgeR750),
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -382,9 +547,9 @@ pub async fn dell_poweredge_r750_bluefield3_bmc(settings: DpuSettings) -> TestBm
             settings,
         ))
     };
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &machine_info,
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-dpu-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -394,9 +559,9 @@ pub async fn dell_poweredge_r750_bluefield3_bmc(settings: DpuSettings) -> TestBm
 
 pub async fn dell_poweredge_r760_bluefield4_bmc(dpu: DpuMachineInfo) -> TestBmcHandle {
     let machine_info = MachineInfo::Dpu(dpu);
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &machine_info,
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-dpu-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -413,9 +578,9 @@ pub async fn nvidia_dgx_vr_bluefield4_dpu_bmc(settings: DpuSettings) -> TestBmcH
             settings,
         ))
     };
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &machine_info,
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-dpu-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -424,9 +589,9 @@ pub async fn nvidia_dgx_vr_bluefield4_dpu_bmc(settings: DpuSettings) -> TestBmcH
 }
 
 pub async fn hpe_proliant_dl380a_gen11_bmc() -> TestBmcHandle {
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &host_info(HardwareType::HpeProliantDl380aGen11),
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -435,9 +600,9 @@ pub async fn hpe_proliant_dl380a_gen11_bmc() -> TestBmcHandle {
 }
 
 pub async fn generic_ami_bmc() -> TestBmcHandle {
-    test_bmc(machine_router(
+    test_bmc(create_test_bmc(
         &host_info(HardwareType::GenericAmi),
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -573,9 +738,9 @@ const TEST_DISABLED_INTERFACE: &str = "/redfish/v1/Systems/Self/EthernetInterfac
 pub fn generic_ami_router_with_network_adapter_ports(
     ports: Vec<serde_json::Value>,
 ) -> (axum::Router, BmcState<TestCallbacks>) {
-    let (router, state) = machine_router(
+    let (router, state) = create_test_bmc(
         &host_info(HardwareType::GenericAmi),
-        Arc::new(TestCallbacks::default()),
+        TestBmcConfig::default(),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -721,6 +886,79 @@ mod test {
     use crate::test_support::axum_http_client::Error;
     use crate::test_support::host_info;
 
+    #[tokio::test(start_paused = true)]
+    async fn power_actor_keeps_cycle_off_and_rejects_resets_until_completion() {
+        let (router, state) = create_test_bmc(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            TestBmcConfig::default(),
+            "test-host-id".to_string(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        let callbacks = state.callbacks.as_ref().unwrap();
+        let system = "/redfish/v1/Systems/System.Embedded.1";
+        async fn power(router: &Router, system: &str) -> serde_json::Value {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(system).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            body["PowerState"].clone()
+        }
+        async fn reset(router: &Router, system: &str, reset_type: &str) -> StatusCode {
+            router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("{system}/Actions/ComputerSystem.Reset"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"ResetType": reset_type}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }
+        assert_eq!(power(&router, system).await, "On");
+        for cycle in ["PowerCycle", "FullPowerCycle"] {
+            assert_eq!(reset(&router, system, cycle).await, StatusCode::OK);
+            assert_eq!(power(&router, system).await, "Off");
+            tokio::time::advance(POWER_CYCLE_DELAY - std::time::Duration::from_secs(1)).await;
+            assert_eq!(power(&router, system).await, "Off");
+            assert_eq!(reset(&router, system, "On").await, StatusCode::BAD_REQUEST);
+            assert_eq!(reset(&router, system, cycle).await, StatusCode::BAD_REQUEST);
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while power(&router, system).await != "On" {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("power cycle did not complete");
+        }
+        assert_eq!(reset(&router, system, "ForceOff").await, StatusCode::OK);
+        assert_eq!(power(&router, system).await, "Off");
+        assert_eq!(reset(&router, system, "On").await, StatusCode::OK);
+        assert_eq!(power(&router, system).await, "On");
+        assert_eq!(
+            *callbacks.commands.lock().unwrap(),
+            vec![
+                ResourceResetType::PowerCycle,
+                ResourceResetType::FullPowerCycle,
+                ResourceResetType::ForceOff,
+                ResourceResetType::On,
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn caller_provided_injection_store_is_active() {
         let injection = Arc::new(InjectionStore::new());
@@ -762,10 +1000,9 @@ mod test {
     async fn manager_reset_takes_bmc_offline_then_recovers() {
         use std::time::Duration;
 
-        let callbacks = Arc::new(TestCallbacks::default());
-        let (router, _state) = machine_router(
+        let (router, state) = create_test_bmc(
             &host_info(HardwareType::DellPowerEdgeR750),
-            callbacks.clone(),
+            TestBmcConfig::default(),
             "test-host-id".to_string(),
             false,
             MachineRouterOptions {
@@ -773,6 +1010,7 @@ mod test {
                 ..Default::default()
             },
         );
+        let callbacks = state.callbacks.as_ref().unwrap();
 
         let get = |path: &str| {
             router
@@ -833,9 +1071,9 @@ mod test {
     async fn zero_reset_duration_keeps_the_old_noop_behavior() {
         use std::time::Duration;
 
-        let (router, state) = machine_router(
+        let (router, state) = create_test_bmc(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(TestCallbacks::default()),
+            TestBmcConfig::default(),
             "test-host-id".to_string(),
             false,
             MachineRouterOptions {
@@ -891,9 +1129,9 @@ mod test {
     #[tokio::test]
     async fn transport_supports_expand_query_through_mock_expander() {
         let client = AxumRouterHttpClient::new(
-            machine_router(
+            create_test_bmc(
                 &host_info(HardwareType::DellPowerEdgeR750),
-                Arc::new(TestCallbacks::default()),
+                TestBmcConfig::default(),
                 "test-host-id".to_string(),
                 false,
                 MachineRouterOptions::default(),

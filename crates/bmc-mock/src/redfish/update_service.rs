@@ -1120,8 +1120,8 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::machine_info::HostFirmwareVersions;
-    use crate::test_support::{TestCallbacks, host_info};
-    use crate::{HardwareType, MachineRouterOptions, machine_router};
+    use crate::test_support::{TestBmcConfig, create_test_bmc, host_info};
+    use crate::{HardwareType, MachineRouterOptions};
 
     fn make_router(
         bmc_current: &str,
@@ -1175,9 +1175,9 @@ mod tests {
         } else {
             info
         };
-        machine_router(
+        create_test_bmc(
             &info,
-            StdArc::new(TestCallbacks::default()),
+            TestBmcConfig::default(),
             "test".into(),
             false,
             MachineRouterOptions::default(),
