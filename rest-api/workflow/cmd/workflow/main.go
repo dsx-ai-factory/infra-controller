@@ -510,24 +510,25 @@ func run(ctx context.Context) error {
 // runWorker triggers the Cloud cron workflows, then runs w until interruptCh fires.
 // w.Run blocks until the worker stops, so the crons have to be triggered before it.
 // ExecuteWorkflow returns the existing run of a cron that is already running, so every
-// start can trigger them.
+// start can trigger them. A trigger that still fails after the SDK's retries returns
+// before the worker runs, so the pod restarts and triggers the crons again.
 func runWorker(ctx context.Context, tc tsdkClient.Client, w tsdkWorker.Worker, namespace string, interruptCh <-chan interface{}) error {
 	if namespace == cwfn.CloudNamespace {
 		_, err := siteWorkflow.ExecuteMonitorHealthForAllSitesWorkflow(ctx, tc)
 		if err != nil {
-			log.Error().Err(err).Msg("failed to trigger Site Health Monitor workflow")
+			return fmt.Errorf("failed to trigger Site Health Monitor workflow: %w", err)
 		}
 
 		// Trigger MonitorTemporalCertExpirationForAllSites
 		_, err = siteWorkflow.ExecuteMonitorTemporalCertExpirationForAllSites(ctx, tc)
 		if err != nil {
-			log.Error().Err(err).Msg("failed to trigger Temporal Cert Expiration Monitor workflow")
+			return fmt.Errorf("failed to trigger Temporal Cert Expiration Monitor workflow: %w", err)
 		}
 
 		// Trigger MonitorSiteTemporalNamespaces
 		_, err = siteWorkflow.ExecuteMonitorSiteTemporalNamespaces(ctx, tc)
 		if err != nil {
-			log.Error().Err(err).Msg("failed to trigger Monitor Site Temporal Namespaces workflow")
+			return fmt.Errorf("failed to trigger Monitor Site Temporal Namespaces workflow: %w", err)
 		}
 	}
 
