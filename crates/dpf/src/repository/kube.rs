@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams, Preconditions};
 use kube::runtime::controller::Action;
@@ -748,6 +749,15 @@ impl K8sConfigRepository for KubeRepository {
 
 #[async_trait]
 impl DpfOperatorConfigRepository for KubeRepository {
+    async fn get_controller_deployment(
+        &self,
+        name: &str,
+        namespace: &str,
+    ) -> Result<Option<Deployment>, DpfError> {
+        let api: Api<Deployment> = self.api(namespace);
+        Ok(api.get_opt(name).await?)
+    }
+
     async fn get(
         &self,
         name: &str,

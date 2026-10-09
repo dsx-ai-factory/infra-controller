@@ -15,13 +15,14 @@
  * limitations under the License.
  */
 
-//! Repository traits for DPF CRD operations.
+//! Repository traits for DPF resources and controller workloads.
 
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use k8s_openapi::api::apps::v1::Deployment;
 
 use crate::crds::bfbs_generated::BFB;
 use crate::crds::bluefieldsoftwares_generated::BlueFieldSoftware;
@@ -310,9 +311,22 @@ pub trait K8sConfigRepository: Send + Sync {
     ) -> Result<(), DpfError>;
 }
 
-/// Repository for DPFOperatorConfig resources.
+/// Repository for DPFOperatorConfig resources and their controller workloads.
 #[async_trait]
 pub trait DpfOperatorConfigRepository: Send + Sync {
+    /// Read a DPF controller workload for version-independent upgrade health checks.
+    /// Missing workloads return `None`; backends without read support return an
+    /// error, so the upgrade exception fails closed with a diagnostic.
+    async fn get_controller_deployment(
+        &self,
+        _name: &str,
+        _namespace: &str,
+    ) -> Result<Option<Deployment>, DpfError> {
+        Err(DpfError::ConfigError(
+            "Repository does not support DPF controller workload reads".to_string(),
+        ))
+    }
+
     async fn get(&self, name: &str, namespace: &str)
     -> Result<Option<DPFOperatorConfig>, DpfError>;
 

@@ -33,3 +33,16 @@ tests:
             resources: ["secrets"]
             resourceNames: ["bmc-shared-password"]
             verbs: ["delete"]
+
+  - it: reads only the controller deployments needed for upgrade recovery
+    documentIndex: 0
+    set:
+      dpf.rbacCreate: true
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["apps"]
+            resources: ["deployments"]
+            resourceNames: ["dpf-provisioning-controller-manager", "dpuservice-controller-manager"]
+            verbs: ["get"]

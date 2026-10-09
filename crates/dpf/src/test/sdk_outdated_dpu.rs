@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use k8s_openapi::api::apps::v1::Deployment;
 use kube::core::ObjectMeta;
 
 use crate::crds::dpfoperatorconfigs_generated::DPFOperatorConfig;
@@ -56,6 +57,7 @@ struct OutdatedDpuMock {
     dpus: Arc<DashMap<String, DPU>>,
     deployments: Arc<DashMap<String, DPUDeployment>>,
     operator_config: Arc<DashMap<String, DPFOperatorConfig>>,
+    controller_deployments: Arc<DashMap<String, Deployment>>,
     dpu_list_selectors: Arc<Mutex<Vec<Option<String>>>>,
 }
 
@@ -121,6 +123,17 @@ impl DpuRepository for OutdatedDpuMock {
 
 #[async_trait]
 impl DpfOperatorConfigRepository for OutdatedDpuMock {
+    async fn get_controller_deployment(
+        &self,
+        name: &str,
+        _namespace: &str,
+    ) -> Result<Option<Deployment>, DpfError> {
+        Ok(self
+            .controller_deployments
+            .get(name)
+            .map(|deployment| deployment.clone()))
+    }
+
     async fn get(&self, name: &str, _ns: &str) -> Result<Option<DPFOperatorConfig>, DpfError> {
         Ok(self.operator_config.get(name).map(|c| c.clone()))
     }
@@ -781,4 +794,494 @@ async fn a_dpu_without_an_owner_label_is_an_error() {
     let mock = OutdatedDpuMock::with(orphan, deployment(Some("bf-bundle-abc"), None, true));
 
     assert!(is_outdated(mock).await.is_err());
+}
+
+/// The operator reports current pre-upgrade validation failure before component
+/// reconciliation, so aggregate readiness cannot gate recovery from stale DPUs.
+fn upgrade_pending_mock(dpu: DPU, deployment: DPUDeployment) -> OutdatedDpuMock {
+    let mock = OutdatedDpuMock::with(dpu, deployment);
+    let config = serde_json::from_value(serde_json::json!({
+        "apiVersion": "operator.dpu.nvidia.com/v1alpha1",
+        "kind": "DPFOperatorConfig",
+        "metadata": { "name": "dpfoperatorconfig", "generation": 2 },
+        "spec": { "deploymentMode": "zero-trust", "provisioningController": {} },
+        "status": { "observedGeneration": 2, "version": "v26.4.0", "conditions": [{
+            "type": "Ready", "status": "False", "observedGeneration": 2,
+            "lastTransitionTime": "2026-01-01T00:00:00Z",
+            "reason": "Pending",
+        }, {
+            "type": "PreUpgradeValidationReady", "status": "False", "observedGeneration": 2,
+            "lastTransitionTime": "2026-01-01T00:00:00Z",
+            "reason": "Error",
+        }, {
+            "type": "ImagePullSecretsReconciled", "status": "True", "observedGeneration": 2,
+            "lastTransitionTime": "2026-01-01T00:00:00Z", "reason": "Success",
+        }, {
+            "type": "SystemComponentsReconciled", "status": "True", "observedGeneration": 2,
+            "lastTransitionTime": "2026-01-01T00:00:00Z", "reason": "Success",
+        }, {
+            "type": "SystemComponentsReady", "status": "False", "observedGeneration": 2,
+            "lastTransitionTime": "2026-01-01T00:00:00Z", "reason": "Error",
+        }] },
+    }))
+    .expect("valid operator config");
+    mock.operator_config
+        .insert("dpfoperatorconfig".to_string(), config);
+    for name in [
+        "dpf-provisioning-controller-manager",
+        "dpuservice-controller-manager",
+    ] {
+        let deployment = serde_json::from_value(serde_json::json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": name, "namespace": TEST_NS, "generation": 1,
+                "labels": {"operator.dpu.nvidia.com/dpf-version": "v26.4.0"}},
+            "spec": {"replicas": 1, "selector": {"matchLabels": {"app": name}},
+                "template": {"metadata": {"labels": {"app": name}},
+                    "spec": {"containers": [{"name": "manager", "image": "old-dpf"}]}}},
+            "status": {"observedGeneration": 1, "replicas": 1,
+                "readyReplicas": 1, "availableReplicas": 1}
+        }))
+        .unwrap();
+        mock.controller_deployments
+            .insert(name.to_string(), deployment);
+    }
+    mock
+}
+
+#[tokio::test]
+async fn outdated_scan_requires_a_current_operator_or_upgrade_blocker() {
+    let stale = dpu(
+        Some("bf-bundle-abc"),
+        None,
+        Some("/bfb/test-namespace-bf-bundle-abc.bfb"),
+        "old-flavor",
+    );
+    let desired = deployment(Some("bf-bundle-abc"), None, true);
+    let mock = upgrade_pending_mock(stale.clone(), desired.clone());
+    let blocked = mock
+        .operator_config
+        .get("dpfoperatorconfig")
+        .unwrap()
+        .clone();
+    let mut ready = blocked.clone();
+    let conditions = ready.status.as_mut().unwrap().conditions.as_mut().unwrap();
+    conditions[0].status = "True".to_string();
+    conditions.truncate(1);
+    let mut unrelated = blocked.clone();
+    unrelated
+        .status
+        .as_mut()
+        .unwrap()
+        .conditions
+        .as_mut()
+        .unwrap()
+        .truncate(1);
+    let mut stale_ready = blocked.clone();
+    stale_ready
+        .status
+        .as_mut()
+        .unwrap()
+        .conditions
+        .as_mut()
+        .unwrap()[0]
+        .observed_generation = Some(1);
+    let mut stale_validation = blocked.clone();
+    stale_validation
+        .status
+        .as_mut()
+        .unwrap()
+        .conditions
+        .as_mut()
+        .unwrap()[1]
+        .observed_generation = Some(1);
+    let mut unknown = blocked.clone();
+    unknown
+        .status
+        .as_mut()
+        .unwrap()
+        .conditions
+        .as_mut()
+        .unwrap()[0]
+        .status = "Unknown".to_string();
+    let mut deleting = ready.clone();
+    deleting.metadata.deletion_timestamp =
+        Some(serde_json::from_value(serde_json::json!("2026-01-01T00:00:00Z")).unwrap());
+    let mut no_status = blocked.clone();
+    no_status.status = None;
+    let mut no_generation = blocked.clone();
+    no_generation.metadata.generation = None;
+
+    let mut cases = vec![
+        ("ready operator", Some(ready), 1),
+        (
+            "upgrade blocker without targetVersion",
+            Some(blocked.clone()),
+            1,
+        ),
+        ("absent operator", None, 0),
+        ("unready outside pre-upgrade validation", Some(unrelated), 0),
+        ("stale aggregate readiness", Some(stale_ready), 0),
+        ("stale upgrade validation", Some(stale_validation), 0),
+        ("unknown aggregate readiness", Some(unknown), 0),
+        ("deleting operator", Some(deleting), 0),
+        ("missing operator status", Some(no_status), 0),
+        ("missing operator generation", Some(no_generation), 0),
+    ];
+    for (name, path, value) in [
+        (
+            "stale operator status",
+            "/status/observedGeneration",
+            serde_json::json!(1),
+        ),
+        (
+            "new operator",
+            "/status/observedGeneration",
+            serde_json::json!(0),
+        ),
+        (
+            "missing installed version",
+            "/status/version",
+            serde_json::Value::Null,
+        ),
+        (
+            "empty installed version",
+            "/status/version",
+            serde_json::json!(""),
+        ),
+        (
+            "unrecognized validation failure",
+            "/status/conditions/1/reason",
+            serde_json::json!("Failure"),
+        ),
+        (
+            "unknown validation",
+            "/status/conditions/1/status",
+            serde_json::json!("Unknown"),
+        ),
+        (
+            "validation succeeded",
+            "/status/conditions/1/status",
+            serde_json::json!("True"),
+        ),
+        (
+            "component failure outside expected upgrade readiness",
+            "/status/conditions/4/reason",
+            serde_json::json!("Failure"),
+        ),
+        (
+            "unknown component",
+            "/status/conditions/4/status",
+            serde_json::json!("Unknown"),
+        ),
+        (
+            "stale component readiness",
+            "/status/conditions/4/observedGeneration",
+            serde_json::json!(1),
+        ),
+        (
+            "failed component reconciliation",
+            "/status/conditions/3/status",
+            serde_json::json!("False"),
+        ),
+    ] {
+        let mut config = serde_json::to_value(&blocked).unwrap();
+        *config.pointer_mut(path).unwrap() = value;
+        cases.push((name, Some(serde_json::from_value(config).unwrap()), 0));
+    }
+    for (name, index) in [
+        ("missing component readiness", 4),
+        ("missing component reconciliation", 3),
+        ("missing image-pull-secret reconciliation", 2),
+    ] {
+        let mut config = blocked.clone();
+        config
+            .status
+            .as_mut()
+            .unwrap()
+            .conditions
+            .as_mut()
+            .unwrap()
+            .remove(index);
+        cases.push((name, Some(config), 0));
+    }
+    let mut upgraded = serde_json::to_value(&blocked).unwrap();
+    upgraded["status"]["targetVersion"] = serde_json::json!("v26.4.0");
+    cases.push((
+        "equal installed and target versions",
+        Some(serde_json::from_value(upgraded.clone()).unwrap()),
+        0,
+    ));
+    upgraded["status"]["targetVersion"] = serde_json::json!("v26.8.0");
+    cases.push((
+        "explicit target version upgrade",
+        Some(serde_json::from_value(upgraded).unwrap()),
+        1,
+    ));
+    let mut paused = serde_json::to_value(&blocked).unwrap();
+    paused["spec"]["overrides"] = serde_json::json!({ "paused": true });
+    cases.push((
+        "paused operator",
+        Some(serde_json::from_value(paused).unwrap()),
+        0,
+    ));
+    let mut other_failure = blocked;
+    let mut extra = other_failure
+        .status
+        .as_ref()
+        .unwrap()
+        .conditions
+        .as_ref()
+        .unwrap()[4]
+        .clone();
+    extra.type_ = "CATrustBundleReady".to_string();
+    extra.status = "False".to_string();
+    other_failure
+        .status
+        .as_mut()
+        .unwrap()
+        .conditions
+        .as_mut()
+        .unwrap()
+        .push(extra);
+    cases.push(("other current validation failure", Some(other_failure), 0));
+
+    for (name, config, expected_count) in cases.into_boxed_slice() {
+        let mock = upgrade_pending_mock(stale.clone(), desired.clone());
+        mock.operator_config.clear();
+        if let Some(config) = config {
+            mock.operator_config
+                .insert("dpfoperatorconfig".to_string(), config);
+        }
+        let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NS, String::new())
+            .build_without_resources()
+            .await
+            .expect(name);
+        assert_eq!(
+            sdk.find_outdated_dpus_dpf(None).await.unwrap().len(),
+            expected_count,
+            "{name}"
+        );
+        if expected_count == 0 {
+            assert!(mock.dpu_list_selectors.lock().unwrap().is_empty(), "{name}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn controller_workload_reads_require_backend_support() {
+    let result = DpfOperatorConfigRepository::get_controller_deployment(
+        &super::helpers::ConfigMock,
+        "dpf-provisioning-controller-manager",
+        TEST_NS,
+    )
+    .await;
+    assert!(matches!(result, Err(DpfError::ConfigError(_))));
+}
+
+#[tokio::test]
+async fn pending_upgrade_requires_available_replacement_controllers() {
+    let stale = dpu(
+        Some("bf-bundle-abc"),
+        None,
+        Some("/bfb/test-namespace-bf-bundle-abc.bfb"),
+        "old-flavor",
+    );
+    let desired = deployment(Some("bf-bundle-abc"), None, true);
+    for (name, path, value) in [
+        (
+            "old version with available controllers",
+            "",
+            serde_json::Value::Null,
+        ),
+        ("missing controller", "missing", serde_json::Value::Null),
+        (
+            "scaled down controller",
+            "/spec/replicas",
+            serde_json::json!(0),
+        ),
+        (
+            "stale workload status",
+            "/status/observedGeneration",
+            serde_json::json!(0),
+        ),
+        (
+            "no controller replicas",
+            "/status/replicas",
+            serde_json::json!(0),
+        ),
+        (
+            "controller replicas not ready",
+            "/status/readyReplicas",
+            serde_json::json!(0),
+        ),
+        (
+            "controller replicas unavailable",
+            "/status/availableReplicas",
+            serde_json::json!(0),
+        ),
+        (
+            "missing workload status",
+            "/status",
+            serde_json::Value::Null,
+        ),
+        (
+            "deleting controller",
+            "/metadata/deletionTimestamp",
+            serde_json::json!("2026-01-01T00:00:00Z"),
+        ),
+    ] {
+        for controller in [
+            "dpf-provisioning-controller-manager",
+            "dpuservice-controller-manager",
+        ] {
+            let mock = upgrade_pending_mock(stale.clone(), desired.clone());
+            if path == "missing" {
+                mock.controller_deployments.remove(controller);
+            } else if !path.is_empty() {
+                let mut workload = serde_json::to_value(
+                    mock.controller_deployments.get(controller).unwrap().value(),
+                )
+                .unwrap();
+                if path == "/metadata/deletionTimestamp" {
+                    workload["metadata"]["deletionTimestamp"] = value.clone();
+                } else {
+                    *workload.pointer_mut(path).unwrap() = value.clone();
+                }
+                mock.controller_deployments.insert(
+                    controller.to_string(),
+                    serde_json::from_value(workload).unwrap(),
+                );
+            }
+            let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NS, String::new())
+                .build_without_resources()
+                .await
+                .unwrap();
+            assert_eq!(
+                sdk.find_outdated_dpus_dpf(None).await.unwrap().len(),
+                usize::from(path.is_empty()),
+                "{name}: {controller}"
+            );
+            if !path.is_empty() {
+                assert!(
+                    mock.dpu_list_selectors.lock().unwrap().is_empty(),
+                    "{name}: {controller}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn pending_upgrade_discovers_only_drift_against_reconciled_deployments() {
+    let stale = dpu(
+        Some("bf-bundle-abc"),
+        None,
+        Some("/bfb/test-namespace-bf-bundle-abc.bfb"),
+        "old-flavor",
+    );
+    let desired = deployment(Some("bf-bundle-abc"), None, true);
+    let mut old_generation = desired.clone();
+    old_generation.metadata.generation = Some(2);
+    let unknown_owner = set_dpu_owner(stale.clone(), "unknown-deployment");
+    let mut missing_owner = stale.clone();
+    missing_owner.metadata.labels = None;
+    let current = dpu(
+        Some("bf-bundle-abc"),
+        None,
+        Some("/bfb/test-namespace-bf-bundle-abc.bfb"),
+        FLAVOR,
+    );
+
+    for (name, dpu, deployment, expected_count) in vec![
+        (
+            "stale flavor during upgrade",
+            stale.clone(),
+            desired.clone(),
+            1,
+        ),
+        (
+            "unreconciled deployment",
+            stale.clone(),
+            deployment(Some("bf-bundle-abc"), None, false),
+            0,
+        ),
+        (
+            "stale observed generation",
+            stale.clone(),
+            old_generation,
+            0,
+        ),
+        ("current DPU", current, desired.clone(), 0),
+        ("unknown owner", unknown_owner, desired.clone(), 0),
+        ("missing owner label", missing_owner, desired, 0),
+        (
+            "no provisioning source",
+            stale.clone(),
+            deployment(None, None, true),
+            0,
+        ),
+        (
+            "ambiguous provisioning source",
+            stale,
+            deployment(Some("bf-bundle-abc"), Some("software"), true),
+            0,
+        ),
+    ]
+    .into_boxed_slice()
+    {
+        let mock = upgrade_pending_mock(dpu, deployment);
+        let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NS, String::new())
+            .build_without_resources()
+            .await
+            .expect("sdk");
+        let mismatches = sdk
+            .find_outdated_dpus_dpf(Some("test/controlled=true"))
+            .await
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(mismatches.len(), expected_count, "{name}");
+        if let Some(mismatch) = mismatches.first() {
+            assert_eq!(mismatch.dpu_cr_name, DPU_NAME);
+            assert_eq!(mismatch.target_source, "test-namespace-bf-bundle-abc.bfb");
+            assert_eq!(
+                *mock.dpu_list_selectors.lock().unwrap(),
+                vec![Some("test/controlled=true".to_string())]
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn replacement_is_current_only_after_its_desired_bfb_is_installed() {
+    let mock = upgrade_pending_mock(
+        dpu(
+            Some("bf-bundle-abc"),
+            None,
+            Some("/bfb/test-namespace-bf-bundle-abc.bfb"),
+            "old-flavor",
+        ),
+        deployment(Some("bf-bundle-abc"), None, true),
+    );
+    let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NS, String::new())
+        .build_without_resources()
+        .await
+        .expect("sdk");
+    assert_eq!(sdk.find_outdated_dpus_dpf(None).await.unwrap().len(), 1);
+
+    sdk.reprovision_dpu("001", "node-host-001").await.unwrap();
+    assert!(mock.dpus.get(DPU_NAME).is_none());
+
+    let mut replacement = dpu(Some("bf-bundle-abc"), None, None, FLAVOR);
+    replacement.status.as_mut().unwrap().phase = DpuStatusPhase::Pending;
+    mock.dpus.insert(DPU_NAME.to_string(), replacement.clone());
+    assert!(sdk.is_dpu_outdated(DPU_NAME).await.unwrap());
+
+    replacement.status.as_mut().unwrap().phase = DpuStatusPhase::Ready;
+    mock.dpus.insert(DPU_NAME.to_string(), replacement.clone());
+    assert!(sdk.is_dpu_outdated(DPU_NAME).await.unwrap());
+
+    replacement.status.as_mut().unwrap().bfb_file =
+        Some("/bfb/test-namespace-bf-bundle-abc.bfb".to_string());
+    mock.dpus.insert(DPU_NAME.to_string(), replacement);
+    assert!(!sdk.is_dpu_outdated(DPU_NAME).await.unwrap());
+    assert!(sdk.find_outdated_dpus_dpf(None).await.unwrap().is_empty());
 }

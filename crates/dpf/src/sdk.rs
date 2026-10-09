@@ -3621,53 +3621,115 @@ impl<R: DpuRepository + DpuDeploymentRepository, L: ResourceLabeler> DpfSdk<R, L
     }
 }
 
-/// Name of the singleton DPFOperatorConfig, as created by helm-prereqs and by the
-/// manual install in `docs/manuals/dpf.md`.
-const DPF_OPERATOR_CONFIG_NAME: &str = "dpfoperatorconfig";
-
 impl<R: DpuDeploymentRepository + DpuRepository + DpfOperatorConfigRepository, L> DpfSdk<R, L> {
-    /// Whether the DPF operator reports `Ready=True` at its current generation.
-    ///
-    /// Fails closed: absent, unreconciled, or condition-less all read as not
-    /// ready, so callers that gate disruptive work skip rather than guess.
-    async fn dpf_operator_config_is_ready(&self) -> Result<bool, DpfError> {
-        let config = DpfOperatorConfigRepository::get(
-            &*self.repo,
-            DPF_OPERATOR_CONFIG_NAME,
-            &self.namespace,
-        )
-        .await?;
-
-        let Some(config) = config else {
-            tracing::info!(
-                name = DPF_OPERATOR_CONFIG_NAME,
-                namespace = %self.namespace,
-                "DPFOperatorConfig not found; treating DPF as not ready"
-            );
+    async fn dpf_operator_allows_outdated_scan(&self) -> Result<bool, DpfError> {
+        let Some(config) =
+            DpfOperatorConfigRepository::get(&*self.repo, "dpfoperatorconfig", &self.namespace)
+                .await?
+        else {
             return Ok(false);
         };
-
-        let ready = config
-            .status
-            .as_ref()
-            .and_then(|status| status.conditions.as_ref())
-            .and_then(|conditions| conditions.iter().find(|c| c.type_ == "Ready"))
-            .is_some_and(|condition| {
-                condition.status == "True"
-                    && observed_generation_is_current(
-                        condition.observed_generation,
-                        config.metadata.generation,
-                    )
-            });
-
-        if !ready {
-            tracing::info!(
-                name = DPF_OPERATOR_CONFIG_NAME,
-                namespace = %self.namespace,
-                "DPFOperatorConfig is not Ready; treating DPF as not ready"
-            );
+        if config.metadata.deletion_timestamp.is_some() {
+            return Ok(false);
         }
-        Ok(ready)
+        let Some(generation) = config.metadata.generation else {
+            return Ok(false);
+        };
+        let Some(status) = config.status.as_ref() else {
+            return Ok(false);
+        };
+        let Some(conditions) = status.conditions.as_ref() else {
+            return Ok(false);
+        };
+        let Some(ready) = conditions.iter().find(|condition| {
+            condition.type_ == "Ready" && condition.observed_generation == Some(generation)
+        }) else {
+            return Ok(false);
+        };
+        if ready.status == "True" {
+            return Ok(true);
+        }
+        if ready.status != "False"
+            || ready.reason != "Pending"
+            || status.observed_generation != Some(generation)
+            || status.version.as_deref().is_none_or(str::is_empty)
+            || status.target_version.as_deref().is_some_and(|target| {
+                target.is_empty() || Some(target) == status.version.as_deref()
+            })
+            || config
+                .spec
+                .overrides
+                .as_ref()
+                .and_then(|overrides| overrides.paused)
+                == Some(true)
+        {
+            return Ok(false);
+        }
+        // DPF reports this error only during a non-new upgrade; targetVersion is absent in older operators.
+        let validation_failed = conditions.iter().any(|condition| {
+            condition.type_ == "PreUpgradeValidationReady"
+                && condition.status == "False"
+                && condition.reason == "Error"
+                && condition.observed_generation == Some(generation)
+        });
+        let prerequisites_present = [
+            "ImagePullSecretsReconciled",
+            "SystemComponentsReconciled",
+            "SystemComponentsReady",
+        ]
+        .iter()
+        .all(|required| {
+            conditions
+                .iter()
+                .any(|condition| condition.type_ == *required)
+        });
+        let upgrade_conditions_allow_scan = validation_failed
+            && prerequisites_present
+            && conditions.iter().all(|condition| {
+                if condition.type_ == "Ready" || condition.type_ == "PreUpgradeValidationReady" {
+                    return true;
+                }
+                // Component readiness also checks target versions, which cannot match before the upgrade.
+                condition.observed_generation == Some(generation)
+                    && (condition.status == "True"
+                        || (condition.type_ == "SystemComponentsReady"
+                            && condition.status == "False"
+                            && condition.reason == "Error"))
+            });
+        if !upgrade_conditions_allow_scan {
+            return Ok(false);
+        }
+        // shortcut: standard DPF controller names; update these if supported DPF changes its workload topology.
+        for name in [
+            "dpf-provisioning-controller-manager",
+            "dpuservice-controller-manager",
+        ] {
+            let Some(deployment) = self
+                .repo
+                .get_controller_deployment(name, &self.namespace)
+                .await?
+            else {
+                return Ok(false);
+            };
+            let (Some(generation), Some(spec), Some(status)) = (
+                deployment.metadata.generation,
+                deployment.spec.as_ref(),
+                deployment.status.as_ref(),
+            ) else {
+                return Ok(false);
+            };
+            let replicas = spec.replicas.unwrap_or(1);
+            if deployment.metadata.deletion_timestamp.is_some()
+                || status.observed_generation != Some(generation)
+                || replicas <= 0
+                || status.replicas != Some(replicas)
+                || status.ready_replicas.unwrap_or(0) < replicas
+                || status.available_replicas.unwrap_or(0) < replicas
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Find DPUs whose installed BFB, BlueFieldSoftware, or `spec.dpuFlavor` no
@@ -3684,6 +3746,13 @@ impl<R: DpuDeploymentRepository + DpuRepository + DpfOperatorConfigRepository, L
     /// Reading from the deployment — rather than from carbide config —
     /// keeps the comparison correct when multiple DPUDeployments coexist,
     /// each pinning their DPUs to a different image or flavor.
+    /// The operator must be currently ready, or an existing, unpaused operator
+    /// must report current pre-upgrade validation failure and reconciled system
+    /// components. Component readiness may report an error during that upgrade
+    /// because it also requires the target component versions. Other conditions
+    /// must be current and true; missing, deleting, or stale configurations skip.
+    /// The upgrade exception additionally requires available, current-generation
+    /// provisioning and DPUService controller workloads, regardless of version.
     ///
     /// The DPF operator stores the downloaded BFB on disk as
     /// `/bfb/<namespace>-<bfb_cr_name>.bfb` and reflects that path in
@@ -3707,14 +3776,10 @@ impl<R: DpuDeploymentRepository + DpuRepository + DpfOperatorConfigRepository, L
         &self,
         dpu_label_selector: Option<&str>,
     ) -> Result<Vec<DpuMismatch>, DpfError> {
-        // A DPF upgrade republishes the CRs this scan reads, so mid-upgrade a DPU
-        // can look outdated against a deployment that is still settling. Report
-        // nothing until the operator says it is Ready, so an upgrade never
-        // triggers reprovisioning on its own.
-        if !self.dpf_operator_config_is_ready().await? {
+        if !self.dpf_operator_allows_outdated_scan().await? {
             return Ok(vec![]);
         }
-
+        // Current DPUSetsReconciled is the authority for each desired deployment.
         let deployments = DpuDeploymentRepository::list(&*self.repo, &self.namespace).await?;
         let ready_deployments: HashMap<String, &DPUDeployment> = deployments
             .iter()
@@ -3911,13 +3976,6 @@ fn dpu_deployment_selects_labels(
                     })
             })
         })
-}
-
-/// True when a condition's `observedGeneration` matches the object's. Either
-/// being absent means not ready: `metadata.generation` is set on submission, and
-/// an absent `observedGeneration` means DPF has not reconciled the object yet.
-fn observed_generation_is_current(observed: Option<i64>, generation: Option<i64>) -> bool {
-    matches!((observed, generation), (Some(observed), Some(generation)) if observed == generation)
 }
 
 impl<R: DpuNodeMaintenanceRepository, L> DpfSdk<R, L> {
