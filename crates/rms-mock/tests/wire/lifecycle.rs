@@ -65,6 +65,7 @@ fn host_only_node_info(node_id: &str, host_ip: &str) -> rms::NodeInfo {
             }),
         }),
         node_descriptor: None,
+        additional_host_endpoints: Vec::new(),
     }
 }
 

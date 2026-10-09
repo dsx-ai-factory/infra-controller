@@ -50,9 +50,9 @@ Sort output by specified field
 
 *Possible values:*
 
-> - primary-id: Sort by the primary ID
->
-> - state: Sort by state
+- primary-id: Sort by the primary ID
+
+- state: Sort by state
 
 `-h, --help`
 
@@ -62,7 +62,6 @@ Print help (see a summary with -h)
 
 ```sh
 nico-admin-cli rms --url https://rms.example.com:8443 inventory
-nico-admin-cli rms power-on-sequence rack-1
 nico-admin-cli rms --url https://rms.example.com:8443 --root-ca /etc/rms/ca.crt --client-cert /etc/rms/client.crt --client-key /etc/rms/client.key inventory
 ```
 
@@ -71,7 +70,6 @@ nico-admin-cli rms --url https://rms.example.com:8443 --root-ca /etc/rms/ca.crt 
 | Subcommand | Description |
 |---|---|
 | [`inventory`](./rms-inventory.md) | Get the full RMS inventory |
-| [`power-on-sequence`](./rms-power-on-sequence.md) | Get the power on sequence |
 | [`power-state`](./rms-power-state.md) | Get the power state for a given node |
 | [`firmware-inventory`](./rms-firmware-inventory.md) | Get the firmware inventory for a given node |
 

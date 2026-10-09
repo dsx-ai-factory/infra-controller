@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::{EnvFilter, reload};
 
 use crate::logging::setup::dep_log_filter;
@@ -62,6 +63,10 @@ pub struct ActiveLevel {
 
     /// When to switch back to the RUST_LOG we had on startup
     expiry: ArcSwap<Option<DateTime<Utc>>>,
+
+    /// `current` as plain target directives, for answering `enables` without a subscriber.
+    /// `None` when `current` has directives that cannot be expressed that way.
+    targets: ArcSwap<Option<Targets>>,
 }
 
 impl fmt::Debug for ActiveLevel {
@@ -81,6 +86,7 @@ impl Default for ActiveLevel {
             current: Default::default(),
             base: "".to_string(),
             expiry: Default::default(),
+            targets: Default::default(),
         }
     }
 }
@@ -92,6 +98,18 @@ impl ActiveLevel {
             base: f.to_string(),
             expiry: Default::default(),
             reload_handle,
+            targets: ArcSwap::from_pointee(f.to_string().parse().ok()),
+        }
+    }
+
+    /// Whether the current filter lets `target` log at `level`. Answers true when the filter
+    /// has directives that cannot be evaluated by target and level alone, so callers err toward
+    /// producing the output the filter might allow.
+    pub fn enables(&self, target: &str, level: &tracing::Level) -> bool {
+        let targets = self.targets.load();
+        match &**targets {
+            Some(targets) => targets.would_enable(target, level),
+            None => true,
         }
     }
 
@@ -107,6 +125,8 @@ impl ActiveLevel {
             handle.reload(current.clone())?;
         }
         self.current.store(Arc::new(current.to_string()));
+        self.targets
+            .store(Arc::new(current.to_string().parse().ok()));
         Ok(())
     }
 
@@ -129,5 +149,49 @@ impl fmt::Display for ActiveLevel {
             None => write!(f, "{current}"),
             Some(exp) => write!(f, "{current} until {exp}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::{Check, check_values};
+
+    use super::*;
+
+    #[test]
+    fn enables_follows_the_filter_at_startup_and_after_reload() {
+        let checks = [
+            Check {
+                scenario: "default level excludes DEBUG",
+                input: "info",
+                expect: false,
+            },
+            Check {
+                scenario: "target directive raises one target",
+                input: "info,rms_rpc_audit=debug",
+                expect: true,
+            },
+            Check {
+                scenario: "target directive overrides a DEBUG default",
+                input: "debug,rms_rpc_audit=off",
+                expect: false,
+            },
+            Check {
+                scenario: "span directives cannot be evaluated, so the answer errs toward true",
+                input: "info,other[span{field=1}]=trace",
+                expect: true,
+            },
+        ];
+        check_values(checks, |filter| {
+            let parse = |filter: &str| dep_log_filter(EnvFilter::builder().parse(filter).unwrap());
+            let at_startup = ActiveLevel::new(parse(filter), None);
+            let reloaded = ActiveLevel::new(parse("error"), None);
+            reloaded.update(filter, None).unwrap();
+            let enables =
+                |level: &ActiveLevel| level.enables("rms_rpc_audit", &tracing::Level::DEBUG);
+            let (startup, reload) = (enables(&at_startup), enables(&reloaded));
+            assert_eq!(startup, reload, "startup and reload disagree for {filter}");
+            startup
+        });
     }
 }

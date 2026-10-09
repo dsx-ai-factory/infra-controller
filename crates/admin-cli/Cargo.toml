@@ -46,6 +46,7 @@ carbide-rpc = { path = "../rpc", features = ["cli"] }
 carbide-rpc-utils = { path = "../rpc-utils" }
 carbide-utils = { path = "../utils" }
 config-version = { path = "../config-version" }
+rms-observability = { path = "../rms-observability" }
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 
 chrono = { workspace = true }

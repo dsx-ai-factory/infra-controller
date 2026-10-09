@@ -884,6 +884,7 @@ impl NvosUpdateManager for RmsNvosUpdateManager {
                 software_type: firmware_type_for_profile(request.profile).to_string(),
                 hardware_type,
                 nodes: Some(rms::NodeSet { nodes }),
+                allow_onie_recovery: false,
             })
             .await
             .map_err(|error| match error {
@@ -1944,6 +1945,7 @@ fn build_power_shelf_node_info(
         }),
         host_endpoint: None,
         node_descriptor: None,
+        additional_host_endpoints: Vec::new(),
     };
 
     resolved.node_identity.apply_to_node_info(&mut node);
@@ -2516,6 +2518,7 @@ fn build_switch_node_info(
             credentials: Some(credentials_to_rms(&ep.nvos_credentials)),
         }),
         node_descriptor: None,
+        additional_host_endpoints: Vec::new(),
     };
 
     resolved.node_identity.apply_to_node_info(&mut node);
@@ -2563,6 +2566,7 @@ fn build_switch_certificate_node_info(
             credentials: Some(credentials_to_rms(&endpoint.nvos_credentials)),
         }),
         node_descriptor: None,
+        additional_host_endpoints: Vec::new(),
     };
 
     resolved.node_identity.apply_to_node_info(&mut node);
@@ -2776,6 +2780,7 @@ fn apply_switch_system_image_request(
             nodes: vec![device],
         }),
         // RMS does not expose force_update on switch system-image JSON updates.
+        allow_onie_recovery: false,
     })
 }
 
@@ -2848,6 +2853,7 @@ fn build_compute_tray_node_info(
         }),
         host_endpoint: None,
         node_descriptor: None,
+        additional_host_endpoints: Vec::new(),
     };
 
     resolved.node_identity.apply_to_node_info(&mut node);

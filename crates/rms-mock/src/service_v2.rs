@@ -30,6 +30,15 @@ use crate::{RmsMock, rms_v2};
 
 #[tonic::async_trait]
 impl RackManagerV2 for RmsMock {
+    async fn start_system_validation(
+        &self,
+        _request: tonic::Request<rms_v2::StartSystemValidationRequest>,
+    ) -> Result<tonic::Response<rms_v2::StartSystemValidationResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "StartSystemValidation is not supported",
+        ))
+    }
+
     /// Begin configuring the rack's scale-up fabric manager and elect its
     /// primary switch.
     ///

@@ -77,6 +77,7 @@ dns-record = { path = "../dns-record" }
 libnmxc = { path = "../libnmxc" }
 mqttea = { path = "../mqttea" }
 nras = { path = "../nras" }
+rms-observability = { path = "../rms-observability" }
 spancounter = { path = "../spancounter" }
 state-controller = { path = "../state-controller" }
 sqlx-query-tracing = { path = "../sqlx-query-tracing" }

@@ -1244,6 +1244,7 @@ dependencies = [
  "reqwest 0.13.4",
  "reqwest-middleware",
  "reqwest-tracing",
+ "rms-observability",
  "rsa 0.9.10",
  "rumqttc",
  "rustls",
@@ -7026,8 +7027,8 @@ dependencies = [
 
 [[package]]
 name = "librms"
-version = "0.0.14"
-source = "git+https://github.com/dsx-ai-factory/nv-rms-client.git?tag=v0.10.1#4bbd502d3d9822fb1dcb8d205b7edaecabb497a6"
+version = "0.10.2"
+source = "git+https://github.com/dsx-ai-factory/nv-rms-client.git?tag=v0.10.2#f6f8f10851bd14f5fc54f9202537c8c865e02bbf"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7044,7 +7045,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tonic",
- "tonic-client-wrapper 1.0.0",
+ "tonic-client-wrapper 1.1.0",
  "tonic-prost",
  "tonic-prost-build",
  "tower",
@@ -7661,6 +7662,7 @@ dependencies = [
  "prettytable-rs",
  "prost",
  "reqwest 0.13.4",
+ "rms-observability",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -9758,6 +9760,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rms-observability"
+version = "0.0.0"
+dependencies = [
+ "carbide-test-support",
+ "chrono",
+ "librms",
+ "logfmt",
+ "prost",
+ "prost-reflect",
+ "serde_json",
+ "tonic",
+ "tower",
+ "trace-propagation",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "roff"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11797,20 +11817,22 @@ dependencies = [
 
 [[package]]
 name = "tonic-client-wrapper"
-version = "1.0.0"
-source = "git+https://github.com/dsx-ai-factory/nv-rms-client.git?tag=v0.10.1#4bbd502d3d9822fb1dcb8d205b7edaecabb497a6"
+version = "1.1.0"
+source = "git+https://github.com/dsx-ai-factory/nv-rms-client.git?tag=v0.10.2#f6f8f10851bd14f5fc54f9202537c8c865e02bbf"
 dependencies = [
  "async-trait",
  "heck",
  "lazy_static",
  "prettyplease",
  "proc-macro2",
+ "prost",
  "prost-types",
  "quote",
  "syn 2.0.117",
  "thiserror 2.0.18",
  "tonic",
  "tonic-prost-build",
+ "tracing",
 ]
 
 [[package]]
@@ -12060,6 +12082,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-serde"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
+dependencies = [
+ "serde",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12069,6 +12101,8 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
+ "serde",
+ "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
@@ -12076,6 +12110,7 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-serde",
 ]
 
 [[package]]

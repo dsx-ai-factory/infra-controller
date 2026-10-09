@@ -58,6 +58,7 @@ fn apply_request(
         software_type: "prod".to_string(),
         hardware_type: "gb200".to_string(),
         nodes: Some(rms::NodeSet { nodes }),
+        allow_onie_recovery: false,
     }
 }
 
