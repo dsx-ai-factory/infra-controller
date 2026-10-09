@@ -38,6 +38,8 @@ pub struct MockNvSwitchManager {
     expected_password_rotation_password: Option<String>,
     factory_reset_job_status_responses: Option<Arc<Mutex<VecDeque<FactoryResetJobStatusResult>>>>,
     factory_reset_job_status_calls: Arc<Mutex<Vec<String>>>,
+    // this is lightweight and can be modified to store a power state per device going forward if needed
+    power_state: Option<String>,
 }
 
 impl MockNvSwitchManager {
@@ -137,6 +139,12 @@ impl MockNvSwitchManager {
             .lock()
             .expect("factory-reset job-status calls lock poisoned")
             .clone()
+    }
+
+    /// Makes `get_power_state` report `power_state` for every endpoint.
+    pub fn with_power_state(mut self, power_state: impl Into<String>) -> Self {
+        self.power_state = Some(power_state.into());
+        self
     }
 }
 
@@ -239,7 +247,7 @@ impl NvSwitchManager for MockNvSwitchManager {
             .iter()
             .map(|ep| SwitchPowerStateResult {
                 bmc_mac: ep.bmc_mac,
-                power_state: None,
+                power_state: self.power_state.clone(),
                 error: None,
             })
             .collect())
