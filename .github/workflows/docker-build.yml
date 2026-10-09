@@ -75,6 +75,16 @@ on:
         required: false
         default: ''
         type: string
+      export_image_archive:
+        description: 'Repo-relative path at which dependent jobs receive the built image as a `docker save` archive, uploaded as the `<file stem>-<run id>` artifact. Empty disables the export.'
+        required: false
+        default: ''
+        type: string
+      export_image_archive_ref:
+        description: 'Image reference stored in the exported archive, i.e. the name `ctr images import` gives it. Required with export_image_archive.'
+        required: false
+        default: ''
+        type: string
       scan:
         description: "Have main's pushed image scanned for vulnerabilities. Records a scan target; image-scan.yml scans it after this workflow finishes. Requires push."
         required: false
@@ -275,11 +285,12 @@ jobs:
       # cannot disagree about what happened.
       #
       # The scan clause is inert now the scan reads the registry, but is the only
-      # clause consulting inputs.load.
+      # clause consulting inputs.load. An unpushed image must be loaded to be
+      # exported; a pushed one is pulled back by the export step instead.
       - name: Decide whether to load the image locally
         id: loadgate
         env:
-          NEEDED: ${{ (inputs.load && !inputs.push && inputs.scan && github.ref == 'refs/heads/main') || (inputs.push && !contains(inputs.platforms, ',') && github.repository != 'dsx-ai-factory/infra-controller') }}
+          NEEDED: ${{ (inputs.export_image_archive != '' && !inputs.push) || (inputs.load && !inputs.push && inputs.scan && github.ref == 'refs/heads/main') || (inputs.push && !contains(inputs.platforms, ',') && github.repository != 'dsx-ai-factory/infra-controller') }}
         run: printf 'load=%s\n' "${NEEDED}" >> "$GITHUB_OUTPUT"
 
       - name: Build image
@@ -345,6 +356,48 @@ jobs:
           done <<< "${TAGS}"
           DIGEST=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${PRIMARY}" | grep -m1 -F "${PRIMARY%:*}@")
           echo "digest=${DIGEST##*@}" >> "$GITHUB_OUTPUT"
+
+      # Staged under a directory that reproduces the repo-relative layout, same
+      # pattern as the bluefield binaries in ci.yaml, so the dependent job's
+      # download restores the archive where its Dockerfile reads it. A loaded
+      # image is this run's build. Canonical pushes straight from the build step
+      # without loading, so the image is pulled back by the digest this run
+      # pushed, through the registry login the pre-build step already opened; the
+      # tag alone could resolve to an older local build of the same version.
+      - name: Export image archive
+        id: archive
+        if: ${{ inputs.export_image_archive != '' }}
+        env:
+          ARCHIVE: ${{ inputs.export_image_archive }}
+          ARCHIVE_REF: ${{ inputs.export_image_archive_ref }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          LOADED: ${{ steps.loadgate.outputs.load }}
+          PRIMARY: ${{ steps.tag_list.outputs.primary }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${ARCHIVE_REF}" ]]; then
+            echo "export_image_archive_ref is required with export_image_archive" >&2
+            exit 1
+          fi
+          SOURCE="${PRIMARY}"
+          if [[ "${LOADED}" != "true" ]]; then
+            SOURCE="${IMAGE_NAME}@${DIGEST:?the build step reported no digest to pull}"
+            docker pull "${SOURCE}"
+          fi
+          docker tag "${SOURCE}" "${ARCHIVE_REF}"
+          mkdir -p "image-archive-dir/$(dirname -- "${ARCHIVE}")"
+          docker save --output "image-archive-dir/${ARCHIVE}" "${ARCHIVE_REF}"
+          printf 'key=%s\n' "$(basename -- "${ARCHIVE}" .tar)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload image archive
+        if: ${{ inputs.export_image_archive != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.archive.outputs.key }}-${{ github.run_id }}
+          path: image-archive-dir/
+          if-no-files-found: error
+          retention-days: 1
 
       # Scan only the image pushed by the main branch build. This avoids a
       # vulnerability scan on every pull request while retaining the mainline
