@@ -72,3 +72,6 @@ dev/certs/pub/
 
 # DPU upgrade ISO/ZIP build output (build-dpu-upgrade-iso.sh default --output-dir)
 scripts/control-plane-dpu/upgrade/output/
+
+# Ansible collection generated modules (release artifacts — run `make ansible` to regenerate)
+ansible/plugins/modules/
