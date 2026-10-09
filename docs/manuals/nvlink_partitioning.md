@@ -126,6 +126,12 @@ Each reconciliation pass does the following:
    from the NICo database.
 1. Resolves the NMX-C endpoint for each chassis and queries its current
    partition list, compute nodes, and GPU membership.
+1. Updates the per-host
+   [`NvlinkUnhealthy`](../architecture/health/health_probe_ids.md#nvlinkunhealthy)
+   health report when the GPU-health query succeeds. Its `PreventAllocations`
+   alerts block normal allocation while they remain in aggregate host health.
+   See the linked probe contract for recovery, hardware replacement, manual
+   removal, and allocation exceptions.
 1. Compares observed state against desired state.
 1. Issues create / update / remove operations to the fabric-management
    service to converge it onto desired state.
@@ -149,7 +155,7 @@ The reconciler exposes metrics under the
 | `carbide_nvlink_partition_monitor_num_logical_partitions` | Logical-partition count NICo is tracking | |
 | `carbide_nvlink_partition_monitor_num_physical_partitions` | Physical-partition count NICo is tracking | |
 | `carbide_nvlink_partition_monitor_nmxc_partition_count` | Partition count NMX-C reports, by `nvlink_domain_uuid` and `health` | `healthy`, `degraded_bw`, `degraded`, `unhealthy`, `unknown` |
-| `carbide_nvlink_partition_monitor_nmxc_gpu_count` | GPU count NMX-C reports, by `nvlink_domain_uuid` and `health` | `healthy`, `degraded`, `no_nvlink`, `degraded_bw`, `unknown` |
+| `carbide_nvlink_partition_monitor_nmxc_gpu_count` | GPU count NMX-C reports, by `nvlink_domain_uuid` and `health`; the same data drives the per-host `NvlinkUnhealthy` alert | `healthy`, `degraded`, `no_nvlink`, `degraded_bw`, `unknown` |
 | `carbide_nvlink_partition_monitor_nmxc_compute_node_count` | Compute-node count NMX-C reports, by `nvlink_domain_uuid` and `health` | `healthy`, `degraded`, `unhealthy`, `unknown` |
 
 ### Instance Release and Logical Partition Deletion
