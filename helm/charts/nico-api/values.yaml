@@ -214,7 +214,8 @@ certificate:
 
 ## Optional NVSwitch control-plane certificates. Both leaves use the
 ## same existing issuer, which defaults to the vault-nico-issuer deployed by
-## the standard NICo prerequisites. Both profiles are disabled by default.
+## the standard NICo prerequisites. nicoClient is enabled by default;
+## switchServer is disabled by default.
 nvSwitchTls:
   issuerRef:
     kind: ClusterIssuer
@@ -223,15 +224,18 @@ nvSwitchTls:
 
   ## Dedicated NICo client identity for direct mTLS connections to NMX-C.
   ## When enabled, the generated Secret is mounted read-only at mountPath.
+  ## nico-api uses it for NVLink partitioning when the site configuration sets
+  ## no nvlink_config TLS keys, provided mountPath is left at its default.
   nicoClient:
-    enabled: false
+    enabled: true
     name: nvswitch-nico-client-certificate
     secretName: nvswitch-nico-client-certificate
     mountPath: /var/run/secrets/nvswitch-client
     duration: 720h0m0s
     renewBefore: 360h0m0s
-    ## At least one URI SAN is required when enabled. Any cert-manager approver
-    ## policy must allow the exact identity.
+    ## URI SANs. Empty uses
+    ## spiffe://<global.spiffe.trustDomain>/<release namespace>/sa/nico-nmxc.
+    ## Any cert-manager approver policy must allow the exact identity.
     uris: []
     privateKey:
       algorithm: ECDSA

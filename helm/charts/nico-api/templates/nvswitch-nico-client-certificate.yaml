@@ -1,8 +1,9 @@
 {{- if .Values.nvSwitchTls.nicoClient.enabled }}
 {{- $certificate := .Values.nvSwitchTls.nicoClient }}
 {{- $issuer := .Values.nvSwitchTls.issuerRef }}
-{{- if eq (len (default (list) $certificate.uris)) 0 }}
-{{- fail "nico-api: nvSwitchTls.nicoClient.uris must contain at least one URI SAN" }}
+{{- $uris := default (list) $certificate.uris }}
+{{- if eq (len $uris) 0 }}
+{{- $uris = list (printf "spiffe://%s/%s/sa/nico-nmxc" .Values.global.spiffe.trustDomain (include "nico-api.namespace" .)) }}
 {{- end }}
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -20,7 +21,7 @@ spec:
     - digital signature
     - client auth
   uris:
-    {{- toYaml $certificate.uris | nindent 4 }}
+    {{- toYaml $uris | nindent 4 }}
   privateKey:
     algorithm: {{ $certificate.privateKey.algorithm }}
     size: {{ $certificate.privateKey.size }}
