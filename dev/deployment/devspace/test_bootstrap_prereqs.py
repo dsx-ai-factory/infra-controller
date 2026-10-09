@@ -14,6 +14,105 @@ SCRIPT = Path(__file__).with_name("bootstrap-prereqs.sh")
 
 
 class BootstrapPrereqsTest(unittest.TestCase):
+    def test_next_step_profile(self):
+        source = SCRIPT.read_text()
+        summary = source[source.index("print_summary() {"):source.index("\nmain() {")]
+        for rest, profile in (("1", "full"), ("0", "core-only")):
+            with self.subTest(rest=rest), tempfile.TemporaryDirectory(prefix="repo ' $ space ") as directory:
+                result = subprocess.run(
+                    ["bash", "-c", summary + "\nprint_summary"],
+                    env={**os.environ, "INSTALL_REST_PREREQS": rest,
+                         "REPO_ROOT": directory, "NAMESPACE": "isolated"},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"devspace deploy -n isolated --profile {profile}", result.stdout)
+                command = result.stdout.split("Next step:\n", 1)[1].strip()
+                execution = subprocess.run(
+                    ["bash", "-c", '''
+devspace() { printf '%s\\n' "$PWD" "$@"; }
+''' + command], capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(execution.returncode, 0, execution.stderr)
+                self.assertEqual(execution.stdout.splitlines(),
+                                 [directory, "deploy", "-n", "isolated",
+                                  "--profile", profile])
+
+    def test_ssh_host_key_bootstrap(self):
+        for existing in ("0", "1"):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as directory:
+                result = subprocess.run(
+                    ["bash", "-c", '''
+kubectl() {
+    case "$*" in
+        'apply -f -')
+            cat >/dev/null
+            [[ ! -e "$TEST_DIRECTORY/applied" ]] || exit 91
+            touch "$TEST_DIRECTORY/applied"
+            ;;
+        'get secret ssh-host-key -n isolated') [[ "$TEST_EXISTING" == 1 ]] ;;
+        'create secret generic ssh-host-key '*|'label secret ssh-host-key '*|'annotate secret ssh-host-key '*)
+            printf '%s\\n' "$*" >> "$TEST_DIRECTORY/calls" ;;
+        *) return 99 ;;
+    esac
+}
+ssh-keygen() { printf '%s\\n' "ssh-keygen $*" >> "$TEST_DIRECTORY/calls"; }
+# The key generator is mocked; do not remove any real host key files.
+rm() { :; }
+helm() { return 99; }
+export -f kubectl ssh-keygen rm helm
+bash "$1"
+''', "bash", str(SCRIPT)],
+                    env={**os.environ, "LOCAL_DEV_INSTALL_CERT_MANAGER": "0",
+                         "LOCAL_DEV_NAMESPACE": "isolated", "LOCAL_DEV_INSTALL_POSTGRES": "1",
+                         "TEST_DIRECTORY": directory, "TEST_EXISTING": existing},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 91, result.stdout + result.stderr)
+                calls = Path(directory) / "calls"
+                if existing == "1":
+                    self.assertFalse(calls.exists())
+                else:
+                    self.assertIn("ssh-keygen -t ed25519 -N", calls.read_text())
+                    self.assertIn("create secret generic ssh-host-key --namespace isolated", calls.read_text())
+
+    def test_effective_core_stack_setting_preserves_tls_configuration(self):
+        repo = SCRIPT.resolve().parents[3]
+        for ssl_mode in ("disable", "require"):
+            with self.subTest(ssl_mode=ssl_mode), tempfile.TemporaryDirectory() as directory:
+                values = Path(directory) / "generated.yaml"
+                emitter = Path(directory) / "bootstrap.sh"
+                # Exercise the real generator without installing prerequisites.
+                emitter.write_text(SCRIPT.read_text().removesuffix('main "$@"\n')
+                                   + "write_generated_values\n")
+                result = subprocess.run(
+                    ["bash", str(emitter)],
+                    env={**os.environ, "LOCAL_DEV_VALUES_FILE": str(values),
+                         "LOCAL_DEV_POSTGRES_SSL_MODE": ssl_mode},
+                    capture_output=True, text=True, timeout=15,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                rendered = subprocess.run(
+                    ["helm", "template", "test", str(repo / "helm"),
+                     "-f", str(SCRIPT.with_name("values.base.yaml")), "-f", str(values),
+                     "--show-only", "charts/nico-api/templates/deployment.yaml"],
+                    capture_output=True, text=True, check=True, timeout=30,
+                )
+                deployment = next(yaml.safe_load_all(rendered.stdout))
+                environment = {entry["name"]: entry.get("value") for entry in
+                               deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+                self.assertEqual(environment.get("RUST_MIN_STACK"), "8388608")
+                self.assertEqual(environment.get("DISABLE_TLS_ENFORCEMENT"),
+                                 "1" if ssl_mode == "disable" else None)
+        production = subprocess.run(
+            ["helm", "template", "test", str(repo / "helm"),
+             "--show-only", "charts/nico-api/templates/deployment.yaml"],
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+        deployment = next(yaml.safe_load_all(production.stdout))
+        environment = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+        self.assertNotIn("RUST_MIN_STACK", [entry["name"] for entry in environment])
+
     def test_rendered_vault_listener_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
             manifest = Path(directory) / "vault.yaml"
@@ -26,6 +125,7 @@ kubectl() {
             cat >> "$BOOTSTRAP_TEST_MANIFEST"
             ;;
         'rollout status statefulset/vault '*) exit 91 ;;
+        'get secret ssh-host-key '*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -94,6 +194,11 @@ source "$1"
                 config = resources[("ConfigMap", "nico-system-nico-database-config")]
                 self.assertEqual(secret["stringData"]["host"], host)
                 self.assertEqual(config["data"]["DB_HOST"], host)
+                ntp = resources[("Service", "nico-ntp-client")]
+                self.assertEqual(ntp["spec"]["selector"], {"app.kubernetes.io/name": "nico-ntp"})
+                self.assertEqual(ntp["spec"]["ports"][0], {
+                    "name": "ntp", "port": 123, "targetPort": 123, "protocol": "UDP"
+                })
 
 
 if __name__ == "__main__":

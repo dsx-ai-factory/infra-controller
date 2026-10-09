@@ -17,7 +17,10 @@
 
 FROM nico-devspace-core-artifacts AS artifacts
 
-FROM ubuntu:24.04
+# Match the build container's distribution and Kea hook ABI on both architectures.
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+
+ARG KEA_VERSION
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
@@ -25,6 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   ipmitool \
   iproute2 \
   iputils-ping \
+  kea-dhcp4-server=${KEA_VERSION} \
+  libssh-4 \
   libudev1 \
   tpm2-tools \
   && rm -rf /var/lib/apt/lists/*
@@ -34,6 +39,9 @@ RUN mkdir -p /opt/carbide /opt/carbide/firmware /mnt/persistence /var/run/kea
 COPY --from=artifacts /artifacts/carbide-api /opt/carbide/carbide-api
 COPY --from=artifacts /artifacts/nico-admin-cli /opt/carbide/nico-admin-cli
 COPY --from=artifacts /artifacts/ssh-console /opt/carbide/ssh-console
+COPY --from=artifacts /artifacts/carbide-dns /opt/carbide/carbide-dns
+COPY --from=artifacts /artifacts/forge-hw-health /opt/carbide/forge-hw-health
+COPY --from=artifacts /artifacts/libdhcp.so /usr/lib/kea/hooks/libdhcp.so
 RUN ln -s /opt/carbide/nico-admin-cli /opt/carbide/carbide-admin-cli
 COPY crates/api/casbin-policy.csv /opt/carbide/casbin-policy.csv
 

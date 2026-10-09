@@ -65,6 +65,11 @@ on:
         required: false
         default: true
         type: boolean 
+      test_pxe_boot_artifacts:
+        description: 'Run the PXE Helm/Kustomize runtime regression against this image (single-platform linux/amd64 only)'
+        required: false
+        default: false
+        type: boolean
       download_artifacts:
         description: 'Download build artifacts before Docker build (needed for release artifact images)'
         required: false
@@ -268,8 +273,8 @@ jobs:
           fi
 
       # Loading means exporting the whole image to the daemon, so it is only
-      # worth doing when a later step reads it back: the deferred push on
-      # mirrors. A pull request never does, yet the 8 GB boot-artifacts carrier
+      # worth doing when a later step reads it back: runtime tests or the deferred
+      # push on mirrors. Most PR builds do neither, yet the 8 GB boot-artifacts carrier
       # still spent a measured 5m20s on the export before every step that could
       # have used it was skipped. Decided once here so the build and the summary
       # cannot disagree about what happened.
@@ -279,7 +284,7 @@ jobs:
       - name: Decide whether to load the image locally
         id: loadgate
         env:
-          NEEDED: ${{ (inputs.load && !inputs.push && inputs.scan && github.ref == 'refs/heads/main') || (inputs.push && !contains(inputs.platforms, ',') && github.repository != 'dsx-ai-factory/infra-controller') }}
+          NEEDED: ${{ (inputs.test_pxe_boot_artifacts && !inputs.push) || (inputs.load && !inputs.push && inputs.scan && github.ref == 'refs/heads/main') || (inputs.push && !contains(inputs.platforms, ',') && github.repository != 'dsx-ai-factory/infra-controller') }}
         run: printf 'load=%s\n' "${NEEDED}" >> "$GITHUB_OUTPUT"
 
       - name: Build image
@@ -296,9 +301,9 @@ jobs:
           # directly.
           push: ${{ inputs.push && (contains(inputs.platforms, ',') || github.repository == 'dsx-ai-factory/infra-controller') }}
           load: ${{ steps.loadgate.outputs.load == 'true' }}
-          # mirrors: the docker exporter cannot attach attestations, and
+          # The docker exporter cannot attach attestations. For mirrors,
           # provenance would embed private downstream repo refs into artifacts
-          provenance: ${{ github.repository == 'dsx-ai-factory/infra-controller' && 'mode=min' || 'false' }}
+          provenance: ${{ github.repository == 'dsx-ai-factory/infra-controller' && steps.loadgate.outputs.load != 'true' && 'mode=min' || 'false' }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ inputs.image_tag }}
@@ -322,6 +327,22 @@ jobs:
             actions_results_url=${{ env.BUILD_ACTIONS_RESULTS_URL }}
             actions_runtime_token=${{ env.BUILD_ACTIONS_RUNTIME_TOKEN }}
             sccache_gha_rw_mode=${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
+
+      # Published canonical images retain provenance; pull them for testing
+      # instead of also exporting through Docker's attestation-less store.
+      - name: Pull the published PXE test image
+        if: ${{ inputs.test_pxe_boot_artifacts && steps.loadgate.outputs.load != 'true' }}
+        env:
+          PXE_TEST_IMAGE: ${{ steps.tag_list.outputs.primary }}
+        run: docker pull "$PXE_TEST_IMAGE"
+
+      - name: Test PXE boot artifact serving
+        id: pxe-runtime
+        if: ${{ inputs.test_pxe_boot_artifacts }}
+        timeout-minutes: 15
+        env:
+          PXE_TEST_IMAGE: ${{ steps.tag_list.outputs.primary }}
+        run: bash .github/ci/test_pxe_runtime.sh
 
       - name: Login to target registry
         if: ${{ inputs.push && !contains(inputs.platforms, ',') && github.repository != 'dsx-ai-factory/infra-controller' }}

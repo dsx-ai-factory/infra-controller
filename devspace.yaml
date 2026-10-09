@@ -33,6 +33,7 @@ vars:
     source: env
     default: "18080"
   LOCAL_DEV_DSX_GATEWAY_PROFILE: "0"
+  LOCAL_DEV_EXTRA_CORE_IMAGE: ""
 
 pipelines:
   build: |-
@@ -72,6 +73,9 @@ functions:
     # image. Always invoke these inexpensive second-stage builds so the tags
     # consumed by the Kind image-loading hook are guaranteed to exist.
     build_images nico-api nico-bmc-proxy machine-a-tron --force-rebuild
+    if [ -n "${LOCAL_DEV_EXTRA_CORE_IMAGE}" ]; then
+      build_images "${LOCAL_DEV_EXTRA_CORE_IMAGE}" --force-rebuild
+    fi
 
 images:
   core-artifacts:
@@ -86,7 +90,7 @@ images:
     image: nico-api
     custom:
       command: |-
-        docker build -t ${runtime.images.nico-api.image}:${runtime.images.nico-api.tag} -f dev/deployment/devspace/Dockerfile.api .
+        docker build --build-arg KEA_VERSION="$(cat dev/docker/kea.version)" -t ${runtime.images.nico-api.image}:${runtime.images.nico-api.tag} -f dev/deployment/devspace/Dockerfile.api .
       onChange:
         - .dockerignore
         - Cargo.toml
@@ -362,6 +366,11 @@ hooks:
       LOCAL_DEV_REST_API_FORWARD_PORT=${LOCAL_DEV_REST_API_FORWARD_PORT} \
       LOCAL_DEV_KEYCLOAK_FORWARD_PORT=${LOCAL_DEV_KEYCLOAK_FORWARD_PORT} \
         dev/deployment/devspace/setup-rest-integration.sh
+  - name: setup-core-services
+    events: ["after:deploy"]
+    command: |-
+      bash dev/deployment/devspace/setup-core-services.sh ${LOCAL_DEV_NAMESPACE} &&
+      bash dev/deployment/devspace/verify-core-services.sh ${LOCAL_DEV_NAMESPACE}
 
 profiles:
   - name: dsx-exchange
@@ -494,6 +503,58 @@ profiles:
         path: deployments.carbide-local.helm.values.nico-api
         value:
           dsxExchangeEventBusConfig: '{enabled=true,mqtt_endpoint="dsx-exchange",mqtt_broker_port=1883,auth={auth_mode="none"},periodic_state_republish={interval="10s"}}'
+  - name: full
+    parent: dsx-exchange
+    patches:
+      - op: replace
+        path: vars.LOCAL_DEV_EXTRA_CORE_IMAGE
+        value: nico-pxe
+      - op: add
+        path: images.nico-pxe
+        value:
+          image: nico-pxe
+          custom:
+            command: |-
+              docker build -t ${runtime.images.nico-pxe.image}:${runtime.images.nico-pxe.tag} -f dev/deployment/devspace/Dockerfile.pxe .
+            onChange:
+              - .dockerignore
+              - Cargo.toml
+              - Cargo.lock
+              - rust-toolchain.toml
+              - .cargo
+              - crates
+              - include
+              - dev/docker/Dockerfile.build-container-x86_64
+              - dev/docker/Dockerfile.build-container-aarch64
+              - dev/deployment/devspace/Dockerfile.core-artifacts
+              - dev/deployment/devspace/Dockerfile.core-artifacts.dockerignore
+              - dev/deployment/devspace/Dockerfile.pxe
+              - dev/deployment/devspace/Dockerfile.pxe.dockerignore
+              - pxe/ipxe/local/embed.ipxe
+              - pxe/scout-firmware-scripts
+              - pxe/templates
+      - op: add
+        path: deployments.carbide-local.helm.values.nico-pxe
+        value:
+          enabled: true
+          image:
+            repository: ${runtime.images.nico-pxe.image}
+            tag: ${runtime.images.nico-pxe.tag}
+            pullPolicy: IfNotPresent
+      - op: replace
+        path: hooks.name=load-images-into-local-cluster.command
+        value: |-
+          CONTEXT=$(kubectl config current-context 2>/dev/null || echo "")
+          case "$CONTEXT" in
+            kind-*)
+              echo "Loading images into kind cluster..."
+              kind load docker-image --name "${CONTEXT#kind-}" \
+                "${runtime.images.nico-api.image}:${runtime.images.nico-api.tag}" \
+                "${runtime.images.nico-bmc-proxy.image}:${runtime.images.nico-bmc-proxy.tag}" \
+                "${runtime.images.machine-a-tron.image}:${runtime.images.machine-a-tron.tag}" \
+                "${runtime.images.nico-pxe.image}:${runtime.images.nico-pxe.tag}"
+              ;;
+          esac
   - name: core-only
     patches:
       - op: add

@@ -20,16 +20,22 @@ RUN --mount=type=cache,id=nico-devspace-cargo-home,target=/cargo-home,sharing=lo
     -p nico-admin-cli --bin nico-admin-cli \
     -p carbide-bmc-proxy --bin carbide-bmc-proxy \
     -p carbide-dhcp --lib \
+    -p carbide-dns --bin carbide-dns \
+    -p carbide-health --bin forge-hw-health \
     -p carbide-ssh-console --bin ssh-console \
-    -p carbide-machine-a-tron --bin machine-a-tron && \
+    -p carbide-machine-a-tron --bin machine-a-tron \
+    -p carbide-pxe --bin carbide && \
   mkdir -p /artifacts && \
   cp \
     /cargo-target/debug/carbide-api \
     /cargo-target/debug/nico-admin-cli \
     /cargo-target/debug/carbide-bmc-proxy \
     /cargo-target/debug/libdhcp.so \
+    /cargo-target/debug/carbide-dns \
+    /cargo-target/debug/forge-hw-health \
     /cargo-target/debug/ssh-console \
     /cargo-target/debug/machine-a-tron \
+    /cargo-target/debug/carbide \
     /artifacts/
 
 FROM scratch
