@@ -182,8 +182,8 @@ func TestAllocationHandler_Create(t *testing.T) {
 	ipb4 := testIPBlockBuildIPBlock(t, dbSession, "test4pb", site4, ip2, &tenant3.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "196.162.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 	ipb5 := testIPBlockBuildIPBlock(t, dbSession, "test4pb", site5, ip2, &tenant4.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "194.162.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 
-	// Matching the provider and site is not enough. A record with SitePrefixID
-	// set belongs to SitePrefix and cannot be the parent of an Allocation.
+	// Matching the provider and site is not enough. A tenant-managed block
+	// cannot be the parent of an Allocation.
 	tenantSitePrefix := testIPBlockBuildTenantSitePrefix(t, dbSession, "private-site-prefix", site, ip, tenant1, "192.169.0.0", 16, cdbm.IPBlockStatusReady, ipu)
 
 	ipbFG := testIPBlockBuildIPBlock(t, dbSession, "testipbFG", site, ip, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.170.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)

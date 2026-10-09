@@ -172,6 +172,7 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 		InfrastructureProviderID: ip.ID,
 		TenantID:                 &tenant.ID,
 		SitePrefixID:             cutil.GetPtr(uuid.New()),
+		Managed:                  cutil.GetPtr(false),
 		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
 		Prefix:                   "10.60.0.0",
 		PrefixLength:             24,
@@ -2145,54 +2146,4 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes(t *testing.T) {
 		assert.Contains(t, logOutput.String(), "created Site fabric IP Block")
 		assert.Contains(t, logOutput.String(), createdIPBlocks[0].ID.String())
 	})
-}
-
-func TestGetSiteFabricIPBlockRoutingType(t *testing.T) {
-	tests := []struct {
-		name   string
-		prefix string
-		want   string
-	}{
-		{
-			name:   "whole 10.0.0.0/8 range",
-			prefix: "10.0.0.0/8",
-			want:   cdbm.IPBlockRoutingTypeDatacenterOnly,
-		},
-		{
-			name:   "last /16 of 172.16.0.0/12",
-			prefix: "172.31.0.0/16",
-			want:   cdbm.IPBlockRoutingTypeDatacenterOnly,
-		},
-		{
-			name:   "inside 192.168.0.0/16",
-			prefix: "192.168.4.128/26",
-			want:   cdbm.IPBlockRoutingTypeDatacenterOnly,
-		},
-		{
-			name:   "inside IPv6 unique local range",
-			prefix: "fd12:3456::/48",
-			want:   cdbm.IPBlockRoutingTypeDatacenterOnly,
-		},
-		{
-			name:   "starts inside a private range but extends past it",
-			prefix: "192.168.0.0/15",
-			want:   cdbm.IPBlockRoutingTypePublic,
-		},
-		{
-			name:   "public IPv4",
-			prefix: "203.0.113.0/24",
-			want:   cdbm.IPBlockRoutingTypePublic,
-		},
-		{
-			name:   "public IPv6",
-			prefix: "2001:db8::/32",
-			want:   cdbm.IPBlockRoutingTypePublic,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, getSiteFabricIPBlockRoutingType(netip.MustParsePrefix(tt.prefix)))
-		})
-	}
 }

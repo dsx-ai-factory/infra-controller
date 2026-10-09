@@ -1067,6 +1067,7 @@ func TestManageVpcPrefix_CreateOrUpdateVpcPrefixFromSite(t *testing.T) {
 			InfrastructureProviderID: provider.ID,
 			TenantID:                 &authorizedTenant.ID,
 			SitePrefixID:             cutil.GetPtr(uuid.New()),
+			Managed:                  cutil.GetPtr(false),
 			RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
 			Prefix:                   "10.6.0.0",
 			PrefixLength:             16,
