@@ -200,11 +200,7 @@ impl ConfigRevisionHandler {
     }
 
     fn handle_apply(&self, request: &MockRequest, revision_id: &str) -> Option<MockResponse> {
-        let expected = json!({
-            "state": "apply",
-            "auto-prompt": {"ays": "ays_yes"},
-        });
-        if request.json::<JsonValue>().ok().as_ref() != Some(&expected) {
+        if !valid_apply_body(request) {
             return bad_request("revision apply body is malformed");
         }
 
@@ -237,6 +233,164 @@ impl NvueMockHandler for ConfigRevisionHandler {
             return self.handle_revision(request, &captures["revision_id"]);
         }
         None
+    }
+}
+
+/// Models an NVUE server that successfully creates a revision but then fails to
+/// apply it, creating a rollback in the process.
+pub(crate) struct ConfigRevisionRollbackHandler {
+    storage: ConfigRevisionHandler,
+    state: Mutex<Option<RollbackAttempt>>,
+    apply_checking_polls: usize,
+    rollback_checking_polls: usize,
+}
+
+struct RollbackAttempt {
+    revision_id: String,
+    apply_checking_remaining: usize,
+    rollback_checking_remaining: usize,
+    rollback_advertised: bool,
+    rollback_completed: bool,
+}
+
+impl RollbackAttempt {
+    fn rollback_id(&self) -> String {
+        format!("rev_{}_apply_1/start", self.revision_id)
+    }
+}
+
+impl ConfigRevisionRollbackHandler {
+    /// Start with `applied_config`, returning `checking` for the specified polls
+    /// before the apply fails and its rollback succeeds, respectively.
+    pub(crate) fn new(
+        applied_config: JsonValue,
+        apply_checking_polls: usize,
+        rollback_checking_polls: usize,
+    ) -> Self {
+        Self {
+            storage: ConfigRevisionHandler::new(applied_config),
+            state: Mutex::new(None),
+            apply_checking_polls,
+            rollback_checking_polls,
+        }
+    }
+
+    /// Return the configuration applied before any failed attempt.
+    pub(crate) fn get_applied_config(&self) -> JsonValue {
+        self.storage.get_applied_config()
+    }
+
+    fn handle_apply(&self, request: &MockRequest, revision_id: &str) -> Option<MockResponse> {
+        if request.uri.query().is_some() {
+            return self.storage.handle(request);
+        }
+        if !valid_apply_body(request) {
+            return bad_request("revision apply body is malformed");
+        }
+        let mut state = self.state.lock().expect("rollback state lock should work");
+        if state.is_some() {
+            return bad_request("cannot repeat or overlap failed applies");
+        }
+        let storage = self.storage.lock_state();
+        if !storage.revisions.contains_key(revision_id) {
+            return not_found(revision_id);
+        }
+        if storage.applied_revision == revision_id {
+            return bad_request("cannot apply the initial revision");
+        }
+        *state = Some(RollbackAttempt {
+            revision_id: revision_id.to_string(),
+            apply_checking_remaining: self.apply_checking_polls,
+            rollback_checking_remaining: self.rollback_checking_polls,
+            rollback_advertised: false,
+            rollback_completed: false,
+        });
+        Some(MockResponse::json(
+            StatusCode::OK,
+            &json!({"state": "apply"}),
+        ))
+    }
+
+    fn handle_revision_read(&self, revision_id: &str) -> Option<MockResponse> {
+        let mut state = self.state.lock().expect("rollback state lock should work");
+        let attempt = state.as_mut()?;
+        let revision = if revision_id == attempt.revision_id {
+            if attempt.apply_checking_remaining > 0 {
+                attempt.apply_checking_remaining -= 1;
+                json!({"state": "checking", "transition": {"progress": "applying"}})
+            } else {
+                attempt.rollback_advertised = true;
+                json!({
+                    "state": "apply_fail",
+                    "transition": {
+                        "progress": "apply failed",
+                        "issue": {
+                            "1": {"severity": "error", "code": "apply_failed", "message": "apply failed", "data": {"path": "/system"}},
+                            "2": {"severity": "warning", "code": "rollback", "data": {"rollback_target": attempt.rollback_id()}},
+                        },
+                    },
+                })
+            }
+        } else if revision_id == attempt.rollback_id() && attempt.rollback_advertised {
+            if attempt.rollback_checking_remaining > 0 {
+                attempt.rollback_checking_remaining -= 1;
+                json!({"state": "checking", "transition": {"progress": "restoring"}})
+            } else {
+                attempt.rollback_completed = true;
+                json!({"state": "applied"})
+            }
+        } else {
+            return None;
+        };
+        Some(MockResponse::json(StatusCode::OK, &revision))
+    }
+}
+
+impl NvueMockHandler for ConfigRevisionRollbackHandler {
+    fn handle(&self, request: &MockRequest) -> Option<MockResponse> {
+        if request.method == Method::GET && request.uri.path() == ConfigRevisionHandler::CONFIG_PATH
+        {
+            let query = request.query_pairs();
+            if query.len() == 2
+                && query
+                    .iter()
+                    .any(|(key, value)| key == "rev" && value == "applied")
+                && query
+                    .iter()
+                    .any(|(key, value)| key == "filled" && value == "false")
+            {
+                return None;
+            }
+        }
+        if let Some(captures) = request.route_captures(
+            request.method.clone(),
+            ConfigRevisionHandler::REVISION_ITEM_ROUTE,
+        ) {
+            let revision_id = &captures["revision_id"];
+            match request.method {
+                Method::PATCH => return self.handle_apply(request, revision_id),
+                Method::GET if request.uri.query().is_none() && request.body.is_empty() => {
+                    if let Some(response) = self.handle_revision_read(revision_id) {
+                        return Some(response);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.storage.handle(request)
+    }
+
+    fn verify(&self) -> Vec<String> {
+        let state = self.state.lock().expect("rollback state lock should work");
+        match state.as_ref() {
+            Some(attempt) if attempt.rollback_advertised && !attempt.rollback_completed => {
+                vec![format!(
+                    "rollback for revision {} did not complete",
+                    attempt.revision_id
+                )]
+            }
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -298,6 +452,14 @@ fn revision_response(revision_id: &str, applied_revision: &str) -> MockResponse 
     )
 }
 
+fn valid_apply_body(request: &MockRequest) -> bool {
+    request.json::<JsonValue>().ok()
+        == Some(json!({
+            "state": "apply",
+            "auto-prompt": {"ays": "ays_yes", "ignore_fail": "ignore_fail_no"},
+        }))
+}
+
 fn bad_request(message: &str) -> Option<MockResponse> {
     Some(MockResponse::json(
         StatusCode::BAD_REQUEST,
@@ -339,7 +501,7 @@ mod tests {
         serde_json::from_slice(&response(action).body).expect("response should contain JSON")
     }
 
-    fn create_revision(handler: &ConfigRevisionHandler) -> String {
+    fn create_revision<H: NvueMockHandler>(handler: &H) -> String {
         let response = response_json(handler.handle(&empty_request(
             Method::POST,
             ConfigRevisionHandler::REVISION_COLLECTION_PATH,
@@ -431,7 +593,10 @@ mod tests {
         let applied = response_json(handler.handle(&request(
             Method::PATCH,
             &apply_uri,
-            json!({"state": "apply", "auto-prompt": {"ays": "ays_yes"}}),
+            json!({
+                "state": "apply",
+                "auto-prompt": {"ays": "ays_yes", "ignore_fail": "ignore_fail_no"},
+            }),
         )));
         assert_eq!(applied["state"], "applied");
         assert_eq!(
@@ -453,6 +618,86 @@ mod tests {
             response_json(handler.handle(&empty_request(Method::GET, &applied_status_uri)));
         assert_eq!(applied_status["state"], "applied");
         assert_eq!(applied_status["transition"]["progress"], "applied");
+    }
+
+    #[test]
+    fn failed_apply_preserves_applied_config_and_rejects_further_applies() {
+        let initial_config = json!({"system": {"hostname": "leaf-0"}});
+        let handler = ConfigRevisionRollbackHandler::new(initial_config.clone(), 0, 0);
+        let first_revision = create_revision(&handler);
+        let second_revision = create_revision(&handler);
+        let apply = json!({
+            "state": "apply",
+            "auto-prompt": {"ays": "ays_yes", "ignore_fail": "ignore_fail_no"},
+        });
+        let diff_uri = format!("/nvue_v1/?diff=applied&rev={first_revision}&filled=false");
+        let staged_config = json!({"system": {"hostname": "leaf-1"}});
+        let patch_uri = format!("/nvue_v1/?rev={first_revision}");
+        assert_eq!(
+            response(handler.handle(&request(Method::PATCH, &patch_uri, staged_config))).status,
+            StatusCode::OK
+        );
+
+        let revision_uri = format!("/nvue_v1/revision/{first_revision}");
+        assert_eq!(
+            response(handler.handle(&request(Method::PATCH, &revision_uri, apply.clone()))).status,
+            StatusCode::OK
+        );
+        let second_uri = format!("/nvue_v1/revision/{second_revision}");
+        assert_eq!(
+            response(handler.handle(&request(Method::PATCH, &second_uri, apply.clone()))).status,
+            StatusCode::BAD_REQUEST
+        );
+        let failed = response_json(handler.handle(&empty_request(Method::GET, &revision_uri)));
+        assert_eq!(failed["state"], "apply_fail");
+        let rollback_id = failed["transition"]["issue"]["2"]["data"]["rollback_target"]
+            .as_str()
+            .expect("failure should advertise a rollback revision");
+        assert!(!handler.verify().is_empty());
+        let rollback_uri = format!("/nvue_v1/revision/{}", urlencoding::encode(rollback_id));
+        assert_eq!(
+            response_json(handler.handle(&empty_request(Method::GET, &rollback_uri)))["state"],
+            "applied"
+        );
+        assert_eq!(handler.get_applied_config(), initial_config);
+        assert_eq!(
+            response_json(handler.handle(&empty_request(Method::GET, &diff_uri))),
+            json!({"changed": true})
+        );
+        assert_eq!(
+            response(handler.handle(&request(Method::PATCH, &second_uri, apply))).status,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(handler.verify().is_empty());
+    }
+
+    #[tokio::test]
+    async fn applied_config_http_read_is_unhandled_but_diff_is_supported() {
+        let handler = ConfigRevisionRollbackHandler::new(json!({}), 0, 0);
+        let server =
+            super::super::super::MockNvueServer::start(handler).expect("mock server should start");
+        let client =
+            crate::NvueClient::new(server.server_address()).expect("client should be created");
+        let revision_id = client
+            .create_config_revision()
+            .await
+            .expect("revision creation should succeed");
+        assert!(
+            client
+                .get_revision_config_diff("applied", &revision_id)
+                .await
+                .expect("diff against applied should succeed")
+                .is_empty()
+        );
+        assert!(client.get_applied_config().await.is_err());
+        let failure = server
+            .finish()
+            .await
+            .expect_err("applied read must be unhandled");
+        assert!(
+            failure.contains("unhandled request: GET /nvue_v1/?rev=applied&filled=false"),
+            "{failure}"
+        );
     }
 
     #[test]
