@@ -383,7 +383,9 @@ impl NvueClient {
             // return a different error type; NvueClientError cannot carry the
             // amount of detail we need to describe our failure modes accurately
             // to the caller.
-            let _ = self.poll_revision_to_terminal_state(rollback_target).await;
+            if let Err(e) = self.poll_revision_to_terminal_state(rollback_target).await {
+                tracing::warn!("error polling rollback target: {e}");
+            }
         }
         Err(error)
     }
