@@ -185,3 +185,15 @@ extraEnv:
 imagePullSecret:
   create: true
   dockerconfigjson: "eyJhdXRocyI6e319"
+
+## Container security context. allowPrivilegeEscalation: false is always set.
+## Override to add capabilities or null to drop all overrides.
+## On OpenShift restricted-v2 SCC, set to null; the hardcoded baseline survives.
+##   containerSecurityContext: null
+containerSecurityContext: {}
+
+## createNamespace controls whether nico-flow renders its own Namespace resource.
+## Set to false (recommended) when using `helm install --create-namespace` or when
+## the namespace is created by the installer. Setting both to true causes a
+## duplicate-ownership conflict with Helm's own Namespace resource.
+createNamespace: false

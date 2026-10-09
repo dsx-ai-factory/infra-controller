@@ -52,10 +52,11 @@ spec:
         - name: chrony
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- with .Values.securityContext }}
           securityContext:
+            allowPrivilegeEscalation: false
+            {{- with .Values.containerSecurityContext }}
             {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- end }}
           ports:
             - containerPort: 123
               protocol: UDP
