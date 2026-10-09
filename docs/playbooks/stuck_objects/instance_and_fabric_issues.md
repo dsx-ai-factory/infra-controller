@@ -83,8 +83,14 @@ nico-admin-cli nvl-logical-partition show
 nico-admin-cli nvl-partition show
 nico-admin-cli nvl-domain show
 nico-admin-cli machine nvlink-info show <host-machine-id>
+nico-admin-cli machine health-report show <host-machine-id>
 nico-admin-cli nvlink-nmxc-endpoints show
 ```
+
+Look for:
+
+- `NvlinkUnhealthy`
+- NMX-C connect errors
 
 Common causes:
 
@@ -94,6 +100,16 @@ Common causes:
 | NMX-C connect error | TLS, endpoint, or network issue. |
 | partition cleanup pending | stale binding or delayed fabric observation. |
 | placement failure | topology, domain health, or requested instance shape mismatch. |
+| host not allocatable with an `NvlinkUnhealthy` alert | A GPU was reported unhealthy and its alert has not cleared. Check current GPU health, inventory, and monitor errors; see [NVLink GPU health recovery](../../architecture/health/health_probe_ids.md#nvlinkunhealthy). |
+
+Compare each alert's `target` GPU UID with the host's `nvlink-info` and current
+NMX-C health. An alert persists while that GPU reports `Unknown`, is absent
+from the response, or partition-list queries, GPU-health queries, or
+health-report writes fail. For a current fault,
+check GPU cabling and the NVSwitch tray. If the affected GPU was replaced or
+removed from the host's inventory, confirm recovery and follow the linked
+manual-removal procedure; a healthy replacement does not clear the old UID's
+alert.
 
 ## Release and Cleanup
 
