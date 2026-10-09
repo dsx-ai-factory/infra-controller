@@ -70,15 +70,12 @@ func (mibp ManageInfiniBandPartition) UpdateInfiniBandPartitionsInDB(ctx context
 		return err
 	}
 
-	// Construct a map of Controller InfiniBandPartition ID to InfiniBandPartition
+	// Construct a map of InfiniBand Partition ID to InfiniBand Partition.
 	existingIbpIDMap := make(map[string]*cdbm.InfiniBandPartition)
 
 	for _, ibp := range existingIbps {
 		curIbp := ibp
 		existingIbpIDMap[ibp.ID.String()] = &curIbp
-		if ibp.ControllerIBPartitionID != nil {
-			existingIbpIDMap[ibp.ControllerIBPartitionID.String()] = &curIbp
-		}
 	}
 
 	reportedIbpIDMap := map[uuid.UUID]bool{}
@@ -104,9 +101,6 @@ func (mibp ManageInfiniBandPartition) UpdateInfiniBandPartitionsInDB(ctx context
 
 		// TODO: Since Site is the source of truth, we must auto-create any Partitions that are in the Site inventory but not in the DB
 		ibp, ok := existingIbpIDMap[controllerIbp.Id.Value]
-		if !ok && controllerIbp.Config != nil {
-			ibp, ok = existingIbpIDMap[controllerIbp.Config.Name]
-		}
 
 		if !ok {
 			ibp = mibp.createOrUpdateInfiniBandPartitionFromSite(ctx, site, controllerIbp)
@@ -115,9 +109,6 @@ func (mibp ManageInfiniBandPartition) UpdateInfiniBandPartitionsInDB(ctx context
 			}
 
 			existingIbpIDMap[ibp.ID.String()] = ibp
-			if ibp.ControllerIBPartitionID != nil {
-				existingIbpIDMap[ibp.ControllerIBPartitionID.String()] = ibp
-			}
 
 			slogger.Info().Str("InfiniBand Partition ID", ibp.ID.String()).Msg("created or undeleted InfiniBand Partition from Site inventory")
 		}
@@ -233,13 +224,7 @@ func (mibp ManageInfiniBandPartition) UpdateInfiniBandPartitionsInDB(ctx context
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
 	if util.ShouldReconcileDeletions(ibpInventory.GetInventoryPage()) {
 		for _, ibp := range existingIbpIDMap {
-			found := false
-
-			_, found = reportedIbpIDMap[ibp.ID]
-			if !found && ibp.ControllerIBPartitionID != nil {
-				// Additional check if controller IBPartition ID != Instance ID
-				_, found = reportedIbpIDMap[*ibp.ControllerIBPartitionID]
-			}
+			_, found := reportedIbpIDMap[ibp.ID]
 
 			if !found {
 				// The InfiniBandPartition was not found in the InfiniBandPartition Inventory, so add it to list of InfiniBandPartition to potentially delete
@@ -399,12 +384,6 @@ func (mibp ManageInfiniBandPartition) createOrUpdateInfiniBandPartitionFromSite(
 			return nil, nil
 		}
 
-		if len(tenants) > 1 {
-			logger.Warn().Msgf("unable to create InfiniBand Partition found on Site: multiple Tenants were found for org: %s", reportedIbp.Org)
-
-			return nil, nil
-		}
-
 		tenant := &tenants[0]
 
 		_, tenantSiteErr := cdbm.NewTenantSiteDAO(mibp.dbSession).GetByTenantIDAndSiteID(ctx, tx, tenant.ID, site.ID, nil)
@@ -416,24 +395,6 @@ func (mibp ManageInfiniBandPartition) createOrUpdateInfiniBandPartitionFromSite(
 			}
 
 			return nil, fmt.Errorf("unable to create InfiniBand Partition found on Site: failed to validate Tenant access to Site, DB error: %w", tenantSiteErr)
-		}
-
-		allocationCount, allocationErr := cdbm.NewAllocationDAO(mibp.dbSession).GetCount(
-			ctx,
-			tx,
-			cdbm.AllocationFilterInput{
-				TenantIDs: []uuid.UUID{tenant.ID},
-				SiteIDs:   []uuid.UUID{site.ID},
-			},
-		)
-		if allocationErr != nil {
-			return nil, fmt.Errorf("unable to create InfiniBand Partition found on Site: failed to validate Tenant allocation for Site, DB error: %w", allocationErr)
-		}
-
-		if allocationCount == 0 {
-			logger.Warn().Msgf("unable to create InfiniBand Partition found on Site: Tenant for org %s has no Allocation with Site", reportedIbp.Org)
-
-			return nil, nil
 		}
 
 		lockErr := tx.TryAcquireAdvisoryLock(
@@ -459,41 +420,6 @@ func (mibp ManageInfiniBandPartition) createOrUpdateInfiniBandPartitionFromSite(
 		)
 		if reloadErr != nil {
 			return nil, fmt.Errorf("unable to create InfiniBand Partition found on Site: failed to retrieve Partition by ID, DB error: %w", reloadErr)
-		}
-
-		if len(matches) == 0 {
-			matches, _, reloadErr = ibpDAO.GetAll(
-				ctx,
-				tx,
-				cdbm.InfiniBandPartitionFilterInput{
-					ControllerIBPartitionIDs: []uuid.UUID{controllerIbpID},
-					IncludeDeleted:           true,
-				},
-				cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
-				nil,
-			)
-			if reloadErr != nil {
-				return nil, fmt.Errorf("unable to create InfiniBand Partition found on Site: failed to retrieve Partition by Controller ID, DB error: %w", reloadErr)
-			}
-		}
-
-		if len(matches) == 0 && controllerIbp.GetConfig() != nil {
-			legacyID, parseErr := uuid.Parse(controllerIbp.GetConfig().GetName())
-			if parseErr == nil && legacyID != controllerIbpID {
-				matches, _, reloadErr = ibpDAO.GetAll(
-					ctx,
-					tx,
-					cdbm.InfiniBandPartitionFilterInput{
-						InfiniBandPartitionIDs: []uuid.UUID{legacyID},
-						IncludeDeleted:         true,
-					},
-					cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
-					nil,
-				)
-				if reloadErr != nil {
-					return nil, fmt.Errorf("unable to create InfiniBand Partition found on Site: failed to retrieve legacy Partition by ID, DB error: %w", reloadErr)
-				}
-			}
 		}
 
 		var existingIbp *cdbm.InfiniBandPartition

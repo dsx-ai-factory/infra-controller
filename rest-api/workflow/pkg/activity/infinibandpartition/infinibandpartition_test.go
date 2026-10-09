@@ -75,9 +75,6 @@ func testInfiniBandPartitionSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create User table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.User)(nil))
 	assert.Nil(t, err)
-	// create Allocation table
-	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Allocation)(nil))
-	assert.Nil(t, err)
 	// create Status Details table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.StatusDetail)(nil))
 	assert.Nil(t, err)
@@ -123,11 +120,6 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 	util.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st4.ID, tnu.ID)
 	util.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st5.ID, tnu.ID)
 	util.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st6.ID, tnu.ID)
-	util.TestBuildAllocation(t, dbSession, ip, tn, st3, "test-recovery-allocation-3")
-	util.TestBuildAllocation(t, dbSession, ip, tn, st4, "test-recovery-allocation-4")
-	util.TestBuildAllocation(t, dbSession, ip, tn, st5, "test-recovery-allocation-5")
-	util.TestBuildAllocation(t, dbSession, ip, tn, st6, "test-recovery-allocation-6")
-
 	ibp1 := util.TestBuildInfiniBandPartition(t, dbSession, "test-ibp-1", st1, tn, nil, cdbm.InfiniBandPartitionStatusPending, false)
 	assert.NotNil(t, ibp1)
 
@@ -232,13 +224,13 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 		_, err = dbSession.DB.Exec("UPDATE infiniband_partition SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), ibp.ID.String())
 		assert.NoError(t, err)
 		pagedIbps = append(pagedIbps, ibp)
-		pagedInvIds = append(pagedInvIds, ibp.ControllerIBPartitionID.String())
+		pagedInvIds = append(pagedInvIds, ibp.ID.String())
 	}
 
 	pagedCtrlIbps := []*corev1.IBPartition{}
 	for i := 0; i < 34; i++ {
 		ctrlIbp := &corev1.IBPartition{
-			Id: &corev1.IBPartitionId{Value: pagedIbps[i].ControllerIBPartitionID.String()},
+			Id: &corev1.IBPartitionId{Value: pagedIbps[i].ID.String()},
 			Config: &corev1.IBPartitionConfig{
 				Name: pagedIbps[i].ID.String(),
 			},
@@ -338,13 +330,13 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 							},
 						},
 						{
-							Id: &corev1.IBPartitionId{Value: ibp4.ControllerIBPartitionID.String()},
+							Id: &corev1.IBPartitionId{Value: ibp4.ID.String()},
 							Config: &corev1.IBPartitionConfig{
 								Name: ibp4.ID.String(),
 							},
 						},
 						{
-							Id: &corev1.IBPartitionId{Value: ibp8.ControllerIBPartitionID.String()},
+							Id: &corev1.IBPartitionId{Value: ibp8.ID.String()},
 							Config: &corev1.IBPartitionConfig{
 								Name: ibp8.ID.String(),
 							},
@@ -353,7 +345,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 							},
 						},
 						{
-							Id: &corev1.IBPartitionId{Value: uuid.NewString()},
+							Id: &corev1.IBPartitionId{Value: ibp9.ID.String()},
 							Config: &corev1.IBPartitionConfig{
 								Name: ibp9.ID.String(),
 							},
@@ -362,7 +354,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 							},
 						},
 						{
-							Id: &corev1.IBPartitionId{Value: uuid.NewString()},
+							Id: &corev1.IBPartitionId{Value: ibp10.ID.String()},
 							Config: &corev1.IBPartitionConfig{
 								Name: ibp10.ID.String(),
 							},

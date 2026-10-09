@@ -334,17 +334,16 @@ type InfiniBandPartitionClearInput struct {
 
 // InfiniBandPartitionFilterInput input parameters for Filter method
 type InfiniBandPartitionFilterInput struct {
-	InfiniBandPartitionIDs   []uuid.UUID
-	ControllerIBPartitionIDs []uuid.UUID
-	Names                    []string
-	SiteIDs                  []uuid.UUID
-	TenantOrgs               []string
-	TenantIDs                []uuid.UUID
-	Statuses                 []string
-	SearchQuery              *string
-	PartitionNames           []string
-	PartitionKeys            []string
-	SharpEnabled             *bool
+	InfiniBandPartitionIDs []uuid.UUID
+	Names                  []string
+	SiteIDs                []uuid.UUID
+	TenantOrgs             []string
+	TenantIDs              []uuid.UUID
+	Statuses               []string
+	SearchQuery            *string
+	PartitionNames         []string
+	PartitionKeys          []string
+	SharpEnabled           *bool
 	// IncludeDeleted returns soft-deleted rows in addition to active rows.
 	IncludeDeleted bool
 }
@@ -454,10 +453,6 @@ func (ibpsd InfiniBandPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 	}
 	if filter.InfiniBandPartitionIDs != nil {
 		query = query.Where("ibp.id IN (?)", bun.In(filter.InfiniBandPartitionIDs))
-	}
-
-	if filter.ControllerIBPartitionIDs != nil {
-		query = query.Where("ibp.controller_ib_partition_id IN (?)", bun.In(filter.ControllerIBPartitionIDs))
 	}
 
 	if filter.PartitionKeys != nil {
