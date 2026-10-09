@@ -84,6 +84,12 @@ impl MachineATron {
         &self,
         paused: bool,
     ) -> eyre::Result<(SimulatorRegistry, ExpectedInventorySummary)> {
+        crate::tenant_network_snapshot::TenantNetworkSnapshot::prepare_directory(
+            self.app_context
+                .app_config
+                .tenant_network_snapshot_dir
+                .as_deref(),
+        )?;
         let resolved_configs = self.app_context.app_config.resolved_device_configs()?;
 
         for (machine_group, machine) in &resolved_configs.machines {

@@ -30,7 +30,9 @@ tenant_network_snapshot_dir = "/tmp/mat-tenant-network"
 ```
 
 Omission disables export. MAT creates the directory if necessary; use a dedicated
-writable directory for each MAT process. Each primary DPU with an active tenant
+writable directory for each MAT process. Before creating or restoring devices,
+MAT removes existing `<machine-id>.json` snapshots from that directory; removal
+errors fail startup. Each primary DPU with an active tenant
 writes `<dpu-id>.json` on every successful network-configuration fetch, before
 reporting its synthetic observation. A write failure causes the observation to
 retry. Files are atomically replaced, contain only selected network fields, and
