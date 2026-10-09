@@ -14,6 +14,9 @@ certsDir: /opt/forge
 rootCaFile: forge_root.pem
 
 ### Service specific values ###
+# host:port of the OTLP receiver targeted by the otlp/site exporter. Empty keeps
+# the built-in default (otel-receiver.forge:443).
+otlpSiteEndpoint: ""
 # Prometheus exporter and Service port; must match DPUServiceConfiguration configPorts (dpf_services).
 prometheusPort: 9999
 # Opt in to unauthenticated metrics on all DPU host interfaces for remote Service scraping.

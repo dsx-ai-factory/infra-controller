@@ -1,0 +1,28 @@
+# The otlp/site exporter endpoint is overridable without editing otel_config.yaml.
+suite: OTLP site endpoint
+templates: [configmap.yaml, daemonset.yaml]
+tests:
+  # Existing installations must keep dialing otel-receiver.forge:443 on upgrade.
+  - it: keeps the built-in endpoint as the default and sets no override env var
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'endpoint: \$\{env:NICO_OTLP_SITE_ENDPOINT:-otel-receiver\.forge:443\}'
+        template: configmap.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_OTLP_SITE_ENDPOINT
+          any: true
+        template: daemonset.yaml
+
+  - it: passes the configured endpoint to the collector container
+    set:
+      otlpSiteEndpoint: obs-gateway.example.com:4317
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_OTLP_SITE_ENDPOINT
+            value: obs-gateway.example.com:4317
+        template: daemonset.yaml

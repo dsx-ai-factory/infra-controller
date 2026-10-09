@@ -66,6 +66,10 @@ spec:
               value: carbide-dpf-cluster-{{ .Values.nico_fmds }}.dpf-operator-system.svc.cluster.local:8888
             - name: NICO_DTS_METRICS_TARGET
               value: carbide-dpf-cluster-{{ .Values.nico_dts }}-doca-telemetry.dpf-operator-system.svc.cluster.local:9189
+            {{- with .Values.otlpSiteEndpoint }}
+            - name: NICO_OTLP_SITE_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
