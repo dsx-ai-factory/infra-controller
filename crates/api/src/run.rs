@@ -121,8 +121,7 @@ pub async fn run(
     // while propagating any panics to the current task.
     let mut join_set = JoinSet::new();
 
-    // Not ready until the readiness probe below confirms PostgreSQL is
-    // reachable, so `/ready` never reports success before that is known.
+    // Keep `/ready` unavailable until runtime startup completes.
     let health_controller = metrics_endpoint::HealthController::new();
     health_controller.set_ready(false);
 
@@ -154,17 +153,6 @@ pub async fn run(
     )
     .await?;
 
-    // `setup_resources` already verified PostgreSQL connectivity while
-    // building `db_pool`, so it is known good now; the periodic probe takes
-    // over from here and flips `health_controller` if that ever changes.
-    health_controller.set_ready(true);
-    crate::readiness::spawn_database_readiness_probe(
-        &mut join_set,
-        &db_pool,
-        health_controller,
-        cancel_token.clone(),
-    )?;
-
     let listen_address = start_runtime(RuntimeInputs {
         carbide_config,
         initial_objects,
@@ -174,13 +162,23 @@ pub async fn run(
         runtime_prelude,
         credential_manager,
         certificate_provider,
-        db_pool,
+        db_pool: db_pool.clone(),
         work_lock_manager_handle,
         secrets_context,
         admin_ui_routes_builder,
-        cancel_token,
+        cancel_token: cancel_token.clone(),
     })
     .await?;
+
+    // Runtime startup is complete and `setup_resources` verified PostgreSQL.
+    // The periodic database probe takes over readiness from here.
+    health_controller.set_ready(true);
+    crate::readiness::spawn_database_readiness_probe(
+        &mut join_set,
+        &db_pool,
+        health_controller,
+        cancel_token,
+    )?;
 
     if ready_channel
         .send(ApiServerAddresses {
