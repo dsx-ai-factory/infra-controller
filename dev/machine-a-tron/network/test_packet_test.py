@@ -3,6 +3,8 @@
 import copy
 import datetime
 import json
+import io
+from types import SimpleNamespace
 import os
 import signal
 import subprocess
@@ -15,7 +17,7 @@ from unittest.mock import patch
 import packet_test
 
 
-def snapshot():
+def network():
     return {
         "schema_version": 1,
         "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -47,16 +49,36 @@ def snapshot():
     }
 
 
-class SnapshotTests(unittest.TestCase):
-    def test_accepts_canonical_addresses_in_either_order(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "snapshot.json"
-            data = snapshot()
-            data["tenant_interfaces"][0]["addresses"].reverse()
-            path.write_text(json.dumps(data))
-            self.assertEqual(packet_test.load_snapshot(path), data)
+class NetworkTests(unittest.TestCase):
+    def test_api_selection_is_live_and_fails_when_an_instance_disappears(self):
+        first = network()
+        second = copy.deepcopy(first)
+        second["instance_id"] = "2d6e9beb-1b7a-4c9d-aa35-abe5d589b314"
+        args = SimpleNamespace(
+            mat_url="http://127.0.0.1:1266",
+            mat_ca=None,
+            mat_insecure=False,
+            instance_id=[first["instance_id"], second["instance_id"]],
+        )
+        with patch.object(packet_test, "build_opener") as build:
+            opener = build.return_value
+            opener.open.side_effect = [
+                io.BytesIO(json.dumps([second, first]).encode()),
+                io.BytesIO(b"[]"),
+            ]
+            self.assertEqual(packet_test.load_networks(args), [first, second])
+            opener.open.assert_called_with(
+                "http://127.0.0.1:1266/machines/tenant-networks", timeout=10
+            )
+            with self.assertRaisesRegex(ValueError, "expected one active primary DPU"):
+                packet_test.load_networks(args)
 
-    def test_rejects_unmodeled_topologies_and_stale_snapshots(self):
+    def test_accepts_canonical_addresses_in_either_order(self):
+        data = network()
+        data["tenant_interfaces"][0]["addresses"].reverse()
+        self.assertEqual(packet_test.validate_network(data), data)
+
+    def test_rejects_unmodeled_topologies_and_stale_observations(self):
         changes = [
             ("stale", lambda d: d.update(updated_at="2000-01-01T00:00:00+00:00")),
             (
@@ -82,18 +104,15 @@ class SnapshotTests(unittest.TestCase):
                 ),
             ),
         ]
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "snapshot.json"
-            for name, change in changes:
-                with self.subTest(name=name):
-                    data = snapshot()
-                    change(data)
-                    path.write_text(json.dumps(data))
-                    with self.assertRaises(ValueError):
-                        packet_test.load_snapshot(path)
+        for name, change in changes:
+            with self.subTest(name=name):
+                data = network()
+                change(data)
+                with self.assertRaises(ValueError):
+                    packet_test.validate_network(data)
 
     def test_pair_rejects_different_vpcs_and_overlapping_linknets(self):
-        first = snapshot()
+        first = network()
         second = copy.deepcopy(first)
         second["instance_id"] = "2d6e9beb-1b7a-4c9d-aa35-abe5d589b314"
         with self.assertRaisesRegex(ValueError, "overlap"):
@@ -103,7 +122,7 @@ class SnapshotTests(unittest.TestCase):
             packet_test.validate_pair([first, second])
 
     def test_refresh_is_not_a_configuration_change(self):
-        original = snapshot()
+        original = network()
         refreshed = copy.deepcopy(original)
         refreshed["updated_at"] = "2000-01-01T00:00:00+00:00"
         self.assertEqual(

@@ -54,6 +54,7 @@ pub fn append(router: Option<Router>, control_state: ControlState) -> Router {
     Router::new()
         .route("/", get(get_machines_ui))
         .route("/machines/status", get(get_machines_status))
+        .route("/machines/tenant-networks", get(get_tenant_networks))
         .route("/racks/status", get(get_racks_status))
         .route("/racks/{rack_id}/status", get(get_rack_status))
         .route(
@@ -531,6 +532,21 @@ async fn get_machines_status(State(state): State<ControlRouter>) -> Json<Devices
     Json(state.control_state.devices_status())
 }
 
+async fn get_tenant_networks(
+    State(state): State<ControlRouter>,
+) -> Json<Vec<crate::tenant_network::TenantNetworkConfig>> {
+    let mut networks: Vec<_> = state
+        .control_state
+        .simulators
+        .devices()
+        .iter()
+        .flat_map(|simulator| simulator.handle().dpus())
+        .filter_map(|dpu| dpu.tenant_network_config())
+        .collect();
+    networks.sort_by_key(|network| network.dpu_id.to_string());
+    Json(networks)
+}
+
 async fn get_racks_status(State(state): State<ControlRouter>) -> Json<crate::RacksStatusResponse> {
     Json(
         state
@@ -771,6 +787,72 @@ mod tests {
             DeviceStatusConfig::new(1266),
             "mat-06:00:00:00:00:00".into(),
         )
+    }
+
+    #[tokio::test]
+    async fn tenant_networks_route_reads_current_dpu_state() {
+        let dpu_id = "fm100dsq7h9eabr4qrfh88vipv7il5sbpfgfq6lhb30n36offacbmusfb50"
+            .parse()
+            .unwrap();
+        let active = DpuMachineHandle::for_control_test(Uuid::new_v4(), Some(dpu_id));
+        let inactive = DpuMachineHandle::for_control_test(Uuid::new_v4(), None);
+        active.set_control_test_tenant_network(
+            crate::tenant_network::TenantNetworkConfig::from_response(
+                dpu_id,
+                &rpc::forge::ManagedHostNetworkConfigResponse {
+                    is_primary_dpu: true,
+                    instance_id: Some("00812118-8c3e-44cb-8dc5-fd9250ddc8f8".parse().unwrap()),
+                    tenant_interfaces: vec![rpc::forge::FlatInterfaceConfig::default()],
+                    ..Default::default()
+                },
+            ),
+        );
+        let router = append(
+            None,
+            control_state(vec![DeviceHandle::for_control_test(
+                vec![inactive, active.clone()],
+                None,
+            )]),
+        );
+        for expected_count in [1, 0] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/machines/tenant-networks")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let networks: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(networks.as_array().unwrap().len(), expected_count);
+            if expected_count == 1 {
+                assert_eq!(networks[0]["dpu_id"], dpu_id.to_string());
+                active.set_control_test_tenant_network(None);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tenant_networks_route_is_available_without_bmc_routes() {
+        let response = append(None, control_state(Vec::new()))
+            .oneshot(
+                Request::builder()
+                    .uri("/machines/tenant-networks")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!([])
+        );
     }
 
     #[tokio::test]

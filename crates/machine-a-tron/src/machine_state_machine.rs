@@ -50,7 +50,7 @@ use crate::machine_utils::{
     send_pxe_boot_request,
 };
 use crate::run_jitter::{first_run_offset, jitter_interval};
-use crate::tenant_network_snapshot::TenantNetworkSnapshot;
+use crate::tenant_network::TenantNetworkConfig;
 use crate::{Guid, InfinibandPortState, PersistedDevice, PersistedDpuMachine, scout_stream};
 
 type DpuDhcpRelayHandle = oneshot::Sender<()>;
@@ -164,7 +164,6 @@ pub(super) struct MachineStateMachine {
     app_context: Arc<MachineATronContext>,
     dpu_dhcp_relay: Option<DpuDhcpRelay>,
     dpu_dhcp_relay_handle: Option<DpuDhcpRelayHandle>,
-    tenant_network_snapshot: TenantNetworkSnapshot,
     scout_stream: Option<scout_stream::Handle>,
 }
 
@@ -233,6 +232,7 @@ pub(super) struct LiveState {
     pub(super) is_up: bool,
     pub(super) power_state: PowerState, // Latest power observation from the machine FSM.
     pub(super) observed_machine_id: Option<MachineId>,
+    pub(super) tenant_network_config: Option<TenantNetworkConfig>,
     pub(super) machine_ip: Option<Ipv4Addr>,
     pub(super) bmc_ip: Option<Ipv4Addr>,
     pub(super) ipmi_port: Option<u16>,
@@ -256,6 +256,14 @@ pub(super) struct LiveState {
     pub(super) bmc_persistence: crate::bmc_mock_wrapper::BmcPersistence,
 }
 
+impl Drop for MachineStateMachine {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.live_state.write() {
+            state.tenant_network_config = None;
+        }
+    }
+}
+
 impl Default for LiveState {
     fn default() -> Self {
         let power_state = PowerState::On;
@@ -263,6 +271,7 @@ impl Default for LiveState {
             is_up: matches!(power_state, PowerState::On),
             power_state: PowerState::On,
             observed_machine_id: None,
+            tenant_network_config: None,
             machine_ip: None,
             bmc_ip: None,
             ipmi_port: None,
@@ -414,7 +423,6 @@ impl MachineStateMachine {
             app_context,
             dpu_dhcp_relay,
             dpu_dhcp_relay_handle: None,
-            tenant_network_snapshot: TenantNetworkSnapshot::default(),
             scout_stream: None,
             mat_host_id,
         }
@@ -466,7 +474,6 @@ impl MachineStateMachine {
             app_context,
             dpu_dhcp_relay,
             dpu_dhcp_relay_handle: None,
-            tenant_network_snapshot: TenantNetworkSnapshot::default(),
             scout_stream: None,
             mat_host_id,
         }
@@ -705,7 +712,7 @@ impl MachineStateMachine {
                     match self.initial_discovery_request(*os_image).await {
                         Ok(None) => {
                             self.actions.pop_front();
-                            self.tenant_network_snapshot = TenantNetworkSnapshot::default();
+                            self.live_state.write().unwrap().tenant_network_config = None;
                             self.fsm_event(Event::MachineNotFound)
                         }
                         Ok(Some(machine_discovery_result)) => {
@@ -740,7 +747,7 @@ impl MachineStateMachine {
                             tracing::warn!(%machine_id, "Machine not found during agent control, likely force deleted");
                             self.scout_stream = None;
                             self.actions.pop_front();
-                            self.tenant_network_snapshot = TenantNetworkSnapshot::default();
+                            self.live_state.write().unwrap().tenant_network_config = None;
                             self.fsm_event(Event::MachineNotFound)
                         }
                         Err(_) => return Some(self.config.run_interval_working),
@@ -758,7 +765,7 @@ impl MachineStateMachine {
                         Err(MachineStateError::MachineNotFound(machine_id)) => {
                             tracing::warn!(%machine_id, "Machine not found during network observation, likely force deleted");
                             self.actions.pop_front();
-                            self.tenant_network_snapshot = TenantNetworkSnapshot::default();
+                            self.live_state.write().unwrap().tenant_network_config = None;
                             self.fsm_event(Event::MachineNotFound)
                         }
                         Err(_) => return Some(self.config.run_interval_working),
@@ -769,7 +776,7 @@ impl MachineStateMachine {
                     self.machine_interface_id = None;
                     self.machine_discovery_result = None;
                     self.dpu_dhcp_relay_handle = None;
-                    self.tenant_network_snapshot = TenantNetworkSnapshot::default();
+                    self.live_state.write().unwrap().tenant_network_config = None;
                     self.scout_stream = None;
                 }
             }
@@ -1089,18 +1096,8 @@ impl MachineStateMachine {
             Err(status) => return Err(status.into()),
         };
 
-        self.tenant_network_snapshot
-            .update(
-                self.app_context
-                    .app_config
-                    .tenant_network_snapshot_dir
-                    .as_deref(),
-                machine_id,
-                &network_config,
-            )
-            .inspect_err(|error| {
-                tracing::warn!(%machine_id, %error, "Failed to export tenant network snapshot; retrying");
-            })?;
+        self.live_state.write().unwrap().tenant_network_config =
+            TenantNetworkConfig::from_response(machine_id, &network_config);
 
         // DPUs send network status periodically
         self.send_network_status_observation(machine_id.to_owned(), &network_config)
@@ -1230,7 +1227,7 @@ impl MachineStateMachine {
     pub(super) fn detach_dpu_dhcp_relay(&mut self) {
         self.dpu_dhcp_relay = None;
         self.dpu_dhcp_relay_handle = None;
-        self.tenant_network_snapshot = TenantNetworkSnapshot::default();
+        self.live_state.write().unwrap().tenant_network_config = None;
     }
 
     /// Drop this host's managed DPUs from its reported inventory once they have
@@ -1573,8 +1570,6 @@ pub(super) enum MachineStateError {
     ClientApi(#[from] ClientApiError),
     #[error("failed to get DHCP address: {0:?}")]
     DhcpError(#[from] DhcpRelayError),
-    #[error("failed to export tenant network snapshot: {0}")]
-    TenantNetworkSnapshot(#[from] std::io::Error),
     #[error("DPU DHCP relay is unavailable")]
     DpuDhcpRelayUnavailable,
     #[error("failed to get PXE response: {0}")]
@@ -1614,7 +1609,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn power_off_action_removes_the_exported_tenant_snapshot() {
+    async fn power_off_and_stop_clear_the_tenant_network_observation() {
         let app_context = MachineATronContext::for_test();
         let config = app_context.app_config.machines["config"].clone();
         let mac = MacAddress::new([2, 0, 0, 0, 0, 0]);
@@ -1635,31 +1630,29 @@ mod tests {
             None,
             Uuid::new_v4(),
         );
-        let directory = tempfile::tempdir().unwrap();
         let dpu_id: MachineId = "fm100dsq7h9eabr4qrfh88vipv7il5sbpfgfq6lhb30n36offacbmusfb50"
             .parse()
             .unwrap();
-        state_machine
-            .tenant_network_snapshot
-            .update(
-                Some(directory.path()),
-                dpu_id,
-                &ManagedHostNetworkConfigResponse {
-                    is_primary_dpu: true,
-                    instance_id: Some("00812118-8c3e-44cb-8dc5-fd9250ddc8f8".parse().unwrap()),
-                    tenant_interfaces: vec![rpc::forge::FlatInterfaceConfig::default()],
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        let path = directory.path().join(format!("{dpu_id}.json"));
-        assert!(path.exists());
+        let network = TenantNetworkConfig::from_response(
+            dpu_id,
+            &ManagedHostNetworkConfigResponse {
+                is_primary_dpu: true,
+                instance_id: Some("00812118-8c3e-44cb-8dc5-fd9250ddc8f8".parse().unwrap()),
+                tenant_interfaces: vec![rpc::forge::FlatInterfaceConfig::default()],
+                ..Default::default()
+            },
+        );
+        let live_state = state_machine.live_state.clone();
+        live_state.write().unwrap().tenant_network_config = network.clone();
         state_machine.actions = VecDeque::from([FsmAction::CleanupOnPowerOff]);
 
         assert!(state_machine.process_actions().await.is_none());
 
-        assert!(!path.exists(), "power-off must retire the tenant snapshot");
+        assert!(live_state.read().unwrap().tenant_network_config.is_none());
         assert!(state_machine.actions.is_empty());
+        live_state.write().unwrap().tenant_network_config = network;
+        drop(state_machine);
+        assert!(live_state.read().unwrap().tenant_network_config.is_none());
     }
 
     #[tokio::test]

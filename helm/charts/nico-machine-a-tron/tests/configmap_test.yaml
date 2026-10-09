@@ -4,9 +4,6 @@ templates:
 tests:
   - it: should create configmap with default machine config
     asserts:
-      - notMatchRegex:
-          path: data["mat.toml"]
-          pattern: tenant_network_snapshot_dir
       - isKind:
           of: ConfigMap
       - equal:
@@ -251,11 +248,3 @@ tests:
       - matchRegex:
           path: data["mat.toml"]
           pattern: 'underlay_dhcp_relay_address = "10.201.0.1"'
-
-  - it: should opt in to tenant snapshot export without changing pod privileges
-    set:
-      machineATron.tenantNetworkSnapshotDir: /tmp/mat-tenant-network
-    asserts:
-      - matchRegex:
-          path: data["mat.toml"]
-          pattern: 'tenant_network_snapshot_dir = "/tmp/mat-tenant-network"'
