@@ -1112,6 +1112,7 @@ dependencies = [
  "carbide-test-support",
  "carbide-utils",
  "carbide-version",
+ "cert-manager",
  "clap",
  "eyre",
  "http",
@@ -1198,6 +1199,7 @@ dependencies = [
  "carbide-version",
  "carbide-vpc-prefix-controller",
  "casbin",
+ "cert-manager",
  "chrono",
  "component-manager",
  "config-version",
@@ -3811,6 +3813,39 @@ dependencies = [
  "jobserver",
  "libc",
  "shlex",
+]
+
+[[package]]
+name = "cert-manager"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "carbide-authn",
+ "carbide-secrets",
+ "carbide-test-support",
+ "carbide-tls",
+ "eyre",
+ "http",
+ "http-body-util",
+ "humantime",
+ "humantime-serde",
+ "k8s-openapi",
+ "kube",
+ "rand 0.10.1",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
+ "x509-parser",
 ]
 
 [[package]]
@@ -9443,6 +9478,7 @@ version = "0.14.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57f6d249aad744e274e682777a50283a225a32705394ee6d5fcc01efa25e4055"
 dependencies = [
+ "aws-lc-rs",
  "pem",
  "ring",
  "rustls-pki-types",
@@ -13106,6 +13142,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d43b0f71ce057da06bc0851b23ee24f3f86190b07203dd8f567d0b706a185202"
 dependencies = [
  "asn1-rs",
+ "aws-lc-rs",
  "data-encoding",
  "der-parser",
  "lazy_static",

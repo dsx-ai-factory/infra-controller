@@ -41,6 +41,10 @@ global:
 
   ## cert-manager Certificate configuration (shared defaults for all services)
   certificate:
+    ## Use CertificateRequests for Scout, DPU, and UFM certificates.
+    ## Requires nico-api.machineCertificates to reference the existing site CA.
+    ## Service Certificate resources use their existing settings.
+    useCertManager: false
     duration: 720h0m0s
     renewBefore: 360h0m0s
     privateKey:

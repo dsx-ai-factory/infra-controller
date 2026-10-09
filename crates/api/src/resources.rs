@@ -86,15 +86,27 @@ pub(crate) async fn setup_resources(
     // is fully explicit, never inheriting the credential Vault's env config. The
     // SPIFFE identity comes from the site-resolved credential Vault config so all
     // backends mint under the same identity namespace.
-    let cert_config = carbide_config.certificates.to_certificate_config()?;
-    let certificate_provider = create_certificate_provider(
-        &cert_config,
-        &vault_client,
-        SpiffeIdentity {
-            trust_domain: vault_config.spiffe_trust_domain(),
-            machine_base_path: vault_config.spiffe_machine_base_path(),
-        },
-    )?;
+    let spiffe = SpiffeIdentity {
+        trust_domain: vault_config.spiffe_trust_domain(),
+        machine_base_path: vault_config.spiffe_machine_base_path(),
+    };
+    let certificate_provider: Arc<dyn CertificateProvider> =
+        if let Some(config) = carbide_config.certificates.cert_manager_config()? {
+            let tls = carbide_config.tls.as_ref().ok_or_else(|| {
+                eyre::eyre!("certificates.use_cert_manager requires [tls] root_cafile_path")
+            })?;
+            Arc::new(
+                cert_manager::CertManagerCertificateProvider::from_config(
+                    config,
+                    spiffe,
+                    tls.root_cafile_path.clone().into(),
+                )
+                .await?,
+            )
+        } else {
+            let cert_config = carbide_config.certificates.to_certificate_config()?;
+            create_certificate_provider(&cert_config, &vault_client, spiffe)?
+        };
 
     let db_pool = connect_postgres(carbide_config).await?;
     let work_lock_manager_handle = work_lock_manager::start(

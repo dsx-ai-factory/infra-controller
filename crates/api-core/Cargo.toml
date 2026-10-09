@@ -27,6 +27,7 @@ repository.workspace = true
 name = "carbide_api_core"
 
 [dependencies]
+cert-manager = { path = "../cert-manager" }
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-model = { path = "../api-model", default-features = false }

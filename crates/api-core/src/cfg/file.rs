@@ -1118,13 +1118,22 @@ impl ApiAdmissionControlConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CertificatesConfig {
-    /// Which backend issues certificates. Defaults to sharing the credential
-    /// Vault client (historical behavior).
+    /// Use cert-manager for Scout, DPU, and UFM certificate issuance. Defaults to false.
+    #[serde(default)]
+    pub use_cert_manager: bool,
+
+    /// Optional overrides for the cert-manager defaults; ignored when disabled.
+    /// The signer must chain to the existing `[tls] root_cafile_path` bundle.
+    #[serde(default)]
+    pub cert_manager: Option<cert_manager::Config>,
+
+    /// Vault backend used when `use_cert_manager` is false. Defaults to sharing
+    /// the credential Vault client (historical behavior).
     #[serde(default)]
     pub backend: CertBackendKind,
 
     /// Connection settings for a dedicated certificate Vault. Required when
-    /// `backend = "dedicated_vault"`, ignored otherwise.
+    /// `backend = "dedicated_vault"` and `use_cert_manager` is false, ignored otherwise.
     #[serde(default)]
     pub dedicated_vault: Option<DedicatedVaultSettings>,
 }
@@ -1294,6 +1303,17 @@ impl std::fmt::Debug for DedicatedVaultSettings {
 }
 
 impl CertificatesConfig {
+    /// Return and validate the signer settings when cert-manager is enabled.
+    /// Disabled settings are ignored; an omitted section uses the signer defaults.
+    pub fn cert_manager_config(&self) -> eyre::Result<Option<cert_manager::Config>> {
+        if !self.use_cert_manager {
+            return Ok(None);
+        }
+        let config = self.cert_manager.clone().unwrap_or_default();
+        config.validate()?;
+        Ok(Some(config))
+    }
+
     /// Convert the parsed section into the runtime certificate config, failing
     /// fast if a dedicated backend was selected without its settings.
     pub fn to_certificate_config(&self) -> eyre::Result<carbide_secrets::CertificateConfig> {
@@ -5578,6 +5598,65 @@ path = "credentials.yaml"
         );
     }
 
+    #[test]
+    fn cert_manager_toml_config_contract() {
+        let cases = [
+            ("default off", "", Ok(false)),
+            (
+                "enabled with only the flag",
+                "use_cert_manager = true",
+                Ok(true),
+            ),
+            (
+                "signer defaults",
+                "use_cert_manager = true\n[cert_manager]",
+                Ok(true),
+            ),
+            (
+                "timeout too large",
+                "use_cert_manager = true\n[cert_manager]\nnamespace = 'forge-system'\nissuer_name = 'site-issuer'\nrequest_timeout_secs = 601",
+                Err("1..=600"),
+            ),
+        ];
+        for (name, toml, expected) in cases {
+            let config: CertificatesConfig =
+                Figment::new().merge(Toml::string(toml)).extract().unwrap();
+            match (config.cert_manager_config(), expected) {
+                (Ok(settings), Ok(enabled)) => {
+                    assert_eq!(settings.is_some(), enabled, "{name}");
+                    if let Some(settings) = settings {
+                        assert_eq!(settings.namespace, "forge-system", "{name}");
+                        assert_eq!(settings.issuer_name, "site-issuer", "{name}");
+                        assert_eq!(settings.request_timeout_secs, 120, "{name}");
+                        assert_eq!(
+                            settings.max_ttl,
+                            std::time::Duration::from_secs(720 * 3600),
+                            "{name}"
+                        );
+                        assert!(
+                            matches!(
+                                settings.issuer_kind,
+                                cert_manager::IssuerKind::ClusterIssuer
+                            ),
+                            "{name}"
+                        );
+                    }
+                    assert!(
+                        matches!(
+                            config.to_certificate_config().unwrap().backend,
+                            carbide_secrets::CertBackend::SharedVault
+                        ),
+                        "{name}: default Vault backend"
+                    );
+                }
+                (Err(error), Err(message)) => {
+                    assert!(error.to_string().contains(message), "{name}: {error}")
+                }
+                (actual, expected) => panic!("{name}: got {actual:?}, expected {expected:?}"),
+            }
+        }
+    }
+
     /// Exercises the real `[certificates]` / `[certificates.dedicated_vault]`
     /// TOML contract through Figment (the production config path), rather than
     /// JSON serde. Each case parses a TOML fragment into `CertificatesConfig`
@@ -6435,6 +6514,23 @@ path = "credentials.yaml"
                 "/etc/forge/carbide-api/site/admin_root_cert_pem",
             ),
             ("{{ .Values.auth.permissiveMode | default false }}", "false"),
+            ("{{ .Values.global.certificate.useCertManager }}", "false"),
+            (
+                r#"{{ include "nico-api.namespace" . | quote }}"#,
+                r#""nico-system""#,
+            ),
+            (
+                "{{ .Values.machineCertificates.issuerRef.name | quote }}",
+                r#""site-issuer""#,
+            ),
+            (
+                "{{ .Values.machineCertificates.issuerRef.kind | quote }}",
+                r#""ClusterIssuer""#,
+            ),
+            (
+                "{{ .Values.machineCertificates.requestTimeoutSecs }}",
+                "120",
+            ),
             ("{{ .Values.global.spiffe.trustDomain }}", "example.test"),
             (
                 r#"{{ .Values.auth.namespace | default (include "nico-api.namespace" .) }}"#,

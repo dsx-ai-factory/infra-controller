@@ -849,8 +849,6 @@ pub(crate) async fn renew_machine_certificate(
     if let Some(machine_identity) = request
         .extensions()
         .get::<crate::auth::AuthContext>()
-        // XXX: Does a machine's certificate resemble a service's
-        // certificate enough for this to work?
         .and_then(|auth_context| auth_context.get_spiffe_machine_id())
     {
         let certificate = api

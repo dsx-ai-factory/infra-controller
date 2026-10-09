@@ -14,6 +14,8 @@ global:
     pullPolicy: IfNotPresent
   imagePullSecrets: []
   certificate:
+    ## Use cert-manager for Scout, DPU, and UFM certificates; the default is Vault.
+    useCertManager: false
     duration: 720h0m0s
     renewBefore: 360h0m0s
     privateKey:
@@ -31,6 +33,16 @@ global:
 
 ## Override the release namespace (defaults to helm install -n <namespace>)
 namespaceOverride: ""
+
+## Used when global.certificate.useCertManager is true. Requests are created
+## in the API namespace using its service account. The issuer must chain to
+## the same site CA already trusted by the API, Scout and DPU agents.
+machineCertificates:
+  issuerRef:
+    name: site-issuer
+    kind: ClusterIssuer
+  ## Issuance deadline in seconds, including request creation; range 1..600.
+  requestTimeoutSecs: 120
 
 ## Legacy name aliases — opt-in ExternalName Services so binaries that
 ## hardcode the pre-rename hostnames (e.g. `carbide-api.forge-system.svc.

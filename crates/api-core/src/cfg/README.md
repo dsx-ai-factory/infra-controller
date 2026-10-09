@@ -1696,8 +1696,77 @@ Each entry in `providers` is tagged by `type`. Unknown fields are rejected.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `backend` | `CertBackendKind` | `shared_vault` | Which backend issues certificates: `shared_vault` reuses the credential store's Vault client (one client, one token lease), `dedicated_vault` uses a separately-configured Vault. |
-| `dedicated_vault` | `Option<DedicatedVaultSettings>` | — | Connection settings for a dedicated certificate Vault (see [DedicatedVaultSettings](#dedicatedvaultsettings)). Required when `backend = "dedicated_vault"`, ignored otherwise. |
+| `use_cert_manager` | `bool` | `false` | Issue and renew Scout, DPU, and UFM certificates using cert-manager. Requires `[tls] root_cafile_path`. Disabled settings are ignored. |
+| `cert_manager` | `Option<cert_manager::Config>` | — | Optional Kubernetes signer overrides. When omitted, the [machine cert-manager defaults](#machine-cert-manager-settings) apply. |
+| `backend` | `CertBackendKind` | `shared_vault` | Vault backend when `use_cert_manager = false`: `shared_vault` reuses the credential store's Vault client (one client, one token lease), `dedicated_vault` uses a separately-configured Vault. Ignored when cert-manager is enabled. |
+| `dedicated_vault` | `Option<DedicatedVaultSettings>` | — | Connection settings for a dedicated certificate Vault (see [DedicatedVaultSettings](#dedicatedvaultsettings)). Required when `backend = "dedicated_vault"` and `use_cert_manager = false`, ignored otherwise. |
+
+### Machine cert-manager settings
+
+These fields live under `[certificates.cert_manager]`.
+
+To enable issuance with the defaults, set only:
+
+```toml
+[certificates]
+use_cert_manager = true
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `namespace` | `String` | `forge-system` | Non-empty namespace for CertificateRequests. The API service account needs `create`, `get`, and `delete` on `certificaterequests` in this namespace. Helm sets it to the deployed API namespace. |
+| `issuer_name` | `String` | `site-issuer` | Non-empty name of an existing issuer in `cert-manager.io`, chaining to the same site CA trusted by the API, Scout, and DPU agents. |
+| `issuer_kind` | `IssuerKind` | `ClusterIssuer` | Accepts `ClusterIssuer` or `Issuer`; an `Issuer` must be in `namespace`. |
+| `request_timeout_secs` | `u64` | `120` | Issuance deadline including Kubernetes creation, in seconds; accepts `1` through `600`. Cleanup has a separate wait bounded by the same duration. |
+| `max_ttl` | `Duration` | `720h` | Whole-second duration of at least the maximum agent renewal interval plus one day of grace (`8d` with the seven-day renewal maximum), in human-readable format (for example `720h`). Caps machine and explicit UFM lifetimes; set it to the existing Vault PKI role's maximum when migrating. |
+
+The API uses Kubernetes client configuration (in-cluster service account or
+kubeconfig). Its issuer must be ready and its CertificateRequests must be
+approved by the cluster's cert-manager approval policy. The Helm chart defaults
+`global.certificate.useCertManager` to `false`; enabling it renders these settings
+using the API namespace (defaulting to the Helm release namespace, overridden by
+`nico-api.namespaceOverride`), with `nico-api.machineCertificates.issuerRef` defaulting
+to `ClusterIssuer/site-issuer`. These chart values can be overridden. A custom
+`configFiles.nicoApiConfig` replaces the chart's generated configuration; the
+site configuration is merged over the global configuration, followed by the
+binary's environment overrides.
+The API chart grants the request permissions regardless of the Helm switch, so
+enabling the provider in the site configuration requires no Helm flag change.
+If site-config requests use a different namespace than the API, grant the API
+service account request permissions there, or override
+`certificates.cert_manager.namespace` to match the API namespace.
+
+For each machine or UFM certificate, the API generates a P-256 key in memory and
+submits only a CSR. The SPIFFE URI is always included using
+`spiffe_trust_domain` and `spiffe_machine_base_path`; it has no separate feature
+flag. Node bearer-token authentication settings do not control this SAN.
+Machine lifetimes retain the randomized Vault default of 432 through 719 hours,
+capped by `max_ttl`. UFM requests include their existing DNS SANs and an explicit
+365-day lifetime, also capped by `max_ttl`. Explicit TTLs must be whole-second
+durations meeting the same minimum as `max_ttl`; DNS SANs are comma-separated,
+with whitespace trimmed. The lifetime bound includes one day beyond the maximum
+agent renewal interval to allow for polling delays and retries.
+The API
+validates the returned key, SPIFFE identity, usages, lifetime, and trust chain
+against `[tls] root_cafile_path`, then returns the existing certificate/key/CA
+response format. The signing issuer must preserve the requested machine usages
+and provide any intermediate certificates needed to verify the leaf against the
+configured trust bundle. The issuer CA field is optional; when absent, the
+returned issuing-CA bytes are empty and trust verification is still required.
+Certificates with less than the minimum lifetime remaining are rejected,
+including when an issuer shortens the requested lifetime.
+
+After success, failure, or timeout, the API submits a deletion request and waits
+only for Kubernetes' acknowledgement, without waiting for finalizers. This wait
+has a separate `request_timeout_secs` deadline. Failure or cleanup timeout
+logs a warning without discarding a successfully issued certificate.
+Cancellation or process death may leave a public CSR for
+operator cleanup. Requests have UUID names and the `nico.nvidia.com/machine-id`
+label for filtering by machine; UFM requests instead use the
+`nico.nvidia.com/fabric` label. Issuance failures are returned to the caller;
+they do not fall back to Vault. Provider selection does not change service
+transport Certificate resources, Secrets, or mounts. Vault credential and KMS
+backends remain independently configured.
 
 ### `DedicatedVaultSettings`
 

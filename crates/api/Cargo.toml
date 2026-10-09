@@ -37,6 +37,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Internal dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+cert-manager = { path = "../cert-manager" }
 carbide-api-core = { path = "../api-core", default-features = false }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-web = { path = "../api-web" }

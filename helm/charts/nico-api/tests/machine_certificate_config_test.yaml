@@ -1,0 +1,58 @@
+suite: Machine certificate provider configuration
+templates:
+  - configmap.yaml
+release:
+  namespace: release-site
+tests:
+  - it: retains Vault machine issuance by default
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^use_cert_manager = false$'
+      - notMatchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '\[certificates\.cert_manager\]'
+
+  - it: enables the site CA issuer in the API namespace
+    documentIndex: 0
+    set:
+      global.certificate.useCertManager: true
+      namespaceOverride: test-site
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^use_cert_manager = true$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^namespace = "test-site"$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^issuer_name = "site-issuer"$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^issuer_kind = "ClusterIssuer"$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^request_timeout_secs = 120$'
+
+  - it: renders custom signer settings in the release namespace
+    documentIndex: 0
+    set:
+      global.certificate.useCertManager: true
+      machineCertificates.issuerRef.name: machine-signer
+      machineCertificates.issuerRef.kind: Issuer
+      machineCertificates.requestTimeoutSecs: 60
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^namespace = "release-site"$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^issuer_name = "machine-signer"$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^issuer_kind = "Issuer"$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^request_timeout_secs = 60$'

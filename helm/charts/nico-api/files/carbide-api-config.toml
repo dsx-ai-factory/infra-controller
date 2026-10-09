@@ -28,6 +28,17 @@ attestation_enabled = true
 # its more specific config for anycast_site_prefixes.
 anycast_site_prefixes = ["0.0.0.0/0"]
 
+[certificates]
+use_cert_manager = {{ .Values.global.certificate.useCertManager }}
+{{- if .Values.global.certificate.useCertManager }}
+
+[certificates.cert_manager]
+namespace = {{ include "nico-api.namespace" . | quote }}
+issuer_name = {{ .Values.machineCertificates.issuerRef.name | quote }}
+issuer_kind = {{ .Values.machineCertificates.issuerRef.kind | quote }}
+request_timeout_secs = {{ .Values.machineCertificates.requestTimeoutSecs }}
+{{- end }}
+
 [dpu_config]
 # DPU NIC firmware settings.
 dpu_nic_firmware_initial_update_enabled = false
