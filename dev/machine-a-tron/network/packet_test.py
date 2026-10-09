@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Bounded software packet test of two MAT tenant snapshots; no HBN/EVPN emulation."""
+"""Bounded dual-stack software packet test of two MAT tenant snapshots; no HBN/EVPN emulation."""
 
 import argparse
 from contextlib import contextmanager
@@ -102,9 +102,12 @@ def validate_pair(configs):
 
 
 def run(*args, timeout=35):
-    return subprocess.check_output(
-        [str(a) for a in args], text=True, stderr=subprocess.STDOUT, timeout=timeout
-    ).strip()
+    try:
+        return subprocess.check_output(
+            [str(a) for a in args], text=True, stderr=subprocess.STDOUT, timeout=timeout
+        ).strip()
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(f"{error}: {error.output}") from error
 
 
 def address(config, family):
@@ -121,7 +124,7 @@ def write_lifetime(path, value):
     temporary.replace(path)
 
 
-def wait_route(namespace, present):
+def wait_route(namespace, present, family=6, gateway=ROUTER):
     for _ in range(30):
         routes = json.loads(
             run(
@@ -131,14 +134,15 @@ def wait_route(namespace, present):
                 namespace,
                 "ip",
                 "-j",
-                "-6",
+                f"-{family}",
                 "route",
                 "show",
                 "default",
             )
         )
         if present and any(
-            r.get("protocol") == "ra" and r.get("gateway") == ROUTER for r in routes
+            r.get("gateway") == gateway and (family == 4 or r.get("protocol") == "ra")
+            for r in routes
         ):
             return routes
         if not present and not routes:
@@ -213,15 +217,16 @@ def execute(args):
     validate_pair(configs)
     if os.geteuid() != 0 or sys.platform != "linux":
         raise ValueError("run on an isolated Linux test VM as root")
-    if run("sysctl", "-n", "net.ipv6.conf.all.forwarding") != "1":
-        raise ValueError("the test VM must already have IPv6 forwarding enabled")
+    for setting in ("net.ipv4.ip_forward", "net.ipv6.conf.all.forwarding"):
+        if run("sysctl", "-n", setting) != "1":
+            raise ValueError(f"the test VM must already have {setting}=1")
     if args.internet_url and (
         urlsplit(args.internet_url).scheme != "https"
         or not urlsplit(args.internet_url).hostname
     ):
         raise ValueError("--internet-url must be an HTTPS URL")
-    if args.nat66_interface and not args.internet_url:
-        raise ValueError("--nat66-interface requires --internet-url")
+    if (args.nat44_interface or args.nat66_interface) and not args.internet_url:
+        raise ValueError("NAT interfaces require --internet-url")
     if not args.dhcp_server.is_file():
         raise ValueError(
             "--dhcp-server must name the compiled forge-dhcp-server binary"
@@ -242,7 +247,8 @@ def execute(args):
     lab = Lab(args.output)
     result = {
         "result": "FAIL",
-        "scope": "real NICo DHCPv6; software RA, DNS and Linux routing; IPv4 static; no HBN/EVPN or isolation proof",
+        "scope": "real NICo DHCPv4/DHCPv6; software RA, DNS and Linux routing; no HBN/EVPN or isolation proof",
+        "nat44_interface": args.nat44_interface,
         "nat66_interface": args.nat66_interface,
         "endpoints": [],
         "checks": [],
@@ -252,7 +258,7 @@ def execute(args):
     try:
         fixture = args.output / "http"
         fixture.mkdir()
-        (fixture / "probe.txt").write_text("mat-ipv6-ok\n")
+        (fixture / "probe.txt").write_text("mat-dual-stack-ok\n")
         for directory in [
             Path("/var/support"),
             Path("/var/support/forge-dhcp"),
@@ -263,6 +269,7 @@ def execute(args):
                 lab.change(["mkdir", directory], ["rmdir", directory])
         for index, config in enumerate(configs):
             v4, v6 = address(config, 1), address(config, 2)
+            gateway4 = str(ipaddress.ip_interface(v4["gateway"]).ip)
             gateway6 = str(ipaddress.ip_network(v6["prefix"]).network_address)
             namespace = f"{tag}-{index}"
             root, peer = f"m{token}{index}", f"p{token}{index}"
@@ -314,73 +321,41 @@ def execute(args):
                 "net.ipv6.conf.all.forwarding=0",
                 "net.ipv6.conf.eth0.accept_ra=1",
             )
-            run(
-                "ip",
-                "netns",
-                "exec",
-                namespace,
-                "ip",
-                "addr",
-                "add",
-                v4["ip"] + "/32",
-                "dev",
-                "eth0",
-            )
-            run(
-                "ip",
-                "netns",
-                "exec",
-                namespace,
-                "ip",
-                "route",
-                "add",
-                v4["gateway"].split("/")[0] + "/32",
-                "dev",
-                "eth0",
-            )
-            run(
-                "ip",
-                "netns",
-                "exec",
-                namespace,
-                "ip",
-                "route",
-                "add",
-                "default",
-                "via",
-                v4["gateway"].split("/")[0],
-            )
-            for direction in ("-i", "-o"):
-                rule = [
-                    "FORWARD",
-                    direction,
-                    root,
-                    "-m",
-                    "comment",
-                    "--comment",
-                    tag,
-                    "-j",
-                    "ACCEPT",
-                ]
-                lab.change(["ip6tables", "-I", *rule], ["ip6tables", "-D", *rule])
-            if args.nat66_interface:
-                rule = [
-                    "POSTROUTING",
-                    "-s",
-                    v6["ip"] + "/128",
-                    "-o",
-                    args.nat66_interface,
-                    "-m",
-                    "comment",
-                    "--comment",
-                    tag,
-                    "-j",
-                    "MASQUERADE",
-                ]
-                lab.change(
-                    ["ip6tables", "-t", "nat", "-A", *rule],
-                    ["ip6tables", "-t", "nat", "-D", *rule],
-                )
+            for tool, ip, bits, egress in (
+                ("iptables", v4["ip"], 32, args.nat44_interface),
+                ("ip6tables", v6["ip"], 128, args.nat66_interface),
+            ):
+                for direction in ("-i", "-o"):
+                    rule = [
+                        "FORWARD",
+                        direction,
+                        root,
+                        "-m",
+                        "comment",
+                        "--comment",
+                        tag,
+                        "-j",
+                        "ACCEPT",
+                    ]
+                    lab.change([tool, "-I", *rule], [tool, "-D", *rule])
+                if egress:
+                    rule = [
+                        "POSTROUTING",
+                        "-s",
+                        f"{ip}/{bits}",
+                        "-o",
+                        egress,
+                        "-m",
+                        "comment",
+                        "--comment",
+                        tag,
+                        "-j",
+                        "MASQUERADE",
+                    ]
+                    lab.change(
+                        [tool, "-t", "nat", "-A", *rule],
+                        [tool, "-t", "nat", "-D", *rule],
+                    )
             control = args.output / f"ra-{index}.lifetime"
             write_lifetime(control, 30)
             lab.launch(
@@ -394,22 +369,24 @@ def execute(args):
                 ],
                 f"ra-{index}.log",
             )
-            lab.launch(
-                [
-                    "python3",
-                    "-u",
-                    HERE / "dns_fixture.py",
-                    gateway6,
-                    address(configs[1 - index], 2)["ip"],
-                    args.dns_upstream,
-                ],
-                f"dns-{index}.log",
-            )
+            for family, gateway in ((4, gateway4), (6, gateway6)):
+                lab.launch(
+                    [
+                        "python3",
+                        "-u",
+                        HERE / "dns_fixture.py",
+                        gateway,
+                        address(configs[1 - index], 1)["ip"],
+                        address(configs[1 - index], 2)["ip"],
+                        args.dns_upstream,
+                    ],
+                    f"dns-{index}-v{family}.log",
+                )
             dhcp = {
                 "lease_time_secs": 7200,
                 "renewal_time_secs": 1800,
                 "rebinding_time_secs": 3600,
-                "carbide_nameservers": [],
+                "carbide_nameservers": [gateway4],
                 "carbide_nameservers_v6": [gateway6],
                 "carbide_ntpservers": [],
                 "carbide_api_url": None,
@@ -463,114 +440,166 @@ def execute(args):
                 {
                     "instance_id": config["instance_id"],
                     "namespace": namespace,
-                    "ipv6": v6["ip"],
-                    "dns": gateway6,
+                    "families": {
+                        "4": {
+                            "address": v4["ip"],
+                            "dns": gateway4,
+                            "gateway": gateway4,
+                        },
+                        "6": {"address": v6["ip"], "dns": gateway6, "gateway": ROUTER},
+                    },
                 }
             )
         time.sleep(3)
         for index, ep in enumerate(result["endpoints"]):
             namespace = ep["namespace"]
-            ep["lease"] = json.loads(
-                run(
+            for family in (4, 6):
+                endpoint = ep["families"][str(family)]
+                client = "dhcpv4_client.py" if family == 4 else "dhcp_client.py"
+                command = [
                     "ip",
                     "netns",
                     "exec",
                     namespace,
                     "python3",
-                    HERE / "dhcp_client.py",
+                    HERE / client,
                     "eth0",
-                    ep["ipv6"],
+                    endpoint["address"],
+                ]
+                if family == 4:
+                    command += [
+                        address(configs[index], 1)["prefix"],
+                        endpoint["gateway"],
+                        endpoint["dns"],
+                    ]
+                endpoint["lease"] = json.loads(run(*command))
+                if endpoint["lease"]["dns_servers"] != [endpoint["dns"]]:
+                    raise RuntimeError(
+                        f"DHCPv{family} DNS does not match the advertised configuration"
+                    )
+                endpoint["routes"] = wait_route(
+                    namespace, True, family, endpoint["gateway"]
                 )
-            )
-            if ep["lease"]["dns_servers"] != [ep["dns"]]:
-                raise RuntimeError(
-                    "DHCPv6 DNS does not match the advertised configuration"
+                lab.launch(
+                    [
+                        "ip",
+                        "netns",
+                        "exec",
+                        namespace,
+                        "python3",
+                        "-m",
+                        "http.server",
+                        "18084",
+                        "--bind",
+                        endpoint["address"],
+                        "--directory",
+                        fixture,
+                    ],
+                    f"http-{index}-v{family}.log",
                 )
-            ep["routes"] = wait_route(namespace, True)
             netns_dir = Path("/etc/netns") / namespace
             lab.change(["mkdir", netns_dir], ["rmdir", netns_dir])
-            for name, value in [
-                (
-                    "resolv.conf",
-                    f'nameserver {ep["dns"]}\noptions timeout:2 attempts:2\n',
-                ),
-                ("nsswitch.conf", "hosts: files dns\n"),
-            ]:
+            for name in ("resolv.conf", "nsswitch.conf"):
                 path = netns_dir / name
                 lab.undo.append(["rm", "-f", path])
-                path.write_text(value)
-            lab.launch(
-                [
-                    "ip",
-                    "netns",
-                    "exec",
-                    namespace,
-                    "python3",
-                    "-m",
-                    "http.server",
-                    "18084",
-                    "--bind",
-                    "::",
-                    "--directory",
-                    fixture,
-                ],
-                f"http-{index}.log",
-            )
+                path.write_text("hosts: files dns\n" if name == "nsswitch.conf" else "")
         time.sleep(1)
         for index, ep in enumerate(result["endpoints"]):
-            ns = ["ip", "netns", "exec", ep["namespace"]]
-            peer = result["endpoints"][1 - index]["ipv6"]
-            check = {
-                "instance_id": ep["instance_id"],
-                "icmpv6": run(*ns, "ping", "-6", "-c", "3", "-W", "3", peer),
-            }
-            check["peer_http"] = run(
-                *ns,
-                "curl",
-                "-6",
-                "--noproxy",
-                "*",
-                "--max-time",
-                "10",
-                "--fail",
-                "-sS",
-                f"http://{PROBE_NAME}:18084/probe.txt",
-            )
-            if check["peer_http"] != "mat-ipv6-ok":
-                raise RuntimeError("unexpected peer HTTP response")
-            if args.internet_url:
-                check["internet_https"] = run(
+            for family in (4, 6):
+                endpoint = ep["families"][str(family)]
+                ns = ["ip", "netns", "exec", ep["namespace"]]
+                peer = result["endpoints"][1 - index]["families"][str(family)][
+                    "address"
+                ]
+                # Each family must resolve through its own DHCP-advertised DNS server.
+                (Path("/etc/netns") / ep["namespace"] / "resolv.conf").write_text(
+                    f'nameserver {endpoint["lease"]["dns_servers"][0]}\noptions timeout:2 attempts:2\n'
+                )
+                check = {
+                    "instance_id": ep["instance_id"],
+                    "family": family,
+                    "dns_server": endpoint["lease"]["dns_servers"][0],
+                    "ping": run(*ns, "ping", f"-{family}", "-c", "3", "-W", "3", peer),
+                }
+                check["peer_http"] = run(
                     *ns,
                     "curl",
-                    "-6",
+                    f"-{family}",
                     "--noproxy",
                     "*",
                     "--max-time",
-                    "25",
+                    "10",
                     "--fail",
                     "-sS",
-                    "-o",
-                    "/dev/null",
-                    "-w",
-                    "%{local_ip} %{remote_ip} %{http_code}",
-                    args.internet_url,
+                    f"http://{PROBE_NAME}:18084/probe.txt",
                 )
-            control = args.output / f"ra-{index}.lifetime"
-            write_lifetime(control, 0)
-            check["withdrawn_routes"] = wait_route(ep["namespace"], False)
-            failed = subprocess.run(
-                [*ns, "ping", "-6", "-c", "1", "-W", "1", peer],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if failed.returncode == 0:
-                raise RuntimeError("peer remained reachable without its default route")
-            check["withdrawal_failure"] = failed.stdout + failed.stderr
-            write_lifetime(control, 30)
-            check["restored_routes"] = wait_route(ep["namespace"], True)
-            check["recovery"] = run(*ns, "ping", "-6", "-c", "1", "-W", "3", peer)
-            result["checks"].append(check)
+                if check["peer_http"] != "mat-dual-stack-ok":
+                    raise RuntimeError("unexpected peer HTTP response")
+                if args.internet_url:
+                    check["internet_https"] = run(
+                        *ns,
+                        "curl",
+                        f"-{family}",
+                        "--noproxy",
+                        "*",
+                        "--max-time",
+                        "25",
+                        "--fail",
+                        "-sS",
+                        "-o",
+                        "/dev/null",
+                        "-w",
+                        "%{local_ip} %{remote_ip} %{http_code}",
+                        args.internet_url,
+                    )
+                control = args.output / f"ra-{index}.lifetime"
+                if family == 6:
+                    write_lifetime(control, 0)
+                else:
+                    run(*ns, "ip", "-4", "route", "del", "default")
+                check["withdrawn_routes"] = wait_route(
+                    ep["namespace"], False, family, endpoint["gateway"]
+                )
+                failed = subprocess.run(
+                    [*ns, "ping", f"-{family}", "-c", "1", "-W", "1", peer],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if failed.returncode == 0:
+                    raise RuntimeError(
+                        "peer remained reachable without its default route"
+                    )
+                check["withdrawal_failure"] = failed.stdout + failed.stderr
+                other = 6 if family == 4 else 4
+                other_peer = result["endpoints"][1 - index]["families"][str(other)][
+                    "address"
+                ]
+                check["other_family_during_withdrawal"] = run(
+                    *ns, "ping", f"-{other}", "-c", "1", "-W", "3", other_peer
+                )
+                if family == 6:
+                    write_lifetime(control, 30)
+                else:
+                    run(
+                        *ns,
+                        "ip",
+                        "-4",
+                        "route",
+                        "add",
+                        "default",
+                        "via",
+                        endpoint["lease"]["gateway"],
+                        "dev",
+                        "eth0",
+                    )
+                check["restored_routes"] = wait_route(
+                    ep["namespace"], True, family, endpoint["gateway"]
+                )
+                check["recovery"] = run(
+                    *ns, "ping", f"-{family}", "-c", "1", "-W", "3", peer
+                )
+                result["checks"].append(check)
         for path, original in zip(args.snapshot, configs):
             if fingerprint(load_snapshot(path)) != fingerprint(original):
                 raise RuntimeError(
@@ -614,6 +643,10 @@ def main():
     parser.add_argument(
         "--internet-url",
         help="Optional HTTPS target; omitted runs only local cross-endpoint checks.",
+    )
+    parser.add_argument(
+        "--nat44-interface",
+        help="Optional VM egress interface for scoped NAT44; requires --internet-url. Omitted leaves egress routing unchanged.",
     )
     parser.add_argument(
         "--nat66-interface",

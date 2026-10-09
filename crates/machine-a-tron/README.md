@@ -7,10 +7,10 @@ environment. I will generate machine information from the files in the template 
 as needed (product serial, mac address, etc). this allows it to create multiple managed hosts. I will stay running and
 periodically report health network observations.
 
-## IPv6 packet testing
+## Dual-stack packet testing
 
-The optional [IPv6 packet test](../../dev/machine-a-tron/ipv6/README.md) uses active
-MAT tenant snapshots to exercise the real NICo DHCPv6 server and temporary Linux
+The optional [dual-stack packet test](../../dev/machine-a-tron/network/README.md) uses active
+MAT tenant snapshots to exercise the real NICo DHCPv4/DHCPv6 server and temporary Linux
 endpoints. Snapshot export is disabled by default.
 
 ## Usage

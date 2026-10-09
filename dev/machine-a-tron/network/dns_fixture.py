@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""IPv6 DNS fixture for peer.mat.test; forwards other names to an explicit VM resolver."""
+"""Dual-stack DNS fixture for peer.mat.test; forwards other names to an explicit VM resolver."""
 
 import ipaddress
 import json
@@ -8,9 +8,12 @@ import socket
 import struct
 import sys
 
-bind, peer, resolver = sys.argv[1:]
+bind, peer4, peer6, resolver = sys.argv[1:]
 upstream_ip = ipaddress.ip_address(resolver)
-sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+sock = socket.socket(
+    socket.AF_INET6 if ipaddress.ip_address(bind).version == 6 else socket.AF_INET,
+    socket.SOCK_DGRAM,
+)
 sock.bind((bind, 53))
 while True:
     data, client = sock.recvfrom(65535)
@@ -29,11 +32,12 @@ while True:
         name = ".".join(labels).lower()
         if name == "peer.mat.test":
             answer = b""
-            if qtype == 28 and qclass == 1:
+            if qtype in (1, 28) and qclass == 1:
+                address = ipaddress.ip_address(peer4 if qtype == 1 else peer6).packed
                 answer = (
                     b"\xc0\x0c"
-                    + struct.pack("!HHIH", 28, 1, 0, 16)
-                    + ipaddress.IPv6Address(peer).packed
+                    + struct.pack("!HHIH", qtype, 1, 0, len(address))
+                    + address
                 )
             response = (
                 data[:2]
