@@ -24,6 +24,8 @@ class DhcpClientTests(unittest.TestCase):
         for failure in (
             "advertise-client",
             "reply-server",
+            "advertise-iaid",
+            "reply-iaid",
             "address",
             "lifetime",
             "dns",
@@ -49,7 +51,13 @@ class DhcpClientTests(unittest.TestCase):
                     lease = ipaddress.IPv6Address(address).packed + struct.pack(
                         "!II", 3600, lifetime
                     )
-                    ia = struct.pack("!III", 1, 0, 0) + option(5, lease)
+                    iaid = (
+                        2
+                        if (advertise and failure == "advertise-iaid")
+                        or (not advertise and failure == "reply-iaid")
+                        else 1
+                    )
+                    ia = struct.pack("!III", iaid, 0, 0) + option(5, lease)
                     dns = (
                         b"bad"
                         if failure == "dns"
