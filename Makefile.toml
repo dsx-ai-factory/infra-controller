@@ -765,8 +765,13 @@ dependencies = [
 
 [tasks.test-release-container-services]
 workspace = false
-command = "cargo"
-args = ["test", "--profile=ci-tests"]
+script = '''
+set -eu
+export NICO_TEST_TEMPLATE_DB="${NICO_TEST_TEMPLATE_DB-sqlx_ci_template_db}"
+cargo test --profile=ci-tests --no-run
+"${CARGO_TARGET_DIR:-target}/ci-tests/prepare-test-template"
+cargo test --profile=ci-tests
+'''
 
 [tasks.build-and-test-release-container-services]
 workspace = false
