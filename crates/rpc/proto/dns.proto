@@ -127,9 +127,10 @@ message CreateDomainRequest {
   // in-addr.arpa or ip6.arpa are rejected with INVALID_ARGUMENT, ignoring case,
   // surrounding whitespace, and trailing dots. Forward names must be lowercase.
   // Live names are unique across all owners, with case and trailing dots ignored
-  // when checking uniqueness. A deleted domain's name may be reused, and parent
-  // and child domains may coexist.
-  // Duplicate live names are rejected with INVALID_ARGUMENT.
+  // when checking uniqueness. A deleted domain's name may be reused. Legacy
+  // domains may nest each other, but cannot be an ancestor or descendant of a
+  // reserved domain; reserved domains reject every live ancestor or descendant.
+  // Name conflicts are rejected with INVALID_ARGUMENT.
   string name = 1;
   // Default record TTL in seconds, 30 to 86400 inclusive; values outside that
   // range are rejected with INVALID_ARGUMENT. Absent means the site default
@@ -140,6 +141,11 @@ message CreateDomainRequest {
   // live domain; another is rejected with INVALID_ARGUMENT. The owning VPC
   // cannot be deleted while this domain is live.
   common.VpcId vpc_id = 3;
+  // Internal REST ownership-index retry, accepted only from the exclusive
+  // site-agent identity; other callers receive PERMISSION_DENIED. Omit for
+  // legacy callers. A cancelled ID or a replay whose name, VPC, or TTL differs
+  // from its original request is rejected with FAILED_PRECONDITION.
+  common.DomainId reserved_id = 4;
 }
 
 message UpdateDomainRequest {
@@ -158,6 +164,12 @@ message DomainSearchQuery {
 
 message DomainDeletionRequest {
   common.DomainId id = 1;
+  // Internal cancellation of an owned, durably reserved ID, accepted only from
+  // the exclusive site-agent identity; other callers receive PERMISSION_DENIED.
+  // On an absent ID this records a terminal tombstone so a delayed CreateDomain
+  // cannot resurrect the zone. A live ID not created through reserved_id is
+  // rejected with FAILED_PRECONDITION. Omit for legacy/admin CLI deletes.
+  bool cancel_reserved_id = 2;
 }
 
 message DomainDeletionResult{

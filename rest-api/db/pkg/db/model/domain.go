@@ -6,8 +6,11 @@ package model
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strings"
 	"time"
 
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 
@@ -24,17 +27,28 @@ const (
 	DomainStatusRegistering = "DomainStatusRegistering"
 	// DomainStatusReady status is ready
 	DomainStatusReady = "DomainStatusReady"
+	// DomainStatusRejecting is a durable cancellation intent; it is public Pending until Core confirms a tombstone.
+	DomainStatusRejecting = "DomainStatusRejecting"
+	// DomainStatusDeleting status is retrying a Core deletion
+	DomainStatusDeleting = "DomainStatusDeleting"
 	// DomainStatusError status is error
 	DomainStatusError = "DomainStatusError"
 	// DomainRelationName is the relation name for the Domain model
 	DomainRelationName = "Domain"
+	// DomainOrderByDefault is the default field used to order Domains.
+	DomainOrderByDefault = "created"
 )
 
 var (
+	// DomainOrderByFields is the list of fields supported by Domain pagination.
+	DomainOrderByFields   = []string{"name", "created", "updated"}
+	domainOrderByDBFields = []string{"hostname", "created", "updated"}
 	// DomainStatusMap is a list of valid status for the Domain model
 	DomainStatusMap = map[string]bool{
 		DomainStatusPending:     true,
+		DomainStatusRejecting:   true,
 		DomainStatusReady:       true,
+		DomainStatusDeleting:    true,
 		DomainStatusError:       true,
 		DomainStatusRegistering: true,
 	}
@@ -44,6 +58,8 @@ var (
 type DomainCreateInput struct {
 	Hostname           string
 	Org                string
+	TenantID           *uuid.UUID
+	SiteID             *uuid.UUID
 	ControllerDomainID *uuid.UUID
 	Status             string
 	CreatedBy          uuid.UUID
@@ -66,8 +82,11 @@ type DomainClearInput struct {
 
 // DomainFilterInput input parameters for GetAll method
 type DomainFilterInput struct {
+	DomainIDs          []uuid.UUID
 	Hostname           *string
 	Org                *string
+	TenantIDs          []uuid.UUID
+	SiteIDs            []uuid.UUID
 	ControllerDomainID *uuid.UUID
 	Status             *string
 }
@@ -80,12 +99,18 @@ type Domain struct {
 	ID                 uuid.UUID  `bun:"type:uuid,pk"`
 	Hostname           string     `bun:"hostname,notnull"`
 	Org                string     `bun:"org,notnull"`
+	TenantID           *uuid.UUID `bun:"tenant_id,type:uuid"`
+	SiteID             *uuid.UUID `bun:"site_id,type:uuid"`
 	ControllerDomainID *uuid.UUID `bun:"controller_domain_id,type:uuid"`
 	Status             string     `bun:"status,notnull"`
 	Created            time.Time  `bun:"created,nullzero,notnull,default:current_timestamp"`
 	Updated            time.Time  `bun:"updated,nullzero,notnull,default:current_timestamp"`
 	Deleted            *time.Time `bun:"deleted,soft_delete"`
 	CreatedBy          uuid.UUID  `bun:"type:uuid,notnull"`
+	RecoveryToken      *uuid.UUID `bun:"recovery_token,type:uuid"`
+	RecoveryLeaseUntil *time.Time `bun:"recovery_lease_until"`
+	RecoveryNextAt     *time.Time `bun:"recovery_next_at"`
+	RecoveryAttempts   int        `bun:"recovery_attempts,notnull"`
 }
 
 var _ bun.BeforeAppendModelHook = (*Domain)(nil)
@@ -104,12 +129,20 @@ func (d *Domain) BeforeAppendModel(ctx context.Context, query bun.Query) error {
 
 // DomainDAO is an interface for interacting with the Domain model
 type DomainDAO interface {
+	ReserveOwned(ctx context.Context, tx *db.Tx, input DomainCreateInput) (*Domain, bool, error)
+	TransitionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from, to string) (bool, error)
+	ReserveDeletionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from string, delay time.Duration) (*time.Time, error)
+	RestoreRejectedDeletion(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, reservedAt time.Time) (bool, error)
+	StageRejectedOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, token *uuid.UUID) (bool, error)
+	ClaimRecovery(ctx context.Context, maxRows int, lease time.Duration) ([]Domain, error)
+	CompleteRecovery(ctx context.Context, id, coreID, token uuid.UUID, from, to string, softDelete bool) (bool, error)
+	DeferRecovery(ctx context.Context, id, token uuid.UUID, delay time.Duration) (bool, error)
 	//
 	Create(ctx context.Context, tx *db.Tx, input DomainCreateInput) (*Domain, error)
 	//
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*Domain, error)
 	//
-	GetAll(ctx context.Context, tx *db.Tx, filter DomainFilterInput, includeRelations []string) ([]Domain, error)
+	GetAll(ctx context.Context, tx *db.Tx, filter DomainFilterInput, page paginator.PageInput, includeRelations []string) ([]Domain, int, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input DomainUpdateInput) (*Domain, error)
 	//
@@ -135,6 +168,8 @@ func (dsd DomainSQLDAO) Create(ctx context.Context, tx *db.Tx, input DomainCreat
 		ID:                 uuid.New(),
 		Hostname:           input.Hostname,
 		Org:                input.Org,
+		TenantID:           input.TenantID,
+		SiteID:             input.SiteID,
 		ControllerDomainID: input.ControllerDomainID,
 		Status:             input.Status,
 		CreatedBy:          input.CreatedBy,
@@ -151,6 +186,230 @@ func (dsd DomainSQLDAO) Create(ctx context.Context, tx *db.Tx, input DomainCreat
 	}
 
 	return nv, nil
+}
+
+// NormalizeForwardDomainName matches Core DNS identity: ASCII lower-case and
+// trailing DNS presentation dots removed. It deliberately does not trim spaces.
+func NormalizeForwardDomainName(name string) string {
+	name = strings.TrimRight(name, ".")
+	var b strings.Builder
+	b.Grow(len(name))
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// ReserveOwned inserts an immutable tenant/Site/name reservation before contacting
+// Core. The partial unique index serializes concurrent requests and protects the
+// stable reserved Core ID; a retry never generates another Core identity.
+// Callers must pass an authenticated tenant and a generated Core ID.
+func (dsd DomainSQLDAO) ReserveOwned(ctx context.Context, tx *db.Tx, input DomainCreateInput) (*Domain, bool, error) {
+	if input.TenantID == nil || input.SiteID == nil || input.ControllerDomainID == nil ||
+		*input.TenantID == uuid.Nil || *input.SiteID == uuid.Nil || *input.ControllerDomainID == uuid.Nil ||
+		input.Status != DomainStatusPending {
+		return nil, false, db.ErrDoesNotExist
+	}
+	// Give the request's first Site RPC time to finish before a worker
+	// replays this immutable reserved ID. A crash still leaves a due intent.
+	firstRetry := time.Now().UTC().Add(70 * time.Second)
+	reservation := &Domain{
+		RecoveryNextAt: &firstRetry,
+		ID:             uuid.New(), Hostname: NormalizeForwardDomainName(input.Hostname), Org: input.Org,
+		TenantID: input.TenantID, SiteID: input.SiteID,
+		ControllerDomainID: input.ControllerDomainID, Status: DomainStatusPending,
+		CreatedBy: input.CreatedBy,
+	}
+	result, err := db.GetIDB(tx, dsd.dbSession).NewInsert().Model(reservation).
+		On("CONFLICT DO NOTHING").Exec(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return nil, false, err
+	}
+	if count == 1 {
+		return reservation, true, nil
+	}
+	// The index is scoped to this exact authenticated owner, not Core's
+	// shared DNS namespace. Never accept a Core resource by a name lookup.
+	var existing Domain
+	err = db.GetIDB(tx, dsd.dbSession).NewSelect().Model(&existing).
+		Where("d.tenant_id = ? AND d.site_id = ? AND translate(rtrim(d.hostname, '.'), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(rtrim(?, '.'), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')", input.TenantID, input.SiteID, input.Hostname).
+		Scan(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	return &existing, false, nil
+}
+
+// TransitionOwned performs a compare-and-swap on a previously committed
+// immutable reservation. A stale worker cannot mark an unrelated state Ready.
+func (dsd DomainSQLDAO) TransitionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from, to string) (bool, error) {
+	if id == uuid.Nil || coreID == uuid.Nil ||
+		!((from == DomainStatusPending && to == DomainStatusReady) ||
+			(from == DomainStatusRejecting && to == DomainStatusError)) {
+		return false, fmt.Errorf("invalid owned Domain transition")
+	}
+	result, err := db.GetIDB(tx, dsd.dbSession).NewUpdate().Model(&Domain{}).
+		Set("status = ?", to).Set("updated = current_timestamp").
+		Where("id = ? AND controller_domain_id = ? AND status = ? AND deleted IS NULL", id, coreID, from).
+		Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
+}
+
+// ReserveDeletionOwned commits or refreshes a handler-owned Deleting intent.
+// Delaying recovery beyond the Site RPC timeout prevents a recovery worker from
+// dispatching a concurrent cancellation. An active worker claim is never stolen.
+func (dsd DomainSQLDAO) ReserveDeletionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from string, delay time.Duration) (*time.Time, error) {
+	if tx == nil || id == uuid.Nil || coreID == uuid.Nil || delay < 90*time.Second || delay > 5*time.Minute ||
+		(from != DomainStatusPending && from != DomainStatusRejecting && from != DomainStatusReady && from != DomainStatusError && from != DomainStatusDeleting) {
+		return nil, fmt.Errorf("invalid owned Domain deletion reservation")
+	}
+	var reservedAt time.Time
+	err := db.GetIDB(tx, dsd.dbSession).NewUpdate().Model(&Domain{}).
+		Set("status = ?", DomainStatusDeleting).
+		Set("updated = GREATEST(current_timestamp, updated + interval '1 microsecond')").
+		Set("recovery_next_at = current_timestamp + (? * interval '1 second')", delay.Seconds()).
+		Where("id = ? AND controller_domain_id = ? AND status = ? AND recovery_token IS NULL AND deleted IS NULL", id, coreID, from).
+		Returning("updated").Scan(ctx, &reservedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &reservedAt, nil
+}
+
+// RestoreRejectedDeletion returns a freshly reserved Ready Domain to service
+// only when neither a newer handler reservation nor a recovery worker claim has
+// taken ownership. The timestamp fences a newer handler reservation; the token
+// predicate fences a recovery worker claim.
+func (dsd DomainSQLDAO) RestoreRejectedDeletion(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, reservedAt time.Time) (bool, error) {
+	if tx == nil || id == uuid.Nil || coreID == uuid.Nil || reservedAt.IsZero() {
+		return false, fmt.Errorf("invalid rejected Domain deletion restoration")
+	}
+	result, err := db.GetIDB(tx, dsd.dbSession).NewUpdate().Model(&Domain{}).
+		Set("status = ?", DomainStatusReady).Set("updated = GREATEST(current_timestamp, updated + interval '1 microsecond')").
+		Set("recovery_next_at = NULL").
+		Where("id = ? AND controller_domain_id = ? AND status = ? AND updated = ? AND recovery_token IS NULL AND deleted IS NULL", id, coreID, DomainStatusDeleting, reservedAt).
+		Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
+}
+
+// StageRejectedOwned COMMITs a cancellation intent before ANY destructive Core
+// RPC. A successful Pending->Rejecting CAS fences every handler/worker Ready
+// completion (all require Pending). A failed transaction sends no cancellation;
+// an uncertain Core response cannot roll back this durable intent.
+func (dsd DomainSQLDAO) StageRejectedOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, token *uuid.UUID) (bool, error) {
+	if tx == nil || id == uuid.Nil || coreID == uuid.Nil {
+		return false, fmt.Errorf("invalid rejected Domain intent")
+	}
+	q := db.GetIDB(tx, dsd.dbSession).NewUpdate().Model(&Domain{}).
+		Set("status = ?", DomainStatusRejecting).Set("updated = current_timestamp").
+		Set("recovery_next_at = NULL").
+		Where("id = ? AND controller_domain_id = ? AND status = ? AND deleted IS NULL", id, coreID, DomainStatusPending)
+	if token != nil {
+		if *token == uuid.Nil {
+			return false, fmt.Errorf("invalid Domain recovery token")
+		}
+		q = q.Where("recovery_token = ? AND recovery_lease_until > current_timestamp", *token)
+	} else {
+		q = q.Set("recovery_token = NULL").Set("recovery_lease_until = NULL")
+		// A handler cannot steal an active worker claim which may be about to
+		// complete the same immutable reservation as Ready.
+		q = q.Where("(recovery_lease_until IS NULL OR recovery_lease_until <= current_timestamp)")
+	}
+	result, err := q.Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
+}
+
+// ClaimRecovery leases only previously reserved REST-owned intents. SKIP LOCKED
+// prevents two replicas from claiming the same row concurrently; the persisted
+// token fences completions by workers whose leases have expired. The Core
+// operations themselves must remain idempotent and version-fenced: a DB lease
+// cannot stop an already dispatched Site RPC from arriving late.
+func (dsd DomainSQLDAO) ClaimRecovery(ctx context.Context, maxRows int, lease time.Duration) ([]Domain, error) {
+	if maxRows < 1 || maxRows > 32 || lease < time.Second || lease > 5*time.Minute {
+		return nil, fmt.Errorf("invalid Domain recovery claim bounds")
+	}
+	claimed := []Domain{}
+	err := dsd.dbSession.DB.NewRaw(`
+		WITH due AS (
+			SELECT id FROM domain
+			WHERE deleted IS NULL AND tenant_id IS NOT NULL AND site_id IS NOT NULL
+			AND controller_domain_id IS NOT NULL AND status IN (?, ?, ?)
+			AND (recovery_next_at IS NULL OR recovery_next_at <= current_timestamp)
+			AND (recovery_lease_until IS NULL OR recovery_lease_until <= current_timestamp)
+			ORDER BY recovery_attempts, updated, id LIMIT ? FOR UPDATE SKIP LOCKED
+		)
+		UPDATE domain AS d SET recovery_token = gen_random_uuid(),
+			recovery_lease_until = current_timestamp + (? * interval '1 second'),
+			recovery_attempts = recovery_attempts + 1
+		FROM due WHERE d.id = due.id RETURNING d.*`,
+		DomainStatusPending, DomainStatusRejecting, DomainStatusDeleting, maxRows, lease.Seconds()).Scan(ctx, &claimed)
+	return claimed, err
+}
+
+// CompleteRecovery accepts only the worker that still holds an unexpired
+// lease and only the immutable reserved Core identity from the claim.
+func (dsd DomainSQLDAO) CompleteRecovery(ctx context.Context, id, coreID, token uuid.UUID, from, to string, softDelete bool) (bool, error) {
+	if token == uuid.Nil || coreID == uuid.Nil || (from != DomainStatusPending && from != DomainStatusRejecting && from != DomainStatusDeleting) ||
+		(!softDelete && !((from == DomainStatusPending && to == DomainStatusReady) ||
+			(from == DomainStatusRejecting && to == DomainStatusError) ||
+			(from == DomainStatusDeleting && to == DomainStatusReady))) ||
+		(softDelete && (from != DomainStatusDeleting || to != DomainStatusDeleting)) {
+		return false, fmt.Errorf("invalid Domain recovery completion")
+	}
+	q := dsd.dbSession.DB.NewUpdate().Model(&Domain{}).
+		Set("status = ?", to).Set("updated = current_timestamp").
+		Set("recovery_token = NULL").Set("recovery_lease_until = NULL").Set("recovery_next_at = NULL").
+		Where("id = ? AND controller_domain_id = ? AND status = ? AND recovery_token = ? AND recovery_lease_until > current_timestamp AND deleted IS NULL", id, coreID, from, token)
+	if softDelete {
+		q = q.Set("deleted = current_timestamp")
+	}
+	result, err := q.Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
+}
+
+// DeferRecovery releases a claim after an uncertain Site reply; the durable
+// row remains retriable without dropping its owner, intent, or Core ID.
+func (dsd DomainSQLDAO) DeferRecovery(ctx context.Context, id, token uuid.UUID, delay time.Duration) (bool, error) {
+	if token == uuid.Nil || delay < time.Second || delay > time.Hour {
+		return false, fmt.Errorf("invalid Domain recovery delay")
+	}
+	result, err := dsd.dbSession.DB.NewUpdate().Model(&Domain{}).
+		Set("recovery_token = NULL").Set("recovery_lease_until = NULL").
+		Set("recovery_next_at = current_timestamp + (? * interval '1 second')", delay.Seconds()).
+		Where("id = ? AND recovery_token = ? AND recovery_lease_until > current_timestamp AND status IN (?, ?, ?) AND deleted IS NULL", id, token, DomainStatusPending, DomainStatusRejecting, DomainStatusDeleting).
+		Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
 }
 
 // GetByID returns a Domain by ID
@@ -185,7 +444,9 @@ func (dsd DomainSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, in
 // Optional filters can be specified on hostname, org, controllerDomainID
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
-func (dsd DomainSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DomainFilterInput, includeRelations []string) (_ []Domain, retErr error) {
+// if orderBy is nil, records are ordered by DomainOrderByDefault and ID in
+// ascending order so pagination remains deterministic when timestamps match.
+func (dsd DomainSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DomainFilterInput, page paginator.PageInput, includeRelations []string) (_ []Domain, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, domainDAOSpan := cotel.StartSpan(ctx, "DomainDAO.GetAll")
 	defer func() { cotel.EndSpan(domainDAOSpan, retErr) }()
@@ -194,6 +455,9 @@ func (dsd DomainSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DomainFilt
 
 	query := db.GetIDB(tx, dsd.dbSession).NewSelect().Model(&d)
 
+	if len(filter.DomainIDs) > 0 {
+		query = query.Where("d.id IN (?)", bun.In(filter.DomainIDs))
+	}
 	if filter.Hostname != nil {
 		query = query.Where("d.hostname = ?", *filter.Hostname)
 		cotel.SetAttribute(domainDAOSpan, attribute.String("hostname", *filter.Hostname))
@@ -201,6 +465,12 @@ func (dsd DomainSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DomainFilt
 	if filter.Org != nil {
 		query = query.Where("d.org = ?", *filter.Org)
 		cotel.SetAttribute(domainDAOSpan, attribute.String("org", *filter.Org))
+	}
+	if len(filter.TenantIDs) > 0 {
+		query = query.Where("d.tenant_id IN (?)", bun.In(filter.TenantIDs))
+	}
+	if len(filter.SiteIDs) > 0 {
+		query = query.Where("d.site_id IN (?)", bun.In(filter.SiteIDs))
 	}
 	if filter.ControllerDomainID != nil {
 		query = query.Where("d.controller_domain_id = ?", *filter.ControllerDomainID)
@@ -215,13 +485,23 @@ func (dsd DomainSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DomainFilt
 		query = query.Relation(relation)
 	}
 
-	err := query.Scan(ctx)
-
-	if err != nil {
-		return nil, err
+	if page.OrderBy == nil {
+		page.OrderBy = paginator.NewDefaultOrderBy(DomainOrderByDefault)
+	} else if page.OrderBy.Field == "name" {
+		page.OrderBy = &paginator.OrderBy{Field: "hostname", Order: page.OrderBy.Order}
 	}
 
-	return d, nil
+	domainPaginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, domainOrderByDBFields)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	err = domainPaginator.Query.Order("d.id ASC").Limit(domainPaginator.Limit).Offset(domainPaginator.Offset).Scan(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return d, domainPaginator.Total, nil
 }
 
 // Update updates specified fields of an existing Domain

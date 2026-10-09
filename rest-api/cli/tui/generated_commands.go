@@ -22,13 +22,14 @@ import (
 // specialized interactive command with a different name. The specialized
 // handlers keep their richer prompts and output.
 var generatedCommandAliases = map[string]string{
-	"machine dpu-machines get":                                          "machine dpu get",
-	"rack bringup bringup-rack":                                         "rack bringup",
-	"rack firmware-update firmware-update-rack":                         "rack firmware",
-	"rack power-control power-control-rack":                             "rack power",
-	"rack validate validate-rack":                                       "rack validate",
-	"task get":                                                          "rack task get",
-	"task cancel cancel-task":                                           "rack task cancel",
+	"machine dpu-machines get":                  "machine dpu get",
+	"rack bringup bringup-rack":                 "rack bringup",
+	"rack firmware-update firmware-update-rack": "rack firmware",
+	"rack power-control power-control-rack":     "rack power",
+	"rack validate validate-rack":               "rack validate",
+	"subnet attach-vpc-to attach-vpc-to-subnet": "subnet attach-vpc",
+	"task get":                "rack task get",
+	"task cancel cancel-task": "rack task cancel",
 	"tray firmware-update firmware-update-tray":                         "tray firmware",
 	"tray power-control power-control-tray":                             "tray power",
 	"tray validate validate-tray":                                       "tray validate",

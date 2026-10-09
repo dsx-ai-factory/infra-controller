@@ -501,3 +501,125 @@ async fn soa_serial_cannot_leave_the_u32_range(pool: sqlx::PgPool) {
         "the rejected bump left the stored serial alone"
     );
 }
+
+#[crate::sqlx_test]
+async fn normalized_forward_names_reject_legacy_reserved_collision(pool: sqlx::PgPool) {
+    use carbide_uuid::domain::DomainId;
+    let mut txn = pool.begin().await.unwrap();
+    db::dns::domain::persist(NewDomain::new("example.test"), txn.as_mut())
+        .await
+        .unwrap();
+    let other: DomainId = uuid::Uuid::new_v4().into();
+    let duplicate =
+        db::dns::domain::persist_reserved(NewDomain::new("example.test."), other, txn.as_mut())
+            .await;
+    assert!(
+        matches!(duplicate, Err(DatabaseError::InvalidArgument(_))),
+        "legacy and reserved forward writers must share a normalized-name gate"
+    );
+}
+
+#[crate::sqlx_test]
+async fn reserved_zone_rejects_overlaps_but_accepts_label_siblings(pool: sqlx::PgPool) {
+    use carbide_uuid::domain::DomainId;
+    let mut txn = pool.begin().await.unwrap();
+    db::dns::domain::persist(NewDomain::new("example.test."), txn.as_mut())
+        .await
+        .unwrap();
+    for name in ["example.test", "child.example.test", "test"] {
+        let id: DomainId = uuid::Uuid::new_v4().into();
+        assert!(matches!(
+            db::dns::domain::persist_reserved(NewDomain::new(name), id, txn.as_mut()).await,
+            Err(DatabaseError::InvalidArgument(_))
+        ));
+    }
+    for name in ["badexample.test", "another.test"] {
+        let id: DomainId = uuid::Uuid::new_v4().into();
+        db::dns::domain::persist_reserved(NewDomain::new(name), id, txn.as_mut())
+            .await
+            .expect("sibling and partial-suffix names do not overlap DNS labels");
+    }
+}
+
+#[crate::sqlx_test]
+async fn concurrent_overlapping_reserved_writers_are_serialized(pool: sqlx::PgPool) {
+    use carbide_uuid::domain::DomainId;
+    let create = |name: &'static str, pool: sqlx::PgPool| async move {
+        let mut txn = pool.begin().await.unwrap();
+        let id: DomainId = uuid::Uuid::new_v4().into();
+        let result =
+            db::dns::domain::persist_reserved(NewDomain::new(name), id, txn.as_mut()).await;
+        if result.is_ok() {
+            txn.commit().await.unwrap();
+        }
+        result
+    };
+    let (parent, child) = tokio::join!(
+        create("race.example.test", pool.clone()),
+        create("child.race.example.test", pool.clone())
+    );
+    assert_eq!(usize::from(parent.is_ok()) + usize::from(child.is_ok()), 1);
+}
+
+#[crate::sqlx_test]
+async fn legacy_writer_may_nest_legacy_but_not_reserved_zones(pool: sqlx::PgPool) {
+    use carbide_uuid::domain::DomainId;
+    let mut txn = pool.begin().await.unwrap();
+    db::dns::domain::persist(NewDomain::new("existing.test"), txn.as_mut())
+        .await
+        .unwrap();
+    db::dns::domain::persist(NewDomain::new("child.existing.test"), txn.as_mut())
+        .await
+        .expect("legacy nesting remains permitted");
+    let id: DomainId = uuid::Uuid::new_v4().into();
+    db::dns::domain::persist_reserved(NewDomain::new("protected.test"), id, txn.as_mut())
+        .await
+        .unwrap();
+    for name in ["child.protected.test", "test"] {
+        assert!(matches!(
+            db::dns::domain::persist(NewDomain::new(name), txn.as_mut()).await,
+            Err(DatabaseError::InvalidArgument(_))
+        ));
+    }
+    db::dns::domain::persist(NewDomain::new("badprotected.test"), txn.as_mut())
+        .await
+        .expect("partial-label suffix is not a DNS authority overlap");
+}
+
+#[crate::sqlx_test]
+async fn concurrent_reserved_and_legacy_overlapping_writers_are_serialized(pool: sqlx::PgPool) {
+    let reserved_pool = pool.clone();
+    let legacy_pool = pool.clone();
+    let (reserved, legacy) = tokio::join!(
+        async move {
+            use carbide_uuid::domain::DomainId;
+            let mut txn = reserved_pool.begin().await.unwrap();
+            let id: DomainId = uuid::Uuid::new_v4().into();
+            let result = db::dns::domain::persist_reserved(
+                NewDomain::new("protected-race.test"),
+                id,
+                txn.as_mut(),
+            )
+            .await;
+            if result.is_ok() {
+                txn.commit().await.unwrap();
+            }
+            result
+        },
+        async move {
+            let mut txn = legacy_pool.begin().await.unwrap();
+            let result =
+                db::dns::domain::persist(NewDomain::new("child.protected-race.test"), txn.as_mut())
+                    .await;
+            if result.is_ok() {
+                txn.commit().await.unwrap();
+            }
+            result
+        }
+    );
+    assert_eq!(
+        usize::from(reserved.is_ok()) + usize::from(legacy.is_ok()),
+        1,
+        "either commit order must protect new reserved-zone authority"
+    );
+}

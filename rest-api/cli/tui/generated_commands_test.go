@@ -313,6 +313,29 @@ func TestGeneratedCommand_ReadOnlyUsesSessionClientScopeAndFetchesAll(t *testing
 	assert.Contains(t, output, `"H100"`)
 }
 
+// Generated DNS Domain list must preserve the selected Site scope while
+// exposing Pending rows for observability (unlike subnet's Ready-only chooser).
+func TestGeneratedDNSDomainList_UsesSelectedSiteAndShowsPending(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v2/org/acme/nico/domain", r.URL.Path)
+		assert.Equal(t, "site-1", r.URL.Query().Get("siteId"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[{"id":"domain-1","status":"Pending","name":"dev.example","siteId":"site-1"}]`)
+	}))
+	defer server.Close()
+
+	session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+	session.Scope.SiteID = "site-1"
+	command := requireTUICommand(t, "dns-domain list")
+	var runErr error
+	output := captureStdout(func() {
+		runErr = command.Run(session, nil)
+	})
+	require.NoError(t, runErr)
+	assert.Contains(t, output, "Pending")
+	assert.Contains(t, output, "--site-id site-1")
+}
+
 func TestGeneratedCommand_ExplicitPaginationIsNotOverridden(t *testing.T) {
 	for _, test := range []struct {
 		name           string
@@ -608,6 +631,46 @@ func TestGeneratedCommand_ResolvesNamesAndReturnsAPIErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "history unavailable")
 }
 
+func TestGeneratedCommand_ResolvesDPUMachineFromSiteList(t *testing.T) {
+	var listCalls atomic.Int32
+	var detailCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v2/org/acme/nico/dpu":
+			listCalls.Add(1)
+			assert.Equal(t, "site-1", r.URL.Query().Get("siteId"))
+			assert.Equal(t, "1", r.URL.Query().Get("pageNumber"))
+			assert.Equal(t, "100", r.URL.Query().Get("pageSize"))
+			_, _ = io.WriteString(w, `[{
+				"id":"dpu-1",
+				"siteId":"site-1",
+				"hostMachineId":"host-1",
+				"state":"Ready",
+				"labels":{"ServerName":"dpu-one"}
+			}]`)
+		case "/v2/org/acme/nico/dpu/dpu-1":
+			detailCalls.Add(1)
+			assert.Equal(t, "site-1", r.URL.Query().Get("siteId"))
+			_, _ = io.WriteString(w, `{"id":"dpu-1","siteId":"site-1","hostMachineId":"host-1","state":"Ready"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+	err := requireTUICommand(t, "dpu-machine get").Run(
+		session,
+		[]string{"--site-id", "site-1", "dpu-one"},
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, "site-1", session.Scope.SiteID)
+	assert.Equal(t, int32(1), listCalls.Load())
+	assert.Equal(t, int32(1), detailCalls.Load())
+}
+
 func TestGeneratedPathResourcePolicy_CoversEveryParameter(t *testing.T) {
 	session := NewSession(
 		appcli.NewClient("http://example.invalid", "acme", "token", nil, false),
@@ -659,6 +722,9 @@ func TestCanonicalGeneratedResourceType_NormalizesSelectorKeys(t *testing.T) {
 		"nvlink acronym": {
 			command: "nvlink-logical-partition delete", parameter: "nvLinkLogicalPartitionId",
 			want: "nvlink-logical-partition",
+		},
+		"dpu machine": {
+			command: "dpu-machine get", parameter: "dpuMachineId", want: "dpu-machine",
 		},
 		"spectrumx acronym": {
 			command: "spectrumx-partition get", parameter: "spectrumXPartitionId",

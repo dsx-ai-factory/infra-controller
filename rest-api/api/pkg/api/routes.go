@@ -927,9 +927,35 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewUpdateSubnetHandler(dbSession, tc, cfg),
 		},
 		{
+			Path:    apiPathPrefix + "/subnet/:subnetId/attach-vpc",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewAttachSubnetVpcHandler(dbSession, scp),
+		},
+		{
 			Path:    apiPathPrefix + "/subnet/:id",
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewDeleteSubnetHandler(dbSession, tc, scp, cfg),
+		},
+		// DNS Domain endpoints
+		{
+			Path:    apiPathPrefix + "/domain",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewCreateDomainHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/domain",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllDomainHandler(dbSession),
+		},
+		{
+			Path:    apiPathPrefix + "/domain/:domainId",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetDomainHandler(dbSession),
+		},
+		{
+			Path:    apiPathPrefix + "/domain/:domainId",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteDomainHandler(dbSession, scp),
 		},
 		// OperatingSystem endpoints
 		{

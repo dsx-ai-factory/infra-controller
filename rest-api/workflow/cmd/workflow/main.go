@@ -42,7 +42,9 @@ import (
 	vpcActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/vpc"
 	vpcWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/vpc"
 
+	domainActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/domain"
 	subnetActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/subnet"
+	domainWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/domain"
 	subnetWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/subnet"
 
 	instanceActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/instance"
@@ -238,6 +240,8 @@ func run(ctx context.Context) error {
 
 		// Subnet workflows
 		w.RegisterWorkflow(subnetWorkflow.DeleteSubnetByID)
+		w.RegisterWorkflow(subnetWorkflow.ReconcileSubnetAttachmentIntents)
+		w.RegisterWorkflow(domainWorkflow.ReconcileReservedDomains)
 
 		// Instance workflows
 		w.RegisterWorkflow(instanceWorkflow.DeleteInstanceByID)
@@ -384,6 +388,9 @@ func run(ctx context.Context) error {
 
 	subnetManager := subnetActivity.NewManageSubnet(dbSession, siteClientPool, tc)
 	w.RegisterActivity(&subnetManager)
+	if tcfg.Namespace == cwfn.CloudNamespace {
+		w.RegisterActivity(&domainActivity.ManageDomain{DB: dbSession, Sites: siteClientPool})
+	}
 
 	instanceManager := instanceActivity.NewManageInstance(dbSession, siteClientPool, tc, cfg)
 	w.RegisterActivity(&instanceManager)
@@ -481,6 +488,16 @@ func run(ctx context.Context) error {
 		serve("Prometheus metrics", mconfig.GetListenAddr())
 	}
 
+	// The existing monitor starts below w.Run cannot execute until shutdown;
+	// schedule this new durable recovery cron *before* the blocking worker run.
+	if tcfg.Namespace == cwfn.CloudNamespace {
+		if err := subnetWorkflow.ExecuteReconcileSubnetAttachmentIntents(ctx, tc); err != nil {
+			log.Error().Err(err).Msg("failed to schedule Subnet attachment recovery; outstanding intents will remain pending")
+		}
+		if err := domainWorkflow.ExecuteReconcileReservedDomains(ctx, tc); err != nil {
+			log.Error().Err(err).Msg("failed to schedule reserved Domain recovery; outstanding intents will remain pending")
+		}
+	}
 	interrupt := make(chan interface{}, 1)
 	go func() {
 		select {

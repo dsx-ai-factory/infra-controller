@@ -8,6 +8,7 @@ import (
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
+	"github.com/google/uuid"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -40,8 +41,12 @@ type APISubnetCreateRequest struct {
 	IPv4BlockID *string `json:"ipv4BlockId"`
 	// IPv6BlockID is retained so legacy ipv6BlockId input can be rejected explicitly.
 	IPv6BlockID *string `json:"ipv6BlockId"`
+	// SubdomainID identifies the REST Domain to use for DNS records in this Subnet.
+	SubdomainID *string `json:"subdomainId"`
 	// PrefixLength is the length of the IPv4 prefix.
 	PrefixLength int `json:"prefixLength"`
+	// ControllerDomainID is the Site-facing ID resolved from SubdomainID by the handler.
+	ControllerDomainID *uuid.UUID `json:"-"`
 }
 
 // Validate ensure the values passed in request are acceptable
@@ -63,6 +68,8 @@ func (scr *APISubnetCreateRequest) Validate() error {
 		validation.Field(&scr.IPv6BlockID,
 			// Subnets in Ethernet virtualizer VPCs support IPv4 only.
 			validation.Nil.Error(validationErrorIPv6SubnetNotSupported)),
+		validation.Field(&scr.SubdomainID,
+			validation.When(scr.SubdomainID != nil, validationis.UUID.Error(validationErrorInvalidUUID))),
 		validation.Field(&scr.PrefixLength,
 			validation.Required.Error(validationErrorValueRequired),
 			validation.Min(SubnetBlockSizeMin).Error(validationErrorSubnetBlockSizeMin),
@@ -101,8 +108,10 @@ func (scr *APISubnetCreateRequest) ToProto(subnet *cdbm.Subnet, vpc *cdbm.Vpc, r
 	var subdomainID *corev1.DomainId
 	var mtu *int32
 	if cfg != nil {
-		subdomainID = cfg.SubdomainId
 		mtu = cfg.Mtu
+	}
+	if scr.ControllerDomainID != nil {
+		subdomainID = &corev1.DomainId{Value: scr.ControllerDomainID.String()}
 	}
 	return &corev1.NetworkSegmentCreationRequest{
 		Id:          subnetProto.Id,
@@ -111,6 +120,36 @@ func (scr *APISubnetCreateRequest) ToProto(subnet *cdbm.Subnet, vpc *cdbm.Vpc, r
 		VpcId:       &corev1.VpcId{Value: vpc.GetSiteID().String()},
 		Mtu:         mtu,
 		Prefixes:    prefixes,
+	}
+}
+
+// APISubnetAttachVpcRequest captures a request to reassign a Subnet to another VPC.
+type APISubnetAttachVpcRequest struct {
+	// VpcID identifies the target REST VPC.
+	VpcID string `json:"vpcId"`
+	// AllowReplace permits replacing an attachment to a different VPC.
+	AllowReplace bool `json:"allowReplace,omitempty"`
+	// ControllerNetworkSegmentID is the Site-facing Subnet ID resolved by the handler.
+	ControllerNetworkSegmentID uuid.UUID `json:"-"`
+	// ControllerVpcID is the Site-facing target VPC ID resolved by the handler.
+	ControllerVpcID uuid.UUID `json:"-"`
+}
+
+// Validate ensures the target REST VPC ID is present and valid.
+func (savr *APISubnetAttachVpcRequest) Validate() error {
+	return validation.ValidateStruct(savr,
+		validation.Field(&savr.VpcID,
+			validation.Required.Error(validationErrorValueRequired),
+			validationis.UUID.Error(validationErrorInvalidUUID)),
+	)
+}
+
+// ToProto builds the Site-facing request after the handler has resolved both controller IDs.
+func (savr *APISubnetAttachVpcRequest) ToProto() *corev1.AttachNetworkSegmentToVpcRequest {
+	return &corev1.AttachNetworkSegmentToVpcRequest{
+		NetworkSegmentId: &corev1.NetworkSegmentId{Value: savr.ControllerNetworkSegmentID.String()},
+		VpcId:            &corev1.VpcId{Value: savr.ControllerVpcID.String()},
+		AllowReplace:     savr.AllowReplace,
 	}
 }
 
@@ -152,6 +191,8 @@ type APISubnet struct {
 	VpcID string `json:"vpcId"`
 	// Vpc is the summary of the VPC
 	Vpc *APIVpcSummary `json:"vpc,omitempty"`
+	// SubdomainID is the local REST Domain ID used by this Subnet.
+	SubdomainID *string `json:"subdomainId"`
 	// Controller network Segment ID is the ID of the Site Controller Network Segment corresponding to the Subnet
 	ControllerNetworkSegmentID *string `json:"controllerNetworkSegmentId"`
 	// IPv4Prefix is the prefix of the network in CIDR notation
@@ -223,6 +264,7 @@ func NewAPISubnet(dbs *cdbm.Subnet, dbsds []cdbm.StatusDetail, dbpu *cipam.Usage
 	if dbs.ControllerNetworkSegmentID != nil {
 		apiSubnet.ControllerNetworkSegmentID = util.GetUUIDPtrToStrPtr(dbs.ControllerNetworkSegmentID)
 	}
+	apiSubnet.SubdomainID = util.GetUUIDPtrToStrPtr(dbs.DomainID)
 
 	apiSubnet.StatusHistory = []APIStatusDetail{}
 	for _, dbsd := range dbsds {

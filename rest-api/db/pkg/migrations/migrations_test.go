@@ -5,6 +5,7 @@ package migrations
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"testing"
 	"time"
@@ -310,6 +311,366 @@ func TestVpcSlaacEnabledMigration(t *testing.T) {
 	persisted, err = model.NewVpcDAO(dbSession).GetByID(ctx, nil, vpc.ID, nil)
 	require.NoError(t, err)
 	require.True(t, persisted.SlaacEnabled)
+}
+
+func TestDomainOwnershipMigration(t *testing.T) {
+	ctx := context.Background()
+	dbSession := util.GetTestDBSession(t, true)
+	defer dbSession.Close()
+
+	model.TestSetupSchema(t, dbSession)
+	user := model.TestBuildUser(t, dbSession, uuid.NewString(), "test-org", []string{authz.TenantAdminRole})
+	domain, err := model.NewDomainDAO(dbSession).Create(ctx, nil, model.DomainCreateInput{
+		Hostname:  "legacy.example.com",
+		Org:       "test-org",
+		Status:    model.DomainStatusReady,
+		CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+
+	_, err = dbSession.DB.ExecContext(ctx, `ALTER TABLE domain DROP COLUMN tenant_id, DROP COLUMN site_id`)
+	require.NoError(t, err)
+	require.NoError(t, domainOwnershipUpMigration(ctx, dbSession.DB))
+
+	var nullableOwnershipColumns int
+	err = dbSession.DB.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		  AND table_name = 'domain'
+		  AND column_name IN ('tenant_id', 'site_id')
+		  AND is_nullable = 'YES'
+	`).Scan(&nullableOwnershipColumns)
+	require.NoError(t, err)
+	assert.Equal(t, 2, nullableOwnershipColumns)
+
+	var legacyTenantID, legacySiteID *uuid.UUID
+	err = dbSession.DB.QueryRowContext(ctx, `SELECT tenant_id, site_id FROM domain WHERE id = ?`, domain.ID).Scan(&legacyTenantID, &legacySiteID)
+	require.NoError(t, err)
+	assert.Nil(t, legacyTenantID)
+	assert.Nil(t, legacySiteID)
+
+	tenantID := uuid.New()
+	siteID := uuid.New()
+	_, err = dbSession.DB.ExecContext(ctx, `UPDATE domain SET tenant_id = ?, site_id = ? WHERE id = ?`, tenantID, siteID, domain.ID)
+	require.NoError(t, err)
+	require.NoError(t, domainOwnershipUpMigration(ctx, dbSession.DB))
+	require.NoError(t, domainOwnershipDownMigration(ctx, dbSession.DB))
+
+	var persistedTenantID, persistedSiteID uuid.UUID
+	err = dbSession.DB.QueryRowContext(ctx, `SELECT tenant_id, site_id FROM domain WHERE id = ?`, domain.ID).Scan(&persistedTenantID, &persistedSiteID)
+	require.NoError(t, err)
+	assert.Equal(t, tenantID, persistedTenantID)
+	assert.Equal(t, siteID, persistedSiteID)
+
+	var ownershipIndexCount int
+	err = dbSession.DB.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM pg_indexes
+		WHERE schemaname = 'public'
+		  AND tablename = 'domain'
+		  AND indexname = 'domain_tenant_site_idx'
+	`).Scan(&ownershipIndexCount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, ownershipIndexCount)
+}
+
+var (
+	domainLifecycleRecoveryColumns = []string{"recovery_token", "recovery_lease_until", "recovery_next_at", "recovery_attempts"}
+	domainLifecycleAttachColumns   = []string{
+		"attach_intent_id", "attach_source_vpc_id", "attach_target_vpc_id",
+		"attach_source_controller_vpc_id", "attach_target_controller_vpc_id",
+		"attach_segment_version", "attach_recovery_token", "attach_lease_until",
+		"attach_next_at", "attach_attempts",
+	}
+	domainLifecycleIndexes = []string{"domain_owned_name_idx", "domain_recovery_due_idx", "subnet_attach_recovery_due_idx"}
+)
+
+// newDomainLifecycleMigrator runs only the lifecycle migration through the
+// same Bun migrator options as the production db init_migrate command.
+func newDomainLifecycleMigrator(t *testing.T, ctx context.Context, dbSession *db.Session) *migrate.Migrator {
+	t.Helper()
+	var targetMigration migrate.Migration
+	for _, migration := range Migrations.Sorted() {
+		if migration.Name == "20260930180000" {
+			targetMigration = migration
+			break
+		}
+	}
+	require.Equal(t, "domain_lifecycle", targetMigration.Comment)
+	targetMigrations := migrate.NewMigrations()
+	targetMigrations.Add(targetMigration)
+	migrator := migrate.NewMigrator(
+		dbSession.DB,
+		targetMigrations,
+		migrate.WithTableName("domain_lifecycle_migrations_test"),
+		migrate.WithLocksTableName("domain_lifecycle_migration_locks_test"),
+		migrate.WithMarkAppliedOnSuccess(true),
+	)
+	require.NoError(t, migrator.Init(ctx))
+	return migrator
+}
+
+func domainLifecycleMigrationApplied(t *testing.T, ctx context.Context, migrator *migrate.Migrator) bool {
+	t.Helper()
+	statuses, err := migrator.MigrationsWithStatus(ctx)
+	require.NoError(t, err)
+	require.Len(t, statuses, 1)
+	return statuses[0].IsApplied()
+}
+
+func countDomainLifecycleColumns(t *testing.T, ctx context.Context, dbSession *db.Session, table string, columns []string) int {
+	t.Helper()
+	var count int
+	err := dbSession.DB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = ? AND column_name IN (?)
+	`, table, bun.In(columns)).Scan(&count)
+	require.NoError(t, err)
+	return count
+}
+
+// assertDomainLifecycleSchema checks the exact converged schema: every column,
+// the zero defaults on the attempt counters, and every index definition.
+func assertDomainLifecycleSchema(t *testing.T, ctx context.Context, dbSession *db.Session) {
+	t.Helper()
+	require.Equal(t, len(domainLifecycleRecoveryColumns), countDomainLifecycleColumns(t, ctx, dbSession, "domain", domainLifecycleRecoveryColumns))
+	require.Equal(t, len(domainLifecycleAttachColumns), countDomainLifecycleColumns(t, ctx, dbSession, "subnet", domainLifecycleAttachColumns))
+	for table, column := range map[string]string{"domain": "recovery_attempts", "subnet": "attach_attempts"} {
+		var isNullable string
+		var columnDefault sql.NullString
+		err := dbSession.DB.QueryRowContext(ctx, `
+			SELECT is_nullable, column_default FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = ? AND column_name = ?
+		`, table, column).Scan(&isNullable, &columnDefault)
+		require.NoError(t, err)
+		assert.Equal(t, "NO", isNullable, "%s.%s", table, column)
+		assert.Equal(t, "0", columnDefault.String, "%s.%s", table, column)
+	}
+	definitions := map[string]string{}
+	rows, err := dbSession.DB.QueryContext(ctx, `
+		SELECT indexname, indexdef FROM pg_indexes
+		WHERE schemaname = 'public' AND indexname IN (?)
+	`, bun.In(domainLifecycleIndexes))
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var name, definition string
+		require.NoError(t, rows.Scan(&name, &definition))
+		definitions[name] = definition
+	}
+	require.NoError(t, rows.Err())
+	require.Len(t, definitions, len(domainLifecycleIndexes))
+	assert.Contains(t, definitions["domain_owned_name_idx"], "CREATE UNIQUE INDEX domain_owned_name_idx ON public.domain USING btree (tenant_id, site_id, translate(rtrim((hostname)::text, '.'::text), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'::text, 'abcdefghijklmnopqrstuvwxyz'::text))")
+	assert.Contains(t, definitions["domain_owned_name_idx"], "WHERE ((deleted IS NULL) AND (tenant_id IS NOT NULL) AND (site_id IS NOT NULL) AND (controller_domain_id IS NOT NULL))")
+	assert.Contains(t, definitions["domain_recovery_due_idx"], "(recovery_next_at, updated, id)")
+	assert.Contains(t, definitions["domain_recovery_due_idx"], "'DomainStatusRejecting'")
+	assert.Contains(t, definitions["subnet_attach_recovery_due_idx"], "(attach_next_at, updated, id) WHERE ((deleted IS NULL) AND (attach_intent_id IS NOT NULL))")
+}
+
+// dropDomainLifecycleSchema recreates the immediate predecessor schema of an
+// upgraded install, which never had the lifecycle columns or indexes.
+func dropDomainLifecycleSchema(t *testing.T, ctx context.Context, dbSession *db.Session) {
+	t.Helper()
+	_, err := dbSession.DB.ExecContext(ctx, `DROP INDEX IF EXISTS domain_owned_name_idx, domain_recovery_due_idx, subnet_attach_recovery_due_idx`)
+	require.NoError(t, err)
+	_, err = dbSession.DB.ExecContext(ctx, `ALTER TABLE domain DROP COLUMN recovery_token, DROP COLUMN recovery_lease_until, DROP COLUMN recovery_next_at, DROP COLUMN recovery_attempts`)
+	require.NoError(t, err)
+	_, err = dbSession.DB.ExecContext(ctx, `ALTER TABLE subnet DROP COLUMN attach_intent_id, DROP COLUMN attach_source_vpc_id, DROP COLUMN attach_target_vpc_id, DROP COLUMN attach_source_controller_vpc_id, DROP COLUMN attach_target_controller_vpc_id, DROP COLUMN attach_segment_version, DROP COLUMN attach_recovery_token, DROP COLUMN attach_lease_until, DROP COLUMN attach_next_at, DROP COLUMN attach_attempts`)
+	require.NoError(t, err)
+	require.Equal(t, 0, countDomainLifecycleColumns(t, ctx, dbSession, "domain", domainLifecycleRecoveryColumns))
+	require.Equal(t, 0, countDomainLifecycleColumns(t, ctx, dbSession, "subnet", domainLifecycleAttachColumns))
+}
+
+func TestDomainLifecycleMigrationFreshInstall(t *testing.T) {
+	ctx := context.Background()
+	// A brand-new database: the initial migration creates domain and subnet
+	// from the current models, which already include every lifecycle column.
+	dbSession := util.GetTestDBSession(t, true)
+	defer dbSession.Close()
+
+	migrator := migrate.NewMigrator(dbSession.DB, Migrations, migrate.WithMarkAppliedOnSuccess(true))
+	require.NoError(t, migrator.Init(ctx))
+	group, err := migrator.Migrate(ctx)
+	require.NoError(t, err)
+	require.False(t, group.IsZero())
+	statuses, err := migrator.MigrationsWithStatus(ctx)
+	require.NoError(t, err)
+	require.Empty(t, statuses.Unapplied())
+	assertDomainLifecycleSchema(t, ctx, dbSession)
+
+	// Re-running init_migrate on the migrated database is a no-op.
+	require.NoError(t, migrator.Init(ctx))
+	group, err = migrator.Migrate(ctx)
+	require.NoError(t, err)
+	require.True(t, group.IsZero())
+}
+
+func TestDomainLifecycleMigrationUpgradePreservesRows(t *testing.T) {
+	ctx := context.Background()
+	dbSession := util.GetTestDBSession(t, true)
+	defer dbSession.Close()
+	model.TestSetupSchema(t, dbSession)
+
+	ipOrg := "test-provider-org"
+	ipUser := model.TestBuildUser(t, dbSession, uuid.NewString(), ipOrg, []string{authz.ProviderAdminRole})
+	ip := model.TestBuildInfrastructureProvider(t, dbSession, "test-provider", ipOrg, ipUser)
+	tenantOrg := "test-tenant-org"
+	tenantUser := model.TestBuildUser(t, dbSession, uuid.NewString(), tenantOrg, []string{authz.TenantAdminRole})
+	tenant := model.TestBuildTenant(t, dbSession, "test-tenant", tenantOrg, tenantUser)
+	site := model.TestBuildSite(t, dbSession, ip, "test-site", ipUser)
+	vpc := model.TestBuildVPC(t, dbSession, "test-vpc", ip, tenant, site, cutil.GetPtr(model.VpcEthernetVirtualizer), nil, nil, model.VpcStatusReady, tenantUser, nil)
+	ipBlock := model.TestBuildIPBlock(t, dbSession, "test-block", site, tenant, model.IPBlockRoutingTypeDatacenterOnly, "192.0.2.0", 24, model.IPBlockProtocolVersionV4)
+	subnet := model.TestBuildSubnet(t, dbSession, "test-subnet", tenant, vpc, nil, ipBlock, model.SubnetStatusReady, tenantUser)
+
+	domainDAO := model.NewDomainDAO(dbSession)
+	legacy, err := domainDAO.Create(ctx, nil, model.DomainCreateInput{
+		Hostname: "legacy.example.com", Org: tenantOrg, Status: model.DomainStatusReady, CreatedBy: tenantUser.ID,
+	})
+	require.NoError(t, err)
+	owned, err := domainDAO.Create(ctx, nil, model.DomainCreateInput{
+		Hostname: "owned.example.com", Org: tenantOrg, TenantID: &tenant.ID, SiteID: &site.ID,
+		ControllerDomainID: cutil.GetPtr(uuid.New()), Status: model.DomainStatusReady, CreatedBy: tenantUser.ID,
+	})
+	require.NoError(t, err)
+
+	dropDomainLifecycleSchema(t, ctx, dbSession)
+	migrator := newDomainLifecycleMigrator(t, ctx, dbSession)
+	group, err := migrator.Migrate(ctx)
+	require.NoError(t, err)
+	require.Len(t, group.Migrations, 1)
+	require.True(t, domainLifecycleMigrationApplied(t, ctx, migrator))
+	assertDomainLifecycleSchema(t, ctx, dbSession)
+
+	// Services start after migrations; read back through a new session so no
+	// statement prepared against the predecessor schema is reused.
+	migratedSession := util.GetTestDBSession(t, false)
+	defer migratedSession.Close()
+	domainDAO = model.NewDomainDAO(migratedSession)
+
+	// Existing rows survive, receive zero attempts and no recovery or attach state.
+	for _, domain := range []*model.Domain{legacy, owned} {
+		persisted, err := domainDAO.GetByID(ctx, nil, domain.ID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, domain.Hostname, persisted.Hostname)
+		assert.Equal(t, domain.TenantID, persisted.TenantID)
+		assert.Equal(t, domain.SiteID, persisted.SiteID)
+		assert.Equal(t, domain.ControllerDomainID, persisted.ControllerDomainID)
+		assert.Equal(t, 0, persisted.RecoveryAttempts)
+		assert.Nil(t, persisted.RecoveryToken)
+		assert.Nil(t, persisted.RecoveryNextAt)
+	}
+	persistedSubnet, err := model.NewSubnetDAO(migratedSession).GetByID(ctx, nil, subnet.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, vpc.ID, persistedSubnet.VpcID)
+	assert.Equal(t, 0, persistedSubnet.AttachAttempts)
+	assert.Nil(t, persistedSubnet.AttachIntentID)
+
+	// The unique index enforces owned-name uniqueness with Core ASCII folding.
+	_, err = domainDAO.Create(ctx, nil, model.DomainCreateInput{
+		Hostname: "OWNED.example.com.", Org: tenantOrg, TenantID: &tenant.ID, SiteID: &site.ID,
+		ControllerDomainID: cutil.GetPtr(uuid.New()), Status: model.DomainStatusPending, CreatedBy: tenantUser.ID,
+	})
+	require.ErrorContains(t, err, "domain_owned_name_idx")
+
+	// A later rerun of init_migrate sees the migration as applied.
+	group, err = migrator.Migrate(ctx)
+	require.NoError(t, err)
+	require.True(t, group.IsZero())
+}
+
+func TestDomainLifecycleMigrationRetriesAfterPartialFailure(t *testing.T) {
+	ctx := context.Background()
+	dbSession := util.GetTestDBSession(t, true)
+	defer dbSession.Close()
+	// Fresh model columns plus the unique index that the previous
+	// non-transactional migration committed before failing on ADD COLUMN.
+	// The leftover deliberately differs from the intended definition.
+	model.TestSetupSchema(t, dbSession)
+	_, err := dbSession.DB.ExecContext(ctx, `CREATE UNIQUE INDEX domain_owned_name_idx ON domain (tenant_id, site_id, hostname)`)
+	require.NoError(t, err)
+
+	migrator := newDomainLifecycleMigrator(t, ctx, dbSession)
+	group, err := migrator.Migrate(ctx)
+	require.NoError(t, err)
+	require.Len(t, group.Migrations, 1)
+	require.True(t, domainLifecycleMigrationApplied(t, ctx, migrator))
+	assertDomainLifecycleSchema(t, ctx, dbSession)
+
+	// Replaying the callback (crash before Bun records it) converges again.
+	require.NoError(t, domainLifecycleUpMigration(ctx, dbSession.DB))
+	assertDomainLifecycleSchema(t, ctx, dbSession)
+}
+
+func TestDomainLifecycleMigrationRejectsDuplicateOwnedDomains(t *testing.T) {
+	ctx := context.Background()
+	dbSession := util.GetTestDBSession(t, true)
+	defer dbSession.Close()
+	model.TestSetupSchema(t, dbSession)
+
+	user := model.TestBuildUser(t, dbSession, uuid.NewString(), "test-org", []string{authz.TenantAdminRole})
+	tenantID, siteID := uuid.New(), uuid.New()
+	dropDomainLifecycleSchema(t, ctx, dbSession)
+	insert := func(hostname string) uuid.UUID {
+		id := uuid.New()
+		_, err := dbSession.DB.ExecContext(ctx, `
+			INSERT INTO domain (id, hostname, org, tenant_id, site_id, controller_domain_id, status, created_by)
+			VALUES (?, ?, 'test-org', ?, ?, ?, ?, ?)
+		`, id, hostname, tenantID, siteID, uuid.New(), model.DomainStatusReady, user.ID)
+		require.NoError(t, err)
+		return id
+	}
+	first := insert("dup.example.com")
+	second := insert("DUP.Example.com.")
+
+	migrator := newDomainLifecycleMigrator(t, ctx, dbSession)
+	_, err := migrator.Migrate(ctx)
+	require.ErrorContains(t, err, "cannot enforce owned Domain uniqueness")
+	require.ErrorContains(t, err, `normalized name "dup.example.com"`)
+	require.ErrorContains(t, err, first.String())
+	require.ErrorContains(t, err, second.String())
+	// Nothing is recorded or partially applied.
+	require.False(t, domainLifecycleMigrationApplied(t, ctx, migrator))
+	require.Equal(t, 0, countDomainLifecycleColumns(t, ctx, dbSession, "domain", domainLifecycleRecoveryColumns))
+	require.Equal(t, 0, countDomainLifecycleColumns(t, ctx, dbSession, "subnet", domainLifecycleAttachColumns))
+
+	// Once the operator reconciles ownership, the same migration succeeds.
+	_, err = dbSession.DB.ExecContext(ctx, `UPDATE domain SET deleted = current_timestamp WHERE id = ?`, second)
+	require.NoError(t, err)
+	_, err = migrator.Migrate(ctx)
+	require.NoError(t, err)
+	require.True(t, domainLifecycleMigrationApplied(t, ctx, migrator))
+	assertDomainLifecycleSchema(t, ctx, dbSession)
+}
+
+func TestDomainLifecycleMigrationRejectsIncompatibleColumns(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name      string
+		alter     string
+		errSubstr string
+	}{
+		{"wrong type", `ALTER TABLE domain ALTER COLUMN recovery_token TYPE text`, "incompatible existing column domain.recovery_token: type text"},
+		{"nullable counter", `ALTER TABLE subnet ALTER COLUMN attach_attempts DROP NOT NULL`, "incompatible existing column subnet.attach_attempts: nullable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dbSession := util.GetTestDBSession(t, true)
+			defer dbSession.Close()
+			model.TestSetupSchema(t, dbSession)
+			_, err := dbSession.DB.ExecContext(ctx, tc.alter)
+			require.NoError(t, err)
+
+			migrator := newDomainLifecycleMigrator(t, ctx, dbSession)
+			_, err = migrator.Migrate(ctx)
+			require.ErrorContains(t, err, tc.errSubstr)
+			require.False(t, domainLifecycleMigrationApplied(t, ctx, migrator))
+			// The transaction rolled back the index creation as well.
+			var indexes int
+			err = dbSession.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname IN (?)`, bun.In(domainLifecycleIndexes)).Scan(&indexes)
+			require.NoError(t, err)
+			require.Equal(t, 0, indexes)
+		})
+	}
 }
 
 func Test_vpcProviderIDUpMigration(t *testing.T) {

@@ -69,19 +69,30 @@ func ConfigFromEnv() (Config, error) {
 }
 
 // BuildDSN builds the Data Source Name (DSN) string for connecting to
-// the database. IPv6 hosts may be supplied with or without brackets.
+// the database. IPv6 hosts may be supplied with or without brackets, and a
+// filesystem path selects a PostgreSQL Unix-domain socket directory.
 func (c *Config) BuildDSN() string {
 	host := c.Host
 	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
 		host = host[1 : len(host)-1]
 	}
 
+	address := net.JoinHostPort(host, strconv.Itoa(c.Port))
+	query := ""
+	if strings.HasPrefix(host, "/") {
+		address = ""
+		query = url.Values{
+			"host": {host},
+			"port": {strconv.Itoa(c.Port)},
+		}.Encode() + "&"
+	}
 	dsn := fmt.Sprintf(
-		"postgres://%v:%v@%v/%v?sslmode=",
+		"postgres://%v:%v@%v/%v?%vsslmode=",
 		url.PathEscape(c.Credential.User),
 		url.PathEscape(c.Credential.Password.Value),
-		net.JoinHostPort(host, strconv.Itoa(c.Port)),
+		address,
 		c.DBName,
+		query,
 	)
 
 	// `sslmode=disable` broke hostssl-only servers in v1.3.1. Keep `prefer`

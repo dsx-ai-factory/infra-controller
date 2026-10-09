@@ -22,12 +22,15 @@ use clap::Parser;
 #[command(after_long_help = "\
 EXAMPLES:
 
-Create an infrastructure domain:
+Create an infrastructure domain using the site default TTL:
     $ nico-admin-cli domain create mysite.example.com
 
 Create a domain owned by a VPC:
     $ nico-admin-cli domain create compute.customer.example \
     --vpc-id 12345678-1234-5678-90ab-cdef01234567
+
+Create an infrastructure domain with a ten-minute default record TTL:
+    $ nico-admin-cli domain create example.com --default-ttl 600
 
 ")]
 pub(crate) struct Args {

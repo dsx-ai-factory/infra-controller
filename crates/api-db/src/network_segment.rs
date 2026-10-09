@@ -873,6 +873,25 @@ pub async fn set_vpc_id_and_can_stretch(
     Ok(())
 }
 
+/// Hold a segment's row lock until an attach transaction commits. This keeps
+/// the expected version/source check and a same-target no-op atomic with
+/// competing segment updates (the regular attach already uses version CAS).
+pub async fn lock_for_attach(txn: &mut PgConnection, id: NetworkSegmentId) -> DatabaseResult<()> {
+    let query = "SELECT id FROM network_segments WHERE id = $1 AND deleted IS NULL FOR UPDATE";
+    let found = sqlx::query(query)
+        .bind(id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if found.is_none() {
+        return Err(DatabaseError::NotFoundError {
+            kind: "network segment",
+            id: id.to_string(),
+        });
+    }
+    Ok(())
+}
+
 pub async fn attach_to_vpc(
     value: &NetworkSegment,
     txn: &mut PgConnection,

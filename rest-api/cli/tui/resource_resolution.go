@@ -267,24 +267,6 @@ func requiredResolvedValue(descriptor GeneratedResourceDescriptor, resolvedValue
 	return value, nil
 }
 
-func (s *Session) fetchDPUMachines(_ context.Context) ([]NamedItem, error) {
-	if s.Scope.SiteID == "" {
-		return nil, fmt.Errorf("siteId must be resolved before DPU machines")
-	}
-	machines, err := s.fetchAll(apiPath(s, "dpu"), map[string]string{"siteId": s.Scope.SiteID})
-	if err != nil {
-		return nil, err
-	}
-	items := make([]NamedItem, 0, len(machines))
-	for _, machine := range machines {
-		items = append(items, NamedItem{
-			Name: machineDisplayName(machine), ID: str(machine, "id"), Status: str(machine, "state"),
-			Labels: extractLabels(machine), Raw: machine,
-		})
-	}
-	return items, nil
-}
-
 func (s *Session) fetchSpectrumXPartitions(ctx context.Context) ([]NamedItem, error) {
 	tenantID, err := s.getTenantID(ctx)
 	if err != nil {
