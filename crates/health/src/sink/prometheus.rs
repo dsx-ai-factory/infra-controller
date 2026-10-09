@@ -687,8 +687,9 @@ mod tests {
             collector_type: "switch_collector",
             labels: Default::default(),
             metadata: Some(EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: Some(switch_id),
-                serial: "SN-SWITCH-001".to_string(),
+                serial: Some("SN-SWITCH-001".to_string()),
                 slot_number: Some(7),
                 tray_index: Some(3),
                 nvlink_domain_uuid: Some(nvlink_domain_uuid),
@@ -716,6 +717,22 @@ mod tests {
         assert_eq!(
             label_value("nvlink_domain_uuid"),
             Some(nvlink_domain_uuid_label.as_str())
+        );
+
+        let mut context = context;
+
+        let Some(EndpointMetadata::Switch(switch)) = context.metadata.as_mut() else {
+            panic!("expected switch metadata");
+        };
+
+        switch.serial = None;
+
+        let labels = PrometheusSink::stream_static_labels(&context);
+
+        assert!(
+            !labels
+                .iter()
+                .any(|(key, _)| key.as_ref() == "serial_number")
         );
     }
 

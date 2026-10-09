@@ -401,12 +401,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn switch_domain_change_restarts_collectors_for_same_endpoint_key() {
+    async fn switch_domain_changes_restart_collectors_but_serial_changes_do_not() {
         let mut ctx = context("switch_domain_change_restarts_collectors");
         let mut endpoint = test_endpoint(mac("00:11:22:33:44:55"));
+
         endpoint.metadata = Some(EndpointMetadata::Switch(SwitchData {
+            log_checkpoint_identity: None,
             id: None,
-            serial: "switch-1".to_string(),
+            serial: Some("switch-1".to_string()),
             slot_number: None,
             tray_index: None,
             nvlink_domain_uuid: None,
@@ -445,8 +447,27 @@ mod tests {
             Cow::Owned(key.clone()),
             noop_collector(),
         );
-        stop_stale_switch_collectors(&mut ctx, &[endpoint]).await;
+
+        stop_stale_switch_collectors(&mut ctx, std::slice::from_ref(&endpoint)).await;
+
         assert!(ctx.collectors.contains(CollectorKind::NvueRest, &key));
+
+        ctx.collectors.insert(
+            CollectorKind::NvueGnmi,
+            Cow::Owned(key.clone()),
+            noop_collector(),
+        );
+
+        let Some(EndpointMetadata::Switch(switch)) = Arc::make_mut(&mut endpoint).metadata.as_mut()
+        else {
+            panic!("test endpoint should contain switch metadata");
+        };
+
+        switch.serial = Some("MT2515600ZYB".to_string());
+
+        stop_stale_switch_collectors(&mut ctx, std::slice::from_ref(&endpoint)).await;
+
+        assert!(ctx.collectors.contains(CollectorKind::NvueGnmi, &key));
     }
 
     #[tokio::test]
@@ -586,8 +607,9 @@ mod tests {
         let mut first = test_endpoint(mac("00:11:22:33:44:55"));
 
         first.metadata = Some(EndpointMetadata::Switch(SwitchData {
+            log_checkpoint_identity: None,
             id: None,
-            serial: "switch-1".to_string(),
+            serial: Some("switch-1".to_string()),
             slot_number: None,
             tray_index: None,
             nvlink_domain_uuid: None,

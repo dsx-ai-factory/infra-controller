@@ -246,7 +246,7 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
         config: Self::Config,
     ) -> Result<Self, HealthError> {
         let switch_id = match &endpoint.metadata {
-            Some(EndpointMetadata::Switch(s)) => s.serial.clone(),
+            Some(EndpointMetadata::Switch(s)) => s.serial.clone().unwrap_or_else(|| endpoint.key()),
             _ => endpoint.key(),
         };
 

@@ -157,7 +157,7 @@ impl EventContext {
 
     pub fn switch_serial(&self) -> Option<&str> {
         match &self.metadata {
-            Some(EndpointMetadata::Switch(switch)) => Some(switch.serial.as_str()),
+            Some(EndpointMetadata::Switch(switch)) => switch.serial.as_deref(),
             _ => None,
         }
     }
@@ -767,8 +767,9 @@ mod tests {
                 driver_version: Some("570.82".to_string()),
             })),
             ContextKind::Switch => Some(EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: Some(switch_id()),
-                serial: "SW-001".to_string(),
+                serial: Some("SW-001".to_string()),
                 slot_number: Some(9),
                 tray_index: Some(4),
                 nvlink_domain_uuid: Some(nvlink_domain_id()),

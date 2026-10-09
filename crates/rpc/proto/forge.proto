@@ -3000,6 +3000,10 @@ message SwitchStatus {
   // NVOS management ports, ordered by MAC address. Addresses within each port
   // are ordered by address family, IPv4 before IPv6.
   repeated SwitchNvosPortInfo nvos_ports = 12;
+
+  // Chassis serial from the cached BMC exploration report. Absent when no
+  // usable switch chassis serial has been discovered.
+  optional string serial_number = 13;
 }
 
 message PlacementInRack {

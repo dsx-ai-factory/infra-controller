@@ -1116,8 +1116,9 @@ mod tests {
         serial: &str,
     ) -> EndpointMetadata {
         EndpointMetadata::Switch(SwitchData {
+            log_checkpoint_identity: None,
             id: None,
-            serial: serial.to_string(),
+            serial: Some(serial.to_string()),
             slot_number: None,
             tray_index: None,
             nvlink_domain_uuid: None,
