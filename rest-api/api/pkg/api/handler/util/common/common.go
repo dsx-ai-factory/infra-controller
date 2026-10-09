@@ -1712,6 +1712,15 @@ func TenantHasTargetedInstanceCreation(ctx context.Context, tx *cdb.Tx, dbSessio
 	return false, nil
 }
 
+// TenantHasSiteAccess reports whether the Tenant has an Allocation or effective TargetedInstanceCreation on the Site.
+func TenantHasSiteAccess(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID) (bool, error) {
+	count, err := cdbm.NewAllocationDAO(dbSession).GetCount(ctx, tx, cdbm.AllocationFilterInput{TenantIDs: []uuid.UUID{tenant.ID}, SiteIDs: []uuid.UUID{siteID}})
+	if err != nil || count > 0 {
+		return count > 0, err
+	}
+	return TenantHasTargetedInstanceCreation(ctx, tx, dbSession, tenant, &TenantPrivilegeScope{SiteID: &siteID})
+}
+
 // GetPrivilegedAccessSiteIDsForTenant returns Site IDs where the Tenant has
 // effective TargetedInstanceCreation via a Ready TenantAccount and optional
 // TenantSite.config overrides. It is nil-safe and returns an empty slice when

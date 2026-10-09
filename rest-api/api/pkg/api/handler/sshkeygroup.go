@@ -190,8 +190,12 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to create SSH Key Group, Site: %s specified in request is not in Registered state", site.ID.String()), nil)
 		}
 
-		// Validate the TenantSite exists for current tenant and this site
-		_, ok := sttsmap[site.ID]
+		// Validate the current tenant has access to this site
+		ok, serr := common.TenantHasSiteAccess(ctx, nil, cskgh.dbSession, tenant, site.ID)
+		if serr != nil {
+			logger.Error().Err(serr).Msg("error checking Tenant access to Site")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create SSH Key Group, DB error checking Site access", nil)
+		}
 		if !ok {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Unable to associate SSH Key Group with Site: %s, Tenant does not have access to Site", stID), nil)
 		}
@@ -631,8 +635,12 @@ func (uskgh UpdateSSHKeyGroupHandler) Handle(c echo.Context) error {
 					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to update SSH Key Group, The Site with ID: %s where this SSH Key Group is being created is not in Registered state", site.ID.String()), nil)
 				}
 
-				// Validate the TenantSite exists for current tenant and this site
-				_, ok := sttsmap[site.ID]
+				// Validate the current tenant has access to this site
+				ok, serr := common.TenantHasSiteAccess(ctx, tx, uskgh.dbSession, tenant, site.ID)
+				if serr != nil {
+					logger.Error().Err(serr).Msg("error checking Tenant access to Site")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SSH Key Group, DB error checking Site access", nil)
+				}
 				if !ok {
 					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Unable to associate SSH Key Group with Site: %s, Tenant does not have access to Site", stID), nil)
 				}
@@ -1253,13 +1261,13 @@ func (gaskgh GetAllSSHKeyGroupHandler) Handle(c echo.Context) error {
 		}
 
 		// Determine if tenant has access to requested site
-		_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, site.ID, nil)
-		if err != nil {
-			if err == cdb.ErrDoesNotExist {
-				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant is not associated with Site specified in query", nil)
-			}
-			logger.Warn().Err(err).Msg("error retrieving Tenant Site association from DB")
+		ok, serr := common.TenantHasSiteAccess(ctx, nil, gaskgh.dbSession, tenant, site.ID)
+		if serr != nil {
+			logger.Warn().Err(serr).Msg("error checking Tenant access to Site")
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to determine if Tenant has access to Site specified in query, DB error", nil)
+		}
+		if !ok {
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant is not associated with Site specified in query", nil)
 		}
 	}
 

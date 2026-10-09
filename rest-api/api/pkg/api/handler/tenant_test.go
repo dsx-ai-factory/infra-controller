@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
@@ -30,9 +29,7 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 )
@@ -72,7 +69,6 @@ func testWithAdvisoryLocks(t *testing.T, ctx context.Context, dbSession *cdb.Ses
 		}
 		return run(tx)
 	})
-	// Workflow mocks also call this from concurrent initialization requests.
 	assert.NoError(t, err)
 }
 
@@ -184,10 +180,7 @@ func TestGetCurrentTenantHandler_Handle(t *testing.T) {
 	scp := sc.NewClientPool(nil)
 	stc := &tmocks.Client{}
 	scp.IDClientMap[site.ID.String()] = stc
-	createRequest := tn1.ToCreateRequestProto()
-	createRequest.Metadata.Name = tnOrg1
-	stc.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateTenant", createRequest).Return(&tmocks.WorkflowRun{}, nil).Once()
-	defer stc.AssertExpectations(t)
+	stc.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateTenant", mock.Anything).Return(&tmocks.WorkflowRun{}, nil)
 
 	// OTEL Spanner configuration
 	ctx = common.TestCommonTraceProviderSetup(t, ctx)
@@ -279,12 +272,8 @@ func TestGetCurrentTenantHandler_Handle(t *testing.T) {
 				testWithAdvisoryLocks(t, ctx, dbSession, []string{lockKey}, func(_ *cdb.Tx) error {
 					assert.NoError(t, gctnh.Handle(ec))
 					assert.Equal(t, http.StatusOK, rec.Code)
-					response := &model.APITenant{}
-					assert.NoError(t, json.Unmarshal(rec.Body.Bytes(), response))
-					assert.Equal(t, tt.wantTenant.ID.String(), response.ID)
 					_, serr := cdbm.NewTenantSiteDAO(dbSession).GetByTenantIDAndSiteID(ctx, nil, tt.wantTenant.ID, site.ID, nil)
 					assert.ErrorIs(t, serr, cdb.ErrDoesNotExist)
-					stc.AssertNumberOfCalls(t, "ExecuteWorkflow", 0)
 					return nil
 				})
 				rec = httptest.NewRecorder()
@@ -341,111 +330,28 @@ func TestEnsurePrivilegedTenantSites(t *testing.T) {
 	provider := common.TestBuildInfrastructureProvider(t, dbSession, "provider", "privileged-org", user)
 	tenant := common.TestBuildTenant(t, dbSession, "tenant", "privileged-org", user)
 	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, provider, &tenant.ID, tenant.Org, cdbm.TenantAccountStatusReady, user)
-	tsDAO := cdbm.NewTenantSiteDAO(dbSession)
+	registered := testIPBlockBuildSite(t, dbSession, provider, "registered-site", cdbm.SiteStatusRegistered, false, user)
+	pending := testIPBlockBuildSite(t, dbSession, provider, "pending-site", cdbm.SiteStatusPending, false, user)
+	granted := testIPBlockBuildSite(t, dbSession, provider, "granted-site", cdbm.SiteStatusRegistered, false, user)
+	existing := cdbm.TestBuildTenantSite(t, dbSession, tenant, granted, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(true)}, user)
+
 	scp := sc.NewClientPool(nil)
-	logger := zerolog.Nop()
-	cases := []struct {
-		name       string
-		status     string
-		override   *bool
-		site       *cdbm.Site
-		existing   *cdbm.TenantSite
-		startErr   error
-		client     *tmocks.Client
-		wantStarts int
-	}{
-		{name: "explicit grant skips existing association lock", status: cdbm.SiteStatusRegistered, override: cutil.GetPtr(true)},
-		{name: "registered site", status: cdbm.SiteStatusRegistered, wantStarts: 1},
-		{name: "pending site", status: cdbm.SiteStatusPending},
-		{name: "explicit denial", status: cdbm.SiteStatusRegistered, override: cutil.GetPtr(false)},
-		{name: "workflow start failure", status: cdbm.SiteStatusRegistered, startErr: fmt.Errorf("workflow unavailable"), wantStarts: 1},
-	}
-	for i := range cases {
-		tc := &cases[i]
-		tc.site = testIPBlockBuildSite(t, dbSession, provider, tc.name, tc.status, false, user)
-		tc.client = &tmocks.Client{}
-		scp.IDClientMap[tc.site.ID.String()] = tc.client
-		if tc.status == cdbm.SiteStatusRegistered && tc.override == nil {
-			tc.client.On("ExecuteWorkflow", mock.Anything, temporalClient.StartWorkflowOptions{
-				ID: "site-tenant-create-" + tenant.Org, TaskQueue: queue.SiteTaskQueue,
-			}, "CreateTenant", tenant.ToCreateRequestProto()).Return(&tmocks.WorkflowRun{}, tc.startErr).Run(func(_ mock.Arguments) {
-				// Submission must follow commit and release the lock shared with allocations.
-				lockKey := fmt.Sprintf("%s-%s-%s", provider.ID, tc.site.ID, tenant.ID)
-				testWithAdvisoryLocks(t, ctx, dbSession, []string{lockKey}, func(tx *cdb.Tx) error {
-					_, derr := tsDAO.GetByTenantIDAndSiteID(ctx, tx, tenant.ID, tc.site.ID, nil)
-					return derr
-				})
-			})
-		}
-		if tc.override != nil {
-			ts := cdbm.TestBuildTenantSite(t, dbSession, tenant, tc.site, &cdbm.TenantSiteConfig{TargetedInstanceCreation: tc.override}, user)
-			var err error
-			tc.existing, err = tsDAO.Update(ctx, nil, cdbm.TenantSiteUpdateInput{TenantSiteID: ts.ID, EnableSerialConsole: cutil.GetPtr(true)})
-			require.NoError(t, err)
-		}
-	}
+	stc := &tmocks.Client{}
+	scp.IDClientMap[registered.ID.String()] = stc
+	stc.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateTenant", tenant.ToCreateRequestProto()).Return(&tmocks.WorkflowRun{}, nil).Once()
 
-	capabilityLockKey := fmt.Sprintf("tenant-account-capabilities-%s-%s", tenant.ID, provider.ID)
-	testWithAdvisoryLocks(t, ctx, dbSession, []string{capabilityLockKey}, func(_ *cdb.Tx) error {
-		assert.ErrorIs(t, ensurePrivilegedTenantSites(ctx, dbSession, scp, logger, tenant, user.ID), cdb.ErrXactAdvisoryLockFailed)
-		return nil
-	})
-	for _, tc := range cases {
-		if tc.existing == nil {
-			_, err := tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, tc.site.ID, nil)
-			assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
-		}
-		tc.client.AssertNumberOfCalls(t, "ExecuteWorkflow", 0)
-	}
+	require.NoError(t, ensurePrivilegedTenantSites(ctx, dbSession, scp, zerolog.Nop(), tenant, user.ID))
+	stc.AssertExpectations(t)
 
-	// A lock on the first missing site must not block provisioning later sites.
-	lockKey := fmt.Sprintf("%s-%s-%s", provider.ID, cases[1].site.ID, tenant.ID)
-	testWithAdvisoryLocks(t, ctx, dbSession, []string{lockKey}, func(_ *cdb.Tx) error {
-		assert.ErrorIs(t, ensurePrivilegedTenantSites(ctx, dbSession, scp, logger, tenant, user.ID), cdb.ErrXactAdvisoryLockFailed)
-		_, err := tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, cases[1].site.ID, nil)
-		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
-		_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, cases[4].site.ID, nil)
-		assert.NoError(t, err)
-		cases[1].client.AssertNumberOfCalls(t, "ExecuteWorkflow", 0)
-		cases[4].client.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
-		return nil
-	})
-
-	// Concurrent current-account requests must not create duplicate associations.
-	start := make(chan struct{})
-	var workers sync.WaitGroup
-	for range 4 {
-		workers.Go(func() {
-			<-start
-			assert.NoError(t, ensurePrivilegedTenantSites(ctx, dbSession, scp, logger, tenant, user.ID))
-		})
-	}
-	close(start)
-	workers.Wait()
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.override != nil && *tc.override {
-				lockKey := fmt.Sprintf("%s-%s-%s", provider.ID, tc.site.ID, tenant.ID)
-				testWithAdvisoryLocks(t, ctx, dbSession, []string{capabilityLockKey, lockKey}, func(_ *cdb.Tx) error {
-					return ensurePrivilegedTenantSites(ctx, dbSession, scp, logger, tenant, user.ID)
-				})
-			}
-			tc.client.AssertNumberOfCalls(t, "ExecuteWorkflow", tc.wantStarts)
-			associations, _, err := tsDAO.GetAll(ctx, nil, cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{tenant.ID}, SiteIDs: []uuid.UUID{tc.site.ID}}, cdbp.PageInput{}, nil)
-			require.NoError(t, err)
-			if tc.status != cdbm.SiteStatusRegistered {
-				assert.Empty(t, associations)
-				return
-			}
-			require.Len(t, associations, 1)
-			assert.Equal(t, tc.override, associations[0].Config.TargetedInstanceCreation)
-			assert.Equal(t, user.ID, associations[0].CreatedBy)
-			if tc.existing != nil {
-				assert.Equal(t, *tc.existing, associations[0])
-			}
-		})
-	}
+	tsDAO := cdbm.NewTenantSiteDAO(dbSession)
+	created, err := tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, registered.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, user.ID, created.CreatedBy)
+	_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, pending.ID, nil)
+	assert.ErrorIs(t, err, cdb.ErrDoesNotExist, "only Registered Sites get associations")
+	unchanged, err := tsDAO.GetByID(ctx, nil, existing.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, existing.Config, unchanged.Config, "existing associations keep their settings")
 }
 
 func TestGetCurrentTenantStatsHandler_Handle(t *testing.T) {

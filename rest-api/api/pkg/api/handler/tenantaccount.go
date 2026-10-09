@@ -1175,6 +1175,22 @@ func (dtah DeleteTenantAccountHandler) Handle(c echo.Context) error {
 			logger.Warn().Str("tenant", ta.TenantID.String()).Msg("allocations exist for tenant")
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Allocations exist for Tenant", nil)
 		}
+
+		// Delete Tenant/Site associations with the Provider's Sites
+		tsDAO := cdbm.NewTenantSiteDAO(dtah.dbSession)
+		tss, _, err := tsDAO.GetAll(ctx, nil, cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{*ta.TenantID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, []string{"Site"})
+		if err != nil {
+			logger.Error().Err(err).Msg("error retrieving Tenant/Site associations")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to delete TenantAccount, DB error retrieving Tenant/Site associations", nil)
+		}
+		for _, ts := range tss {
+			if ts.Site != nil && ts.Site.InfrastructureProviderID == ip.ID {
+				if err = tsDAO.Delete(ctx, nil, ts.ID); err != nil {
+					logger.Error().Err(err).Msg("error deleting Tenant/Site association")
+					return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to delete TenantAccount, DB error deleting Tenant/Site association", nil)
+				}
+			}
+		}
 	}
 
 	// Delete TenantAccount in DB
