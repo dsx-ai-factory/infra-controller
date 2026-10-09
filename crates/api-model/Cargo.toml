@@ -32,6 +32,7 @@ name = "model"
 bmc-vendor = { path = "../bmc-vendor" }
 config-version = { path = "../config-version", features = ["sqlx"] }
 carbide-libmlx-model = { path = "../libmlx-model" }
+carbide-macros = { path = "../macros" }
 carbide-network = { path = "../network", features = ["sqlx"] }
 carbide-version = { path = "../version" }
 carbide-health-report = { path = "../health-report" }
@@ -90,7 +91,6 @@ test-support = []
 carbide-version = { path = "../version" }
 
 [dev-dependencies]
-carbide-macros = { path = "../macros" }
 carbide-sqlx-testing = { path = "../sqlx-testing", default-features = false }
 carbide-secrets = { path = "../secrets" }
 carbide-test-support = { path = "../test-support" }

@@ -18,6 +18,7 @@
 //! Tenant identity config for SPIFFE JWT-SVID machine identity.
 //! Stores per-org identity config and signing keys in `tenant_identity_config` table.
 
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::{HostOrDpuId, MachineId};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use model::tenant::identity_config::SigningKeyPublicV1;
@@ -31,21 +32,6 @@ use sqlx::types::Json;
 
 use crate::db_read::DbReader;
 use crate::{ConditionalWrite, DatabaseError, DatabaseResult};
-
-/// Explicit column list for [`TenantIdentityConfig`] queries. Avoid `SELECT *` so schema migrations
-/// (e.g. dropped columns) do not invalidate cached prepared statements on live connections.
-const TENANT_IDENTITY_CONFIG_COLUMNS: &str = "\
-    organization_id, issuer, default_audience, allowed_audiences, \
-    token_ttl_sec, subject_prefix, enabled, created_at, updated_at, \
-    encrypted_signing_key_1, encrypted_signing_key_2, \
-    signing_key_public_1, signing_key_public_2, \
-    current_signing_key_slot, non_active_slot_expires_at, \
-    token_endpoint, auth_method, encrypted_auth_method_config, \
-    subject_token_audience, token_delegation_created_at";
-
-fn tenant_identity_config_returning() -> String {
-    format!("RETURNING {TENANT_IDENTITY_CONFIG_COLUMNS}")
-}
 
 /// After `non_active_slot_expires_at`, clears the non-current slot (public + private ciphertext).
 pub async fn gc_expired_non_active_signing_key(
@@ -271,8 +257,8 @@ pub async fn set(
             signing_key_public_2 = EXCLUDED.signing_key_public_2,
             current_signing_key_slot = EXCLUDED.current_signing_key_slot,
             non_active_slot_expires_at = EXCLUDED.non_active_slot_expires_at
-        {}"#,
-        tenant_identity_config_returning(),
+        RETURNING {}"#,
+        TenantIdentityConfig::db_table_columns(),
     );
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(org_id.as_str())
@@ -301,7 +287,8 @@ where
     for<'db> &'db mut DB: DbReader<'db>,
 {
     let query = format!(
-        "SELECT {TENANT_IDENTITY_CONFIG_COLUMNS} FROM tenant_identity_config WHERE organization_id = $1"
+        "SELECT {} FROM tenant_identity_config WHERE organization_id = $1",
+        TenantIdentityConfig::db_table_columns(),
     );
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(org_id.as_str())
@@ -385,8 +372,8 @@ pub async fn set_token_delegation(
             subject_token_audience = $5, updated_at = NOW(),
             token_delegation_created_at = COALESCE(token_delegation_created_at, NOW())
         WHERE organization_id = $1
-        {}"#,
-        tenant_identity_config_returning(),
+        RETURNING {}"#,
+        TenantIdentityConfig::db_table_columns(),
     );
     let row = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(org_id.as_str())
@@ -424,8 +411,8 @@ pub async fn delete_token_delegation(
         SET token_endpoint = NULL, auth_method = NULL, encrypted_auth_method_config = NULL,
             subject_token_audience = NULL, token_delegation_created_at = NULL, updated_at = NOW()
         WHERE organization_id = $1
-        {}"#,
-        tenant_identity_config_returning(),
+        RETURNING {}"#,
+        TenantIdentityConfig::db_table_columns(),
     );
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(org_id.as_str())
@@ -465,7 +452,8 @@ async fn find_for_update(
     txn: &mut PgConnection,
 ) -> DatabaseResult<Option<TenantIdentityConfig>> {
     let query = format!(
-        "SELECT {TENANT_IDENTITY_CONFIG_COLUMNS} FROM tenant_identity_config WHERE organization_id = $1 FOR UPDATE"
+        "SELECT {} FROM tenant_identity_config WHERE organization_id = $1 FOR UPDATE",
+        TenantIdentityConfig::db_table_columns(),
     );
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(org_id.as_str())
@@ -690,6 +678,10 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
     #[crate::sqlx_test]
     async fn test_token_delegation_set_get_delete(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.unwrap();
+        let created_at: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
+            .fetch_one(txn.as_mut())
+            .await
+            .unwrap();
         let org_id = test_org_id();
         ensure_tenant(&mut txn, &org_id).await;
 
@@ -738,6 +730,10 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             cfg.subject_token_audience.as_deref(),
             Some("https://api.example.com")
         );
+        assert_eq!(cfg.encrypted_auth_method_config.as_ref(), Some(&enc));
+        assert_eq!(cfg.token_delegation_created_at, Some(created_at));
+        assert_eq!(cfg.created_at, created_at);
+        assert_eq!(cfg.updated_at, created_at);
 
         let cleared = delete_token_delegation(&org_id, &mut txn)
             .await
@@ -745,6 +741,9 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             .unwrap();
         assert!(cleared.token_endpoint.is_none());
         assert!(cleared.auth_method.is_none());
+        assert!(cleared.encrypted_auth_method_config.is_none());
+        assert!(cleared.subject_token_audience.is_none());
+        assert!(cleared.token_delegation_created_at.is_none());
     }
 
     #[crate::sqlx_test]

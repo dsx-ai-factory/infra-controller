@@ -24,6 +24,7 @@
 //! once and the only durable artifact is the session's `@odata.id`, which is
 //! what a later revoke (cap enforcement or `flush_mac`) needs.
 
+use carbide_uuid::DbTable;
 use mac_address::MacAddress;
 use model::bmc_redfish_session::StoredSession;
 use sqlx::PgConnection;
@@ -38,17 +39,20 @@ pub async fn find_by_owner(
     spiffe_service_id: &str,
     bmc_mac: MacAddress,
 ) -> DatabaseResult<Vec<StoredSession>> {
-    let query = "SELECT spiffe_service_id, bmc_mac_address, session_odata_id, issued_at
+    let query = format!(
+        "SELECT {}
                  FROM bmc_redfish_sessions
                  WHERE spiffe_service_id = $1 AND bmc_mac_address = $2
-                 ORDER BY issued_at, session_odata_id";
+                 ORDER BY issued_at, session_odata_id",
+        StoredSession::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(spiffe_service_id)
         .bind(bmc_mac)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Records a newly created session. `issued_at` is set to `now()`
@@ -125,15 +129,18 @@ pub async fn delete_by_mac(
     txn: &mut PgConnection,
     bmc_mac: MacAddress,
 ) -> DatabaseResult<Vec<StoredSession>> {
-    let query = "DELETE FROM bmc_redfish_sessions
+    let query = format!(
+        "DELETE FROM bmc_redfish_sessions
                  WHERE bmc_mac_address = $1
-                 RETURNING spiffe_service_id, bmc_mac_address, session_odata_id, issued_at";
+                 RETURNING {}",
+        StoredSession::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(bmc_mac)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 #[cfg(test)]
@@ -287,6 +294,10 @@ mod tests {
     async fn one_identity_holds_many_sessions_oldest_first(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.unwrap();
         let bmc = mac(1);
+        let issued_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT now()")
+            .fetch_one(txn.as_mut())
+            .await
+            .unwrap();
 
         insert(txn.as_mut(), "svc", bmc, "/sessions/1")
             .await
@@ -309,6 +320,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["/sessions/1", "/sessions/2"],
         );
+        for row in rows {
+            assert_eq!(row.spiffe_service_id, "svc");
+            assert_eq!(row.bmc_mac_address, bmc);
+            assert_eq!(row.issued_at, issued_at);
+        }
     }
 
     #[crate::sqlx_test]
@@ -401,6 +417,10 @@ mod tests {
     async fn delete_by_mac_returns_every_caller_row_for_that_bmc(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.unwrap();
         let bmc = mac(4);
+        let issued_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT now()")
+            .fetch_one(txn.as_mut())
+            .await
+            .unwrap();
 
         insert(txn.as_mut(), "svc-1", bmc, "/sessions/1")
             .await
@@ -417,6 +437,12 @@ mod tests {
         assert_eq!(removed.len(), 2);
         assert_eq!(removed[0].spiffe_service_id, "svc-1");
         assert_eq!(removed[1].spiffe_service_id, "svc-2");
+        assert_eq!(removed[0].session_odata_id, "/sessions/1");
+        assert_eq!(removed[1].session_odata_id, "/sessions/2");
+        for row in removed {
+            assert_eq!(row.bmc_mac_address, bmc);
+            assert_eq!(row.issued_at, issued_at);
+        }
 
         assert!(
             find_by_owner(txn.as_mut(), "svc-1", bmc)

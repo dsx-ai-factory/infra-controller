@@ -17,6 +17,7 @@
 
 //! Per-subsystem suppression requests for BMC MAC addresses.
 
+use carbide_uuid::DbTable;
 use mac_address::MacAddress;
 use model::bmc_suppression::{
     BmcSuppression, BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression,
@@ -34,7 +35,8 @@ pub async fn upsert(
     txn: &mut PgConnection,
     input: &NewBmcSuppression,
 ) -> DatabaseResult<BmcSuppression> {
-    const QUERY: &str = "INSERT INTO bmc_suppressions (
+    let query = format!(
+        "INSERT INTO bmc_suppressions (
         bmc_mac_address,
         subsystem,
         source,
@@ -42,22 +44,18 @@ pub async fn upsert(
     ) VALUES ($1, $2, $3, $4)
     ON CONFLICT (bmc_mac_address, subsystem, source) DO UPDATE SET
         reason = EXCLUDED.reason
-    RETURNING
-        bmc_mac_address,
-        subsystem,
-        source,
-        reason,
-        requested_at,
-        acknowledged_at";
+    RETURNING {}",
+        BmcSuppression::db_table_columns(),
+    );
 
-    sqlx::query_as(QUERY)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(input.bmc_mac_address)
         .bind(input.subsystem)
         .bind(input.source)
         .bind(&input.reason)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Returns the suppression rows for the selected BMC MAC addresses in
@@ -69,24 +67,21 @@ pub async fn find_many(
     subsystem: BmcSuppressionSubsystem,
     source: BmcSuppressionSource,
 ) -> DatabaseResult<Vec<BmcSuppression>> {
-    const QUERY: &str = "SELECT
-        bmc_mac_address,
-        subsystem,
-        source,
-        reason,
-        requested_at,
-        acknowledged_at
+    let query = format!(
+        "SELECT {}
     FROM bmc_suppressions
     WHERE bmc_mac_address = ANY($1) AND subsystem = $2 AND source = $3
-    ORDER BY bmc_mac_address";
+    ORDER BY bmc_mac_address",
+        BmcSuppression::db_table_columns(),
+    );
 
-    sqlx::query_as(QUERY)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(bmc_mac_addresses)
         .bind(subsystem)
         .bind(source)
         .fetch_all(db)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Returns an active suppression request for this source, if one exists.
@@ -96,23 +91,20 @@ pub async fn find(
     subsystem: BmcSuppressionSubsystem,
     source: BmcSuppressionSource,
 ) -> DatabaseResult<Option<BmcSuppression>> {
-    const QUERY: &str = "SELECT
-        bmc_mac_address,
-        subsystem,
-        source,
-        reason,
-        requested_at,
-        acknowledged_at
+    let query = format!(
+        "SELECT {}
     FROM bmc_suppressions
-    WHERE bmc_mac_address = $1 AND subsystem = $2 AND source = $3";
+    WHERE bmc_mac_address = $1 AND subsystem = $2 AND source = $3",
+        BmcSuppression::db_table_columns(),
+    );
 
-    sqlx::query_as(QUERY)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(bmc_mac_address)
         .bind(subsystem)
         .bind(source)
         .fetch_optional(db)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Whether decommissioning must still wait for this endpoint to acknowledge DHCP suppression.
@@ -170,22 +162,19 @@ pub async fn find_all_by_subsystem(
     db: impl DbReader<'_>,
     subsystem: BmcSuppressionSubsystem,
 ) -> DatabaseResult<Vec<BmcSuppression>> {
-    const QUERY: &str = "SELECT
-        bmc_mac_address,
-        subsystem,
-        source,
-        reason,
-        requested_at,
-        acknowledged_at
+    let query = format!(
+        "SELECT {}
     FROM bmc_suppressions
     WHERE subsystem = $1
-    ORDER BY bmc_mac_address, source";
+    ORDER BY bmc_mac_address, source",
+        BmcSuppression::db_table_columns(),
+    );
 
-    sqlx::query_as(QUERY)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(subsystem)
         .fetch_all(db)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Acknowledges pending suppression requests for the selected BMC MAC addresses.
@@ -756,6 +745,10 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(retried.bmc_mac_address, mac(1));
+        assert_eq!(retried.subsystem, SITE_EXPLORER);
+        assert_eq!(retried.source, DECOMMISSIONING);
+        assert_eq!(retried.reason, "decommissioning retry");
         assert_eq!(retried.requested_at, initial.requested_at);
         assert_eq!(retried.acknowledged_at, initial.acknowledged_at);
 
