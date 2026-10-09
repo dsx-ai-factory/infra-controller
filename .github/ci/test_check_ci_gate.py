@@ -552,6 +552,19 @@ class ResultTests(unittest.TestCase):
                     [],
                 )
 
+    def test_control_plane_dpu_failure_blocks_core_ci(self) -> None:
+        # A failed run must block the gate even if the path decision said
+        # the job could skip. The checked-in needs list supplies the job.
+        for changed in ("true", "false"):
+            with self.subTest(control_plane_dpu_changed=changed):
+                job_results, environment = _build_result_context("core")
+                job_results["prepare"]["outputs"]["control_plane_dpu_changed"] = changed
+                job_results["test-control-plane-dpu"]["result"] = "failure"
+                self.assertIn(
+                    "`test-control-plane-dpu` failed",
+                    result_errors(job_results, "core", environment=environment),
+                )
+
     def test_every_gated_job_rejects_an_unexpected_skip(self) -> None:
         core_results, core_environment = _build_result_context("core")
         for job in _read_gate_dependencies("core"):

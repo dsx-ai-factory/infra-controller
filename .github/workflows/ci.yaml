@@ -173,6 +173,7 @@ jobs:
       core_rpc_proto_files_changed: ${{ steps.base-container-gate.outputs.core_rpc_proto_files_changed }}
       source_files_changed: ${{ steps.base-container-gate.outputs.source_files_changed }}
       machine_lifecycle_changed: ${{ steps.base-container-gate.outputs.machine_lifecycle_changed }}
+      control_plane_dpu_changed: ${{ steps.base-container-gate.outputs.control_plane_dpu_changed }}
       kea_version: ${{ steps.kea-version.outputs.version }}
       release_build_args: ${{ steps.release-metadata.outputs.build_args }}
       release_build_args_aarch64: ${{ steps.release-metadata.outputs.build_args_aarch64 }}
@@ -233,6 +234,11 @@ jobs:
             machine_lifecycle:
               - 'tests/machine-lifecycle/**'
               - '.github/workflows/ci.yaml'
+            control_plane_dpu:
+              - 'scripts/control-plane-dpu/**'
+              - '.github/workflows/ci.yaml'
+              - '.github/ci/check_ci_gate.py'
+              - '.github/ci/test_check_ci_gate.py'
       - name: Calculate version
         id: version
         run: |
@@ -425,6 +431,7 @@ jobs:
           CORE_RPC_PROTO_FILES_CHANGED: ${{ steps.build-container-changes.outputs.core_rpc_proto_files }}
           SOURCE_FILES_CHANGED: ${{ steps.build-container-changes.outputs.source_files }}
           MACHINE_LIFECYCLE_CHANGED: ${{ steps.build-container-changes.outputs.machine_lifecycle }}
+          CONTROL_PLANE_DPU_CHANGED: ${{ steps.build-container-changes.outputs.control_plane_dpu }}
         run: |
           build_container_x86_64_run=false
           runtime_container_x86_64_run=false
@@ -436,6 +443,7 @@ jobs:
           core_rpc_proto_files_changed=false
           source_files_changed=false
           machine_lifecycle_changed=false
+          control_plane_dpu_changed=false
 
           if [[ "${COMMIT_MESSAGE}" =~ ci-rebuild-base-containers ]]; then
             build_container_x86_64_run=true
@@ -462,6 +470,10 @@ jobs:
 
           if [[ "${MACHINE_LIFECYCLE_CHANGED}" == "true" ]]; then
              machine_lifecycle_changed=true
+          fi
+
+          if [[ "${CONTROL_PLANE_DPU_CHANGED}" == "true" ]]; then
+             control_plane_dpu_changed=true
           fi
 
           if [[ "${RUNTIME_CONTAINER_X86_64_DOCKERFILE_CHANGED}" == "true" ]]; then
@@ -494,6 +506,7 @@ jobs:
           echo "core_rpc_proto_files_changed=${core_rpc_proto_files_changed}" >> "$GITHUB_OUTPUT"
           echo "source_files_changed=${source_files_changed}" >> "$GITHUB_OUTPUT"
           echo "machine_lifecycle_changed=${machine_lifecycle_changed}" >> "$GITHUB_OUTPUT"
+          echo "control_plane_dpu_changed=${control_plane_dpu_changed}" >> "$GITHUB_OUTPUT"
 
           MAJOR_MINOR=$(echo "${VERSION}" | cut -d. -f1,2)
           echo "major_minor_version=${MAJOR_MINOR}" >> "$GITHUB_OUTPUT"
@@ -636,6 +649,60 @@ jobs:
             '{VERSION: $VERSION, CI_COMMIT_SHORT_SHA: $SHORT_SHA, CI_COMMIT_TIMESTAMP: $COMMIT_TIMESTAMP, CONTAINER_BUILD_AARCH64: $BUILD, CONTAINER_RUNTIME_AARCH64: $RUNTIME, CARBIDE_BUILD_HELM_VERSION: $HELM_VERSION}')
 
           echo "build_args_aarch64=${BUILD_ARGS_AARCH64}" >> "$GITHUB_OUTPUT"
+
+  test-control-plane-dpu:
+    name: Control-plane DPU shell tests
+    needs:
+      - prepare
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.control_plane_dpu_changed == 'true'
+      }}
+    runs-on: linux-amd64-cpu4
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Provide main for template regression comparisons
+        run: git update-ref refs/remotes/upstream/main refs/remotes/origin/main
+
+      - name: Install test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools_dir="$RUNNER_TEMP/control-plane-dpu-tools"
+          mkdir -p "$tools_dir"
+          cd "$tools_dir"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/mikefarah/yq/releases/download/v4.52.5/yq_linux_amd64 -o yq
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/hairyhenderson/gomplate/releases/download/v4.3.3/gomplate_linux-amd64 -o gomplate
+          echo '75d893a0d5940d1019cb7cdc60001d9e876623852c31cfc6267047bc31149fa9  yq' | sha256sum --check
+          echo 'ca281666e86f2f09218c1653e1908f572c0e349e9de64cb4ea93ade9333f0596  gomplate' | sha256sum --check
+          chmod +x yq gomplate
+          echo "$tools_dir" >> "$GITHUB_PATH"
+
+      - name: Check test prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          (( BASH_VERSINFO[0] >= 4 ))
+          for tool in yq gomplate python3 setsid openssl shasum ps; do
+            command -v "$tool"
+          done
+          yq --version
+          gomplate --version
+          ps -o tty= -p $$ >/dev/null
+
+      - name: Run DPU shell tests
+        run: bash scripts/control-plane-dpu/unit-tests/run_all.sh
 
   # ============================================================================
   # BUILD STAGE - Base Containers
@@ -2771,6 +2838,9 @@ jobs:
       - build-machine-lifecycle-test-x86_64
       - build-machine-lifecycle-test-aarch64
       - merge-manifests-machine-lifecycle-test
+
+      # DPU shell tests
+      - test-control-plane-dpu
 
       # Source and repository policy checks
       - proto-police
