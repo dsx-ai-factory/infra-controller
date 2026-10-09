@@ -102,11 +102,10 @@ pub struct NvueClient {
 }
 
 impl NvueClient {
-    // In the past, we've seen calls to `nv config apply` take a long time, to
-    // the point where the timeout for that code path (outside this crate) was
-    // raised to 45s. We don't know for sure that we need the same budget here,
-    // but let's assume we do. -drew
-    const APPLY_CONFIG_REVISION_TIMEOUT: Duration = Duration::from_secs(45);
+    // We've seen apply operations take up to 43 seconds in the wild, though
+    // admittedly using `NvueAutoPrompt` settings that were not matched to our
+    // use case.
+    const APPLY_CONFIG_REVISION_TIMEOUT: Duration = Duration::from_secs(60);
     const APPLY_CONFIG_REVISION_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
     pub fn new(server_address: NvueServerAddress) -> Result<Self, NvueClientError> {
@@ -346,7 +345,7 @@ impl NvueClient {
     /// control back to the client in a predictable state, despite all of the
     /// complications introduced by NVUE's revision model.
     ///
-    /// Each polling stage has a timeout of 45 seconds, but an in-flight HTTP
+    /// Each polling stage has a timeout of 60 seconds, but an in-flight HTTP
     /// request may exceed this until its own timeout is reached.
     ///
     /// Many of the error variants returned by this method can be caused by a
@@ -375,6 +374,15 @@ impl NvueClient {
         };
 
         if let Some(rollback_target) = revision.rollback_target() {
+            // Note that our behavior here is not ideal; we're not handling
+            // the (probably unlikely) case of a rollback failing or timing
+            // out, which would potentially leave the "applied" branch in an
+            // unpredictable state.
+            //
+            // TODO: Rework this method and any other fused-operation methods to
+            // return a different error type; NvueClientError cannot carry the
+            // amount of detail we need to describe our failure modes accurately
+            // to the caller.
             let _ = self.poll_revision_to_terminal_state(rollback_target).await;
         }
         Err(error)
