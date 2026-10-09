@@ -156,22 +156,26 @@ copy of the VPC VRF. The DPU also removes the host-to-DPU BGP session in the
 tenant VRF, per-interface routing policy, and any routes previously leaked to
 the underlay.
 
-**Prevent unknown or released hosts from using network resources.** The
-release flow is convergence-gated. The state machine blocks until either the
-DPU confirms that all tenant interfaces have moved onto the admin overlay or
-the machine carries a health alert that prevents reuse. This gate prevents a
-released instance from lingering as a "ghost instance." NICo returns tenant IP,
-VNI, and DPU-loopback allocations to their pools and deletes the instance
-record. Force-delete tears down the same fabric state through the same APIs.
+**Prevent unknown or released hosts from using network resources.** Normal
+release waits until the DPU confirms that all tenant interfaces use the admin
+overlay. NICo then returns tenant IP, VNI, and DPU-loopback allocations to their
+pools and deletes the instance record. A health alert can prevent reuse of the
+machine while release is pending, but does not replace that confirmation.
 
-**Prevent cross-tenant leakage of IPs, connectivity, or metadata.** NICo does
-not report the instance as deleted until every fabric—Ethernet, InfiniBand, and
-NVLink—reports that the host has been removed from all tenant partitions.
-Addresses and VNIs return to their pools only after teardown. The released
-instance's DNS records are also removed. These actions prevent the next tenant
-from inheriting a live address or reaching the prior tenant. The DPU metadata
-service is reconfigured for the post-tenant phase so that a later occupant
-cannot read the prior tenant's metadata or identity.
+Force deletion is different. It requests external fabric cleanup, but a new
+deletion does not wait for DPU acknowledgement by default. Deleting the records
+does not prove that the DPU has stopped forwarding tenant traffic. Refer to the
+[optional DPU acknowledgement wait](../playbooks/force_delete.md#optional-dpu-acknowledgement-wait)
+for when to use the wait and what it confirms.
+
+**Prevent cross-tenant leakage of IPs, connectivity, or metadata.** During normal
+instance release, NICo waits for Ethernet, InfiniBand, and NVLink to confirm
+that the host no longer belongs to any tenant partition. Only then does NICo
+report the instance as deleted. Addresses and VNIs return to their pools after
+teardown, and NICo removes the instance's DNS records. This prevents the next
+tenant from inheriting a live address or reaching the prior tenant. NICo also
+reconfigures the DPU metadata service so the next tenant cannot read the prior
+tenant's metadata or identity.
 
 Verify network cleanup from the per-host cleanup state and DPU/machine network
 status:

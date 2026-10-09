@@ -148,10 +148,11 @@ The following invariants apply to every fabric.
   removed from all tenant partitions before the instance is reported as
   deleted. This guarantees a terminated instance cannot continue to exchange
   traffic on any fabric.
-- **Force-delete still tears down fabric state.** Force-deleting a managed
-  host explicitly detaches it from every fabric through the same external
-  APIs the normal lifecycle uses, so external fabric managers do not retain
-  stale tenant references.
+- **Force deletion does not wait for DPUs by default.** It requests external
+  fabric cleanup, including InfiniBand port unbinding. This does not confirm
+  that a DPU has stopped forwarding tenant traffic. Refer to the
+  [Force Delete playbook](../playbooks/force_delete.md#optional-dpu-acknowledgement-wait)
+  for the optional wait and its limits.
 - **External fabric reachability is monitored.** Each external fabric service
   (UFM and NMX-C) is monitored from NICo with request-success and latency
   metrics so that fabric-side outages can be distinguished from NICo-side
