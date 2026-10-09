@@ -52,3 +52,19 @@ Prometheus scrape port (must match DPUServiceConfiguration configPorts in NICo d
 {{- define "nico-otelcol.prometheusPort" -}}
 {{- default 9999 .Values.prometheusPort -}}
 {{- end -}}
+
+{{/*
+transceiver-exporter sidecar image.
+
+Repository: transceiverExporter.image.repository, else the sibling
+`transceiver-exporter` path next to image.repository.
+Tag: transceiverExporter.image.tag, else image.tag, else the chart appVersion.
+*/}}
+{{- define "nico-otelcol.transceiverExporterImage" -}}
+{{- $repository := .Values.transceiverExporter.image.repository -}}
+{{- if not $repository -}}
+{{- $repository = regexReplaceAll "[^/]+$" .Values.image.repository "transceiver-exporter" -}}
+{{- end -}}
+{{- $tag := .Values.transceiverExporter.image.tag | default .Values.image.tag | default .Chart.AppVersion -}}
+{{- printf "%s:%s" $repository $tag -}}
+{{- end -}}

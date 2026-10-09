@@ -175,7 +175,7 @@ spec:
               mountPropagation: HostToContainer
               readOnly: true
         - name: transceiver-exporter
-          image: "{{ .Values.transceiverExporter.image.repository }}:{{ .Values.transceiverExporter.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ include "nico-otelcol.transceiverExporterImage" . }}"
           imagePullPolicy: {{ .Values.transceiverExporter.image.pullPolicy }}
           args:
             # Bind to loopback only: the collector scrapes localhost:{{ .Values.transceiverExporter.port }}
