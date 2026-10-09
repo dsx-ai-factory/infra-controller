@@ -409,7 +409,8 @@ processors:
 
 exporters:
   otlp/site:
-    endpoint: otel-receiver.forge:443
+    # Overridable via the otlpSiteEndpoint chart value (NICO_OTLP_SITE_ENDPOINT).
+    endpoint: ${env:NICO_OTLP_SITE_ENDPOINT}
     tls:
       ca_file: /opt/forge/forge_root.pem
       cert_file: /opt/forge/machine_cert.pem

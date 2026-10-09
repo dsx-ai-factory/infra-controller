@@ -410,7 +410,7 @@ pub(super) async fn runs(
                 context: vr.context.unwrap_or_default(),
                 validation_id: vr.validation_id.unwrap_or_default().to_string(),
                 start_time: vr.start_time.unwrap_or_default().to_string(),
-                end_time: vr.end_time.unwrap_or_default().to_string(),
+                end_time: vr.end_time.map_or_else(|| "N/A".to_string(), |time| time.to_string()),
             })
             .collect(),
         Err(err) => {
