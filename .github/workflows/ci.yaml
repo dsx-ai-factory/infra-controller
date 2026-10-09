@@ -77,6 +77,9 @@ jobs:
       - name: Test development bootstrap addresses
         run: python3 -B dev/bin/test_bootstrap_addresses.py
 
+      - name: Test MAT dual-stack packet-test helpers
+        run: python3 -B -m unittest discover -s dev/machine-a-tron/network -v
+
       - name: Test HBN management startup patches
         run: python3 -B pxe/tests/test_hbn_management.py
 
