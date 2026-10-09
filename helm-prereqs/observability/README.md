@@ -109,7 +109,8 @@ direct scrape.
 Running **standalone**, using `--skip-core`, or declining the Core install uses `hint`: upgrading
 an existing release with a chart tree that may differ from what is deployed could apply more
 than the monitors, so the installer prints the enable command instead. Apply it with the chart
-ref your site was actually installed from:
+ref from the same repository revision as the deployed Core image, following the
+[image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration):
 
 ```bash
 helm upgrade nico <your-chart-ref> -n nico-system --reuse-values \
@@ -117,12 +118,12 @@ helm upgrade nico <your-chart-ref> -n nico-system --reuse-values \
 ```
 
 (or run `NICO_SERVICEMONITORS=true helm-prereqs/observability/install-observability.sh` when this
-checkout matches the deployed chart). If Core is not installed at all (infra-only cluster), the
-step defers with the same hint.
+checkout matches the deployed chart and Core image revision). If Core is not installed at all
+(infra-only cluster), the step defers with the same hint.
 
 ### IPv6 NICo metrics
 
-The bundled monitoring stack keeps IPv4 discovery by default. For a collector that must scrape NICo over IPv6, use the [IPv6 scrape discovery recipe](../../docs/observability/metrics.md#opt-in-ipv6-scrape-discovery). Upgrade the NICo chart before applying its optional `values-nico-ipv6-scraping.yaml` overlay, so primary ServiceMonitors carry the label used to exclude overlapping jobs. Also upgrade or configure DSX, hardware-health, and PXE to accept IPv6 metrics connections. A chart-only upgrade preserves an older pinned image's IPv4 listener defaults. Before switching, confirm that every selected pod's `/metrics` endpoint responds over its IPv6 address from the collector's network. The overlay works with the pinned stack and adds EndpointSlice read permissions. It covers primary metrics; optional telemetry and per-object monitors keep their existing discovery. Unbound requires its IPv6 enablement before this switch.
+The bundled monitoring stack keeps IPv4 discovery by default. For a collector that must scrape NICo over IPv6, use the [IPv6 scrape discovery recipe](../../docs/observability/metrics.md#opt-in-ipv6-scrape-discovery). Before applying its optional `values-nico-ipv6-scraping.yaml` overlay, deploy the NICo chart and Core image from the same repository revision, following the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration). Primary ServiceMonitors must carry the label used to exclude overlapping jobs. Check any explicit DSX, hardware-health, and PXE listener overrides to ensure they accept IPv6 metrics connections. Before switching, confirm that every selected pod's `/metrics` endpoint responds over its IPv6 address from the collector's network. The overlay works with the pinned stack and adds EndpointSlice read permissions. It covers primary metrics; optional telemetry and per-object monitors keep their existing discovery. Unbound requires its IPv6 enablement before this switch.
 
 If the DPU gateway is installed, follow the recipe's gateway upgrade and apply `otel-collector-gateway-metrics.yaml` before switching Prometheus. The bundled gateway values enable its wildcard metrics listener. Existing installations that bind only the primary pod address need the endpoint update. The separate dual-stack metrics Service enables IPv6 EndpointSlice discovery. The gateway pod still needs a reachable IPv6 address. Its OTLP receiver and LoadBalancer retain their settings. Reapply the Prometheus overlay after rerunning the installer.
 

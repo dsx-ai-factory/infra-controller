@@ -207,7 +207,15 @@ nico-machine-a-tron:
 
 ### Image Configuration
 
-The `global.image.repository` and `global.image.tag` values **must** be set -- they default to empty strings. Most subcharts use the global image reference. The following subcharts use their own separate image references and do **not** inherit `global.image`:
+The `global.image.repository` and `global.image.tag` values **must** be set --
+they default to empty strings. Most subcharts use the global image reference.
+Build images from the same repository revision that supplies the Helm chart and
+setup script used to deploy them. Image tags may use your own naming convention,
+but deploying a chart with images built from another git revision is
+unsupported.
+
+The following subcharts use their own separate image references and do **not**
+inherit `global.image`:
 
 | Subchart | Image Parameter | Default |
 |----------|----------------|---------|
