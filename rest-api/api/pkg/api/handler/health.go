@@ -8,12 +8,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog/log"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 )
 
 // HealthCheckHandler is an API handler to return health status of the API server
@@ -41,7 +41,7 @@ func (hch HealthCheckHandler) Handle(c echo.Context) error {
 // probe timeout. This budget includes waiting for a database connection.
 const readinessCheckTimeout = 500 * time.Millisecond
 
-// Check whether the API's PostgreSQL session is reachable and writable.
+// Check whether the API's PostgreSQL session can query the site table.
 type ReadinessCheckHandler struct {
 	dbSession *cdb.Session
 }
@@ -51,29 +51,16 @@ func NewReadinessCheckHandler(dbSession *cdb.Session) ReadinessCheckHandler {
 	return ReadinessCheckHandler{dbSession: dbSession}
 }
 
-// Handle returns 503 with a sanitised error if the database is read-only, the
-// check fails, or it exceeds 500 ms.
+// Handle returns 503 with a sanitised error if the site count query fails or
+// exceeds 500 ms.
 func (rch ReadinessCheckHandler) Handle(c echo.Context) error {
 	ctx, cancel := context.WithTimeout(c.Request().Context(), readinessCheckTimeout)
 	defer cancel()
 
-	var readOnly bool
-	conn, err := rch.dbSession.DB.Conn(ctx)
-	if err == nil {
-		defer conn.Close()
-		// This read also proves connectivity without modifying application data.
-		err = conn.QueryRowContext(ctx, "SELECT current_setting('transaction_read_only')::bool").Scan(&readOnly)
-		if err == nil && readOnly {
-			// cdb.Session wraps pgxpool with database/sql. Closing only the SQL
-			// wrapper would return this read-only connection to pgxpool, where
-			// it could remain attached to a standby after routing recovers.
-			err = conn.Raw(func(driverConn any) error {
-				return driverConn.(*stdlib.Conn).Conn().Close(ctx)
-			})
-		}
-	}
-	if err != nil || readOnly {
-		log.Warn().Err(err).Bool("read_only", readOnly).Msg("database readiness check failed")
+	siteDAO := cdbm.NewSiteDAO(rch.dbSession)
+	_, err := siteDAO.GetCount(ctx, nil, cdbm.SiteFilterInput{})
+	if err != nil {
+		log.Warn().Err(err).Msg("database readiness check failed")
 		errorMessage := "database connection is unavailable"
 		return c.JSON(http.StatusServiceUnavailable, model.NewAPIHealthCheck(false, &errorMessage))
 	}

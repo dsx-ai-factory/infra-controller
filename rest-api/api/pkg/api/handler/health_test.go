@@ -13,6 +13,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -69,9 +70,24 @@ func TestReadinessCheckHandler_Handle(t *testing.T) {
 		wantBody      string
 	}{
 		{
-			name:       "healthy database",
+			name:       "empty site table is healthy",
 			wantStatus: http.StatusOK,
 			wantBody:   `{"is_healthy":true,"error":null}`,
+		},
+		{
+			name: "missing site table fails despite database connectivity",
+			prepare: func(t *testing.T, session *cdb.Session) func() {
+				_, err := session.DB.NewDropTable().Model((*cdbm.Site)(nil)).Cascade().Exec(t.Context())
+				require.NoError(t, err)
+				err = session.DB.PingContext(t.Context())
+				require.NoError(t, err, "PostgreSQL is reachable even when the site table is missing")
+				return func() {
+					_, err := session.DB.NewCreateTable().Model((*cdbm.Site)(nil)).Exec(t.Context())
+					require.NoError(t, err)
+				}
+			},
+			wantStatus: http.StatusServiceUnavailable,
+			wantBody:   `{"is_healthy":false,"error":"database connection is unavailable"}`,
 		},
 		{
 			name: "closed database returns a sanitized error",
@@ -104,26 +120,16 @@ func TestReadinessCheckHandler_Handle(t *testing.T) {
 			wantBody:   `{"is_healthy":false,"error":"database connection is unavailable"}`,
 		},
 		{
-			name: "read-only connection is rejected and replaced",
+			name: "read-only connection can query the site table",
 			prepare: func(t *testing.T, session *cdb.Session) func() {
 				session.DB.SetMaxOpenConns(1)
 				session.DB.SetMaxIdleConns(1)
-				var originalPID int
-				err := session.DB.QueryRowContext(t.Context(), "SELECT pg_backend_pid()").Scan(&originalPID)
+				_, err := session.DB.ExecContext(t.Context(), "SET default_transaction_read_only = on")
 				require.NoError(t, err)
-				_, err = session.DB.ExecContext(t.Context(), "SET default_transaction_read_only = on")
-				require.NoError(t, err)
-				err = session.DB.PingContext(t.Context())
-				require.NoError(t, err, "read-only PostgreSQL still responds to a ping")
-				return func() {
-					var replacementPID int
-					err := session.DB.QueryRowContext(t.Context(), "SELECT pg_backend_pid()").Scan(&replacementPID)
-					require.NoError(t, err)
-					assert.NotEqual(t, originalPID, replacementPID, "discard the physical connection, not just its SQL wrapper")
-				}
+				return nil
 			},
-			wantStatus: http.StatusServiceUnavailable,
-			wantBody:   `{"is_healthy":false,"error":"database connection is unavailable"}`,
+			wantStatus: http.StatusOK,
+			wantBody:   `{"is_healthy":true,"error":null}`,
 		},
 		{
 			name:          "request cancellation stops the check",
@@ -136,6 +142,7 @@ func TestReadinessCheckHandler_Handle(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			session := cdbu.GetTestDBSession(t, false)
 			t.Cleanup(session.Close)
+			testSiteSetupSchema(t, session)
 			var recoverDatabase func()
 			if tt.prepare != nil {
 				recoverDatabase = tt.prepare(t, session)

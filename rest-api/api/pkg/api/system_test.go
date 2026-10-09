@@ -11,6 +11,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 )
 
@@ -53,6 +54,7 @@ func TestNewSystemAPIRoutes(t *testing.T) {
 }
 
 func TestIsSystemRoute(t *testing.T) {
+	dbSession := &cdb.Session{}
 	tests := []struct {
 		path string
 		want bool
@@ -63,7 +65,7 @@ func TestIsSystemRoute(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
-			assert.Equal(t, tt.want, IsSystemRoute(tt.path))
+			assert.Equal(t, tt.want, IsSystemRoute(tt.path, dbSession))
 		})
 	}
 }

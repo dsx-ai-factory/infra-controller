@@ -164,7 +164,9 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 		// Bootstrap resolves the exported service.name independently, with
 		// OTEL_SERVICE_NAME taking precedence over the config fallback. This name
 		// identifies the HTTP server to the Echo instrumentation only.
-		e.Use(otelecho.Middleware(cfg.GetAPIName(), otelecho.WithSkipper(skipTracingRoutes)))
+		e.Use(otelecho.Middleware(cfg.GetAPIName(), otelecho.WithSkipper(func(c echo.Context) bool {
+			return skipTracingRoutes(c, dbSession)
+		})))
 	}
 
 	// Sentry middleware
@@ -291,6 +293,6 @@ func InitMetricsServer(e *echo.Echo, namespace string) *echo.Echo {
 }
 
 // skipTracingRoutes returns true if the route should be skipped for tracing
-func skipTracingRoutes(c echo.Context) bool {
-	return api.IsSystemRoute(c.Path())
+func skipTracingRoutes(c echo.Context, dbSession *cdb.Session) bool {
+	return api.IsSystemRoute(c.Path(), dbSession)
 }
