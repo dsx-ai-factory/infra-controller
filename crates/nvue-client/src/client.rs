@@ -528,7 +528,7 @@ struct NvueApplyData {
 impl NvueApplyData {
     fn force_apply() -> Self {
         let state = "apply".into();
-        let auto_prompt = NvueAutoPrompt::ays_yes();
+        let auto_prompt = NvueAutoPrompt::unattended_fail_fast();
         Self { state, auto_prompt }
     }
 }
@@ -537,13 +537,18 @@ impl NvueApplyData {
 // This controls what NVUE does with configurations where the validator produced
 // warnings or errors.
 struct NvueAutoPrompt {
+    // "ays" means Are You Sure.
     ays: String,
+    // This controls whether NVUE waits for a client for 30 seconds to try to do
+    // something about a config health-check failure, or fails immediately.
+    ignore_fail: String,
 }
 
 impl NvueAutoPrompt {
-    fn ays_yes() -> Self {
+    fn unattended_fail_fast() -> Self {
         let ays = "ays_yes".into();
-        Self { ays }
+        let ignore_fail = "ignore_fail_no".into();
+        Self { ays, ignore_fail }
     }
 }
 

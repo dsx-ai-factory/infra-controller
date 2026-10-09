@@ -454,7 +454,10 @@ fn revision_response(revision_id: &str, applied_revision: &str) -> MockResponse 
 
 fn valid_apply_body(request: &MockRequest) -> bool {
     request.json::<JsonValue>().ok()
-        == Some(json!({"state": "apply", "auto-prompt": {"ays": "ays_yes"}}))
+        == Some(json!({
+            "state": "apply",
+            "auto-prompt": {"ays": "ays_yes", "ignore_fail": "ignore_fail_no"},
+        }))
 }
 
 fn bad_request(message: &str) -> Option<MockResponse> {
@@ -590,7 +593,10 @@ mod tests {
         let applied = response_json(handler.handle(&request(
             Method::PATCH,
             &apply_uri,
-            json!({"state": "apply", "auto-prompt": {"ays": "ays_yes"}}),
+            json!({
+                "state": "apply",
+                "auto-prompt": {"ays": "ays_yes", "ignore_fail": "ignore_fail_no"},
+            }),
         )));
         assert_eq!(applied["state"], "applied");
         assert_eq!(
@@ -620,7 +626,10 @@ mod tests {
         let handler = ConfigRevisionRollbackHandler::new(initial_config.clone(), 0, 0);
         let first_revision = create_revision(&handler);
         let second_revision = create_revision(&handler);
-        let apply = json!({"state": "apply", "auto-prompt": {"ays": "ays_yes"}});
+        let apply = json!({
+            "state": "apply",
+            "auto-prompt": {"ays": "ays_yes", "ignore_fail": "ignore_fail_no"},
+        });
         let diff_uri = format!("/nvue_v1/?diff=applied&rev={first_revision}&filled=false");
         let staged_config = json!({"system": {"hostname": "leaf-1"}});
         let patch_uri = format!("/nvue_v1/?rev={first_revision}");
