@@ -871,6 +871,12 @@ async fn reset_restores_power_after_preempting_a_dpf_power_cycle(pool: sqlx::PgP
         host.reset_requested.unwrap().started_at,
         started_request.started_at
     );
+    assert!(matches!(
+        host.controller_state_outcome.as_ref(),
+        Some(PersistentStateHandlerOutcome::Wait { reason, .. })
+            if reason.contains("waiting for the host to power on before reset DPU discovery")
+                && reason.contains(&PowerState::PoweringOn.to_string())
+    ));
     txn.commit().await.unwrap();
     assert!(
         env.redfish_sim
