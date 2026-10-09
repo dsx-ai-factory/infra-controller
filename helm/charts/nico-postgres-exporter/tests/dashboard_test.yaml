@@ -1,0 +1,79 @@
+suite: PostgreSQL dashboard distribution
+templates:
+  - templates/grafana-dashboards.yaml
+  - templates/deployment.yaml
+  - templates/service.yaml
+  - templates/service-monitor.yaml
+tests:
+  - it: can distribute the dashboard without a workload or Operator CRDs
+    set:
+      enabled: true
+      exporter.enabled: false
+      serviceMonitor.enabled: true
+    asserts:
+      - isKind:
+          of: ConfigMap
+        template: templates/grafana-dashboards.yaml
+      - equal:
+          path: metadata.annotations.grafana_folder
+          value: PostgreSQL
+        template: templates/grafana-dashboards.yaml
+      - matchRegex:
+          path: data["nico-postgres.json"]
+          pattern: '"uid": "nico-postgres"'
+        template: templates/grafana-dashboards.yaml
+      - matchRegex:
+          path: data["nico-postgres.json"]
+          pattern: '"title": "Slow queries'
+        template: templates/grafana-dashboards.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/deployment.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/service.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/service-monitor.yaml
+
+  - it: allows the site's Grafana namespace and sidecar metadata
+    set:
+      enabled: true
+      exporter.enabled: false
+      grafanaDashboards.namespace: monitoring
+      grafanaDashboards.labels.grafana_dashboard: null
+      grafanaDashboards.labels.custom-dashboard: "true"
+      grafanaDashboards.folder: Debugging
+      grafanaDashboards.folderAnnotation: custom-folder
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: monitoring
+        template: templates/grafana-dashboards.yaml
+      - equal:
+          path: metadata.labels.custom-dashboard
+          value: "true"
+        template: templates/grafana-dashboards.yaml
+      - notExists:
+          path: metadata.labels.grafana_dashboard
+        template: templates/grafana-dashboards.yaml
+      - equal:
+          path: metadata.annotations.custom-folder
+          value: Debugging
+        template: templates/grafana-dashboards.yaml
+      - notExists:
+          path: metadata.annotations.grafana_folder
+        template: templates/grafana-dashboards.yaml
+
+  - it: can omit the dashboard independently of the exporter
+    values:
+      - fixtures/exporter.yaml
+    set:
+      grafanaDashboards.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/grafana-dashboards.yaml
+      - isKind:
+          of: Deployment
+        template: templates/deployment.yaml

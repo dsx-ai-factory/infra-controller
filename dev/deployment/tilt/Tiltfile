@@ -243,14 +243,21 @@ prerequisite(
     values=tilt_values['certManager'],
     repo='repo-jetstack',
 )
+cnpg_operator_values = tilt_values['cnpgOperator']
+cnpg_operator_values['monitoring']['podMonitorEnabled'] = enable_observability
+cnpg_dashboard_values = cnpg_operator_values['monitoring']['grafanaDashboard']
+cnpg_dashboard_values['create'] = enable_observability
+cnpg_dashboard_values['namespace'] = observability_namespace
+cnpg_operator_dependencies = ['prometheus'] if enable_observability else []
 prerequisite(
     name='cnpg-operator',
     chart='cnpg/cloudnative-pg',
     release_name='cnpg',
     namespace='cnpg-system',
     version='0.29.0',
-    values=tilt_values['cnpgOperator'],
+    values=cnpg_operator_values,
     repo='repo-cnpg',
+    resource_deps=cnpg_operator_dependencies,
 )
 prerequisite(
     name='vault',
@@ -577,8 +584,21 @@ k8s_resource(
 )
 
 postgres_values = tilt_values['postgres']
+postgres_values['cluster']['monitoring']['enabled'] = enable_observability
 if not enable_rest:
     postgres_values['cluster']['roles'] = []
+if enable_observability:
+    # CNPG manages the preload library and extension when this parameter is set.
+    postgres_values['cluster']['postgresql'] = {
+        'parameters': {'pg_stat_statements.track': 'top'},
+    }
+    # The application owner also monitors statements issued by the other dev roles.
+    postgres_values['cluster']['roles'].append({
+        'name': postgres_values['cluster']['initdb']['owner'],
+        'ensure': 'present',
+        'login': True,
+        'inRoles': ['pg_read_all_stats'],
+    })
 
 prerequisite(
     name='nico-postgres',
@@ -601,6 +621,27 @@ k8s_resource(
     extra_pod_selectors=[{'cnpg.io/cluster': 'nico-pg-cluster'}],
     pod_readiness='wait',
 )
+
+if enable_observability:
+    exporter_values = observability_values['postgresExporter']
+    exporter_values['enabled'] = True
+    exporter_values['database']['host'] = database_config['host']
+    exporter_values['database']['port'] = database_config['port']
+    exporter_values['database']['name'] = database_config['name']
+    exporter_values['grafanaDashboards']['namespace'] = observability_namespace
+    helm_resource(
+        name='nico-postgres-exporter',
+        chart=os.path.join(core_charts, 'nico-postgres-exporter'),
+        release_name='nico-postgres-exporter',
+        namespace=core_namespace,
+        deps=[os.path.join(core_charts, 'nico-postgres-exporter'), values_file],
+        resource_deps=['prometheus', 'nico-postgres', 'nico-local-config'],
+        image_deps=['nico-postgres-exporter'],
+        image_keys=[('image.repository', 'image.tag')],
+        labels=['observability'],
+        pod_readiness='wait',
+        flags=helm_json_flags(exporter_values) + ['--wait', '--timeout=5m'],
+    )
 
 database_objects = []
 for database in [rest_database, keycloak_database, temporal_database]:
@@ -819,6 +860,13 @@ docker_build(
     ),
     ignore=['dev/deployment/tilt'],
 )
+if enable_observability:
+    docker_build(
+        'nico-postgres-exporter',
+        repo_root,
+        dockerfile=os.path.join(devspace_dir, 'Dockerfile.postgres-exporter'),
+        ignore=['dev/deployment/tilt'],
+    )
 docker_build(
     'nico-api',
     repo_root,
@@ -1262,6 +1310,7 @@ if enable_observability:
         'repo-prometheus-community',
         'nico-observability-namespace',
         'grafana-dashboards',
+        'nico-postgres-exporter',
         'prometheus',
         'loki',
         'alloy',

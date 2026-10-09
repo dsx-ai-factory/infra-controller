@@ -2091,6 +2091,7 @@ jobs:
             helm/charts/nico-machine-a-tron/charts/mat-k8s-controller
             helm/charts/nico-machine-a-tron/charts/nico-site-health-probe
             helm/charts/nico-ntp
+            helm/charts/nico-postgres-exporter
             helm/charts/nico-pxe
             helm/charts/nico-ssh-console-rs
             helm/charts/unbound
