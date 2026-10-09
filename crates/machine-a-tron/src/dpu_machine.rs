@@ -368,6 +368,25 @@ impl DpuMachineHandle {
         self.0.live_state.read().unwrap().machine_ip
     }
 
+    pub(super) fn tenant_network_config(
+        &self,
+    ) -> Option<crate::tenant_network::TenantNetworkConfig> {
+        self.0
+            .live_state
+            .read()
+            .unwrap()
+            .tenant_network_config
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_control_test_tenant_network(
+        &self,
+        config: Option<crate::tenant_network::TenantNetworkConfig>,
+    ) {
+        self.0.live_state.write().unwrap().tenant_network_config = config;
+    }
+
     pub fn observed_machine_id(&self) -> Option<MachineId> {
         self.0
             .live_state

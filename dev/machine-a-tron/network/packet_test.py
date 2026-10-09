@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Bounded dual-stack software packet test of two MAT tenant snapshots; no HBN/EVPN emulation."""
+"""Bounded dual-stack software packet test of two live MAT tenant configurations; no HBN/EVPN emulation."""
 
 import argparse
 from contextlib import contextmanager
@@ -11,30 +11,29 @@ import json
 import os
 from pathlib import Path
 import signal
+import ssl
 import subprocess
 import sys
 import time
 import uuid
 from urllib.parse import urlsplit
+from urllib.request import HTTPSHandler, ProxyHandler, build_opener
 
 HERE = Path(__file__).resolve().parent
 ROUTER = "fe80::1"
 PROBE_NAME = "peer.mat.test"
 
 
-def load_snapshot(path, max_age=120):
-    """Validate the supported topology before making any privileged changes."""
-    data = json.loads(Path(path).read_text())
+def validate_network(data, max_age=120):
+    """Validate a live MAT observation before making privileged changes."""
     if data.get("schema_version") != 1:
-        raise ValueError("unsupported snapshot schema")
+        raise ValueError("unsupported tenant-network schema")
     age = (
         datetime.datetime.now(datetime.timezone.utc)
         - datetime.datetime.fromisoformat(data["updated_at"])
     ).total_seconds()
     if not 0 <= age <= max_age:
-        raise ValueError(
-            "stale or future-dated snapshot; refresh it from the running MAT"
-        )
+        raise ValueError("stale or future-dated MAT tenant-network observation")
     uuid.UUID(data["instance_id"])
     if data["network_virtualization_type"] != 5:
         raise ValueError("only FNN is supported")
@@ -73,6 +72,43 @@ def load_snapshot(path, max_age=120):
         ) != ipaddress.ip_interface(f"{prefix.network_address}/{prefix.prefixlen}"):
             raise ValueError("IPv4 gateway must match the linknet")
     return data
+
+
+def load_networks(args):
+    url = urlsplit(args.mat_url)
+    if (
+        url.scheme not in ("http", "https")
+        or not url.hostname
+        or url.username
+        or url.password
+        or url.query
+        or url.fragment
+    ):
+        raise ValueError(
+            "--mat-url must be an HTTP(S) control API base URL without credentials, query or fragment"
+        )
+    if url.scheme != "https" and (args.mat_ca or args.mat_insecure):
+        raise ValueError("MAT TLS options require an HTTPS --mat-url")
+    context = ssl.create_default_context(cafile=args.mat_ca)
+    if args.mat_insecure:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    opener = build_opener(ProxyHandler({}), HTTPSHandler(context=context))
+    with opener.open(
+        args.mat_url.rstrip("/") + "/machines/tenant-networks", timeout=10
+    ) as response:
+        data = json.load(response)
+    if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+        raise ValueError("MAT tenant-network API must return an array of observations")
+    result = []
+    for instance_id in args.instance_id:
+        matches = [item for item in data if item.get("instance_id") == str(instance_id)]
+        if len(matches) != 1:
+            raise ValueError(
+                f"expected one active primary DPU for instance {instance_id}; got {len(matches)}"
+            )
+        result.append(validate_network(matches[0]))
+    return result
 
 
 def fingerprint(data):
@@ -213,7 +249,7 @@ class Lab:
 
 
 def execute(args):
-    configs = [load_snapshot(p) for p in args.snapshot]
+    configs = load_networks(args)
     validate_pair(configs)
     if os.geteuid() != 0 or sys.platform != "linux":
         raise ValueError("run on an isolated Linux test VM as root")
@@ -600,10 +636,10 @@ def execute(args):
                     *ns, "ping", f"-{family}", "-c", "1", "-W", "3", peer
                 )
                 result["checks"].append(check)
-        for path, original in zip(args.snapshot, configs):
-            if fingerprint(load_snapshot(path)) != fingerprint(original):
+        for current, original in zip(load_networks(args), configs):
+            if fingerprint(current) != fingerprint(original):
                 raise RuntimeError(
-                    "MAT configuration changed during the test; rerun with fresh snapshots"
+                    "MAT configuration changed during the test; rerun against the current API state"
                 )
         result["result"] = "PASS"
     except BaseException as error:
@@ -622,11 +658,27 @@ def execute(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--snapshot",
-        type=Path,
+        "--mat-url",
+        required=True,
+        help="HTTP(S) base URL of the MAT control API; fetched before and after testing (10-second request timeout).",
+    )
+    parser.add_argument(
+        "--instance-id",
+        type=uuid.UUID,
         action="append",
         required=True,
-        help="Fresh MAT snapshot; specify exactly twice (maximum age 120 seconds).",
+        help="Instance UUID to test; specify exactly two distinct instances with observations at most 120 seconds old.",
+    )
+    tls = parser.add_mutually_exclusive_group()
+    tls.add_argument(
+        "--mat-ca",
+        type=Path,
+        help="PEM CA bundle for HTTPS MAT control access; omitted uses system trust.",
+    )
+    tls.add_argument(
+        "--mat-insecure",
+        action="store_true",
+        help="Explicitly disable certificate verification for a self-signed MAT test endpoint; HTTPS only.",
     )
     parser.add_argument(
         "--dhcp-server",
@@ -660,12 +712,13 @@ def main():
     )
     args = parser.parse_args()
     if (
-        len(args.snapshot) != 2
+        len(args.instance_id) != 2
+        or len(set(args.instance_id)) != 2
         or not args.output.is_absolute()
         or not args.dhcp_server.is_absolute()
     ):
         parser.error(
-            "exactly two --snapshot paths and absolute --output/--dhcp-server paths are required"
+            "exactly two distinct --instance-id values and absolute --output/--dhcp-server paths are required"
         )
 
     def interrupted(signum, frame):

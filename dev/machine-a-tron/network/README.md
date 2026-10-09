@@ -1,6 +1,6 @@
 # MAT dual-stack packet test
 
-This opt-in test joins machine-a-tron's (MAT's) tenant configuration snapshots to
+This opt-in test joins machine-a-tron's (MAT's) control API tenant observations to
 real NICo DHCPv4/DHCPv6 exchanges and Linux packet forwarding. It supports two distinct
 instances in the same FNN VPC, each with one physical routed interface, IPv4
 `/31` and IPv6 `/127` linknets, and `/32` and `/128` host bindings. It rejects
@@ -32,46 +32,39 @@ offload. The small DHCP clients install one lease; they do not renew or rebind.
 The RA and DNS servers are fixtures. MAT's synthetic network status remains
 independent of the packet-test result.
 
-## Export active tenant configurations
+## Read active tenant configurations
 
-Add this top-level setting to the MAT TOML configuration and restart MAT:
+The read-only MAT control route `GET /machines/tenant-networks` returns a JSON
+array of cached tenant network observations, sorted by DPU ID. It uses the existing
+control server's address and TLS configuration and requires no additional MAT or
+Helm setting. Reading this route does not fetch new configuration from NICo or
+change simulator state. An empty array means no primary DPU has a cached tenant
+configuration.
 
-```toml
-tenant_network_snapshot_dir = "/tmp/mat-tenant-network"
-```
+MAT refreshes each observation after a successful network-configuration fetch.
+Only primary DPUs with an instance ID, tenant interfaces, and the admin network
+disabled are included. MAT clears the observation when it observes a return to
+the admin network, loses the machine configuration, detaches the NIC, powers off
+the DPU, or stops its actor. A new MAT process starts without cached observations.
+A failed configuration fetch can leave the previous observation visible; consumers
+must check `updated_at` for freshness.
 
-Omission disables export. MAT creates the directory if necessary; use a dedicated
-writable directory for each MAT process. Before creating or restoring devices,
-MAT creates the directory if absent, verifies it can create a snapshot file, and
-removes existing `<machine-id>.json` snapshots. Preparation errors fail startup. Each primary DPU with an active tenant
-writes `<dpu-id>.json` on every successful network-configuration fetch, before
-reporting its synthetic observation. A write failure causes the observation to
-retry. Files are atomically replaced, contain only selected network fields, and
-exclude credentials and tenant user data. They are removed when MAT observes a
-return to the admin network, stops the DPU, or shuts down normally. An abrupt kill
-can leave files behind; consumers must check `updated_at` rather than treating file
-existence as proof that an instance is active.
+Each observation has schema version `1`. It records `updated_at` (UTC), DPU and
+instance IDs, the host interface ID (nullable), managed-host and instance-network
+configuration versions, virtualization type (nullable numeric protobuf enum), and
+tenant interfaces. Interfaces include canonical family-tagged `addresses`, numeric
+function type, L2 status, VPC VNI, and whether an NSG is present. Deprecated address
+fields, credentials, and tenant user data are excluded.
 
-For the MAT Helm chart, `machineATron.tenantNetworkSnapshotDir` selects the same
-path. The chart default is an empty string, which omits the TOML setting. A full
-`configFiles.matConfigs` override replaces the generated TOML, so put the setting
-in that override instead. The setting adds no privileges or host mount. With
-DevSpace, copy the selected JSON files from the MAT container to the test VM just
-before running the test. Keep their timestamps and contents intact.
-
-The schema version is `1`. It records `updated_at`, DPU and instance IDs, the host
-interface ID, managed-host and instance-network configuration versions,
-virtualization type, and tenant interfaces. Interfaces include canonical
-family-tagged `addresses`, function type, L2 status, VPC VNI, and whether an NSG is
-present. Deprecated address fields are not exported. The packet test rejects
-unknown schema versions and snapshots older than 120 seconds or dated in the
-future. It also rechecks freshness and configuration identity at the end; a
-changed or removed snapshot fails the run. Copied snapshots cannot prove that
-MAT remained alive after the copy.
+The packet test selects exactly one observation for each requested instance ID.
+It rejects unknown schema versions and observations older than 120 seconds or
+dated in the future. It fetches the API again at the end and checks freshness and
+configuration identity; an unavailable API or a changed or missing observation
+fails the run. These two checks do not prove continuous availability between them.
 
 ## Run on an isolated Linux VM
 
-The VM needs Python 3, `ip`, `sysctl`, `ip6tables`, `unshare`, `mount`, `ping`,
+The VM needs Python 3.11 or newer (for RFC 3339 UTC timestamp parsing), `ip`, `sysctl`, `ip6tables`, `unshare`, `mount`, `ping`,
 `iptables`, `curl`, and the compiled NICo DHCP server. Both `net.ipv4.ip_forward`
 and `net.ipv6.conf.all.forwarding` must already be `1`;
 the test does not change global forwarding settings. Run from the repository root.
@@ -81,19 +74,28 @@ Build the DHCP server from the revision being tested:
 cargo build --locked --profile ci-tests -p carbide-dhcp-server --bin forge-dhcp-server
 ```
 
-Set `snapshot0` and `snapshot1` to absolute paths for two fresh MAT JSON files.
+Set `mat_url` to the HTTP(S) base URL of the reachable MAT control server and
+`instance0` and `instance1` to the UUIDs of the two instances. If MAT runs in a
+cluster, forward its control service port to the VM before running the test.
 Set `dhcp_server` to the absolute path of the resulting
 `target/ci-tests/forge-dhcp-server` binary, accounting for `CARGO_TARGET_DIR` if set.
 Choose a new absolute `output` directory that does not yet exist:
 
 ```bash
 sudo -n python3 dev/machine-a-tron/network/packet_test.py \
-  --snapshot "$snapshot0" --snapshot "$snapshot1" \
+  --mat-url "$mat_url" --instance-id "$instance0" --instance-id "$instance1" \
   --dhcp-server "$dhcp_server" --output "$output"
 ```
 
-Exactly two `--snapshot` arguments are required. All other required arguments
-appear above. Default execution needs no Internet access. During each run it creates
+Exactly two distinct `--instance-id` arguments are required. All other required
+arguments appear above. `--mat-url` accepts HTTP or HTTPS and must not contain
+credentials, a query, or a fragment. Requests bypass environment proxy settings
+and use a ten-second timeout. HTTPS uses system trust by default; `--mat-ca`
+selects a PEM CA bundle. For a self-signed test endpoint, `--mat-insecure`
+explicitly disables certificate verification. These TLS flags are mutually
+exclusive and require HTTPS.
+
+Default execution needs no Internet access. During each run it creates
 veths, addresses and connected routes, per-namespace resolver files, processes,
 and scoped IPv4/IPv6 forwarding rules. MTU is fixed at 1280; this does not validate the
 configured production MTU. Normal completion, errors, Ctrl-C, and SIGTERM clean up
@@ -112,7 +114,7 @@ If the lab requires translation, explicitly supply each family's egress interfac
 
 ```bash
 sudo -n python3 dev/machine-a-tron/network/packet_test.py \
-  --snapshot "$snapshot0" --snapshot "$snapshot1" \
+  --mat-url "$mat_url" --instance-id "$instance0" --instance-id "$instance1" \
   --dhcp-server "$dhcp_server" --output "$output" \
   --internet-url https://www.google.com \
   --nat44-interface eth0 --nat66-interface eth0

@@ -1479,7 +1479,6 @@ where
         bmc_mock_certs_dir: None,
         configure_carbide_bmc_proxy_host: None,
         persist_dir: None,
-        tenant_network_snapshot_dir: None,
         cleanup_on_quit: false,
         register_expected_machines: true,
         host_bmc_password: None,

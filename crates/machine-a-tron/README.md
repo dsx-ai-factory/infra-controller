@@ -10,8 +10,9 @@ periodically report health network observations.
 ## Dual-stack packet testing
 
 The optional [dual-stack packet test](../../dev/machine-a-tron/network/README.md) uses active
-MAT tenant snapshots to exercise the real NICo DHCPv4/DHCPv6 server and temporary Linux
-endpoints. Snapshot export is disabled by default.
+tenant observations from the read-only MAT control route
+`GET /machines/tenant-networks` to exercise the real NICo DHCPv4/DHCPv6 server and
+temporary Linux endpoints. No file export or additional MAT setting is needed.
 
 ## Usage
 
