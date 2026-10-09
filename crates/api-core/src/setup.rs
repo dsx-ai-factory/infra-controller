@@ -853,6 +853,98 @@ fn scoped_service_interface_names(
         .collect()
 }
 
+/// Builds the startup deployment from its effective inventory so operator limits and mandatory
+/// service attachments are validated together. BF4 uses a single `BlueFieldSoftware` source whose
+/// CR carries the complete PSID-to-PLDM mapping.
+fn build_dpf_init_config(
+    carbide_config: &CarbideConfig,
+    deployment: &crate::cfg::file::DpfDeploymentConfig,
+    deployment_type: DpuDeploymentType,
+    bluefield_software: Option<carbide_dpf::BlueFieldSoftwareParams>,
+    interfaces: &[carbide_dpf::types::DpuServiceInterfaceTemplateDefinition],
+    service_vpc_slots: carbide_dpf::ServiceVpcSlots,
+    intercept_bridging: Option<&carbide_dpf::DpfInterceptBridging>,
+) -> eyre::Result<carbide_dpf::InitDpfResourcesConfig> {
+    // Resolve the same service overrides that startup supplies to each deployment.
+    let services = carbide_config
+        .dpf
+        .resolved_services_for(deployment, deployment_type);
+    // Warn when an Astra deployment has Weave services but no ewethers config.
+    if deployment_type == DpuDeploymentType::Bf4Astra
+        && carbide_config.ewethers_config.is_none()
+        && services.extra.keys().any(|service| {
+            matches!(
+                service,
+                DpfExtraService::DocaWeaveDhcpAgent | DpfExtraService::DocaWeaveFlowController
+            )
+        })
+    {
+        tracing::warn!(
+            deployment = %deployment.deployment_name,
+            "Weave services are configured without ewethers_config; NICo's DPA/Astra paths remain disabled. Configure ewethers with the appropriate enable flags and overlay subnet values"
+        );
+    }
+    // Service-capable deployments receive both limits; Astra remains explicitly unreserved.
+    let (service_vpc_slots, additional_managed_sf, max_active_service_vpc_interfaces_per_dpu) =
+        match deployment_type {
+            DpuDeploymentType::Bf4Astra => (carbide_dpf::ServiceVpcSlots::default(), 0, 0),
+            DpuDeploymentType::Bf3
+            | DpuDeploymentType::Bf3Gb200
+            | DpuDeploymentType::Bf4Generic => (
+                service_vpc_slots,
+                carbide_config.dpu_config.additional_managed_sf,
+                carbide_config
+                    .dpu_config
+                    .max_active_service_vpc_interfaces_per_dpu,
+            ),
+        };
+    let mut builder = carbide_dpf::InitDpfResourcesConfigBuilder::default()
+        .bfb_url(deployment.bfb_url.clone().unwrap_or_default())
+        .flavor_name(deployment.flavor_name.clone())
+        .deployment_name(deployment.deployment_name.clone())
+        .deployment_scoped_service_interfaces(
+            carbide_config.dpf.deployment_scoped_service_interfaces,
+        )
+        .services(crate::dpf_services::mandatory_services(
+            &services,
+            &carbide_config.dpf.dpu_agent_bootstrap_ca,
+            interfaces,
+            service_vpc_slots,
+            &carbide_config.node_auth,
+            carbide_config.ewethers_config.as_ref(),
+        ))
+        .num_of_vfs(carbide_config.dpu_config.num_of_vfs)
+        .pf_total_sf_reserved(carbide_config.dpf.pf_total_sf_reserved)
+        .additional_managed_sf(additional_managed_sf)
+        .service_vpc_slots(service_vpc_slots)
+        .max_active_service_vpc_interfaces_per_dpu(max_active_service_vpc_interfaces_per_dpu)
+        .max_sf_per_pf(deployment.max_sf_per_pf)
+        .interfaces(interfaces.to_vec())
+        .extra_bfcfg_parameters(carbide_config.dpf.resolved_bfcfg_parameters_for(deployment))
+        .enable_delay_host_init(deployment.enable_delay_host_init)
+        .deployment_type(deployment_type);
+    if let Some(bluefield_software) = bluefield_software {
+        builder = builder.bluefield_software(bluefield_software);
+    }
+    if let Some(intercept_bridging) = match deployment_type {
+        DpuDeploymentType::Bf4Astra => None,
+        DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 | DpuDeploymentType::Bf4Generic => {
+            intercept_bridging.cloned()
+        }
+    } {
+        builder = builder.intercept_bridging(intercept_bridging);
+    }
+    if let Some(proxy) = carbide_config.dpf.proxy.clone() {
+        builder = builder.proxy(proxy);
+    }
+    builder.build().map_err(|err| {
+        eyre::eyre!(
+            "invalid {} DPF initialization configuration: {err}",
+            deployment.deployment_name
+        )
+    })
+}
+
 /// Initialize the DPF SDK and create all required Kubernetes CRs.
 ///
 /// Returns `None` (with a deprecation warning) when DPF is disabled.
@@ -943,7 +1035,6 @@ async fn initialize_dpf_sdk(
     let service_vpc_slots =
         carbide_dpf::ServiceVpcSlots::new(carbide_config.dpu_config.service_vpc_slot_count)
             .map_err(|error| eyre::eyre!("invalid DPF service-VPC configuration: {error}"))?;
-    let additional_managed_sf = carbide_config.dpu_config.additional_managed_sf;
 
     let repo = carbide_dpf::KubeRepository::new()
         .await
@@ -971,87 +1062,25 @@ async fn initialize_dpf_sdk(
     // Soon v2 flag will be removed and will become only mode for dpf handling.
     let deployment_type_labels = build_deployment_type_labels(carbide_config);
 
-    // Builds the SDK init config for one DPUDeployment. BF4 uses a single
-    // `BlueFieldSoftware` source whose CR carries the complete PSID→PLDM mapping.
+    // Select the platform inventory before building its validated initialization configuration.
     let make_init_config =
         |deployment: &crate::cfg::file::DpfDeploymentConfig,
          deployment_type: DpuDeploymentType,
          bluefield_software: Option<carbide_dpf::BlueFieldSoftwareParams>| {
-            let services = carbide_config
-                .dpf
-                .resolved_services_for(deployment, deployment_type);
-            // Warn when an Astra deployment has Weave services but no ewethers config.
-            if deployment_type == DpuDeploymentType::Bf4Astra
-                && carbide_config.ewethers_config.is_none()
-                && services.extra.keys().any(|service| {
-                    matches!(
-                        service,
-                        DpfExtraService::DocaWeaveDhcpAgent
-                            | DpfExtraService::DocaWeaveFlowController
-                    )
-                })
-            {
-                tracing::warn!(
-                    deployment = %deployment.deployment_name,
-                    "Weave services are configured without ewethers_config; NICo's DPA/Astra paths remain disabled. Configure ewethers with the appropriate enable flags and overlay subnet values"
-                );
-            }
             let interfaces = match deployment_type {
                 DpuDeploymentType::Bf4Astra => &astra_interfaces,
                 DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 => &bf3_interfaces,
                 DpuDeploymentType::Bf4Generic => &bf4_interfaces,
             };
-            let (service_vpc_slots, additional_managed_sf) = match deployment_type {
-                DpuDeploymentType::Bf4Astra => (carbide_dpf::ServiceVpcSlots::default(), 0),
-                DpuDeploymentType::Bf3
-                | DpuDeploymentType::Bf3Gb200
-                | DpuDeploymentType::Bf4Generic => (service_vpc_slots, additional_managed_sf),
-            };
-            let mut builder = carbide_dpf::InitDpfResourcesConfigBuilder::default()
-                .bfb_url(deployment.bfb_url.clone().unwrap_or_default())
-                .flavor_name(deployment.flavor_name.clone())
-                .deployment_name(deployment.deployment_name.clone())
-                .deployment_scoped_service_interfaces(
-                    carbide_config.dpf.deployment_scoped_service_interfaces,
-                )
-                .services(crate::dpf_services::mandatory_services(
-                    &services,
-                    &carbide_config.dpf.dpu_agent_bootstrap_ca,
-                    interfaces,
-                    service_vpc_slots,
-                    &carbide_config.node_auth,
-                    carbide_config.ewethers_config.as_ref(),
-                ))
-                .num_of_vfs(carbide_config.dpu_config.num_of_vfs)
-                .pf_total_sf_reserved(carbide_config.dpf.pf_total_sf_reserved)
-                .additional_managed_sf(additional_managed_sf)
-                .service_vpc_slots(service_vpc_slots)
-                .interfaces(interfaces.clone())
-                .extra_bfcfg_parameters(
-                    carbide_config.dpf.resolved_bfcfg_parameters_for(deployment),
-                )
-                .enable_delay_host_init(deployment.enable_delay_host_init)
-                .deployment_type(deployment_type);
-            if let Some(bluefield_software) = bluefield_software {
-                builder = builder.bluefield_software(bluefield_software);
-            }
-            if let Some(intercept_bridging) = match deployment_type {
-                DpuDeploymentType::Bf4Astra => None,
-                DpuDeploymentType::Bf3
-                | DpuDeploymentType::Bf3Gb200
-                | DpuDeploymentType::Bf4Generic => intercept_bridging.clone(),
-            } {
-                builder = builder.intercept_bridging(intercept_bridging);
-            }
-            if let Some(proxy) = carbide_config.dpf.proxy.clone() {
-                builder = builder.proxy(proxy);
-            }
-            builder.build().map_err(|err| {
-                eyre::eyre!(
-                    "invalid {} DPF initialization configuration: {err}",
-                    deployment.deployment_name
-                )
-            })
+            build_dpf_init_config(
+                carbide_config,
+                deployment,
+                deployment_type,
+                bluefield_software,
+                interfaces,
+                service_vpc_slots,
+                intercept_bridging.as_ref(),
+            )
         };
 
     let bf3 = &carbide_config.dpf.deployments.bf3;
@@ -1113,6 +1142,7 @@ async fn initialize_dpf_sdk(
         .await
         .map_err(|err| eyre::eyre!("failed to initialize DPF SDK: {err}"))?;
 
+    // Each config was validated by build() before the shared Secret write; retain deployment context on failure.
     for (name, config) in &init_configs {
         sdk.create_initialization_objects(config)
             .await
@@ -2604,6 +2634,97 @@ mod tests {
             ))
             .extract()
             .expect("minimal CarbideConfig parses")
+    }
+
+    /// Verifies startup forwards the operator ceiling rather than accepting the SDK default.
+    /// The complete pool fits managed demand in the ceiling cases, so only the declared ceiling distinguishes them.
+    /// Endpoint overcommit and Astra assembly also verify startup preserves platform-specific reservations.
+    #[test]
+    fn dpf_init_config_preserves_the_deployment_sf_ceiling() {
+        // The ceiling cases use one slot and one endpoint (30 SFs); the 31-SF pool isolates ceiling forwarding.
+        let mut config = minimal_carbide_config();
+        config.dpu_config.service_vpc_slot_count = 1;
+        config.dpf.pf_total_sf_reserved = 31;
+        let slots = carbide_dpf::ServiceVpcSlots::new(1).expect("bounded test slot count");
+        let interfaces = carbide_dpf::build_deployment_dpu_interfaces(
+            DpuDeploymentType::Bf3,
+            config.dpu_config.num_of_vfs,
+            None,
+        );
+
+        for (ceiling, active_limit, expected_error) in [
+            // A sufficient pool still fails when it exceeds the operator's declared ceiling.
+            (
+                30,
+                1,
+                Some(("requires PF_TOTAL_SF=31", "exceeding the SF ceiling 30")),
+            ),
+            // Raising only that ceiling accepts the same pool and complete service inventory.
+            (31, 1, None),
+            // Three endpoint reservations overcommit the unchanged pool, proving startup forwards admission capacity.
+            (
+                31,
+                3,
+                Some((
+                    "configured DPF managed SFs (32)",
+                    "dpf.pf_total_sf_reserved pool (31)",
+                )),
+            ),
+        ] {
+            // Change only the case's ceiling and endpoint commitment, keeping the inventory and pool fixed.
+            config.dpf.deployments.bf3.max_sf_per_pf = ceiling;
+            config.dpu_config.max_active_service_vpc_interfaces_per_dpu = active_limit;
+            let result = build_dpf_init_config(
+                &config,
+                &config.dpf.deployments.bf3,
+                DpuDeploymentType::Bf3,
+                None,
+                &interfaces,
+                slots,
+                None,
+            );
+
+            // Check the intended failure boundary, with a successful control for the same assembly.
+            if let Some((expected_demand, expected_boundary)) = expected_error {
+                let error = result
+                    .expect_err("startup must reject the configured capacity boundary")
+                    .to_string();
+                assert!(error.contains(expected_demand), "{error}");
+                assert!(error.contains(expected_boundary), "{error}");
+            } else {
+                result.expect("pool equal to the declared ceiling must be accepted");
+            }
+        }
+
+        // Global service reservations are reachable alongside Astra, which must clear them before SDK validation.
+        config.dpf.deployment_scoped_service_interfaces = true;
+        config.dpu_config.max_active_service_vpc_interfaces_per_dpu = 1;
+        config.dpu_config.additional_managed_sf = 1;
+
+        // Astra uses software provisioning; defaults provide the remaining deployment settings and ordinary services.
+        let deployment = crate::cfg::file::DpfDeploymentConfig {
+            bfb_url: None,
+            ..Default::default()
+        };
+        let interfaces = carbide_dpf::sdk::build_dpu_interfaces_vec();
+
+        // Each leaked reservation is independently rejected by SDK validation, so success proves all three are cleared.
+        build_dpf_init_config(
+            &config,
+            &deployment,
+            DpuDeploymentType::Bf4Astra,
+            Some(carbide_dpf::BlueFieldSoftwareParams {
+                os_iso: "http://example.com/astra.iso".to_string(),
+                pldm_fw_bundle: Some(BTreeMap::from([(
+                    "psid".to_string(),
+                    "http://example.com/astra.pldm".to_string(),
+                )])),
+            }),
+            &interfaces,
+            slots,
+            None,
+        )
+        .expect("Astra startup must omit global service-VPC and managed-SF reservations");
     }
 
     #[test]
