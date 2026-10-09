@@ -48,6 +48,12 @@ func NewCommand() *cli.Command {
 				Usage: "creds manager service endpoint used by backend",
 			},
 			&cli.StringFlag{
+				Name:  "creds-manager-ca-path",
+				Value: "/etc/credsmgr-ca/ca.crt",
+				Usage: "CA that signed the creds manager endpoint's listener. That " +
+					"endpoint's host name must appear in its --dns-name SANs",
+			},
+			&cli.StringFlag{
 				Name:  "tls-key-path",
 				Value: "",
 				Usage: "File path for server tls key",
@@ -86,13 +92,14 @@ func NewCommand() *cli.Command {
 			log := core.GetLogger(ctx)
 
 			o := Options{
-				credsMgrURL: c.String("creds-manager-url"),
-				ingressHost: c.String("ingress-host"),
-				listenPort:  c.String("listen-port"),
-				tlsKeyPath:  c.String("tls-key-path"),
-				tlsCertPath: c.String("tls-cert-path"),
-				namespace:   c.String("namespace"),
-				sentryDSN:   c.String("sentry-dsn"),
+				credsMgrURL:    c.String("creds-manager-url"),
+				credsMgrCAPath: c.String("creds-manager-ca-path"),
+				ingressHost:    c.String("ingress-host"),
+				listenPort:     c.String("listen-port"),
+				tlsKeyPath:     c.String("tls-key-path"),
+				tlsCertPath:    c.String("tls-cert-path"),
+				namespace:      c.String("namespace"),
+				sentryDSN:      c.String("sentry-dsn"),
 			}
 
 			otpHrs := c.Int("otp-duration")

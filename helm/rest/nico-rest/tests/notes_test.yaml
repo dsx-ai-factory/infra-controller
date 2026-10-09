@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: install notes list the CA Secrets that must already exist
+templates:
+  - NOTES.txt
+release:
+  namespace: nico-rest
+tests:
+  - it: names the shared Secret once when both subcharts use the same one
+    asserts:
+      - matchRegexRaw:
+          pattern: '- Secret: ca-signing-secret in namespace nico-rest \(CA cert\+key'
+      - notMatchRegexRaw:
+          pattern: '(?s)- Secret: ca-signing-secret.*- Secret: ca-signing-secret'
+
+  - it: still requires the trust Secret when cert-manager is deployed elsewhere
+    set:
+      nico-rest-cert-manager.enabled: false
+    asserts:
+      - matchRegexRaw:
+          pattern: '- Secret: ca-signing-secret in namespace nico-rest \(certificate of the'
+
+  - it: reports each configured name when the two diverge
+    set:
+      nico-rest-cert-manager.secrets.caSigningSecret: cm-ca
+      nico-rest-site-manager.credsManagerCa.secretName: sm-ca
+    asserts:
+      - matchRegexRaw:
+          pattern: '- Secret: cm-ca in namespace nico-rest \(CA cert\+key that'
+      - matchRegexRaw:
+          pattern: '- Secret: sm-ca in namespace nico-rest \(certificate of the'
+
+  - it: asks for no CA Secret when neither subchart is deployed
+    set:
+      nico-rest-cert-manager.enabled: false
+      nico-rest-site-manager.enabled: false
+    asserts:
+      - notMatchRegexRaw:
+          pattern: '- Secret: .*CA'
+
+  - it: lists both copies when one Secret name spans two namespaces
+    set:
+      nico-rest-site-manager.namespaceOverride: nico-rest-sm
+      nico-rest-site-manager.args.credsManagerUrl: https://nico-rest-cert-manager.nico-rest:8000
+    asserts:
+      - matchRegexRaw:
+          pattern: '- Secret: ca-signing-secret in namespace nico-rest \(CA cert\+key that'
+      - matchRegexRaw:
+          pattern: '- Secret: ca-signing-secret in namespace nico-rest-sm \(certificate of the'
+
+  - it: renders with any subchart disabled, which contributes no values at all
+    set:
+      nico-rest-api.enabled: false
+      nico-rest-common.enabled: false
+      nico-rest-workflow.enabled: false
+      nico-rest-db.enabled: false
+    asserts:
+      - matchRegexRaw:
+          pattern: 'Prerequisites \(must exist before install\):'

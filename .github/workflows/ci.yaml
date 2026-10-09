@@ -2095,8 +2095,10 @@ jobs:
             helm/charts/nico-ssh-console-rs
             helm/charts/unbound
             helm/rest/nico-mcp
+            helm/rest/nico-rest
             helm/rest/nico-rest-site-agent
             helm/rest/nico-rest/charts/nico-rest-api
+            helm/rest/nico-rest/charts/nico-rest-cert-manager
             helm/rest/nico-rest/charts/nico-rest-common
             helm/rest/nico-rest/charts/nico-rest-site-manager
             helm/rest/nico-rest/charts/nico-rest-workflow

@@ -56,10 +56,22 @@ func (ca *CA) GetCRL() string {
 	return ca.crl.listPEM
 }
 
-// IssueCertificate issues a new certificate signed by this CA
-func (ca *CA) IssueCertificate(commonName string, ttlHours int) (certPEM, keyPEM string, err error) {
+// IssueCertificate issues a new certificate signed by this CA. The subject
+// common name is commonName, and the DNS SANs are commonName followed by
+// extraDNSNames with duplicates removed. Hostname verification ignores the
+// common name, so a server certificate has to list every name its clients
+// dial in extraDNSNames.
+func (ca *CA) IssueCertificate(commonName string, extraDNSNames []string, ttlHours int) (certPEM, keyPEM string, err error) {
 	ca.mu.RLock()
 	defer ca.mu.RUnlock()
+
+	// Checked after deduplication rather than on the arguments, because a
+	// caller passing only empty strings would otherwise get a certificate
+	// carrying no SAN at all, which no verifying client can accept.
+	dnsNames := dedupeDNSNames(commonName, extraDNSNames)
+	if len(dnsNames) == 0 {
+		return "", "", fmt.Errorf("at least one non-empty DNS name is required to issue a certificate")
+	}
 
 	// Generate private key for the certificate
 	key, err := rsa.GenerateKey(rand.Reader, RSAKeySize)
@@ -87,7 +99,7 @@ func (ca *CA) IssueCertificate(commonName string, ttlHours int) (certPEM, keyPEM
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
-		DNSNames:              []string{commonName},
+		DNSNames:              dnsNames,
 	}
 
 	// Sign the certificate with CA
@@ -109,6 +121,27 @@ func (ca *CA) IssueCertificate(commonName string, ttlHours int) (certPEM, keyPEM
 	})
 
 	return string(certPEMBytes), string(keyPEMBytes), nil
+}
+
+// dedupeDNSNames returns commonName followed by extraDNSNames, dropping empty
+// and repeated entries while preserving the caller's order.
+func dedupeDNSNames(commonName string, extraDNSNames []string) []string {
+	names := make([]string, 0, len(extraDNSNames)+1)
+	seen := make(map[string]struct{}, len(extraDNSNames)+1)
+
+	for _, name := range append([]string{commonName}, extraDNSNames...) {
+		if name == "" {
+			continue
+		}
+		_, duplicate := seen[name]
+		if duplicate {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+
+	return names
 }
 
 // updateCRL updates the Certificate Revocation List

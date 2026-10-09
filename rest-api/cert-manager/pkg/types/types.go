@@ -15,7 +15,9 @@ type CertificateIssuer interface {
 	NewCertificate(ctx context.Context, req *CertificateRequest) (string, string, error)
 	GetCACertificate(ctx context.Context) (string, error)
 	GetCRL(ctx context.Context) (string, error)
-	RawCertificate(ctx context.Context, sans string, ttl int) (string, string, error)
+	// RawCertificate issues a certificate carrying every name in sans as a DNS
+	// SAN. The first entry also becomes the subject common name.
+	RawCertificate(ctx context.Context, sans []string, ttl int) (string, string, error)
 }
 
 // CertificateRequest defines a request

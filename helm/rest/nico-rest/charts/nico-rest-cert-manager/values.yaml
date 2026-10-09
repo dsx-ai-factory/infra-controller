@@ -14,11 +14,22 @@ replicaCount: 1
 config:
   caCommonName: "NICo Local Dev CA"
   caOrganization: "NVIDIA"
+  # -- Where the listener's signing CA is read from. These default to the
+  # caSigningSecret mount; the binary's own defaults are Vault agent paths.
+  # Pointing them elsewhere signs the listener with a CA this chart never sees,
+  # so nico-rest-site-manager has to be told what to trust instead — the
+  # nico-rest parent chart fails rendering until it is.
   caCertFile: "/etc/pki/ca/tls.crt"
   caKeyFile: "/etc/pki/ca/tls.key"
   tlsPort: 8000
   insecurePort: 8001
   caBaseDns: "nico.local"
+  # -- Fully override the SANs stamped on the HTTPS listener's certificate.
+  # When empty, they are generated from the Service name and namespace (plus
+  # localhost). Any hostname a client dials must appear here, or that client's
+  # TLS hostname verification fails; the nico-rest parent chart enforces that
+  # for nico-rest-site-manager, which is the one in-tree client.
+  dnsNames: []
   debug: false
 
 secrets:
@@ -26,6 +37,9 @@ secrets:
   # This Secret must exist before deploying this chart — it is NOT created by any sub-chart.
   # In production it is typically provisioned by Vault agent injection.
   # For local dev, it is created by make kind-reset-infra (setup-local.sh).
+  # This CA signs the HTTPS listener, so nico-rest-site-manager has to trust it:
+  # overriding this means overriding nico-rest-site-manager.credsManagerCa
+  # .secretName to match, which the nico-rest parent chart enforces.
   caSigningSecret: ca-signing-secret
 
 service:

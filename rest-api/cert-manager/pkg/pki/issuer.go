@@ -78,12 +78,17 @@ func (i *NativeCertificateIssuer) NewCertificate(ctx context.Context, req *types
 	if ttl == 0 {
 		ttl = 24 * 90 // 90 days default
 	}
-	return i.ca.IssueCertificate(sans, ttl)
+	return i.ca.IssueCertificate(sans, nil, ttl)
 }
 
 // RawCertificate implements types.CertificateIssuer
-func (i *NativeCertificateIssuer) RawCertificate(ctx context.Context, sans string, ttl int) (string, string, error) {
-	return i.ca.IssueCertificate(sans, ttl)
+func (i *NativeCertificateIssuer) RawCertificate(ctx context.Context, sans []string, ttl int) (string, string, error) {
+	// Guards the indexing below. IssueCertificate rejects a list that is empty
+	// only once blank entries are discarded.
+	if len(sans) == 0 {
+		return "", "", fmt.Errorf("at least one SAN is required to issue a certificate")
+	}
+	return i.ca.IssueCertificate(sans[0], sans[1:], ttl)
 }
 
 // GetCACertificate implements types.CertificateIssuer
