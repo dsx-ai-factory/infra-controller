@@ -62,7 +62,16 @@ externalService:
   # These Service settings are independent of the internal ipv6.enabled option.
   ipFamilyPolicy: SingleStack
   ipFamilies: [IPv4]
+  # Empty keeps the Kubernetes default (Cluster). MetalLB only lets Local
+  # Services share an IP with Services that select the same pods.
   externalTrafficPolicy: ""
+  # Annotation key that lets the UDP and TCP Services share an IP. Its value
+  # is <name>-external. Change the key for a load-balancer controller that
+  # does not use MetalLB annotations, or set it to "" to omit the annotation.
+  # An
+  # annotations entry under either MetalLB spelling replaces the built-in
+  # annotation; one with the same key overrides its value.
+  sharedIpAnnotation: metallb.universe.tf/allow-shared-ip
   annotations: {}
 
 serviceMonitor:

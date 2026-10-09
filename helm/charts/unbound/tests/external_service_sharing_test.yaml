@@ -1,0 +1,30 @@
+suite: External unbound Service IP sharing
+templates:
+  - external-service.yaml
+tests:
+  - it: lets operator annotations override the sharing key without duplicating it
+    set:
+      externalService:
+        enabled: true
+        annotations:
+          metallb.universe.tf/loadBalancerIPs: "10.0.0.12"
+          metallb.universe.tf/allow-shared-ip: "nico-shared"
+    asserts:
+      - equal:
+          path: metadata.annotations
+          value:
+            metallb.universe.tf/loadBalancerIPs: "10.0.0.12"
+            metallb.universe.tf/allow-shared-ip: nico-shared
+
+  - it: omits the sharing annotation when the key is cleared
+    set:
+      externalService:
+        enabled: true
+        sharedIpAnnotation: ""
+        annotations:
+          metallb.universe.tf/loadBalancerIPs: "10.0.0.12"
+    asserts:
+      - equal:
+          path: metadata.annotations
+          value:
+            metallb.universe.tf/loadBalancerIPs: "10.0.0.12"
