@@ -46,6 +46,11 @@ After any required manual Flow overwrite, every installation phase is safe to re
 
 Complete every item before running `setup.sh`. Missing any of these can cause the upgrade to fail or leave the cluster in a partially upgraded state.
 
+If you are upgrading to
+[asynchronous VPC peering deletion](#upgrades-that-introduce-asynchronous-peering-deletion)
+for the first time, plan an API maintenance window. You must stop the old API
+before starting the new one; the default rolling update does not do this.
+
 If `flow/flow` or an active Flow Pod still contains a `psm` or `nsm` container, do not run setup yet. Preserve that release, or follow the [manual Flow-only overwrite guidance](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm). Setup rejects that predecessor topology or an incomplete Flow-only rollout before making any cluster change.
 
 <Steps toc={true}>
@@ -366,6 +371,39 @@ Once the writer is Postgres, the KEK backup above belongs in every pre-upgrade c
 
 ## Version-specific upgrade notes
 
+### Upgrades That Introduce Asynchronous Peering Deletion
+
+Follow these steps the first time you upgrade to the peering deletion behavior
+added in [#6917](https://github.com/dsx-ai-factory/infra-controller/pull/6917).
+You can upgrade directly; no intermediate release is required.
+
+The new API waits for DPUs to stop allowing a peering before deleting it. An
+old API can still tell those DPUs to allow the connection, making the new API
+mistakenly treat deletion as finished. Stop every old API before starting any
+new one. The Helm chart's default `RollingUpdate` can run both versions at once,
+even with just one replica.
+
+During your API maintenance window:
+
+1. Record the namespace, Deployment name, and desired replica count for every
+   `nico-api` Deployment serving the site. Pause any automation that would
+   restore the old replicas during the maintenance window.
+2. Scale those Deployments to zero. Wait for all old API pods and any API
+   processes outside those Deployments to exit and their requests to drain.
+3. Run the normal upgrade with the new image and desired replica count. With
+   `setup.sh`, set `nico-api.replicas` in the Core values file to that count.
+   Phase 6 runs the Core migration Job and starts the new API pods. Keep the
+   old processes stopped.
+4. Verify that only the new API version is serving the site before restoring
+   automation. Follow the
+   [peering deletion guide](vpc/vpc_peering_management.md#deleting-vpc-peering-connections)
+   to confirm any pending deletions finish.
+
+Do not roll back to an API that lacks this behavior. It deletes peerings without
+waiting for the DPUs, and restoring a database backup does not undo their network
+changes. For the network-version and migration details, see the
+[configuration reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#vpc-peering-deletion).
+
 ### 2.2 → 2.3: Core components are mandatory
 
 **Impact:** The core NICo subcharts (`nico-api`, `nico-bmc-proxy`, `nico-dhcp`, `nico-dns`, `nico-hardware-health`, `nico-pxe`, `nico-ssh-console-rs`) no longer have `<chart>.enabled` toggles - they are unconditional dependencies in `helm/Chart.yaml` and always install. A site values file (including one passed via `setup.sh --core-values`) that still sets a core `<chart>.enabled` key, whether `true` or `false`, keeps working: the key is ignored and the component installs. No values changes are required for the upgrade. If a site previously disabled a core component (for example, a DHCP or BMC proxy provided externally), plan for the in-cluster component to appear after the upgrade. Optional services (`nico-dsx-exchange-consumer`, `nico-ntp`, `unbound`) keep their toggles.
@@ -480,13 +518,18 @@ Downgrades are **not a supported version move**. The [release policy](../../RELE
 `setup.sh` does not have a built-in rollback mechanism. Rollback consists of:
 
 1. Checking out the prior release branch or tag.
-1. Re-running `setup.sh` with the prior image tags.
+2. Re-running `setup.sh` with the prior image tags.
 
 For NICo Core and REST, the Helm release is rolled back in-place, and the database migration Jobs for the prior version run on startup. NICo's database migrations are designed to be forward-compatible; rolling back does not guarantee schema compatibility if the new version added non-nullable columns. This is why a pre-upgrade database backup is essential.
 
 The database dumps from the [pre-upgrade checklist](#back-up-the-databases) are the rollback foundation: `nico-pg-cluster` holds `nico_system_nico` (NICo Core), `nico_rest` (NICo REST), `flow`, and any retained `psm` or `nsm` databases from a predecessor bundled-manager deployment, while the plain `postgres` StatefulSet holds `temporal`, `temporal_visibility`, and `keycloak`. Restoring means replaying the SQL against a clean instance (`psql -f <dump>.sql`).
 
 Re-running `setup.sh` with the prior image tags alone is **not** a complete rollback if the new version's migrations already ran. Restore the database dumps first, then deploy the prior version.
+
+If you have upgraded to
+[asynchronous peering deletion](#upgrades-that-introduce-asynchronous-peering-deletion),
+do not return to an API that lacks it, even after restoring the database. Fix
+the newer version instead.
 
 For DPF, rolling back to a prior DPF version is not supported by NVIDIA. If DPF fails to upgrade, reach out to NVIDIA support rather than attempting a downgrade.
 

@@ -1129,6 +1129,11 @@ and [Instance admission](https://github.com/dsx-ai-factory/infra-controller/issu
 
 ### VPC Peering Deletion
 
+For operator procedures, see the
+[peering deletion guide](../../../../docs/manuals/vpc/vpc_peering_management.md#deleting-vpc-peering-connections)
+and the
+[upgrade stop-and-drain procedure](../../../../docs/manuals/upgrade.md#upgrades-that-introduce-asynchronous-peering-deletion).
+
 `DeleteVpcPeering` starts permission removal. `FindVpcPeeringsByIds` reports
 `VPC_PEERING_STATE_DELETING` until every affected DPU acknowledges the new
 managed-host network configuration. During that wait, FNN and ETV responses
@@ -1153,7 +1158,7 @@ the host and expected network version and stores the wait reason in
 `vpc_peerings.controller_state_outcome`. Restore the DPU and let it acknowledge
 the configuration; `DeleteVpcPeering` never treats a missing receipt as success.
 
-Before starting an API with this deletion controller, stop every API process
+Before starting an API with this deletion behavior, stop every API process
 without the peering deletion behavior added in
 [#6917](https://github.com/dsx-ai-factory/infra-controller/pull/6917) and drain its
 requests. Scale the API deployment to zero and wait for the old pods to exit
@@ -1167,7 +1172,7 @@ Those old binaries also hard-delete peerings, so they are not a safe application
 rollback. No intermediate release is required. The additive migration can run
 while the outgoing API is live, with the existing possibility of cached
 wildcard-query errors until its connections or process are replaced. The
-stop-and-drain requirement applies before the new controller starts; stopping
+stop-and-drain requirement applies before any new API process starts; stopping
 the old API before migrations also avoids that additional error window.
 
 ### Stored Prefix Scope
