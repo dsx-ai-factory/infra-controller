@@ -24,9 +24,10 @@ use bmc_mock::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId}
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    ActionError, Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, MockPowerState,
-    POWER_CYCLE_DELAY, ResourceResetType,
+    ActionError, Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, POWER_CYCLE_DELAY,
+    ResourceResetType,
 };
+use nv_redfish::schema::resource::PowerState;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -45,7 +46,7 @@ fn abandon_nvos_dhcp_on_power_change(actions: &mut VecDeque<Action>) {
 
 #[derive(Debug)]
 struct SwitchLiveState {
-    power_state: MockPowerState,
+    power_state: PowerState,
     bmc_ip: Option<Ipv4Addr>,
     nvos_ip: Option<Ipv4Addr>,
     ipmi_port: Option<u16>,
@@ -78,7 +79,10 @@ struct SwitchCallbacks {
 
 impl SwitchCallbacks {
     pub(crate) fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
-        self.get_power_state().validate_reset_type(reset_type)?;
+        crate::power_state::validate_reset_type(
+            self.state.read().unwrap().power_state,
+            reset_type,
+        )?;
         self.mailbox
             .send(SwitchMessage::Bmc(BmcCommand::SetSystemPower {
                 request: reset_type,
@@ -89,8 +93,8 @@ impl SwitchCallbacks {
 }
 
 impl Callbacks for SwitchCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        self.state.read().unwrap().power_state
+    fn get_power_state(&self) -> bmc_mock::MockPowerState {
+        unreachable!("switch profiles do not expose power state through callbacks")
     }
 
     async fn computer_system_reset(
@@ -612,7 +616,7 @@ impl SwitchHandle {
         .set_power_state(request)
     }
 
-    pub(crate) fn power_state(&self) -> MockPowerState {
+    pub(crate) fn power_state(&self) -> PowerState {
         self.0.live_state.read().unwrap().power_state
     }
 
@@ -644,7 +648,7 @@ impl SwitchHandle {
             hardware_type: Some(self.0.host_info.hw_type),
             mat_state: Some(state.state.to_string()),
             api_state: "Unknown".to_string(),
-            power_state: state.power_state.to_string(),
+            power_state: state.power_state,
             machine_ip: None,
             nvos_ip: state.nvos_ip.map(|ip| ip.to_string()),
             infiniband_ports: None,

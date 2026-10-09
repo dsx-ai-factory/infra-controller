@@ -23,11 +23,11 @@ use std::time::Duration;
 
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::{
-    ActionError, BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, MockPowerState,
-    ResourceResetType,
+    ActionError, BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, ResourceResetType,
 };
 use carbide_network::virtualization::build_dual_stack_list;
 use carbide_uuid::machine::{DpuMachineId, InvalidMachineType, MachineId, MachineInterfaceId};
+use nv_redfish::schema::resource::PowerState;
 use rpc::forge::{MachineArchitecture, MachineDiscoveryResult, ManagedHostNetworkConfigResponse};
 use rpc::forge_agent_control_response::Action;
 use serde::{Deserialize, Serialize};
@@ -184,7 +184,10 @@ impl LiveStateCallbacks {
     }
 
     pub(crate) fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
-        self.get_power_state().validate_reset_type(reset_type)?;
+        crate::power_state::validate_reset_type(
+            self.state.read().unwrap().power_state,
+            reset_type,
+        )?;
         self.command_channel
             .send(BmcCommand::SetSystemPower {
                 request: reset_type,
@@ -195,8 +198,8 @@ impl LiveStateCallbacks {
 }
 
 impl Callbacks for LiveStateCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        self.state.read().unwrap().power_state
+    fn get_power_state(&self) -> bmc_mock::MockPowerState {
+        unreachable!("machine-a-tron publishes power state to the Redfish model")
     }
 
     async fn computer_system_reset(
@@ -233,7 +236,7 @@ impl HostnameQuerying for LiveStateHostnameQuery {
 #[derive(Debug)]
 pub(super) struct LiveState {
     pub(super) is_up: bool,
-    pub(super) power_state: MockPowerState, // reflects the "desired" power state of the machine. Affects whether next_state will boot the machine or not.
+    pub(super) power_state: PowerState, // Latest power observation from the machine FSM.
     pub(super) observed_machine_id: Option<MachineId>,
     pub(super) machine_ip: Option<Ipv4Addr>,
     pub(super) bmc_ip: Option<Ipv4Addr>,
@@ -260,10 +263,10 @@ pub(super) struct LiveState {
 
 impl Default for LiveState {
     fn default() -> Self {
-        let power_state = MockPowerState::default();
+        let power_state = PowerState::On;
         LiveState {
-            is_up: matches!(power_state, MockPowerState::On),
-            power_state: MockPowerState::default(),
+            is_up: matches!(power_state, PowerState::On),
+            power_state: PowerState::On,
             observed_machine_id: None,
             machine_ip: None,
             bmc_ip: None,
@@ -286,7 +289,7 @@ impl Default for LiveState {
 impl LiveState {
     fn for_machine(
         machine_info: &MachineInfo,
-        power_state: MockPowerState,
+        power_state: PowerState,
         tpm_ek_certificate: Option<Vec<u8>>,
     ) -> Self {
         let infiniband_port_states = match machine_info {
@@ -387,7 +390,7 @@ impl MachineStateMachine {
             initial_os_image,
         );
         let mut live_state =
-            LiveState::for_machine(&machine_info, MockPowerState::On, tpm_ek_certificate);
+            LiveState::for_machine(&machine_info, PowerState::On, tpm_ek_certificate);
         live_state.bmc_persistence = bmc_persistence;
         MachineStateMachine {
             fsm,
@@ -439,7 +442,7 @@ impl MachineStateMachine {
         MachineStateMachine {
             live_state: Arc::new(RwLock::new(LiveState::for_machine(
                 &machine_info,
-                MockPowerState::Off,
+                PowerState::Off,
                 tpm_ek_certificate,
             ))),
             fsm,
@@ -1125,6 +1128,11 @@ impl MachineStateMachine {
         }
         live_state.state_string = Some(self.fsm.state_string());
         live_state.power_state = self.fsm.power_state();
+        if let Some(bmc_state) = &self.bmc_state {
+            bmc_state
+                .system_state
+                .set_power_state(live_state.power_state);
+        }
         live_state.booted_os = self.booted_os();
         live_state.dpu_flipped_to_nic_mode = matches!(&self.machine_info, MachineInfo::Dpu(_))
             && self
@@ -1421,6 +1429,11 @@ impl MachineStateMachine {
             // wires LifecycleTimings::bmc_reset (epic #3796 issue 4) and firmware_upgrade (#4494)
             Some(&self.resolved_timings),
         );
+
+        bmc_mock
+            .state()
+            .system_state
+            .set_power_state(self.fsm.power_state());
 
         let pw_override = match &self.machine_info {
             MachineInfo::Host(_) => self.app_context.app_config.host_bmc_password.as_deref(),

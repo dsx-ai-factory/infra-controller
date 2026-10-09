@@ -467,7 +467,7 @@ impl DpuMachineHandle {
             hardware_type: None,
             mat_state: live_state.state_string.map(ToOwned::to_owned),
             api_state: live_state.api_state.clone(),
-            power_state: live_state.power_state.to_string(),
+            power_state: live_state.power_state,
             machine_ip: live_state.machine_ip.map(|ip| ip.to_string()),
             nvos_ip: None,
             infiniband_ports: None,

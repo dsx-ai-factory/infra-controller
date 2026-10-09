@@ -25,8 +25,9 @@ use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
     ActionError, Callbacks, HardwareType, HostMachineInfo, HostnameQuerying, MachineInfo,
-    MockPowerState, POWER_CYCLE_DELAY, ResourceResetType,
+    POWER_CYCLE_DELAY, ResourceResetType,
 };
+use nv_redfish::schema::resource::PowerState;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -41,7 +42,7 @@ use crate::status::{BmcStatus, DeviceKind, DeviceStatus, DeviceStatusConfig, End
 
 #[derive(Debug)]
 struct PowerShelfLiveState {
-    power_state: MockPowerState,
+    power_state: PowerState,
     bmc_ip: Option<Ipv4Addr>,
     ipmi_port: Option<u16>,
     ssh_endpoint_port: Option<u16>,
@@ -70,7 +71,10 @@ struct PowerShelfCallbacks {
 
 impl PowerShelfCallbacks {
     fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
-        self.get_power_state().validate_reset_type(reset_type)?;
+        crate::power_state::validate_reset_type(
+            self.state.read().unwrap().power_state,
+            reset_type,
+        )?;
         self.mailbox
             .send(PowerShelfMessage::Bmc(BmcCommand::SetSystemPower {
                 request: reset_type,
@@ -81,8 +85,8 @@ impl PowerShelfCallbacks {
 }
 
 impl Callbacks for PowerShelfCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        self.state.read().unwrap().power_state
+    fn get_power_state(&self) -> bmc_mock::MockPowerState {
+        unreachable!("power shelf profiles do not expose power state through callbacks")
     }
 
     async fn computer_system_reset(
@@ -529,7 +533,7 @@ impl PowerShelfHandle {
         .set_power_state(request)
     }
 
-    pub(crate) fn power_state(&self) -> MockPowerState {
+    pub(crate) fn power_state(&self) -> PowerState {
         self.0.live_state.read().unwrap().power_state
     }
 
@@ -561,7 +565,7 @@ impl PowerShelfHandle {
             hardware_type: Some(self.0.host_info.hw_type),
             mat_state: Some(state.state.to_string()),
             api_state: "Unknown".to_string(),
-            power_state: state.power_state.to_string(),
+            power_state: state.power_state,
             machine_ip: None,
             nvos_ip: None,
             infiniband_ports: None,

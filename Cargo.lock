@@ -2534,6 +2534,7 @@ dependencies = [
  "logfmt",
  "mac_address",
  "metrics-endpoint",
+ "nv-redfish",
  "rand 0.10.1",
  "reqwest 0.13.4",
  "russh",

@@ -16,7 +16,7 @@
  */
 use std::time::Duration;
 
-use bmc_mock::MockPowerState;
+use nv_redfish::schema::resource::PowerState;
 
 use crate::dhcp_retry_fsm::{
     Action as RetryAction, DhcpRetryFsm, Event as RetryEvent, Milliseconds,
@@ -71,7 +71,7 @@ impl PowerShelfFsm {
         self.state.is_paused()
     }
 
-    pub(super) fn power_state(&self) -> MockPowerState {
+    pub(super) fn power_state(&self) -> PowerState {
         self.state.power_state()
     }
 
@@ -111,13 +111,13 @@ impl PowerShelfState {
         }
     }
 
-    fn power_state(&self) -> MockPowerState {
+    fn power_state(&self) -> PowerState {
         match self {
-            Self::BmcInit { power_on: true, .. } | Self::DeviceUp { .. } => MockPowerState::On,
+            Self::BmcInit { power_on: true, .. } | Self::DeviceUp { .. } => PowerState::On,
             Self::BmcInit {
                 power_on: false, ..
             }
-            | Self::DeviceDown { .. } => MockPowerState::Off,
+            | Self::DeviceDown { .. } => PowerState::Off,
         }
     }
 

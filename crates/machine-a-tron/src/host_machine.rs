@@ -22,12 +22,12 @@ use std::time::{Duration, Instant};
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    ActionError, HostFirmwareVersions, HostMachineInfo, MachineInfo, MockPowerState,
-    ResourceResetType,
+    ActionError, HostFirmwareVersions, HostMachineInfo, MachineInfo, ResourceResetType,
 };
 use carbide_utils::test_support::certs::create_random_self_signed_cert;
 use carbide_uuid::machine::MachineId;
 use eyre::Context;
+use nv_redfish::schema::resource::PowerState;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Interval;
@@ -598,7 +598,7 @@ impl MachineHandle {
             .set_power_state(request)
     }
 
-    pub(crate) fn power_state(&self) -> MockPowerState {
+    pub(crate) fn power_state(&self) -> PowerState {
         self.0.live_state.read().unwrap().power_state
     }
 
@@ -771,7 +771,7 @@ impl MachineHandle {
             hardware_type: Some(self.0.host_info.hw_type),
             mat_state: live_state.state_string.map(ToOwned::to_owned),
             api_state: live_state.api_state.clone(),
-            power_state: live_state.power_state.to_string(),
+            power_state: live_state.power_state,
             machine_ip: live_state.machine_ip.map(|ip| ip.to_string()),
             nvos_ip: None,
             infiniband_ports: (!infiniband_ports.is_empty()).then_some(infiniband_ports),
