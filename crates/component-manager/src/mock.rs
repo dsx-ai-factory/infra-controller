@@ -10,6 +10,7 @@ use model::component_manager::{
     PowerAction, PowerShelfComponent,
 };
 
+use crate::component_common::ComponentPowerStateResult;
 use crate::compute_tray_manager::{
     Backend, ComputeTrayEndpoint, ComputeTrayFirmwareUpdateStatus, ComputeTrayManager,
     ComputeTrayResult,
@@ -18,11 +19,11 @@ use crate::error::ComponentManagerError;
 use crate::nv_switch_manager::{
     ConfigureSwitchCertificateJobStatus, NvSwitchManager, SwitchCertificateEndpoint,
     SwitchComponentResult, SwitchEndpoint, SwitchFactoryResetJobStatus, SwitchFirmwareUpdateStatus,
-    SwitchPasswordRotationState, SwitchPowerStateResult, SwitchSlotAndTrayResult,
+    SwitchPasswordRotationState, SwitchSlotAndTrayResult,
 };
 use crate::power_shelf_manager::{
     PowerShelfComponentResult, PowerShelfEndpoint, PowerShelfFirmwareUpdateStatus,
-    PowerShelfFirmwareVersions, PowerShelfManager, PowerShelfPowerStateResult,
+    PowerShelfFirmwareVersions, PowerShelfManager,
 };
 use crate::types::FirmwareUpdateOptions;
 
@@ -234,13 +235,12 @@ impl NvSwitchManager for MockNvSwitchManager {
     async fn get_power_state(
         &self,
         endpoints: &[SwitchEndpoint],
-    ) -> Result<Vec<SwitchPowerStateResult>, ComponentManagerError> {
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
         Ok(endpoints
             .iter()
-            .map(|ep| SwitchPowerStateResult {
-                bmc_mac: ep.bmc_mac,
-                power_state: None,
-                error: None,
+            .map(|ep| ComponentPowerStateResult {
+                mac_address: ep.bmc_mac,
+                power_state: Ok(None),
             })
             .collect())
     }
@@ -435,13 +435,12 @@ impl PowerShelfManager for MockPowerShelfManager {
     async fn get_power_state(
         &self,
         endpoints: &[PowerShelfEndpoint],
-    ) -> Result<Vec<PowerShelfPowerStateResult>, ComponentManagerError> {
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
         Ok(endpoints
             .iter()
-            .map(|ep| PowerShelfPowerStateResult {
-                pmc_mac: ep.pmc_mac,
-                power_state: None,
-                error: None,
+            .map(|ep| ComponentPowerStateResult {
+                mac_address: ep.pmc_mac,
+                power_state: Ok(None),
             })
             .collect())
     }

@@ -3,81 +3,80 @@
 
 //! Shared helpers used across component-manager backends and state controllers.
 
-// ---------------------------------------------------------------------------
-// Power-state observation
-// ---------------------------------------------------------------------------
+use mac_address::MacAddress;
+use model::machine::PowerState;
 
-/// Outcome of interpreting a single-device `get_power_state` poll.
+/// `ComponentPowerStateResult` identifies a component and its power observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentPowerStateResult {
+    /// Management-controller MAC: BMC for switches, PMC for power shelves.
+    pub mac_address: MacAddress,
+    /// `Ok(Some(_))` is an observation, including an explicit `Unknown` state.
+    /// `Ok(None)` means the backend supplied no state; `Err` describes a failed
+    /// observation. Neither should replace a previously observed state.
+    pub power_state: Result<Option<PowerState>, String>,
+}
+
+/// `PowerStatePollOutcome` describes a single-component `get_power_state` poll.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PowerStatePollOutcome {
-    Observed(String),
+    /// The backend reported a state, including an explicit `Unknown` value.
+    Observed(PowerState),
+    /// The backend failed to observe the state, with a description of the error.
     BackendError(String),
+    /// The backend returned an entry without a power observation.
     NoPowerState,
+    /// The backend returned no entries.
     NoResult,
 }
 
-/// Common surface shared by switch and power-shelf power-state poll results.
-pub trait ComponentPowerStateResult {
-    fn power_state(&self) -> Option<&str>;
-    fn error(&self) -> Option<&str>;
-}
-
-/// Interpret the first entry from a component-manager `get_power_state` response.
-pub fn interpret_power_state_poll<T: ComponentPowerStateResult>(
-    results: Vec<T>,
+/// `interpret_power_state_poll` reads the first entry from a component-manager
+/// response. Callers polling one component use this to decide whether to update
+/// its stored observation; any additional entries are ignored.
+pub fn interpret_power_state_poll(
+    results: Vec<ComponentPowerStateResult>,
 ) -> PowerStatePollOutcome {
     let Some(result) = results.into_iter().next() else {
         return PowerStatePollOutcome::NoResult;
     };
 
-    if let Some(error) = result.error() {
-        return PowerStatePollOutcome::BackendError(error.to_owned());
-    }
-
-    match result.power_state() {
-        Some(power_state) => PowerStatePollOutcome::Observed(power_state.to_owned()),
-        None => PowerStatePollOutcome::NoPowerState,
+    match result.power_state {
+        Ok(Some(power_state)) => PowerStatePollOutcome::Observed(power_state),
+        Ok(None) => PowerStatePollOutcome::NoPowerState,
+        Err(error) => PowerStatePollOutcome::BackendError(error),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use mac_address::MacAddress;
+    use carbide_test_support::value_scenarios;
 
     use super::*;
-    use crate::nv_switch_manager::SwitchPowerStateResult;
-    use crate::power_shelf_manager::PowerShelfPowerStateResult;
 
-    fn test_mac() -> MacAddress {
-        "AA:BB:CC:DD:EE:FF".parse().unwrap()
+    fn observation(power_state: Result<Option<PowerState>, String>) -> ComponentPowerStateResult {
+        ComponentPowerStateResult {
+            mac_address: MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+            power_state,
+        }
     }
 
     #[test]
-    fn interpret_switch_power_state_poll_observed() {
-        let outcome = interpret_power_state_poll(vec![SwitchPowerStateResult {
-            bmc_mac: test_mac(),
-            power_state: Some("on".into()),
-            error: None,
-        }]);
-        assert_eq!(outcome, PowerStatePollOutcome::Observed("on".to_owned()));
-    }
-
-    #[test]
-    fn interpret_power_shelf_power_state_poll_backend_error() {
-        let outcome = interpret_power_state_poll(vec![PowerShelfPowerStateResult {
-            pmc_mac: test_mac(),
-            power_state: None,
-            error: Some("rms failed".into()),
-        }]);
-        assert_eq!(
-            outcome,
-            PowerStatePollOutcome::BackendError("rms failed".to_owned())
+    fn power_state_poll_preserves_observations_and_missing_states() {
+        value_scenarios!(interpret_power_state_poll:
+            "reported states" {
+                vec![observation(Ok(Some(PowerState::Unknown)))]
+                    => PowerStatePollOutcome::Observed(PowerState::Unknown),
+            }
+            "missing observations" {
+                vec![observation(Ok(None))] => PowerStatePollOutcome::NoPowerState,
+                vec![observation(Err("rms failed".into()))]
+                    => PowerStatePollOutcome::BackendError("rms failed".into()),
+                vec![] => PowerStatePollOutcome::NoResult,
+            }
+            "only the first entry is used" {
+                vec![observation(Ok(None)), observation(Ok(Some(PowerState::On)))]
+                    => PowerStatePollOutcome::NoPowerState,
+            }
         );
-    }
-
-    #[test]
-    fn interpret_power_state_poll_no_result() {
-        let outcome = interpret_power_state_poll(Vec::<SwitchPowerStateResult>::new());
-        assert_eq!(outcome, PowerStatePollOutcome::NoResult);
     }
 }

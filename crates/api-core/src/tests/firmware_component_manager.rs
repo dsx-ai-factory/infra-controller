@@ -24,6 +24,7 @@ use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
+use component_manager::component_common::ComponentPowerStateResult;
 use component_manager::compute_tray_manager::{
     Backend, ComputeTrayEndpoint, ComputeTrayFirmwareUpdateStatus, ComputeTrayManager,
     ComputeTrayResult,
@@ -32,11 +33,11 @@ use component_manager::error::ComponentManagerError;
 use component_manager::mock::{MockComputeTrayManager, MockNvSwitchManager, MockPowerShelfManager};
 use component_manager::nv_switch_manager::{
     ConfigureSwitchCertificateJobStatus, NvSwitchManager, SwitchComponentResult, SwitchEndpoint,
-    SwitchFirmwareUpdateStatus, SwitchPowerStateResult, SwitchSlotAndTrayResult,
+    SwitchFirmwareUpdateStatus, SwitchSlotAndTrayResult,
 };
 use component_manager::power_shelf_manager::{
     PowerShelfComponentResult, PowerShelfEndpoint, PowerShelfFirmwareUpdateStatus,
-    PowerShelfFirmwareVersions, PowerShelfManager, PowerShelfPowerStateResult,
+    PowerShelfFirmwareVersions, PowerShelfManager,
 };
 use component_manager::types::FirmwareUpdateOptions;
 use mac_address::MacAddress;
@@ -197,7 +198,7 @@ impl NvSwitchManager for RecordingNvSwitchManager {
     async fn get_power_state(
         &self,
         endpoints: &[SwitchEndpoint],
-    ) -> Result<Vec<SwitchPowerStateResult>, ComponentManagerError> {
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
         self.inner.get_power_state(endpoints).await
     }
 
@@ -280,7 +281,7 @@ impl PowerShelfManager for RecordingPowerShelfManager {
     async fn get_power_state(
         &self,
         endpoints: &[PowerShelfEndpoint],
-    ) -> Result<Vec<PowerShelfPowerStateResult>, ComponentManagerError> {
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
         self.inner.get_power_state(endpoints).await
     }
 }

@@ -41,6 +41,7 @@ use model::component_manager::{
     ComputeTrayComponent, ConfigureSwitchCertificateState, FirmwareState, NvSwitchComponent,
     PowerAction, PowerShelfComponent,
 };
+use model::machine::PowerState;
 use model::rack::{
     FirmwareProgressState, FirmwareUpgradeDeviceInfo, FirmwareUpgradeDeviceStatus,
     FirmwareUpgradeJob, NvosUpdateJob, NvosUpdateSwitchStatus,
@@ -51,6 +52,7 @@ use serde::Deserialize;
 use sqlx::PgPool;
 use tracing::instrument;
 
+use crate::component_common::ComponentPowerStateResult;
 use crate::compute_tray_manager::{
     Backend as ComputeTrayBackend, ComputeTrayEndpoint, ComputeTrayFirmwareUpdateStatus,
     ComputeTrayManager, ComputeTrayResult,
@@ -65,13 +67,11 @@ use crate::nv_switch_manager::{
     ScaleUpFabricManagerJobStatus, ScaleUpFabricResponseStatus, ScaleUpFabricServiceStatuses,
     ScaleUpFabricStatus, ScaleUpFabricSwitchStatus, SwitchCertificateEndpoint,
     SwitchComponentResult, SwitchEndpoint, SwitchFactoryResetJobStatus, SwitchFactoryResetState,
-    SwitchFirmwareUpdateStatus, SwitchPasswordRotationState, SwitchPowerStateResult,
-    SwitchSlotAndTrayResult,
+    SwitchFirmwareUpdateStatus, SwitchPasswordRotationState, SwitchSlotAndTrayResult,
 };
 use crate::power_shelf_manager::{
     Backend as PowerShelfBackend, PowerShelfComponentResult, PowerShelfEndpoint,
     PowerShelfFirmwareUpdateStatus, PowerShelfFirmwareVersions, PowerShelfManager,
-    PowerShelfPowerStateResult,
 };
 use crate::types::FirmwareUpdateOptions;
 use crate::{
@@ -2393,7 +2393,7 @@ impl PowerShelfManager for RmsBackend {
     async fn get_power_state(
         &self,
         endpoints: &[PowerShelfEndpoint],
-    ) -> Result<Vec<PowerShelfPowerStateResult>, ComponentManagerError> {
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
         let macs: Vec<MacAddress> = endpoints.iter().map(|ep| ep.pmc_mac).collect();
         let mut ids = resolve_power_shelf_identities(&self.db, &macs).await?;
         // Power shelves with no `power_shelves` row yet (pre-ingestion) fall back
@@ -2418,10 +2418,9 @@ impl PowerShelfManager for RmsBackend {
             ) {
                 Ok(resolved) => resolved,
                 Err(error) => {
-                    results.push(PowerShelfPowerStateResult {
-                        pmc_mac: ep.pmc_mac,
-                        power_state: None,
-                        error: Some(error),
+                    results.push(ComponentPowerStateResult {
+                        mac_address: ep.pmc_mac,
+                        power_state: Err(error),
                     });
                     continue;
                 }
@@ -2437,10 +2436,9 @@ impl PowerShelfManager for RmsBackend {
                 "power shelf",
             )
             .await;
-            results.push(PowerShelfPowerStateResult {
-                pmc_mac: ep.pmc_mac,
-                power_state: observed.power_state,
-                error: observed.error,
+            results.push(ComponentPowerStateResult {
+                mac_address: ep.pmc_mac,
+                power_state: observed,
             });
         }
 
@@ -2638,19 +2636,13 @@ fn summarize_power_batch(batch: rms::NodeBatchResponse) -> (bool, Option<String>
     (false, Some(error))
 }
 
-#[derive(Debug, Clone)]
-struct RmsObservedPowerState {
-    power_state: Option<String>,
-    error: Option<String>,
-}
-
 async fn query_rms_power_state(
     client: &dyn RmsApi,
     device: rms::NodeInfo,
     node_id: &str,
     device_mac: MacAddress,
     device_kind: &str,
-) -> RmsObservedPowerState {
+) -> Result<Option<PowerState>, String> {
     let request = rms::BatchGetPowerStateRequest {
         nodes: Some(rms::NodeSet {
             nodes: vec![device],
@@ -2665,7 +2657,7 @@ async fn query_rms_power_state(
     .await
     {
         Ok(response) => {
-            let batch = response.response.clone().unwrap_or_default();
+            let batch = response.response.unwrap_or_default();
             let stats = batch.stats.unwrap_or_default();
 
             if batch.status != rms::ReturnCode::Success as i32 || stats.failed_nodes != 0 {
@@ -2677,22 +2669,28 @@ async fn query_rms_power_state(
                 } else {
                     batch.message
                 };
-                return RmsObservedPowerState {
-                    power_state: None,
-                    error: Some(summary),
-                };
+                return Err(summary);
             }
 
-            let power_state = response
+            let Some(node) = response
                 .node_power_states
                 .iter()
                 .find(|node| node.node_id == node_id)
-                .map(|node| node.pstate.to_lowercase());
+            else {
+                return Ok(None);
+            };
 
-            RmsObservedPowerState {
-                power_state,
-                error: None,
-            }
+            let power_state = match node.pstate.to_ascii_lowercase().as_str() {
+                "on" => PowerState::On,
+                "off" => PowerState::Off,
+                "poweringon" => PowerState::PoweringOn,
+                "poweringoff" => PowerState::PoweringOff,
+                "paused" => PowerState::Paused,
+                "reset" => PowerState::Reset,
+                "unknown" => PowerState::Unknown,
+                _ => return Err(format!("unrecognized RMS power state: {:?}", node.pstate)),
+            };
+            Ok(Some(power_state))
         }
         Err(error) => {
             tracing::warn!(
@@ -2701,10 +2699,7 @@ async fn query_rms_power_state(
                 device_kind,
                 "RMS get power state failed"
             );
-            RmsObservedPowerState {
-                power_state: None,
-                error: Some(error.to_string()),
-            }
+            Err(error.to_string())
         }
     }
 }
@@ -3672,7 +3667,7 @@ impl NvSwitchManager for RmsBackend {
     async fn get_power_state(
         &self,
         endpoints: &[SwitchEndpoint],
-    ) -> Result<Vec<SwitchPowerStateResult>, ComponentManagerError> {
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
         let macs: Vec<MacAddress> = endpoints.iter().map(|ep| ep.bmc_mac).collect();
         let ids = resolve_switch_identities(&self.db, &macs).await?;
         let mut results = Vec::with_capacity(endpoints.len());
@@ -3686,10 +3681,9 @@ impl NvSwitchManager for RmsBackend {
             ) {
                 Ok(resolved) => resolved,
                 Err(error) => {
-                    results.push(SwitchPowerStateResult {
-                        bmc_mac: ep.bmc_mac,
-                        power_state: None,
-                        error: Some(error),
+                    results.push(ComponentPowerStateResult {
+                        mac_address: ep.bmc_mac,
+                        power_state: Err(error),
                     });
                     continue;
                 }
@@ -3706,10 +3700,9 @@ impl NvSwitchManager for RmsBackend {
                 "switch",
             )
             .await;
-            results.push(SwitchPowerStateResult {
-                bmc_mac: ep.bmc_mac,
-                power_state: observed.power_state,
-                error: observed.error,
+            results.push(ComponentPowerStateResult {
+                mac_address: ep.bmc_mac,
+                power_state: observed,
             });
         }
 
@@ -5089,7 +5082,8 @@ impl ComputeTrayManager for RmsBackend {
 mod tests {
     use api_test_helper::mock_rms::MockRmsApi;
     use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
-    use carbide_test_support::{Check, check_values, value_scenarios};
+    use carbide_test_support::Outcome::{FailsWith, Yields};
+    use carbide_test_support::{Case, Check, check_cases_async, check_values, value_scenarios};
     use carbide_uuid::machine::MachineId;
     use carbide_uuid::power_shelf::PowerShelfId;
     use carbide_uuid::rack::RackId;
@@ -6580,6 +6574,206 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rms_power_observations_preserve_states_and_reject_invalid_values() {
+        let cases = [
+            ("on", Some("ON"), Yields(Some(PowerState::On))),
+            ("off", Some("Off"), Yields(Some(PowerState::Off))),
+            (
+                "powering on",
+                Some("pOwErInGoN"),
+                Yields(Some(PowerState::PoweringOn)),
+            ),
+            (
+                "powering off",
+                Some("PoweringOff"),
+                Yields(Some(PowerState::PoweringOff)),
+            ),
+            ("paused", Some("Paused"), Yields(Some(PowerState::Paused))),
+            ("reset", Some("Reset"), Yields(Some(PowerState::Reset))),
+            (
+                "explicit unknown",
+                Some("UNKNOWN"),
+                Yields(Some(PowerState::Unknown)),
+            ),
+            ("matching node absent", None, Yields(None)),
+            (
+                "unrecognized state",
+                Some("sleeping"),
+                FailsWith("unrecognized RMS power state: \"sleeping\"".to_owned()),
+            ),
+            (
+                "empty state",
+                Some(""),
+                FailsWith("unrecognized RMS power state: \"\"".to_owned()),
+            ),
+        ];
+        check_cases_async(
+            cases.map(|(scenario, input, expect)| Case {
+                scenario,
+                input,
+                expect,
+            }),
+            |power_state| async move {
+                let mut node_power_states = vec![rms::NodePowerState {
+                    node_id: "another-node".to_owned(),
+                    pstate: "OFF".to_owned(),
+                }];
+                if let Some(power_state) = power_state {
+                    node_power_states.push(rms::NodePowerState {
+                        node_id: "node-1".to_owned(),
+                        pstate: power_state.to_owned(),
+                    });
+                }
+
+                let mock = MockRmsApi::new();
+                mock.enqueue_batch_get_power_state(Ok(rms::BatchGetPowerStateResponse {
+                    response: Some(rms::NodeBatchResponse {
+                        status: rms::ReturnCode::Success as i32,
+                        ..Default::default()
+                    }),
+                    node_power_states,
+                }))
+                .await;
+                let device = rms::NodeInfo {
+                    node_id: "node-1".to_owned(),
+                    rack_id: "rack-1".to_owned(),
+                    ..Default::default()
+                };
+                let observed = query_rms_power_state(
+                    &mock,
+                    device.clone(),
+                    "node-1",
+                    PS_MAC_1.parse().expect("power shelf MAC"),
+                    "power shelf",
+                )
+                .await;
+                let calls = mock.batch_get_power_state_calls().await;
+                assert_eq!(calls.len(), 1);
+                assert_eq!(
+                    calls[0].nodes.as_ref().expect("request nodes").nodes,
+                    [device]
+                );
+                observed
+            },
+        )
+        .await;
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn power_observations_identify_management_macs_in_endpoint_order(pool: sqlx::PgPool) {
+        let (mock, backend, _, ps1, ps2, sw1, sw2) = make_backend(&pool).await;
+        for (node_id, pstate) in [
+            (sw2.to_string(), "ON"),
+            (sw1.to_string(), "OFF"),
+            (ps2.to_string(), "OFF"),
+            (ps1.to_string(), "ON"),
+        ] {
+            mock.enqueue_batch_get_power_state(Ok(rms::BatchGetPowerStateResponse {
+                response: Some(rms::NodeBatchResponse {
+                    status: rms::ReturnCode::Success as i32,
+                    ..Default::default()
+                }),
+                node_power_states: vec![rms::NodePowerState {
+                    node_id,
+                    pstate: pstate.to_owned(),
+                }],
+            }))
+            .await;
+        }
+
+        let switches = [make_sw_endpoint(SW_MAC_2), make_sw_endpoint(SW_MAC_1)];
+        for switch in &switches {
+            assert_ne!(switch.bmc_mac, switch.nvos_mac);
+        }
+        let switch_results = NvSwitchManager::get_power_state(&backend, &switches)
+            .await
+            .expect("read switch power states");
+        assert_eq!(
+            switch_results,
+            [
+                ComponentPowerStateResult {
+                    mac_address: SW_MAC_2.parse().expect("second switch BMC MAC"),
+                    power_state: Ok(Some(PowerState::On)),
+                },
+                ComponentPowerStateResult {
+                    mac_address: SW_MAC_1.parse().expect("first switch BMC MAC"),
+                    power_state: Ok(Some(PowerState::Off)),
+                },
+            ],
+        );
+
+        let shelves = [make_ps_endpoint(PS_MAC_2), make_ps_endpoint(PS_MAC_1)];
+        let shelf_results = PowerShelfManager::get_power_state(&backend, &shelves)
+            .await
+            .expect("read power shelf power states");
+        assert_eq!(
+            shelf_results,
+            [
+                ComponentPowerStateResult {
+                    mac_address: PS_MAC_2.parse().expect("second shelf PMC MAC"),
+                    power_state: Ok(Some(PowerState::Off)),
+                },
+                ComponentPowerStateResult {
+                    mac_address: PS_MAC_1.parse().expect("first shelf PMC MAC"),
+                    power_state: Ok(Some(PowerState::On)),
+                },
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn rms_power_batch_failure_rejects_returned_observations() {
+        check_cases_async(
+            [
+                Case {
+                    scenario: "failed batch status",
+                    input: rms::NodeBatchResponse {
+                        status: rms::ReturnCode::Failure as i32,
+                        message: "power read failed".to_owned(),
+                        ..Default::default()
+                    },
+                    expect: FailsWith("power read failed".to_owned()),
+                },
+                Case {
+                    scenario: "failed node count despite success status",
+                    input: rms::NodeBatchResponse {
+                        status: rms::ReturnCode::Success as i32,
+                        stats: Some(rms::NodeOperationStats {
+                            failed_nodes: 1,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    expect: FailsWith(format!(
+                        "batch status {}, failed_nodes 1",
+                        rms::ReturnCode::Success as i32,
+                    )),
+                },
+            ],
+            |response| async move {
+                let mock = MockRmsApi::new();
+                mock.enqueue_batch_get_power_state(Ok(rms::BatchGetPowerStateResponse {
+                    response: Some(response),
+                    node_power_states: vec![rms::NodePowerState {
+                        node_id: "node-1".to_owned(),
+                        pstate: "ON".to_owned(),
+                    }],
+                }))
+                .await;
+                query_rms_power_state(
+                    &mock,
+                    rms::NodeInfo::default(),
+                    "node-1",
+                    PS_MAC_1.parse().expect("power shelf MAC"),
+                    "power shelf",
+                )
+                .await
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn rms_calls_record_the_external_call_histogram_by_outcome() {
         use carbide_instrument::testing::MetricsCapture;
 
@@ -6607,7 +6801,7 @@ mod tests {
             );
         }
         assert!(
-            observed[1].error.is_some(),
+            observed[1].is_err(),
             "transport failure surfaces as an error"
         );
 
