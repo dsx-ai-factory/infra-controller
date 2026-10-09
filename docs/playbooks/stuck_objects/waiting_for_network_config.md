@@ -4,6 +4,10 @@ Use this playbook when an assigned managed host waits in
 `WaitingForNetworkConfig` or `WaitingForRebootToReady`. These states protect the
 normal PXE boot path during initial instance provisioning.
 
+For a live network update, use it when the host waits in
+`NetworkConfigUpdate/WaitingForConfigSynced` or
+`NetworkConfigUpdate/ReleaseOldResources`.
+
 ## Readiness Checks
 
 `WaitingForNetworkConfig` evaluates these conditions before provisioning can
@@ -28,12 +32,14 @@ The following paths have different behavior:
 - A host without associated DPUs skips DPU observations and aggregate health in
   `WaitingForNetworkConfig`. It still receives the aggregate health check before
   the normal restart.
-- Instance deletion bypasses the network wait and both final readiness checks.
+- During initial provisioning, instance deletion bypasses the network wait and
+  both final readiness checks. A pending live update must still pass its checks.
 - An explicit custom iPXE request bypasses both final readiness checks.
-- A live network update uses `NetworkConfigUpdate/WaitingForConfigSynced`. A
-  host with associated DPUs waits for current observations and aggregate
-  health. A host without associated DPUs skips both checks. This path does not
-  apply the p0 PXE gate or restart the host.
+- A live network update checks acknowledgements and aggregate health in both
+  `WaitingForConfigSynced` and `ReleaseOldResources`. It does not restart the
+  host or apply the p0 PXE gate. Refer to
+  [Live Network Update Resource Release](../../architecture/state_machines/managedhost.md#live-network-update-resource-release)
+  for the required reports and the exception for hosts without DPUs.
 
 Refer to
 [DPU ToR Uplink Health](../../dpu-management/dpu_configuration.md#dpu-tor-uplink-health)
@@ -52,8 +58,11 @@ nico-admin-cli dpu health-report show <dpu-machine-id>
 nico-admin-cli machine health-report show <host-machine-id>
 ```
 
-The DPU network configuration shows the desired managed host and instance
-versions. The status view shows the last observed versions and DPU agent health.
+The configuration view shows the network versions NICo wants the DPU to apply:
+the managed-host version and the instance version. The status view shows the
+managed-host version the DPU reported and its health. It does not show the
+reported instance version.
+
 The health report commands show the sources and whether each uses `Merge` or
 `Replace`.
 
@@ -62,8 +71,8 @@ The persisted handler reason identifies the active gate:
 | Wait Reason | Interpretation |
 |---|---|
 | `Waiting for DPU agent(s) to apply network config and report healthy network` | A managed host configuration version has not synchronized. |
-| `Waiting for DPU agents to apply initial network config for DPUs: <comma-separated DPU IDs>` | One or more required DPU observations are missing. |
-| `Waiting for DPU agent to apply most recent network config for DPUs: <comma-separated DPU IDs>` | A DPU observation reports an older version. |
+| `Waiting for DPU agents to apply initial network config for DPUs: <comma-separated DPU IDs>` | The instance observation count differs from the required DPU count. The list identifies missing required observations, but can be empty when extra observations remain. |
+| `Waiting for DPU agent to apply most recent network config for DPUs: <comma-separated DPU IDs>` | A DPU instance observation does not match the desired version. |
 | `Waiting for lifecycle-blocking host health alerts to clear before PXE reboot` | An effective alert has `PreventHostStateChanges`. |
 | `Waiting for the primary DPU p0 BGP session to be established` | The effective primary p0 alert has `PreventAllocations`. |
 
@@ -88,6 +97,39 @@ host without managed DPUs, but still checks aggregate `PreventHostStateChanges`.
 Refer to
 [Health Report Overrides](../../architecture/health_aggregation.md#health-report-overrides)
 before changing an override.
+
+### Diagnose a Live Network Update
+
+NICo keeps the old resources and pending request while a live update waits.
+The managed-host and instance-version wait reasons above apply in both
+`WaitingForConfigSynced` and `ReleaseOldResources`.
+
+Check the DPU reports first:
+
+1. Compare the desired and observed managed-host versions for every DPU
+   associated with the host. Include DPUs whose tenant interfaces the update
+   removed. If an acknowledgement is missing, inspect the DPU agent logs for
+   errors applying the configuration.
+1. Check the instance observation count separately. Find the controller log
+   message `network observation count does not match DPU count` and compare
+   `network_observation_count` with `dpu_count`. An empty DPU list can mean that
+   a DPU whose interfaces were removed still has an old instance observation.
+
+An Admin configuration has no desired instance network version. An absent
+instance observation or a healthy report does not prove that the DPU applied
+Admin. The agent's `loop metrics` logs include
+`managed_host_network_config_version` and `instance_network_config_version`,
+but these local values do not prove that NICo received the report.
+
+If the counts and versions match, check the saved handler error and aggregate
+`PreventHostStateChanges` alerts. Blocking health records
+`state will not be advanced due to health probe alert`, not the PXE-specific
+health wait reason.
+
+A new blocking report can stop `ReleaseOldResources` even after
+`WaitingForConfigSynced` succeeded. NICo checks again from its saved state.
+After the required reports and health checks pass, cleanup completes and the
+host returns to `Assigned/Ready`.
 
 ## Diagnose Health Alerts
 
