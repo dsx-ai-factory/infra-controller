@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::http::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
+use axum::http::header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, HeaderMap, HeaderValue};
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use carbide_instrument::{Event, LabelValue, emit};
@@ -415,11 +415,15 @@ pub fn metadata_header_is_true(headers: &HeaderMap) -> bool {
         .is_some_and(|s| s.eq_ignore_ascii_case("true"))
 }
 
-/// Returns true when the request carries `X-Forwarded-For` (any value).
-///
-/// Per SPIFFE/IMDS SDD, identity requests must not include this header.
-pub fn request_has_x_forwarded_for(headers: &HeaderMap) -> bool {
-    headers.contains_key("x-forwarded-for")
+fn request_has_forwarding_header(headers: &HeaderMap) -> bool {
+    [
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+    ]
+    .iter()
+    .any(|name| headers.contains_key(*name))
 }
 
 pub fn accept_text_plain(headers: &HeaderMap) -> bool {
@@ -569,6 +573,13 @@ pub async fn forward_sign_proxy_http(
         .get(CONTENT_TYPE)
         .and_then(|v| HeaderValue::from_bytes(v.as_bytes()).ok());
 
+    let cache_control: Vec<_> = upstream
+        .headers()
+        .get_all(CACHE_CONTROL)
+        .iter()
+        .cloned()
+        .collect();
+
     let body_bytes = match upstream.bytes().await {
         Ok(b) => b,
         Err(error) => {
@@ -583,6 +594,9 @@ pub async fn forward_sign_proxy_http(
     let mut res = Response::builder().status(status);
     if let Some(ct) = content_type {
         res = res.header(CONTENT_TYPE, ct);
+    }
+    for value in cache_control {
+        res = res.header(CACHE_CONTROL, value);
     }
     let response = match res.body(axum::body::Body::from(body_bytes)) {
         Ok(response) => response,
@@ -649,10 +663,10 @@ pub async fn serve_meta_data_identity<S: MetaDataIdentitySigner + ?Sized>(
             .into_response();
     }
 
-    if request_has_x_forwarded_for(&headers) {
+    if request_has_forwarding_header(&headers) {
         return (
             StatusCode::BAD_REQUEST,
-            "X-Forwarded-For header is not permitted for meta-data/identity\n",
+            "Forwarding headers are not permitted for meta-data/identity\n",
         )
             .into_response();
     }
@@ -699,6 +713,7 @@ pub async fn serve_meta_data_identity<S: MetaDataIdentitySigner + ?Sized>(
 #[cfg(test)]
 mod tests {
     use axum::Router;
+    use axum::response::AppendHeaders;
     use axum::routing::get;
     use carbide_instrument::testing::{CapturedLog, MetricsCapture, capture_logs};
     use carbide_test_support::Outcome::Yields;
@@ -751,35 +766,6 @@ mod tests {
         assert!(metadata_header_is_true(&h2));
     }
 
-    #[test]
-    fn request_has_x_forwarded_for_cases() {
-        let cases: &[(&[(&str, &str)], bool)] = &[
-            (&[], false),
-            (&[("Metadata", "true")], false),
-            (&[("X-Forwarded-For", "1.2.3.4")], true),
-            (&[("x-forwarded-for", "1.2.3.4")], true),
-            (
-                &[("Metadata", "true"), ("X-Forwarded-For", "1.2.3.4")],
-                true,
-            ),
-        ];
-
-        for (header_pairs, want) in cases {
-            let mut headers = HeaderMap::new();
-            for (name, value) in *header_pairs {
-                headers.insert(
-                    *name,
-                    HeaderValue::from_str(value).expect("valid header value"),
-                );
-            }
-            assert_eq!(
-                request_has_x_forwarded_for(&headers),
-                *want,
-                "header_pairs={header_pairs:?}"
-            );
-        }
-    }
-
     struct StubIdentitySigner;
 
     #[async_trait]
@@ -804,21 +790,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn serve_meta_data_identity_rejects_x_forwarded_for() {
-        let uri: Uri = "http://169.254.169.254/latest/meta-data/identity?aud=test"
-            .parse()
-            .unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert("metadata", HeaderValue::from_static("true"));
-        headers.insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4"));
-
-        let response = serve_meta_data_identity(&StubIdentitySigner, uri, headers).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            &body[..],
-            b"X-Forwarded-For header is not permitted for meta-data/identity\n"
-        );
+    async fn serve_meta_data_identity_rejects_forwarding_headers() {
+        check_cases_async(
+            [
+                "forwarded",
+                "x-forwarded-for",
+                "x-forwarded-host",
+                "x-forwarded-proto",
+            ]
+            .map(|name| Case {
+                scenario: name,
+                input: name,
+                expect: Yields((
+                    StatusCode::BAD_REQUEST,
+                    "Forwarding headers are not permitted for meta-data/identity\n".to_string(),
+                )),
+            }),
+            |name| async move {
+                let uri: Uri = "http://169.254.169.254/latest/meta-data/identity?aud=test"
+                    .parse()
+                    .unwrap();
+                let mut headers = HeaderMap::new();
+                headers.insert("metadata", HeaderValue::from_static("true"));
+                headers.insert(name, HeaderValue::from_static(""));
+                let response = serve_meta_data_identity(&StubIdentitySigner, uri, headers).await;
+                let status = response.status();
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                Ok::<_, ()>((status, String::from_utf8(body.to_vec()).unwrap()))
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -911,6 +912,7 @@ mod tests {
     struct SignProxyResponseObservation {
         status: StatusCode,
         content_type: Option<String>,
+        cache_control: Vec<String>,
         body: String,
         counter_deltas: [f64; 5],
     }
@@ -935,6 +937,7 @@ mod tests {
                 (
                     status,
                     [(CONTENT_TYPE, "application/special")],
+                    AppendHeaders([(CACHE_CONTROL, "private"), (CACHE_CONTROL, "no-store")]),
                     format!("upstream status {}", status.as_u16()),
                 )
             }),
@@ -961,6 +964,7 @@ mod tests {
                     expect: Yields(SignProxyResponseObservation {
                         status: StatusCode::CREATED,
                         content_type: Some("application/special".to_string()),
+                        cache_control: vec!["private".to_string(), "no-store".to_string()],
                         body: "upstream status 201".to_string(),
                         counter_deltas: [0.0; 5],
                     }),
@@ -971,6 +975,7 @@ mod tests {
                     expect: Yields(SignProxyResponseObservation {
                         status: StatusCode::BAD_REQUEST,
                         content_type: Some("application/special".to_string()),
+                        cache_control: vec!["private".to_string(), "no-store".to_string()],
                         body: "upstream status 400".to_string(),
                         counter_deltas: [0.0; 5],
                     }),
@@ -981,6 +986,7 @@ mod tests {
                     expect: Yields(SignProxyResponseObservation {
                         status: StatusCode::SERVICE_UNAVAILABLE,
                         content_type: Some("application/special".to_string()),
+                        cache_control: vec!["private".to_string(), "no-store".to_string()],
                         body: "upstream status 503".to_string(),
                         counter_deltas: [0.0, 0.0, 0.0, 0.0, 1.0],
                     }),
@@ -1005,11 +1011,18 @@ mod tests {
                         .get(CONTENT_TYPE)
                         .and_then(|value| value.to_str().ok())
                         .map(str::to_string);
+                    let cache_control = response
+                        .headers()
+                        .get_all(CACHE_CONTROL)
+                        .iter()
+                        .map(|value| value.to_str().unwrap().to_string())
+                        .collect();
                     let body = response.into_body().collect().await.unwrap().to_bytes();
 
                     Ok::<_, ()>(SignProxyResponseObservation {
                         status,
                         content_type,
+                        cache_control,
                         body: String::from_utf8(body.to_vec()).unwrap(),
                         counter_deltas: [
                             metrics.counter_delta(
