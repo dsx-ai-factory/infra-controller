@@ -215,4 +215,63 @@ fi
 assert_eq "unknown argument leaves image_url unchanged" "unchanged-url" "$image_url"
 assert_eq "unknown argument leaves image_disk unchanged" "unchanged-disk" "$image_disk"
 
+echo "image auth header construction"
+image_url="https://images.example/image.qcow2"
+
+image_auth_token=""
+image_auth_type=""
+build_image_auth_args
+assert_eq "no-token auth arg count" "0" "${#image_auth[@]}"
+
+image_auth_token="my-token"
+image_auth_type=""
+build_image_auth_args
+assert_eq "default auth type" "Bearer" "$image_auth_type"
+assert_eq "auth arg count" "2" "${#image_auth[@]}"
+assert_eq "auth flag" "-H" "${image_auth[0]}"
+assert_eq "auth header value" "Authorization: Bearer my-token" "${image_auth[1]}"
+
+image_auth_token="my-token"
+image_auth_type="Basic"
+build_image_auth_args
+assert_eq "explicit auth type is not overridden" "Basic" "$image_auth_type"
+assert_eq "basic auth header value" "Authorization: Basic my-token" "${image_auth[1]}"
+
+image_auth_type="Token"
+build_image_auth_args
+assert_eq "token auth header value" "Authorization: Token my-token" "${image_auth[1]}"
+
+echo "curl_url forwards the url and the auth header as separate arguments"
+# curl_url pipes through tee, so curl runs in a subshell: capture its
+# arguments via a file rather than a variable, which would not survive
+# back to this shell.
+mock_curl_args_file="$temp_dir/curl_args"
+curl() {
+	printf '%s\n' "$@" >"$mock_curl_args_file"
+	return 0
+}
+read_mock_curl_args() {
+	mock_curl_args=()
+	while IFS= read -r line; do
+		mock_curl_args+=("$line")
+	done <"$mock_curl_args_file"
+}
+
+image_auth=()
+curl_url "$image_url"
+read_mock_curl_args
+assert_eq "unauthenticated curl arg count" "7" "${#mock_curl_args[@]}"
+assert_eq "unauthenticated curl url is the last argument" "$image_url" "${mock_curl_args[6]}"
+
+image_auth_token="my-token"
+image_auth_type="Bearer"
+build_image_auth_args
+curl_url "$image_url" "${image_auth[@]}"
+read_mock_curl_args
+assert_eq "authenticated curl arg count" "9" "${#mock_curl_args[@]}"
+assert_eq "authenticated curl auth flag" "-H" "${mock_curl_args[6]}"
+assert_eq "authenticated curl header stays one argument" \
+	"Authorization: Bearer my-token" "${mock_curl_args[7]}"
+assert_eq "authenticated curl url is the last argument" "$image_url" "${mock_curl_args[8]}"
+
 echo "disk imaging identifier tests passed"

@@ -42,8 +42,22 @@ update_grub_cfg="yes"
 
 function curl_url() {
 	url=$1
-	auth=$2
-	curl --retry 5 --retry-all-errors -k -L -O $auth $url 2>&1 | tee $log_output
+	shift
+	curl --retry 5 --retry-all-errors -k -L -O "$@" "$url" 2>&1 | tee $log_output
+}
+
+# build_image_auth_args populates the image_auth array with the curl arguments
+# needed to authenticate the image download, or leaves it empty when
+# image_auth_token is unset. Kept as an array, not a string, so the header
+# value survives as a single argument instead of being word-split.
+function build_image_auth_args() {
+	image_auth=()
+	if [ -n "$image_auth_token" ]; then
+		if [ -z "$image_auth_type" ]; then
+			image_auth_type=Bearer
+		fi
+		image_auth=(-H "Authorization: $image_auth_type $image_auth_token")
+	fi
 }
 
 function verify_sha() {
@@ -1058,15 +1072,10 @@ function main() {
 		file=$(basename $image_url)
 	fi
 
-	if [ ! -z "$image_auth_token" ]; then
-		if [ -z "$image_auth_type" ]; then
-		       image_auth_type=Bearer
-		fi
-		image_auth="-H \"Authorization: $image_auth_type $image_auth_token\""
-	fi
+	build_image_auth_args
 
 	echo "Downloading image from $image_url" | tee $log_output
-	curl_url $image_url $image_auth
+	curl_url "$image_url" "${image_auth[@]}"
 	if [ ! -z "$image_sha" ]; then
 		echo "Verifying image with digest $image_sha" | tee $log_output
 		verify_sha $image_sha
