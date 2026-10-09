@@ -373,6 +373,8 @@ impl NvueClient {
             error_issues: revision.error_issue_summaries(),
         };
 
+        // If NVUE gives us a rollback target, we'll wait for the rollback to
+        // finish before returning control to the caller.
         if let Some(rollback_target) = revision.rollback_target() {
             // Note that our behavior here is not ideal; we're not handling
             // the (probably unlikely) case of a rollback failing or timing
@@ -383,8 +385,9 @@ impl NvueClient {
             // return a different error type; NvueClientError cannot carry the
             // amount of detail we need to describe our failure modes accurately
             // to the caller.
-            if let Err(e) = self.poll_revision_to_terminal_state(rollback_target).await {
-                tracing::warn!("error polling rollback target: {e}");
+            if let Err(rollback_error) = self.poll_revision_to_terminal_state(rollback_target).await
+            {
+                tracing::warn!(%revision_id, %rollback_target, %rollback_error, "error polling rollback target");
             }
         }
         Err(error)
