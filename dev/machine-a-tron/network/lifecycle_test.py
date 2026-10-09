@@ -374,13 +374,20 @@ class Lifecycle:
                 self.save()
             self.result["result"] = "PASS"
         except BaseException as error:
-            self.result["error"] = str(error)
+            self.result["error"] = repr(error)
             raise
         finally:
-            self.cleanup()
-            if self.result["cleanup_errors"]:
-                self.result["result"] = "FAIL"
-            self.save()
+            try:
+                self.cleanup()
+            except BaseException as error:
+                self.result["cleanup_errors"].append(
+                    f"cleanup interrupted; owned resources may remain: {error!r}"
+                )
+                raise
+            finally:
+                if self.result["cleanup_errors"]:
+                    self.result["result"] = "FAIL"
+                self.save()
         if self.result["result"] != "PASS":
             raise RuntimeError("lifecycle cleanup failed; inspect result.json")
         print(json.dumps(self.result, indent=2))

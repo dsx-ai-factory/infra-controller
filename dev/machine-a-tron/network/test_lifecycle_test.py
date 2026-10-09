@@ -153,6 +153,37 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse(objects)
         self.assertEqual(sum(m == "ReleaseInstance" for m, _ in calls), 2)
 
+    def test_interruption_records_failure_before_propagating(self):
+        for phase in ("execution", "cleanup"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                runner = self.runner()
+                runner.args.output = Path(directory) / "run"
+                runner.args.ipv4_prefix = ipaddress.ip_network("10.84.200.0/29")
+                runner.args.ipv6_prefix = ipaddress.ip_network("fd42:84:200::/120")
+                runner.preflight = Mock()
+                runner.wait = Mock(return_value=[])
+                runner.allocation_requests = Mock(return_value=[])
+                runner.packet_check = Mock()
+                runner.release_instances = Mock()
+                runner.cleanup = Mock()
+                if phase == "execution":
+                    runner.rpc.side_effect = KeyboardInterrupt
+                else:
+                    runner.cleanup.side_effect = KeyboardInterrupt
+                with self.assertRaises(KeyboardInterrupt):
+                    runner.execute()
+                result = json.loads((runner.args.output / "result.json").read_text())
+                self.assertEqual(result["result"], "FAIL")
+                runner.cleanup.assert_called_once()
+                if phase == "execution":
+                    self.assertEqual(result["error"], "KeyboardInterrupt()")
+                    self.assertEqual(result["cleanup_errors"], [])
+                else:
+                    self.assertIn("KeyboardInterrupt()", result["cleanup_errors"][0])
+                    self.assertIn(
+                        "owned resources may remain", result["cleanup_errors"][0]
+                    )
+
     def test_signal_during_packet_launch_terminates_child_before_returning(self):
         runner = self.runner()
         runner.args.mat_url = "http://mat.invalid"
