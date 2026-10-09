@@ -536,6 +536,14 @@ pub struct MachineATronConfig {
     /// Set this to the path of a directory that can be used to persist machine info between runs
     pub persist_dir: Option<PathBuf>,
 
+    /// Optional directory for credential-free primary-DPU tenant network snapshots.
+    /// Omitted disables export. Files refresh on network observations and are removed
+    /// on release, power-off, or normal shutdown. Use a dedicated directory per MAT.
+    /// Export errors fail the observation. Abrupt termination can leave stale files;
+    /// the external packet test rejects snapshots older than 120 seconds.
+    #[serde(default)]
+    pub tenant_network_snapshot_dir: Option<PathBuf>,
+
     #[serde(default)]
     /// Set this to true to delete created machines from the API on quit
     pub cleanup_on_quit: bool,

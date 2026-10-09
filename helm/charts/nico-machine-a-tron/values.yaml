@@ -197,6 +197,9 @@ machineATron:
   mockBmcSshPort: 2222
   configureBmcProxyHost: ""
   persistDir: "/tmp/machine-a-tron-data"
+  ## Optional in-pod directory for credential-free tenant packet-test snapshots.
+  ## Empty disables export. No host mount or privileged networking is added.
+  tenantNetworkSnapshotDir: ""
   cleanupOnQuit: false
   enableIpmiSimulation: false
   registerExpectedMachines: true

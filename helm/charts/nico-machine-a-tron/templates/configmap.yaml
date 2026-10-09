@@ -100,6 +100,9 @@ data:
     {{- if $root.Values.persistence.enabled }}
     persist_dir = {{ $root.Values.machineATron.persistDir | quote }}
     {{- end }}
+    {{- if $root.Values.machineATron.tenantNetworkSnapshotDir }}
+    tenant_network_snapshot_dir = {{ $root.Values.machineATron.tenantNetworkSnapshotDir | quote }}
+    {{- end }}
     cleanup_on_quit = {{ $root.Values.machineATron.cleanupOnQuit }}
     register_expected_machines = {{ $root.Values.machineATron.registerExpectedMachines }}
     {{- if $root.Values.machineATron.enableIpmiSimulation }}
