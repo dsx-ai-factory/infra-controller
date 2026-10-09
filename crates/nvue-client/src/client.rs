@@ -414,7 +414,7 @@ impl NvueClient {
                     },
                     last_state: revision.state.clone(),
                     progress: revision.transition_progress().map(str::to_owned),
-                    error_issues: Vec::new(),
+                    error_issues: revision.error_issue_summaries(),
                 });
             }
         }
