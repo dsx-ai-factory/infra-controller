@@ -28,7 +28,9 @@ use attestation::{
 };
 use carbide_credential_rotation::site_explorer_pause::{self, GateDecision};
 use carbide_credential_rotation::{RotationStep, advance};
-use carbide_firmware::{FirmwareConfig, FirmwareConfigSnapshot, FirmwareDownloader};
+use carbide_firmware::{
+    ArtifactStatus, FirmwareConfig, FirmwareConfigSnapshot, FirmwareDownloader,
+};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::conv::{
     IntoLibredfish, IntoModel, machine_last_reboot_requested_mode,
@@ -11509,14 +11511,28 @@ impl HostUpgradeState {
 
         match &artifact.source {
             ResolvedFirmwareArtifactSource::Remote { url, sha256 } => {
-                if !self.downloader.available(&artifact.local_path, url, sha256) {
-                    tracing::debug!(
-                        artifact_path = %artifact.local_path.display(),
-                        %url,
-                        "firmware artifact is being downloaded, update deferred"
-                    );
-
-                    return Ok(StateHandlerOutcome::do_nothing());
+                match self.downloader.available(&artifact.local_path, url, sha256) {
+                    ArtifactStatus::Available => {}
+                    ArtifactStatus::Downloading => {
+                        return Ok(StateHandlerOutcome::wait(format!(
+                            "waiting for firmware artifact {} to download",
+                            artifact.local_path.display()
+                        )));
+                    }
+                    ArtifactStatus::Failed { error } => {
+                        return Ok(StateHandlerOutcome::transition(scenario.actual_new_state(
+                            HostReprovisionState::FailedFirmwareUpgrade {
+                                firmware_type: *component_type,
+                                report_time: Some(Utc::now()),
+                                reason: Some(format!(
+                                    "firmware artifact {} for machine {} could not be downloaded: {error}",
+                                    artifact.local_path.display(),
+                                    snapshot.id
+                                )),
+                            },
+                            state.managed_state.get_host_repro_retry_count(),
+                        )));
+                    }
                 }
             }
             ResolvedFirmwareArtifactSource::Local => {

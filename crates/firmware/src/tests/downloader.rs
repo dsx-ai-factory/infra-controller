@@ -57,26 +57,36 @@ async fn wait_for_downloads(metrics: &MetricsCapture, outcome: &str, expect: u64
     }
 }
 
+/// Calls to `available` made while a download is in flight join it instead of
+/// starting another, so the source is fetched once.
 #[tokio::test]
-async fn test_firmware_downloader_repeated() {
-    // Check that if we get a bunch of parallel requests, only one actually downloads
-    let filename = Path::new("/tmp/test_firmware_repeated");
-    let url = "file:///dev/null".to_string();
-    let _ = std::fs::remove_file(filename);
+async fn repeated_available_calls_share_one_download() {
+    let mut server = mockito::Server::new_async().await;
+    let source = server
+        .mock("GET", "/fw.bin")
+        .with_body("firmware artifact")
+        .expect(1)
+        .create_async()
+        .await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let filename = temp_dir.path().join("fw.bin");
+    let url = format!("{}/fw.bin", server.url());
     let downloader = FirmwareDownloader::new();
 
+    // The test runtime is single-threaded, so the download task cannot run
+    // until the test yields: every call below is made while it is pending.
     for _ in 0..9 {
-        if downloader.available_actual(filename, &url, "", Some(std::time::Duration::from_secs(1)))
-        {
-            panic!("Should not have had something");
-        }
+        assert_eq!(
+            downloader.available(&filename, &url, ""),
+            ArtifactStatus::Downloading,
+        );
     }
 
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    if !downloader.available_actual(filename, &url, "", Some(std::time::Duration::from_secs(1))) {
-        panic!("Should have succeeded");
-    }
-    let _ = std::fs::remove_file(filename);
+    assert_eq!(
+        status_after_download(&downloader, &filename, &url).await,
+        ArtifactStatus::Available,
+    );
+    source.assert_async().await;
 }
 
 #[tokio::test]
@@ -97,7 +107,7 @@ async fn test_download_without_checksum() -> Result<(), std::io::Error> {
 
     let mut count = 0;
     loop {
-        if !downloader.available(filename, &url, "") {
+        if downloader.available(filename, &url, "") != ArtifactStatus::Available {
             tokio::time::sleep(Duration::from_millis(10)).await;
             count += 1;
             if count >= 1000 {
@@ -134,7 +144,7 @@ async fn test_available_verifies_sha256_checksum() -> Result<(), std::io::Error>
 
     let mut count = 0;
     loop {
-        if !downloader.available(filename, &url, &checksum) {
+        if downloader.available(filename, &url, &checksum) != ArtifactStatus::Available {
             tokio::time::sleep(Duration::from_millis(10)).await;
             count += 1;
             if count >= 1000 {
@@ -168,11 +178,14 @@ async fn test_available_rejects_stale_cache_with_wrong_sha256() -> Result<(), st
     let downloader = FirmwareDownloader::new();
     let checksum = hex::encode(sha2::Sha256::digest(contents));
 
-    assert!(!downloader.available(filename, &url, &checksum));
+    assert_eq!(
+        downloader.available(filename, &url, &checksum),
+        ArtifactStatus::Downloading,
+    );
 
     let mut count = 0;
     loop {
-        if !downloader.available(filename, &url, &checksum) {
+        if downloader.available(filename, &url, &checksum) != ArtifactStatus::Available {
             tokio::time::sleep(Duration::from_millis(10)).await;
             count += 1;
             if count >= 1000 {
@@ -201,7 +214,10 @@ async fn test_available_checksum_failure_does_not_publish_file() -> Result<(), s
     let downloader = FirmwareDownloader::new();
 
     let metrics = MetricsCapture::start();
-    assert!(!downloader.available(filename, &url, &"0".repeat(64)));
+    assert_eq!(
+        downloader.available(filename, &url, &"0".repeat(64)),
+        ArtifactStatus::Downloading,
+    );
     wait_for_downloads(&metrics, "checksum", 1).await;
 
     assert!(!filename.exists());
@@ -222,11 +238,84 @@ async fn test_available_fetch_failure_counts() -> Result<(), std::io::Error> {
     let downloader = FirmwareDownloader::new();
 
     let metrics = MetricsCapture::start();
-    assert!(!downloader.available(filename, &url, ""));
+    assert_eq!(
+        downloader.available(filename, &url, ""),
+        ArtifactStatus::Downloading,
+    );
     wait_for_downloads(&metrics, "fetch", 1).await;
 
     assert!(!filename.exists());
     Ok(())
+}
+
+/// Polls until the attempt in flight ends and returns what the next caller sees.
+async fn status_after_download(
+    downloader: &FirmwareDownloader,
+    filename: &Path,
+    url: &str,
+) -> ArtifactStatus {
+    for _ in 0..1000 {
+        let status = downloader.available(filename, url, "");
+        if status != ArtifactStatus::Downloading {
+            return status;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("download from {url} did not finish");
+}
+
+/// A failed attempt is reported to the next caller once, and the call after
+/// that starts a new attempt, so a caller retries by asking again.
+#[tokio::test]
+async fn failed_download_is_reported_once_then_retried() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let filename = temp_dir.path().join("fw.bin");
+    let src_filename = temp_dir.path().join("src.bin");
+    let url = format!("file://{}", src_filename.display());
+    let downloader = FirmwareDownloader::new();
+
+    assert_eq!(
+        downloader.available(&filename, &url, ""),
+        ArtifactStatus::Downloading
+    );
+    let ArtifactStatus::Failed { error } =
+        status_after_download(&downloader, &filename, &url).await
+    else {
+        panic!("a missing source should fail the download");
+    };
+    assert!(
+        error.contains(&url),
+        "error should name the source: {error}"
+    );
+
+    std::fs::write(&src_filename, b"firmware artifact").unwrap();
+    assert_eq!(
+        downloader.available(&filename, &url, ""),
+        ArtifactStatus::Downloading,
+    );
+    assert_eq!(
+        status_after_download(&downloader, &filename, &url).await,
+        ArtifactStatus::Available,
+    );
+}
+
+/// The failure text reaches operators, so a presigned URL's query string must
+/// not survive in it, including inside the HTTP client's own error.
+#[tokio::test]
+async fn download_failure_error_omits_url_query() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let filename = temp_dir.path().join("fw.bin");
+    // Nothing listens on port 1, so the connection is refused immediately.
+    let url = "http://127.0.0.1:1/fw.bin?X-Amz-Signature=secret";
+    let downloader = FirmwareDownloader::new();
+
+    downloader.available(&filename, url, "");
+    let ArtifactStatus::Failed { error } = status_after_download(&downloader, &filename, url).await
+    else {
+        panic!("a refused connection should fail the download");
+    };
+    assert!(error.contains("http://127.0.0.1:1/fw.bin"), "{error}");
+    assert!(!error.contains("secret"), "{error}");
 }
 
 #[test]
@@ -325,7 +414,10 @@ fn unavailable_absent_artifact_without_url_counts_the_blocker() {
     let metrics = MetricsCapture::start();
 
     let logs = capture_logs(|| {
-        assert!(!downloader.available(&filename, "", ""));
+        assert!(matches!(
+            downloader.available(&filename, "", ""),
+            ArtifactStatus::Failed { .. },
+        ));
     });
 
     assert_eq!(logs.len(), 1);
@@ -354,10 +446,13 @@ fn unavailable_stale_artifact_removal_failure_counts_the_blocker() {
     let metrics = MetricsCapture::start();
 
     let logs = capture_logs(|| {
-        assert!(!downloader.available(
-            &filename,
-            "https://firmware.example/stale.fwpkg",
-            "expected-checksum",
+        assert!(matches!(
+            downloader.available(
+                &filename,
+                "https://firmware.example/stale.fwpkg",
+                "expected-checksum",
+            ),
+            ArtifactStatus::Failed { .. },
         ));
     });
 
