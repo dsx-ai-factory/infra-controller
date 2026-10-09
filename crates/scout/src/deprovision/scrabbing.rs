@@ -937,7 +937,8 @@ async fn set_ib_link_up() -> Result<(), CarbideClientError> {
                                 error = %e,
                                 "Failed to set KEEP_IB_LINK_UP_P1=1 on IB device",
                             );
-                            return Err(e);
+                            //Allow to pass error to support Nvidia ConnectX7 mezz for Nvidia B300 System
+                            //It has no appropriate FW and functionality.
                         }
                     }
                     // Set P2 (optional - only dual-port devices have P2)
@@ -996,7 +997,8 @@ async fn reset_ib_devices() -> Result<(), CarbideClientError> {
                                 error = %e,
                                 "Failed to reset IB device",
                             );
-                            return Err(e);
+                            //Allow to pass error to support Nvidia ConnectX7 mezz for Nvidia B300 System
+                            //It has no appropriate FW and functionality.
                         }
                     }
                 }
