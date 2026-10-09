@@ -3484,6 +3484,49 @@ func TestTenantHasTargetedInstanceCreation(t *testing.T) {
 	})
 }
 
+func TestTenantHasSiteAccess(t *testing.T) {
+	ctx := context.Background()
+	dbSession := TestInitDB(t)
+	defer dbSession.Close()
+	TestSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, uuid.NewString(), "site-access-org", []string{authz.ProviderAdminRole})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "provider", "site-access-org", user)
+	site := TestBuildSite(t, dbSession, ip, "site", user)
+	buildTenant := func(name string, privileged bool) *cdbm.Tenant {
+		tn := TestBuildTenant(t, dbSession, name, name+"-org", user)
+		if privileged {
+			TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn.ID, tn.Org, cdbm.TenantAccountStatusReady, user)
+		} else {
+			TestBuildTenantAccount(t, dbSession, ip, &tn.ID, tn.Org, cdbm.TenantAccountStatusReady, user)
+		}
+		return tn
+	}
+
+	allocated := buildTenant("allocated", false)
+	TestBuildAllocation(t, dbSession, site, allocated, "allocation", user)
+	blocked := buildTenant("blocked", true)
+	cdbm.TestBuildTenantSite(t, dbSession, blocked, site, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, user)
+
+	tests := []struct {
+		name   string
+		tenant *cdbm.Tenant
+		want   bool
+	}{
+		{name: "allocation grants access", tenant: allocated, want: true},
+		{name: "privilege grants access", tenant: buildTenant("privileged", true), want: true},
+		{name: "site denial without allocation denies access", tenant: blocked, want: false},
+		{name: "no allocation or privilege denies access", tenant: buildTenant("unprivileged", false), want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := TenantHasSiteAccess(ctx, nil, dbSession, tc.tenant, site.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestTenantHasLegacyTargetedInstanceCreation(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testCommonInitDB(t)

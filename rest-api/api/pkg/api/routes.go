@@ -114,7 +114,7 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		{
 			Path:    apiPathPrefix + "/service-account/current",
 			Method:  http.MethodGet,
-			Handler: apiHandler.NewGetCurrentServiceAccountHandler(dbSession),
+			Handler: apiHandler.NewGetCurrentServiceAccountHandler(dbSession, scp),
 		},
 		// Infrastructure Provider endpoints
 		{
@@ -146,7 +146,7 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		{
 			Path:    apiPathPrefix + "/tenant/current",
 			Method:  http.MethodGet,
-			Handler: apiHandler.NewGetCurrentTenantHandler(dbSession, tc, cfg),
+			Handler: apiHandler.NewGetCurrentTenantHandler(dbSession, scp, tc, cfg),
 		},
 		{
 			Path:    apiPathPrefix + "/tenant/current",
