@@ -83,6 +83,42 @@ class DhcpClientTests(unittest.TestCase):
                         )
                     install.assert_not_called()
 
+    def test_unrelated_or_short_packets_cannot_extend_the_retry_deadline(self):
+        for response in (b"\x02\x00\x00\x00", b""):
+            with self.subTest(response=response):
+                sock = Mock()
+                clock = [0]
+
+                def receive(_size):
+                    clock[0] += 1
+                    if clock[0] > 16:
+                        self.fail("unrelated packets extended the DHCPv6 retry budget")
+                    return response, ("fe80::1", 547, 0, 1)
+
+                sock.recvfrom.side_effect = receive
+                with patch.object(
+                    sys, "argv", ["dhcp_client.py", "eth0", ADDRESS]
+                ), patch("socket.if_nametoindex", return_value=1), patch(
+                    "socket.socket", return_value=sock
+                ), patch.object(
+                    socket, "SO_BINDTODEVICE", 25, create=True
+                ), patch(
+                    "builtins.open", mock_open(read_data="02:00:00:00:00:01\n")
+                ), patch(
+                    "os.urandom", return_value=b"\x01\x02\x03"
+                ), patch(
+                    "time.monotonic", side_effect=lambda: clock[0]
+                ), patch(
+                    "subprocess.run"
+                ) as install:
+                    with self.assertRaisesRegex(TimeoutError, "DHCPv6 response absent"):
+                        runpy.run_path(
+                            str(HERE / "dhcp_client.py"), run_name="__main__"
+                        )
+                self.assertEqual(sock.sendto.call_count, 4)
+                self.assertEqual(clock[0], 16)
+                install.assert_not_called()
+
     def test_validation_survives_optimized_python(self):
         result = subprocess.run(
             [

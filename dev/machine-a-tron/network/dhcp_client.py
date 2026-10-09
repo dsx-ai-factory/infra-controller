@@ -7,6 +7,7 @@ import socket
 import struct
 import subprocess
 import sys
+import time
 
 iface, expected = sys.argv[1:]
 
@@ -36,7 +37,6 @@ sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, iface.encode() + b"\0")
 sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, idx)
 sock.bind(("::", 546))
-sock.settimeout(4)
 
 
 def exchange(kind, payload, expected_kind):
@@ -44,13 +44,19 @@ def exchange(kind, payload, expected_kind):
     packet = bytes([kind]) + xid + payload
     for attempt in range(4):
         sock.sendto(packet, ("ff02::1:2", 547, 0, idx))
-        try:
-            while True:
+        deadline = time.monotonic() + 4
+        while (remaining := deadline - time.monotonic()) > 0:
+            sock.settimeout(remaining)
+            try:
                 response, peer = sock.recvfrom(8192)
-                if response[0] == expected_kind and response[1:4] == xid:
-                    return opts(response[4:]), peer
-        except socket.timeout:
-            pass
+            except socket.timeout:
+                break
+            if (
+                len(response) >= 4
+                and response[0] == expected_kind
+                and response[1:4] == xid
+            ):
+                return opts(response[4:]), peer
     raise TimeoutError("DHCPv6 response absent")
 
 
