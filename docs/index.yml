@@ -128,6 +128,8 @@ navigation:
           path: provisioning/ingesting-hosts.md
         - page: Ingesting Hosts (REST API)
           path: provisioning/ingesting-hosts-rest-api.md
+        - page: Expected Inventory
+          path: provisioning/expected-inventory.md
         - page: Discovery OS cloud-init (Scout)
           path: provisioning/discovery-os-cloud-init.md
         - page: Configure Expected Machine Interfaces

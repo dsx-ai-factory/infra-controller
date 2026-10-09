@@ -1,9 +1,7 @@
 # Operation Rules Versioning
 
 Rule definitions use the `version` field to identify their persisted JSON
-format. `v1` is the only supported version. See the
-[Operation Rules guide](../../../docs/operations/flow/operation-rules.md)
-for the schema and executable examples.
+format. `v1` is the only supported version.
 
 ## Read and write behavior
 
