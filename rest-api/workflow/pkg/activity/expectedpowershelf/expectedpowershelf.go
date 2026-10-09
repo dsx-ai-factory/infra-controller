@@ -6,7 +6,7 @@ package expectedpowershelf
 import (
 	"context"
 	"errors"
-	"reflect"
+	"maps"
 
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/google/uuid"
@@ -33,7 +33,8 @@ type ManageExpectedPowerShelf struct {
 
 // UpdateExpectedPowerShelvesInDB is a Temporal activity that takes a collection of ExpectedPowerShelf data pushed by Site Agent and updates the DB
 // Expected Power Shelf records have two unique values (MAC and UUID). We ignore the MAC value and only rely on the UUID for uniqueness.
-// NICo is the source of truth: out of the race-condition window we make the DB match NICo exactly.
+// Core supplies inventory values; omitted names, descriptions, and rack IDs
+// preserve the existing Cloud values.
 // The reconciliation logic is as follows:
 // - UUID existing in NICo but not in DB: create record in DB
 // - UUID existing in both NICo and DB with differences: update record in DB
@@ -133,6 +134,9 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 				BmcMacAddress:        reported.BmcMacAddress,
 				ShelfSerialNumber:    reported.ShelfSerialNumber,
 				BmcIpAddress:         reported.BmcIpAddress,
+				RackID:               reported.RackID,
+				Name:                 reported.Name,
+				Description:          reported.Description,
 				Labels:               reported.Labels,
 				CreatedBy:            siteID, /* This would normally be a user ID, but that isn't something NICo provides */
 			})
@@ -151,24 +155,42 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 			continue
 		}
 
-		// update if any field differs
+		// Labels are replaced as a whole, including when Core reports none.
+		if reported.Labels == nil {
+			reported.Labels = cdbm.Labels{}
+		}
+
+		// Omitted optional fields preserve Cloud values, which may predate their
+		// storage in Core. Compare only fields that Update will actually write.
 		if cur.BmcMacAddress != reported.BmcMacAddress ||
 			cur.ShelfSerialNumber != reported.ShelfSerialNumber ||
-			!util.PtrsEqual(cur.BmcIpAddress, reported.BmcIpAddress) ||
-			!reflect.DeepEqual(cur.Labels, reported.Labels) {
-			// nil labels in nico can mean we need to clear out existing labels in DB
-			// but a nil value will not trigger an update in the DAO layer. We could use `Clear` but an empty map
-			// will save a call to the DB.
-			labels := reported.Labels
-			if cur.Labels != nil && labels == nil {
-				labels = map[string]string{}
-			}
-			_, uerr := epsDAO.Update(ctx, nil, cdbm.ExpectedPowerShelfUpdateInput{
-				ExpectedPowerShelfID: cur.ID,
-				BmcMacAddress:        &reported.BmcMacAddress,
-				ShelfSerialNumber:    &reported.ShelfSerialNumber,
-				BmcIpAddress:         reported.BmcIpAddress,
-				Labels:               labels,
+			(reported.BmcIpAddress != nil && !util.PtrsEqual(cur.BmcIpAddress, reported.BmcIpAddress)) ||
+			(reported.RackID != nil && !util.PtrsEqual(cur.RackID, reported.RackID)) ||
+			(reported.Name != nil && !util.PtrsEqual(cur.Name, reported.Name)) ||
+			(reported.Description != nil && !util.PtrsEqual(cur.Description, reported.Description)) ||
+			!maps.Equal(cur.Labels, reported.Labels) {
+			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
+				// Lock and re-read before writing so an API change after the
+				// initial inventory lookup isn't overwritten by this snapshot.
+				locked, err := epsDAO.Get(ctx, tx, cur.ID, nil, true)
+				if err != nil {
+					return err
+				}
+				if !locked.Updated.Equal(cur.Updated) {
+					return nil
+				}
+
+				_, uerr := epsDAO.Update(ctx, tx, cdbm.ExpectedPowerShelfUpdateInput{
+					ExpectedPowerShelfID: cur.ID,
+					BmcMacAddress:        &reported.BmcMacAddress,
+					ShelfSerialNumber:    &reported.ShelfSerialNumber,
+					BmcIpAddress:         reported.BmcIpAddress,
+					RackID:               reported.RackID,
+					Name:                 reported.Name,
+					Description:          reported.Description,
+					Labels:               reported.Labels,
+				})
+				return uerr
 			})
 			if uerr != nil {
 				logger.Error().Err(uerr).Str("ExpectedPowerShelfID", cur.ID.String()).Msg("failed to update ExpectedPowerShelf in DB")

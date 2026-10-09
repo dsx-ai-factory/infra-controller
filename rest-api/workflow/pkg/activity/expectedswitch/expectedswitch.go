@@ -6,7 +6,7 @@ package expectedswitch
 import (
 	"context"
 	"errors"
-	"reflect"
+	"maps"
 	"slices"
 
 	"github.com/google/uuid"
@@ -34,7 +34,8 @@ type ManageExpectedSwitch struct {
 
 // UpdateExpectedSwitchesInDB is a Temporal activity that takes a collection of ExpectedSwitch data pushed by Site Agent and updates the DB
 // Expected Switch records have two unique values (MAC and UUID). We ignore the MAC value and only rely on the UUID for uniqueness.
-// NICo is the source of truth: out of the race-condition window we make the DB match NICo exactly.
+// Core supplies inventory values; omitted names, descriptions, and rack IDs
+// preserve the existing Cloud values.
 // The reconciliation logic is as follows:
 // - UUID existing in NICo but not in DB: create record in DB
 // - UUID existing in both NICo and DB with differences: update record in DB
@@ -133,6 +134,10 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 				SiteID:             siteID,
 				BmcMacAddress:      reported.BmcMacAddress,
 				SwitchSerialNumber: reported.SwitchSerialNumber,
+				BmcIpAddress:       reported.BmcIpAddress,
+				RackID:             reported.RackID,
+				Name:               reported.Name,
+				Description:        reported.Description,
 				NvosMacAddresses:   reported.NvosMacAddresses,
 				Labels:             reported.Labels,
 				CreatedBy:          siteID, /* This would normally be a user ID, but that isn't something NICo provides */
@@ -152,30 +157,47 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 			continue
 		}
 
-		// update if any field differs
+		// Labels are replaced as a whole, including when Core reports none.
+		if reported.Labels == nil {
+			reported.Labels = cdbm.Labels{}
+		}
+		if reported.NvosMacAddresses == nil {
+			reported.NvosMacAddresses = []string{}
+		}
+
+		// Omitted optional fields preserve Cloud values, which may predate their
+		// storage in Core. Compare only fields that Update will actually write.
 		if cur.BmcMacAddress != reported.BmcMacAddress ||
 			cur.SwitchSerialNumber != reported.SwitchSerialNumber ||
+			(reported.BmcIpAddress != nil && !util.PtrsEqual(cur.BmcIpAddress, reported.BmcIpAddress)) ||
+			(reported.RackID != nil && !util.PtrsEqual(cur.RackID, reported.RackID)) ||
+			(reported.Name != nil && !util.PtrsEqual(cur.Name, reported.Name)) ||
+			(reported.Description != nil && !util.PtrsEqual(cur.Description, reported.Description)) ||
 			!slices.Equal(cur.NvosMacAddresses, reported.NvosMacAddresses) ||
-			!reflect.DeepEqual(cur.Labels, reported.Labels) {
-			// nil labels in nico can mean we need to clear out existing labels in DB
-			// but a nil value will not trigger an update in the DAO layer. We could use `Clear` but an empty map
-			// will save a call to the DB.
-			labels := reported.Labels
-			if cur.Labels != nil && labels == nil {
-				labels = map[string]string{}
-			}
-			// nil NVOS MACs from nico follow the same rule as labels: swap in an
-			// empty slice so the DAO clears a previously-set list.
-			nvosMacAddresses := reported.NvosMacAddresses
-			if cur.NvosMacAddresses != nil && nvosMacAddresses == nil {
-				nvosMacAddresses = []string{}
-			}
-			_, uerr := esDAO.Update(ctx, nil, cdbm.ExpectedSwitchUpdateInput{
-				ExpectedSwitchID:   cur.ID,
-				BmcMacAddress:      &reported.BmcMacAddress,
-				SwitchSerialNumber: &reported.SwitchSerialNumber,
-				NvosMacAddresses:   nvosMacAddresses,
-				Labels:             labels,
+			!maps.Equal(cur.Labels, reported.Labels) {
+			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
+				// Lock and re-read before writing so an API change after the
+				// initial inventory lookup isn't overwritten by this snapshot.
+				locked, err := esDAO.Get(ctx, tx, cur.ID, nil, true)
+				if err != nil {
+					return err
+				}
+				if !locked.Updated.Equal(cur.Updated) {
+					return nil
+				}
+
+				_, uerr := esDAO.Update(ctx, tx, cdbm.ExpectedSwitchUpdateInput{
+					ExpectedSwitchID:   cur.ID,
+					BmcMacAddress:      &reported.BmcMacAddress,
+					SwitchSerialNumber: &reported.SwitchSerialNumber,
+					BmcIpAddress:       reported.BmcIpAddress,
+					RackID:             reported.RackID,
+					Name:               reported.Name,
+					Description:        reported.Description,
+					NvosMacAddresses:   reported.NvosMacAddresses,
+					Labels:             reported.Labels,
+				})
+				return uerr
 			})
 			if uerr != nil {
 				logger.Error().Err(uerr).Str("ExpectedSwitchID", cur.ID.String()).Msg("failed to update ExpectedSwitch in DB")

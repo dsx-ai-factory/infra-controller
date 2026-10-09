@@ -16,6 +16,7 @@ import (
 	otrace "go.opentelemetry.io/otel/trace"
 
 	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -269,6 +270,7 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *corev1.Exp
 // table). A nil proto is a no-op. An invalid or missing proto.Id leaves
 // em.ID unchanged so the caller can validate the proto's UUID before
 // calling.
+// Name and description come from `Metadata`; empty strings become nil.
 func (em *ExpectedMachine) FromProto(proto *corev1.ExpectedMachine, linkedMachineID *string) {
 	if proto == nil {
 		return
@@ -296,10 +298,10 @@ func (em *ExpectedMachine) FromProto(proto *corev1.ExpectedMachine, linkedMachin
 	} else {
 		em.RackID = nil
 	}
-	em.Name = proto.Name
+	em.Name = cutil.GetPtrIfNotZero(proto.Metadata.GetName())
 	em.Manufacturer = proto.Manufacturer
 	em.Model = proto.Model
-	em.Description = proto.Description
+	em.Description = cutil.GetPtrIfNotZero(proto.Metadata.GetDescription())
 	em.SlotID = proto.SlotId
 	em.TrayIdx = proto.TrayIdx
 	em.HostID = proto.HostId

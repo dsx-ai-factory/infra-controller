@@ -15,6 +15,7 @@ import (
 	otrace "go.opentelemetry.io/otel/trace"
 
 	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -163,6 +164,7 @@ func (es *ExpectedSwitch) ToProto(creds ExpectedSwitchCredentials) *corev1.Expec
 // by a Site. A nil proto is a no-op. An invalid or missing
 // proto.ExpectedSwitchId leaves es.ID unchanged so the caller can validate
 // the proto's UUID before calling.
+// Name and description come from `Metadata`; empty strings become nil.
 func (es *ExpectedSwitch) FromProto(proto *corev1.ExpectedSwitch) {
 	if proto == nil {
 		return
@@ -187,10 +189,10 @@ func (es *ExpectedSwitch) FromProto(proto *corev1.ExpectedSwitch) {
 	} else {
 		es.RackID = nil
 	}
-	es.Name = proto.Name
+	es.Name = cutil.GetPtrIfNotZero(proto.Metadata.GetName())
 	es.Manufacturer = proto.Manufacturer
 	es.Model = proto.Model
-	es.Description = proto.Description
+	es.Description = cutil.GetPtrIfNotZero(proto.Metadata.GetDescription())
 	es.SlotID = proto.SlotId
 	es.TrayIdx = proto.TrayIdx
 	es.HostID = proto.HostId

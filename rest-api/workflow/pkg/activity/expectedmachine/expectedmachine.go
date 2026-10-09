@@ -6,7 +6,9 @@ package expectedmachine
 import (
 	"context"
 	"errors"
+	"maps"
 	"reflect"
+	"slices"
 
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/google/uuid"
@@ -33,7 +35,8 @@ type ManageExpectedMachine struct {
 
 // UpdateExpectedMachinesInDB is a Temporal activity that takes a collection of ExpectedMachine data pushed by Site Agent and updates the DB
 // Expected Machine records have two unique values (MAC and UUID). We ignore the MAC value and only rely on the UUID for uniqueness.
-// NICo is the source of truth: out of the race-condition window we make the DB match NICo exactly.
+// Core supplies inventory values; omitted names, descriptions, and rack IDs
+// preserve the existing Cloud values.
 // The reconciliation logic is as follows:
 // - UUID existing in NICo but not in DB: create record in DB
 // - UUID existing in both NICo and DB with differences: update record in DB
@@ -180,13 +183,17 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 				SiteID:                   siteID,
 				BmcMacAddress:            reported.BmcMacAddress,
 				ChassisSerialNumber:      reported.ChassisSerialNumber,
-				SkuID:                    reported.SkuID,
-				FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
 				Interfaces:               reported.Interfaces,
 				BmcIpAddress:             reported.BmcIpAddress,
-				Labels:                   reported.Labels,
+				RackID:                   reported.RackID,
+				Name:                     reported.Name,
+				Description:              reported.Description,
+				SkuID:                    reported.SkuID,
 				MachineID:                reported.MachineID,
+				FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
 				IsDpfEnabled:             reported.IsDpfEnabled,
+				HostLifecycleProfile:     reported.HostLifecycleProfile,
+				Labels:                   reported.Labels,
 				CreatedBy:                siteID, /* This would normally be a user ID, but that isn't something NICo provides */
 			})
 			if cerr != nil {
@@ -204,27 +211,38 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 			continue
 		}
 
-		// update if any field differs
+		// Labels are replaced as a whole, including when Core reports none.
+		if reported.Labels == nil {
+			reported.Labels = cdbm.Labels{}
+		}
+
+		// Omitted optional fields preserve Cloud values, which may predate their
+		// storage in Core. Compare only fields that Update will actually write.
 		if cur.BmcMacAddress != reported.BmcMacAddress ||
 			cur.ChassisSerialNumber != reported.ChassisSerialNumber ||
-			!util.PtrsEqual(cur.SkuID, reported.SkuID) ||
-			!util.PtrsEqual(cur.MachineID, reported.MachineID) ||
-			!reflect.DeepEqual(cur.FallbackDpuSerialNumbers, reported.FallbackDpuSerialNumbers) ||
 			!reflect.DeepEqual(cur.Interfaces, reported.Interfaces) ||
 			!util.PtrsEqual(cur.BmcIpAddress, reported.BmcIpAddress) ||
-			!reflect.DeepEqual(cur.Labels, reported.Labels) ||
-			!util.PtrsEqual(cur.IsDpfEnabled, reported.IsDpfEnabled) {
-			// nil labels in nico can mean we need to clear out existing labels in DB
-			// but a nil value will not trigger an update in the DAO layer. We could use `Clear` but an empty map
-			// will save a call to the DB.
-			labels := reported.Labels
-			if cur.Labels != nil && labels == nil {
-				labels = map[string]string{}
-			}
-
+			(reported.RackID != nil && !util.PtrsEqual(cur.RackID, reported.RackID)) ||
+			(reported.Name != nil && !util.PtrsEqual(cur.Name, reported.Name)) ||
+			(reported.Description != nil && !util.PtrsEqual(cur.Description, reported.Description)) ||
+			(reported.SkuID != nil && !util.PtrsEqual(cur.SkuID, reported.SkuID)) ||
+			(reported.MachineID != nil && !util.PtrsEqual(cur.MachineID, reported.MachineID)) ||
+			(reported.FallbackDpuSerialNumbers != nil && !slices.Equal(cur.FallbackDpuSerialNumbers, reported.FallbackDpuSerialNumbers)) ||
+			(reported.IsDpfEnabled != nil && !util.PtrsEqual(cur.IsDpfEnabled, reported.IsDpfEnabled)) ||
+			(reported.HostLifecycleProfile.DisableLockdown != nil && !util.PtrsEqual(cur.HostLifecycleProfile.DisableLockdown, reported.HostLifecycleProfile.DisableLockdown)) ||
+			!maps.Equal(cur.Labels, reported.Labels) {
 			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
-				// Passing nil to Update leaves the existing value unchanged, so explicitly clear a
-				// BMC IP address that NICo no longer reports.
+				// Lock and re-read before writing so an API change after the
+				// initial inventory lookup isn't overwritten by this snapshot.
+				locked, err := emDAO.Get(ctx, tx, cur.ID, nil, true)
+				if err != nil {
+					return err
+				}
+				if !locked.Updated.Equal(cur.Updated) {
+					return nil
+				}
+
+				// BMC IP absence is an explicit clear in machine inventory.
 				if cur.BmcIpAddress != nil && reported.BmcIpAddress == nil {
 					_, cerr := emDAO.Clear(ctx, tx, cdbm.ExpectedMachineClearInput{
 						ExpectedMachineID: cur.ID,
@@ -235,17 +253,26 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 					}
 				}
 
+				var hostLifecycleProfile *cdbm.HostLifecycleProfile
+				if reported.HostLifecycleProfile.HasSetFields() {
+					hostLifecycleProfile = &reported.HostLifecycleProfile
+				}
+
 				_, uerr := emDAO.Update(ctx, tx, cdbm.ExpectedMachineUpdateInput{
 					ExpectedMachineID:        cur.ID,
 					BmcMacAddress:            &reported.BmcMacAddress,
 					ChassisSerialNumber:      &reported.ChassisSerialNumber,
+					BmcIpAddress:             reported.BmcIpAddress,
+					RackID:                   reported.RackID,
+					Name:                     reported.Name,
+					Description:              reported.Description,
 					SkuID:                    reported.SkuID,
 					MachineID:                reported.MachineID,
 					FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
 					Interfaces:               reported.Interfaces,
-					BmcIpAddress:             reported.BmcIpAddress,
-					Labels:                   labels,
 					IsDpfEnabled:             reported.IsDpfEnabled,
+					HostLifecycleProfile:     hostLifecycleProfile,
+					Labels:                   reported.Labels,
 				})
 				return uerr
 			})

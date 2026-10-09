@@ -20,93 +20,103 @@ import (
 
 func TestExpectedPowerShelf_FromProto(t *testing.T) {
 	id := uuid.New()
-	rackID := "rack-1"
-	name := "ps-1"
-	manufacturer := "ACME"
-	model := "PS1"
-	description := "primary"
-	var slot, trayIdx, host int32 = 1, 2, 3
-
-	t.Run("nil proto leaves receiver unchanged", func(t *testing.T) {
-		eps := &ExpectedPowerShelf{ID: id, BmcMacAddress: "aa:bb"}
-		eps.FromProto(nil)
-
-		assert.Equal(t, id, eps.ID)
-		assert.Equal(t, "aa:bb", eps.BmcMacAddress)
-	})
-
-	t.Run("invalid id leaves eps.ID unchanged", func(t *testing.T) {
-		eps := &ExpectedPowerShelf{ID: id}
-		eps.FromProto(&corev1.ExpectedPowerShelf{
-			ExpectedPowerShelfId: &corev1.UUID{Value: "not-a-uuid"},
-			BmcMacAddress:        "aa:bb",
-		})
-
-		assert.Equal(t, id, eps.ID)
-		assert.Equal(t, "aa:bb", eps.BmcMacAddress)
-	})
-
-	t.Run("populates all proto fields", func(t *testing.T) {
-		eps := &ExpectedPowerShelf{}
-		eps.FromProto(&corev1.ExpectedPowerShelf{
-			ExpectedPowerShelfId: &corev1.UUID{Value: id.String()},
-			BmcMacAddress:        "aa:bb:cc:dd:ee:ff",
-			ShelfSerialNumber:    "SSN-1",
-			BmcIpAddress:         "10.0.0.1",
-			RackId:               &corev1.RackId{Id: rackID},
-			Name:                 &name,
-			Manufacturer:         &manufacturer,
-			Model:                &model,
-			Description:          &description,
-			SlotId:               &slot,
-			TrayIdx:              &trayIdx,
-			HostId:               &host,
-			Metadata: &corev1.Metadata{
-				Labels: []*corev1.Label{
-					{Key: "env", Value: cutil.GetPtr("prod")},
+	incomingID := uuid.New()
+	siteID := uuid.New()
+	stored := ExpectedPowerShelf{
+		ID:                id,
+		SiteID:            siteID,
+		BmcMacAddress:     "aa:bb",
+		ShelfSerialNumber: "old-serial",
+		BmcIpAddress:      cutil.GetPtr("10.0.0.2"),
+		RackID:            cutil.GetPtr("old-rack"),
+		Name:              cutil.GetPtr("old-name"),
+		Description:       cutil.GetPtr("old-description"),
+		Manufacturer:      cutil.GetPtr("old-manufacturer"),
+		Model:             cutil.GetPtr("old-model"),
+		SlotID:            cutil.GetPtr(int32(9)),
+		TrayIdx:           cutil.GetPtr(int32(9)),
+		HostID:            cutil.GetPtr(int32(9)),
+		Labels:            Labels{"old": "value"},
+	}
+	tests := []struct {
+		name  string
+		proto *corev1.ExpectedPowerShelf
+		want  ExpectedPowerShelf
+	}{
+		{
+			name: "nil proto leaves receiver unchanged",
+			want: stored,
+		},
+		{
+			name: "reads metadata names and preserves raw labels",
+			proto: &corev1.ExpectedPowerShelf{
+				ExpectedPowerShelfId: &corev1.UUID{Value: incomingID.String()},
+				BmcMacAddress:        "aa:bb:cc:dd:ee:ff",
+				ShelfSerialNumber:    "serial-1",
+				BmcIpAddress:         "10.0.0.1",
+				RackId:               &corev1.RackId{Id: "rack-1"},
+				Name:                 cutil.GetPtr("obsolete-name"),
+				Description:          cutil.GetPtr("obsolete-description"),
+				Manufacturer:         cutil.GetPtr("ACME"),
+				Model:                cutil.GetPtr("M1"),
+				SlotId:               cutil.GetPtr(int32(4)),
+				TrayIdx:              cutil.GetPtr(int32(5)),
+				HostId:               cutil.GetPtr(int32(6)),
+				Metadata: &corev1.Metadata{
+					Name:        "component-1",
+					Description: "primary",
+					Labels: []*corev1.Label{
+						{Key: "manufacturer", Value: cutil.GetPtr("NVIDIA")},
+						{Key: "model", Value: cutil.GetPtr("model-1")},
+						{Key: "slot_id", Value: cutil.GetPtr("1")},
+						{Key: "tray_idx", Value: cutil.GetPtr("2")},
+						{Key: "host_id", Value: cutil.GetPtr("3")},
+						{Key: "env", Value: cutil.GetPtr("prod")},
+					},
 				},
 			},
+			want: ExpectedPowerShelf{
+				ID:                incomingID,
+				SiteID:            siteID,
+				BmcMacAddress:     "aa:bb:cc:dd:ee:ff",
+				ShelfSerialNumber: "serial-1",
+				BmcIpAddress:      cutil.GetPtr("10.0.0.1"),
+				RackID:            cutil.GetPtr("rack-1"),
+				Name:              cutil.GetPtr("component-1"),
+				Description:       cutil.GetPtr("primary"),
+				Manufacturer:      cutil.GetPtr("ACME"),
+				Model:             cutil.GetPtr("M1"),
+				SlotID:            cutil.GetPtr(int32(4)),
+				TrayIdx:           cutil.GetPtr(int32(5)),
+				HostID:            cutil.GetPtr(int32(6)),
+				Labels:            Labels{"manufacturer": "NVIDIA", "model": "model-1", "slot_id": "1", "tray_idx": "2", "host_id": "3", "env": "prod"},
+			},
+		},
+		{
+			name: "invalid ID preserves identity and absent fields reset the receiver",
+			proto: &corev1.ExpectedPowerShelf{
+				ExpectedPowerShelfId: &corev1.UUID{Value: "not-a-uuid"},
+				BmcMacAddress:        "aa:bb",
+			},
+			want: ExpectedPowerShelf{ID: id, SiteID: siteID, BmcMacAddress: "aa:bb"},
+		},
+		{
+			name: "empty metadata does not read obsolete names",
+			proto: &corev1.ExpectedPowerShelf{
+				Name:        cutil.GetPtr("obsolete-name"),
+				Description: cutil.GetPtr("obsolete-description"),
+				Metadata:    &corev1.Metadata{},
+			},
+			want: ExpectedPowerShelf{ID: id, SiteID: siteID},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stored
+			got.FromProto(tc.proto)
+			assert.Equal(t, tc.want, got)
 		})
-
-		assert.Equal(t, id, eps.ID)
-		assert.Equal(t, "aa:bb:cc:dd:ee:ff", eps.BmcMacAddress)
-		assert.Equal(t, "SSN-1", eps.ShelfSerialNumber)
-		if assert.NotNil(t, eps.BmcIpAddress) {
-			assert.Equal(t, "10.0.0.1", *eps.BmcIpAddress)
-		}
-		if assert.NotNil(t, eps.RackID) {
-			assert.Equal(t, rackID, *eps.RackID)
-		}
-		assert.Equal(t, &name, eps.Name)
-		assert.Equal(t, &manufacturer, eps.Manufacturer)
-		assert.Equal(t, &model, eps.Model)
-		assert.Equal(t, &description, eps.Description)
-		assert.Equal(t, &slot, eps.SlotID)
-		assert.Equal(t, &trayIdx, eps.TrayIdx)
-		assert.Equal(t, &host, eps.HostID)
-		assert.Equal(t, Labels{"env": "prod"}, eps.Labels)
-	})
-
-	t.Run("empty BmcIpAddress yields nil pointer", func(t *testing.T) {
-		eps := &ExpectedPowerShelf{BmcIpAddress: cutil.GetPtr("stale")}
-		eps.FromProto(&corev1.ExpectedPowerShelf{
-			ExpectedPowerShelfId: &corev1.UUID{Value: id.String()},
-			BmcIpAddress:         "",
-		})
-
-		assert.Nil(t, eps.BmcIpAddress)
-	})
-
-	t.Run("nil RackId clears eps.RackID", func(t *testing.T) {
-		stale := "stale-rack"
-		eps := &ExpectedPowerShelf{RackID: &stale}
-		eps.FromProto(&corev1.ExpectedPowerShelf{
-			ExpectedPowerShelfId: &corev1.UUID{Value: id.String()},
-			BmcMacAddress:        "aa:bb",
-		})
-
-		assert.Nil(t, eps.RackID)
-	})
+	}
 }
 
 // reset the tables needed for ExpectedPowerShelf tests
