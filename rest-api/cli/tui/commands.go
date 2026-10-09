@@ -628,7 +628,7 @@ func cmdVPCList(s *Session, args []string) error {
 }
 
 func cmdVPCCreate(s *Session, _ []string) error {
-	site, err := s.Resolver.Resolve(context.Background(), "site", "Site")
+	site, err := promptRegisteredSite(s, context.Background())
 	if err != nil {
 		return err
 	}
@@ -1521,7 +1521,7 @@ func promptTemplatedIPXEOperatingSystem(
 	ctx context.Context,
 	body map[string]interface{},
 ) error {
-	site, err := s.Resolver.Resolve(ctx, "site", "Site")
+	site, err := promptRegisteredSite(s, ctx)
 	if err != nil {
 		return err
 	}
@@ -1709,7 +1709,7 @@ func promptImageOperatingSystem(
 	ctx context.Context,
 	body map[string]interface{},
 ) error {
-	site, err := s.Resolver.Resolve(ctx, "site", "Site")
+	site, err := promptRegisteredSite(s, ctx)
 	if err != nil {
 		return err
 	}
@@ -2124,7 +2124,7 @@ func cmdSSHKeyGroupCreate(s *Session, _ []string) error {
 		return err
 	}
 
-	siteIDs, err := promptOptionalResourceIDs(s, ctx, "site", "site")
+	siteIDs, err := promptOptionalRegisteredSiteIDs(s, ctx)
 	if err != nil {
 		return err
 	}
@@ -2173,9 +2173,23 @@ func cmdSSHKeyGroupUpdate(s *Session, args []string) error {
 	if err != nil {
 		return err
 	}
-	siteIDsText, err := PromptText("Replace site IDs (comma-separated, blank to keep)", false)
+	replaceSites, err := PromptConfirm("Replace associated sites (select none to clear)?")
 	if err != nil {
 		return err
+	}
+	var siteIDs []string
+	if replaceSites {
+		sites, err := sshKeyGroupSiteItems(s, context.Background(), item)
+		if err != nil {
+			return err
+		}
+		siteIDs, err = promptOptionalItemIDs(s, sites, "site", "site")
+		if err != nil {
+			return err
+		}
+		if siteIDs == nil {
+			siteIDs = []string{}
+		}
 	}
 	sshKeyIDsText, err := PromptText("Replace SSH key IDs (comma-separated, blank to keep)", false)
 	if err != nil {
@@ -2198,8 +2212,8 @@ func cmdSSHKeyGroupUpdate(s *Session, args []string) error {
 	if strings.TrimSpace(desc) != "" {
 		body["description"] = strings.TrimSpace(desc)
 	}
-	if strings.TrimSpace(siteIDsText) != "" {
-		body["siteIds"] = splitCommaSeparated(siteIDsText)
+	if replaceSites {
+		body["siteIds"] = siteIDs
 	}
 	if strings.TrimSpace(sshKeyIDsText) != "" {
 		body["sshKeyIds"] = splitCommaSeparated(sshKeyIDsText)
@@ -2925,7 +2939,7 @@ func cmdNSGList(s *Session, args []string) error {
 }
 
 func cmdNSGCreate(s *Session, _ []string) error {
-	site, err := s.Resolver.Resolve(context.Background(), "site", "Site")
+	site, err := promptRegisteredSite(s, context.Background())
 	if err != nil {
 		return err
 	}
@@ -4371,6 +4385,10 @@ func promptOptionalResourceIDs(s *Session, ctx context.Context, resourceType, si
 		fmt.Fprintf(os.Stderr, "%s could not list %s (%v); skipping\n", Dim("note:"), resourceType, err)
 		return nil, nil
 	}
+	return promptOptionalItemIDs(s, items, resourceType, singular)
+}
+
+func promptOptionalItemIDs(s *Session, items []NamedItem, resourceType, singular string) ([]string, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}

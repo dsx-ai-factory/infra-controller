@@ -613,6 +613,8 @@ func TestCmdOSCreate(t *testing.T) {
 	)
 	tests := []struct {
 		name                      string
+		siteResponse              string
+		expectedError             string
 		provider                  bool
 		tenantForbidden           bool
 		input                     string
@@ -624,6 +626,20 @@ func TestCmdOSCreate(t *testing.T) {
 		expectedOutput            []string
 		unexpectedOutput          []string
 	}{
+		{
+			name:              "image stops when no Registered sites exist",
+			siteResponse:      `[{"id":"pending-site","name":"Pending Site","status":"Pending"}]`,
+			input:             "unregistered-os\n\nImage\n",
+			expectedSiteCalls: 1,
+			expectedError:     "no Registered site available",
+		},
+		{
+			name:              "templated iPXE stops when no Registered sites exist",
+			siteResponse:      `[{"id":"pending-site","name":"Pending Site","status":"Pending"}]`,
+			input:             "unregistered-os\n\nTemplated iPXE\n",
+			expectedSiteCalls: 1,
+			expectedError:     "no Registered site available",
+		},
 		{
 			name:     "tenant raw iPXE prompts for script and shared options",
 			provider: false,
@@ -1002,7 +1018,16 @@ func TestCmdOSCreate(t *testing.T) {
 					_, _ = io.WriteString(w, `{"id":"tenant-1"}`)
 				case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/site":
 					siteCalls.Add(1)
-					_, _ = io.WriteString(w, `[{"id":"`+siteID+`","name":"Site One","status":"Registered"}]`)
+					siteResponse := test.siteResponse
+					if siteResponse == "" {
+						siteResponse = `[
+							{"id":"pending-site","name":"Pending Site","status":"Pending"},
+							{"id":"unknown-site","name":"Unknown Site"},
+							{"id":"error-site","name":"Error Site","status":"Error"},
+							{"id":"` + siteID + `","name":"Site One","status":"Registered"}
+						]`
+					}
+					_, _ = io.WriteString(w, siteResponse)
 				case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/ipxe-template":
 					templateCalls.Add(1)
 					assert.Equal(t, siteID, r.URL.Query().Get("siteId"))
@@ -1040,7 +1065,18 @@ func TestCmdOSCreate(t *testing.T) {
 				return cmdOSCreate(session, nil)
 			})
 
+			if test.expectedError != "" {
+				require.EqualError(t, err, test.expectedError)
+				assert.Equal(t, test.expectedSiteCalls, siteCalls.Load())
+				assert.Zero(t, templateCalls.Load())
+				assert.Zero(t, createCalls.Load())
+				assert.NotContains(t, output, "Pending Site")
+				return
+			}
 			require.NoError(t, err)
+			assert.NotContains(t, output, "Pending Site")
+			assert.NotContains(t, output, "Unknown Site")
+			assert.NotContains(t, output, "Error Site")
 			assert.Equal(t, int32(1), tenantCalls.Load())
 			if test.tenantForbidden {
 				assert.Equal(t, int32(1), providerCalls.Load())
@@ -1698,9 +1734,10 @@ func TestCmdVPCCreate(t *testing.T) {
 
 			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
 			session.Cache.Set("site", []NamedItem{{
-				Name: "native-site",
-				ID:   "site-1",
-				Raw:  map[string]interface{}{"capabilities": map[string]interface{}{"nativeNetworking": true}},
+				Name:   "native-site",
+				ID:     "site-1",
+				Status: "Registered",
+				Raw:    map[string]interface{}{"capabilities": map[string]interface{}{"nativeNetworking": true}},
 			}})
 
 			output, runErr := runSpecializedCommandWithInput(t, test.input, func() error {
