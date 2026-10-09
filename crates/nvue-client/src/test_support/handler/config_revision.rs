@@ -236,8 +236,8 @@ impl NvueMockHandler for ConfigRevisionHandler {
     }
 }
 
-/// Models an NVUE server that models successfully creating revision but then
-/// failing to apply it, including the rollback logic.
+/// Models an NVUE server that successfully creates a revision but then fails to
+/// apply it, creating a rollback in the process.
 pub(crate) struct ConfigRevisionRollbackHandler {
     storage: ConfigRevisionHandler,
     state: Mutex<Option<RollbackAttempt>>,
