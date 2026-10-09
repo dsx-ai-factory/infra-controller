@@ -1892,8 +1892,14 @@ pub struct DpfConfig {
     /// ServiceInterfaces exist.
     #[serde(default)]
     pub deployment_scoped_service_interfaces: bool,
-    /// SF capacity reserved beyond configured NICo-managed service endpoints.
-    /// Without intercept bridging, this remains the complete legacy `PF_TOTAL_SF` value.
+    /// SF capacity reserve for regular BF3 and generic BF4.
+    ///
+    /// With intercept bridging, it is added to NICo-managed service endpoints and
+    /// `additional_managed_sf`. Without intercept bridging, it is the complete legacy
+    /// `PF_TOTAL_SF` pool, and those endpoints plus `additional_managed_sf` must fit inside it. BF3
+    /// GB200 applies the same validation but emits fixed `PF_TOTAL_SF=128`, so changing this value
+    /// does not change its flavor. BF4 Astra ignores this value and derives capacity from managed
+    /// endpoints plus fixed allocations.
     #[serde(default = "default_dpf_pf_total_sf_reserved")]
     pub pf_total_sf_reserved: u32,
     /// Whether carbide rolls a changed DPUService out on its own, by releasing
@@ -3968,8 +3974,10 @@ pub struct DpuConfig {
     #[serde(default)]
     pub dpu_enable_secure_boot: bool,
 
-    /// Number of virtual functions configured per DPU PF during BlueField provisioning.
-    /// Defaults to 16 and must not exceed 126.
+    /// Number of virtual functions configured per DPU PF during BF3 and generic-BF4 provisioning.
+    /// Defaults to 16 and must not exceed 126. BF4 Astra always emits `NUM_OF_VFS=46` and retains
+    /// its full topology-free static VF inventory, but this value still bounds VF identities in a
+    /// configured intercept topology shared by all DPF deployment profiles.
     #[serde(default)]
     pub num_of_vfs: u32,
 
@@ -4843,9 +4851,9 @@ pub struct VmaasConfig {
     /// `dpu_config.num_of_vfs`. An explicit value replaces the fallback; when omitted or empty,
     /// VF0 through VF13 are selected and still capped by `num_of_vfs`. Malformed PF0 VF selectors,
     /// whitespace, and empty list entries cause non-DPF instance creation and network updates to
-    /// fail. DPF-managed hosts ignore this field for instance admission: BF4 Astra hosts use the
-    /// static VF0 through VF13 inventory provisioned for Astra, while other DPF hosts use the
-    /// configured intercept topology or retain topology-free compatibility behavior.
+    /// fail. DPF-managed hosts ignore this field for instance admission: configured intercept
+    /// topology is authoritative for every DPF deployment profile, while topology-free Astra uses
+    /// its static VF0 through VF13 inventory and other profiles retain compatibility behavior.
     pub hbn_reps: Option<String>,
 
     /// Provisioning-time topology for bridges inserted between host representors and HBN.

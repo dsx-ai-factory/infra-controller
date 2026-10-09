@@ -76,9 +76,11 @@ struct InitializationMock {
     service_interfaces: Arc<DashMap<String, DPUServiceInterface>>,
     blocked_service_interface_deletes: Arc<DashMap<String, ()>>,
     deferred_service_interface_deletes: Arc<DashMap<String, ()>>,
+    deferred_service_interface_applies: Arc<DashMap<String, ()>>, // Holds named applies.
     service_interface_delete_requests: Arc<DashMap<String, usize>>,
     service_interface_delete_started: Arc<Notify>,
     service_interface_delete_release: Arc<Notify>,
+    service_interface_apply_started: Arc<Notify>, // Signals the held apply.
     configs: Arc<DashMap<String, BTreeMap<String, String>>>,
     secrets: Arc<DashMap<String, BTreeMap<String, Vec<u8>>>>,
 }
@@ -154,6 +156,36 @@ fn unscoped_astra_config() -> InitDpfResourcesConfig {
         deployment_type: DpuDeploymentType::Bf4Astra,
         ..Default::default()
     }
+}
+
+/// Establishes the exact topology-free scoped Astra state emitted by predecessor initialization so
+/// migration tests exercise a real persisted starting point rather than a hand-built approximation.
+async fn seed_pre_topology_scoped_astra(
+    mock: &InitializationMock,
+) -> crate::sdk::DpfSdk<InitializationMock, InitializationLabeler> {
+    // Supply the runtime configuration required while rendering Astra's fixed xplane files.
+    mock.configs.insert(
+        ns_key(TEST_NS, "ra2.2-runtime"),
+        BTreeMap::from([(
+            "RA2.2-runtime.yaml".to_string(),
+            "runtimeConfig:\n  roce: []\n".to_string(),
+        )]),
+    );
+
+    // Apply the predecessor inventory through the public split-initialization path.
+    let sdk = crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+        .with_labeler(InitializationLabeler)
+        .build_without_resources()
+        .await
+        .unwrap();
+    sdk.create_initialization_objects(&InitDpfResourcesConfig {
+        deployment_scoped_service_interfaces: true,
+        ..unscoped_astra_config()
+    })
+    .await
+    .expect("topology-free scoped Astra initialization must establish the old state");
+
+    sdk
 }
 
 /// Asserts every DPF initialization CR store is empty so both public paths prove no-write safety.
@@ -433,8 +465,15 @@ impl DpuServiceInterfaceRepository for InitializationMock {
             .collect())
     }
     async fn apply(&self, iface: &DPUServiceInterface) -> Result<DPUServiceInterface, DpfError> {
-        self.service_interfaces
-            .insert(resource_key(iface), iface.clone());
+        let key = resource_key(iface);
+        // A canceled task leaves earlier applies persisted while this selected replacement remains
+        // absent, matching an interrupted sequence of Kubernetes requests.
+        if self.deferred_service_interface_applies.contains_key(&key) {
+            self.service_interface_apply_started.notify_one();
+            std::future::pending::<()>().await;
+        }
+
+        self.service_interfaces.insert(key, iface.clone());
         Ok(iface.clone())
     }
 
@@ -659,7 +698,7 @@ async fn sf_overflow_fails_before_initialization_writes() {
 
 /// Verifies one-shot Astra initialization rejects global interfaces before its first write.
 /// Qualified local SF references must also fail before writes so SDK namespace forwarding
-/// cannot bypass the static profile boundary.
+/// cannot bypass the direct SF-consumer boundary.
 #[tokio::test]
 async fn unscoped_astra_builder_initialization_writes_nothing() {
     // Target namespace qualification is the variable; the existing fixture supplies Astra defaults.
@@ -1152,8 +1191,8 @@ async fn test_create_initialization_objects_bluefield_software() {
     drop(sdk);
 }
 
-/// Verifies ordinary and GB200 BF3, generic BF4, and Astra coexist while each
-/// deployment retains its own flavor, interfaces, service chains, and selectors.
+/// Verifies every DPF profile consumes one intercept topology while retaining isolated flavors,
+/// interfaces, chains, and selectors so Astra's fixed xplane resources cannot cross-bind.
 #[tokio::test]
 async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
     // Build one SDK so all four deployment classes share the production namespace.
@@ -1213,11 +1252,11 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .flavor_name("bf4-flavor")
             .services(services.clone())
             .deployment_scoped_service_interfaces(true)
-            .intercept_bridging(topology)
+            .intercept_bridging(topology.clone())
             .deployment_type(DpuDeploymentType::Bf4Generic)
             .build()
             .expect("scoped generic BF4 test configuration must be valid"),
-        // Astra proves its fixed BF4+CX9 inventory remains isolated from both configured classes.
+        // Astra proves the shared PF/VF topology composes with its fixed CX/xplane interfaces.
         InitDpfResourcesConfigBuilder::default()
             .bluefield_software(BlueFieldSoftwareParams {
                 os_iso: "http://example.com/astra.iso".to_string(),
@@ -1230,12 +1269,14 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .flavor_name("astra-flavor")
             .services(services)
             .deployment_scoped_service_interfaces(true)
+            .intercept_bridging(topology)
             .enable_delay_host_init(true)
             .deployment_type(DpuDeploymentType::Bf4Astra)
             .build()
             .expect("scoped Astra test configuration must be valid"),
     ];
 
+    // Provide the Astra runtime ConfigMap required while rendering its fixed xplane files.
     mock.configs.insert(
         ns_key(TEST_NS, "ra2.2-runtime"),
         BTreeMap::from([(
@@ -1269,17 +1310,16 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
         .map(|interface| interface.metadata.name.clone().unwrap())
         .collect::<BTreeSet<_>>();
     let mut expected_interface_names = BTreeSet::new();
-    for suffix in ["bf3", "bf3gb200", "bf4"] {
+    for suffix in ["bf3", "bf3gb200", "bf4", "astra"] {
         for logical_name in ["p0", "p1", "c2pf3", "c2pf3vf4"] {
             expected_interface_names.insert(format!("{logical_name}-{suffix}"));
         }
     }
-    // Astra ignores configured intercept topology and retains its static BF4+CX logical inventory.
-    let mut astra_chainable_logical_names = ["p0", "p1", "pf0hpf", "pf1hpf"]
+    // Astra retains its fixed xplane resources around the shared replacement PF/VF inventory.
+    let astra_chainable_logical_names = ["p0", "p1", "c2pf3", "c2pf3vf4"]
         .into_iter()
         .map(|name| name.to_string())
         .collect::<BTreeSet<_>>();
-    astra_chainable_logical_names.extend((0..14).map(|vf_id| format!("pf0vf{vf_id}")));
     let mut astra_logical_names = astra_chainable_logical_names.clone();
     let astra_xplane_group_ids = [
         "r0swpln0", "r1swpln0", "r0swpln1", "r1swpln1", "r2swpln0", "r3swpln0", "r2swpln1",
@@ -1332,8 +1372,8 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
         }
     }
 
-    // All three configured classes must serialize the same exact DPF-owned Patch pairs.
-    for suffix in ["bf3", "bf3gb200", "bf4"] {
+    // All four configured classes must serialize the same exact topology Patch pairs.
+    for suffix in ["bf3", "bf3gb200", "bf4", "astra"] {
         for (logical_name, peer_bridge, peer_patch_name) in [
             ("c2pf3", "br-pf3", "p-pf3"),
             ("c2pf3vf4", "br-vf4", "p-vf4"),
@@ -1556,8 +1596,14 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
         Some(&expected_astra_labels)
     );
     let astra_switches = &astra.spec.service_chains.as_ref().unwrap().switches;
-    // Astra service-to-service chains must select the static logical names constructed above, not
-    // the configured BF3/BF4 `c2pf3` topology.
+    // Each service chain and fixed xplane pair must appear once; the set checks below hide
+    // duplicates.
+    assert_eq!(
+        astra_switches.len(),
+        astra_chainable_logical_names.len() + astra_xplane_group_ids.len()
+    );
+    // Astra service-to-service chains must select the configured topology logical names while its
+    // fixed xplane-to-CX chains remain present.
     let astra_chain_interfaces = astra_switches
         .iter()
         .filter(|switch| switch.ports.iter().any(|port| port.service.is_some()))
@@ -1595,8 +1641,8 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             })
             .collect::<BTreeSet<_>>()
     );
-    // Astra's flavor derives PF_TOTAL_SF from static service endpoints and the DOCA Weave DHCP
-    // Agent PF allocation, and must not render configured peer bridges.
+    // One selected PF and one VF produce seven topology-backed endpoints. Astra adds eight Weave
+    // DHCP Agent SFs and four headroom SFs, so this fixture must emit exactly PF_TOTAL_SF=19.
     assert!(astra.spec.dpus.flavor.is_none());
     let astra_template = DpuFlavorTemplateRepository::get(
         &mock,
@@ -1615,18 +1661,13 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             serde_yaml::from_value(body["spec"].clone()).unwrap()
         },
     };
-    let astra_interfaces = crate::sdk::build_astra_dpu_interfaces_vec();
-    let expected_astra_pf_total_sf =
-        crate::sdk::calculate_astra_pf_total_sf(astra_interfaces.as_slice())
-            .expect("canonical Astra inventory must have valid SF capacity");
-    let expected_astra_pf_total_sf_parameter = format!("PF_TOTAL_SF={expected_astra_pf_total_sf}");
     assert!(
         astra_flavor.spec.nvconfig.as_ref().unwrap()[0]
             .parameters
             .as_ref()
             .unwrap()
             .iter()
-            .any(|parameter| parameter == &expected_astra_pf_total_sf_parameter)
+            .any(|parameter| parameter == "PF_TOTAL_SF=19")
     );
     assert!(
         astra_flavor.spec.nvconfig.as_ref().unwrap()[0]
@@ -1643,16 +1684,394 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .and_then(|readiness| readiness.gate),
         Some(DpuFlavorServiceReadinessGate::DpuServiceCriticalPodsReady)
     ));
-    assert!(
-        !astra_flavor
-            .spec
-            .ovs
-            .as_ref()
-            .and_then(|ovs| ovs.raw_config_script.as_ref())
-            .unwrap()
-            .contains("br-pf3")
-    );
+
+    // Astra must resolve BF4 identities before fixed OVS setup, then add configured intercept bridges afterward.
+    let astra_ovs = astra_flavor
+        .spec
+        .ovs
+        .as_ref()
+        .and_then(|ovs| ovs.raw_config_script.as_ref())
+        .unwrap();
+    assert!(astra_ovs.contains("resolve_dpf_pf 'c2pf3'"));
+    assert!(astra_ovs.contains("_ovs-vsctl --may-exist add-br 'br-pf3'"));
+    assert!(astra_ovs.contains("_ovs-vsctl --may-exist add-br 'br-vf4'"));
+    let resolution = astra_ovs.find("resolve_dpf_pf 'c2pf3'").unwrap();
+    let fixed_ovs_setup = astra_ovs.find("/etc/mellanox/ovs-script.sh").unwrap();
+    let fixed_xplane_setup = astra_ovs.find("/etc/mellanox/xplane-bridge.sh").unwrap();
+    let intercept_bridge_setup = astra_ovs
+        .find("_ovs-vsctl --may-exist add-br 'br-pf3'")
+        .unwrap();
+    assert!(resolution < fixed_ovs_setup);
+    assert!(fixed_xplane_setup < intercept_bridge_setup);
+
+    // The flavor ACL must cover the selected topology-backed HBN endpoints and omit an unselected
+    // VF.
+    let astra_dhcp_acl = astra_flavor
+        .spec
+        .config_files
+        .as_ref()
+        .unwrap()
+        .iter()
+        .find(|file| file.path.ends_with("/10-dhcp.rules"))
+        .and_then(|file| file.raw.as_ref())
+        .unwrap();
+    assert!(astra_dhcp_acl.contains("pf0hpf_if"));
+    assert!(astra_dhcp_acl.contains("pf0vf4_if"));
+    assert!(!astra_dhcp_acl.contains("pf0vf0_if"));
     drop(sdk);
+}
+
+/// Verifies the one-way Astra migration deletes exactly the old scoped PF/VF set and a restarted
+/// attempt resumes an accepted deletion, preventing interruption from leaving old and new
+/// inventories together.
+#[tokio::test(start_paused = true)]
+async fn topology_backed_astra_initialization_replaces_pre_topology_scoped_pf_vfs_in_order() {
+    // Create the scoped topology-free Astra state emitted by the predecessor startup path.
+    let mock = InitializationMock::default();
+    let sdk = seed_pre_topology_scoped_astra(&mock).await;
+
+    // Seed one static PF from each unrelated scoped class. Cloning preserves the complete PF
+    // fixture, while the non-Astra name keeps it outside the exact migration set. The owner label
+    // only keeps the fixture consistent with its deployment class.
+    let scoped_pf = DpuServiceInterfaceRepository::get(&mock, "pf0hpf-astra", TEST_NS)
+        .await
+        .unwrap()
+        .expect("the predecessor Astra state must contain its static PF");
+    for (name, deployment_name) in [
+        // BF3 proves cleanup cannot broaden to another deployment's static PF generation.
+        ("pf0hpf-bf3", "bf3-deployment"),
+        // Generic BF4 differs by suffix and protects the other supported BF generation.
+        ("pf0hpf-bf4", "bf4-deployment"),
+    ] {
+        let mut interface = scoped_pf.clone();
+        interface.metadata.name = Some(name.to_string());
+        interface
+            .spec
+            .template
+            .spec
+            .node_selector
+            .as_mut()
+            .expect("the cloned scoped interface must retain its selector")
+            .match_labels = Some(BTreeMap::from([(
+            "svc.dpu.nvidia.com/owned-by-dpudeployment".to_string(),
+            format!("{TEST_NS}_{deployment_name}"),
+        )]));
+        mock.service_interfaces
+            .insert(resource_key(&interface), interface);
+    }
+
+    // Pin the predecessor PF/VF generation so migration cleanup cannot silently broaden.
+    let pre_topology_names = ["pf0hpf-astra", "pf1hpf-astra"]
+        .into_iter()
+        .map(str::to_string)
+        .chain((0..=13).map(|vf_id| format!("pf0vf{vf_id}-astra")))
+        .collect::<BTreeSet<_>>();
+    let initial_names = DpuServiceInterfaceRepository::list(&mock, TEST_NS)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|interface| interface.metadata.name)
+        .collect::<BTreeSet<_>>();
+    assert!(pre_topology_names.is_subset(&initial_names));
+
+    // Hold one accepted delete behind its simulated finalizer so ordering remains observable.
+    let deferred_name = "pf0vf13-astra";
+    let deferred_key = ns_key(TEST_NS, deferred_name);
+    mock.deferred_service_interface_deletes
+        .insert(deferred_key.clone(), ());
+    let delete_started = mock.service_interface_delete_started.notified();
+    let topology_config = InitDpfResourcesConfig {
+        deployment_scoped_service_interfaces: true,
+        intercept_bridging: Some(configured_intercept_bridging()),
+        ..unscoped_astra_config()
+    };
+    let first_attempt_config = topology_config.clone();
+    let mut initialization = tokio::spawn(async move {
+        sdk.create_initialization_objects(&first_attempt_config)
+            .await
+    });
+
+    // The delete must start before task completion so a cleanup regression fails instead of
+    // hanging.
+    tokio::select! {
+        _ = delete_started => {}
+        result = &mut initialization => {
+            panic!(
+                "topology migration completed before submitting its deferred delete: {result:?}"
+            );
+        }
+    }
+    tokio::task::yield_now().await;
+
+    // Every historical PF/VF receives one delete request, and retained resources are untouched.
+    assert_eq!(
+        mock.service_interface_delete_requests.len(),
+        pre_topology_names.len()
+    );
+    for name in &pre_topology_names {
+        assert_eq!(
+            *mock
+                .service_interface_delete_requests
+                .get(&ns_key(TEST_NS, name))
+                .unwrap_or_else(|| panic!("missing delete request for {name}")),
+            1
+        );
+    }
+    for retained_name in [
+        "p0-astra",
+        "p1-astra",
+        "p-brcx-r0swpln0-to-br-sfc-astra",
+        "p-br-xplane-r0swpln0-to-br-sfc-astra",
+        "pf0hpf-bf3",
+        "pf0hpf-bf4",
+    ] {
+        assert!(
+            !mock
+                .service_interface_delete_requests
+                .contains_key(&ns_key(TEST_NS, retained_name)),
+            "{retained_name} must not be deleted by the PF/VF migration"
+        );
+        assert!(
+            DpuServiceInterfaceRepository::get(&mock, retained_name, TEST_NS)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    // An accepted delete is not completion: replacements remain absent while it still exists.
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, deferred_name, TEST_NS)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    for replacement_name in ["c2pf3-astra", "c2pf3vf4-astra"] {
+        assert!(
+            DpuServiceInterfaceRepository::get(&mock, replacement_name, TEST_NS)
+                .await
+                .unwrap()
+                .is_none(),
+            "{replacement_name} must not coexist with the old scoped PF/VF generation"
+        );
+    }
+
+    // Crossing the ten-minute diagnostic deadline must not release cleanup or apply replacements.
+    tokio::time::advance(Duration::from_secs(10 * 60 + 1)).await;
+    assert!(
+        !initialization.is_finished(),
+        "migration must keep waiting after the blocked-cleanup deadline"
+    );
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, "c2pf3-astra", TEST_NS)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Interrupt startup while the accepted deletion is still waiting on its finalizer.
+    initialization.abort();
+    assert!(
+        initialization
+            .await
+            .expect_err("the interrupted initialization task must not complete")
+            .is_cancelled()
+    );
+
+    // A fresh SDK over the same persisted state must rediscover and resubmit the stale resource.
+    let retry_sdk =
+        crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+            .with_labeler(InitializationLabeler)
+            .build_without_resources()
+            .await
+            .unwrap();
+    let delete_retried = mock.service_interface_delete_started.notified();
+    let mut retry = tokio::spawn(async move {
+        retry_sdk
+            .create_initialization_objects(&topology_config)
+            .await
+    });
+    tokio::select! {
+        _ = delete_retried => {}
+        result = &mut retry => {
+            panic!("retry completed before resubmitting its deferred delete: {result:?}");
+        }
+    }
+    assert_eq!(
+        *mock
+            .service_interface_delete_requests
+            .get(&deferred_key)
+            .expect("retry must record the deferred delete"),
+        2,
+        "restart must resubmit an accepted deletion whose resource still exists"
+    );
+
+    // Complete the finalizer only after retry is waiting, then require normal convergence.
+    mock.deferred_service_interface_deletes
+        .remove(&deferred_key);
+    mock.service_interfaces.remove(&deferred_key);
+    tokio::time::advance(Duration::from_secs(10)).await;
+    retry.await.unwrap().unwrap();
+
+    // The final state contains topology resources and none of the old scoped PF/VF resources.
+    let final_names = DpuServiceInterfaceRepository::list(&mock, TEST_NS)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|interface| interface.metadata.name)
+        .collect::<BTreeSet<_>>();
+    assert!(pre_topology_names.is_disjoint(&final_names));
+    assert!(final_names.contains("c2pf3-astra"));
+    assert!(final_names.contains("c2pf3vf4-astra"));
+    for retained_name in [
+        "p0-astra",
+        "p1-astra",
+        "p-brcx-r0swpln0-to-br-sfc-astra",
+        "p-br-xplane-r0swpln0-to-br-sfc-astra",
+        "pf0hpf-bf3",
+        "pf0hpf-bf4",
+    ] {
+        assert!(final_names.contains(retained_name));
+    }
+}
+
+/// Verifies restart completes a partially applied topology before publishing its services and
+/// deployment, preventing interrupted startup from exposing references to missing interfaces.
+#[tokio::test]
+async fn topology_backed_astra_initialization_retries_partial_replacements_before_publication() {
+    // Establish the predecessor resources that the migration must replace.
+    let mock = InitializationMock::default();
+    let sdk = seed_pre_topology_scoped_astra(&mock).await;
+
+    // Retain predecessor defaults and add one marker whose resources identify new publication.
+    let marker_service_name = "migration-marker";
+    let marker_resource_name = "migration-marker-bf4astra";
+    let mut services = crate::services::default_services(&crate::ServiceRegistryConfig::default());
+    services.push(ServiceDefinition::new(
+        marker_service_name,
+        "repo",
+        "chart",
+        "1.0.0",
+    ));
+    let topology_config = InitDpfResourcesConfig {
+        deployment_scoped_service_interfaces: true,
+        intercept_bridging: Some(configured_intercept_bridging()),
+        services,
+        ..unscoped_astra_config()
+    };
+
+    // Hold the second configured replacement before persistence so the first remains observable.
+    let deferred_replacement_name = "c2pf3vf4-astra";
+    let deferred_replacement_key = ns_key(TEST_NS, deferred_replacement_name);
+    mock.deferred_service_interface_applies
+        .insert(deferred_replacement_key.clone(), ());
+    let replacement_apply_started = mock.service_interface_apply_started.notified();
+    let first_attempt_config = topology_config.clone();
+    let mut initialization = tokio::spawn(async move {
+        sdk.create_initialization_objects(&first_attempt_config)
+            .await
+    });
+    tokio::select! {
+        _ = replacement_apply_started => {}
+        result = &mut initialization => {
+            panic!("initialization completed before reaching its deferred replacement: {result:?}");
+        }
+    }
+
+    // Cleanup completed and one replacement persisted, but the held replacement remains absent.
+    for stale_name in ["pf0hpf-astra", "pf0vf13-astra"] {
+        assert!(
+            DpuServiceInterfaceRepository::get(&mock, stale_name, TEST_NS)
+                .await
+                .unwrap()
+                .is_none(),
+            "{stale_name} must be deleted before replacement application"
+        );
+    }
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, "c2pf3-astra", TEST_NS)
+            .await
+            .unwrap()
+            .is_some(),
+        "the first configured replacement must persist before interruption"
+    );
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, deferred_replacement_name, TEST_NS)
+            .await
+            .unwrap()
+            .is_none(),
+        "the deferred replacement must remain absent before interruption"
+    );
+
+    // Neither service resources nor the updated deployment may precede the complete interface set.
+    assert!(
+        DpuServiceTemplateRepository::get(&mock, marker_resource_name, TEST_NS)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        DpuServiceConfigurationRepository::get(&mock, marker_resource_name, TEST_NS)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let predecessor_deployment = DpuDeploymentRepository::get(&mock, "astra-deployment", TEST_NS)
+        .await
+        .unwrap()
+        .expect("the predecessor Astra deployment must remain published");
+    assert!(
+        !predecessor_deployment
+            .spec
+            .services
+            .contains_key(marker_service_name)
+    );
+
+    // Cancel the partial attempt, then let a fresh SDK replay the complete desired state.
+    initialization.abort();
+    assert!(
+        initialization
+            .await
+            .expect_err("the interrupted initialization task must not complete")
+            .is_cancelled()
+    );
+    mock.deferred_service_interface_applies
+        .remove(&deferred_replacement_key);
+    let retry_sdk =
+        crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+            .with_labeler(InitializationLabeler)
+            .build_without_resources()
+            .await
+            .unwrap();
+    retry_sdk
+        .create_initialization_objects(&topology_config)
+        .await
+        .expect("retry must complete the partial topology migration");
+
+    // Retry publishes the missing replacement before the marker service and updated deployment.
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, deferred_replacement_name, TEST_NS)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        DpuServiceTemplateRepository::get(&mock, marker_resource_name, TEST_NS)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        DpuServiceConfigurationRepository::get(&mock, marker_resource_name, TEST_NS)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let deployment = DpuDeploymentRepository::get(&mock, "astra-deployment", TEST_NS)
+        .await
+        .unwrap()
+        .expect("retry must publish the updated Astra deployment");
+    assert!(deployment.spec.services.contains_key(marker_service_name));
 }
 
 #[tokio::test]

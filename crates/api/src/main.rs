@@ -60,7 +60,8 @@ async fn main() -> eyre::Result<()> {
 
             // production cancel_token is driven by SIGTERM/SIGINT
             let cancel_token = carbide_utils::shutdown_handler::start()?;
-            // production readiness is gated by a TCP check on the gRPC port: ready_tx is a no-op
+            // Production Kubernetes readiness uses the database-backed `/ready` endpoint.
+            // The startup channel is retained for in-process callers; this binary does not consume it.
             let (ready_tx, _ready_rx) = tokio::sync::oneshot::channel();
 
             carbide::run(

@@ -24,8 +24,8 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use carbide_dpa::DpaInfo;
 use carbide_dpa_manager::DpaMonitor;
-use carbide_dpf::DpuDeploymentType;
 use carbide_dpf::repository::DpuServiceInterfaceRepository;
+use carbide_dpf::{DpfInterceptBridging, DpuDeploymentType, ServiceVpcSlots};
 use carbide_extension_service_controller::context::ExtensionServiceStateHandlerServices;
 use carbide_extension_service_controller::handler::ExtensionServiceStateHandler;
 use carbide_extension_service_controller::io::ExtensionServiceStateControllerIO;
@@ -99,7 +99,8 @@ use crate::api::Api;
 use crate::api::metrics::ApiMetricsEmitter;
 use crate::bootstrap::{RuntimeInputs, RuntimePrelude};
 use crate::cfg::file::{
-    CarbideConfig, DpfExtraService, InitialObjectsConfig, ListenMode, VmaasConfig,
+    CarbideConfig, DpfDeploymentConfig, DpfExtraService, InitialObjectsConfig, ListenMode,
+    VmaasConfig,
 };
 use crate::cfg::load::all_configuration_files;
 use crate::dpa::handler::start_svpc_handler;
@@ -593,13 +594,20 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         None
     };
 
-    let dpf_sdk = initialize_dpf_sdk(
-        &carbide_config,
-        credential_manager.clone(),
-        db_pool.clone(),
-        join_set,
-    )
-    .await?;
+    // Shutdown may interrupt one-way Kubernetes migration safely because each startup rediscovers
+    // remaining old resources and server-side applies the complete desired state.
+    let dpf_sdk = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            return Err(eyre::eyre!("DPF initialization canceled during shutdown"));
+        }
+        result = initialize_dpf_sdk(
+            &carbide_config,
+            credential_manager.clone(),
+            db_pool.clone(),
+            join_set,
+        ) => result?,
+    };
 
     let component_manager = if let Some(cd_config) = &carbide_config.component_manager {
         match component_manager::component_manager::build_component_manager(
@@ -853,22 +861,29 @@ fn scoped_service_interface_names(
         .collect()
 }
 
-/// Builds the startup deployment from its effective inventory so operator limits and mandatory
-/// service attachments are validated together. BF4 uses a single `BlueFieldSoftware` source whose
-/// CR carries the complete PSID-to-PLDM mapping.
-fn build_dpf_init_config(
+/// Builds startup interfaces and mandatory services from one effective topology projection.
+///
+/// Keeping both results behind this seam prevents API service endpoints from drifting from the
+/// interface inventory validated by the DPF SDK.
+fn build_dpf_interfaces_and_services(
     carbide_config: &CarbideConfig,
-    deployment: &crate::cfg::file::DpfDeploymentConfig,
+    deployment: &DpfDeploymentConfig,
     deployment_type: DpuDeploymentType,
-    bluefield_software: Option<carbide_dpf::BlueFieldSoftwareParams>,
-    interfaces: &[carbide_dpf::types::DpuServiceInterfaceTemplateDefinition],
-    service_vpc_slots: carbide_dpf::ServiceVpcSlots,
-    intercept_bridging: Option<&carbide_dpf::DpfInterceptBridging>,
-) -> eyre::Result<carbide_dpf::InitDpfResourcesConfig> {
-    // Resolve the same service overrides that startup supplies to each deployment.
+    service_vpc_slots: ServiceVpcSlots,
+    intercept_bridging: Option<&DpfInterceptBridging>,
+) -> (
+    Vec<carbide_dpf::types::DpuServiceInterfaceTemplateDefinition>,
+    Vec<carbide_dpf::ServiceDefinition>,
+) {
+    let interfaces = carbide_dpf::build_deployment_dpu_interfaces(
+        deployment_type,
+        carbide_config.dpu_config.num_of_vfs,
+        intercept_bridging,
+    );
     let services = carbide_config
         .dpf
         .resolved_services_for(deployment, deployment_type);
+
     // Warn when an Astra deployment has Weave services but no ewethers config.
     if deployment_type == DpuDeploymentType::Bf4Astra
         && carbide_config.ewethers_config.is_none()
@@ -884,20 +899,50 @@ fn build_dpf_init_config(
             "Weave services are configured without ewethers_config; NICo's DPA/Astra paths remain disabled. Configure ewethers with the appropriate enable flags and overlay subnet values"
         );
     }
-    // Service-capable deployments receive both limits; Astra remains explicitly unreserved.
+
+    let mandatory_services = crate::dpf_services::mandatory_services(
+        &services,
+        &carbide_config.dpf.dpu_agent_bootstrap_ca,
+        &interfaces,
+        service_vpc_slots,
+        &carbide_config.node_auth,
+        carbide_config.ewethers_config.as_ref(),
+    );
+    (interfaces, mandatory_services)
+}
+
+/// Builds the startup deployment from its effective inventory so operator limits and mandatory
+/// service attachments are validated together. BF4 uses a single `BlueFieldSoftware` source whose
+/// CR carries the complete PSID-to-PLDM mapping.
+fn build_dpf_init_config(
+    carbide_config: &CarbideConfig,
+    deployment: &DpfDeploymentConfig,
+    deployment_type: DpuDeploymentType,
+    bluefield_software: Option<carbide_dpf::BlueFieldSoftwareParams>,
+    configured_service_vpc_slots: ServiceVpcSlots,
+    intercept_bridging: Option<&DpfInterceptBridging>,
+) -> eyre::Result<carbide_dpf::InitDpfResourcesConfig> {
+    // Astra consumes topology-derived endpoints but not generic service-VPC reservations.
     let (service_vpc_slots, additional_managed_sf, max_active_service_vpc_interfaces_per_dpu) =
         match deployment_type {
-            DpuDeploymentType::Bf4Astra => (carbide_dpf::ServiceVpcSlots::default(), 0, 0),
+            DpuDeploymentType::Bf4Astra => (ServiceVpcSlots::default(), 0, 0),
             DpuDeploymentType::Bf3
             | DpuDeploymentType::Bf3Gb200
             | DpuDeploymentType::Bf4Generic => (
-                service_vpc_slots,
+                configured_service_vpc_slots,
                 carbide_config.dpu_config.additional_managed_sf,
                 carbide_config
                     .dpu_config
                     .max_active_service_vpc_interfaces_per_dpu,
             ),
         };
+    let (interfaces, services) = build_dpf_interfaces_and_services(
+        carbide_config,
+        deployment,
+        deployment_type,
+        service_vpc_slots,
+        intercept_bridging,
+    );
     let mut builder = carbide_dpf::InitDpfResourcesConfigBuilder::default()
         .bfb_url(deployment.bfb_url.clone().unwrap_or_default())
         .flavor_name(deployment.flavor_name.clone())
@@ -905,33 +950,21 @@ fn build_dpf_init_config(
         .deployment_scoped_service_interfaces(
             carbide_config.dpf.deployment_scoped_service_interfaces,
         )
-        .services(crate::dpf_services::mandatory_services(
-            &services,
-            &carbide_config.dpf.dpu_agent_bootstrap_ca,
-            interfaces,
-            service_vpc_slots,
-            &carbide_config.node_auth,
-            carbide_config.ewethers_config.as_ref(),
-        ))
+        .services(services)
         .num_of_vfs(carbide_config.dpu_config.num_of_vfs)
         .pf_total_sf_reserved(carbide_config.dpf.pf_total_sf_reserved)
         .additional_managed_sf(additional_managed_sf)
         .service_vpc_slots(service_vpc_slots)
         .max_active_service_vpc_interfaces_per_dpu(max_active_service_vpc_interfaces_per_dpu)
         .max_sf_per_pf(deployment.max_sf_per_pf)
-        .interfaces(interfaces.to_vec())
+        .interfaces(interfaces)
         .extra_bfcfg_parameters(carbide_config.dpf.resolved_bfcfg_parameters_for(deployment))
         .enable_delay_host_init(deployment.enable_delay_host_init)
         .deployment_type(deployment_type);
     if let Some(bluefield_software) = bluefield_software {
         builder = builder.bluefield_software(bluefield_software);
     }
-    if let Some(intercept_bridging) = match deployment_type {
-        DpuDeploymentType::Bf4Astra => None,
-        DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 | DpuDeploymentType::Bf4Generic => {
-            intercept_bridging.cloned()
-        }
-    } {
+    if let Some(intercept_bridging) = intercept_bridging.cloned() {
         builder = builder.intercept_bridging(intercept_bridging);
     }
     if let Some(proxy) = carbide_config.dpf.proxy.clone() {
@@ -1015,26 +1048,8 @@ async fn initialize_dpf_sdk(
         );
     }
 
-    // Build interfaces vector for each deployment type.
-    // For Astra we only build the static interfaces vector here, and
-    // the function resolve_initialization_inventory() adds the required
-    // xplane patch interfaces before it applies DPF CRs. In theory, we
-    // could have augmented the patch interfaces here also.
-    let bf3_interfaces = carbide_dpf::build_deployment_dpu_interfaces(
-        DpuDeploymentType::Bf3,
-        carbide_config.dpu_config.num_of_vfs,
-        intercept_bridging.as_ref(),
-    );
-    let bf4_interfaces = carbide_dpf::build_deployment_dpu_interfaces(
-        DpuDeploymentType::Bf4Generic,
-        carbide_config.dpu_config.num_of_vfs,
-        intercept_bridging.as_ref(),
-    );
-    let astra_interfaces = carbide_dpf::sdk::build_dpu_interfaces_vec();
-
-    let service_vpc_slots =
-        carbide_dpf::ServiceVpcSlots::new(carbide_config.dpu_config.service_vpc_slot_count)
-            .map_err(|error| eyre::eyre!("invalid DPF service-VPC configuration: {error}"))?;
+    let service_vpc_slots = ServiceVpcSlots::new(carbide_config.dpu_config.service_vpc_slot_count)
+        .map_err(|error| eyre::eyre!("invalid DPF service-VPC configuration: {error}"))?;
 
     let repo = carbide_dpf::KubeRepository::new()
         .await
@@ -1062,22 +1077,16 @@ async fn initialize_dpf_sdk(
     // Soon v2 flag will be removed and will become only mode for dpf handling.
     let deployment_type_labels = build_deployment_type_labels(carbide_config);
 
-    // Select the platform inventory before building its validated initialization configuration.
+    // Build each deployment's validated initialization configuration from its effective inventory.
     let make_init_config =
-        |deployment: &crate::cfg::file::DpfDeploymentConfig,
+        |deployment: &DpfDeploymentConfig,
          deployment_type: DpuDeploymentType,
          bluefield_software: Option<carbide_dpf::BlueFieldSoftwareParams>| {
-            let interfaces = match deployment_type {
-                DpuDeploymentType::Bf4Astra => &astra_interfaces,
-                DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 => &bf3_interfaces,
-                DpuDeploymentType::Bf4Generic => &bf4_interfaces,
-            };
             build_dpf_init_config(
                 carbide_config,
                 deployment,
                 deployment_type,
                 bluefield_software,
-                interfaces,
                 service_vpc_slots,
                 intercept_bridging.as_ref(),
             )
@@ -2471,6 +2480,93 @@ mod tests {
         );
     }
 
+    /// Verifies Astra startup wires one sparse topology to exact mandatory-service endpoints and a
+    /// valid full config, because SDK-only tests bypass API-core service construction.
+    #[test]
+    fn astra_init_config_wires_topology_into_mandatory_services() {
+        // Select one sparse VF, enable required interface scoping, and set non-default capacity
+        // knobs so Astra's three generic-reservation exclusions are observable.
+        let mut config = crate::test_support::default_config::with_dpf_intercept_topology(&[4]);
+        config.dpf.deployment_scoped_service_interfaces = true;
+        config.dpu_config.num_of_vfs = 16;
+        config.dpu_config.additional_managed_sf = 17;
+        config.dpu_config.max_active_service_vpc_interfaces_per_dpu = 23;
+        let topology = normalize_dpf_intercept_bridging(
+            config.vmaas_config.as_ref(),
+            config.dpu_config.num_of_vfs,
+        )
+        .unwrap()
+        .expect("the configured DPF topology must normalize");
+
+        // Astra uses software provisioning; the remaining defaults provide ordinary services.
+        let deployment = DpfDeploymentConfig {
+            bfb_url: None,
+            ..Default::default()
+        };
+
+        // Inspect production's shared startup seam so every mandatory endpoint and its order are
+        // pinned.
+        let (_, services) = build_dpf_interfaces_and_services(
+            &config,
+            &deployment,
+            DpuDeploymentType::Bf4Astra,
+            ServiceVpcSlots::default(),
+            Some(&topology),
+        );
+        let service_endpoints: BTreeMap<_, _> = services
+            .iter()
+            .map(|service| {
+                (
+                    service.name.as_str(),
+                    service
+                        .interfaces
+                        .iter()
+                        .map(|interface| (interface.name.as_str(), interface.network.as_str()))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            service_endpoints[carbide_dpf::types::DOCA_HBN_SERVICE_NAME],
+            vec![
+                ("p0_if", "mybrhbn"),
+                ("p1_if", "mybrhbn"),
+                ("pf0hpf_if", "mybrhbn"),
+                ("pf0vf4_if", "mybrhbn"),
+            ]
+        );
+        assert_eq!(
+            service_endpoints[carbide_dpf::types::DHCP_SERVER_SERVICE_NAME],
+            vec![
+                ("d_pf0hpf_if", "mybrsfc-dhcp"),
+                ("d_pf0vf4_if", "mybrsfc-dhcp"),
+            ]
+        );
+        assert_eq!(
+            service_endpoints[carbide_dpf::types::FMDS_SERVICE_NAME],
+            vec![("f_pf0hpf_if", "mybrsfc-fmds")]
+        );
+
+        // The full builder must accept those endpoints while excluding every generic reservation.
+        let init_config = build_dpf_init_config(
+            &config,
+            &deployment,
+            DpuDeploymentType::Bf4Astra,
+            Some(carbide_dpf::BlueFieldSoftwareParams {
+                os_iso: "http://example.com/astra.iso".to_string(),
+                pldm_fw_bundle: Some(BTreeMap::from([(
+                    "psid".to_string(),
+                    "http://example.com/astra.pldm".to_string(),
+                )])),
+            }),
+            ServiceVpcSlots::new(1).unwrap(),
+            Some(&topology),
+        )
+        .expect("Astra startup must assemble one validated topology-backed configuration");
+
+        assert_eq!(init_config.deployment_type(), DpuDeploymentType::Bf4Astra);
+    }
+
     /// Verifies incomplete or skipped entries are rejected only at the DPF boundary.
     #[test]
     fn dpf_intercept_bridging_normalization_rejects_missing_identity_and_skip_create() {
@@ -2646,12 +2742,6 @@ mod tests {
         config.dpu_config.service_vpc_slot_count = 1;
         config.dpf.pf_total_sf_reserved = 31;
         let slots = carbide_dpf::ServiceVpcSlots::new(1).expect("bounded test slot count");
-        let interfaces = carbide_dpf::build_deployment_dpu_interfaces(
-            DpuDeploymentType::Bf3,
-            config.dpu_config.num_of_vfs,
-            None,
-        );
-
         for (ceiling, active_limit, expected_error) in [
             // A sufficient pool still fails when it exceeds the operator's declared ceiling.
             (
@@ -2679,7 +2769,6 @@ mod tests {
                 &config.dpf.deployments.bf3,
                 DpuDeploymentType::Bf3,
                 None,
-                &interfaces,
                 slots,
                 None,
             );
@@ -2706,7 +2795,6 @@ mod tests {
             bfb_url: None,
             ..Default::default()
         };
-        let interfaces = carbide_dpf::sdk::build_dpu_interfaces_vec();
 
         // Each leaked reservation is independently rejected by SDK validation, so success proves all three are cleared.
         build_dpf_init_config(
@@ -2720,7 +2808,6 @@ mod tests {
                     "http://example.com/astra.pldm".to_string(),
                 )])),
             }),
-            &interfaces,
             slots,
             None,
         )

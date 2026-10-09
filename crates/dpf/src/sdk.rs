@@ -879,10 +879,18 @@ async fn create_dpu_flavor_template<R: DpuFlavorTemplateRepository>(
     config: &InitDpfResourcesConfig,
     resolved: &ResolvedInitialization<'_>,
 ) -> Result<String, DpfError> {
-    let mut template = crate::flavor::flavor_bf4_astra(
+    // Derive configured ACLs from the canonical inventory, but retain the topology-free Astra ACL
+    // verbatim so an upgrade alone does not change the immutable flavor-template hash.
+    let dhcp_acl_interfaces = config
+        .intercept_bridging
+        .as_ref()
+        .map(|_| resolved.interfaces.as_ref());
+    let mut template = crate::flavor::flavor_bf4_astra_with_topology(
         namespace,
         &config.proxy,
         resolved.pf_total_sf,
+        config.intercept_bridging.as_ref(),
+        dhcp_acl_interfaces,
         &config.extra_bfcfg_parameters,
         config.enable_delay_host_init,
     )?;
@@ -1359,6 +1367,47 @@ fn astra_xplane_group_ids() -> [&'static str; 8] {
     ]
 }
 
+/// Returns the Astra component that owns an OVS name reserved outside intercept topology.
+/// Central ownership classification prevents configured names from aliasing fixed Astra, Weave,
+/// or DPF-generated OVS state.
+fn astra_ovs_name_owner(name: &str) -> Option<String> {
+    let has_generated_hash = |prefix: &str| {
+        name.strip_prefix(prefix).is_some_and(|hash| {
+            hash.len() == 8
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    };
+
+    if name == "br-xplane" {
+        return Some("BF4 Astra aggregate xplane bridge".to_string());
+    }
+
+    for group_id in astra_xplane_group_ids() {
+        for (reserved_name, owner) in [
+            (format!("brcx-{group_id}"), "BF4 Astra rail bridge"),
+            (format!("br-dhcp-{group_id}"), "DOCA Weave DHCP bridge"),
+            (format!("br-drop-{group_id}"), "DOCA Weave drop bridge"),
+        ] {
+            if name == reserved_name {
+                return Some(format!("{owner} for {group_id}"));
+            }
+        }
+
+        // DPF removes bridge-name hyphens before adding its eight-character FNV-1a suffix.
+        let rail_bridge = format!("brcx{group_id}");
+        if has_generated_hash(&format!("p_brsfc_to_{rail_bridge}_"))
+            || has_generated_hash(&format!("p_{rail_bridge}_to_brsfc_"))
+        {
+            return Some("DPF-generated BF4 Astra rail patch port".to_string());
+        }
+    }
+
+    (has_generated_hash("p_brsfc_to_brxplane_") || has_generated_hash("p_brxplane_to_brsfc_"))
+        .then(|| "DPF-generated BF4 Astra aggregate patch port".to_string())
+}
+
 pub fn build_dpu_interfaces_vec() -> Vec<DpuServiceInterfaceTemplateDefinition> {
     let interfaces: Vec<DpuServiceInterfaceTemplateDefinition> = vec![
         DpuServiceInterfaceTemplateDefinition {
@@ -1585,18 +1634,16 @@ pub fn build_effective_dpu_interfaces(
 }
 
 /// Builds the interface inventory for a deployment's platform profile.
-/// A static interface vector is first built using build_dpu_interfaces_vec()
-/// which is then changed based on deployment type.
-/// BF3 exposes only the static PF0 host representor in its NVConfig, so its
-/// static inventory omits `pf1hpf`.
-/// Generic BF4 retains static host PF1.
-/// Astra interface inventory calls build_astra_dpu_interfaces_vec() which
-/// also calls build_dpu_interfaces_vec() and then adds brcx- and br-xplane
-/// patch interfaces.
-/// When intercept bridging (VMaaS) is configured, the PF/VF topology
-/// specified in the site-config TOML replaces ordinary PF/VF entries and
-/// is authoritative. The deployment specific static-name filter does not
-/// alter the topology specified in the site-config.
+///
+/// Without intercept bridging, BF3 and generic BF4 derive their inventory from
+/// [`build_dpu_interfaces_vec`] and omit static VFs whose IDs are not below `num_of_vfs`. BF3 also
+/// omits `pf1hpf`, while generic BF4 retains it. Topology-free Astra deliberately does not apply
+/// that VF filter: it retains the complete static VF0 through VF13 inventory and adds its fixed
+/// `brcx-*` and `br-xplane` patch interfaces.
+///
+/// When intercept bridging is configured, its PF/VF topology replaces the ordinary PF/VF entries
+/// for every deployment profile and is authoritative. Deployment-specific static-name filtering
+/// does not alter that configured topology; Astra adds its fixed patch interfaces afterward.
 pub fn build_deployment_dpu_interfaces(
     deployment_type: DpuDeploymentType,
     num_of_vfs: u32,
@@ -1611,7 +1658,16 @@ pub fn build_deployment_dpu_interfaces(
         DpuDeploymentType::Bf4Generic => {
             build_effective_dpu_interfaces(num_of_vfs, intercept_bridging)
         }
-        DpuDeploymentType::Bf4Astra => build_astra_dpu_interfaces_vec(),
+        DpuDeploymentType::Bf4Astra => {
+            // Astra's fixed flavor keeps its established static VF population when no replacement
+            // topology exists; num_of_vfs bounds only a configured shared topology.
+            let mut interfaces = intercept_bridging
+                .map_or_else(build_dpu_interfaces_vec, |topology| {
+                    build_effective_dpu_interfaces(num_of_vfs, Some(topology))
+                });
+            interfaces.extend(build_astra_patch_dpu_interfaces_vec());
+            interfaces
+        }
     }
 }
 
@@ -1688,11 +1744,12 @@ fn build_astra_patch_dpu_interfaces_vec() -> Vec<DpuServiceInterfaceTemplateDefi
         .collect()
 }
 
-/// Calculates BF3 or generic-BF4 SF capacity from generated endpoints and additional capacity.
+/// Calculates the managed SF requirement used by BF3 and generic BF4.
 ///
 /// With intercept topology, `additional_managed_sf` increases the returned total. Without
 /// topology, generated endpoints and additional capacity must fit inside `reserved`, which is the
-/// returned legacy total.
+/// returned legacy total. Regular BF3 and generic BF4 emit the returned value as `PF_TOTAL_SF`;
+/// BF3 GB200 uses the same validation result but emits its platform-fixed value of 128.
 pub fn calculate_pf_total_sf(
     interfaces: &[DpuServiceInterfaceTemplateDefinition],
     intercept_bridging: Option<&DpfInterceptBridging>,
@@ -1816,12 +1873,12 @@ pub(crate) fn validate_initialization_config(
 
 /// Resolves the final interface inventory and PF SF capacity for a deployment.
 ///
-/// Normal NICo startup builds the BF3/generic-BF4 intercept topology in `setup.rs` before it
+/// Normal NICo startup builds the shared intercept topology in `setup.rs` before it
 /// constructs service definitions. It passes that inventory here in `config.interfaces`. This
 /// function rebuilds the expected inventory and verifies it against the `config.interfaces`
-/// passed in; on success it keeps using the caller's list. For Astra, only the base set of
-/// interfaces is passed in, and this function augments Astra's required xplane patch interfaces
-/// before applying DPF CRs.
+/// passed in; on success it keeps using the caller's list. Topology-free direct Astra callers may
+/// pass only the base interface set; this function then augments Astra's required xplane patch
+/// interfaces before applying DPF CRs.
 ///
 /// For direct SDK callers with an empty inventory, this function builds the
 /// appropriate default or topology projection itself.
@@ -1850,7 +1907,7 @@ fn resolve_initialization_inventory<'a>(
         ));
     }
 
-    // Astra's static interface inventory is safe only when deployment selectors isolate it from
+    // Astra's distinct interface inventory is safe only when deployment selectors isolate it from
     // BF3 and generic-BF4 nodes.
     if matches!(config.deployment_type, DpuDeploymentType::Bf4Astra)
         && !config.deployment_scoped_service_interfaces
@@ -1874,11 +1931,32 @@ fn resolve_initialization_inventory<'a>(
         ));
     }
 
+    // Astra, DPF's autogenerated patch pairs, Weave, and the intercept topology share one OVS namespace.
+    if matches!(config.deployment_type, DpuDeploymentType::Bf4Astra)
+        && let Some(topology) = &config.intercept_bridging
+    {
+        for interface in topology.interfaces() {
+            // DPF creates this br-sfc-side name from the configured peer-side patch name.
+            let local_patch_port = format!("p_brsfc_to_{}", interface.patch_port);
+            for (name, purpose) in [
+                (interface.bridge.as_str(), "intermediate bridge"),
+                (interface.patch_port.as_str(), "peer patch port"),
+                (local_patch_port.as_str(), "DPF-generated local patch port"),
+            ] {
+                if let Some(owner) = astra_ovs_name_owner(name) {
+                    return Err(DpfError::ConfigError(format!(
+                        "OVS name {name} for {purpose} on DPF intercept-bridging interface {} conflicts with {owner}",
+                        interface.identity.resource_name()
+                    )));
+                }
+            }
+        }
+    }
+
     // A normalized topology is valid only for the VF population supplied to its constructor.
     // Direct SDK callers can construct both inputs independently, so reject mismatches before
     // building a flavor or writing any initialization resource.
-    if !matches!(config.deployment_type, DpuDeploymentType::Bf4Astra)
-        && let Some(topology) = &config.intercept_bridging
+    if let Some(topology) = &config.intercept_bridging
         && topology.num_of_vfs() != config.num_of_vfs
     {
         return Err(DpfError::ConfigError(format!(
@@ -1888,9 +1966,7 @@ fn resolve_initialization_inventory<'a>(
         )));
     }
 
-    let interfaces = if !matches!(config.deployment_type, DpuDeploymentType::Bf4Astra)
-        && let Some(topology) = config.intercept_bridging.as_ref()
-    {
+    let interfaces = if let Some(topology) = config.intercept_bridging.as_ref() {
         let projected = build_deployment_dpu_interfaces(
             config.deployment_type,
             config.num_of_vfs,
@@ -2012,7 +2088,8 @@ fn resolve_initialization_inventory<'a>(
         ),
         DpuDeploymentType::Bf3 => (config.max_sf_per_pf, 10),
         DpuDeploymentType::Bf4Generic => (config.max_sf_per_pf, 14),
-        // Astra's separate static profile is outside service-VPC capacity.
+        // The fixed-xplane deployment derives capacity from its effective interface inventory
+        // rather than this generic ceiling.
         DpuDeploymentType::Bf4Astra => {
             // Astra's supported profile covers chained endpoints and the fixed Weave allocation;
             // unchained SF consumers must not spend its fixed headroom.
@@ -2260,39 +2337,40 @@ async fn wait_for_service_interface_deletions<
     }
 }
 
-async fn delete_stale_unscoped_legacy_service_interfaces<
+/// Deletes one migration's exact stale ServiceInterface set and waits for DPF finalizers before
+/// the caller applies replacements. After ten minutes it logs operator guidance and keeps waiting.
+async fn delete_service_interfaces_for_migration<
     R: crate::repository::DpuServiceInterfaceRepository,
 >(
     repo: &R,
     namespace: &str,
+    mut stale_names: Vec<String>,
+    migration: &'static str,
 ) -> Result<(), crate::error::DpfError> {
-    let mut live_interfaces =
-        crate::repository::DpuServiceInterfaceRepository::list(repo, namespace).await?;
-    live_interfaces.sort_by(|left, right| left.metadata.name.cmp(&right.metadata.name));
-    let stale_names = live_interfaces
-        .into_iter()
-        .filter(|interface| interface.spec.template.spec.node_selector.is_none())
-        .filter_map(|interface| interface.metadata.name)
-        .collect::<Vec<_>>();
+    stale_names.sort_unstable();
+    stale_names.dedup();
     if stale_names.is_empty() {
         tracing::info!(
             namespace,
-            "No legacy unscoped DPUServiceInterfaces require scoped-migration cleanup"
+            migration,
+            "No stale DPUServiceInterfaces require one-way migration cleanup"
         );
         return Ok(());
     }
 
     tracing::info!(
         namespace,
+        migration,
         service_interfaces = ?stale_names,
         blocked_log_delay = ?SERVICE_INTERFACE_MIGRATION_BLOCKED_LOG_DELAY,
-        "Starting legacy DPUServiceInterface cleanup for scoped migration"
+        "Starting DPUServiceInterface cleanup for one-way migration"
     );
     for name in &stale_names {
         tracing::info!(
             namespace,
+            migration,
             service_interface = %name,
-            "Deleting stale legacy unscoped DPUServiceInterface during scoped migration"
+            "Deleting stale DPUServiceInterface during one-way migration"
         );
     }
     // Continue waiting after the blocked-migration log. This leaves the startup attempt intact
@@ -2310,8 +2388,9 @@ async fn delete_stale_unscoped_legacy_service_interfaces<
         _ = tokio::time::sleep(SERVICE_INTERFACE_MIGRATION_BLOCKED_LOG_DELAY) => {
             tracing::error!(
                 namespace,
+                migration,
                 service_interfaces = ?stale_names,
-                "Legacy DPUServiceInterface cleanup remains blocked after ten minutes during scoped migration; NICo will continue waiting and scoped replacements will not be created. Inspect DPUServiceInterface deletion and finalizer status in this namespace; once DPF completes cleanup, initialization resumes automatically"
+                "DPUServiceInterface cleanup remains blocked after ten minutes during one-way migration; NICo will continue waiting and replacements will not be created. Inspect DPUServiceInterface deletion and finalizer status in this namespace; once DPF completes cleanup, initialization resumes automatically"
             );
             cleanup.await
         }
@@ -2321,19 +2400,72 @@ async fn delete_stale_unscoped_legacy_service_interfaces<
         Err(error) => {
             tracing::error!(
                 namespace,
+                migration,
                 service_interfaces = ?stale_names,
                 error = %error,
-                "Legacy DPUServiceInterface cleanup failed during scoped migration"
+                "DPUServiceInterface cleanup failed during one-way migration"
             );
             return Err(error);
         }
     }
     tracing::info!(
         namespace,
-        "Legacy DPUServiceInterface cleanup completed; applying scoped replacements"
+        migration,
+        "DPUServiceInterface cleanup completed; applying replacements"
     );
 
     Ok(())
+}
+
+async fn delete_stale_unscoped_legacy_service_interfaces<
+    R: crate::repository::DpuServiceInterfaceRepository,
+>(
+    repo: &R,
+    namespace: &str,
+) -> Result<(), crate::error::DpfError> {
+    let stale_names = crate::repository::DpuServiceInterfaceRepository::list(repo, namespace)
+        .await?
+        .into_iter()
+        .filter(|interface| interface.spec.template.spec.node_selector.is_none())
+        .filter_map(|interface| interface.metadata.name)
+        .collect::<Vec<_>>();
+    delete_service_interfaces_for_migration(repo, namespace, stale_names, "unscoped-to-scoped")
+        .await
+}
+
+/// Removes only the scoped PF/VF resources emitted by topology-free Astra releases.
+///
+/// Physical `p0`/`p1`, fixed CX/xplane Patch resources, and immutable flavor templates are shared
+/// or retained across the transition and therefore are deliberately outside this cleanup.
+async fn delete_pre_topology_scoped_astra_pf_vf_interfaces<
+    R: crate::repository::DpuServiceInterfaceRepository,
+>(
+    repo: &R,
+    namespace: &str,
+) -> Result<(), crate::error::DpfError> {
+    let suffix = service_interface_cr_suffix(DpuDeploymentType::Bf4Astra);
+
+    // Pin the exact historical generation so future inventory changes cannot broaden deletion.
+    let pre_topology_names = ["pf0hpf", "pf1hpf"]
+        .into_iter()
+        .map(|name| service_cr_name(name, suffix))
+        .chain((0..=13).map(|vf_id| service_cr_name(&format!("pf0vf{vf_id}"), suffix)))
+        .collect::<BTreeSet<_>>();
+    let stale_names = crate::repository::DpuServiceInterfaceRepository::list(repo, namespace)
+        .await?
+        .into_iter()
+        .filter(|interface| interface.spec.template.spec.node_selector.is_some())
+        .filter_map(|interface| interface.metadata.name)
+        .filter(|name| pre_topology_names.contains(name))
+        .collect::<Vec<_>>();
+
+    delete_service_interfaces_for_migration(
+        repo,
+        namespace,
+        stale_names,
+        "pre-topology-scoped-astra-to-topology",
+    )
+    .await
 }
 
 async fn create_flavor_services_and_deployment<
@@ -2404,6 +2536,22 @@ async fn create_flavor_services_and_deployment<
             .map_err(|error| {
                 DpfError::InvalidState(format!(
                     "failed to remove legacy DPUServiceInterfaces ({error}); resolve the deletion failure, then retry initialization. Check for legacy interfaces that may be only partially removed"
+                ))
+            })?;
+    }
+
+    // Replace only Astra's historical static PF/VF generation. Waiting for deletion prevents
+    // omitted static resources from coexisting with topology-specific replacements.
+    if config.deployment_scoped_service_interfaces
+        && deployment_type == DpuDeploymentType::Bf4Astra
+        && config.intercept_bridging.is_some()
+    {
+        delete_pre_topology_scoped_astra_pf_vf_interfaces(repo, namespace)
+            .await
+            .map_err(|error| {
+                DpfError::InvalidState(format!(
+                    "failed to remove pre-topology scoped Astra PF/VF DPUServiceInterfaces \
+                     ({error}); resolve the deletion failure, then retry initialization"
                 ))
             })?;
     }
@@ -4819,6 +4967,61 @@ mod tests {
         }
     }
 
+    /// Verifies the exact topology-free Astra inventory because changing a static interface or
+    /// endpoint silently changes ServiceInterfaces, service chains, and calculated SF capacity.
+    #[test]
+    fn topology_free_astra_inventory_ignores_generic_vf_count() {
+        // Use zero to prove the generic VF filter does not shrink Astra's compatibility inventory.
+        let interfaces = build_deployment_dpu_interfaces(DpuDeploymentType::Bf4Astra, 0, None);
+
+        // Pin the complete ordered static inventory, including every NICo-owned xplane patch.
+        assert_eq!(
+            interfaces
+                .iter()
+                .map(|interface| interface.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "p0",
+                "pf0hpf",
+                "pf0vf0",
+                "pf0vf1",
+                "pf0vf2",
+                "pf0vf3",
+                "pf0vf4",
+                "pf0vf5",
+                "pf0vf6",
+                "pf0vf7",
+                "pf0vf8",
+                "pf0vf9",
+                "pf0vf10",
+                "pf0vf11",
+                "pf0vf12",
+                "pf0vf13",
+                "p1",
+                "pf1hpf",
+                "p-brcx-r0swpln0-to-br-sfc",
+                "p-br-xplane-r0swpln0-to-br-sfc",
+                "p-brcx-r1swpln0-to-br-sfc",
+                "p-br-xplane-r1swpln0-to-br-sfc",
+                "p-brcx-r0swpln1-to-br-sfc",
+                "p-br-xplane-r0swpln1-to-br-sfc",
+                "p-brcx-r1swpln1-to-br-sfc",
+                "p-br-xplane-r1swpln1-to-br-sfc",
+                "p-brcx-r2swpln0-to-br-sfc",
+                "p-br-xplane-r2swpln0-to-br-sfc",
+                "p-brcx-r3swpln0-to-br-sfc",
+                "p-br-xplane-r3swpln0-to-br-sfc",
+                "p-brcx-r2swpln1-to-br-sfc",
+                "p-br-xplane-r2swpln1-to-br-sfc",
+                "p-brcx-r3swpln1-to-br-sfc",
+                "p-br-xplane-r3swpln1-to-br-sfc",
+            ],
+        );
+        // Fourteen VFs plus four physical/PF entries and sixteen patches produce 34 interfaces;
+        // the 18 HBN, nine DHCP, and one FMDS endpoints independently account for 28 SFs.
+        assert_eq!(interface_counts(&interfaces), (14, 34, 18, 9, 1));
+    }
+
     /// Verifies static inventory filtering pins minimum, default, and maximum counts.
     #[test]
     fn effective_static_inventory_follows_provisioned_vf_count() {
@@ -5174,7 +5377,7 @@ mod tests {
         for (network, veth_shadow, expected_network) in [
             // Logical SF references must reject an endpoint absent from the service chains.
             ("mybrsfc-dhcp", false, None),
-            // Literal rendered SF references must enforce the same Astra profile boundary.
+            // Literal rendered SF references must enforce the same direct SF-consumer boundary.
             ("mybrsfc-dhcp-bf4astra", false, None),
             // A local Veth logical name takes precedence over another NAD's rendered SF name.
             (
@@ -5346,25 +5549,153 @@ mod tests {
         ));
     }
 
-    /// Verifies a caller-provided inventory cannot diverge from its authoritative topology.
+    /// Verifies Astra reports every externally owned OVS namespace collision because accepting one
+    /// could bind a topology-selected endpoint to fixed xplane, Weave, or autogenerated patch state.
+    #[test]
+    fn astra_initialization_rejects_reserved_ovs_name_collisions() {
+        value_scenarios!(
+            run = |(bridge, patch_port)| {
+                // Validate one selected PF through the public initialization-config boundary.
+                let result = DpfInterceptBridging::new(
+                    vec![DpfInterceptBridge::new(
+                        DpfInterfaceIdentity {
+                            controller_id: 2,
+                            pf_id: 3,
+                            vf_id: None,
+                        },
+                        bridge,
+                        patch_port,
+                    )],
+                    16,
+                )
+                .and_then(|topology| {
+                    InitDpfResourcesConfigBuilder::default()
+                        .deployment_scoped_service_interfaces(true)
+                        .deployment_type(DpuDeploymentType::Bf4Astra)
+                        .intercept_bridging(topology)
+                        .build()
+                });
+                match result {
+                    Ok(_) => None,
+                    Err(DpfError::ConfigError(message)) => Some(message),
+                    Err(error) => panic!("unexpected Astra validation error: {error}"),
+                }
+            };
+
+            "ordinary intercept names" {
+                // Names outside externally managed Astra namespaces remain available.
+                ("br-host", "p-host") => None,
+            }
+
+            "similar autogenerated name with a short hash" {
+                // Only the exact eight-character DPF suffix is reserved.
+                ("br-host", "p_brxplane_to_brsfc_0123abc") => None,
+            }
+
+            "Astra aggregate xplane bridge" {
+                // The shared xplane bridge cannot also become an intermediate intercept bridge.
+                ("br-xplane", "p-host") => Some(
+                    "OVS name br-xplane for intermediate bridge on DPF intercept-bridging interface c2pf3 conflicts with BF4 Astra aggregate xplane bridge".to_string()
+                ),
+            }
+
+            "Astra rail bridge as a patch port" {
+                // OVS bridge and port names share a namespace, so a peer port cannot alias a rail.
+                ("br-host", "brcx-r0swpln0") => Some(
+                    "OVS name brcx-r0swpln0 for peer patch port on DPF intercept-bridging interface c2pf3 conflicts with BF4 Astra rail bridge for r0swpln0".to_string()
+                ),
+            }
+
+            "Weave DHCP bridge as a patch port" {
+                // The long Weave bridge cannot be an intercept bridge, but remains valid as a port.
+                ("br-host", "br-dhcp-r0swpln0") => Some(
+                    "OVS name br-dhcp-r0swpln0 for peer patch port on DPF intercept-bridging interface c2pf3 conflicts with DOCA Weave DHCP bridge for r0swpln0".to_string()
+                ),
+            }
+
+            "Weave drop bridge as a patch port" {
+                // The separate drop bridge is owned by the same external Weave lifecycle.
+                ("br-host", "br-drop-r0swpln0") => Some(
+                    "OVS name br-drop-r0swpln0 for peer patch port on DPF intercept-bridging interface c2pf3 conflicts with DOCA Weave drop bridge for r0swpln0".to_string()
+                ),
+            }
+
+            "DPF-generated rail peer port" {
+                // The rail-side autogenerated orientation occupies the global OVS namespace.
+                ("br-host", "p_brcxr0swpln0_to_brsfc_0123abcd") => Some(
+                    "OVS name p_brcxr0swpln0_to_brsfc_0123abcd for peer patch port on DPF intercept-bridging interface c2pf3 conflicts with DPF-generated BF4 Astra rail patch port".to_string()
+                ),
+            }
+
+            "DPF-generated rail local port" {
+                // A shorter peer name can make the topology's derived local name alias the other orientation.
+                ("br-host", "brcxr0swpln0_0123abcd") => Some(
+                    "OVS name p_brsfc_to_brcxr0swpln0_0123abcd for DPF-generated local patch port on DPF intercept-bridging interface c2pf3 conflicts with DPF-generated BF4 Astra rail patch port".to_string()
+                ),
+            }
+
+            "DPF-generated aggregate peer port" {
+                // The aggregate-side autogenerated orientation is independent of rail group names.
+                ("br-host", "p_brxplane_to_brsfc_0123abcd") => Some(
+                    "OVS name p_brxplane_to_brsfc_0123abcd for peer patch port on DPF intercept-bridging interface c2pf3 conflicts with DPF-generated BF4 Astra aggregate patch port".to_string()
+                ),
+            }
+
+            "DPF-generated aggregate local port" {
+                // The topology's local-name derivation must also reserve the br-sfc-side orientation.
+                ("br-host", "brxplane_0123abcd") => Some(
+                    "OVS name p_brsfc_to_brxplane_0123abcd for DPF-generated local patch port on DPF intercept-bridging interface c2pf3 conflicts with DPF-generated BF4 Astra aggregate patch port".to_string()
+                ),
+            }
+        );
+    }
+
+    /// Verifies generic and Astra callers cannot diverge from their authoritative topology.
+    /// Astra is distinct because its canonical projection also appends fixed patch interfaces.
     #[test]
     fn initialization_rejects_mismatched_topology_interface_projection() {
-        let topology = configured_topology();
-        let mut interfaces =
-            build_effective_dpu_interfaces(crate::DEFAULT_DPU_NUM_OF_VFS, Some(&topology));
-        interfaces[1].name = "unexpected".to_string();
-        let config = InitDpfResourcesConfigBuilder::default()
-            .intercept_bridging(topology)
-            // A non-empty custom inventory previously bypassed projection and could diverge from
-            // the Patch-backed HBN endpoints used to generate the DHCP ACL.
-            .interfaces(interfaces);
+        value_scenarios!(
+            run = |(deployment_type, expected_count)| {
+                let topology = configured_topology();
+                // Build the complete projection so every untouched field remains canonical.
+                let mut interfaces = build_deployment_dpu_interfaces(
+                    deployment_type,
+                    crate::DEFAULT_DPU_NUM_OF_VFS,
+                    Some(&topology),
+                );
+                // Corrupt only p1 to exercise ordered canonical-projection validation.
+                interfaces[1].name = "unexpected".to_string();
+                let config = InitDpfResourcesConfigBuilder::default()
+                    .deployment_scoped_service_interfaces(matches!(
+                        deployment_type,
+                        DpuDeploymentType::Bf4Astra
+                    ))
+                    .deployment_type(deployment_type)
+                    .intercept_bridging(topology)
+                    // A non-empty custom inventory previously bypassed projection and could
+                    // diverge from the Patch-backed HBN endpoints used to generate the DHCP ACL.
+                    .interfaces(interfaces);
 
-        assert!(matches!(
-            config.build(),
-            Err(DpfError::ConfigError(message))
-                if message.contains("first differing interface: received unexpected, expected p1")
-                    && message.contains("received 4 interfaces, expected 4")
-        ));
+                matches!(
+                    config.build(),
+                    Err(DpfError::ConfigError(message))
+                        if message.contains(
+                            "first differing interface: received unexpected, expected p1"
+                        ) && message.contains(&format!(
+                            "received {expected_count} interfaces, expected {expected_count}"
+                        ))
+                )
+            };
+            "generic topology projection" {
+                // Retain the shared check on the smallest four-interface projection.
+                (DpuDeploymentType::Bf3, 4) => true,
+            }
+
+            "Astra topology projection" {
+                // Fixed patch interfaces must remain validated instead of reviving the old bypass.
+                (DpuDeploymentType::Bf4Astra, 20) => true,
+            }
+        );
     }
 
     /// Verifies callers may still provide the canonical topology projection explicitly.
@@ -5448,8 +5779,8 @@ mod tests {
         ));
     }
 
-    /// Astra capacity follows its managed endpoints, the Weave DHCP Agent allocation, and fixed
-    /// headroom; the BF3/generic reserve must not change the Astra flavor.
+    /// Verifies topology-free Astra resolves to exactly 40 SFs and ignores the BF3/generic reserve,
+    /// because either value changing would alter its immutable flavor template.
     #[test]
     fn astra_pf_total_sf_ignores_site_reserve() {
         let config = InitDpfResourcesConfigBuilder::default()
@@ -5463,15 +5794,8 @@ mod tests {
         let resolved = resolve_initialization_inventory(&config, None)
             .expect("Astra initialization must resolve");
 
-        let astra_interfaces = build_astra_dpu_interfaces_vec();
-        let managed_endpoints = astra_interfaces
-            .iter()
-            .map(|interface| interface.chained_svc_if.as_ref().map_or(0, Vec::len) as u32)
-            .sum::<u32>();
-        assert_eq!(
-            resolved.pf_total_sf,
-            managed_endpoints + DOCA_WEAVE_DHCP_AGENT_PF_TOTAL_SF + PF_TOTAL_SF_BF4_ASTRA_FUDGE
-        );
+        // The independently pinned inventory has 28 endpoints; Weave consumes eight and headroom four.
+        assert_eq!(resolved.pf_total_sf, 40);
     }
 
     /// Verifies the public initialization boundary rejects unsupported hardware VF populations.

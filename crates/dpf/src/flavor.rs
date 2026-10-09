@@ -380,11 +380,18 @@ fn bf4_pf_variable(controller_id: u8, pf_id: u8) -> String {
     format!("dpf_c{controller_id}p{pf_id}_netdev")
 }
 
-/// OVS raw config script for the BF4 flavor.
-fn get_bf4_astra_ovs_defaults() -> String {
-    concat!(
-        "#!/bin/bash\n",
-        "if [ -x /opt/dpf/extra-script-pre-ovs.sh ]; then /opt/dpf/extra-script-pre-ovs.sh; fi\n",
+/// Builds the Astra OVS bootstrap while preserving its fixed xplane configuration.
+fn get_bf4_astra_ovs_defaults(topology: Option<&DpfInterceptBridging>) -> String {
+    // Preserve the topology-free prefix and fixed body byte-for-byte so existing template hashes
+    // remain stable, while resolving configured PF identities before the fixed scripts mutate OVS.
+    let mut script = String::from("#!/bin/bash\n");
+    if topology.is_some() {
+        // Stop after a required stage fails because later topology setup assumes it completed.
+        script.push_str("set -e\n");
+    }
+    append_pre_ovs_hook(&mut script);
+    script.push_str(&topology.map_or_else(String::new, render_bf4_pf_preflight));
+    script.push_str(concat!(
         "# Shared helper used by the called scripts; exported so they inherit it\n",
         "\n",
         "_ovs-vsctl() {\n",
@@ -393,7 +400,16 @@ fn get_bf4_astra_ovs_defaults() -> String {
         "export -f _ovs-vsctl\n",
         "\n",
         "# 1. Configure OVS bridges and xplane ports\n",
-        "/etc/mellanox/ovs-script.sh\n",
+    ));
+    if topology.is_some() {
+        // A separately launched Bash child does not inherit the parent script's errexit option.
+        // Pass it explicitly because configured topology assumes the fixed setup completes.
+        script.push_str("bash -e /etc/mellanox/ovs-script.sh\n");
+    } else {
+        // Keep topology-free output byte-for-byte stable for immutable flavor hashing.
+        script.push_str("/etc/mellanox/ovs-script.sh\n");
+    }
+    script.push_str(concat!(
         "\n",
         "# 2. Enable OVS metrics for xplane and Weave\n",
         "_ovs-vsctl set Open_vSwitch . \\\n",
@@ -404,9 +420,21 @@ fn get_bf4_astra_ovs_defaults() -> String {
         "\n",
         "# 3. Configure rail bridge addressing (netplan)\n",
         "/etc/mellanox/xplane-bridge.sh\n",
-        "if [ -x /opt/dpf/extra-script-post-ovs.sh ]; then /opt/dpf/extra-script-post-ovs.sh; fi\n",
-    )
-    .to_string()
+    ));
+
+    // Layer configured intercept bridges onto the established Astra xplane topology after its fixed setup.
+    if let Some(topology) = topology {
+        append_peer_bridge_bootstrap(&mut script, topology, |interface| {
+            let variable =
+                bf4_pf_variable(interface.identity.controller_id, interface.identity.pf_id);
+            match interface.identity.vf_id {
+                Some(vf_id) => format!("\"${{{variable}}}vf{vf_id}\""),
+                None => format!("\"${{{variable}}}\""),
+            }
+        });
+    }
+    append_post_ovs_hook(&mut script);
+    script
 }
 
 /// Rejects bf.cfg parameters carrying the Go template opening delimiter.
@@ -637,6 +665,10 @@ fn flavor_bf4_with_topology(
 ///
 /// The DPF operator renders this template for each DPU and creates the resulting DPUFlavor.
 ///
+/// This direct entry point preserves the topology-free Astra flavor. Callers configuring
+/// intercept bridging should initialize through [`crate::DpfSdk`], which keeps the flavor and
+/// effective interface inventory aligned.
+///
 /// Astra declares no built-in `bfcfgParameters`, so the field stays absent unless the operator
 /// configures some. Keeping it absent holds the template hash of existing Astra sites unchanged,
 /// which is what stops an upgrade from reprovisioning Astra DPUs on its own.
@@ -647,11 +679,35 @@ pub fn flavor_bf4_astra(
     extra_bfcfg_parameters: &[String],
     enable_delay_host_init: bool,
 ) -> Result<DPUFlavorTemplate, crate::error::DpfError> {
+    flavor_bf4_astra_with_topology(
+        namespace,
+        proxy,
+        pf_total_sf,
+        None,
+        None,
+        extra_bfcfg_parameters,
+        enable_delay_host_init,
+    )
+}
+
+/// Builds an Astra flavor template from the resolved intercept topology and interface inventory.
+///
+/// Keeping both inputs here ensures the OVS bootstrap and DHCP ACL consume the same PF/VF
+/// projection as the generated ServiceInterfaces and service chains.
+pub(crate) fn flavor_bf4_astra_with_topology(
+    namespace: &str,
+    proxy: &Option<DpfProxyDetails>,
+    pf_total_sf: u32,
+    intercept_bridging: Option<&DpfInterceptBridging>,
+    dhcp_acl_interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>,
+    extra_bfcfg_parameters: &[String],
+    enable_delay_host_init: bool,
+) -> Result<DPUFlavorTemplate, crate::error::DpfError> {
     reject_template_delimiters(extra_bfcfg_parameters)?;
     let flavor_spec = DpuFlavorSpec {
         bfcfg_parameters: (!extra_bfcfg_parameters.is_empty())
             .then(|| extra_bfcfg_parameters.to_vec()),
-        config_files: Some(get_bf4_astra_config_files(proxy)?),
+        config_files: Some(get_bf4_astra_config_files(proxy, dhcp_acl_interfaces)?),
         containerd_config: Some(DpuFlavorContainerdConfig {
             registry_endpoint: None,
         }),
@@ -665,7 +721,7 @@ pub fn flavor_bf4_astra(
             enable_delay_host_init,
         )]),
         ovs: Some(DpuFlavorOvs {
-            raw_config_script: Some(get_bf4_astra_ovs_defaults()),
+            raw_config_script: Some(get_bf4_astra_ovs_defaults(intercept_bridging)),
         }),
         packages: Some(vec![]),
         sysctl: Some(DpuFlavorSysctl {
@@ -1236,9 +1292,13 @@ fn get_bf4_nvconfig(
     }
 }
 
-/// Returns the bf4 astra config files, plus an optional containerd proxy drop-in if `proxy` is set.
+/// Returns Astra config files, deriving DHCP ACLs from a configured effective interface inventory.
+///
+/// An absent inventory retains the legacy ACL verbatim, which keeps topology-free template hashes
+/// stable. A configured inventory limits the ACL to the PF/VFs selected for interception.
 fn get_bf4_astra_config_files(
     proxy: &Option<DpfProxyDetails>,
+    dhcp_acl_interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>,
 ) -> Result<Vec<DpuFlavorConfigFiles>, crate::error::DpfError> {
     let mut config_files = vec![
         DpuFlavorConfigFiles {
@@ -1263,7 +1323,7 @@ fn get_bf4_astra_config_files(
             path: "/var/lib/hbn/etc/cumulus/acl/policy.d/10-dhcp.rules".to_string(),
             operation: Some(DpuFlavorConfigFilesOperation::Override),
             permissions: Some("0644".to_string()),
-            raw: Some(dhcp_acl_rules(None)),
+            raw: Some(dhcp_acl_rules(dhcp_acl_interfaces)),
             content_from: None,
             r#type: None,
         },
@@ -1611,6 +1671,9 @@ fn get_bf4_astra_config_files(
 }
 
 /// Builds BF3 NVConfig with the validated site VF population and platform profile.
+///
+/// GB200 deliberately replaces the validated SF-capacity result with its platform-fixed
+/// `PF_TOTAL_SF=128`.
 fn get_bf3_nvconfig(
     num_of_vfs: u32,
     pf_total_sf: u32,
@@ -1809,7 +1872,8 @@ mod tests {
             .unwrap()
     }
 
-    /// Provides deterministic PF/VF entries for flavor topology tests.
+    /// Provides deterministic PF/VF entries whose fixed names make flavor topology assertions
+    /// exact.
     fn intercept_bridging() -> DpfInterceptBridging {
         DpfInterceptBridging::new(
             vec![
@@ -1865,6 +1929,267 @@ mod tests {
         output
     }
 
+    /// Executes the complete topology-backed Astra raw script against controlled external
+    /// boundaries so ordering and propagation are tested without modifying host OVS or netplan.
+    fn run_astra_topology_bootstrap(failure: &str) -> (Output, Vec<String>) {
+        let fixture = std::env::temp_dir().join(format!(
+            "carbide-dpf-astra-bootstrap-{}",
+            uuid::Uuid::new_v4()
+        ));
+        // Map the semantic PF to a different runtime name so command checks prove resolution.
+        let netdev = fixture.join("sys-class-net/en8f2");
+        fs::create_dir_all(&netdev).expect("synthetic Astra netdev directory must be created");
+        fs::write(netdev.join("phys_port_name"), "c2pf3")
+            .expect("synthetic Astra phys_port_name must be written");
+
+        // These child scripts expose completion markers around the external script boundaries.
+        let fixed_ovs = fixture.join("fixed-ovs.sh");
+        fs::write(
+            &fixed_ovs,
+            r#"#!/bin/bash
+run_stage fixed
+if [[ "$TEST_FAILURE" == fixed ]]; then
+    run_stage injected:fixed
+    false
+fi
+run_stage fixed-complete
+"#,
+        )
+        .expect("synthetic fixed OVS script must be written");
+        let xplane = fixture.join("xplane.sh");
+        fs::write(
+            &xplane,
+            r#"#!/bin/bash
+set -e
+run_stage xplane
+if [[ "$TEST_FAILURE" == xplane ]]; then
+    run_stage injected:xplane
+    false
+fi
+run_stage xplane-complete
+"#,
+        )
+        .expect("synthetic xplane script must be written");
+
+        // Fake ovs-vsctl records all operations and injects one requested boundary failure.
+        let harness = r#"
+run_stage() {
+    printf '%s\n' "$1" >> "$TEST_LOG"
+}
+ovs-vsctl() {
+    printf 'ovs:%s\n' "$*" >> "$TEST_LOG"
+    if [[ "$TEST_FAILURE" == required-topology
+        && "$*" == *"--may-exist add-br br-pf3"* ]]; then
+        run_stage injected:required-topology
+        return 1
+    fi
+    if [[ "$TEST_FAILURE" == tolerated-representor
+        && "$*" == *"--may-exist add-port br-pf3"* ]]; then
+        run_stage injected:tolerated-representor
+        return 1
+    fi
+}
+export -f run_stage ovs-vsctl
+"#;
+        let log = fixture.join("stages.log");
+        // Replace external hooks and fixed scripts while leaving generated topology commands
+        // intact for exact inspection.
+        let script = get_bf4_astra_ovs_defaults(Some(&intercept_bridging()))
+            .replace(
+                "if [ -x /opt/dpf/extra-script-pre-ovs.sh ]; then /opt/dpf/extra-script-pre-ovs.sh; fi",
+                "run_stage pre",
+            )
+            .replace(
+                "bash -e /etc/mellanox/ovs-script.sh",
+                "bash -e \"$TEST_FIXED_OVS\"",
+            )
+            .replace(
+                "/etc/mellanox/xplane-bridge.sh",
+                "bash \"$TEST_XPLANE\"",
+            )
+            .replace(
+                "if [ -x /opt/dpf/extra-script-post-ovs.sh ]; then /opt/dpf/extra-script-post-ovs.sh; fi",
+                concat!(
+                    "run_stage post\n",
+                    "if [[ \"$TEST_FAILURE\" == post ]]; then\n",
+                    "    run_stage injected:post\n",
+                    "    false\n",
+                    "fi",
+                ),
+            );
+
+        // Do not supply errexit from the harness; the generated script must own that contract.
+        let output = Command::new("bash")
+            .args(["-c", &format!("{harness}\n{script}")])
+            .env("NICO_SYS_CLASS_NET", fixture.join("sys-class-net"))
+            .env("TEST_FAILURE", failure)
+            .env("TEST_FIXED_OVS", &fixed_ovs)
+            .env("TEST_XPLANE", &xplane)
+            .env("TEST_LOG", &log)
+            .output()
+            .expect("bash must execute the topology-backed Astra bootstrap");
+        let stages = fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        fs::remove_dir_all(&fixture).expect("Astra bootstrap fixture must be removed");
+        (output, stages)
+    }
+
+    /// Verifies the complete topology-free flavor-template identity remains rollout-compatible,
+    /// because changing its hash-derived name would reprovision existing DPUs.
+    #[test]
+    fn topology_free_astra_flavor_template_identity_is_stable() {
+        // Render the canonical predecessor input, including its inventory-derived SF capacity.
+        let interfaces = crate::sdk::build_astra_dpu_interfaces_vec();
+        let pf_total_sf = crate::sdk::calculate_astra_pf_total_sf(&interfaces)
+            .expect("canonical Astra inventory must have valid SF capacity");
+        let template = flavor_bf4_astra("ns", &None, pf_total_sf, &[], false).unwrap();
+
+        // Pin the complete serialized template spec rather than one nested script.
+        assert_eq!(
+            template.unique_name(DEFAULT_FLAVOR_NAME).unwrap(),
+            "dpu-flavor-369cd609a3d2e3a4"
+        );
+    }
+
+    /// Verifies the topology-backed Astra bootstrap preserves its dependency order and each
+    /// distinct strict or deliberately tolerant failure boundary.
+    #[test]
+    fn astra_topology_bootstrap_order_and_failure_boundaries() {
+        // The successful execution proves hooks surround fixed OVS, telemetry, xplane, and topology.
+        let (output, stages) = run_astra_topology_bootstrap("");
+        assert!(
+            output.status.success(),
+            "successful bootstrap failed: {output:?}"
+        );
+        let exact_position = |stage: &str| {
+            stages
+                .iter()
+                .position(|observed| observed == stage)
+                .unwrap_or_else(|| panic!("missing stage {stage:?} in {stages:?}"))
+        };
+        let containing_position = |fragment: &str| {
+            stages
+                .iter()
+                .position(|observed| observed.contains(fragment))
+                .unwrap_or_else(|| panic!("missing fragment {fragment:?} in {stages:?}"))
+        };
+        let order = [
+            exact_position("pre"),
+            exact_position("fixed"),
+            exact_position("fixed-complete"),
+            containing_position("doca-telemetry-source-id=xplane"),
+            exact_position("xplane"),
+            exact_position("xplane-complete"),
+            containing_position("--may-exist add-br br-pf3"),
+            exact_position("post"),
+        ];
+        assert!(
+            order
+                .windows(2)
+                .all(|positions| positions[0] < positions[1]),
+            "unexpected Astra bootstrap order: {stages:?}"
+        );
+
+        // The resolved PF and its derived VF must reach the exact representor attachments.
+        for expected in [
+            // The selected PF must attach its resolved runtime netdev to its configured bridge.
+            concat!(
+                "ovs:--timeout 30 --if-exists del-port en8f2 -- --may-exist add-port ",
+                "br-pf3 en8f2 -- set interface en8f2 type=dpdk mtu_request=9216 ",
+                "external_ids={}",
+            ),
+            // The selected VF derives its runtime netdev from that PF before attachment.
+            concat!(
+                "ovs:--timeout 30 --if-exists del-port en8f2vf4 -- --may-exist add-port ",
+                "br-vf4 en8f2vf4 -- set interface en8f2vf4 type=dpdk mtu_request=9216 ",
+                "external_ids={}",
+            ),
+        ] {
+            assert!(
+                stages.iter().any(|stage| stage.as_str() == expected),
+                "missing exact representor command {expected:?} in {stages:?}"
+            );
+        }
+
+        struct FailureCase {
+            name: &'static str,
+            failure: &'static str,
+            expected_success: bool,
+            required: &'static [&'static str],
+            forbidden: &'static [&'static str],
+        }
+        let cases = [
+            // An internal fixed-child failure must stop before telemetry and xplane setup.
+            FailureCase {
+                name: "fixed child failure",
+                failure: "fixed",
+                expected_success: false,
+                required: &["injected:fixed"],
+                forbidden: &["fixed-complete", "xplane", "post"],
+            },
+            // Xplane failure must stop before any topology bridge or the post hook.
+            FailureCase {
+                name: "xplane failure",
+                failure: "xplane",
+                expected_success: false,
+                required: &["fixed-complete", "injected:xplane"],
+                forbidden: &["xplane-complete", "--may-exist add-br br-pf3", "post"],
+            },
+            // Required bridge creation must fail the run rather than invoke the post hook.
+            FailureCase {
+                name: "required topology failure",
+                failure: "required-topology",
+                expected_success: false,
+                required: &["xplane-complete", "injected:required-topology"],
+                forbidden: &["post"],
+            },
+            // Representor attachment is explicitly best-effort and must still reach the post hook.
+            FailureCase {
+                name: "tolerated representor failure",
+                failure: "tolerated-representor",
+                expected_success: true,
+                required: &["injected:tolerated-representor", "post"],
+                forbidden: &[],
+            },
+            // A post-hook failure occurs last but must remain the raw script's final status.
+            FailureCase {
+                name: "post hook failure",
+                failure: "post",
+                expected_success: false,
+                required: &["injected:post"],
+                forbidden: &[],
+            },
+        ];
+        for case in cases {
+            let (output, stages) = run_astra_topology_bootstrap(case.failure);
+            assert_eq!(
+                output.status.success(),
+                case.expected_success,
+                "{}: unexpected status with stages {stages:?} and output {output:?}",
+                case.name,
+            );
+            for marker in case.required {
+                assert!(
+                    stages.iter().any(|stage| stage.contains(marker)),
+                    "{}: missing {marker:?} in {stages:?}",
+                    case.name,
+                );
+            }
+            for marker in case.forbidden {
+                assert!(
+                    stages.iter().all(|stage| !stage.contains(marker)),
+                    "{}: unexpectedly reached {marker:?} in {stages:?}",
+                    case.name,
+                );
+            }
+        }
+    }
+
+    /// Verifies a failed rail lookup preserves the installed netplan and skips applying a partial
+    /// candidate because incomplete xplane addressing must not replace working configuration.
     #[test]
     fn astra_netplan_preserves_existing_file_on_failed_bridge_lookup() {
         let fixture =
@@ -1876,7 +2201,7 @@ mod tests {
         let netplan = fixture.join("99-cx9-rails.yaml");
         fs::write(&netplan, "original configuration\n").unwrap();
         let applied = fixture.join("applied");
-        let mut script = get_bf4_astra_config_files(&None)
+        let mut script = get_bf4_astra_config_files(&None, None)
             .unwrap()
             .into_iter()
             .find(|file| file.path == "/etc/mellanox/xplane-bridge.sh")
@@ -1899,6 +2224,7 @@ mod tests {
                 script = script.replace(&format!("{{{{ .{key}_{index}_val }}}}"), &value);
             }
         }
+        // Execute with only the first rail discoverable so generation fails after a partial write.
         let output = Command::new("bash")
             .arg("-c")
             .arg(format!(
@@ -1909,6 +2235,8 @@ mod tests {
             .env("TEST_APPLIED", &applied)
             .output()
             .unwrap();
+
+        // Failure must leave the installed file byte-identical and never invoke `netplan apply`.
         assert!(!output.status.success());
         assert_eq!(
             fs::read_to_string(&netplan).unwrap(),
@@ -2084,7 +2412,8 @@ mod tests {
         assert!(final_resolution < first_mutation);
     }
 
-    /// Verifies configured VF and SF counts affect BF3/generic BF4 but never Astra.
+    /// Verifies each platform emits its provisioned VF count and resolved SF capacity because a
+    /// wrong NVConfig value can overcommit hardware or unnecessarily reprovision its DPU.
     #[test]
     fn flavor_nvconfig_uses_platform_appropriate_vf_and_sf_counts() {
         // Extract nvconfig parameters uniformly across all flavor variants.
@@ -2126,14 +2455,14 @@ mod tests {
         assert!(generic_bf4.contains(&"NUM_OF_VFS=5".to_string()));
         assert!(generic_bf4.contains(&"PF_TOTAL_SF=63".to_string()));
 
-        // Astra retains its established fixed VF configuration and derives SF capacity from its
-        // static service endpoints and DOCA Weave DHCP Agent PF allocation.
+        // Topology-free Astra retains 46 hardware VFs and uses 28 static service endpoints, eight
+        // DOCA Weave DHCP Agent SFs, and four SFs of fixed headroom.
         let astra = parameters(DPUFlavor {
             metadata: ObjectMeta::default(),
             spec: astra_flavor_spec(&None, true),
         });
         assert!(astra.contains(&"NUM_OF_VFS=46".to_string()));
-        assert!(astra.contains(&expected_astra_pf_total_sf_parameter()));
+        assert!(astra.contains(&"PF_TOTAL_SF=40".to_string()));
     }
 
     #[test]
@@ -2587,10 +2916,12 @@ mod tests {
         // Matched against a real OVS operation, not the substring "ovs", which
         // also occurs inside the pre-hook's own filename.
         for (script, first_ovs_operation) in [
+            // Topology-free generic BF4 still brackets its built-in OVS setup.
             (
                 get_bf4_ovs_defaults_with_topology(None, ServiceVpcSlots::default()),
                 "ovs-vsctl --if-exists del-br",
             ),
+            // Configured generic BF4 brackets preflight and inherited OVS setup alike.
             (
                 get_bf4_ovs_defaults_with_topology(
                     Some(&intercept_bridging()),
@@ -2598,7 +2929,16 @@ mod tests {
                 ),
                 "ovs-vsctl --if-exists del-br",
             ),
-            (get_bf4_astra_ovs_defaults(), "/etc/mellanox/ovs-script.sh"),
+            // Topology-free Astra brackets its unchanged fixed OVS child.
+            (
+                get_bf4_astra_ovs_defaults(None),
+                "/etc/mellanox/ovs-script.sh",
+            ),
+            // Topology-backed Astra must enable child errexit before creating topology state.
+            (
+                get_bf4_astra_ovs_defaults(Some(&intercept_bridging())),
+                "bash -e /etc/mellanox/ovs-script.sh",
+            ),
         ] {
             let guard = |hook: &str| {
                 let path = format!("/opt/dpf/extra-script-{hook}.sh");
@@ -2632,7 +2972,10 @@ mod tests {
                 get_config_files(&None, DpuDeploymentType::Bf4Generic, None).unwrap(),
                 "bf4-generic",
             ),
-            (get_bf4_astra_config_files(&None).unwrap(), "bf4-astra"),
+            (
+                get_bf4_astra_config_files(&None, None).unwrap(),
+                "bf4-astra",
+            ),
         ] {
             for hook in ["pre-ovs", "post-ovs"] {
                 let path = format!("/opt/dpf/extra-script-{hook}.sh");

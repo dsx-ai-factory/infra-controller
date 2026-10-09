@@ -121,8 +121,7 @@ pub async fn run(
     // while propagating any panics to the current task.
     let mut join_set = JoinSet::new();
 
-    // Not ready until the readiness probe below confirms PostgreSQL is
-    // reachable, so `/ready` never reports success before that is known.
+    // Keep readiness false until the API listener and a fresh PostgreSQL check are ready.
     let health_controller = metrics_endpoint::HealthController::new();
     health_controller.set_ready(false);
 
@@ -154,33 +153,30 @@ pub async fn run(
     )
     .await?;
 
-    // `setup_resources` already verified PostgreSQL connectivity while
-    // building `db_pool`, so it is known good now; the periodic probe takes
-    // over from here and flips `health_controller` if that ever changes.
-    health_controller.set_ready(true);
-    crate::readiness::spawn_database_readiness_probe(
-        &mut join_set,
-        &db_pool,
-        health_controller,
-        cancel_token.clone(),
-    )?;
-
-    let listen_address = start_runtime(RuntimeInputs {
-        carbide_config,
-        initial_objects,
-        meter,
-        per_object_metrics,
-        join_set: &mut join_set,
-        runtime_prelude,
-        credential_manager,
-        certificate_provider,
-        db_pool,
-        work_lock_manager_handle,
-        secrets_context,
-        admin_ui_routes_builder,
-        cancel_token,
-    })
+    let database_readiness_probe = crate::readiness::DatabaseReadinessProbe::new(&db_pool);
+    let listen_address = await_api_runtime_and_database_before_marking_ready(
+        &health_controller,
+        start_runtime(RuntimeInputs {
+            carbide_config,
+            initial_objects,
+            meter,
+            per_object_metrics,
+            join_set: &mut join_set,
+            runtime_prelude,
+            credential_manager,
+            certificate_provider,
+            db_pool,
+            work_lock_manager_handle,
+            secrets_context,
+            admin_ui_routes_builder,
+            cancel_token: cancel_token.clone(),
+        }),
+        database_readiness_probe.check(),
+    )
     .await?;
+
+    // The fresh check established initial readiness; the same pool now monitors it periodically.
+    database_readiness_probe.spawn(&mut join_set, health_controller, cancel_token)?;
 
     if ready_channel
         .send(ApiServerAddresses {
@@ -198,6 +194,24 @@ pub async fn run(
     // propagated here.
     join_set.join_all().await;
     Ok(())
+}
+
+/// Awaits API runtime startup and a fresh database check before exposing readiness.
+///
+/// Keeping both prerequisites together prevents listener availability from exposing stale
+/// database readiness.
+async fn await_api_runtime_and_database_before_marking_ready(
+    health_controller: &metrics_endpoint::HealthController,
+    runtime_start: impl std::future::Future<Output = eyre::Result<SocketAddr>>,
+    database_check: impl std::future::Future<Output = bool>,
+) -> eyre::Result<SocketAddr> {
+    // Runtime startup returns only after the API listener is bound and its accept loop is spawned.
+    let listen_address = runtime_start.await?;
+
+    // Recheck PostgreSQL after startup because the earlier resource check may now be stale.
+    health_controller.set_ready(database_check.await);
+
+    Ok(listen_address)
 }
 
 async fn start_metrics_endpoint(
@@ -340,6 +354,139 @@ mod tests {
     use carbide_test_support::value_scenarios;
 
     use super::*;
+
+    /// Verifies runtime completion alone leaves readiness false until a fresh database result
+    /// succeeds, because listener availability must not expose stale database readiness.
+    #[tokio::test]
+    async fn readiness_waits_for_api_runtime_and_fresh_database_check() {
+        // Hold both prerequisites separately so either premature readiness transition is visible.
+        let health_controller = metrics_endpoint::HealthController::new();
+        health_controller.set_ready(false);
+        let (startup_entered_tx, startup_entered_rx) = tokio::sync::oneshot::channel();
+        let (startup_release_tx, startup_release_rx) = tokio::sync::oneshot::channel();
+        let (database_check_entered_tx, database_check_entered_rx) =
+            tokio::sync::oneshot::channel();
+        let (database_result_tx, database_result_rx) = tokio::sync::oneshot::channel();
+        let expected_address: SocketAddr = "127.0.0.1:1079"
+            .parse()
+            .expect("test listener address must be valid");
+        let startup_task = tokio::spawn({
+            let health_controller = health_controller.clone();
+            async move {
+                await_api_runtime_and_database_before_marking_ready(
+                    &health_controller,
+                    async move {
+                        startup_entered_tx
+                            .send(())
+                            .expect("test must observe runtime startup");
+                        startup_release_rx
+                            .await
+                            .expect("test must release runtime startup");
+                        Ok::<SocketAddr, eyre::Report>(expected_address)
+                    },
+                    async move {
+                        database_check_entered_tx
+                            .send(())
+                            .expect("test must observe the fresh database check");
+                        database_result_rx
+                            .await
+                            .expect("test must release the fresh database check")
+                    },
+                )
+                .await
+            }
+        });
+
+        // Observe runtime startup while the listener is still unavailable.
+        startup_entered_rx
+            .await
+            .expect("runtime startup must reach the test gate");
+        assert!(
+            !health_controller.is_ready(),
+            "readiness must remain false while API runtime startup is pending"
+        );
+
+        // Complete runtime startup, then hold the fresh database result after its check begins.
+        startup_release_tx
+            .send(())
+            .expect("runtime startup must still be waiting");
+        database_check_entered_rx
+            .await
+            .expect("fresh database check must reach the test gate");
+        assert!(
+            !health_controller.is_ready(),
+            "runtime completion must not mark readiness before the fresh database result"
+        );
+
+        // Supply database success and verify both prerequisites now complete readiness.
+        database_result_tx
+            .send(true)
+            .expect("fresh database check must still be waiting");
+        assert_eq!(
+            startup_task
+                .await
+                .expect("startup task must not panic")
+                .expect("runtime startup must succeed"),
+            expected_address
+        );
+        assert!(
+            health_controller.is_ready(),
+            "fresh database success must complete readiness"
+        );
+    }
+
+    /// Verifies a failed fresh database check leaves readiness false because the bound API
+    /// listener cannot safely serve database-backed traffic without a writable database.
+    #[tokio::test]
+    async fn readiness_stays_false_when_fresh_database_check_fails() {
+        // Mirror startup's not-ready state, then supply a bound listener and a failed fresh check.
+        let health_controller = metrics_endpoint::HealthController::new();
+        health_controller.set_ready(false);
+        let expected_address: SocketAddr = "127.0.0.1:1079"
+            .parse()
+            .expect("test listener address must be valid");
+
+        let listen_address = await_api_runtime_and_database_before_marking_ready(
+            &health_controller,
+            std::future::ready(Ok::<SocketAddr, eyre::Report>(expected_address)),
+            std::future::ready(false),
+        )
+        .await
+        .expect("runtime startup must succeed");
+
+        // The listener can start, but database failure must prevent readiness from being exposed.
+        assert_eq!(listen_address, expected_address);
+        assert!(
+            !health_controller.is_ready(),
+            "fresh database failure must leave readiness false"
+        );
+    }
+
+    /// Verifies API runtime startup errors are returned while readiness stays false because a
+    /// process without a bound API listener cannot be advertised as ready.
+    #[tokio::test]
+    async fn readiness_propagates_api_runtime_startup_failure() {
+        // Mirror startup's not-ready state and inject an error before the database check.
+        let health_controller = metrics_endpoint::HealthController::new();
+        health_controller.set_ready(false);
+
+        let error = await_api_runtime_and_database_before_marking_ready(
+            &health_controller,
+            std::future::ready(Err::<SocketAddr, eyre::Report>(eyre::eyre!(
+                "test runtime startup failed"
+            ))),
+            std::future::ready(true),
+        )
+        .await
+        .expect_err("runtime startup failure must be returned");
+
+        // Preserve the runtime failure without changing the unavailable readiness state.
+        assert_eq!(error.to_string(), "test runtime startup failed");
+        assert!(
+            !health_controller.is_ready(),
+            "runtime startup failure must leave readiness false"
+        );
+    }
 
     struct PrefixPair {
         deny: &'static str,
