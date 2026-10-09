@@ -1,0 +1,59 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[package]
+name = "carbide-kmip"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Scoped KMIP 1.4 client that wraps and unwraps data encryption keys with a server-held, non-exportable AES key"
+
+[lib]
+name = "carbide_kmip"
+
+[features]
+# An in-process mock KMIP server for tests in this crate and in dependents.
+test-support = ["dep:aes-gcm", "dep:rand", "dep:rcgen"]
+
+[dependencies]
+aes-gcm = { workspace = true, optional = true }
+kmip-ttlv = { workspace = true }
+rand = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rustls-pki-types = { workspace = true }
+serde = { features = ["derive"], workspace = true }
+serde_bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+aes-gcm = { workspace = true }
+carbide-test-support = { path = "../test-support" }
+hex = { workspace = true }
+rand = { workspace = true }
+rcgen = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true
