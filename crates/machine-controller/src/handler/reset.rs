@@ -20,6 +20,7 @@
 //! DPU discovery re-ingests it. Hosts without an instance skip the network wait.
 
 use eyre::eyre;
+use libredfish::{PowerState, SystemPowerControl};
 use model::machine::{
     CleanupContext, CleanupState, DpuDiscoveringState, DpuDiscoveringStates, ManagedHostState,
     ManagedHostStateSnapshot, ResetState,
@@ -31,8 +32,9 @@ use state_controller::state_handler::{
 };
 
 use super::{
-    process_dpu_use_admin_network_state_change, release_network_segments_with_vpc_prefix,
-    release_vpc_dpu_loopback, waiting_for_cleanup_state,
+    handler_host_power_control, host_power_state, process_dpu_use_admin_network_state_change,
+    release_network_segments_with_vpc_prefix, release_vpc_dpu_loopback, wait,
+    waiting_for_cleanup_state,
 };
 use crate::context::MachineStateHandlerContextObjects;
 use crate::dpf::{DpfOperations, dpf_dpudevices_and_dpunode_crs_noexist};
@@ -184,6 +186,44 @@ async fn handle_deleting_crs(
         return Ok(StateHandlerOutcome::wait(
             "waiting for managed host DPF resources to be deleted".to_string(),
         ));
+    }
+
+    // Reset can preempt a DPF power cycle's pending On step. Discovery needs
+    // reachable DPU BMCs, so retain the reset until host power is observed On.
+    let redfish_client = ctx
+        .services
+        .create_redfish_client_from_machine(&state.host_snapshot)
+        .await?;
+    let power_state = host_power_state(redfish_client.as_ref()).await?;
+    if power_state != PowerState::On {
+        if power_state == PowerState::Off {
+            let phase_started_at = state.host_snapshot.state.version.timestamp();
+            let basetime = state
+                .host_snapshot
+                .status
+                .last_reboot_requested
+                .as_ref()
+                .map_or(phase_started_at, |request| {
+                    request.time.max(phase_started_at)
+                });
+            if wait(
+                &basetime,
+                ctx.services
+                    .site_config
+                    .machine_state_controller
+                    .power_down_wait,
+            ) {
+                return Ok(StateHandlerOutcome::wait(
+                    "waiting for the host power-transition delay before reset power-on".to_string(),
+                ));
+            }
+
+            handler_host_power_control(state, ctx, SystemPowerControl::On).await?;
+        }
+
+        return Ok(StateHandlerOutcome::wait(format!(
+            "waiting for the host to power on before reset DPU discovery; current power state: {power_state}"
+        )));
     }
 
     start_host_reingestion(state, ctx).await

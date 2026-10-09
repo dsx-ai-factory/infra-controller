@@ -24,9 +24,15 @@ use std::time::Duration;
 use carbide_dpf::types::{DpuDeviceSummary, DpuNodeSummary, HostDpfSnapshot};
 use carbide_dpf::{DpuDeploymentType, DpuPhase};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
+use carbide_redfish::libredfish::RedfishClientPool;
+use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::machine::MachineId;
+use libredfish::{PowerState, SystemPowerControl};
+use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
-    CleanupContext, CleanupState, DpuDiscoveringState, FailureDetails, ManagedHostState, ResetState,
+    CleanupContext, CleanupState, DpfState, DpuDiscoveringState, DpuReprovisionStates,
+    FailureDetails, MachineLastRebootRequestedMode, ManagedHostState, ManagedHostStateSnapshot,
+    PerformPowerOperation, ReprovisionState, ResetState,
 };
 use rpc::forge::forge_server::Forge;
 use rpc::forge::managed_host_reset_request::Mode;
@@ -64,7 +70,7 @@ fn provisioning_mock() -> MockDpfOperations {
 /// drives the real provisioning flow, so these tests need DPF enabled in config plus an
 /// SDK for it to register against. Same starting point as the `dpf` suites.
 async fn dpf_test_env(pool: sqlx::PgPool) -> TestEnv {
-    env_with_dpf_mock(pool, provisioning_mock()).await
+    env_with_dpf_mock(pool, provisioning_mock(), get_config()).await
 }
 
 /// What `snapshot_host` reports for the host's DPF CRs, which is the only thing
@@ -81,7 +87,7 @@ async fn reset_controller_env(pool: sqlx::PgPool, crs: DpfCrs) -> TestEnv {
     mock.expect_snapshot_host()
         .returning(move |_| Ok(host_dpf_snapshot(crs)));
 
-    env_with_dpf_mock(pool, mock).await
+    env_with_dpf_mock(pool, mock, get_config()).await
 }
 
 /// A present CR set must match the fixture's DPU count. An incomplete set
@@ -120,10 +126,13 @@ fn host_dpf_snapshot(crs: DpfCrs) -> HostDpfSnapshot {
     }
 }
 
-async fn env_with_dpf_mock(pool: sqlx::PgPool, mock: MockDpfOperations) -> TestEnv {
+async fn env_with_dpf_mock(
+    pool: sqlx::PgPool,
+    mock: MockDpfOperations,
+    mut config: crate::cfg::file::CarbideConfig,
+) -> TestEnv {
     let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(mock);
 
-    let mut config = get_config();
     config.dpf = crate::cfg::file::DpfConfig {
         enabled: true,
         deployments: crate::cfg::file::DpfDeploymentsConfig {
@@ -617,6 +626,278 @@ async fn reset_re_enters_dpu_discovery_once_the_dpf_crs_are_gone(pool: sqlx::PgP
             .reset_requested
             .is_none()
     );
+}
+
+/// Preempting a pending DPF On step must not strand an Off host in discovery.
+/// A transient On failure retains the reset, and command acceptance alone is
+/// insufficient to hand off: a later reconciliation must observe host power On.
+#[crate::sqlx_test]
+async fn reset_restores_power_after_preempting_a_dpf_power_cycle(pool: sqlx::PgPool) {
+    let mut mock = provisioning_mock();
+    mock.expect_force_delete_host().returning(|_, _| Ok(()));
+    mock.expect_snapshot_host()
+        .returning(|_| Ok(host_dpf_snapshot(DpfCrs::Gone)));
+    let mut config = get_config();
+    // Keep the initial cooldown open regardless of test runner speed.
+    config.machine_state_controller.power_down_wait = chrono::Duration::minutes(5);
+    let env = env_with_dpf_mock(pool, mock, config).await;
+    let managed_host = dpf_ingested_host(&env).await;
+    let host_id: MachineId = managed_host.id.into();
+    managed_host.mark_machine_for_updates().await;
+
+    let bmc_access = {
+        let mut txn = env.db_txn().await;
+        let bmc_access = managed_host.host().bmc_access(&mut txn).await;
+        let host = managed_host.host().db_machine(&mut txn).await;
+        let pending_on = ManagedHostState::DPUReprovision {
+            dpu_states: DpuReprovisionStates {
+                states: managed_host
+                    .dpu_ids
+                    .iter()
+                    .map(|id| {
+                        (
+                            *id,
+                            ReprovisionState::DpfStates {
+                                substate: DpfState::HandleReboot {
+                                    op: PerformPowerOperation::On,
+                                    retry_count: 0,
+                                },
+                            },
+                        )
+                    })
+                    .collect(),
+            },
+        };
+        assert!(
+            db::machine::advance(&host, &mut txn, &pending_on, None)
+                .await
+                .unwrap()
+        );
+        db::machine::update_reboot_requested_explicit_time(
+            &host_id,
+            &mut txn,
+            MachineLastRebootRequestedMode::PowerOff,
+            chrono::Utc::now() - chrono::Duration::minutes(10),
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+        bmc_access
+    };
+    let redfish_client = env.redfish_sim.client_by_info(&bmc_access).await.unwrap();
+    redfish_client
+        .power(SystemPowerControl::ForceOff)
+        .await
+        .unwrap();
+    env.api
+        .trigger_managed_host_reset(reset_request(host_id, Mode::Set))
+        .await
+        .unwrap();
+
+    let deleting_crs = ManagedHostState::Reset {
+        reset_state: ResetState::DeletingCrs,
+    };
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &managed_host.id,
+        3,
+        deleting_crs.clone(),
+    )
+    .await;
+    let power_records = |snapshot: &ManagedHostStateSnapshot| {
+        std::iter::once((
+            MachineId::from(snapshot.host_snapshot.id),
+            snapshot.host_snapshot.status.last_reboot_requested,
+        ))
+        .chain(
+            snapshot
+                .dpu_snapshots
+                .iter()
+                .map(|dpu| (MachineId::from(dpu.id), dpu.status.last_reboot_requested)),
+        )
+        .collect::<Vec<_>>()
+    };
+    let (started_request, fresh_reset_version, initial_power_records) = {
+        let mut txn = env.db_txn().await;
+        let host = managed_host.host().db_machine(&mut txn).await;
+        let fresh_reset_version = format!(
+            "V{}-T{}",
+            host.state.version.version_nr() + 1,
+            chrono::Utc::now().timestamp_micros(),
+        )
+        .parse()
+        .unwrap();
+        assert!(
+            db::machine::advance(&host, &mut txn, &deleting_crs, Some(fresh_reset_version))
+                .await
+                .unwrap()
+        );
+        let snapshot = managed_host.snapshot(&mut txn).await;
+        let records = power_records(&snapshot);
+        txn.commit().await.unwrap();
+        (host.reset_requested.unwrap(), fresh_reset_version, records)
+    };
+    assert!(started_request.started_at.is_some());
+
+    // A stale Off command must not bypass the fresh reset phase's cooldown.
+    let timepoint = env.redfish_sim.timepoint();
+    timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
+        .await
+        .expect("timed out during reset power cooldown");
+    let mut txn = env.db_txn().await;
+    let snapshot = managed_host.snapshot(&mut txn).await;
+    let host = &snapshot.host_snapshot;
+    assert_eq!(host.state.version, fresh_reset_version);
+    assert_eq!(host.current_state(), &deleting_crs);
+    assert_eq!(
+        host.reset_requested.as_ref().unwrap().started_at,
+        started_request.started_at
+    );
+    assert!(matches!(
+        host.controller_state_outcome.as_ref(),
+        Some(PersistentStateHandlerOutcome::Wait { reason, .. })
+            if reason.contains("power-transition delay")
+    ));
+    assert_eq!(power_records(&snapshot), initial_power_records);
+    txn.commit().await.unwrap();
+    assert!(
+        env.redfish_sim
+            .actions_since(&timepoint)
+            .for_host(&bmc_access.host)
+            .is_empty()
+    );
+    assert_eq!(
+        redfish_client.get_power_state().await.unwrap(),
+        PowerState::Off
+    );
+
+    for (scenario, expected_action, expected_power) in [
+        (
+            "power-on fails transiently",
+            RedfishSimAction::PowerFailed(SystemPowerControl::On),
+            PowerState::Off,
+        ),
+        (
+            "power-on is retried",
+            RedfishSimAction::Power(SystemPowerControl::On),
+            PowerState::On,
+        ),
+    ] {
+        // Age only this fixture's persisted power and phase clocks, without sleeping.
+        let mut txn = env.db_txn().await;
+        let host = managed_host.host().db_machine(&mut txn).await;
+        let mut request = host.status.last_reboot_requested.unwrap();
+        let expired_at = chrono::Utc::now() - chrono::Duration::minutes(10);
+        request.time = expired_at;
+        db::machine::record_reboot_request(&host_id, &mut txn, &request)
+            .await
+            .unwrap();
+        let expired_version = format!(
+            "V{}-T{}",
+            host.state.version.version_nr() + 1,
+            expired_at.timestamp_micros(),
+        )
+        .parse()
+        .unwrap();
+        assert!(
+            db::machine::advance(&host, &mut txn, &deleting_crs, Some(expired_version))
+                .await
+                .unwrap()
+        );
+        let before_power_records = power_records(&managed_host.snapshot(&mut txn).await);
+        txn.commit().await.unwrap();
+        if expected_power == PowerState::Off {
+            env.redfish_sim
+                .fail_next_power_action(SystemPowerControl::On, "transient power-on failure");
+        }
+        let timepoint = env.redfish_sim.timepoint();
+        let attempted_at = chrono::Utc::now();
+
+        timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
+            .await
+            .expect("timed out during reset power recovery");
+        let completed_at = chrono::Utc::now();
+
+        let mut txn = env.db_txn().await;
+        let snapshot = managed_host.snapshot(&mut txn).await;
+        let host = &snapshot.host_snapshot;
+        assert_eq!(host.current_state(), &deleting_crs, "{scenario}");
+        let request = host.reset_requested.as_ref().unwrap();
+        assert_eq!(
+            request.requested_at, started_request.requested_at,
+            "{scenario}"
+        );
+        assert_eq!(request.started_at, started_request.started_at, "{scenario}");
+        let after_power_records = power_records(&snapshot);
+        if expected_power == PowerState::Off {
+            assert_eq!(after_power_records, before_power_records, "{scenario}");
+        } else {
+            for (machine_id, power_request) in after_power_records {
+                let power_request = power_request.unwrap();
+                assert_eq!(
+                    power_request.mode,
+                    MachineLastRebootRequestedMode::PowerOn,
+                    "{scenario}: {machine_id}"
+                );
+                assert!(
+                    power_request.time >= attempted_at && power_request.time <= completed_at,
+                    "{scenario}: {machine_id}"
+                );
+            }
+        }
+        txn.commit().await.unwrap();
+        assert_eq!(
+            env.redfish_sim
+                .actions_since(&timepoint)
+                .for_host(&bmc_access.host),
+            vec![expected_action],
+            "{scenario}"
+        );
+        assert_eq!(
+            redfish_client.get_power_state().await.unwrap(),
+            expected_power,
+            "{scenario}"
+        );
+    }
+
+    // An accepted On can still be in progress; wait without issuing another On.
+    env.redfish_sim
+        .set_power_state(&bmc_access.host, PowerState::PoweringOn);
+    let timepoint = env.redfish_sim.timepoint();
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let host = managed_host.host().db_machine(&mut txn).await;
+    assert_eq!(host.current_state(), &deleting_crs);
+    assert_eq!(
+        host.reset_requested.unwrap().started_at,
+        started_request.started_at
+    );
+    txn.commit().await.unwrap();
+    assert!(
+        env.redfish_sim
+            .actions_since(&timepoint)
+            .for_host(&bmc_access.host)
+            .is_empty()
+    );
+
+    env.redfish_sim
+        .set_power_state(&bmc_access.host, PowerState::On);
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let host = managed_host.host().db_machine(&mut txn).await;
+    let ManagedHostState::DpuDiscoveringState { dpu_states } = host.current_state() else {
+        panic!(
+            "an observed On host must resume DPU discovery, got {:?}",
+            host.current_state()
+        );
+    };
+    assert_eq!(dpu_states.states.len(), managed_host.dpu_ids.len());
+    assert!(
+        dpu_states
+            .states
+            .values()
+            .all(|state| *state == DpuDiscoveringState::Initializing)
+    );
+    assert!(host.reset_requested.is_none());
 }
 
 /// The controller parks any host carrying a failure record in `Failed` before it dispatches on
