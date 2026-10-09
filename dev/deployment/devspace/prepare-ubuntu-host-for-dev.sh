@@ -594,6 +594,8 @@ update_shell_file() {
       printf 'export PATH="$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/protobuf/bin:$HOME/go/bin:$PATH"\n'
       # shellcheck disable=SC2016 # Expand $HOME in the developer's login shell.
       printf 'export OPENSSL_CONF="$HOME/.config/nico/openssl-compat.cnf"\n'
+      # shellcheck disable=SC2016 # vfkit updates these values on each source sync.
+      printf 'if [ -r "$HOME/.config/nico/vfkit-source-version.sh" ]; then . "$HOME/.config/nico/vfkit-source-version.sh"; fi\n'
       printf 'export CARGO_HTTP_LOW_SPEED_LIMIT=1\n'
       printf 'export CARGO_HTTP_TIMEOUT=120\n'
       printf 'export CARGO_NET_GIT_FETCH_WITH_CLI=true\n'
