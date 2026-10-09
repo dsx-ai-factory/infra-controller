@@ -446,9 +446,9 @@ impl NvueClient {
             .await?;
         if diff.is_empty() {
             // Note that we're leaving the old revision sitting around unused!
-            // NVUE provides a `DELETE` operation on a revision ID, but HBN
-            // patches this out in its OpenAPI spec For Some Reason(tm) so it's
-            // unclear if it's safe to try it.
+            // NVUE provides a `DELETE` operation on a revision ID starting in
+            // version 1.8.0.32, but HBN 3.0 through 3.3 are built on the NVUE
+            // 1.7 line and therefore don't implement it.
             return Ok(None);
         }
 
