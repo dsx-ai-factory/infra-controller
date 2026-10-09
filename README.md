@@ -6,8 +6,8 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-76B900.svg)](LICENSE)
 [![NICo Core CI](https://img.shields.io/github/actions/workflow/status/dsx-ai-factory/infra-controller/ci.yaml?branch=main&label=NICo%20Core%20CI)](https://github.com/dsx-ai-factory/infra-controller/actions/workflows/ci.yaml)
-[![Rust](https://img.shields.io/badge/Rust-1.97.1-orange.svg?logo=rust)](rust-toolchain.toml)
-[![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg?logo=go)](rest-api/go.mod)
+[![NICo REST CI](https://img.shields.io/github/actions/workflow/status/dsx-ai-factory/infra-controller/rest-ci.yml?branch=main&label=NICo%20REST%20CI)](https://github.com/dsx-ai-factory/infra-controller/actions/workflows/rest-ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/dsx-ai-factory/infra-controller?label=release&color=76B900)](https://github.com/dsx-ai-factory/infra-controller/releases/latest)
 [![Documentation](https://img.shields.io/badge/docs-docs.nvidia.com-76B900.svg)](https://docs.nvidia.com/infra-controller/documentation/home)
 
 [Documentation](https://docs.nvidia.com/infra-controller/documentation/home) |
@@ -235,9 +235,10 @@ scheduling, tenancy policy, or workloads are managed above it.
 
 ## How It Is Built
 
-The **Site Controller** is the on-site control plane: a set of Rust services
-deployed on a Kubernetes cluster of at least three nodes, all talking to each
-other over mutual TLS (mTLS) and gRPC. **NICo REST** is a Go service layer
+The **Site Controller** is the on-site control plane: Rust services deployed
+on a Kubernetes cluster of at least three nodes, all talking to each other over
+mutual TLS (mTLS) and gRPC, plus the Go Site Agent that links the site to NICo
+REST. **NICo REST** is a Go service layer
 that exposes those capabilities as a REST API. It can run next to the Site
 Controller or centrally in the cloud, where many sites connect to it through
 their Site Agents.
@@ -270,8 +271,9 @@ and uses Machine-a-Tron to supply mock hosts, so you can exercise the REST API
 and the Core gRPC API end to end without hardware.
 
 ```bash
-# 1. Install the toolchain: rustup with the version in rust-toolchain.toml,
-#    Go 1.26, Docker, kind, kubectl, helm, and devspace. Then install cargo-make:
+# 1. Install the toolchain: rustup with the Rust version pinned in rust-toolchain.toml,
+#    the Go version in rest-api/go.mod, Docker, kind, kubectl, helm, and devspace.
+#    Then install cargo-make:
 cargo install cargo-make
 
 # 2. Bootstrap the cluster-side prerequisites (cert-manager, PostgreSQL, Vault,
@@ -370,6 +372,17 @@ full reference: PKI architecture, PostgreSQL setup, phase-by-phase description,
 every environment variable, DPF options, secrets, health checks, and
 troubleshooting.
 
+## Examples
+
+Runnable inputs and reference configurations that ship with the repository:
+
+| Example | What it shows |
+| --- | --- |
+| [Go Simple SDK examples](rest-api/sdk/simple/examples/) | Small programs against the REST API for machines, expected machines, instances, VPCs, and IP blocks, built on the [Simple SDK](rest-api/sdk/simple/README.md) |
+| [Site bootstrap input](rest-api/cli/examples/site-prerequisites.yaml) | The provider and tenant organizations, site, and network prerequisites that `nicocli site bootstrap` creates in one pass |
+| [NICo Flow inputs](rest-api/flow/examples/README.md) | A GB200 NVL72 rack definition and operation rules for the Flow CLI |
+| [Helm values](helm/examples/) | Minimal and full values files for installing the NICo Core chart directly |
+
 ## Repository Tour
 
 | Path | What lives there |
@@ -382,12 +395,19 @@ troubleshooting.
 | [`bluefield/`](bluefield/) and [`pxe/`](pxe/) | DPU image components and PXE boot artifact generation |
 | [`deploy/`](deploy/) | Kubernetes manifests and Kustomize overlays |
 
+## Community and Support
+
+- **Questions and ideas:** [GitHub Discussions](https://github.com/dsx-ai-factory/infra-controller/discussions)
+- **Bugs and feature requests:** [GitHub Issues](https://github.com/dsx-ai-factory/infra-controller/issues)
+- **Releases:** [Release Notes](https://docs.nvidia.com/infra-controller/documentation/release-notes) for what changed, and the [Release Policy](RELEASE.md) for the monthly branch, version, and support cadence
+- **Security:** report vulnerabilities as described in [SECURITY.md](SECURITY.md)
+
 ## Contributing
 
 Contributions are welcome. Refer to the [contribution guide](CONTRIBUTING.md)
 for the development environment, the DCO sign-off process, and the engineering
 guidelines, and to the [code of conduct](CODE_OF_CONDUCT.md) for contributor
-expectations. To report a security issue, follow [SECURITY.md](SECURITY.md).
+expectations.
 
 ## License and Release Notice
 
