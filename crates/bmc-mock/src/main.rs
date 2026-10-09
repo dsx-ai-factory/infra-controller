@@ -198,7 +198,10 @@ async fn start_mock_app(
         backend = ?StateBackend::Internal,
         "Using generated BMC mock",
     );
-    let callbacks = Arc::new(bmc_mock::simulated::SimulatedCallbacks::new());
+    let stop = CancellationToken::new();
+    let (actor, callbacks) = bmc_mock::simulated::SimulatedActor::new(stop.clone().drop_guard());
+    let callbacks = Arc::new(callbacks);
+    let mut backend_tasks = JoinSet::new();
     let (router, state) = {
         bmc_mock::machine_router(
             &machine.machine_info(),
@@ -211,6 +214,7 @@ async fn start_mock_app(
             },
         )
     };
+    actor.run(&state, &mut backend_tasks, stop);
     let _ipmi = if bmc_behaviour.enable_ipmi_simulation {
         Some(bmc_mock::ipmi_sim::start(&state, ipmi_sim_config(), None).await?)
     } else {
@@ -224,7 +228,19 @@ async fn start_mock_app(
         Some(listener.bind().await?),
         bmc_mock::tls::server_config(listener.cert_path)?,
     );
-    handle.wait().await?;
+    let result: Result<(), Box<dyn std::error::Error>> = tokio::select! {
+        result = handle.wait() => result.map_err(Into::into),
+        result = backend_tasks.join_next() => {
+            match result.expect("simulated backend task set is not empty") {
+                Ok(()) => Err("simulated BMC backend stopped unexpectedly".into()),
+                Err(error) => Err(error.into()),
+            }
+        }
+    };
+    let server_result = handle.stop().await;
+    backend_tasks.shutdown().await;
+    result?;
+    server_result?;
     Ok(())
 }
 

@@ -23,6 +23,7 @@ use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
 use eyre::WrapErr;
+use nv_redfish::schema::resource::PowerState;
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer};
 use tokio::io::AsyncReadExt;
@@ -36,7 +37,9 @@ use url::Url;
 use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
 use crate::persistence::PersistenceError;
 use crate::redfish::computer_system::{SingleSystemState, SystemState};
-use crate::{ActionError, BmcState, BootOptionKind, Callbacks, MockPowerState, ResourceResetType};
+use crate::{
+    ActionError, BmcState, BootOptionKind, Callbacks, ResourceResetType, validate_power_reset,
+};
 
 mod persistence;
 use persistence::StateFile;
@@ -51,12 +54,18 @@ const VIRSH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const POWER_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const PERSISTENCE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
+#[derive(Debug)]
+struct PowerObservation {
+    state: PowerState,
+    cycling: bool,
+}
+
 pub struct LibvirtActor {
     actor: Actor<LibvirtMessage>,
     mailbox: ActorMailbox<LibvirtMessage>,
     config: Config,
     refresh_pending: Arc<AtomicBool>,
-    power_state: Arc<RwLock<MockPowerState>>,
+    power_state: Arc<RwLock<PowerObservation>>,
 }
 
 impl LibvirtActor {
@@ -64,7 +73,10 @@ impl LibvirtActor {
     /// Call `run` to initialize the backend and spawn it in the owner's supervised task set.
     pub fn new(config: Config, guard: DropGuard) -> (Self, LibvirtCallbacks) {
         let refresh_pending = Arc::new(AtomicBool::new(false));
-        let power_state = Arc::new(RwLock::new(MockPowerState::Unknown));
+        let power_state = Arc::new(RwLock::new(PowerObservation {
+            state: PowerState::Off,
+            cycling: false,
+        }));
         let (actor, mailbox) = Actor::new();
         (
             LibvirtActor {
@@ -134,18 +146,19 @@ pub struct Config {
 /// Backend handle that sends operations to one sequential libvirt actor.
 ///
 /// Commands use an unbounded mailbox. Refresh notifications coalesce into one pending signal.
-/// Power reads return the last completed observation, initially Unknown, updated at actor startup,
+/// Power observations are published to Redfish, initially Off, updated at actor startup,
 /// after power commands and refresh notifications, and by polling with a five-second
 /// delay after each attempt. Actor work can delay polling; each virsh attempt has a 30-second
-/// deadline and up to five seconds of cleanup. Failed or unrecognized observations return Unknown.
+/// deadline and up to five seconds of cleanup. Failed or unrecognized observations retain the last state.
 /// Power commands return once enqueued; execution failures are logged by the actor.
+/// Resets are rejected while a power-cycle command is executing.
 /// Dropping the handle cancels the actor. Cancelling `LibvirtActor::run` during
 /// initialization interrupts it before the actor task is spawned.
 #[derive(Debug)]
 pub struct LibvirtCallbacks {
     mailbox: ActorMailbox<LibvirtMessage>,
     refresh_pending: Arc<AtomicBool>,
-    power_state: Arc<RwLock<MockPowerState>>,
+    power_state: Arc<RwLock<PowerObservation>>,
     _stop: DropGuard,
 }
 
@@ -166,7 +179,7 @@ struct LibvirtBackend {
     system_state: Option<Weak<SystemState<LibvirtCallbacks>>>,
     applied_state: AppliedState,
     refresh_pending: Arc<AtomicBool>,
-    power_state: Arc<RwLock<MockPowerState>>,
+    power_state: Arc<RwLock<PowerObservation>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -210,6 +223,7 @@ impl LibvirtBackend {
             .await?;
         self.system_state = Some(Arc::downgrade(&state));
         self.applied_state = applied;
+        self.publish_power_state(PowerState::Off);
         self.refresh_power_state().await;
         Ok(())
     }
@@ -555,16 +569,16 @@ fn boot_source_override_is_active(boot_source_override: &serde_json::Value) -> b
 }
 
 impl LibvirtBackend {
-    async fn get_power_state(&self) -> MockPowerState {
+    async fn observe_power_state(&self) -> Option<PowerState> {
         match self.virsh(&["domstate", &self.config.domain]).await {
             Ok(output) => match String::from_utf8_lossy(&output.stdout).trim() {
                 "running" | "idle" | "blocked" | "paused" | "in shutdown" | "pmsuspended" => {
-                    MockPowerState::On
+                    Some(PowerState::On)
                 }
-                "shut off" | "crashed" => MockPowerState::Off,
+                "shut off" | "crashed" => Some(PowerState::Off),
                 state => {
                     tracing::warn!(domain = %self.config.domain, state, "unrecognized libvirt domain power state");
-                    MockPowerState::Unknown
+                    None
                 }
             },
             Err(error) => {
@@ -573,14 +587,25 @@ impl LibvirtBackend {
                     error = ?error,
                     "could not read libvirt domain power state",
                 );
-                MockPowerState::Unknown
+                None
             }
         }
     }
 
+    fn publish_power_state(&self, state: PowerState) {
+        self.power_state
+            .write()
+            .expect("power state lock poisoned")
+            .state = state;
+        if let Some(system_state) = self.system_state.as_ref().and_then(Weak::upgrade) {
+            system_state.set_power_state(state);
+        }
+    }
+
     async fn refresh_power_state(&self) {
-        let observed = self.get_power_state().await;
-        *self.power_state.write().expect("power state lock poisoned") = observed;
+        if let Some(observed) = self.observe_power_state().await {
+            self.publish_power_state(observed);
+        }
     }
 
     async fn send_power_command(
@@ -694,15 +719,20 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
             }
             LibvirtMessage::SendPowerCommand { reset_type } => {
                 if matches!(reset_type, ResourceResetType::PowerCycle) {
-                    *self.power_state.write().expect("power state lock poisoned") =
-                        MockPowerState::PowerCycling {
-                            since: Instant::now(),
-                        };
+                    self.power_state
+                        .write()
+                        .expect("power state lock poisoned")
+                        .cycling = true;
+                    self.publish_power_state(PowerState::Off);
                 }
                 if let Err(error) = self.send_power_command(reset_type).await {
                     tracing::error!(domain = %self.config.domain, ?reset_type, %error, "libvirt power command failed");
                 }
                 self.refresh_power_state().await;
+                self.power_state
+                    .write()
+                    .expect("power state lock poisoned")
+                    .cycling = false;
                 ActorResult::Noop
             }
             LibvirtMessage::Refresh => {
@@ -729,15 +759,19 @@ impl LibvirtCallbacks {
 }
 
 impl Callbacks for LibvirtCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        *self.power_state.read().expect("power state lock poisoned")
-    }
-
     async fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,
     ) -> Result<(), ActionError> {
-        self.get_power_state().validate_reset_type(reset_type)?;
+        {
+            let observation = self.power_state.read().expect("power state lock poisoned");
+            if observation.cycling {
+                return Err(ActionError::BadRequest(eyre::eyre!(
+                    "libvirt backend is in the middle of power cycling"
+                )));
+            }
+            validate_power_reset(observation.state, reset_type)?;
+        }
         self.mailbox
             .send(LibvirtMessage::SendPowerCommand { reset_type })
             .map_err(|err| ActionError::Internal(err.into()))
@@ -935,6 +969,7 @@ mod tests {
 case "$3" in
     domstate)
         IFS= read -r state < "$0.state"
+        printf '%s\n' "$state" > "$0.observed"
         [ "$state" != error ] || exit 1
         printf '%s\n' "$state"
         ;;
@@ -961,10 +996,6 @@ esac
             stop.clone().drop_guard(),
         );
         let callbacks = Arc::new(callbacks);
-        assert!(matches!(
-            callbacks.get_power_state(),
-            MockPowerState::Unknown
-        ));
         let (router, state) = machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
             callbacks.clone(),
@@ -977,9 +1008,9 @@ esac
         for (observation, expected) in [
             ("running", serde_json::json!("On")),
             ("shut off", serde_json::json!("Off")),
-            ("error", serde_json::Value::Null),
+            ("error", serde_json::json!("Off")),
             ("running", serde_json::json!("On")),
-            ("unrecognized", serde_json::Value::Null),
+            ("unrecognized", serde_json::json!("On")),
         ] {
             let replacement = directory.path().join("next-state");
             std::fs::write(&replacement, observation).unwrap();
@@ -999,7 +1030,12 @@ esac
                     assert_eq!(response.status(), StatusCode::OK);
                     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
                     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                    if body.get("PowerState") == Some(&expected) {
+                    if body.get("PowerState") == Some(&expected)
+                        && std::fs::read_to_string(directory.path().join("virsh.observed"))
+                            .unwrap_or_default()
+                            .trim()
+                            == observation
+                    {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(20)).await;
