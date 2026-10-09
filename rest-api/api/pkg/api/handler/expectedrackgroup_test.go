@@ -95,6 +95,86 @@ func TestDeleteAllExpectedRackGroupsHandler_Handle(t *testing.T) {
 	testRackGroupMutation(t, "DeleteAllExpectedRackGroups")
 }
 
+func TestReplaceAllExpectedRackGroupsHandler_ConcurrentRequests(t *testing.T) {
+	session := testExpectedRackInitDB(t)
+	t.Cleanup(func() { session.Close() })
+	ctx := context.Background()
+	require.NoError(t, session.DB.ResetModel(ctx, (*cdbm.ExpectedRackGroup)(nil)))
+	_, site, _ := testExpectedRackSetupTestData(t, session, "test")
+	user := &cdbm.User{
+		ID:          uuid.New(),
+		StarfleetID: cutil.GetPtr("concurrent-rack-group-user"),
+		OrgData: cdbm.OrgData{"test": cdbm.Org{
+			Name: "test", Roles: []string{"FORGE_PROVIDER_ADMIN"},
+		}},
+	}
+	_, err := session.DB.NewInsert().Model(user).Exec(ctx)
+	require.NoError(t, err)
+
+	cfg := common.GetTestConfig()
+	pool := sc.NewClientPool(nil)
+	client := &tmocks.Client{}
+	pool.IDClientMap[site.ID.String()] = client
+	run := &tmocks.WorkflowRun{}
+	run.On("Get", mock.Anything, mock.Anything).Return(nil).Once()
+
+	handler := NewReplaceAllExpectedRackGroupsHandler(session, pool, cfg)
+	var invoke func(context.Context, string) (*httptest.ResponseRecorder, error)
+	var second *httptest.ResponseRecorder
+	var secondErr error
+	var coreRequest corev1.ExpectedRackGroupList
+	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, "InvokeCoreGRPC", mock.Anything).Run(func(args mock.Arguments) {
+		request := args.Get(3).(grpcproxy.Request)
+		require.Equal(t, corev1.Forge_ReplaceAllExpectedRackGroups_FullMethodName, request.FullMethod)
+		require.NoError(t, protojson.Unmarshal(request.RequestJSON, &coreRequest))
+		second, secondErr = invoke(ctx, "group-b")
+	}).Return(run, nil).Once()
+	t.Cleanup(func() {
+		client.AssertExpectations(t)
+		run.AssertExpectations(t)
+	})
+
+	invoke = func(requestCtx context.Context, rackGroupID string) (*httptest.ResponseRecorder, error) {
+		body, marshalErr := json.Marshal(apim.APIReplaceAllExpectedRackGroupsRequest{
+			SiteID: site.ID.String(),
+			ExpectedRackGroups: []*apim.APIExpectedRackGroupCreateRequest{{
+				SiteID: site.ID.String(), RackGroupID: rackGroupID, Topology: "topology", Protocol: "NVLINK_V6",
+				Racks: []apim.APIExpectedRackGroupRack{},
+			}},
+		})
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		req := httptest.NewRequest(http.MethodPut, "/v2/org/test/nico/expected-rack-group/all", strings.NewReader(string(body)))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		req = req.WithContext(requestCtx)
+		rec := httptest.NewRecorder()
+		request := echo.New().NewContext(req, rec)
+		request.Set("user", user)
+		request.SetParamNames("orgName")
+		request.SetParamValues("test")
+		return rec, handler.Handle(request)
+	}
+
+	first, firstErr := invoke(ctx, "group-a")
+	require.NoError(t, firstErr)
+	require.NoError(t, secondErr)
+	require.Equal(t, http.StatusOK, first.Code, first.Body.String())
+	require.Equal(t, http.StatusConflict, second.Code, second.Body.String())
+
+	var response []apim.APIExpectedRackGroup
+	require.NoError(t, json.Unmarshal(first.Body.Bytes(), &response))
+	require.Len(t, response, 1)
+	require.Equal(t, "group-a", response[0].RackGroupID)
+
+	var stored []cdbm.ExpectedRackGroup
+	require.NoError(t, session.DB.NewSelect().Model(&stored).Where("site_id = ?", site.ID).Scan(ctx))
+	require.Len(t, stored, 1)
+	require.Equal(t, "group-a", stored[0].RackGroupID)
+	require.Len(t, coreRequest.ExpectedRackGroups, 1)
+	require.Equal(t, "group-a", coreRequest.ExpectedRackGroups[0].GetRackGroupId().GetId())
+}
+
 type rackGroupConcurrentInsertHook struct {
 	insert func()
 }

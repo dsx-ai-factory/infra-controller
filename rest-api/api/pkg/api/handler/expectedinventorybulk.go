@@ -27,6 +27,8 @@ type expectedInventoryBulkBase struct {
 	scp       *sc.ClientPool
 }
 
+const expectedInventoryMutationLockPrefix = "expected-inventory-mutation:"
+
 func newExpectedInventoryBulkBase(dbSession *cdb.Session, scp *sc.ClientPool, _ *config.Config) expectedInventoryBulkBase {
 	return expectedInventoryBulkBase{
 		dbSession: dbSession,
@@ -72,6 +74,24 @@ func validateDeleteAllSiteID(c echo.Context) (string, *cutil.APIError) {
 	return siteID, nil
 }
 
+// acquireExpectedInventoryMutationLock serializes complete Expected Inventory
+// mutations for one Site until the surrounding transaction commits or rolls
+// back. All resource types share the lock because rack membership and derived
+// inventory fields cross resource boundaries.
+func acquireExpectedInventoryMutationLock(ctx context.Context, logger zerolog.Logger, tx *cdb.Tx, siteID uuid.UUID) *cutil.APIError {
+	lockID := cdb.GetAdvisoryLockIDFromString(expectedInventoryMutationLockPrefix + siteID.String())
+	err := tx.TryAcquireAdvisoryLock(ctx, lockID, nil)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, cdb.ErrXactAdvisoryLockFailed) {
+		logger.Warn().Err(err).Msg("Expected Inventory mutation lock is held by another writer")
+		return cutil.NewAPIError(http.StatusConflict, "Expected Inventory for this Site is being updated; retry the request", nil)
+	}
+	logger.Error().Err(err).Msg("failed to acquire Expected Inventory mutation lock")
+	return cutil.NewAPIError(http.StatusInternalServerError, "Failed to lock Expected Inventory for update", nil)
+}
+
 func (b expectedInventoryBulkBase) deleteAll(c echo.Context, resource, method string, deleteDB func(context.Context, *cdb.Tx, uuid.UUID) error) error {
 	org, dbUser, ctx, logger, span := common.SetupHandler(resource, "DeleteAll", c)
 	if span != nil {
@@ -94,12 +114,16 @@ func (b expectedInventoryBulkBase) deleteAll(c echo.Context, resource, method st
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 	err = cdb.WithTx(ctx, b.dbSession, func(tx *cdb.Tx) error {
+		apiErr := acquireExpectedInventoryMutationLock(ctx, logger, tx, site.ID)
+		if apiErr != nil {
+			return apiErr
+		}
 		derr := deleteDB(ctx, tx, site.ID)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error deleting Expected Inventory records from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Expected Inventory due to DB error", nil)
 		}
-		apiErr := common.ExecuteCoreGRPC(ctx, stc, method, &emptypb.Empty{}, nil, site.ID.String())
+		apiErr = common.ExecuteCoreGRPC(ctx, stc, method, &emptypb.Empty{}, nil, site.ID.String())
 		if apiErr != nil {
 			return apiErr
 		}

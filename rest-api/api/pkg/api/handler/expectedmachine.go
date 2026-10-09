@@ -1806,6 +1806,10 @@ func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
 	}
 	dao := cdbm.NewExpectedMachineDAO(h.dbSession)
 	replaced, err := cdb.WithTxResult(ctx, h.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedMachine, error) {
+		apiErr := acquireExpectedInventoryMutationLock(ctx, logger, tx, site.ID)
+		if apiErr != nil {
+			return nil, apiErr
+		}
 		machines, derr := dao.ReplaceAll(ctx, tx, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{site.ID}}, inputs)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error replacing ExpectedMachine records in DB")
@@ -1825,7 +1829,7 @@ func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
 		}) {
 			secretFields = []string{"expectedMachines"}
 		}
-		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedMachines_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
+		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedMachines_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
 		if apiErr != nil {
 			return nil, apiErr
 		}

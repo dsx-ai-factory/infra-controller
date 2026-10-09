@@ -4600,6 +4600,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/ExpectedInventoryMutationConflictError'
       tags:
         - Expected Machine
     delete:
@@ -4626,6 +4628,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/ExpectedInventoryMutationConflictError'
       tags:
         - Expected Machine
   '/v2/org/{org}/nico/expected-machine/label/key':
@@ -5194,6 +5198,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/ExpectedInventoryMutationConflictError'
       tags:
         - Expected Power Shelf
     delete:
@@ -5220,6 +5226,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/ExpectedInventoryMutationConflictError'
       tags:
         - Expected Power Shelf
   '/v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId}':
@@ -5526,6 +5534,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/ExpectedInventoryMutationConflictError'
       tags:
         - Expected Rack
   '/v2/org/{org}/nico/expected-rack/all':
@@ -5567,6 +5577,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/ExpectedInventoryMutationConflictError'
       tags:
         - Expected Rack
     delete:
@@ -5595,6 +5607,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/ExpectedInventoryMutationConflictError'
       tags:
         - Expected Rack
   '/v2/org/{org}/nico/expected-rack/{id}':
@@ -5919,6 +5933,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/ExpectedInventoryMutationConflictError'
       tags:
         - Expected Rack Group
   '/v2/org/{org}/nico/expected-rack-group/all':
@@ -5960,6 +5976,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/ExpectedInventoryMutationConflictError'
       tags:
         - Expected Rack Group
     delete:
@@ -5988,6 +6006,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/ExpectedInventoryMutationConflictError'
       tags:
         - Expected Rack Group
   '/v2/org/{org}/nico/expected-rack-group/{id}':
@@ -6276,6 +6296,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/ExpectedInventoryMutationConflictError'
       tags:
         - Expected Switch
     delete:
@@ -6302,6 +6324,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/ExpectedInventoryMutationConflictError'
       tags:
         - Expected Switch
   '/v2/org/{org}/nico/expected-switch/{expectedSwitchId}':
@@ -34770,6 +34794,19 @@ components:
               value:
                 source: nico
                 message: Error handling API request
+                data: null
+    ExpectedInventoryMutationConflictError:
+      description: |-
+        Another complete Expected Inventory replace or delete request is already in progress for the same Site. The request is rejected before PostgreSQL or Core is mutated and may be retried.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NICoAPIError'
+          examples:
+            example-1:
+              value:
+                source: nico
+                message: Expected Inventory for this Site is being updated; retry the request
                 data: null
     GatewayTimeoutError:
       description: |-
