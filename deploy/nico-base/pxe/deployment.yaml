@@ -33,6 +33,11 @@ spec:
       annotations:
         kubectl.kubernetes.io/default-container: nico-pxe
     spec:
+      securityContext:
+        # Keep artifact sidecars root for copying; only PXE serves as UID 10001.
+        # The boot-artifacts component grants the serving group read/traverse
+        # on copied artifacts, including source files with mode 0600.
+        fsGroup: 10001
       containers:
         - name: nico-pxe
           image: yourdockerregistry.com/path/to/nico-core:latest
@@ -40,7 +45,7 @@ spec:
             - /opt/carbide/carbide
           args:
             - -s
-            - /nico-boot-artifacts
+            - /forge-boot-artifacts
           env:
             - name: ROCKET_CONFIG
               value: "/tmp/nico/Rocket.toml"
@@ -64,6 +69,9 @@ spec:
                 optional: true
           imagePullPolicy: IfNotPresent
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
             capabilities:
               add:
                 - SYS_PTRACE
@@ -84,6 +92,13 @@ spec:
               mountPath: /var/run/secrets/spiffe.io
               readOnly: true
       volumes:
+        # Legacy Rocket mount: the current PXE binary reads configuration from
+        # environment variables only, so the pod must not wait for this map.
+        - name: config
+          configMap:
+            defaultMode: 420
+            name: nico-pxe-config
+            optional: true
         - name: spiffe
           secret:
             secretName: nico-pxe-certificate
