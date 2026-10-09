@@ -143,8 +143,9 @@ func workflowOrchestrator() (*workflowtypes.WorkerStatus, error) {
 			// GODEBUG=x509keypairleaf=0 leaves Leaf unset after a successful load.
 			leaf, err = x509.ParseCertificate(clientcert.Certificate[0])
 		}
-		if err == nil && leaf != nil && CertExpirationMetric != nil {
+		if err == nil && leaf != nil && CertExpirationMetric != nil && CertExpirationTimestampSecondsMetric != nil {
 			CertExpirationMetric.Set(float64(leaf.NotAfter.Unix()))
+			CertExpirationTimestampSecondsMetric.Set(float64(leaf.NotAfter.Unix()))
 		} else {
 			log.Warn().Err(err).Msg("Workflow: Unable to update Temporal certificate expiration metric")
 		}
