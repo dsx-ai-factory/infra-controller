@@ -279,6 +279,12 @@ func InitMetricsServer(e *echo.Echo, namespace string) *echo.Echo {
 		// its own "echo" for an empty one.
 		Subsystem: namespace,
 		Skipper:   api.MetricsURLSkipper,
+		// echoprometheus otherwise uses the caller-controlled HTTP Host header.
+		// Keep the published label but give it one server-controlled value so
+		// unauthenticated requests cannot create unbounded time series.
+		LabelFuncs: map[string]echoPrometheus.LabelValueFunc{
+			"host": func(echo.Context, error) string { return namespace },
+		},
 	}
 
 	p := echoPrometheus.NewMiddlewareWithConfig(conf)
