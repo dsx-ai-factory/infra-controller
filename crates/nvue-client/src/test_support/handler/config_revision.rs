@@ -200,11 +200,7 @@ impl ConfigRevisionHandler {
     }
 
     fn handle_apply(&self, request: &MockRequest, revision_id: &str) -> Option<MockResponse> {
-        let expected = json!({
-            "state": "apply",
-            "auto-prompt": {"ays": "ays_yes"},
-        });
-        if request.json::<JsonValue>().ok().as_ref() != Some(&expected) {
+        if !valid_apply_body(request) {
             return bad_request("revision apply body is malformed");
         }
 
@@ -288,11 +284,7 @@ impl ConfigRevisionRollbackHandler {
         if request.uri.query().is_some() {
             return self.storage.handle(request);
         }
-        let expected = json!({
-            "state": "apply",
-            "auto-prompt": {"ays": "ays_yes"},
-        });
-        if request.json::<JsonValue>().ok().as_ref() != Some(&expected) {
+        if !valid_apply_body(request) {
             return bad_request("revision apply body is malformed");
         }
         let mut state = self.state.lock().expect("rollback state lock should work");
@@ -460,6 +452,11 @@ fn revision_response(revision_id: &str, applied_revision: &str) -> MockResponse 
     )
 }
 
+fn valid_apply_body(request: &MockRequest) -> bool {
+    request.json::<JsonValue>().ok()
+        == Some(json!({"state": "apply", "auto-prompt": {"ays": "ays_yes"}}))
+}
+
 fn bad_request(message: &str) -> Option<MockResponse> {
     Some(MockResponse::json(
         StatusCode::BAD_REQUEST,
@@ -501,7 +498,7 @@ mod tests {
         serde_json::from_slice(&response(action).body).expect("response should contain JSON")
     }
 
-    fn create_revision(handler: &ConfigRevisionHandler) -> String {
+    fn create_revision<H: NvueMockHandler>(handler: &H) -> String {
         let response = response_json(handler.handle(&empty_request(
             Method::POST,
             ConfigRevisionHandler::REVISION_COLLECTION_PATH,
@@ -621,8 +618,8 @@ mod tests {
     fn failed_apply_preserves_applied_config_and_rejects_further_applies() {
         let initial_config = json!({"system": {"hostname": "leaf-0"}});
         let handler = ConfigRevisionRollbackHandler::new(initial_config.clone(), 0, 0);
-        let first_revision = create_revision(&handler.storage);
-        let second_revision = create_revision(&handler.storage);
+        let first_revision = create_revision(&handler);
+        let second_revision = create_revision(&handler);
         let apply = json!({"state": "apply", "auto-prompt": {"ays": "ays_yes"}});
         let diff_uri = format!("/nvue_v1/?diff=applied&rev={first_revision}&filled=false");
         let staged_config = json!({"system": {"hostname": "leaf-1"}});
