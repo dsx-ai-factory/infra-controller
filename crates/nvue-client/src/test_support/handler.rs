@@ -20,7 +20,7 @@ mod config_revision;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub(crate) use config_revision::ConfigRevisionHandler;
+pub(crate) use config_revision::{ConfigRevisionHandler, ConfigRevisionRollbackHandler};
 use tokio::sync::Notify;
 
 use super::{MockRequest, MockResponse};

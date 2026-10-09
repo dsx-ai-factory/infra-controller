@@ -654,10 +654,11 @@ mod tests {
 
     use super::*;
     use crate::test_support::{
-        ConfigRevisionHandler, MockNvueServer, MockRequest, MockResponse, NvueMockHandler,
-        handler_fn, respond_once,
+        ConfigRevisionHandler, ConfigRevisionRollbackHandler, MockNvueServer, MockRequest,
+        MockResponse, NvueMockHandler, handler_fn, respond_once,
     };
     use crate::types::bgp::BgpPeerState;
+    use crate::types::revision::RevisionIssueSeverity;
 
     #[tokio::test]
     async fn get_bgp_neighbors_filtered_returns_neighbors() {
@@ -833,6 +834,106 @@ mod tests {
             }
             Ok(()) => panic!("revision apply should time out"),
         }
+
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn apply_config_revision_waits_for_rollback_and_preserves_error() {
+        let handler = ConfigRevisionRollbackHandler::new(serde_json::json!({}), 1, 1);
+        let server = MockNvueServer::start(handler).expect("mock server should start");
+        let client = NvueClient::new(server.server_address()).expect("client should be created");
+        let revision_id = client
+            .create_config_revision()
+            .await
+            .expect("revision creation should succeed");
+
+        let error = client
+            .apply_config_revision(&revision_id)
+            .await
+            .expect_err("apply should fail");
+        let NvueClientError::RevisionApplyFailed {
+            revision_id: failed_revision_id,
+            reason,
+            last_state,
+            progress,
+            error_issues,
+        } = error
+        else {
+            panic!("unexpected apply error: {error:?}");
+        };
+        assert_eq!(failed_revision_id, revision_id);
+        assert_eq!(reason, RevisionApplyFailureReason::Error);
+        assert_eq!(last_state.as_deref(), Some("apply_fail"));
+        assert_eq!(progress.as_deref(), Some("apply failed"));
+        assert_eq!(
+            error_issues,
+            vec![RevisionIssueSummary {
+                issue_id: "1".to_owned(),
+                severity: RevisionIssueSeverity::Error,
+                code: Some("apply_failed".to_owned()),
+                message: Some("apply failed".to_owned()),
+                data: Some(BTreeMap::from([("path".to_owned(), "/system".to_owned())])),
+            }]
+        );
+
+        let rollback_request = "GET /nvue_v1/revision/rev_1_apply_1%2Fstart";
+        let requests = server.summarize_requests();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.as_str() == rollback_request)
+                .count(),
+            2
+        );
+        assert_eq!(requests.last().map(String::as_str), Some(rollback_request));
+
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn apply_config_revision_gives_rollback_its_own_polling_window() {
+        let (handler, checkpoints) =
+            ConfigRevisionRollbackHandler::new(serde_json::json!({}), 35, 35)
+                .with_response_checkpoints();
+        let server = MockNvueServer::start(handler).expect("mock server should start");
+        let client = NvueClient::new(server.server_address()).expect("client should be created");
+        let revision_id = client
+            .create_config_revision()
+            .await
+            .expect("revision creation should succeed");
+
+        let mut apply_future = Box::pin(client.apply_config_revision(&revision_id));
+        tokio::select! {
+            () = checkpoints.wait_until_response(4) => {}
+            result = &mut apply_future => panic!("apply completed before second checking response: {result:?}"),
+        }
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let mut clock = tokio::time::interval(Duration::from_millis(100));
+        let error = loop {
+            tokio::select! {
+                result = &mut apply_future => break result.expect_err("apply should fail"),
+                _ = clock.tick() => {}
+            }
+        };
+        assert!(
+            matches!(
+                &error,
+                NvueClientError::RevisionApplyFailed {
+                    last_state: Some(state),
+                    ..
+                } if state == "apply_fail"
+            ),
+            "unexpected apply error: {error:?}"
+        );
+        assert!(started.elapsed() > NvueClient::APPLY_CONFIG_REVISION_TIMEOUT);
 
         server
             .finish()
