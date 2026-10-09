@@ -89,8 +89,8 @@ async fn test_ssh_console() -> eyre::Result<()> {
     env.start_console_output();
 
     // Run new ssh-console
-    // Keep the complete continuous-output interval so lifecycle markers and all three transport
-    // streams can be checked together. Log rotation has a dedicated integration test below.
+    // Capture lifecycle markers and continuous output from all transport streams together.
+    // Log rotation has a dedicated integration test below.
     let handle = ssh_console_test_helper::spawn(
         env.mock_api_server.addr.port(),
         Some(ssh_console_test_helper::ConfigOverrides {
@@ -459,7 +459,7 @@ async fn test_ssh_console_reconnect() -> eyre::Result<()> {
     let Some(env) = run_baseline_test_environment(vec![MockBmcType::Ssh]).await? else {
         return Ok(());
     };
-    let reconnect_interval_max = Duration::from_secs(5);
+    let reconnect_interval_max = Duration::from_millis(200);
 
     // Run new ssh-console
     let handle = ssh_console_test_helper::spawn(
@@ -467,7 +467,7 @@ async fn test_ssh_console_reconnect() -> eyre::Result<()> {
         // Exercise reconnect backoff without letting randomized exponential delays exceed the
         // prompt wait below.
         Some(ssh_console_test_helper::ConfigOverrides {
-            reconnect_interval_base: Some(Duration::from_secs(3)),
+            reconnect_interval_base: Some(Duration::from_millis(100)),
             reconnect_interval_max: Some(reconnect_interval_max),
             successful_connection_minimum_duration: Some(Duration::from_secs(60)),
             ..Default::default()
@@ -559,7 +559,7 @@ async fn test_ssh_console_reconnect() -> eyre::Result<()> {
     for _ in 0..5 {
         while prompt_seen_rx.try_recv().is_ok() {}
 
-        let mut newline_interval = tokio::time::interval(Duration::from_secs(1));
+        let mut newline_interval = tokio::time::interval(Duration::from_millis(100));
         let wait_for_prompt_timeout =
             Instant::now() + reconnect_interval_max + Duration::from_secs(5);
         // Send newlines to wait for prompt to appear
