@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use carbide_dhcp_common::VendorClass;
 use carbide_instrument::emit;
-use carbide_rpc_utils::dhcp::{HostConfig, InterfaceInfo};
+use carbide_rpc_utils::dhcp::{DhcpV4Config, HostConfig, InterfaceInfo};
 use dhcproto::v4::relay::{RelayAgentInformation, RelayCode, RelayInfo};
 use dhcproto::v4::{Decodable, Decoder, DhcpOption, Message, MessageType, OptionCode};
 use dhcproto::{Encodable, Encoder};
@@ -134,7 +134,7 @@ impl DecodedPacket {
 
     fn is_this_for_us(&self, config: &Config) -> Result<(), DhcpError> {
         if let Some(val) = self.get_option_val(OptionCode::ServerIdentifier, None)? {
-            if val == config.dhcp_config.carbide_dhcp_server {
+            if Some(val) == config.dhcp_config.carbide_dhcp_server {
                 return Ok(());
             }
             return Err(DhcpError::NotMyPacket(val.to_string()));
@@ -272,6 +272,9 @@ pub async fn process_packet(
     handler: &dyn DhcpMode,
     machine_cache: &mut Arc<Mutex<LruCache<String, CacheEntry>>>,
 ) -> Result<Packet, DhcpError> {
+    let ipv4 = config
+        .ipv4()?
+        .ok_or_else(|| DhcpError::InvalidInput("DHCPv4 is disabled".to_string()))?;
     let (&bootp_op, _) = buf.split_first().ok_or(DhcpError::PacketDecodeFailure(
         dhcproto::error::DecodeError::NotEnoughBytes,
     ))?;
@@ -331,8 +334,14 @@ pub async fn process_packet(
     let (dst_address, dst_port) =
         decoded_packet.decide_dst_ip(msg_type, config.relay_response_port);
 
-    let packet =
-        create_dhcp_reply_packet(&decoded_packet, circuit_id, dhcp_response, config, msg_type)?;
+    let packet = create_dhcp_reply_packet(
+        &decoded_packet,
+        circuit_id,
+        dhcp_response,
+        config,
+        ipv4,
+        msg_type,
+    )?;
 
     // Read the type off the reply itself: create_dhcp_reply_packet answers a
     // Request with either an Ack or a Nak.
@@ -366,6 +375,7 @@ fn create_dhcp_reply_packet(
     circuit_id: &str,
     forge_response: DhcpRecord,
     config: &Config,
+    ipv4: DhcpV4Config,
     dhcp_msg_type: MessageType,
 ) -> Result<Message, DhcpError> {
     let relay_address = forge_response
@@ -375,7 +385,7 @@ fn create_dhcp_reply_packet(
             x.parse::<Ipv4Addr>()
                 .unwrap_or_else(|_| Ipv4Addr::from([0, 0, 0, 0]))
         })
-        .unwrap_or(config.dhcp_config.carbide_dhcp_server);
+        .unwrap_or(ipv4.server);
     let allocated_address = Ipv4Addr::from_str(&forge_response.address)?;
     let reply_message_type = match dhcp_msg_type {
         MessageType::Discover => MessageType::Offer,
@@ -388,11 +398,7 @@ fn create_dhcp_reply_packet(
         MessageType::Request if src.packet.ciaddr() == allocated_address => MessageType::Ack,
         // This means allocated IP address is not same as requested by the client. Send NAK.
         MessageType::Request => {
-            return nak_packet(
-                src,
-                config.dhcp_config.carbide_provisioning_server_ipv4,
-                config.dhcp_config.carbide_dhcp_server,
-            );
+            return nak_packet(src, ipv4.provisioning_server, ipv4.server);
         }
         MessageType::Decline => {
             return Err(DhcpError::DhcpDeclineMessage(
@@ -448,7 +454,7 @@ fn create_dhcp_reply_packet(
         .set_flags(src.packet.flags())
         .set_ciaddr(src.packet.ciaddr())
         .set_yiaddr(allocated_address)
-        .set_siaddr(config.dhcp_config.carbide_provisioning_server_ipv4)
+        .set_siaddr(ipv4.provisioning_server)
         .set_giaddr(src.packet.giaddr())
         .set_chaddr(src.packet.chaddr());
 
@@ -482,9 +488,8 @@ fn create_dhcp_reply_packet(
     msg.opts_mut().insert(DhcpOption::AddressLeaseTime(
         config.dhcp_config.lease_time_secs,
     ));
-    msg.opts_mut().insert(DhcpOption::ServerIdentifier(
-        config.dhcp_config.carbide_dhcp_server,
-    ));
+    msg.opts_mut()
+        .insert(DhcpOption::ServerIdentifier(ipv4.server));
     msg.opts_mut()
         .insert(DhcpOption::Renewal(config.dhcp_config.renewal_time_secs));
     msg.opts_mut().insert(DhcpOption::Rebinding(
@@ -519,7 +524,7 @@ fn create_dhcp_reply_packet(
                 .insert(DhcpOption::BootfileName(util::machine_get_filename(
                     &forge_response,
                     &vendor_class,
-                    config,
+                    ipv4.provisioning_server,
                 )));
         }
     }

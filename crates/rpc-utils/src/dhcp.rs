@@ -38,14 +38,26 @@ pub struct DhcpConfig {
     // Mandatory for Controller mode.
     pub carbide_api_url: Option<String>,
     pub carbide_ntpservers: Vec<Ipv4Addr>,
-    pub carbide_provisioning_server_ipv4: Ipv4Addr,
+    /// DHCPv4 boot address. Omit together with `carbide_dhcp_server` to
+    /// disable DHCPv4; an incomplete pair is invalid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carbide_provisioning_server_ipv4: Option<Ipv4Addr>,
     /// IPv6 provisioning address used to generate default DHCPv6 HTTP boot URLs.
     ///
     /// Omission disables URL generation. An explicit interface `booturl`,
     /// including an empty one, takes precedence. DHCPv4 uses its own address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub carbide_provisioning_server_ipv6: Option<Ipv6Addr>,
-    pub carbide_dhcp_server: Ipv4Addr,
+    /// DHCPv4 server address, absent when DHCPv4 is disabled. Supplies the
+    /// legacy DHCPv6 identity when `dhcpv6_server_id` is omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carbide_dhcp_server: Option<Ipv4Addr>,
+    /// Configured DHCPv6 identity as a YAML/JSON array of integer bytes.
+    /// Omission or `null` permits derivation from `carbide_dhcp_server`;
+    /// an empty or malformed array is rejected during deserialization.
+    /// The server resolves any saved identity separately before serving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dhcpv6_server_id: Option<DhcpV6ServerId>,
     #[serde(default)]
     pub carbide_nameservers_v6: Vec<Ipv6Addr>,
     #[serde(default)]
@@ -71,6 +83,13 @@ pub struct DhcpConfig {
 
 #[derive(thiserror::Error, Debug)]
 pub enum DhcpDataError {
+    /// A server identifier is not a bounded NVIDIA DUID-EN.
+    #[error("invalid DHCPv6 server identifier")]
+    InvalidServerIdentifier,
+    /// The DPU remote ID cannot form a bounded DHCPv6 server identifier;
+    /// the payload is its UTF-8 length in bytes.
+    #[error("invalid DPU remote_id length {0}: expected 1 to 120 UTF-8 bytes")]
+    InvalidRemoteIdLength(usize),
     #[error("DhcpDataError: AddressParseError: {0}")]
     AddressParseError(#[from] std::net::AddrParseError),
     #[error("DhcpDataError: missing: {0}")]
@@ -96,9 +115,9 @@ impl Default for DhcpConfig {
             carbide_api_url: None,
             carbide_ntpservers: vec![],
 
-            // These two must be updated with valid values.
-            carbide_provisioning_server_ipv4: Ipv4Addr::from([127, 0, 0, 1]),
-            carbide_dhcp_server: Ipv4Addr::from([127, 0, 0, 1]),
+            carbide_provisioning_server_ipv4: None,
+            carbide_dhcp_server: None,
+            dhcpv6_server_id: None,
             carbide_provisioning_server_ipv6: None,
             carbide_nameservers_v6: vec![],
             carbide_ntpservers_v6: vec![],
@@ -111,21 +130,135 @@ impl Default for DhcpConfig {
 }
 
 impl DhcpConfig {
+    /// `ipv4` returns the complete DHCPv4 configuration, or `None` when
+    /// both addresses are omitted. A partial pair is an error.
+    pub fn ipv4(&self) -> Result<Option<DhcpV4Config>, DhcpDataError> {
+        match (
+            self.carbide_dhcp_server,
+            self.carbide_provisioning_server_ipv4,
+        ) {
+            (None, None) => Ok(None),
+            (Some(server), Some(provisioning_server)) => Ok(Some(DhcpV4Config {
+                server,
+                provisioning_server,
+            })),
+            _ => Err(DhcpDataError::ParameterMissing(
+                "complete IPv4 DHCP configuration",
+            )),
+        }
+    }
+
+    /// `validate` checks the IPv4 address pair and availability of a DHCPv6
+    /// identity. It does not check host settings, lifetimes, or boot sources.
+    pub fn validate(&self) -> Result<(), DhcpDataError> {
+        self.ipv4()?;
+        self.server_identifier()?;
+        Ok(())
+    }
+
+    /// `server_identifier` uses the configured identity when supplied, otherwise
+    /// reproduces the legacy identifier from the IPv4 server address.
+    pub fn server_identifier(&self) -> Result<DhcpV6ServerId, DhcpDataError> {
+        self.dhcpv6_server_id
+            .clone()
+            .or_else(|| self.carbide_dhcp_server.map(DhcpV6ServerId::from_ipv4))
+            .ok_or(DhcpDataError::ParameterMissing("DHCPv6 server identifier"))
+    }
+
+    /// `from_forge_dhcp_config` builds settings from the agent's service
+    /// addresses. IPv4 addresses must both be present or both absent; callers
+    /// must also supply a DHCPv6 identity before serving without IPv4.
     pub fn from_forge_dhcp_config(
-        carbide_provisioning_server_ipv4: Ipv4Addr,
+        carbide_provisioning_server_ipv4: Option<Ipv4Addr>,
         carbide_ntpservers: Vec<Ipv4Addr>,
         carbide_nameservers: Vec<Ipv4Addr>,
         carbide_nameservers_v6: Vec<Ipv6Addr>,
-        loopback_ip: Ipv4Addr,
+        loopback_ip: Option<Ipv4Addr>,
     ) -> Result<Self, DhcpDataError> {
-        Ok(DhcpConfig {
+        let config = DhcpConfig {
             carbide_nameservers,
             carbide_nameservers_v6,
             carbide_ntpservers,
             carbide_provisioning_server_ipv4,
             carbide_dhcp_server: loopback_ip,
             ..Default::default()
-        })
+        };
+        config.ipv4()?;
+        Ok(config)
+    }
+}
+
+/// `DhcpV4Config` contains the two addresses required to serve DHCPv4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DhcpV4Config {
+    /// Server identifier emitted in DHCPv4 responses.
+    pub server: Ipv4Addr,
+    /// Address used for DHCPv4 boot URLs and the next-server field.
+    pub provisioning_server: Ipv4Addr,
+}
+
+/// `DhcpV6ServerId` is an NVIDIA DUID-EN containing 7 through 130 bytes.
+/// The header is type 2 and enterprise 5703 (`00 02 00 00 16 47`), followed
+/// by a nonempty identifier. YAML and JSON encode it as an array of integer bytes;
+/// deserialization and `TryFrom<Vec<u8>>` reject other headers or lengths with
+/// `DhcpDataError::InvalidServerIdentifier`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<u8>", into = "Vec<u8>")]
+pub struct DhcpV6ServerId(Vec<u8>);
+
+impl DhcpV6ServerId {
+    const DUID_EN: u16 = 2;
+    const NVIDIA_ENTERPRISE_NUMBER: u32 = 5703;
+    const HEADER: [u8; 6] = {
+        let kind = Self::DUID_EN.to_be_bytes();
+        let enterprise = Self::NVIDIA_ENTERPRISE_NUMBER.to_be_bytes();
+        [
+            kind[0],
+            kind[1],
+            enterprise[0],
+            enterprise[1],
+            enterprise[2],
+            enterprise[3],
+        ]
+    };
+
+    /// `from_ipv4` preserves the exact identifier emitted by older servers.
+    fn from_ipv4(address: Ipv4Addr) -> Self {
+        Self([Self::HEADER.as_slice(), &address.octets()].concat())
+    }
+
+    /// `from_remote_id` derives a stable identifier from the DPU's remote ID.
+    /// Empty IDs and IDs over 120 UTF-8 bytes return
+    /// `DhcpDataError::InvalidRemoteIdLength`.
+    /// The `dpu:` prefix plus a nonempty ID cannot collide with the four-byte
+    /// legacy IPv4 identifiers. The remote ID is visible in DHCPv6 packets.
+    pub fn from_remote_id(remote_id: &str) -> Result<Self, DhcpDataError> {
+        if remote_id.is_empty() || remote_id.len() > 120 {
+            return Err(DhcpDataError::InvalidRemoteIdLength(remote_id.len()));
+        }
+        Self::try_from([Self::HEADER.as_slice(), b"dpu:", remote_id.as_bytes()].concat())
+    }
+
+    /// `as_bytes` returns the complete DUID for the DHCPv6 ServerId option.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl TryFrom<Vec<u8>> for DhcpV6ServerId {
+    type Error = DhcpDataError;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        if !(7..=130).contains(&bytes.len()) || !bytes.starts_with(&Self::HEADER) {
+            return Err(DhcpDataError::InvalidServerIdentifier);
+        }
+        Ok(Self(bytes))
+    }
+}
+
+impl From<DhcpV6ServerId> for Vec<u8> {
+    fn from(identifier: DhcpV6ServerId) -> Self {
+        identifier.0
     }
 }
 
@@ -386,8 +519,8 @@ mod tests {
 
     #[derive(Debug, PartialEq)]
     struct DhcpConfigSummary {
-        provisioning_server: Ipv4Addr,
-        dhcp_server: Ipv4Addr,
+        provisioning_server: Option<Ipv4Addr>,
+        dhcp_server: Option<Ipv4Addr>,
         ntpservers: Vec<Ipv4Addr>,
         nameservers: Vec<Ipv4Addr>,
         nameservers_v6: Vec<Ipv6Addr>,
@@ -516,11 +649,11 @@ mod tests {
         ),
     ) -> Result<DhcpConfigSummary, &'static str> {
         DhcpConfig::from_forge_dhcp_config(
-            provisioning_server,
+            Some(provisioning_server),
             ntpservers,
             nameservers,
             nameservers_v6,
-            dhcp_server,
+            Some(dhcp_server),
         )
         .map(|config| DhcpConfigSummary {
             provisioning_server: config.carbide_provisioning_server_ipv4,
@@ -552,6 +685,8 @@ mod tests {
 
     fn dhcp_error_kind(error: DhcpDataError) -> &'static str {
         match error {
+            DhcpDataError::InvalidServerIdentifier => "server-identifier",
+            DhcpDataError::InvalidRemoteIdLength(_) => "remote-id-length",
             DhcpDataError::AddressParseError(_) => "address-parse",
             DhcpDataError::ParameterMissing(_) => "parameter-missing",
             DhcpDataError::IpNetworkError(_) => "ip-network",
@@ -572,8 +707,8 @@ mod tests {
                     vec!["2001:db8::53".parse::<Ipv6Addr>().unwrap()],
                     Ipv4Addr::new(127, 0, 0, 2),
                 ) => Yields(DhcpConfigSummary {
-                    provisioning_server: Ipv4Addr::new(192, 0, 2, 10),
-                    dhcp_server: Ipv4Addr::new(127, 0, 0, 2),
+                    provisioning_server: Some(Ipv4Addr::new(192, 0, 2, 10)),
+                    dhcp_server: Some(Ipv4Addr::new(127, 0, 0, 2)),
                     ntpservers: vec![Ipv4Addr::new(192, 0, 2, 20)],
                     nameservers: vec![Ipv4Addr::new(192, 0, 2, 53)],
                     nameservers_v6: vec!["2001:db8::53".parse::<Ipv6Addr>().unwrap()],
@@ -779,6 +914,7 @@ mod tests {
     #[test]
     fn dhcp_config_v6_fields_round_trip_and_default_when_absent() {
         let config = DhcpConfig {
+            dhcpv6_server_id: Some(DhcpV6ServerId::from_remote_id("test-dpu").unwrap()),
             carbide_provisioning_server_ipv6: Some("2001:db8::80".parse().unwrap()),
             carbide_nameservers_v6: vec!["2001:db8::53".parse().unwrap()],
             carbide_ntpservers_v6: vec!["2001:db8::123".parse().unwrap()],
@@ -792,6 +928,11 @@ mod tests {
         // Serialize a populated config and verify the IPv6 fields survive.
         let wire = serde_json::to_string(&config).expect("dhcp config serializes");
         let recovered: DhcpConfig = serde_json::from_str(&wire).expect("dhcp config deserializes");
+        recovered.validate().unwrap();
+        assert_eq!(recovered.ipv4().unwrap(), None);
+        assert_eq!(recovered.dhcpv6_server_id, config.dhcpv6_server_id);
+        assert!(!wire.contains("carbide_dhcp_server\""));
+        assert!(!wire.contains("carbide_provisioning_server_ipv4"));
         assert_eq!(
             recovered.carbide_provisioning_server_ipv6,
             Some(Ipv6Addr::from_str("2001:db8::80").unwrap())
@@ -825,6 +966,12 @@ mod tests {
         }"#;
         let old_config: DhcpConfig =
             serde_json::from_str(old_wire).expect("old dhcp config deserializes");
+        old_config.validate().unwrap();
+        assert_eq!(old_config.dhcpv6_server_id, None);
+        assert_eq!(
+            old_config.server_identifier().unwrap().as_bytes(),
+            &[0, 2, 0, 0, 0x16, 0x47, 127, 0, 0, 1],
+        );
         assert!(old_config.carbide_nameservers_v6.is_empty());
         assert!(old_config.carbide_ntpservers_v6.is_empty());
         assert_eq!(old_config.carbide_provisioning_server_ipv6, None);
@@ -837,6 +984,56 @@ mod tests {
         assert_eq!(old_config.dhcpv6_preferred_lifetime_secs, 0);
         assert_eq!(old_config.dhcpv6_valid_lifetime_secs, 0);
         assert_eq!(old_config.dhcpv6_server_preference, None);
+    }
+
+    #[test]
+    fn requires_complete_ipv4_settings_or_an_explicit_identity() {
+        value_scenarios!(run = |(server, boot, identity): (Option<Ipv4Addr>, Option<Ipv4Addr>, bool)| {
+                DhcpConfig {
+                    carbide_dhcp_server: server,
+                    carbide_provisioning_server_ipv4: boot,
+                    dhcpv6_server_id: identity.then(|| DhcpV6ServerId::from_ipv4(Ipv4Addr::LOCALHOST)),
+                    ..Default::default()
+                }.validate().is_ok()
+            };
+            "incomplete IPv4 is invalid even with a DHCPv6 identity" {
+                (Some(Ipv4Addr::LOCALHOST), None, true) => false,
+                (None, Some(Ipv4Addr::LOCALHOST), true) => false,
+            }
+            "IPv6-only needs an identity" {
+                (None, None, false) => false,
+                (None, None, true) => true,
+            }
+        );
+    }
+
+    #[test]
+    fn validates_persisted_server_identity_and_remote_id_boundaries() {
+        let id = DhcpV6ServerId::from_remote_id("test-dpu").unwrap();
+        assert_eq!(id.as_bytes(), b"\x00\x02\x00\x00\x16\x47dpu:test-dpu");
+        assert_ne!(id, DhcpV6ServerId::from_remote_id("another-dpu").unwrap());
+        assert_ne!(id, DhcpV6ServerId::from_ipv4(Ipv4Addr::LOCALHOST));
+        let maximum = DhcpV6ServerId::from_remote_id(&"x".repeat(120)).unwrap();
+        assert_eq!(maximum.as_bytes().len(), 130);
+        assert!(matches!(
+            DhcpV6ServerId::from_remote_id(&"x".repeat(121)),
+            Err(DhcpDataError::InvalidRemoteIdLength(121))
+        ));
+        assert!(matches!(
+            DhcpV6ServerId::from_remote_id(""),
+            Err(DhcpDataError::InvalidRemoteIdLength(0))
+        ));
+
+        value_scenarios!(run = |bytes: Vec<u8>| {
+                serde_json::from_value::<DhcpV6ServerId>(serde_json::json!(bytes)).is_ok()
+            };
+            "persisted identity" {
+                id.as_bytes().to_vec() => true,
+                DhcpV6ServerId::HEADER.to_vec() => false,
+                vec![0; 10] => false,
+                [maximum.as_bytes(), &[1]].concat() => false,
+            }
+        );
     }
 
     /// Verifies per-interface IPv6 details round-trip and old host configs default them.

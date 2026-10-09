@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 use std::ffi::CString;
-use std::net::{Ipv6Addr, SocketAddrV6};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV6};
 use std::time::Duration;
 
 use carbide_dhcp_common::{MachineArchitecture, VendorClass};
@@ -23,7 +23,6 @@ use carbide_instrument::emit;
 use rpc::forge::DhcpRecord;
 use tokio::net::UdpSocket;
 
-use crate::Config;
 use crate::errors::DhcpError;
 use crate::metrics::{
     DhcpInterfaceBindFailed, DhcpSocketSetupFailed, SocketSetupNextAction, SocketSetupOperation,
@@ -101,7 +100,7 @@ pub(super) fn u8_to_hex_string(data: &[u8]) -> Result<String, DhcpError> {
 pub(super) fn machine_get_filename(
     dhcp_response: &DhcpRecord,
     vendor_class: &VendorClass,
-    config: &Config,
+    provisioning_server: Ipv4Addr,
 ) -> Vec<u8> {
     // If the API sent us the URL we should boot from, just use it.
     let url = if let Some(url) = &dhcp_response.booturl {
@@ -113,13 +112,12 @@ pub(super) fn machine_get_filename(
 
         let VendorClass { arch, .. } = vendor_class;
 
-        let base_url = config.dhcp_config.carbide_provisioning_server_ipv4;
         match arch {
             MachineArchitecture::EfiX64 => {
-                format!("http://{base_url}:8080/public/blobs/internal/x86_64/ipxe.efi")
+                format!("http://{provisioning_server}:8080/public/blobs/internal/x86_64/ipxe.efi")
             }
             MachineArchitecture::Arm64 => {
-                format!("http://{base_url}:8080/public/blobs/internal/aarch64/ipxe.efi")
+                format!("http://{provisioning_server}:8080/public/blobs/internal/aarch64/ipxe.efi")
             }
             MachineArchitecture::BiosX86 => {
                 tracing::warn!(
