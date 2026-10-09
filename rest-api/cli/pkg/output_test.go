@@ -42,6 +42,86 @@ func TestValidateOutputFormat(t *testing.T) {
 	}
 }
 
+func TestDefaultOutputFormat(t *testing.T) {
+	assert.Equal(t, "table", defaultOutputFormat(vpcPeeringListOperationID))
+	assert.Equal(t, "json", defaultOutputFormat("get-all-site"))
+}
+
+func TestNestedString(t *testing.T) {
+	tests := []struct {
+		name string
+		item map[string]interface{}
+		path string
+		want string
+	}{
+		{
+			name: "nested string",
+			item: map[string]interface{}{"vpc1": map[string]interface{}{"name": "Application VPC"}},
+			path: "vpc1.name",
+			want: "Application VPC",
+		},
+		{
+			name: "top-level string",
+			item: map[string]interface{}{"id": "peering-id"},
+			path: "id",
+			want: "peering-id",
+		},
+		{
+			name: "missing field",
+			item: map[string]interface{}{"vpc1": map[string]interface{}{}},
+			path: "vpc1.name",
+		},
+		{
+			name: "non-object intermediate value",
+			item: map[string]interface{}{"vpc1": "not-an-object"},
+			path: "vpc1.name",
+		},
+		{
+			name: "non-string value",
+			item: map[string]interface{}{"vpc1": map[string]interface{}{"name": 42}},
+			path: "vpc1.name",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, nestedString(test.item, test.path))
+		})
+	}
+}
+
+func TestEscapeTableCell(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: "plain text", want: "plain text"},
+		{input: "a\tb", want: `a\tb`},
+		{input: "a\nb", want: `a\nb`},
+		{input: `a"b`, want: `a\"b`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.input, func(t *testing.T) {
+			assert.Equal(t, test.want, escapeTableCell(test.input))
+		})
+	}
+}
+
+func TestFormatTableEscapesCellWhitespace(t *testing.T) {
+	data := []byte(`{"id":"peering-id","vpc1":{"name":"Application\tVPC\nprimary"},"vpc1Id":"vpc1-id","vpc2":{"name":"Storage VPC"},"vpc2Id":"vpc2-id"}`)
+	var formatErr error
+
+	output := captureStdout(t, func() {
+		formatErr = formatTableWithColumns(data, tableColumnsByOperation[vpcPeeringListOperationID])
+	})
+
+	require.NoError(t, formatErr)
+	assert.Contains(t, output, `Application\tVPC\nprimary`)
+	assert.NotContains(t, output, "Application\tVPC")
+	assert.NotContains(t, output, "VPC\nprimary")
+}
+
 func TestFormatOutput_RejectsUnknownFormatAsDefenseInDepth(t *testing.T) {
 	// FormatOutput is called from generated commands and from the --all
 	// pagination path; if a future code path forgets to attach the
