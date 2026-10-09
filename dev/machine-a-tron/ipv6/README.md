@@ -81,7 +81,7 @@ sudo -n python3 dev/machine-a-tron/ipv6/packet_test.py \
 ```
 
 Exactly two `--snapshot` arguments are required. All other required arguments
-appear above. Default execution needs no Internet access. It temporarily creates
+appear above. Default execution needs no Internet access. During each run it creates
 veths, addresses and connected routes, per-namespace resolver files, processes,
 and scoped IPv6 forwarding rules. MTU is fixed at 1280; this does not validate the
 configured production MTU. Normal completion, errors, Ctrl-C, and SIGTERM clean up

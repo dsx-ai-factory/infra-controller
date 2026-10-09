@@ -1092,14 +1092,18 @@ impl MachineStateMachine {
             Err(status) => return Err(status.into()),
         };
 
-        self.tenant_network_snapshot.update(
-            self.app_context
-                .app_config
-                .tenant_network_snapshot_dir
-                .as_deref(),
-            machine_id,
-            &network_config,
-        )?;
+        self.tenant_network_snapshot
+            .update(
+                self.app_context
+                    .app_config
+                    .tenant_network_snapshot_dir
+                    .as_deref(),
+                machine_id,
+                &network_config,
+            )
+            .inspect_err(|error| {
+                tracing::warn!(%machine_id, %error, "Failed to export tenant network snapshot; retrying");
+            })?;
 
         // DPUs send network status periodically
         self.send_network_status_observation(machine_id.to_owned(), &network_config)
