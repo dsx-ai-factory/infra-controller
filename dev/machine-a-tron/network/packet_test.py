@@ -74,7 +74,7 @@ def validate_network(data, max_age=120):
     return data
 
 
-def load_networks(args):
+def mat_request(args, path):
     url = urlsplit(args.mat_url)
     if (
         url.scheme not in ("http", "https")
@@ -94,12 +94,19 @@ def load_networks(args):
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
     opener = build_opener(ProxyHandler({}), HTTPSHandler(context=context))
-    with opener.open(
-        args.mat_url.rstrip("/") + "/machines/tenant-networks", timeout=10
-    ) as response:
-        data = json.load(response)
+    with opener.open(args.mat_url.rstrip("/") + path, timeout=10) as response:
+        return json.load(response)
+
+
+def fetch_networks(args):
+    data = mat_request(args, "/machines/tenant-networks")
     if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
         raise ValueError("MAT tenant-network API must return an array of observations")
+    return data
+
+
+def load_networks(args):
+    data = fetch_networks(args)
     result = []
     for instance_id in args.instance_id:
         matches = [item for item in data if item.get("instance_id") == str(instance_id)]

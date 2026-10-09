@@ -138,6 +138,81 @@ advertise each simulated router's address in the corresponding family as the
 endpoint's DNS server; this is fixture configuration, not verification of site
 DNS settings.
 
+## Create, release, and recreate instances
+
+`lifecycle_test.py` runs the packet test twice around a real Core instance
+lifecycle. It creates an FNN VPC and one prefix per family, allocates two instances,
+waits for Ready, synchronized network configuration and fresh MAT observations,
+and exercises the DHCP, peer, Internet and route-recovery checks above. It then
+releases both instances, waits for Core and MAT to forget them and for prefix
+capacity to recover, and allocates new instance IDs on the same hosts while
+explicitly requesting the previous IPv4 and IPv6 addresses. Both generations must
+pass. Finally it releases the instances, waits for both prefixes to drain and be
+removed, and deletes the VPC.
+
+Use two unallocated MAT host IDs, an existing tenant with an FNN routing profile,
+and unused site-admitted IPv4 and IPv6 prefixes. The script verifies that both
+hosts belong to the selected MAT server and refuses hosts that already have an
+instance. The simulated OS configuration is an iPXE exit script with phone-home
+disabled; no tenant OS boots. Site prefixes, tenant configuration, simulated host
+creation and lab gateway configuration remain operator prerequisites.
+
+Provide `--rpc-command` as an absolute executable path to a locally configured
+authentication wrapper. It receives the Forge gRPC method name as its only
+argument and a ProtoJSON request on standard input. It must write only the
+ProtoJSON response to standard output, send diagnostics to standard error and
+exit nonzero on failure. Requests and responses use protobuf JSON field names
+and enum names, not admin CLI JSON. A `grpcurl` wrapper can use `-emit-defaults`,
+`-d @`, and the method `forge.Forge/$1` with the VM's configured TLS endpoint,
+CA, client certificate and key. Keep credentials outside the repository. Each
+wrapper invocation has a 60-second timeout.
+
+Set the variables below to the wrapper, the two host IDs, tenant, prefixes,
+MAT endpoint, compiled DHCP server, and a new absolute evidence directory:
+
+```bash
+sudo -n python3 dev/machine-a-tron/network/lifecycle_test.py \
+  --rpc-command "$rpc_command" \
+  --machine-id "$machine0" --machine-id "$machine1" \
+  --tenant-org "$tenant_org" \
+  --ipv4-prefix "$ipv4_prefix" --ipv6-prefix "$ipv6_prefix" \
+  --mat-url "$mat_url" --dhcp-server "$dhcp_server" \
+  --output "$output" --internet-url https://www.google.com
+```
+
+All arguments shown are required; exactly two distinct `--machine-id` values
+are accepted. CIDRs must be canonical networks with at least two linknets
+(IPv4 `/30` or wider and IPv6 `/64` through `/126`). Wider IPv6 prefixes are
+excluded because their saturated capacity counters cannot prove full reclamation;
+choose a supported subnet of the larger site prefix. `--timeout` is a finite positive
+number of seconds for each reconciliation or cleanup stage, default `1200`.
+Each packet-test subprocess is limited to 300 seconds. `--mat-ca`,
+`--mat-insecure`, `--dns-upstream`, `--nat44-interface` and `--nat66-interface`
+have the same contracts as the packet test. Internet access is required for the
+lifecycle test, and both families must succeed.
+
+To exercise tenant prefixes through a lab gateway, omit both VM NAT flags.
+Configure the gateway to admit and translate the chosen source prefixes and
+route return traffic through the VM. The VM forwards packets between the temporary
+endpoint links and the gateway; NAT then occurs at the gateway. Admission alone
+does not provide the return route. Restore temporary gateway changes after testing.
+This demonstrates the software path for those prefixes, not production fabric
+routing or hardware offload.
+
+The driver writes its generated resource IDs before mutations and labels each
+resource with `mat-network-lifecycle=<run UUID>`. Cleanup only deletes resources
+with that ownership label. A lost allocation reply still triggers a lookup of
+the recorded instance IDs. Cleanup waits for soft-deleted prefix rows to disappear
+before deleting their parent VPC. A failure stops dependent cleanup and records
+remaining IDs and errors in `result.json`; use those IDs for manual recovery.
+Normal errors, Ctrl-C and SIGTERM attempt cleanup. SIGKILL or VM failure cannot
+run it. Do not run multiple lifecycle tests against the same hosts concurrently.
+
+The top-level `result.json` records both generations' IDs, addresses, packet result
+and release/capacity checks. Each generation has its own packet-test evidence
+subdirectory and log. PASS requires successful cleanup. Existing instances,
+VPCs, site prefixes and the tenant are preserved.
+
 ## Regression checks
 
 ```bash
