@@ -160,8 +160,7 @@ pub(super) async fn assert_metrics(
                         "machine_id",
                         Cow::Owned(mock_host.machine_id.to_string()),
                     )),
-                    // Don't assert this, because one of the tests drops to BMC and the machine still may be unhealthy by the time we assert.
-                    value: None,
+                    value: Some(1),
                 })
                 .collect(),
         ),
