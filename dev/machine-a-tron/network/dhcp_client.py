@@ -9,6 +9,8 @@ import subprocess
 import sys
 import time
 
+IAID = 1
+
 iface, expected = sys.argv[1:]
 
 
@@ -29,10 +31,16 @@ def opts(data):
     return result
 
 
+def checked_ia(data):
+    if len(data) < 12 or struct.unpack("!I", data[:4])[0] != IAID:
+        raise RuntimeError("DHCPv6 IA_NA identity mismatch")
+    return data
+
+
 idx = socket.if_nametoindex(iface)
 mac = open("/sys/class/net/" + iface + "/address").read().strip()
 duid = struct.pack("!HH", 3, 1) + bytes.fromhex(mac.replace(":", ""))
-ia = struct.pack("!III", 1, 0, 0)
+ia = struct.pack("!III", IAID, 0, 0)
 sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, iface.encode() + b"\0")
 sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, idx)
@@ -63,12 +71,18 @@ def exchange(kind, payload, expected_kind):
 adv, peer = exchange(1, opt(1, duid) + opt(3, ia) + opt(6, struct.pack("!H", 23)), 2)
 if adv.get(1) != duid:
     raise RuntimeError("Advertise client ID mismatch")
+advertised_ia = checked_ia(adv.get(3, b""))
 reply, peer = exchange(
-    3, opt(1, duid) + opt(2, adv[2]) + opt(3, adv[3]) + opt(6, struct.pack("!H", 23)), 7
+    3,
+    opt(1, duid)
+    + opt(2, adv[2])
+    + opt(3, advertised_ia)
+    + opt(6, struct.pack("!H", 23)),
+    7,
 )
 if reply.get(1) != duid or reply.get(2) != adv[2]:
     raise RuntimeError("Reply identity mismatch")
-iaopts = opts(reply[3][12:])
+iaopts = opts(checked_ia(reply.get(3, b""))[12:])
 address = str(ipaddress.IPv6Address(iaopts[5][:16]))
 preferred, valid = struct.unpack("!II", iaopts[5][16:24])
 if address != expected or not valid >= preferred > 0:
