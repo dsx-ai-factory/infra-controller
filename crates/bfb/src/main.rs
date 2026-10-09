@@ -23,11 +23,18 @@
 //! this helper owns input validation, command construction, and post-build
 //! artifact validation for the custom payload path.
 
+#![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, ExitStatus};
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use wait_timeout::ChildExt;
+
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const MLX_MKBFB_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Command-line entry point for BlueField BFB helper operations.
 #[derive(Parser, Debug)]
@@ -141,13 +148,15 @@ fn ensure_base_bfb(base_bfb: &Path, download_url: Option<&str>) -> Result<(), St
 
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
-    let status = Command::new("wget")
+    let mut command = Command::new("wget");
+    command
         .arg("-Nnv")
+        .arg("--tries=3")
+        .arg("--timeout=60")
         .arg(download_url)
         .arg("-P")
-        .arg(parent)
-        .status()
-        .map_err(|error| format!("failed to run wget: {error}"))?;
+        .arg(parent);
+    let status = run_command_with_timeout(&mut command, "wget", DOWNLOAD_TIMEOUT)?;
     if !status.success() {
         return Err(format!("wget failed with status {status}"));
     }
@@ -173,9 +182,11 @@ fn run_mlx_mkbfb(
     for arg in mlx_mkbfb_args(args, boot_versions) {
         command.arg(arg);
     }
-    let status = command
-        .status()
-        .map_err(|error| format!("failed to run {}: {error}", args.mlx_mkbfb.display()))?;
+    let status = run_command_with_timeout(
+        &mut command,
+        &args.mlx_mkbfb.display().to_string(),
+        MLX_MKBFB_TIMEOUT,
+    )?;
     if !status.success() {
         return Err(format!(
             "{} failed with status {status}",
@@ -254,8 +265,7 @@ fn inspect_carrier_boot_versions_in_dir(
         .arg("-x")
         .arg(base_bfb)
         .current_dir(dump_dir)
-        .status()
-        .map_err(|error| format!("failed to run {} -x: {error}", mlx_mkbfb.display()))?;
+        .run_with_timeout(&format!("{} -x", mlx_mkbfb.display()), MLX_MKBFB_TIMEOUT)?;
     if !status.success() {
         return Err(format!(
             "{} -x failed for {} with status {status}",
@@ -338,8 +348,7 @@ fn run_mlx_mkbfb_check(mlx_mkbfb: &Path, output: &Path) -> Result<(), String> {
     let status = Command::new(mlx_mkbfb)
         .arg("-c")
         .arg(output)
-        .status()
-        .map_err(|error| format!("failed to run {} -c: {error}", mlx_mkbfb.display()))?;
+        .run_with_timeout(&format!("{} -c", mlx_mkbfb.display()), MLX_MKBFB_TIMEOUT)?;
 
     if !status.success() {
         return Err(format!(
@@ -350,6 +359,42 @@ fn run_mlx_mkbfb_check(mlx_mkbfb: &Path, output: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Extension trait that keeps command setup local while enforcing a wall-clock deadline.
+trait TimedCommand {
+    /// Runs the command and kills the child if it exceeds `timeout`.
+    fn run_with_timeout(&mut self, label: &str, timeout: Duration) -> Result<ExitStatus, String>;
+}
+
+impl TimedCommand for Command {
+    fn run_with_timeout(&mut self, label: &str, timeout: Duration) -> Result<ExitStatus, String> {
+        run_command_with_timeout(self, label, timeout)
+    }
+}
+
+/// Runs one child process with a caller-provided deadline, then kills and reaps on timeout.
+fn run_command_with_timeout(
+    command: &mut Command,
+    label: &str,
+    timeout: Duration,
+) -> Result<ExitStatus, String> {
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to run {label}: {error}"))?;
+    match child
+        .wait_timeout(timeout)
+        .map_err(|error| format!("failed to wait for {label}: {error}"))?
+    {
+        Some(status) => Ok(status),
+        None => {
+            child
+                .kill()
+                .map_err(|error| format!("failed to kill timed out {label}: {error}"))?;
+            let _ = child.wait();
+            Err(format!("{label} exceeded {}s timeout", timeout.as_secs()))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -437,6 +482,18 @@ mod tests {
     fn rejects_unsupported_boot_entry_versions() {
         let versions = BTreeSet::from([0, 3]);
         assert!(validate_boot_versions(&versions).is_err());
+    }
+
+    #[test]
+    fn command_runner_times_out_hung_child() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 30");
+
+        let error =
+            run_command_with_timeout(&mut command, "hung-test-command", Duration::from_millis(10))
+                .expect_err("hung command should time out");
+
+        assert!(error.contains("hung-test-command exceeded"));
     }
 
     #[test]

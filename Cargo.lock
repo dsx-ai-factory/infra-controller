@@ -1599,6 +1599,7 @@ name = "carbide-bfb"
 version = "0.0.1"
 dependencies = [
  "clap",
+ "wait-timeout",
 ]
 
 [[package]]
