@@ -275,10 +275,14 @@ On the Prometheus endpoint, series carry entity labels (`processor_id`,
 standard identity labels added by the sink (`machine_id`, `endpoint_ip`,
 `serial_number`, `rack_id`, ...), with `collector_type="metrics_collector"`.
 
-The OTLP sink (`[sinks.otlp]`) emits the same metric *names*, but places the
-identity context on OTLP resource attributes rather than datapoint labels;
-whether those appear as query labels depends on the backend (VictoriaMetrics,
-for example, flattens resource attributes onto every series).
+The OTLP sink (`[sinks.otlp]`) emits the same metric *names*, and puts the
+identity context both on OTLP resource attributes and on each datapoint, under
+the Prometheus sink's label names, custom endpoint labels included. A backend
+that keeps resource attributes off its series, such as the OpenTelemetry
+Collector's Prometheus exporter, still gets every identity label. One that
+flattens resource attributes onto every series, such as VictoriaMetrics, also
+shows the resource attributes whose names differ, for example
+`switch_serial_number` beside `serial_number`, with the same value.
 
 Entity discovery runs as its own periodic task (`[collectors.discovery]`,
 always on) that walks each BMC's Redfish Systems and Chassis trees and
