@@ -1,6 +1,6 @@
 # DNS <Badge intent="info">v2.0</Badge>
 
-NICo answers DNS for everything it manages. Records are never authored by hand: they derive from the machine, BMC, and instance inventory in the `nico-api` database, appear when an interface or instance gains an address, and disappear when it loses one. This page covers the names NICo serves, how the site zone and per-segment subdomains are configured, and how reverse (PTR) resolution works. For the deployment side - the `nico-dns` service, the recursive resolver in front of it, and the fixed infrastructure service names - refer to [IP and Network Configuration](../provisioning/ip-and-network-configuration.md#3-dns-configuration).
+NICo answers DNS for everything it manages. Records are never authored by hand: they derive from the machine, BMC, and instance inventory in the `nico-api` database, appear when an interface or instance gains an address, and disappear when it loses one. This page covers the names NICo serves, site zones and per-segment subdomains, reverse (PTR) resolution, and IPv6 Service configuration. For the overall DNS deployment, including the recursive resolver and fixed infrastructure service names, refer to [IP and Network Configuration](../provisioning/ip-and-network-configuration.md#3-dns-configuration).
 
 ## What Gets a Name
 
@@ -59,6 +59,46 @@ DHCP option 6 tells managed machines where to resolve, and it must point at the 
 - On the site DHCP path, option 6 comes from the `nico-dhcp` Kea hook parameter `carbide-nameservers` (the `config.kea.hookParameters.nameservers` Helm value emits it).
 - Hosts behind a DPU receive the DPU's own resolver set.
 - The opt-in [DHCPv6 deployment](../provisioning/dhcpv6-deployment.md) advertises IPv6 recursive resolvers in option 23 through the `dhcp.v6DnsServers` Helm value.
+
+## nico-dns External Services
+
+The `nico-dns` chart disables external Services by default (`externalService.enabled: false`). Enabling them creates separate UDP and TCP Services on port 53 for each replica (two replicas by default). These expose authoritative DNS only; they do not replace the recursive resolver handed to hosts.
+
+The optional `externalService.ipFamilyPolicy` and `externalService.ipFamilies` values control every replica's external Services. Their chart defaults are `""` and `[]`. Empty or omitted values omit the corresponding Service fields, leaving Kubernetes defaults in effect. For a new Service with both fields omitted, Kubernetes selects `SingleStack` and the cluster's default Service address family.
+
+For IPv6-only external Services, use the following umbrella-chart values. Replace the example virtual IP addresses (VIPs) with addresses from your MetalLB pools. When installing the `nico-dns` chart directly, omit the outer `nico-dns:` key.
+
+```yaml
+nico-dns:
+  externalService:
+    enabled: true
+    ipFamilyPolicy: SingleStack
+    ipFamilies: [IPv6]
+    perPodAnnotations:
+      - metallb.universe.tf/loadBalancerIPs: "2001:db8:10::53"
+      - metallb.universe.tf/loadBalancerIPs: "2001:db8:10::54"
+```
+
+For dual-stack external Services with IPv4 primary, use the following values. `RequireDualStack` requires cluster support for both families; Kubernetes rejects the Service if dual-stack is unavailable.
+
+```yaml
+nico-dns:
+  externalService:
+    enabled: true
+    ipFamilyPolicy: RequireDualStack
+    ipFamilies: [IPv4, IPv6]
+    perPodAnnotations:
+      - metallb.universe.tf/loadBalancerIPs: "192.0.2.53,2001:db8:10::53"
+      - metallb.universe.tf/loadBalancerIPs: "192.0.2.54,2001:db8:10::54"
+```
+
+Use `PreferDualStack` when single-stack fallback is acceptable, and leave `ipFamilies` empty to let the cluster select the available families. Pinned VIPs must match the resulting Service families: on a single-stack cluster, replace each VIP pair with an address from the selected family.
+
+An explicit `ipFamilies` list contains unique `IPv4` or `IPv6` entries; `SingleStack` accepts only one. The first entry is the primary family. Kubernetes permits adding or removing a secondary family, but not changing an existing Service's primary family in place. Plan Service replacement if you need to change it. Refer to [Kubernetes IPv4/IPv6 Dual-Stack](https://kubernetes.io/docs/concepts/services-networking/dual-stack/#services) for the policy and update rules.
+
+`perPodAnnotations[0]` applies to both Services for pod `nico-dns-0`, `[1]` to both for `nico-dns-1`, and so on, as described in [Assign Service VIPs](../getting-started/quick-start.md#3h-assign-service-vips). Supply an entry for every replica when pinning VIPs. The chart sets a shared-IP annotation so each replica's UDP and TCP Services can use the same VIPs. Each dual-stack entry requests one IPv4 and one IPv6 VIP. MetalLB needs a pool containing both families for dual-stack allocation; refer to [MetalLB IPv6 and Dual-Stack Services](https://metallb.io/usage/#ipv6-and-dual-stack-services).
+
+The `nico-dns.listenAddress` umbrella value defaults to `"[::]:53"`; an IPv4-only override such as `"0.0.0.0:53"` cannot serve IPv6 clients. Matching VIPs and pools alone do not establish connectivity: the cluster network, DNS listeners, load balancer, and client routes must support the selected families. Validate DNS answers over both UDP and TCP from the intended client network before relying on the VIPs.
 
 ## Unbound IPv6 Transport
 
