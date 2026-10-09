@@ -147,9 +147,11 @@ func TestManageOsImage_UpdateOsImageInDB(t *testing.T) {
 	}
 
 	tests := []struct {
-		name   string
-		fields fields
-		args   args
+		name             string
+		lockContention   bool
+		failFinalization bool
+		fields           fields
+		args             args
 	}{
 		{
 			name: "test OS Image inventory return success status",
@@ -262,6 +264,18 @@ func TestManageOsImage_UpdateOsImageInDB(t *testing.T) {
 				site: st2,
 			},
 		},
+		{
+			name:           "deletion retries after OS lock contention",
+			lockContention: true,
+			fields:         fields{dbSession: dbSession, siteClientPool: tSiteClientPool, env: env},
+			args:           args{ctx: context.Background(), site: st3, osImageInventory: &corev1.OsImageInventory{}},
+		},
+		{
+			name:             "deletion retries after finalization failure",
+			failFinalization: true,
+			fields:           fields{dbSession: dbSession, siteClientPool: tSiteClientPool, env: env},
+			args:             args{ctx: context.Background(), site: st4, osImageInventory: &corev1.OsImageInventory{}},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -273,10 +287,57 @@ func TestManageOsImage_UpdateOsImageInDB(t *testing.T) {
 			mtc := &tmocks.Client{}
 			mv.siteClientPool.IDClientMap[tt.args.site.ID.String()] = mtc
 
+			ossaDAO := cdbm.NewOperatingSystemSiteAssociationDAO(dbSession)
+			osDAO := cdbm.NewOperatingSystemDAO(dbSession)
+			var deletingOS *cdbm.OperatingSystem
+			if tt.lockContention || tt.failFinalization {
+				deletingOS = util.TestBuildImageOperatingSystem(t, dbSession, &ip.ID, &tn.ID, uuid.NewString(), tnOrg, nil, cdbm.OperatingSystemStatusDeleting)
+				association := util.TestBuildImageOperatingSystemSiteAssociation(t, dbSession, deletingOS.ID, tt.args.site.ID, cdbm.OperatingSystemSiteAssociationStatusDeleting, "delete-version", false)
+				tt.args.deletedoss = []uuid.UUID{deletingOS.ID}
+
+				var releaseFailure func()
+				if tt.lockContention {
+					tx, err := cdb.BeginTx(tt.args.ctx, dbSession, nil)
+					require.NoError(t, err)
+					defer func() { _ = tx.Rollback() }()
+					require.NoError(t, tx.TryAcquireAdvisoryLock(tt.args.ctx, cdb.GetAdvisoryLockIDFromString(deletingOS.ID.String()), nil))
+					releaseFailure = func() { require.NoError(t, tx.Commit()) }
+				} else {
+					// Fail finalization after the association delete to verify both writes roll back.
+					const cleanup = `DROP TRIGGER IF EXISTS test_fail_os_deletion ON operating_system;
+DROP FUNCTION IF EXISTS test_fail_os_deletion()`
+					releaseFailure = func() {
+						_, err := dbSession.DB.ExecContext(tt.args.ctx, cleanup)
+						require.NoError(t, err)
+					}
+					t.Cleanup(releaseFailure)
+					_, err := dbSession.DB.ExecContext(tt.args.ctx, `CREATE FUNCTION test_fail_os_deletion() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'injected OS deletion failure';
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER test_fail_os_deletion BEFORE UPDATE OF deleted ON operating_system
+FOR EACH ROW EXECUTE FUNCTION test_fail_os_deletion()`)
+					require.NoError(t, err)
+				}
+
+				_, err := mv.UpdateOsImagesInDB(tt.args.ctx, tt.args.site.ID, tt.args.osImageInventory)
+				require.NoError(t, err)
+				storedAssociation, err := ossaDAO.GetByID(tt.args.ctx, nil, association.ID, nil)
+				require.NoError(t, err)
+				require.Equal(t, cdbm.OperatingSystemSiteAssociationStatusDeleting, storedAssociation.Status)
+				storedOS, err := osDAO.GetByID(tt.args.ctx, nil, deletingOS.ID, nil)
+				require.NoError(t, err)
+				require.Equal(t, cdbm.OperatingSystemStatusDeleting, storedOS.Status)
+				releaseFailure()
+			}
+
 			_, err := mv.UpdateOsImagesInDB(tt.args.ctx, tt.args.site.ID, tt.args.osImageInventory)
 			assert.NoError(t, err)
-
-			ossaDAO := cdbm.NewOperatingSystemSiteAssociationDAO(dbSession)
+			if deletingOS != nil {
+				_, err = osDAO.GetByID(tt.args.ctx, nil, deletingOS.ID, nil)
+				require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			}
 			if tt.args.readyoss != nil {
 				readyossa, _, err := ossaDAO.GetAll(
 					tt.args.ctx,
