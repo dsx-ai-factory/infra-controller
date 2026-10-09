@@ -7684,6 +7684,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nico-postgres-exporter"
+version = "0.0.0"
+dependencies = [
+ "carbide-test-support",
+ "carbide-utils",
+ "clap",
+ "eyre",
+ "logfmt",
+ "metrics-endpoint",
+ "opentelemetry 0.32.0",
+ "prometheus",
+ "sqlx",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

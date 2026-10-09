@@ -18,7 +18,8 @@
 ## helm/Chart.yaml declares them as unconditional dependencies. A leftover
 ## <chart-name>.enabled key for a core component is ignored, so values files
 ## written for earlier releases keep working. Optional services
-## (nico-dsx-exchange-consumer, nico-ntp, unbound, nico-machine-a-tron) can
+## (nico-dsx-exchange-consumer, nico-ntp, unbound, nico-machine-a-tron,
+## nico-postgres-exporter) can
 ## still be disabled via <chart-name>.enabled: false.
 ## =============================================================================
 
@@ -175,4 +176,9 @@ unbound:
 ##   helm install mat ./helm/charts/nico-machine-a-tron -n nico-system ...
 ## ---------------------------------------------------------------------------
 nico-machine-a-tron:
+  enabled: false
+
+## Optional PostgreSQL debugging exporter and dashboard. Configure image and
+## database settings under this key; see charts/nico-postgres-exporter/README.md.
+nico-postgres-exporter:
   enabled: false

@@ -1,0 +1,8 @@
+enabled: true
+image:
+  repository: example.invalid/nico-postgres-exporter
+  tag: test
+database:
+  host: postgres.example
+  name: nico
+  credentialsSecret: db-creds

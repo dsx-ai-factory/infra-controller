@@ -53,6 +53,54 @@ Tilt forwards these endpoints:
 | Grafana | `http://localhost:13000` |
 | Prometheus | `http://localhost:19090` |
 
+## NICo PostgreSQL dashboard
+
+With `--observability=true`, Tilt installs the shared
+[`nico-postgres-exporter` Helm chart](../../../helm/charts/nico-postgres-exporter/README.md)
+as a separate release in `nico-system`. It builds the exporter image through the
+shared Rust artifacts image and provisions **NICo / PostgreSQL** alongside
+**CloudNativePG** in Grafana's **PostgreSQL** folder.
+
+```bash
+tilt up -f dev/deployment/tilt/Tiltfile -- --observability=true
+```
+
+Open [Grafana at localhost:13000](http://localhost:13000) and choose
+**PostgreSQL → NICo / PostgreSQL**. The dashboard includes connection health and
+a cumulative **Slow queries** table. See the chart README for collection behavior,
+metric contracts, binary configuration, and installation with your own Grafana.
+
+Tilt passes `tilt.observability.postgresExporter` as chart values, supplying the
+image and `tilt.localConfig.database` host, port, and database name. Development
+values use `database.credentialsSecret: nico-pg-cluster-app` and
+`database.sslMode: disable`; the credentials Secret is in the release namespace.
+For verified TLS, configure `database.sslMode` and `database.sslRootCertSecret`
+under `tilt.observability.postgresExporter`. Tilt enables the ServiceMonitor and
+places the dashboard ConfigMap in `observability`, waiting for Prometheus,
+PostgreSQL, and local configuration before installation. Disabling observability
+excludes the exporter release and dashboard.
+
+With observability enabled, Tilt sets `pg_stat_statements.track: top` and grants
+the application owner `pg_read_all_stats` membership. CloudNativePG manages the
+preload library and installs the extension in connectable databases when that
+parameter is present; changing the preload configuration can restart PostgreSQL.
+See [CloudNativePG's managed-extension contract](https://cloudnative-pg.io/docs/1.28/postgresql_conf/#enabling-pg_stat_statements).
+The shared chart itself does not configure extensions or database permissions.
+
+The dashboard JSON now lives in the chart at
+[`dashboards/nico-postgres.json`](../../../helm/charts/nico-postgres-exporter/dashboards/nico-postgres.json).
+Tilt watches the chart directory; edits update the Helm-managed ConfigMap and
+Grafana's existing sidecar loads them. Allow one collection and scrape interval
+for fresh data. Chart-only installs can enable the optional umbrella dependency
+or install this chart as a separate release; both are disabled by default.
+
+If upgrading a Tilt environment from the direct Kubernetes exporter wiring,
+remove the old Tilt-owned `nico-postgres-exporter` Deployment, Service, and
+ServiceMonitor in `nico-system`, plus the old
+`grafana-dashboards-nico-postgres` ConfigMap in `observability`, then retry the
+exporter resource. Helm cannot adopt those existing objects. This is a one-time
+migration; do not remove resources already owned by the new Helm release.
+
 ## Pod logs
 
 Grafana Alloy collects stdout and stderr from every pod through the Kubernetes
@@ -108,6 +156,26 @@ import or Grafana restart.
 The Prometheus chart also publishes its standard Kubernetes dashboards for the
 same sidecar to load. These cover cluster, namespace, workload, pod, node,
 kubelet, API server, and persistent-volume metrics.
+
+With the observability profile enabled, Tilt also enables PodMonitors for the
+CloudNativePG operator and PostgreSQL cluster. The operator chart provisions the
+**CloudNativePG** dashboard in Grafana's **PostgreSQL** folder, covering operator
+and database metrics. Tilt places its dashboard ConfigMap in the observability
+namespace and waits for Prometheus before installing the operator's PodMonitor.
+
+If Tilt is already running, it reloads changes to the Tiltfile and values file
+and updates the `cnpg-operator` and `nico-postgres` Helm releases automatically.
+Enable the profile with `tilt args -- --observability=true` if needed. To retry
+an update, use the resource's update button in Tilt or run:
+
+```bash
+tilt trigger cnpg-operator
+tilt trigger nico-postgres
+```
+
+Grafana's sidecar loads the dashboard automatically. Allow time for the Helm
+updates and a Prometheus scrape, then refresh Grafana; no manual dashboard
+import is required.
 
 All Tilt settings are in [`values.yaml`](values.yaml). NICo Core values are at
 the document root, while the `tilt` section contains the prerequisite and REST

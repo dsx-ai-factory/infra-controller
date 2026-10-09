@@ -1,0 +1,25 @@
+suite: optional PostgreSQL exporter dependency
+templates:
+  - charts/nico-postgres-exporter/templates/grafana-dashboards.yaml
+  - templates/grafana-dashboards.yaml
+set:
+  global.image.repository: example.invalid/core
+  global.image.tag: test
+tests:
+  - it: enables the PostgreSQL dashboard without adding it to the Core folder
+    set:
+      nico-postgres-exporter.enabled: true
+      nico-postgres-exporter.exporter.enabled: false
+      grafanaDashboards.enabled: true
+    asserts:
+      - equal:
+          path: metadata.annotations.grafana_folder
+          value: PostgreSQL
+        template: charts/nico-postgres-exporter/templates/grafana-dashboards.yaml
+      - equal:
+          path: metadata.annotations.grafana_folder
+          value: NICo
+        template: templates/grafana-dashboards.yaml
+      - notExists:
+          path: data["nico-postgres.json"]
+        template: templates/grafana-dashboards.yaml
