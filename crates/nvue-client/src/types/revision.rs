@@ -70,19 +70,6 @@ impl RevisionData {
             .unwrap_or(false)
     }
 
-    pub(crate) fn apply_status(&self) -> RevisionApplyStatus {
-        let error_issues = self.error_issue_summaries();
-        if !error_issues.is_empty() {
-            return RevisionApplyStatus::Failed(error_issues);
-        }
-
-        if self.state.as_deref() == Some("applied") {
-            return RevisionApplyStatus::Applied;
-        }
-
-        RevisionApplyStatus::Pending
-    }
-
     pub(crate) fn transition_progress(&self) -> Option<&str> {
         self.transition
             .as_ref()
@@ -118,15 +105,6 @@ impl RevisionData {
             .find_map(|data| data.get("rollback_target"))
             .map(String::as_str)
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-// Note that this doesn't exactly model the `status` field of an NVUE revision,
-// despite some resemblance in the variant names.
-pub(crate) enum RevisionApplyStatus {
-    Applied,
-    Pending,
-    Failed(Vec<RevisionIssueSummary>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -298,144 +276,6 @@ mod tests {
                     )
                 }
             }
-        }
-    }
-
-    #[test]
-    fn classifies_revision_apply_status() {
-        struct Case {
-            name: &'static str,
-            revision: RevisionData,
-            expected_status: RevisionApplyStatus,
-            expected_progress: Option<&'static str>,
-        }
-
-        let cases = [
-            Case {
-                name: "applied revision without issues succeeds",
-                revision: revision(Some("applied"), None, vec![]),
-                expected_status: RevisionApplyStatus::Applied,
-                expected_progress: None,
-            },
-            Case {
-                name: "applying revision without issues remains pending",
-                revision: revision(Some("apply"), Some("checking"), vec![]),
-                expected_status: RevisionApplyStatus::Pending,
-                expected_progress: Some("checking"),
-            },
-            Case {
-                name: "unknown state without issues remains pending",
-                revision: revision(Some("unknown"), None, vec![]),
-                expected_status: RevisionApplyStatus::Pending,
-                expected_progress: None,
-            },
-            Case {
-                name: "missing state without issues remains pending",
-                revision: revision(None, None, vec![]),
-                expected_status: RevisionApplyStatus::Pending,
-                expected_progress: None,
-            },
-            Case {
-                name: "warning-only issues remain pending",
-                revision: revision(
-                    Some("apply"),
-                    Some("validating"),
-                    vec![(
-                        "1",
-                        issue(
-                            RevisionIssueSeverity::Warning,
-                            Some("sample-warning"),
-                            Some("sample warning"),
-                            None,
-                        ),
-                    )],
-                ),
-                expected_status: RevisionApplyStatus::Pending,
-                expected_progress: Some("validating"),
-            },
-            Case {
-                name: "error issue fails with issue summary",
-                revision: revision(
-                    Some("apply"),
-                    Some("failed"),
-                    vec![(
-                        "2",
-                        issue(
-                            RevisionIssueSeverity::Error,
-                            Some("sample-error"),
-                            Some("sample error"),
-                            Some(BTreeMap::from([(
-                                "path".to_string(),
-                                "/system".to_string(),
-                            )])),
-                        ),
-                    )],
-                ),
-                expected_status: RevisionApplyStatus::Failed(vec![RevisionIssueSummary {
-                    issue_id: "2".to_string(),
-                    severity: RevisionIssueSeverity::Error,
-                    code: Some("sample-error".to_string()),
-                    message: Some("sample error".to_string()),
-                    data: Some(BTreeMap::from([(
-                        "path".to_string(),
-                        "/system".to_string(),
-                    )])),
-                }]),
-                expected_progress: Some("failed"),
-            },
-        ];
-
-        for case in cases {
-            assert_eq!(
-                case.revision.apply_status(),
-                case.expected_status,
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                case.revision.transition_progress(),
-                case.expected_progress,
-                "{}",
-                case.name
-            );
-        }
-    }
-
-    fn revision(
-        state: Option<&str>,
-        progress: Option<&str>,
-        issues: Vec<(&str, RevisionIssue)>,
-    ) -> RevisionData {
-        RevisionData {
-            message: None,
-            state: state.map(str::to_owned),
-            transition: Some(RevisionTransition {
-                progress: progress.map(str::to_owned),
-                issue: (!issues.is_empty()).then(|| {
-                    issues
-                        .into_iter()
-                        .map(|(issue_id, issue)| (issue_id.to_string(), issue))
-                        .collect()
-                }),
-            }),
-            last_apply: None,
-            additional_data: None,
-            auto_prompt: None,
-            state_controls: None,
-        }
-    }
-
-    fn issue(
-        severity: RevisionIssueSeverity,
-        code: Option<&str>,
-        message: Option<&str>,
-        data: Option<BTreeMap<String, String>>,
-    ) -> RevisionIssue {
-        RevisionIssue {
-            severity: Some(severity),
-            code: code.map(str::to_owned),
-            message: message.map(str::to_owned),
-            data,
         }
     }
 
