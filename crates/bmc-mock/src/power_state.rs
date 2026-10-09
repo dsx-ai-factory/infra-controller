@@ -14,11 +14,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use bmc_mock::{ActionError, ResourceResetType};
 use nv_redfish::schema::resource::PowerState;
 
-/// Validates reset requests against the latest FSM power observation.
-pub(crate) fn validate_reset_type(
+use crate::{ActionError, ResourceResetType};
+
+/// Checks whether a native power observation permits a reset request.
+///
+/// Returns [`ActionError::BadRequest`] for shutdown or restart requests on an off
+/// machine, and power-on requests on an on, starting, or shutting-down machine.
+pub fn validate_power_reset(
     power_state: PowerState,
     reset_type: ResourceResetType,
 ) -> Result<(), ActionError> {

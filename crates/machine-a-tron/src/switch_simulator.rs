@@ -79,10 +79,7 @@ struct SwitchCallbacks {
 
 impl SwitchCallbacks {
     pub(crate) fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
-        crate::power_state::validate_reset_type(
-            self.state.read().unwrap().power_state,
-            reset_type,
-        )?;
+        bmc_mock::validate_power_reset(self.state.read().unwrap().power_state, reset_type)?;
         self.mailbox
             .send(SwitchMessage::Bmc(BmcCommand::SetSystemPower {
                 request: reset_type,
@@ -93,10 +90,6 @@ impl SwitchCallbacks {
 }
 
 impl Callbacks for SwitchCallbacks {
-    fn get_power_state(&self) -> bmc_mock::MockPowerState {
-        unreachable!("switch profiles do not expose power state through callbacks")
-    }
-
     async fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,

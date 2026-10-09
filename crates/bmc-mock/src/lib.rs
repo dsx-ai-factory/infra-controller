@@ -65,7 +65,6 @@ use std::fmt;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::time::Instant;
 pub mod actor;
 mod ipmi;
 pub mod ipmi_sim;
@@ -86,6 +85,7 @@ pub mod mac_address_pool;
 mod machine_info;
 mod middleware_router;
 mod mock_machine_router;
+mod power_state;
 mod rack_info;
 mod redfish;
 mod sse;
@@ -107,6 +107,7 @@ pub use mock_machine_router::{
     EventServiceOverride, MachineRouterOptions, machine_router, machine_router_with_injection_store,
 };
 pub use nv_redfish::schema::resource::ResetType as ResourceResetType;
+pub use power_state::validate_power_reset;
 pub use rack_info::RackInfo;
 /// BMC account state and the credential snapshot type used to persist and
 /// restore rotated passwords across a mock rebuild.
@@ -240,80 +241,11 @@ pub enum ActionError {
     Internal(eyre::Error),
 }
 
-#[derive(Debug, Copy, Clone, Default)]
-pub enum MockPowerState {
-    #[default]
-    On,
-    Off,
-    /// Power could not be observed; Redfish reports a null `PowerState`.
-    Unknown,
-    /// Power-on accepted; the host is not yet `On` (POST has not begun).
-    PoweringOn,
-    /// Graceful shutdown accepted; the OS is going down but power is still applied.
-    PoweringOff,
-    PowerCycling {
-        since: Instant,
-    },
-}
-
-impl MockPowerState {
-    /// Checks whether the current power state permits a reset request.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ActionError::Internal`] for every request when the state is
-    /// [`Self::Unknown`], because power state is unavailable. Returns
-    /// [`ActionError::BadRequest`] when a known state prevents the request.
-    pub fn validate_reset_type(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
-        type C = ResourceResetType;
-        match (reset_type, self) {
-            (_, MockPowerState::Unknown) => Err(ActionError::Internal(eyre::eyre!(
-                "bmc-mock: power state is unavailable",
-            ))),
-            (
-                C::GracefulShutdown | C::ForceOff | C::GracefulRestart | C::ForceRestart,
-                MockPowerState::Off,
-            ) => Err(ActionError::BadRequest(eyre::eyre!(
-                "bmc-mock: cannot power off machine, it is already off",
-            ))),
-            (C::On | C::ForceOn, MockPowerState::On | MockPowerState::PoweringOn) => {
-                Err(ActionError::BadRequest(eyre::eyre!(
-                    "bmc-mock: cannot power on machine, it is already on"
-                )))
-            }
-            (C::On | C::ForceOn, MockPowerState::PoweringOff) => Err(ActionError::BadRequest(
-                eyre::eyre!("bmc-mock: cannot power on machine, it is shutting down"),
-            )),
-            (_, MockPowerState::PowerCycling { since }) if since.elapsed() < POWER_CYCLE_DELAY => {
-                Err(ActionError::BadRequest(eyre::eyre!(
-                    "bmc-mock: cannot reset machine, it is in the middle of power cycling since {:?} ago",
-                    since.elapsed()
-                )))
-            }
-            _ => Ok(()),
-        }
-    }
-}
-
-impl fmt::Display for MockPowerState {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::On => "On".fmt(f),
-            Self::Off => "Off".fmt(f),
-            Self::Unknown => "Unknown".fmt(f),
-            Self::PoweringOn => "PoweringOn".fmt(f),
-            Self::PoweringOff => "PoweringOff".fmt(f),
-            Self::PowerCycling { since } => write!(f, "PowerCycling {:?}", since.elapsed()),
-        }
-    }
-}
-
 // Simulate a 5-second power cycle
 pub const POWER_CYCLE_DELAY: Duration = Duration::from_secs(5);
 
 /// Backend operations for one BMC, selected by the router's concrete callback type.
 pub trait Callbacks: Send + Sync + 'static {
-    fn get_power_state(&self) -> MockPowerState;
     fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,
