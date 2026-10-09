@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**Zero-touch, zero-trust lifecycle automation for bare-metal AI infrastructure**
+**Zero-trust lifecycle automation for bare-metal AI infrastructure**
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-76B900.svg)](LICENSE)
 [![NICo Core CI](https://img.shields.io/github/actions/workflow/status/dsx-ai-factory/infra-controller/ci.yaml?branch=main&label=NICo%20Core%20CI)](https://github.com/dsx-ai-factory/infra-controller/actions/workflows/ci.yaml)
@@ -29,8 +29,9 @@
 
 ## What Is NICo
 
-NICo makes physical servers behave like cloud instances. It is an open source
-suite of microservices that runs next to the hardware it manages and automates
+NICo delivers lifecycle automation for bare-metal systems that secures
+datacenter infrastructure at its foundation. It is an open source suite of
+microservices that runs next to the hardware it manages and automates
 the full bare-metal lifecycle: hardware discovery, firmware validation,
 BlueField DPU provisioning, network isolation, tenant provisioning, and secure
 sanitization between tenants. NVIDIA Cloud Partners (NCPs) and infrastructure
@@ -55,10 +56,14 @@ alignment on every rack bring-up, no single enforcement point for tenant
 isolation across Ethernet, InfiniBand, and NVLink, custom scripts for
 sanitization and attestation, and firmware drift across hardware generations.
 
-NICo closes that gap. Every managed host is a server with one or more
-BlueField DPUs, and the DPU is the enforcement boundary. NICo provisions and
-controls the DPU directly, independently of whatever the tenant runs on the
-host, so the layers above it can treat bare metal as a reliable building block.
+NICo closes that gap. In the default configuration, a managed host is a
+server with one or more BlueField DPUs, and the DPU is the enforcement
+boundary. NICo provisions and controls the DPU directly, independently of
+whatever the tenant runs on the host, so the layers above it can treat bare
+metal as a reliable building block. NICo also supports zero-DPU hosts, where
+the DPU policy is `ignore` or `nic`. Their tenant instances attach to Flat
+VPCs on the underlay, and the operator's fabric provides the isolation. Refer
+to the [glossary](docs/glossary.md#zero-dpu-host) for both host types.
 
 ## What NICo Does
 
@@ -124,9 +129,10 @@ supported servers and DPUs.
 
 ## Who Uses NICo
 
-NICo REST authorizes every caller as either a **provider** or a **tenant**.
-Both personas work through the same REST API, and every endpoint is documented
-in the [REST API Reference](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference),
+NICo REST authorizes every caller as a **provider** or a **tenant**, or as a
+**service account** that acts as both. All of them work through the same REST
+API, and every endpoint is documented in the
+[REST API Reference](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference),
 including the typical API call flows for each persona.
 
 <table>
@@ -168,9 +174,14 @@ including the typical API call flows for each persona.
   </tr>
 </table>
 
-Refer to the [authorization roles](docs/glossary.md#authorization-roles) in
-the glossary for the provider and tenant role families and what each one can
-do.
+**Service Account mode** is the third option. NICo REST can be configured so
+that one organization holds both the provider and tenant roles through a
+service account, with no separate tenant organizations. This suits
+deployments that manage tenancy in a system above NICo and call it as one
+principal. Refer to [Tenant Management with Keycloak](docs/configuration/tenant-management-keycloak.md)
+for the service-account client setup and to the
+[authorization roles](docs/glossary.md#authorization-roles) in the glossary
+for what each role family can do.
 
 ## The Lifecycle NICo Automates
 
@@ -184,12 +195,14 @@ to the pool.
   <img src="docs/static/readme/lifecycle-light.svg" alt="The NICo lifecycle: Day 0 bring-up (discovery, validation, firmware baseline, DPU provisioning, attestation, network setup), Day 1 provisioning (isolation, lockdown, iPXE install, hand off), and Day 2 operations (health, firmware upgrades, release, sanitize and re-attest), with released hosts returning to the pool." width="100%">
 </picture>
 
-**Day 0: Discovery, Validation, and Ingestion.** After a host is racked and
-cabled, NICo discovers it over Redfish, links each DPU to its host, validates
-the machine against its SKU, runs burn-in and fabric tests, brings firmware to
-the site baseline, installs the DPU OS and HBN, attests the host with measured
-boot and TPM checks, and allocates its IP addresses. No manual inventory entry
-is required.
+**Day 0: Discovery, Validation, and Ingestion.** The provider registers each
+host as an Expected Machine with its BMC MAC address, chassis serial, and
+factory BMC credentials. From there NICo takes over: it discovers the host
+over Redfish, links each DPU to its host, validates the machine against its
+SKU, runs burn-in and fabric tests, brings firmware to the site baseline,
+installs the DPU OS and HBN, attests the host with measured boot and TPM
+checks, and allocates its IP addresses. Component inventory is collected
+automatically, so no manual component entry is required.
 
 **Day 1: Isolation, Lockdown, and Provisioning.** Before a tenant receives a
 host, NICo establishes isolation on every network plane, locks down UEFI and
@@ -276,11 +289,15 @@ and the Core gRPC API end to end without hardware.
 #    Then install cargo-make:
 cargo install cargo-make
 
-# 2. Bootstrap the cluster-side prerequisites (cert-manager, PostgreSQL, Vault,
-#    Temporal, and Keycloak) on your current Kubernetes context. Safe to re-run.
+# 2. Create a local cluster. The bootstrap script works on your current
+#    Kubernetes context, so this must exist first.
+kind create cluster --name nico
+
+# 3. Bootstrap the cluster-side prerequisites (cert-manager, PostgreSQL, Vault,
+#    Temporal, and Keycloak) on that context. Safe to re-run.
 dev/deployment/devspace/bootstrap-prereqs.sh
 
-# 3. Build and deploy NICo Core, NICo REST, and the mock hosts.
+# 4. Build and deploy NICo Core, NICo REST, and the mock hosts.
 devspace deploy
 ```
 
@@ -293,6 +310,9 @@ make rest-build                          # Go REST API binaries
 make rest-test                           # Go unit tests with PostgreSQL and mock gRPC servers
 cargo make pre-commit-verify-workspace   # what CI runs before merge
 ```
+
+On a fresh Ubuntu VM, `dev/deployment/devspace/setup-devspace-on-host.sh`
+performs all four steps, including the kind cluster.
 
 Refer to [Local Development with DevSpace](dev/deployment/devspace/README.md)
 for profiles, port-forwarding, and teardown, to the
@@ -326,21 +346,27 @@ Kubernetes cluster in three layers:
 export IMAGE_REGISTRY=my-registry.example.com/infra-controller
 make images IMAGE_REGISTRY="${IMAGE_REGISTRY}"   # NICo Core and REST service images
 
-# 2. Set environment variables
+# 2. Set environment variables. The values below are examples: replace
+#    every one of them with your own before running setup.
 export KUBECONFIG=/path/to/kubeconfig
 export NICO_IMAGE_REGISTRY="${IMAGE_REGISTRY}"
-export NICO_CORE_IMAGE_TAG=<nico-core-image-tag>     # e.g. v2.0.0
-export NICO_REST_IMAGE_TAG=<nico-rest-image-tag>     # e.g. v2.0.0
-# export REGISTRY_PULL_SECRET=<pull-secret-or-api-key>   # optional, for authenticated registries
+export NICO_CORE_IMAGE_TAG=v2.2.0
+export NICO_REST_IMAGE_TAG=v2.2.0
+# For an authenticated registry, read the pull secret from a prompt so it
+# never appears in shell history:
+# read -r -s -p 'Registry pull secret: ' REGISTRY_PULL_SECRET && export REGISTRY_PULL_SECRET
 
 # DPF (DOCA Platform Framework) DPU provisioning installs by default.
 # Set these two variables, or pass --skip-dpf to opt out:
-export NICO_DPF_DPU_INTERFACE=<nic-facing-dpus>      # controller NIC for the DPU cluster VIP
-export NICO_DPF_DPU_CLUSTER_VIP=<free-routable-ip>   # floating IP the DPUs use to reach their control plane
+export NICO_DPF_DPU_INTERFACE=ens1f0          # controller NIC facing the DPUs
+export NICO_DPF_DPU_CLUSTER_VIP=192.0.2.10    # free routable IP for the DPU cluster control plane
 
-# RMS (Rack Management Service) installs by default. Set its image tag,
-# or pass --skip-rms to opt out:
-export NICO_RMS_IMAGE_TAG=<rms-api-image-tag>
+# RMS (Rack Management Service) installs by default and requires an image
+# tag. Its default image is entitlement-gated on NGC, so also supply an NGC
+# API key (it defaults to REGISTRY_PULL_SECRET), point NICO_RMS_IMAGE_REPO
+# at your mirror, or pass --skip-rms to opt out:
+export NICO_RMS_IMAGE_TAG=v0.8.0
+read -r -s -p 'NGC API key for RMS: ' NICO_RMS_NGC_API_KEY && export NICO_RMS_NGC_API_KEY
 
 # 3. Customize site-specific values
 #    Edit helm-prereqs/values/nico-core.yaml:
@@ -379,7 +405,7 @@ Runnable inputs and reference configurations that ship with the repository:
 | Example | What it shows |
 | --- | --- |
 | [Go Simple SDK examples](rest-api/sdk/simple/examples/) | Small programs against the REST API for machines, expected machines, instances, VPCs, and IP blocks, built on the [Simple SDK](rest-api/sdk/simple/README.md) |
-| [Site bootstrap input](rest-api/cli/examples/site-prerequisites.yaml) | The provider and tenant organizations, site, and network prerequisites that `nicocli site bootstrap` creates in one pass |
+| [Site bootstrap manifest](rest-api/cli/examples/site-prerequisites.yaml) | Input for `nicocli site bootstrap`, which initializes the calling organization and creates the instance types, allocations, VPCs, and VPC prefixes for a Site that already exists |
 | [NICo Flow inputs](rest-api/flow/examples/README.md) | A GB200 NVL72 rack definition and operation rules for the Flow CLI |
 | [Helm values](helm/examples/) | Minimal and full values files for installing the NICo Core chart directly |
 

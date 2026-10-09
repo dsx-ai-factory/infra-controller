@@ -96,6 +96,6 @@
 <text x="1260" y="592" font-size="16" font-weight="normal" fill="#656d76" text-anchor="start" >NICo provisions and controls it</text>
 <text x="1260" y="616" font-size="16" font-weight="normal" fill="#656d76" text-anchor="start" >directly, so tenant isolation never</text>
 <text x="1260" y="640" font-size="16" font-weight="normal" fill="#656d76" text-anchor="start" >depends on what runs on the host.</text>
-<text x="230" y="690" font-size="16" font-weight="normal" fill="#656d76" text-anchor="start" >Racks of managed hosts, each with one or more DPUs, BMCs, and GPUs</text>
+<text x="230" y="690" font-size="16" font-weight="normal" fill="#656d76" text-anchor="start" >Racks of managed hosts with their BMCs, GPUs, and DPUs</text>
 </g>
 </svg>
