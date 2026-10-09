@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_uuid::DbTable;
 use chrono::{DateTime, Utc};
 use model::firmware::HostFirmwareConfig;
 use sqlx::PgConnection;
@@ -23,7 +24,8 @@ use sqlx::types::Json;
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
-#[derive(Clone, Debug, sqlx::FromRow)]
+#[derive(Clone, Debug, sqlx::FromRow, carbide_macros::DbTable)]
+#[db_table(name = "host_firmware_config")]
 pub struct HostFirmwareConfigRow {
     pub vendor: String,
     pub model: String,
@@ -73,23 +75,26 @@ pub async fn upsert(
     txn: &mut PgConnection,
     config: &HostFirmwareConfig,
 ) -> DatabaseResult<HostFirmwareConfigRow> {
-    let query = r#"
+    let query = format!(
+        r#"
         INSERT INTO host_firmware_config (vendor, model, config)
         VALUES ($1, $2, $3)
         ON CONFLICT (vendor, lower(model))
         DO UPDATE SET
             model = EXCLUDED.model,
             config = EXCLUDED.config
-        RETURNING vendor, model, config, created_at, updated_at
-    "#;
+        RETURNING {}
+    "#,
+        HostFirmwareConfigRow::db_table_columns()
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(config.vendor.to_pascalcase())
         .bind(&config.model)
         .bind(Json(config.clone()))
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 pub async fn get(
@@ -97,31 +102,37 @@ pub async fn get(
     vendor: &str,
     model: &str,
 ) -> DatabaseResult<Option<HostFirmwareConfigRow>> {
-    let query = r#"
-        SELECT vendor, model, config, created_at, updated_at
+    let query = format!(
+        r#"
+        SELECT {}
         FROM host_firmware_config
         WHERE vendor = $1 AND lower(model) = lower($2)
-    "#;
+    "#,
+        HostFirmwareConfigRow::db_table_columns()
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(vendor)
         .bind(model)
         .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 pub async fn list(db_reader: impl DbReader<'_>) -> DatabaseResult<Vec<HostFirmwareConfigRow>> {
-    let query = r#"
-        SELECT vendor, model, config, created_at, updated_at
+    let query = format!(
+        r#"
+        SELECT {}
         FROM host_firmware_config
         ORDER BY vendor, lower(model)
-    "#;
+    "#,
+        HostFirmwareConfigRow::db_table_columns()
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .fetch_all(db_reader)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 pub async fn list_configs(db_reader: impl DbReader<'_>) -> DatabaseResult<Vec<HostFirmwareConfig>> {
@@ -249,6 +260,12 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].vendor, "Nvidia");
         assert_eq!(rows[0].model, "DGXH100");
+        assert_eq!(rows[0].created_at, inserted.created_at);
+        assert_eq!(rows[0].updated_at, inserted.updated_at);
+        assert_eq!(
+            serde_json::to_value(&rows[0].config.0)?,
+            serde_json::to_value(&inserted.config.0)?
+        );
         assert_eq!(summary.row_count, 1);
         assert_eq!(summary.latest_updated_at, Some(inserted.updated_at));
 
