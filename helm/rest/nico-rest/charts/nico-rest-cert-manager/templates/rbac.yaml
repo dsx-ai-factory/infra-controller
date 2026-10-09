@@ -8,7 +8,26 @@ metadata:
   namespace: {{ include "nico-rest-cert-manager.namespace" . }}
   labels:
     {{- include "nico-rest-cert-manager.labels" . | nindent 4 }}
-# credsmgr reads the CA signing cert and key from a mounted Secret volume, which
-# the kubelet resolves without pod RBAC, and writes its serving cert to /tmp. It
-# never calls the Kubernetes API, so it holds no Role and needs no mounted token.
-automountServiceAccountToken: false
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nico-rest-cert-manager-{{ include "nico-rest-cert-manager.namespace" . }}-token-review
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nico-rest-cert-manager-{{ include "nico-rest-cert-manager.namespace" . }}-token-review
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nico-rest-cert-manager-{{ include "nico-rest-cert-manager.namespace" . }}-token-review
+subjects:
+  - kind: ServiceAccount
+    name: nico-rest-cert-manager
+    namespace: {{ include "nico-rest-cert-manager.namespace" . }}

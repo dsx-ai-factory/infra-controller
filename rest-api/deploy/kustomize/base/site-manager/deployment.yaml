@@ -38,17 +38,28 @@ spec:
             capabilities:
               drop:
                 - ALL
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           args:
             - --listen-port=8100
-            - --creds-manager-url=https://carbide-rest-cert-manager.carbide-rest:8000
+            - --creds-manager-url=https://nico-rest-cert-manager.$(POD_NAMESPACE):8000
             - --tls-cert-path=/etc/tls/tls.crt
             - --tls-key-path=/etc/tls/tls.key
-            - --namespace=carbide-rest
+            - --namespace=$(POD_NAMESPACE)
             - --debug
           ports:
             - containerPort: 8100
               name: https
           volumeMounts:
+            - name: creds-manager-token
+              mountPath: /var/run/secrets/nico-rest-cert-manager
+              readOnly: true
+            - name: creds-manager-ca
+              mountPath: /etc/pki/creds-manager
+              readOnly: true
             - name: tls-certs
               mountPath: /etc/tls
               readOnly: true
@@ -76,6 +87,19 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 15
       volumes:
+        - name: creds-manager-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: nico-rest-cert-manager
+                  expirationSeconds: 3600
+        - name: creds-manager-ca
+          secret:
+            secretName: ca-signing-secret
+            items:
+              - key: tls.crt
+                path: ca.crt
         - name: tls-certs
           secret:
             secretName: site-manager-tls
