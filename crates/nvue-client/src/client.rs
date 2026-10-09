@@ -339,14 +339,20 @@ impl NvueClient {
     /// Apply the specified revision ID and poll it until NVUE reports it as
     /// "applied" or another terminal state.
     ///
-    /// If the config revision enters an error state with a rollback revision
-    /// specified, this method will also poll that until it's in a terminal
-    /// state to ensure the "applied" revision is not still churning when we
-    /// return control.
+    /// If NVUE returns a terminal error state with a rollback revision
+    /// specified, this method will also attempt to poll that revision to a
+    /// terminal state, unless this method encounters an error while polling
+    /// it or hits a timeout. This represents our best-effort attempt to yield
+    /// control back to the client in a predictable state, despite all of the
+    /// complications introduced by NVUE's revision model.
     ///
-    /// Each of these polls can take up to 45 seconds, so in the worst case
-    /// this may take 90 seconds to complete (plus a bit of wiggle room for the
-    /// per-request timeout).
+    /// Each polling stage has a timeout of 45 seconds, but an in-flight HTTP
+    /// request may exceed this until its own timeout is reached.
+    ///
+    /// Many of the error variants returned by this method can be caused by a
+    /// timeout without that being immediately obvious in the return value, so
+    /// the caller is advised to be extremely pessimistic about what state NVUE
+    /// might be in when encountering an error.
     pub async fn apply_config_revision(&self, revision_id: &str) -> Result<(), NvueClientError> {
         let revision_path = format!("/nvue_v1/revision/{revision_id}");
         let builder = self.request(Method::PATCH, &revision_path)?;
@@ -410,6 +416,9 @@ impl NvueClient {
     ///
     /// Returns a `Some(revision_id)` if we applied the new revision, and `None`
     /// if NVUE indicated no change compared to the "applied" revision.
+    ///
+    /// Please also refer to the warning text about error handling in
+    /// `apply_config_revision`'s docstring.
     pub async fn push_config(
         &self,
         config: &NvueConfig,
