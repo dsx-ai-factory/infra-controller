@@ -26,6 +26,32 @@ pub(super) struct TenantNetworkSnapshot {
 }
 
 impl TenantNetworkSnapshot {
+    pub(super) fn prepare_directory(directory: Option<&Path>) -> std::io::Result<()> {
+        let Some(directory) = directory else {
+            return Ok(());
+        };
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        // A restarted process must not advertise observations from its predecessor.
+        for entry in entries {
+            let path = entry?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+                && path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(|stem| stem.parse::<MachineId>().is_ok())
+            {
+                std::fs::remove_file(path)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn update(
         &mut self,
         directory: Option<&Path>,
@@ -175,6 +201,24 @@ mod tests {
             .unwrap();
         drop(snapshot);
         assert!(!path.exists(), "stopping the DPU must remove the snapshot");
+    }
+
+    #[test]
+    fn startup_removes_only_previous_machine_snapshots() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(format!("{}.json", dpu_id()));
+        std::fs::write(&path, "previous process snapshot").unwrap();
+        let unrelated = directory.path().join("notes.json");
+        std::fs::write(&unrelated, "keep").unwrap();
+        TenantNetworkSnapshot::prepare_directory(None).unwrap();
+        assert!(path.exists(), "disabled export must leave files untouched");
+        TenantNetworkSnapshot::prepare_directory(Some(directory.path())).unwrap();
+        assert!(
+            !path.exists(),
+            "startup must retire snapshots before restoring devices"
+        );
+        assert!(unrelated.exists());
+        TenantNetworkSnapshot::prepare_directory(Some(&directory.path().join("absent"))).unwrap();
     }
 
     #[test]

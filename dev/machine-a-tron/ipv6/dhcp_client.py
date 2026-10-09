@@ -55,16 +55,20 @@ def exchange(kind, payload, expected_kind):
 
 
 adv, peer = exchange(1, opt(1, duid) + opt(3, ia) + opt(6, struct.pack("!H", 23)), 2)
-assert adv[1] == duid
+if adv.get(1) != duid:
+    raise RuntimeError("Advertise client ID mismatch")
 reply, peer = exchange(
     3, opt(1, duid) + opt(2, adv[2]) + opt(3, adv[3]) + opt(6, struct.pack("!H", 23)), 7
 )
-assert reply[1] == duid and reply[2] == adv[2]
+if reply.get(1) != duid or reply.get(2) != adv[2]:
+    raise RuntimeError("Reply identity mismatch")
 iaopts = opts(reply[3][12:])
 address = str(ipaddress.IPv6Address(iaopts[5][:16]))
 preferred, valid = struct.unpack("!II", iaopts[5][16:24])
-assert address == expected and valid >= preferred > 0
-assert 23 in reply and len(reply[23]) % 16 == 0
+if address != expected or not valid >= preferred > 0:
+    raise RuntimeError("unexpected DHCPv6 lease")
+if 23 not in reply or len(reply[23]) % 16:
+    raise RuntimeError("missing or malformed DNS option")
 dns = [
     str(ipaddress.IPv6Address(reply[23][i : i + 16]))
     for i in range(0, len(reply[23]), 16)
