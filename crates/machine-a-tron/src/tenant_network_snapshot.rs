@@ -30,11 +30,9 @@ impl TenantNetworkSnapshot {
         let Some(directory) = directory else {
             return Ok(());
         };
-        let entries = match std::fs::read_dir(directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error),
-        };
+        std::fs::create_dir_all(directory)?;
+        drop(tempfile::NamedTempFile::new_in(directory)?);
+        let entries = std::fs::read_dir(directory)?;
         // A restarted process must not advertise observations from its predecessor.
         for entry in entries {
             let path = entry?.path();
@@ -218,7 +216,13 @@ mod tests {
             "startup must retire snapshots before restoring devices"
         );
         assert!(unrelated.exists());
-        TenantNetworkSnapshot::prepare_directory(Some(&directory.path().join("absent"))).unwrap();
+        let new_directory = directory.path().join("absent");
+        TenantNetworkSnapshot::prepare_directory(Some(&new_directory)).unwrap();
+        assert!(
+            new_directory.is_dir(),
+            "startup must create the configured directory"
+        );
+        assert!(TenantNetworkSnapshot::prepare_directory(Some(&unrelated)).is_err());
     }
 
     #[test]
