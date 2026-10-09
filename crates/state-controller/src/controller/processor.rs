@@ -23,7 +23,7 @@ use ::db::{DatabaseError, Transaction};
 use config_version::Versioned;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use opentelemetry::KeyValue;
-use opentelemetry::metrics::{Counter, Histogram, Meter};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use rand::RngExt;
 use sqlx_query_tracing::SqlxQueryDataAggregation;
 use tokio::task::{JoinError, JoinSet};
@@ -376,20 +376,29 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
                     count
                 }
                 Err(_) => {
-                    tracing::error!(
-                        in_flight_task_count = self.object_tasks.len(),
-                        "Timed out waiting for state controller object handling tasks to complete"
+                    // If we timed out after `max_duration`, it means tasks are still running. This
+                    // isn't an error unless these tasks exceed the max object wait time, which is
+                    // logged elsewhere. `max_duration` might be the controller iteration time,
+                    // which is shorter than the max object wait time and is not an error to exceed.
+                    let in_flight_task_count = self.object_tasks.len();
+                    tracing::info!(
+                        in_flight_task_count,
+                        "{in_flight_task_count} tasks still running after iteration"
                     );
                     0
                 }
             };
 
-        if total_completions > 0
-            && let Some(emitter) = &self.metric_emitter
-        {
+        if let Some(emitter) = &self.metric_emitter {
+            if total_completions > 0 {
+                emitter
+                    .completed_tasks_counter
+                    .add(total_completions as u64, &[]);
+            }
+
             emitter
-                .completed_tasks_counter
-                .add(total_completions as u64, &[]);
+                .running_tasks_gauge
+                .record(self.object_tasks.len() as u64, &[]);
         }
 
         total_completions
@@ -942,6 +951,8 @@ pub(super) struct ProcessorMetricsEmitter {
     completed_tasks_counter: Counter<u64>,
     requeued_tasks_counter: Counter<u64>,
     errored_tasks_counter: Counter<u64>,
+    /// How many tasks are currently running in the queue
+    running_tasks_gauge: Gauge<u64>,
     db: sqlx_query_tracing::DatabaseMetricEmitters,
 }
 
@@ -985,6 +996,13 @@ impl ProcessorMetricsEmitter {
             ))
             .build();
 
+        let running_tasks_gauge = meter
+            .u64_gauge(format!("{object_type}_object_tasks_running"))
+            .with_description(format!(
+                "Number of object handling tasks currently running of type {object_type}"
+            ))
+            .build();
+
         Self {
             iteration_latency,
             db,
@@ -992,6 +1010,7 @@ impl ProcessorMetricsEmitter {
             completed_tasks_counter,
             requeued_tasks_counter,
             errored_tasks_counter,
+            running_tasks_gauge,
         }
     }
 

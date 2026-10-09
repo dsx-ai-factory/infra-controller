@@ -114,6 +114,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_extension_services_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_extension_services in the system</td></tr>
 <tr><td>carbide_extension_services_iteration_latency_milliseconds</td><td>histogram</td><td>The elapsed time in the last state processor iteration to handle objects of type carbide_extension_services</td></tr>
 <tr><td>carbide_extension_services_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_extension_services</td></tr>
+<tr><td>carbide_extension_services_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_extension_services</td></tr>
 <tr><td>carbide_extension_services_total</td><td>gauge</td><td>Number of carbide_extension_services in the system</td></tr>
 <tr><td>carbide_external_call_duration_milliseconds</td><td>histogram</td><td>Duration of outbound calls by backend, operation, and outcome; the _count series, split by outcome, gives the request and error rates.</td></tr>
 <tr><td>carbide_firmware_artifact_unavailable_total</td><td>counter</td><td>Number of firmware artifacts unavailable before download, by reason.</td></tr>
@@ -156,6 +157,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_ib_partitions_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_ib_partitions in the system</td></tr>
 <tr><td>carbide_ib_partitions_iteration_latency_milliseconds</td><td>histogram</td><td>The elapsed time in the last state processor iteration to handle objects of type carbide_ib_partitions</td></tr>
 <tr><td>carbide_ib_partitions_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_ib_partitions</td></tr>
+<tr><td>carbide_ib_partitions_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_ib_partitions</td></tr>
 <tr><td>carbide_ib_partitions_total</td><td>gauge</td><td>Number of carbide_ib_partitions in the system</td></tr>
 <tr><td>carbide_ipmi_commands_total</td><td>counter</td><td>Number of IPMI command executions, by command and outcome.</td></tr>
 <tr><td>carbide_kms_token_maintenance_failures_total</td><td>counter</td><td>Number of Transit KMS token maintenance failures, by maintenance stage</td></tr>
@@ -185,6 +187,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_machines_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_machines</td></tr>
 <tr><td>carbide_machines_object_tasks_errored_total</td><td>counter</td><td>Number of object handling tasks completed with an error for objects of type carbide_machines</td></tr>
 <tr><td>carbide_machines_object_tasks_requeued_total</td><td>counter</td><td>Number of object handling tasks requeued for objects of type carbide_machines</td></tr>
+<tr><td>carbide_machines_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_machines</td></tr>
 <tr><td>carbide_machines_per_state</td><td>gauge</td><td>Number of carbide_machines in the system with a given state</td></tr>
 <tr><td>carbide_machines_per_state_above_sla</td><td>gauge</td><td>Number of carbide_machines currently in a state longer than the SLA allows</td></tr>
 <tr><td>carbide_machines_state_entered_total</td><td>counter</td><td>Number of times objects of type carbide_machines have entered a certain state</td></tr>
@@ -210,6 +213,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_network_segments_object_tasks_dispatched_total</td><td>counter</td><td>Number of object handling tasks dequeued and dispatched for processing for objects of type carbide_network_segments</td></tr>
 <tr><td>carbide_network_segments_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_network_segments</td></tr>
 <tr><td>carbide_network_segments_object_tasks_requeued_total</td><td>counter</td><td>Number of object handling tasks requeued for objects of type carbide_network_segments</td></tr>
+<tr><td>carbide_network_segments_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_network_segments</td></tr>
 <tr><td>carbide_network_segments_per_state</td><td>gauge</td><td>Number of carbide_network_segments in the system with a given state</td></tr>
 <tr><td>carbide_network_segments_per_state_above_sla</td><td>gauge</td><td>Number of carbide_network_segments currently in a state longer than the SLA allows</td></tr>
 <tr><td>carbide_network_segments_state_entered_total</td><td>counter</td><td>Number of times objects of type carbide_network_segments have entered a certain state</td></tr>
@@ -237,6 +241,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_power_shelves_health_status_count</td><td>gauge</td><td>Number of power shelves in the system that have reported either a healthy or not healthy status - based on the presence of health probe alerts</td></tr>
 <tr><td>carbide_power_shelves_iteration_latency_milliseconds</td><td>histogram</td><td>The elapsed time in the last state processor iteration to handle objects of type carbide_power_shelves</td></tr>
 <tr><td>carbide_power_shelves_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_power_shelves</td></tr>
+<tr><td>carbide_power_shelves_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_power_shelves</td></tr>
 <tr><td>carbide_power_shelves_total</td><td>gauge</td><td>Number of carbide_power_shelves in the system</td></tr>
 <tr><td>carbide_preingestion_bfb_copy_duration_seconds</td><td>histogram</td><td>Duration of preingestion BFB copies to a DPU rshim, by outcome; the _count series, split by outcome, is the copy and failure rate.</td></tr>
 <tr><td>carbide_preingestion_firmware_upgrade_tasks_total</td><td>counter</td><td>Number of preingestion firmware upgrade Redfish tasks reaching a terminal state, by firmware component, final task state, and outcome.</td></tr>
@@ -252,6 +257,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_racks_health_status_count</td><td>gauge</td><td>Number of racks in the system that have reported either a healthy or not healthy status - based on the presence of health probe alerts</td></tr>
 <tr><td>carbide_racks_iteration_latency_milliseconds</td><td>histogram</td><td>The elapsed time in the last state processor iteration to handle objects of type carbide_racks</td></tr>
 <tr><td>carbide_racks_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_racks</td></tr>
+<tr><td>carbide_racks_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_racks</td></tr>
 <tr><td>carbide_racks_total</td><td>gauge</td><td>Number of carbide_racks in the system</td></tr>
 <tr><td>carbide_reboot_attempts_in_booting_with_discovery_image</td><td>histogram</td><td>Reboot attempts per machine in BootingWithDiscoveryImage, recorded when a machine is rebooted again after no response from the host.</td></tr>
 <tr><td>carbide_redfish_action_result_persistence_failures_total</td><td>counter</td><td>Number of detached Redfish action results that failed to persist</td></tr>
@@ -302,6 +308,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_switches_health_status_count</td><td>gauge</td><td>Number of switches in the system that have reported either a healthy or not healthy status - based on the presence of health probe alerts</td></tr>
 <tr><td>carbide_switches_iteration_latency_milliseconds</td><td>histogram</td><td>The elapsed time in the last state processor iteration to handle objects of type carbide_switches</td></tr>
 <tr><td>carbide_switches_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_switches</td></tr>
+<tr><td>carbide_switches_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_switches</td></tr>
 <tr><td>carbide_switches_total</td><td>gauge</td><td>Number of carbide_switches in the system</td></tr>
 <tr><td>carbide_total_ips_count</td><td>gauge</td><td>Number of IPs per network segment</td></tr>
 <tr><td>carbide_unavailable_dpu_nic_firmware_update_count</td><td>gauge</td><td>Number of machines in the system that need a DPU/NIC firmware update but are unavailable for update</td></tr>
@@ -312,6 +319,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_vpc_prefixes_object_tasks_dispatched_total</td><td>counter</td><td>Number of object handling tasks dequeued and dispatched for processing for objects of type carbide_vpc_prefixes</td></tr>
 <tr><td>carbide_vpc_prefixes_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_vpc_prefixes</td></tr>
 <tr><td>carbide_vpc_prefixes_object_tasks_requeued_total</td><td>counter</td><td>Number of object handling tasks requeued for objects of type carbide_vpc_prefixes</td></tr>
+<tr><td>carbide_vpc_prefixes_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_vpc_prefixes</td></tr>
 <tr><td>carbide_vpc_prefixes_per_state</td><td>gauge</td><td>Number of carbide_vpc_prefixes in the system with a given state</td></tr>
 <tr><td>carbide_vpc_prefixes_per_state_above_sla</td><td>gauge</td><td>Number of carbide_vpc_prefixes currently in a state longer than the SLA allows</td></tr>
 <tr><td>carbide_vpc_prefixes_state_entered_total</td><td>counter</td><td>Number of times objects of type carbide_vpc_prefixes have entered a certain state</td></tr>
