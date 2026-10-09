@@ -4,11 +4,15 @@
 package inventorysync
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"testing"
@@ -51,6 +55,50 @@ func TestBuildDomainTopologySnapshot(t *testing.T) {
 			assert.Equal(t, &y, got.clusterByGroup["group-c"])
 		})
 	}
+}
+
+func TestBuildDomainTopologySnapshotLogsOncePerSync(t *testing.T) {
+	var output bytes.Buffer
+	original := log.Logger
+	log.Logger = zerolog.New(&output)
+	t.Cleanup(func() { log.Logger = original })
+
+	x, y := uuid.New(), uuid.New()
+	racks := map[string]uuid.UUID{"a": uuid.New(), "b": uuid.New(), "no-group": uuid.New()}
+	groups := map[string]string{"a": "group-ab", "b": "group-ab"}
+	// Core reports one membership per switch, so each rack appears once per switch.
+	var rows []nicoapi.NVLinkDomainMembership
+	for range 3 {
+		rows = append(rows,
+			nicoapi.NVLinkDomainMembership{RackID: "no-group", DomainID: x.String()},
+			nicoapi.NVLinkDomainMembership{RackID: "unknown", DomainID: x.String()},
+			nicoapi.NVLinkDomainMembership{RackID: "a", DomainID: x.String()},
+			nicoapi.NVLinkDomainMembership{RackID: "b", DomainID: y.String()},
+		)
+	}
+	buildDomainTopologySnapshot(rows, racks, groups)
+
+	var entries []map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(output.Bytes()), []byte("\n")) {
+		var entry map[string]any
+		require.NoError(t, json.Unmarshal(line, &entry))
+		entries = append(entries, entry)
+	}
+	assert.Equal(t, []map[string]any{
+		{
+			"level":                   "error",
+			"rack_group_id":           "group-ab",
+			"nmxc_cluster_id":         y.String(),
+			"current_nmxc_cluster_id": x.String(),
+			"message":                 "Invalid or conflicting NMX-C cluster observation; preserving this group's cluster",
+		},
+		{
+			"level":               "warn",
+			"skipped_memberships": float64(6),
+			"rack_ids":            []any{"no-group", "unknown"},
+			"message":             "Skipping NMX-C observations without a known rack group",
+		},
+	}, entries)
 }
 
 func TestMirrorObservedNVLinkDomainMemberships(t *testing.T) {
