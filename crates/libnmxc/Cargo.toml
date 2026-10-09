@@ -33,6 +33,7 @@ server = []
 
 [dependencies]
 async-trait = { workspace = true }
+carbide-client-cache = { path = "../client-cache" }
 trace-propagation = { path = "../trace-propagation" }
 http = { workspace = true }
 tokio = { workspace = true, features = [

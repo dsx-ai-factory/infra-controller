@@ -17,6 +17,7 @@ test-support = ["dep:config-version"]
 [dependencies]
 carbide-api-db = { path = "../api-db" }
 carbide-api-model = { path = "../api-model" }
+carbide-client-cache = { path = "../client-cache" }
 carbide-health-report = { path = "../health-report" }
 carbide-instrument = { path = "../instrument" }
 carbide-secrets = { path = "../secrets" }
