@@ -19,11 +19,11 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
-	cwu "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/google/uuid"
@@ -307,13 +307,14 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 	vpc12.NetworkSecurityGroupPropagationDetails = &cdbm.NetworkSecurityGroupPropagationDetails{
 		NetworkSecurityGroupPropagationObjectStatus: &corev1.NetworkSecurityGroupPropagationObjectStatus{},
 	}
-	cwu.TestUpdateVPC(t, dbSession, vpc12)
+	util.TestUpdateVPC(t, dbSession, vpc12)
 
 	vpc13 := testVPCBuildVPC(t, dbSession, "test-vpc-13", ip, tn, st, nil, cutil.GetPtr(uuid.New()), nil, tnu, cdbm.VpcStatusReady)
 
 	// Build real NSG rows so reconciliation exercises the VPC foreign-key column.
 	networkSecurityGroupA := util.TestBuildNetworkSecurityGroup(t, dbSession, "test-nsg-a", st, tn, cdbm.NetworkSecurityGroupStatusReady, tnu)
 	networkSecurityGroupB := util.TestBuildNetworkSecurityGroup(t, dbSession, "test-nsg-b", st, tn, cdbm.NetworkSecurityGroupStatusReady, tnu)
+	metadataNetworkSecurityGroup := util.TestBuildNetworkSecurityGroup(t, dbSession, "test-metadata-nsg", st3, tn, cdbm.NetworkSecurityGroupStatusReady, tnu)
 	vpc14 := testVPCBuildVPC(t, dbSession, "test-vpc-14", ip, tn, st, nil, cutil.GetPtr(uuid.New()), nil, tnu, cdbm.VpcStatusReady)
 	vpc15 := testVPCBuildVPC(t, dbSession, "test-vpc-15", ip, tn, st, nil, cutil.GetPtr(uuid.New()), nil, tnu, cdbm.VpcStatusReady)
 	vpc16 := testVPCBuildVPC(t, dbSession, "test-vpc-16", ip, tn, st, nil, cutil.GetPtr(uuid.New()), nil, tnu, cdbm.VpcStatusReady)
@@ -349,6 +350,11 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 		pagedVpcs = append(pagedVpcs, vpc)
 		pagedInvIds = append(pagedInvIds, vpc.ControllerVpcID.String())
 	}
+	pagedVpcs[1], err = vpcDAO.Update(ctx, nil, cdbm.VpcUpdateInput{
+		VpcID:                  pagedVpcs[1].ID,
+		NetworkSecurityGroupID: cutil.GetPtr(metadataNetworkSecurityGroup.ID),
+	})
+	require.NoError(t, err)
 
 	pagedCtrlVpcs := []*corev1.Vpc{}
 	for i := 0; i < 34; i++ {
@@ -364,6 +370,7 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 		}
 
 		if i == 1 {
+			ctrlVpc.Config.NetworkSecurityGroupId = cutil.GetPtr(metadataNetworkSecurityGroup.ID)
 			ctrlVpc.Metadata = &corev1.Metadata{
 				Name:        "Test VPC",
 				Description: "Test description",
@@ -396,6 +403,8 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 
 	mtc1 := &tmocks.Client{}
 	mtc1.Mock.On("ExecuteWorkflow", context.Background(), workflowOptions1, "UpdateVPC", mock.Anything).Return(wrun, nil)
+	metadataClient := &tmocks.Client{}
+	metadataClient.Mock.On("ExecuteWorkflow", context.Background(), workflowOptions1, "UpdateVPC", mock.Anything).Return(wrun, nil)
 
 	nwvt := corev1.VpcVirtualizationType_FNN
 	evt := corev1.VpcVirtualizationType_ETHERNET_VIRTUALIZER
@@ -673,7 +682,7 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 			fields: fields{
 				dbSession:        dbSession,
 				siteClientPool:   tSiteClientPool,
-				clientPoolClient: mtc1,
+				clientPoolClient: metadataClient,
 				env:              env,
 			},
 			args: args{
@@ -705,7 +714,7 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 
 			mv.siteClientPool.IDClientMap[tt.args.siteID.String()] = tt.fields.clientPoolClient
 
-			cwu.TestInventoryAgeUpdatedTimestamp(tt.args.ctx, t, dbSession, (*cdbm.Vpc)(nil))
+			util.TestInventoryAgeUpdatedTimestamp(tt.args.ctx, t, dbSession, (*cdbm.Vpc)(nil))
 
 			_, err := mv.UpdateVpcsInDB(tt.args.ctx, tt.args.siteID, tt.args.vpcInventory)
 			assert.Equal(t, tt.wantErr, err != nil)
@@ -846,11 +855,19 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 			}
 
 			if tt.requiredMetadataUpdate {
-				assert.True(t, len(tt.fields.clientPoolClient.Calls) > 0)
-				assert.Equal(t, len(tt.fields.clientPoolClient.Calls[0].Arguments), 4)
+				require.Len(t, tt.fields.clientPoolClient.Calls, 1)
+				require.Len(t, tt.fields.clientPoolClient.Calls[0].Arguments, 4)
 
 				scReq := tt.fields.clientPoolClient.Calls[0].Arguments[3].(*corev1.VpcUpdateRequest)
 				assert.Equal(t, tt.metadataVpcUpdate.ID.String(), scReq.Id.Value)
+				require.NotNil(t, tt.metadataVpcUpdate.NetworkSecurityGroupID)
+				require.NotNil(t, scReq.NetworkSecurityGroupId)
+				assert.Equal(t, *tt.metadataVpcUpdate.NetworkSecurityGroupID, *scReq.NetworkSecurityGroupId)
+				assert.True(t, proto.Equal(tt.metadataVpcUpdate.ToProto().Metadata, scReq.Metadata))
+
+				persistedVpc, gerr := vpcDAO.GetByID(ctx, nil, tt.metadataVpcUpdate.ID, nil)
+				require.NoError(t, gerr)
+				assert.Equal(t, tt.metadataVpcUpdate.NetworkSecurityGroupID, persistedVpc.NetworkSecurityGroupID)
 			}
 
 			statusDetailDAO := cdbm.NewStatusDetailDAO(dbSession)
@@ -862,6 +879,114 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 				require.NotNil(t, statusDetails[0].Message)
 				assert.Equal(t, "VPC is ready for use", *statusDetails[0].Message)
 			}
+		})
+	}
+}
+
+func TestManageVpc_UpdateVpcMetadata(t *testing.T) {
+	tests := []struct {
+		name                   string
+		databaseHasReplacement bool
+	}{
+		{
+			// A delayed snapshot must not undo a newer replacement with a different NSG.
+			name:                   "uses replacement association from database instead of stale inventory",
+			databaseHasReplacement: true,
+		},
+		{
+			// A delayed snapshot must not reattach an NSG after an intentional detach.
+			name: "uses detached association from database instead of stale inventory",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			dbSession := testVPCInitDB(t)
+			defer dbSession.Close()
+			testVPCSetupSchema(t, dbSession)
+
+			providerOrg := "test-provider-org"
+			providerUser := testVPCBuildUser(t, dbSession, uuid.NewString(), providerOrg, []string{"FORGE_PROVIDER_ADMIN"})
+			provider := testVPCSiteBuildInfrastructureProvider(t, dbSession, "test-provider", providerOrg, providerUser)
+			tenantOrg := "test-tenant-org"
+			tenantUser := testVPCBuildUser(t, dbSession, uuid.NewString(), tenantOrg, []string{"FORGE_TENANT_ADMIN"})
+			tenant := testVPCBuildTenant(t, dbSession, "test-tenant", tenantOrg, tenantUser)
+			site := testVPCBuildSite(t, dbSession, provider, "test-site", providerUser)
+			staleNetworkSecurityGroup := util.TestBuildNetworkSecurityGroup(
+				t,
+				dbSession,
+				"stale-inventory-nsg",
+				site,
+				tenant,
+				cdbm.NetworkSecurityGroupStatusReady,
+				tenantUser,
+			)
+			vpc := testVPCBuildVPC(
+				t,
+				dbSession,
+				"test-vpc",
+				provider,
+				tenant,
+				site,
+				nil,
+				cutil.GetPtr(uuid.New()),
+				map[string]string{"source": "database"},
+				tenantUser,
+				cdbm.VpcStatusReady,
+			)
+
+			var expectedNetworkSecurityGroupID *string
+			if tt.databaseHasReplacement {
+				replacementNetworkSecurityGroup := util.TestBuildNetworkSecurityGroup(
+					t,
+					dbSession,
+					"replacement-nsg",
+					site,
+					tenant,
+					cdbm.NetworkSecurityGroupStatusReady,
+					tenantUser,
+				)
+				var err error
+				vpc, err = cdbm.NewVpcDAO(dbSession).Update(ctx, nil, cdbm.VpcUpdateInput{
+					VpcID:                  vpc.ID,
+					NetworkSecurityGroupID: cutil.GetPtr(replacementNetworkSecurityGroup.ID),
+				})
+				require.NoError(t, err)
+				expectedNetworkSecurityGroupID = cutil.GetPtr(replacementNetworkSecurityGroup.ID)
+			}
+
+			staleControllerVpc := &corev1.Vpc{
+				Id: &corev1.VpcId{Value: vpc.ID.String()},
+				Config: &corev1.VpcConfig{
+					NetworkSecurityGroupId: cutil.GetPtr(staleNetworkSecurityGroup.ID),
+				},
+				Metadata: &corev1.Metadata{Name: "stale-inventory-name"},
+			}
+
+			workflowRun := &tmocks.WorkflowRun{}
+			workflowRun.On("GetID").Return("test-workflow-id")
+			temporalClient := &tmocks.Client{}
+			var capturedRequest *corev1.VpcUpdateRequest
+			temporalClient.Mock.On(
+				"ExecuteWorkflow",
+				mock.Anything,
+				mock.Anything,
+				"UpdateVPC",
+				mock.Anything,
+			).Run(func(args mock.Arguments) {
+				var ok bool
+				capturedRequest, ok = args.Get(3).(*corev1.VpcUpdateRequest)
+				require.True(t, ok)
+			}).Return(workflowRun, nil).Once()
+
+			manager := ManageVpc{dbSession: dbSession}
+			err := manager.UpdateVpcMetadata(ctx, site.ID, temporalClient, vpc.ID, staleControllerVpc)
+			require.NoError(t, err)
+			require.NotNil(t, capturedRequest)
+			assert.Equal(t, expectedNetworkSecurityGroupID, capturedRequest.NetworkSecurityGroupId)
+			temporalClient.AssertExpectations(t)
+			workflowRun.AssertExpectations(t)
 		})
 	}
 }
@@ -975,7 +1100,7 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 	}
 
 	t.Run("inventory restores soft-deleted VPC", func(t *testing.T) {
-		nonReadyNVLink := cwu.TestBuildNVLinkLogicalPartition(
+		nonReadyNVLink := util.TestBuildNVLinkLogicalPartition(
 			t,
 			dbSession,
 			"test-restore-non-ready-nvlink",
@@ -1009,8 +1134,8 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 
 		// The undelete is deferred while the delete is newer than the staleness threshold, so
 		// backdate it past that.
-		cwu.TestInventoryAgeDeletedTimestamp(ctx, t, dbSession, (*cdbm.Vpc)(nil), controllerVpcID)
-		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.Vpc)(nil))
+		util.TestInventoryAgeDeletedTimestamp(ctx, t, dbSession, (*cdbm.Vpc)(nil), controllerVpcID)
+		util.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.Vpc)(nil))
 		_, err = manager.UpdateVpcsInDB(ctx, site.ID, inventory)
 		require.NoError(t, err)
 		restoredVpc, err := vpcDAO.GetByID(ctx, nil, controllerVpcID, nil)
@@ -1118,7 +1243,7 @@ func TestManageVpc_CreateOrUpdateVpcFromSite_SkipsIncompleteOwnership(t *testing
 	otherTenantOrg := "test-other-tenant"
 	otherTenantUser := testVPCBuildUser(t, dbSession, uuid.NewString(), otherTenantOrg, []string{"FORGE_TENANT_ADMIN"})
 	otherTenant := testVPCBuildTenant(t, dbSession, "test-other-tenant", otherTenantOrg, otherTenantUser)
-	otherTenantNVLink := cwu.TestBuildNVLinkLogicalPartition(
+	otherTenantNVLink := util.TestBuildNVLinkLogicalPartition(
 		t,
 		dbSession,
 		"test-other-tenant-nvlink",
@@ -1128,7 +1253,7 @@ func TestManageVpc_CreateOrUpdateVpcFromSite_SkipsIncompleteOwnership(t *testing
 		cdbm.NVLinkLogicalPartitionStatusReady,
 		false,
 	)
-	nonReadyNVLink := cwu.TestBuildNVLinkLogicalPartition(
+	nonReadyNVLink := util.TestBuildNVLinkLogicalPartition(
 		t,
 		dbSession,
 		"test-non-ready-nvlink",

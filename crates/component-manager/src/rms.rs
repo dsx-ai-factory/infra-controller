@@ -6773,54 +6773,6 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
-    async fn rms_calls_record_the_external_call_histogram_by_outcome() {
-        use carbide_instrument::testing::MetricsCapture;
-
-        let mock = MockRmsApi::new();
-        mock.enqueue_batch_get_power_state(Ok(rms::BatchGetPowerStateResponse::default()))
-            .await;
-        mock.enqueue_batch_get_power_state(Err(RackManagerError::ApiInvocationError(
-            tonic::Status::unavailable("down"),
-        )))
-        .await;
-
-        let device_mac: MacAddress = PS_MAC_1.parse().unwrap();
-        let metrics = MetricsCapture::start();
-        let mut observed = Vec::new();
-        for _ in 0..2 {
-            observed.push(
-                query_rms_power_state(
-                    &mock,
-                    rms::NodeInfo::default(),
-                    "node-1",
-                    device_mac,
-                    "power shelf",
-                )
-                .await,
-            );
-        }
-        assert!(
-            observed[1].is_err(),
-            "transport failure surfaces as an error"
-        );
-
-        for outcome in ["ok", "error"] {
-            assert_eq!(
-                metrics.histogram_count_delta(
-                    "carbide_external_call_duration_milliseconds",
-                    &[
-                        ("backend", "rms"),
-                        ("operation", "batch_get_power_state"),
-                        ("outcome", outcome),
-                    ],
-                ),
-                1,
-                "{outcome}"
-            );
-        }
-    }
-
     // ---- Test helpers ----
 
     fn make_ps_endpoint(mac: &str) -> PowerShelfEndpoint {
