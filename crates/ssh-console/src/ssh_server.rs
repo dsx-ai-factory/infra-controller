@@ -99,7 +99,7 @@ pub enum SpawnError {
     },
     #[error("error listening on {addr}: {error}")]
     Listening {
-        addr: SocketAddr,
+        addr: carbide_utils::ListenAddr,
         error: std::io::Error,
     },
 }

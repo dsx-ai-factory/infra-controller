@@ -23,6 +23,7 @@ pub mod arch;
 pub mod cmd;
 pub mod config;
 mod host_port_pair;
+mod listen_addr;
 pub mod managed_loop;
 pub mod memory_device_group;
 pub mod metrics;
@@ -36,6 +37,7 @@ pub mod sku;
 pub mod test_support;
 
 pub use host_port_pair::{HostPortPair, HostPortParseError};
+pub use listen_addr::{ListenAddr, ParseListenAddrError};
 pub const DEFAULT_DPU_DMI_BOARD_SERIAL_NUMBER: &str = "Unspecified Base Board Serial Number";
 pub const DEFAULT_DPU_DMI_CHASSIS_SERIAL_NUMBER: &str = "Unspecified Chassis Board Serial Number";
 pub const DEFAULT_DMI_SYSTEM_MANUFACTURER: &str = "Unspecified System Manufacturer";
