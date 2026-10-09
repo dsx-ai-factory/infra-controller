@@ -43,6 +43,7 @@ nv-redfish = { workspace = true, features = [
   "bios",
   "boot-options",
   "chassis",
+  "component-integrity",
   "computer-systems",
   "ethernet-interfaces",
   "host-interfaces",
@@ -68,7 +69,6 @@ nv-redfish = { workspace = true, features = [
 ] }
 regex = { workspace = true }
 lazy_static = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

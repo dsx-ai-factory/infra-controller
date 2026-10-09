@@ -726,8 +726,8 @@ pub(crate) mod fixtures {
     use tower::ServiceExt;
 
     use super::{EventServiceConfig, EventServiceLimits, EventServiceState};
-    use crate::test_support::{TestCallbacks, host_info};
-    use crate::{BmcState, HardwareType, MachineRouterOptions, machine_router};
+    use crate::test_support::{TestBmcConfig, TestCallbacks, create_test_bmc, host_info};
+    use crate::{BmcState, HardwareType, MachineRouterOptions};
 
     pub(crate) fn event() -> Value {
         json!({"@odata.id": "/redfish/v1/EventService/SSE#/Event1",
@@ -771,9 +771,9 @@ pub(crate) mod fixtures {
 
     /// A Dell R750 mock with a ten-millisecond outage window on reset.
     pub(crate) fn router(auth: bool) -> (Router, BmcState<TestCallbacks>) {
-        machine_router(
+        create_test_bmc(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(TestCallbacks::default()),
+            TestBmcConfig::default(),
             "sse-test".into(),
             auth,
             MachineRouterOptions {
@@ -836,11 +836,10 @@ mod tests {
 
     use super::fixtures::{event, json_body, limits, metric, request, router, state};
     use super::*;
-    use crate::test_support::{TestCallbacks, host_info, serve_https};
-    use crate::{
-        BmcEvent, BmcState, EventServiceOverride, HardwareType, MachineRouterOptions,
-        machine_router,
+    use crate::test_support::{
+        TestBmcConfig, TestCallbacks, create_test_bmc, host_info, serve_https,
     };
+    use crate::{BmcEvent, BmcState, EventServiceOverride, HardwareType, MachineRouterOptions};
 
     #[test]
     fn configuration_rejects_unbounded_or_invalid_limits() {
@@ -862,11 +861,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn poisoned_state_does_not_panic_in_destructors() {
-        let (router, bmc) = machine_router(
+    #[tokio::test]
+    async fn poisoned_state_does_not_panic_in_destructors() {
+        let (router, bmc) = create_test_bmc(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(TestCallbacks::default()),
+            TestBmcConfig::default(),
             "poison".into(),
             false,
             MachineRouterOptions::default(),
@@ -996,9 +995,9 @@ mod tests {
     }
 
     fn router_with(limits: EventServiceConfig) -> (Router, BmcState<TestCallbacks>) {
-        machine_router(
+        create_test_bmc(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(TestCallbacks::default()),
+            TestBmcConfig::default(),
             "sse-limits-test".into(),
             false,
             MachineRouterOptions {
@@ -1129,9 +1128,9 @@ mod tests {
                 } else {
                     host_info(hardware)
                 };
-                let (router, state) = machine_router(
+                let (router, state) = create_test_bmc(
                     &info,
-                    Arc::new(TestCallbacks::default()),
+                    TestBmcConfig::default(),
                     "hardware-event-service".into(),
                     false,
                     MachineRouterOptions {
@@ -1300,9 +1299,9 @@ mod tests {
 
     #[tokio::test]
     async fn ipmi_cold_reset_closes_stream_and_invalidates_replay() {
-        let (router, bmc) = machine_router(
+        let (router, bmc) = create_test_bmc(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(TestCallbacks::default()),
+            TestBmcConfig::default(),
             "ipmi-reset".into(),
             false,
             MachineRouterOptions {
@@ -1881,9 +1880,9 @@ mod tests {
 
     #[tokio::test]
     async fn manager_reset_without_outage_still_closes_sse() {
-        let (router, bmc) = machine_router(
+        let (router, bmc) = create_test_bmc(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(TestCallbacks::default()),
+            TestBmcConfig::default(),
             "reset-test".into(),
             false,
             MachineRouterOptions::default(),
@@ -1973,9 +1972,9 @@ mod tests {
         assert_eq!(count(&router, &entries).await, before + 2);
 
         // A profile without a log service still publishes, pointing at the system.
-        let (bare, bare_bmc) = machine_router(
+        let (bare, bare_bmc) = create_test_bmc(
             &host_info(HardwareType::GenericAmi),
-            Arc::new(TestCallbacks::default()),
+            TestBmcConfig::default(),
             "bare-log".into(),
             false,
             MachineRouterOptions::default(),

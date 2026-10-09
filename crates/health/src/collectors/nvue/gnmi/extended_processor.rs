@@ -24,6 +24,7 @@ use std::time::Instant;
 
 use super::client::{typed_value_to_f64, typed_value_to_string};
 use super::proto::{self, PathElem};
+use super::reconciliation::MetricReconciler;
 use super::sample_processor::now_unix_secs;
 use super::subscriber::GnmiStreamMetrics;
 use crate::config::{NvueGnmiMetricConfig, NvueGnmiMetricOutput, NvueGnmiSubscriptionConfig};
@@ -39,7 +40,7 @@ pub(super) struct ExtendedGnmiProcessor {
     pub(super) subscription_name: String,
     pub(super) switch_id: String,
     mappings: HashMap<Vec<String>, NvueGnmiMetricConfig>,
-    retained_sources: HashMap<(String, String, String), Vec<PathElem>>,
+    pub(super) reconciliation: Arc<MetricReconciler>,
 }
 
 impl ExtendedGnmiProcessor {
@@ -60,12 +61,15 @@ impl ExtendedGnmiProcessor {
             .collect();
 
         Self {
+            reconciliation: Arc::new(MetricReconciler::new(
+                data_sink.clone(),
+                event_context.clone(),
+            )),
             data_sink,
             event_context,
             subscription_name: config.name.clone(),
             switch_id,
             mappings,
-            retained_sources: HashMap::new(),
         }
     }
 
@@ -138,37 +142,12 @@ impl ExtendedGnmiProcessor {
         for path in &notification.delete {
             let combined = prefix.iter().chain(&path.elem).collect::<Vec<_>>();
 
-            let Some(sink) = &self.data_sink else {
-                continue;
-            };
-
             // A reading belongs to its last source, including when different
             // paths project to the same metric and labels.
-            self.retained_sources
-                .retain(|(key, metric_type, unit), source| {
-                    if source.len() < combined.len()
-                        || !source.iter().zip(&combined).all(|(actual, deleted)| {
-                            actual.name == deleted.name
-                                && deleted
-                                    .key
-                                    .iter()
-                                    .all(|(key, value)| actual.key.get(key) == Some(value))
-                        })
-                    {
-                        return true;
-                    }
-
-                    sink.prune_metric_key(&self.event_context, key, metric_type, unit);
-
-                    false
-                });
+            self.reconciliation.delete(&combined);
         }
 
         for update in &notification.update {
-            let Some(value) = update.val.as_ref() else {
-                continue;
-            };
-
             let update_path = update
                 .path
                 .as_ref()
@@ -176,6 +155,12 @@ impl ExtendedGnmiProcessor {
                 .unwrap_or_default();
 
             let combined = prefix.iter().chain(update_path).collect::<Vec<_>>();
+
+            self.reconciliation.touch(&combined);
+
+            let Some(value) = update.val.as_ref() else {
+                continue;
+            };
 
             let names = combined
                 .iter()
@@ -192,14 +177,7 @@ impl ExtendedGnmiProcessor {
                         continue;
                     };
 
-                    self.retained_sources.insert(
-                        (
-                            sample.key.clone(),
-                            sample.metric_type.clone(),
-                            sample.unit.clone(),
-                        ),
-                        combined.iter().map(|element| (*element).clone()).collect(),
-                    );
+                    self.reconciliation.record(&sample, &combined);
 
                     sink.handle_event(
                         &self.event_context,
@@ -537,6 +515,215 @@ mod tests {
 
     fn stream_metrics() -> GnmiStreamMetrics {
         super::super::subscriber::test_gnmi_stream_metrics()
+    }
+
+    #[test]
+    fn reconciliation_preserves_present_and_live_touched_readings_without_replay() {
+        let output = NvueGnmiMetricOutput::StateSet {
+            states: vec!["up".into(), "down".into()],
+        };
+
+        let config = subscription(output.clone());
+        let (mut processor, sink) = processor(output);
+
+        let mut update = notification(
+            Some(proto::TypedValue {
+                value: Some(proto::typed_value::Value::StringVal("up".into())),
+            }),
+            true,
+        );
+
+        for id in [
+            "removed",
+            "present",
+            "val-less",
+            "empty-value",
+            "touched",
+            "recreated",
+            "unprojectable",
+            "live-val-less",
+        ] {
+            update.update[0].path.as_mut().unwrap().elem[0]
+                .key
+                .insert("name".into(), id.into());
+
+            processor.process_notification(&update);
+        }
+
+        let request = super::super::client::build_snapshot_request(
+            super::super::client::build_extended_subscribe_request(&config).unwrap(),
+        );
+
+        let mut snapshot = processor.reconciliation.begin(&request).unwrap();
+        let emitted = captured_metrics(&sink).len();
+
+        update.prefix.as_mut().unwrap().origin = "openconfig".into();
+        update.update[0].val.as_mut().unwrap().value =
+            Some(proto::typed_value::Value::StringVal("down".into()));
+
+        for (id, value) in [
+            ("present", update.update[0].val.clone()),
+            ("val-less", None),
+            ("empty-value", Some(proto::TypedValue::default())),
+        ] {
+            let mut present = update.clone();
+            present.update[0].path.as_mut().unwrap().elem[0]
+                .key
+                .insert("name".into(), id.into());
+
+            present.update[0].val = value;
+
+            snapshot
+                .process_response(&proto::SubscribeResponse {
+                    response: Some(proto::subscribe_response::Response::Update(present)),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        assert_eq!(captured_metrics(&sink).len(), emitted);
+
+        let mut unrelated = update.clone();
+        unrelated.update[0]
+            .path
+            .as_mut()
+            .unwrap()
+            .elem
+            .last_mut()
+            .unwrap()
+            .name = "unmapped".into();
+
+        unrelated.update[0].val.as_mut().unwrap().value =
+            Some(proto::typed_value::Value::JsonVal(b"{}".to_vec()));
+
+        snapshot
+            .process_response(&proto::SubscribeResponse {
+                response: Some(proto::subscribe_response::Response::Update(unrelated)),
+                ..Default::default()
+            })
+            .unwrap();
+
+        for id in ["touched", "new", "recreated"] {
+            update.update[0].path.as_mut().unwrap().elem[0]
+                .key
+                .insert("name".into(), id.into());
+
+            if id == "recreated" {
+                let deleted = update.update[0].path.clone().unwrap();
+
+                processor.process_notification(&proto::Notification {
+                    prefix: update.prefix.clone(),
+                    delete: vec![deleted],
+                    ..Default::default()
+                });
+            }
+
+            processor.process_notification(&update);
+        }
+
+        update.update[0].path.as_mut().unwrap().elem[0]
+            .key
+            .insert("name".into(), "unprojectable".into());
+
+        update.update[0].val.as_mut().unwrap().value =
+            Some(proto::typed_value::Value::StringVal("unknown".into()));
+
+        processor.process_notification(&update);
+
+        update.update[0].path.as_mut().unwrap().elem[0]
+            .key
+            .insert("name".into(), "live-val-less".into());
+
+        update.update[0].val = None;
+        processor.process_notification(&update);
+
+        let prunes_before = sink.prunes.lock().unwrap().len();
+
+        assert_eq!(processor.reconciliation.finish(Some(snapshot)), 2);
+        let prunes = sink.prunes.lock().unwrap();
+
+        assert_eq!(prunes.len() - prunes_before, 2);
+
+        assert!(
+            prunes[prunes_before..]
+                .iter()
+                .all(|(key, _, _)| key.contains("removed"))
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn reconciliation_rejects_unsupported_snapshot_paths_and_values() {
+        let config = subscription(NvueGnmiMetricOutput::Gauge {
+            unit: "count".into(),
+        });
+
+        let request = super::super::client::build_snapshot_request(
+            super::super::client::build_extended_subscribe_request(&config).unwrap(),
+        );
+
+        let valid = notification(
+            Some(proto::TypedValue {
+                value: Some(proto::typed_value::Value::UintVal(1)),
+            }),
+            true,
+        );
+
+        type Invalidate = fn(&mut proto::Notification);
+
+        let cases: &[(&str, Invalidate)] = &[
+            ("target", |n| {
+                n.prefix.as_mut().unwrap().target = "other".into()
+            }),
+            ("origin", |n| {
+                n.prefix.as_mut().unwrap().origin = "other".into()
+            }),
+            ("scope", |n| {
+                n.prefix.as_mut().unwrap().elem[0].name = "components".into()
+            }),
+            ("keys", |n| {
+                n.update[0].path.as_mut().unwrap().elem[0].key =
+                    [("unknown".into(), "port-1".into())].into()
+            }),
+            ("missing key", |n| {
+                n.update[0].path.as_mut().unwrap().elem[0].key.clear()
+            }),
+            ("container path", |n| {
+                n.update[0].path.as_mut().unwrap().elem.pop();
+            }),
+            ("aggregate", |n| {
+                n.update[0].val.as_mut().unwrap().value =
+                    Some(proto::typed_value::Value::JsonVal(b"{}".to_vec()))
+            }),
+            ("legacy Delete", |n| {
+                n.delete.push(proto::Path {
+                    element: vec!["interface[name=port-1]".into()],
+                    ..Default::default()
+                })
+            }),
+        ];
+
+        for (name, invalidate) in cases {
+            let (mut processor, sink) = processor(config.metrics[0].output.clone());
+            processor.process_notification(&valid);
+            let mut snapshot = processor.reconciliation.begin(&request).unwrap();
+            let mut notification = valid.clone();
+
+            invalidate(&mut notification);
+
+            assert!(
+                snapshot
+                    .process_response(&proto::SubscribeResponse {
+                        response: Some(proto::subscribe_response::Response::Update(notification)),
+                        ..Default::default()
+                    })
+                    .is_err(),
+                "{name}"
+            );
+
+            assert_eq!(processor.reconciliation.finish(None), 0, "{name}");
+            assert!(sink.prunes.lock().unwrap().is_empty(), "{name}");
+        }
     }
 
     #[test]

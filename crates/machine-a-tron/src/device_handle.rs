@@ -19,8 +19,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bmc_mock::injection::InjectionStore;
-use bmc_mock::{ActionError, HostMachineInfo, MockPowerState, ResourceResetType};
+use bmc_mock::{ActionError, HostMachineInfo, ResourceResetType};
 use carbide_uuid::machine::MachineId;
+use nv_redfish::schema::resource::PowerState;
 use uuid::Uuid;
 
 use crate::api_client::ApiClient;
@@ -79,7 +80,7 @@ impl DeviceHandle {
         }
     }
 
-    pub(crate) fn power_state(&self) -> MockPowerState {
+    pub(crate) fn power_state(&self) -> PowerState {
         match &self.0 {
             DeviceHandleInner::Machine(handle) => handle.power_state(),
             DeviceHandleInner::Switch(handle) => handle.power_state(),

@@ -12,11 +12,12 @@ use tonic::transport::Channel;
 use trace_propagation::TraceInjectService;
 use tracing::instrument;
 
+use crate::component_common::ComponentPowerStateResult;
 use crate::config::BackendTlsConfig;
 use crate::error::ComponentManagerError;
 use crate::nv_switch_manager::{
     ConfigureSwitchCertificateJobStatus, NvSwitchManager, SwitchComponentResult, SwitchEndpoint,
-    SwitchFirmwareUpdateStatus, SwitchPowerStateResult, SwitchSlotAndTrayResult,
+    SwitchFirmwareUpdateStatus, SwitchSlotAndTrayResult,
 };
 use crate::proto::nsm;
 use crate::types::parse_mac;
@@ -373,14 +374,13 @@ impl NvSwitchManager for NsmSwitchBackend {
     async fn get_power_state(
         &self,
         endpoints: &[SwitchEndpoint],
-    ) -> Result<Vec<SwitchPowerStateResult>, ComponentManagerError> {
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
         tracing::warn!("get power state is not supported by NSM backend, passthrough");
         Ok(endpoints
             .iter()
-            .map(|ep| SwitchPowerStateResult {
-                bmc_mac: ep.bmc_mac,
-                power_state: None,
-                error: None,
+            .map(|ep| ComponentPowerStateResult {
+                mac_address: ep.bmc_mac,
+                power_state: Ok(None),
             })
             .collect())
     }

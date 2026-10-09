@@ -1902,34 +1902,37 @@ fn warn_report_diff(report1: &EndpointExplorationReport, report2: &EndpointExplo
         )
     }
 
-    if report1.physical_slot_number != report2.physical_slot_number {
+    let position1 = report1.rack_position();
+    let position2 = report2.rack_position();
+
+    if position1.physical_slot_number != position2.physical_slot_number {
         tracing::warn!(
-            libredfish_physical_slot_number = ?report1.physical_slot_number,
-            nvredfish_physical_slot_number = ?report2.physical_slot_number,
+            libredfish_physical_slot_number = ?position1.physical_slot_number,
+            nvredfish_physical_slot_number = ?position2.physical_slot_number,
             "physical slot numbers are not equal"
         )
     }
 
-    if report1.compute_tray_index != report2.compute_tray_index {
+    if position1.compute_tray_index != position2.compute_tray_index {
         tracing::warn!(
-            libredfish_compute_tray_index = ?report1.compute_tray_index,
-            nvredfish_compute_tray_index = ?report2.compute_tray_index,
+            libredfish_compute_tray_index = ?position1.compute_tray_index,
+            nvredfish_compute_tray_index = ?position2.compute_tray_index,
             "compute tray indexes are not equal"
         )
     }
 
-    if report1.topology_id != report2.topology_id {
+    if position1.topology_id != position2.topology_id {
         tracing::warn!(
-            libredfish_topology_id = ?report1.topology_id,
-            nvredfish_topology_id = ?report2.topology_id,
+            libredfish_topology_id = ?position1.topology_id,
+            nvredfish_topology_id = ?position2.topology_id,
             "topology IDs are not equal"
         )
     }
 
-    if report1.revision_id != report2.revision_id {
+    if position1.revision_id != position2.revision_id {
         tracing::warn!(
-            libredfish_revision_id = ?report1.revision_id,
-            nvredfish_revision_id = ?report2.revision_id,
+            libredfish_revision_id = ?position1.revision_id,
+            nvredfish_revision_id = ?position2.revision_id,
             "revision IDs are not equal"
         )
     }

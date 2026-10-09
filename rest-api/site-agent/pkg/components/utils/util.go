@@ -4,10 +4,9 @@
 package utils
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -25,20 +24,13 @@ import (
 const (
 	// SiteStatus path is status
 	SiteStatus = "/status"
-	// VPCStatus path is status-vpc
-	VPCStatus = "/status-vpc"
-	// SubnetStatus path is status-subnet
-	SubnetStatus = "/status-subnet"
-	// InstanceStatus path is status-instance
-	InstanceStatus = "/status-instance"
-	// MachineStatus path is status-machine
-	MachineStatus = "/status-machine"
-	// DatastoreStatus path is status-datastore
-	DatastoreStatus = "/status-datastore"
-	// InfiniBandPartitionStatus path is status-infinibandpartition"
-	InfiniBandPartitionStatus = "/status-infinibandpartition"
-	// SSHKeyGroupStatus path is status-sshkeygroup"
-	SSHKeyGroupStatus = "/status-sshkeygroup"
+	// LivenessStatus path is healthz
+	LivenessStatus = "/healthz"
+	// ReadinessStatus path is readyz
+	ReadinessStatus = "/readyz"
+	// DefaultStatusPort is the port the Site Agent serves its status page and probes on
+	// when ESA_PORT is unset.
+	DefaultStatusPort = "8080"
 	// ParamName in URI
 	ParamName = "name"
 )
@@ -104,7 +96,7 @@ func RetryWithExponentialBackoff(client *http.Client, req *http.Request,
 			if !httpIsRetryable(resp) {
 				return nil, badStatus
 			}
-			req.Body = ioutil.NopCloser(bytes.NewReader(reqBody))
+			req.Body = io.NopCloser(bytes.NewReader(reqBody))
 			sleepTime := float64(delayMs) * math.Pow(backoff, float64(i+1))
 			log.Info().Msgf("sleeping for %v", sleepTime)
 			time.Sleep(time.Duration(sleepTime) * time.Millisecond)
@@ -124,22 +116,13 @@ func ConvertTimestampToVersion(ts *timestamppb.Timestamp) (uint64, error) {
 	return uint64(stdTime.UnixMicro()), nil
 }
 
-// GetSAStatus - Get Status from elektra agent
-func GetSAStatus(path string) {
-	addr := os.Getenv("ESA_PORT")
-	resp, err := http.Get("http://localhost:" + addr + path)
-	if err != nil {
-		fmt.Println(err.Error())
-		return
+// StatusPort returns the port the Site Agent serves its status page and probes on.
+func StatusPort() string {
+	port := os.Getenv("ESA_PORT")
+	if port == "" {
+		return DefaultStatusPort
 	}
-	defer resp.Body.Close()
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		fmt.Println(scanner.Text())
-	}
-	if err = scanner.Err(); err != nil {
-		fmt.Println(err.Error())
-	}
+	return port
 }
 
 // SiteHealth derives aggregate health from Core, Temporal, and enabled Flow state.

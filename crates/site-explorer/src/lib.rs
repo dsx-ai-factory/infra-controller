@@ -179,9 +179,10 @@ pub fn enrich_endpoint_exploration_report(
                 "Can not find firmware info"
             );
         }
-
-        // Derive position from the collected chassis and processor inventory.
-        report.parse_position_info()
+        // Persist cached position fields so older versions can read reports after rollback.
+        // TODO: Remove this compatibility call after release 2.5.
+        #[allow(deprecated)]
+        report.parse_position_info();
     } else {
         tracing::info!("Generating PowerShelfId for power shelf");
         if let Err(error) = report.generate_power_shelf_id() {
@@ -4936,6 +4937,36 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn enrichment_serializes_rack_position_for_older_versions() {
+        let mut report = EndpointExplorationReport {
+            systems: vec![ComputerSystem {
+                id: "HGX_Baseboard_0".into(),
+                processors: Some(vec![model::site_explorer::Processor {
+                    id: "GPU_0".into(),
+                    model: None,
+                    physical_slot_number: Some(26),
+                    compute_tray_index: Some(16),
+                }]),
+                ..Default::default()
+            }],
+            chassis: vec![model::site_explorer::Chassis {
+                topology_id: Some(7),
+                revision_id: Some(2),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let firmware = carbide_firmware::FirmwareConfig::default().create_snapshot();
+        enrich_endpoint_exploration_report(&mut report, &firmware);
+
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["PhysicalSlotNumber"], 26);
+        assert_eq!(json["ComputeTrayIndex"], 16);
+        assert_eq!(json["TopologyId"], 7);
+        assert_eq!(json["RevisionId"], 2);
+    }
 
     #[test]
     fn power_shelf_already_exists_cases() {

@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::rack::{RackGroupId, RackId};
 use model::expected_rack_group::{
     ExpectedRackGroup, ExpectedRackGroupRack, RackGroupProtocol, RackGroupTopology,
@@ -14,7 +15,8 @@ use sqlx::{FromRow, PgConnection};
 
 use crate::{DatabaseError, DatabaseResult};
 
-#[derive(FromRow)]
+#[derive(FromRow, carbide_macros::DbTable)]
+#[db_table(name = "expected_rack_groups")]
 struct GroupRow {
     rack_group_id: RackGroupId,
     topology: String,
@@ -45,12 +47,15 @@ pub async fn find_by_rack_group_id(
     txn: &mut PgConnection,
     rack_group_id: &RackGroupId,
 ) -> DatabaseResult<Option<ExpectedRackGroup>> {
-    let query = "SELECT rack_group_id, topology, protocol, racks, metadata_name, metadata_description, metadata_labels FROM expected_rack_groups WHERE rack_group_id=$1";
-    let Some(row): Option<GroupRow> = sqlx::query_as(query)
+    let query = format!(
+        "SELECT {} FROM expected_rack_groups WHERE rack_group_id=$1",
+        GroupRow::db_table_columns()
+    );
+    let Some(row): Option<GroupRow> = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(rack_group_id)
         .fetch_optional(&mut *txn)
         .await
-        .map_err(|err| DatabaseError::query(query, err))?
+        .map_err(|err| DatabaseError::query(&query, err))?
     else {
         return Ok(None);
     };
@@ -62,24 +67,30 @@ pub async fn find_by_rack_id(
     txn: &mut PgConnection,
     rack_id: &RackId,
 ) -> DatabaseResult<Vec<ExpectedRackGroup>> {
-    let query = "SELECT rack_group_id, topology, protocol, racks, metadata_name, metadata_description, metadata_labels FROM expected_rack_groups WHERE racks @> $1 ORDER BY rack_group_id LIMIT 2 FOR SHARE";
-    let rows: Vec<GroupRow> = sqlx::query_as(query)
+    let query = format!(
+        "SELECT {} FROM expected_rack_groups WHERE racks @> $1 ORDER BY rack_group_id LIMIT 2 FOR SHARE",
+        GroupRow::db_table_columns()
+    );
+    let rows: Vec<GroupRow> = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(sqlx::types::Json(
             serde_json::json!([{"rack_id": rack_id.as_str()}]),
         ))
         .fetch_all(txn)
         .await
-        .map_err(|err| DatabaseError::query(query, err))?;
+        .map_err(|err| DatabaseError::query(&query, err))?;
     Ok(rows.into_iter().map(GroupRow::into_group).collect())
 }
 
 /// Returns all expected rack groups ordered by their external ID.
 pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<ExpectedRackGroup>> {
-    let query = "SELECT rack_group_id, topology, protocol, racks, metadata_name, metadata_description, metadata_labels FROM expected_rack_groups ORDER BY rack_group_id";
-    let rows: Vec<GroupRow> = sqlx::query_as(query)
+    let query = format!(
+        "SELECT {} FROM expected_rack_groups ORDER BY rack_group_id",
+        GroupRow::db_table_columns()
+    );
+    let rows: Vec<GroupRow> = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .fetch_all(&mut *txn)
         .await
-        .map_err(|err| DatabaseError::query(query, err))?;
+        .map_err(|err| DatabaseError::query(&query, err))?;
 
     Ok(rows.into_iter().map(GroupRow::into_group).collect())
 }
@@ -96,13 +107,16 @@ pub async fn find_by_ids(
     txn: &mut PgConnection,
     ids: &[RackGroupId],
 ) -> DatabaseResult<Vec<ExpectedRackGroup>> {
-    let query = "SELECT rack_group_id, topology, protocol, racks, metadata_name, metadata_description, metadata_labels FROM expected_rack_groups WHERE rack_group_id = ANY($1) ORDER BY rack_group_id";
+    let query = format!(
+        "SELECT {} FROM expected_rack_groups WHERE rack_group_id = ANY($1) ORDER BY rack_group_id",
+        GroupRow::db_table_columns()
+    );
     let values: Vec<&str> = ids.iter().map(RackGroupId::as_str).collect();
-    let rows: Vec<GroupRow> = sqlx::query_as(query)
+    let rows: Vec<GroupRow> = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(values)
         .fetch_all(txn)
         .await
-        .map_err(|err| DatabaseError::query(query, err))?;
+        .map_err(|err| DatabaseError::query(&query, err))?;
     Ok(rows.into_iter().map(GroupRow::into_group).collect())
 }
 

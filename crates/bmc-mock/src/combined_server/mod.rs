@@ -166,8 +166,10 @@ impl CombinedServer {
     }
 
     pub async fn wait(&mut self) -> std::io::Result<()> {
-        if let Some(join_handle) = self.join_handle.take() {
-            join_handle.await.expect("join error")
+        if let Some(join_handle) = self.join_handle.as_mut() {
+            let result = join_handle.await.expect("join error");
+            self.join_handle.take();
+            result
         } else {
             Ok(())
         }

@@ -7,6 +7,7 @@ package report
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -170,6 +171,91 @@ func TestTracker_FailStage_truncatesLongError(t *testing.T) {
 
 	assert.Len(t, tr.Report.Stages[1].Error, maxErrLen)
 	assert.Len(t, tr.Report.Error, maxErrLen)
+}
+
+func TestTracker_FinishStep_preservesObservedOutcome(t *testing.T) {
+	for _, stepErr := range []error{nil, errors.New(strings.Repeat("x", maxErrLen+50))} {
+		t.Run(fmt.Sprint(stepErr != nil), func(t *testing.T) {
+			tr := &Tracker{Report: NewInitial(twoStageRule(), map[devicetypes.ComponentType]int{devicetypes.ComponentTypeCompute: 2})}
+			start := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
+			tr.BeginStage(2, start)
+			require.NoError(t, tr.SetStepProgress(2, "Compute", 2, 0))
+			tr.FinishStep(2, "Compute", stepErr, start.Add(time.Second))
+			tr.FinishStep(2, "Compute", errors.New("duplicate outcome"), start.Add(2*time.Second))
+			tr.FailStage(2, errors.New("sibling failure"), start.Add(3*time.Second))
+			step := tr.Report.Stages[1].Steps[0]
+			require.Equal(t, "2026-05-28T12:00:01Z", step.FinishedAt)
+			require.Equal(t, 2, step.CompletedComponents)
+			if stepErr == nil {
+				require.Equal(t, StatusCompleted, step.Status)
+				require.Empty(t, step.Error)
+			} else {
+				require.Equal(t, StatusFailed, step.Status)
+				require.Equal(t, strings.Repeat("x", maxErrLen), step.Error)
+			}
+		})
+	}
+}
+
+func TestTracker_SetStepProgress(t *testing.T) {
+	tests := []struct {
+		name              string
+		stageNumber       int
+		componentType     string
+		completed         int
+		failed            int
+		wantErrorContains string
+	}{
+		{
+			name:          "sets terminal counters",
+			stageNumber:   2,
+			componentType: "Compute",
+			completed:     2,
+			failed:        1,
+		},
+		{
+			name:              "rejects terminal count above total",
+			stageNumber:       2,
+			componentType:     "Compute",
+			completed:         3,
+			failed:            1,
+			wantErrorContains: "exceeds total",
+		},
+		{
+			name:              "rejects an unknown step",
+			stageNumber:       1,
+			componentType:     "Compute",
+			completed:         1,
+			wantErrorContains: "not found",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tracker := &Tracker{Report: NewInitial(
+				twoStageRule(),
+				map[devicetypes.ComponentType]int{
+					devicetypes.ComponentTypeCompute: 3,
+				},
+			)}
+
+			err := tracker.SetStepProgress(
+				tc.stageNumber,
+				tc.componentType,
+				tc.completed,
+				tc.failed,
+			)
+			if tc.wantErrorContains != "" {
+				require.ErrorContains(t, err, tc.wantErrorContains)
+				return
+			}
+
+			require.NoError(t, err)
+			step := tracker.Report.Stages[1].Steps[0]
+			assert.Equal(t, tc.completed, step.CompletedComponents)
+			assert.Equal(t, tc.failed, step.FailedComponents)
+		})
+	}
 }
 
 func TestTracker_skippedStepsAreNotMutated(t *testing.T) {

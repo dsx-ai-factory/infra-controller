@@ -35,10 +35,7 @@ fn quote_identifier(identifier: &str) -> String {
 }
 
 fn drop_database_query(db_name: &str) -> String {
-    format!(
-        "drop database if exists {} WITH (FORCE);",
-        quote_identifier(db_name)
-    )
+    format!("drop database if exists {}", quote_identifier(db_name))
 }
 
 fn create_database_query(db_name: &str) -> String {
@@ -173,43 +170,24 @@ async fn init_pool() -> PgPool {
         .after_release(|_conn, _| Box::pin(async move { Ok(false) }))
         .connect_lazy_with(opts);
 
-    // Terminate any existing connections to the template database
-    sqlx::query(
-        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid();",
-    )
-        .bind(TEMPLATE_DB)
-        .execute(&root_pool)
-        .await
-        .ok(); // Ignore errors if no connections exist
-
-    // Wait a moment for PostgreSQL to clean up terminated connections
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-    // Try to drop and recreate the template database
-    // Use WITH (FORCE) to forcefully disconnect any lingering sessions
     let drop_template_query = drop_database_query(TEMPLATE_DB);
-    let dropped = root_pool
+    root_pool
         .execute(sqlx::AssertSqlSafe(drop_template_query))
         .await
-        .is_ok();
+        .expect("cannot cleanup template database");
 
-    if !dropped {
-        eprintln!("Note: Template database is in use, reusing existing version");
-    } else {
-        // Create and migrate template database
-        let create_template_query = create_database_query(TEMPLATE_DB);
-        root_pool
-            .execute(sqlx::AssertSqlSafe(create_template_query))
-            .await
-            .expect("cannot create template database");
-        let root_opts: std::sync::Arc<PgConnectOptions> = root_pool.connect_options();
-        let template_opts = root_opts.deref().clone().database(TEMPLATE_DB);
-        let template_pool = PoolOptions::new().connect_lazy_with(template_opts);
-        db::migrations::migrate(&template_pool)
-            .await
-            .expect("cannot migrate DB used as template");
-        template_pool.close().await;
-    }
+    let create_template_query = create_database_query(TEMPLATE_DB);
+    root_pool
+        .execute(sqlx::AssertSqlSafe(create_template_query))
+        .await
+        .expect("cannot create template database");
+    let root_opts: std::sync::Arc<PgConnectOptions> = root_pool.connect_options();
+    let template_opts = root_opts.deref().clone().database(TEMPLATE_DB);
+    let template_pool = PoolOptions::new().connect_lazy_with(template_opts);
+    db::migrations::migrate(&template_pool)
+        .await
+        .expect("cannot migrate DB used as template");
+    template_pool.close().await;
     root_pool
 }
 
@@ -227,19 +205,6 @@ async fn test_context(args: &TestArgs) -> Result<TestContext<Postgres>, sqlx::Er
         .await?
         .execute(sqlx::AssertSqlSafe(drop_test_query))
         .await?;
-
-    // Terminate connections to template database before copying from it
-    // PostgreSQL requires exclusive access to template databases
-    sqlx::query(
-        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid();",
-    )
-        .bind(TEMPLATE_DB)
-        .execute(pool)
-        .await
-        .ok(); // Ignore if no connections
-
-    // Wait for PostgreSQL to fully close terminated connections
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let create_test_query = create_database_from_template_query(&new_db_name);
     pool.acquire()

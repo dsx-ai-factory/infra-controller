@@ -209,6 +209,10 @@ async fn expected_rack_group_persistence(
         find_by_rack_group_id(&mut txn, &expected.rack_group_id).await?,
         Some(expected.clone())
     );
+    assert_eq!(
+        find_by_rack_id(&mut txn, &expected.racks[0].rack_id).await?,
+        vec![expected.clone()]
+    );
     // Declaration is independent of device discovery and rack ingestion.
     create(&mut txn, &group("group-a")).await?;
     assert_eq!(

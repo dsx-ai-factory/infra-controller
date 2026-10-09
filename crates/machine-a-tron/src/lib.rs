@@ -39,6 +39,7 @@ mod machine_utils;
 mod mock_ssh_server;
 mod power_shelf_fsm;
 mod power_shelf_simulator;
+mod power_state;
 mod rack;
 mod run_jitter;
 mod scout_stream;

@@ -13,6 +13,7 @@ use model::component_manager::{
 use model::rack_type::RackHardwareTopology;
 use model::switch::FabricManagerStatus;
 
+use crate::component_common::ComponentPowerStateResult;
 use crate::error::ComponentManagerError;
 use crate::types::FirmwareUpdateOptions;
 
@@ -140,23 +141,6 @@ pub struct SwitchSlotAndTrayResult {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct SwitchPowerStateResult {
-    pub bmc_mac: MacAddress,
-    pub power_state: Option<String>,
-    pub error: Option<String>,
-}
-
-impl crate::component_common::ComponentPowerStateResult for SwitchPowerStateResult {
-    fn power_state(&self) -> Option<&str> {
-        self.power_state.as_deref()
-    }
-
-    fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigureSwitchCertificateJobStatus {
     pub state: ConfigureSwitchCertificateState,
@@ -257,7 +241,8 @@ pub struct SwitchFactoryResetJobStatus {
 /// Implementations receive physical endpoint information (BMC + NVOS IPs/MACs)
 /// and handle registration with the backend service internally. The
 /// service-generated UUID is used for the actual operation and never exposed
-/// to the caller; results are keyed by `bmc_mac`.
+/// to the caller; results are keyed by the BMC MAC (`bmc_mac`, or `mac_address`
+/// for power observations).
 ///
 /// Password rotation is split into capability discovery, submission, and
 /// observation. This keeps backend-specific job handling here while leaving
@@ -310,10 +295,13 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
         endpoints: &[SwitchEndpoint],
     ) -> Result<Vec<SwitchSlotAndTrayResult>, ComponentManagerError>;
 
+    /// Reads power observations in endpoint order, identified by each switch's
+    /// BMC MAC. Per-switch absence and errors are represented in each result;
+    /// an error preparing the request can fail the whole call.
     async fn get_power_state(
         &self,
         endpoints: &[SwitchEndpoint],
-    ) -> Result<Vec<SwitchPowerStateResult>, ComponentManagerError>;
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError>;
     async fn configure_switch_certificate(
         &self,
         endpoint: &SwitchEndpoint,

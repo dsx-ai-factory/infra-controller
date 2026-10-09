@@ -33,6 +33,7 @@ use url::Url;
 
 use crate::metrics::BmcLatencyAttribute;
 
+const MAX_GNMI_RECONCILE_INTERVAL: Duration = Duration::from_secs(366 * 24 * 60 * 60);
 const DEFAULT_BMC_REQUEST_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(3);
 const ENDPOINT_SOURCES_CONFIG_KEY: &str = "endpoint_sources";
 const NICO_API_CONFIG_KEY: &str = "nico_api";
@@ -1942,7 +1943,8 @@ pub struct NvueGnmiConfig {
     ///
     /// One attempt may take nearly three times this duration before reconnect
     /// backoff. Updates before `sync_response=true` do not extend the
-    /// synchronization timeout.
+    /// synchronization timeout. gNMI reconciliation uses this duration as one
+    /// overall deadline, including credentials, connection, and the complete snapshot.
     #[serde(with = "humantime_serde")]
     pub request_timeout: Duration,
 
@@ -1954,6 +1956,16 @@ pub struct NvueGnmiConfig {
     /// Enable gNMI ON_CHANGE subscription for live system-event messages.
     #[serde(alias = "system_events_subscription_enabled", alias = "events_enabled")]
     pub system_events_enabled: bool,
+
+    /// Interval between complete snapshots used to remove stale metrics from each gNMI stream.
+    /// Omission or zero disables reconciliation. Positive intervals up to 366 days enable it.
+    /// A complete empty snapshot removes cached metrics unless live updates protect them.
+    /// The `system_events_reconcile_interval` alias also applies to every stream.
+    #[serde(
+        with = "humantime_serde::option",
+        alias = "system_events_reconcile_interval"
+    )]
+    pub reconcile_interval: Option<Duration>,
 
     /// gNMI SAMPLE subscription paths.
     pub paths: NvueGnmiPaths,
@@ -1973,6 +1985,7 @@ impl Default for NvueGnmiConfig {
             request_timeout: Duration::from_secs(30),
             dangerously_skip_tls_verification: false,
             system_events_enabled: true,
+            reconcile_interval: None,
             paths: NvueGnmiPaths::default(),
             additional_subscriptions: Vec::new(),
         }
@@ -1980,7 +1993,25 @@ impl Default for NvueGnmiConfig {
 }
 
 impl NvueGnmiConfig {
-    fn validate(&self) -> Result<(), String> {
+    /// Checks subscription configuration before collector activation.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self
+            .reconcile_interval
+            .is_some_and(|interval| interval > MAX_GNMI_RECONCILE_INTERVAL)
+        {
+            return Err(
+                "collectors.nvue.gnmi.reconcile_interval must not exceed 366 days".to_string(),
+            );
+        }
+
+        if self
+            .reconcile_interval
+            .is_some_and(|interval| !interval.is_zero())
+            && self.request_timeout.is_zero()
+        {
+            return Err("collectors.nvue.gnmi.request_timeout must be positive when gNMI reconciliation is enabled".to_string());
+        }
+
         if let Some(interface_paths) = &self.paths.interface_paths {
             let config_path = "collectors.nvue.gnmi.paths.interface_paths";
 
@@ -3005,6 +3036,49 @@ mod tests {
     use carbide_test_support::{Check, check_values, scenarios, value_scenarios};
 
     use super::*;
+
+    #[test]
+    fn gnmi_reconciliation_config_contract() {
+        for (input, seconds, valid) in [
+            ("", None, true),
+            ("reconcile_interval = '0s'", Some(0), true),
+            ("reconcile_interval = '2m'", Some(120), true),
+            ("reconcile_interval = '366d'", Some(31622400), true),
+            ("reconcile_interval = '31622401s'", Some(31622401), false),
+            ("system_events_reconcile_interval = '30m'", Some(1800), true),
+            ("request_timeout = '0s'", None, true),
+            (
+                "request_timeout = '0s'\nreconcile_interval = '30m'",
+                Some(1800),
+                false,
+            ),
+            (
+                "request_timeout = '0s'\nreconcile_interval = '30m'\nsystem_events_enabled = false",
+                Some(1800),
+                false,
+            ),
+            (
+                "request_timeout = '0s'\nreconcile_interval = '0s'",
+                Some(0),
+                true,
+            ),
+        ] {
+            let config: super::NvueGnmiConfig =
+                Figment::new().merge(Toml::string(input)).extract().unwrap();
+
+            assert_eq!(
+                config.reconcile_interval.map(|interval| interval.as_secs()),
+                seconds
+            );
+
+            assert_eq!(config.validate().is_ok(), valid, "{input}");
+
+            let round_trip: super::NvueGnmiConfig =
+                serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+
+            assert_eq!(round_trip.reconcile_interval, config.reconcile_interval);
+        }
+    }
 
     fn config_with(configure: impl FnOnce(&mut Config)) -> Box<Config> {
         let mut config = Config::default();

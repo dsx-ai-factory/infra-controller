@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::domain::DomainId;
 use chrono::{DateTime, Utc};
 use hickory_proto::rr::Name;
@@ -47,7 +48,8 @@ fn validate_domain_name(name: &str) -> Result<(), DatabaseError> {
     Ok(())
 }
 
-#[derive(Clone, Debug, FromRow)]
+#[derive(Clone, Debug, FromRow, carbide_macros::DbTable)]
+#[db_table(name = "domains")]
 pub struct DbDomain {
     pub id: DomainId,
     pub name: String,
@@ -115,11 +117,14 @@ pub async fn persist(value: NewDomain, txn: &mut PgConnection) -> DatabaseResult
     // Create default metadata entry
     let metadata_id = super::domain_metadata::DbMetadata::create_default(txn).await?;
 
-    let query = "INSERT INTO domains (name, soa, domain_metadata_id, vpc_id, default_ttl)
+    let query = format!(
+        "INSERT INTO domains (name, soa, domain_metadata_id, vpc_id, default_ttl)
                  VALUES ($1, $2, $3, $4, $5)
-                 RETURNING id, name, default_ttl, vpc_id, created, updated, deleted, soa, domain_metadata_id";
+                 RETURNING {}",
+        DbDomain::db_table_columns()
+    );
 
-    match persist_inner_with_metadata(&value, metadata_id, txn, query).await {
+    match persist_inner_with_metadata(&value, metadata_id, txn, &query).await {
         Ok(Some(domain)) => Ok(domain),
         Ok(None) => Err(DatabaseError::NotFoundError {
             kind: "domain",
@@ -154,21 +159,24 @@ pub async fn persist_first(
 
     let metadata_id = super::domain_metadata::DbMetadata::create_default(txn).await?;
 
-    let query = "
+    let query = format!(
+        "
             INSERT INTO domains (name, soa, domain_metadata_id, vpc_id, default_ttl)
             SELECT $1, $2, $3, $4, $5
             WHERE NOT EXISTS (SELECT name FROM domains)
-            RETURNING id, name, default_ttl, vpc_id, created, updated, deleted, soa, domain_metadata_id";
-    persist_inner_with_metadata(value, metadata_id, txn, query).await
+            RETURNING {}",
+        DbDomain::db_table_columns()
+    );
+    persist_inner_with_metadata(value, metadata_id, txn, &query).await
 }
 
 async fn persist_inner_with_metadata(
     value: &NewDomain,
     metadata_id: i32,
     txn: &mut PgConnection,
-    query: &'static str,
+    query: &str,
 ) -> DatabaseResult<Option<Domain>> {
-    sqlx::query_as::<_, DbDomain>(query)
+    sqlx::query_as::<_, DbDomain>(sqlx::AssertSqlSafe(query))
         .bind(&value.name)
         .bind(sqlx::types::Json(&value.soa))
         .bind(metadata_id)
@@ -245,9 +253,10 @@ pub async fn find_all_by<'a, C: ColumnInfo<'a, TableType = Domain>>(
     filter: ObjectColumnFilter<'a, C>,
     include_deleted: bool,
 ) -> Result<Vec<Domain>, DatabaseError> {
-    let mut query = FilterableQueryBuilder::new(
-        "SELECT id, name, default_ttl, vpc_id, created, updated, deleted, soa, domain_metadata_id FROM domains",
-    )
+    let mut query = FilterableQueryBuilder::new(format!(
+        "SELECT {} FROM domains",
+        DbDomain::db_table_columns()
+    ))
     .filter(&filter);
     if !include_deleted {
         query.push(" AND deleted IS NULL");
@@ -277,20 +286,22 @@ pub async fn find_longest_live_zone(
     txn: impl DbReader<'_>,
     candidates: &[String],
 ) -> Result<Option<Domain>, DatabaseError> {
-    let query =
-        "SELECT id, name, default_ttl, vpc_id, created, updated, deleted, soa, domain_metadata_id
+    let query = format!(
+        "SELECT {}
                  FROM domains
                  WHERE deleted IS NULL
                    AND vpc_id IS NULL
                    AND lower(rtrim(name, '.')) = ANY($1)
                  ORDER BY length(rtrim(name, '.')) DESC, name
-                 LIMIT 1";
-    sqlx::query_as::<_, DbDomain>(query)
+                 LIMIT 1",
+        DbDomain::db_table_columns()
+    );
+    sqlx::query_as::<_, DbDomain>(sqlx::AssertSqlSafe(query.as_str()))
         .bind(candidates)
         .fetch_optional(txn)
         .await
         .map(|domain| domain.map(Domain::from))
-        .map_err(|error| DatabaseError::query(query, error))
+        .map_err(|error| DatabaseError::query(&query, error))
 }
 
 /// Finds live domains named `name`.
@@ -315,22 +326,24 @@ pub async fn find_reverse_zone_by_normalized_name(
     txn: impl DbReader<'_>,
     name: &str,
 ) -> Result<Vec<Domain>, DatabaseError> {
-    let query =
-        "SELECT id, name, default_ttl, vpc_id, created, updated, deleted, soa, domain_metadata_id
+    let query = format!(
+        "SELECT {}
                  FROM domains
                  WHERE lower(rtrim(name, '.')) = $1
                    AND deleted IS NULL
                    AND (
                        lower(rtrim(name, '.')) LIKE '%.in-addr.arpa'
                        OR lower(rtrim(name, '.')) LIKE '%.ip6.arpa'
-                   )";
+                   )",
+        DbDomain::db_table_columns()
+    );
     let name = super::normalize_domain(name);
-    sqlx::query_as::<_, DbDomain>(query)
+    sqlx::query_as::<_, DbDomain>(sqlx::AssertSqlSafe(query.as_str()))
         .bind(name)
         .fetch_all(txn)
         .await
         .map(|domains| domains.into_iter().map(Domain::from).collect())
-        .map_err(|error| DatabaseError::query(query, error))
+        .map_err(|error| DatabaseError::query(&query, error))
 }
 
 /// Find the domain with the given ID, even if it is deleted.
@@ -368,13 +381,16 @@ pub async fn delete(value: Domain, txn: &mut PgConnection) -> Result<Domain, Dat
     // PostgreSQL evaluates both assignments from the pre-update row. Reusing
     // this expression gives `updated` and `deleted` the same monotonic value,
     // so the returned row has one timestamp for the deletion version.
-    let query = "UPDATE domains
+    let query = format!(
+        "UPDATE domains
                  SET updated = GREATEST(statement_timestamp(), updated + interval '1 microsecond'),
                      deleted = GREATEST(statement_timestamp(), updated + interval '1 microsecond')
                  WHERE id = $1
                    AND updated = $2
-                 RETURNING id, name, default_ttl, vpc_id, created, updated, deleted, soa, domain_metadata_id";
-    sqlx::query_as::<_, DbDomain>(query)
+                 RETURNING {}",
+        DbDomain::db_table_columns()
+    );
+    sqlx::query_as::<_, DbDomain>(sqlx::AssertSqlSafe(query.as_str()))
         .bind(value.id)
         .bind(value.updated)
         .fetch_one(txn)
@@ -384,7 +400,7 @@ pub async fn delete(value: Domain, txn: &mut PgConnection) -> Result<Domain, Dat
             sqlx::Error::RowNotFound => {
                 DatabaseError::ConcurrentModificationError("domain", value.updated.to_rfc3339())
             }
-            error => DatabaseError::query(query, error),
+            error => DatabaseError::query(&query, error),
         })
 }
 
@@ -399,7 +415,8 @@ pub async fn delete(value: Domain, txn: &mut PgConnection) -> Result<Domain, Dat
 pub async fn update(value: &Domain, txn: &mut PgConnection) -> Result<Domain, DatabaseError> {
     validate_domain_name(&value.name)?;
 
-    let query = "UPDATE domains
+    let query = format!(
+        "UPDATE domains
                  SET name = $1,
                      updated = GREATEST(statement_timestamp(), updated + interval '1 microsecond'),
                      soa = $2,
@@ -407,9 +424,11 @@ pub async fn update(value: &Domain, txn: &mut PgConnection) -> Result<Domain, Da
                  WHERE id = $3
                    AND updated = $4
                    AND vpc_id IS NOT DISTINCT FROM $5
-                 RETURNING id, name, default_ttl, vpc_id, created, updated, deleted, soa, domain_metadata_id";
+                 RETURNING {}",
+        DbDomain::db_table_columns()
+    );
 
-    sqlx::query_as::<_, DbDomain>(query)
+    sqlx::query_as::<_, DbDomain>(sqlx::AssertSqlSafe(query.as_str()))
         .bind(&value.name)
         .bind(sqlx::types::Json(&value.soa))
         .bind(value.id)
@@ -423,7 +442,7 @@ pub async fn update(value: &Domain, txn: &mut PgConnection) -> Result<Domain, Da
             sqlx::Error::RowNotFound => {
                 DatabaseError::ConcurrentModificationError("domain", value.updated.to_rfc3339())
             }
-            error => DatabaseError::query(query, error),
+            error => DatabaseError::query(&query, error),
         })
 }
 

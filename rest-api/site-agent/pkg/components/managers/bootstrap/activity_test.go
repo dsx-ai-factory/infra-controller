@@ -42,8 +42,8 @@ func (m *MockBoostrap) Start() {}
 func (m *MockBoostrap) DownloadAndStoreCreds(otpOverride []byte) error {
 	return nil
 }
-func (m *MockBoostrap) GetState() []string {
-	return []string{"state1", "state2"}
+func (m *MockBoostrap) CheckRegistration() error {
+	return nil
 }
 func (m *MockBoostrap) RegisterSubscriber() error {
 	return nil
@@ -59,6 +59,8 @@ func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
 	mtc := &tmocks.Client{}
 
 	siteID := "test-site-id"
+	registration := &bootstraptypes.Registration{}
+	registration.Load(siteID, "startupOtp")
 
 	ManagerAccess = &Manager.ManagerAccess{
 		API: &Manager.ManagerAPI{
@@ -80,6 +82,7 @@ func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
 						Config: &bootstraptypes.SecretConfig{
 							UUID: siteID,
 						},
+						Registration: registration,
 					},
 					Workflow: &workflowtypes.Workflow{
 						Temporal: workflowtypes.Temporal{
@@ -187,4 +190,6 @@ func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
 	bootstrapSecret, err := client.CoreV1().Secrets("default").Get(context.TODO(), ManagerAccess.Conf.EB.BootstrapSecretName, metav1.GetOptions{})
 	assert.NoError(t, err)
 	assert.Equal(t, mockOtp, string(bootstrapSecret.Data["otp"]))
+	// The liveness check must not take the rotated OTP for a re-pair once it is mounted.
+	assert.NoError(t, registration.Check(siteID, mockOtp))
 }

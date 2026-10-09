@@ -1390,12 +1390,15 @@ pub(crate) async fn get_machine_position_info(
             .iter()
             .map(|(machine_id, ip_opt)| {
                 let endpoint = ip_opt.as_ref().and_then(|ip| as_hashmap.get(ip));
+                let position = endpoint
+                    .map(|ep| ep.report.rack_position())
+                    .unwrap_or_default();
                 rpc::MachinePositionInfo {
                     machine_id: Some(*machine_id),
-                    physical_slot_number: endpoint.and_then(|ep| ep.report.physical_slot_number),
-                    compute_tray_index: endpoint.and_then(|ep| ep.report.compute_tray_index),
-                    topology_id: endpoint.and_then(|ep| ep.report.topology_id),
-                    revision_id: endpoint.and_then(|ep| ep.report.revision_id),
+                    physical_slot_number: position.physical_slot_number,
+                    compute_tray_index: position.compute_tray_index,
+                    topology_id: position.topology_id,
+                    revision_id: position.revision_id,
                     switch_id: endpoint.and_then(|ep| ep.report.switch_id),
                     power_shelf_id: endpoint.and_then(|ep| ep.report.power_shelf_id),
                 }

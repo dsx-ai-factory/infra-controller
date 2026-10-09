@@ -50,7 +50,6 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 	var enableTLS string
 	var disableBootstrap string
 	var watcherInterval string
-	var podName string
 	var skipCoreGrpcServerAuth string
 
 	// Determine environment in which app is running.
@@ -193,7 +192,7 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 	flag.StringVar(&conf.BootstrapSecret, "bootstrapSecret", os.Getenv("BOOTSTRAP_SECRET"), "Bootstrap secret")
 	flag.StringVar(&conf.BootstrapSecretName, "bootstrapSecretName", os.Getenv("BOOTSTRAP_SECRET_NAME"), "Bootstrap secret name")
 	flag.StringVar(&watcherInterval, "watcherInterval", os.Getenv("WATCHER_INTERVAL"), "Watcher Interval")
-	flag.StringVar(&podName, "podName", os.Getenv("POD_NAME"), "POD Name")
+	flag.StringVar(&conf.PodName, "podName", os.Getenv("POD_NAME"), "POD Name")
 	flag.StringVar(&conf.PodNamespace, "podNamespace", os.Getenv("POD_NAMESPACE"), "POD Namespace")
 	flag.StringVar(&conf.TemporalSecret, "temporalSecret", os.Getenv("TEMPORAL_CERT"), "Temporal cert secret")
 	flag.StringVar(&conf.CloudVersion, "cloudVersion", os.Getenv("CLOUD_WORKFLOW_VERSION"), "Cloud Workflow Proto version")
@@ -215,21 +214,21 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 	if conf.Temporal.Port == "" {
 		log.Fatal().Msg("error loading config, invalid Temporal port")
 	}
-	if podName == "" {
+	if conf.PodName == "" {
 		log.Fatal().Msg("error loading config, empty Pod Name")
 	} else {
 		conf.IsMasterPod = false
-		parts := regexp.MustCompile(`(.*)-(\d+)$`).FindStringSubmatch(podName)
+		parts := regexp.MustCompile(`(.*)-(\d+)$`).FindStringSubmatch(conf.PodName)
 		if len(parts) == 3 {
 			id, err := strconv.Atoi(parts[2])
 			if err != nil {
-				log.Fatal().Msgf("error loading config, invalid Pod Name %v %v", podName, err.Error())
+				log.Fatal().Msgf("error loading config, invalid Pod Name %v %v", conf.PodName, err.Error())
 			}
 			if id == 0 {
 				conf.IsMasterPod = true
 			}
 		} else {
-			log.Fatal().Msgf("error loading config, invalid Pod Name %v", podName)
+			log.Fatal().Msgf("error loading config, invalid Pod Name %v", conf.PodName)
 		}
 	}
 	if conf.PodNamespace == "" {

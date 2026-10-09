@@ -4,9 +4,11 @@
 package coregrpc
 
 import (
+	"context"
 	"fmt"
 	"time"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	"github.com/prometheus/client_golang/prometheus"
@@ -50,7 +52,7 @@ func (coregrpc *API) Start() {
 			break
 		}
 		if time.Since(start) >= client.CoreGrpcConnectionRetryTimeout {
-			panic(fmt.Errorf("Core gRPC: failed to create gRPC client within %s: %w", client.CoreGrpcConnectionRetryTimeout, err))
+			panic(fmt.Errorf("core gRPC: failed to create gRPC client within %s: %w", client.CoreGrpcConnectionRetryTimeout, err))
 		}
 		ManagerAccess.Data.EB.Log.Error().Err(err).Dur("RetryIn", backoff).Msg("Core gRPC: failed to create gRPC client, retrying")
 		time.Sleep(backoff)
@@ -61,16 +63,30 @@ func (coregrpc *API) Start() {
 	}
 }
 
-// GetState returns the current state of the Core gRPC client manager
-func (coregrpc *API) GetState() []string {
-	state := ManagerAccess.Data.EB.Managers.CoreGrpc.State
-	var strs []string
-	strs = append(strs, fmt.Sprintln(" GRPC Succeeded:", state.GrpcSucc.Load()))
-	strs = append(strs, fmt.Sprintln(" GRPC Failed:", state.GrpcFail.Load()))
-	strs = append(strs, fmt.Sprintln(" GRPC Status:", computils.CompStatus(state.HealthStatus.Load())))
-	strs = append(strs, fmt.Sprintln(" GRPC Last Error:", state.Err.Load()))
+// CheckConnection calls Core's Version RPC and records whether it succeeded in the
+// Core gRPC state. Without DisplayConfig, Version only returns build information.
+func (coregrpc *API) CheckConnection(ctx context.Context) {
+	err := client.ErrCoreGrpcClientNotConnected
+	grpcClient := ManagerAccess.Data.EB.Managers.CoreGrpc.GetClient()
+	if grpcClient != nil {
+		_, err = grpcClient.GrpcServiceClient().Version(ctx, &corev1.VersionRequest{})
+	}
 
-	return strs
+	state := ManagerAccess.Data.EB.Managers.CoreGrpc.State
+	if err != nil {
+		state.Err.Store(err.Error())
+		// Logs every change to Unhealthy, including from NotKnown when Core was never
+		// reachable. The probes and the status page leave the error out.
+		previous := state.HealthStatus.Swap(uint64(computils.CompUnhealthy))
+		if computils.CompStatus(previous) != computils.CompUnhealthy {
+			ManagerAccess.Data.EB.Log.Warn().Err(err).Msg("Core gRPC: health check failed")
+		}
+		return
+	}
+	previous := state.HealthStatus.Swap(uint64(computils.CompHealthy))
+	if computils.CompStatus(previous) != computils.CompHealthy {
+		ManagerAccess.Data.EB.Log.Info().Msg("Core gRPC: health check passed")
+	}
 }
 
 // GetGrpcClientVersion returns the current version of the Core gRPC client

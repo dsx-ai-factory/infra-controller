@@ -2380,6 +2380,11 @@ impl DpfServiceConfigOverride {
     }
 }
 
+/// Supplies the operator-declared default SF ceiling until a deployment selects its supported limit.
+fn default_dpf_max_sf_per_pf() -> u32 {
+    carbide_dpf::DEFAULT_MAX_SF_PER_PF
+}
+
 /// Per-deployment DPF configuration for named entries under `[dpf.deployments]`.
 ///
 /// `flavor_name`, `deployment_name`, and `node_label_key` are required when a
@@ -2411,6 +2416,12 @@ pub struct DpfDeploymentConfig {
     pub deployment_name: String,
     /// Label key applied to DPUNode CRs for this deployment's node selector.
     pub node_label_key: String,
+    /// Operator-declared SF ceiling per parent PF (default 126).
+    /// Must be positive and bounds the generated pool when BF3/generic BF4 service slots are enabled.
+    /// Ignored with zero slots; GB200 uses its fixed 128-SF profile and Astra ignores this field.
+    /// The platform's SF BAR size gives the allocation, not physical firmware qualification.
+    #[serde(default = "default_dpf_max_sf_per_pf")]
+    pub max_sf_per_pf: u32,
     /// Optional per-deployment override of the mandatory Helm services. When set,
     /// these services are deployed for this deployment instead of the top-level
     /// [`DpfConfig::services`]. When absent, the top-level services are inherited.
@@ -2447,6 +2458,7 @@ impl Default for DpfDeploymentConfig {
             flavor_name: default_dpf_flavor_name(),
             deployment_name: default_dpf_deployment_name(),
             node_label_key: default_dpf_node_label_key(),
+            max_sf_per_pf: default_dpf_max_sf_per_pf(),
             services: None,
             extra_services: BTreeMap::new(),
             extra_bfcfg_parameters: Vec::new(),
@@ -3328,6 +3340,12 @@ impl CarbideConfig {
     }
 
     pub(crate) fn validate_service_vpc_slots(&self) -> eyre::Result<()> {
+        // Endpoint capacity is unusable without a provisioned slot for its VPC.
+        eyre::ensure!(
+            self.dpu_config.max_active_service_vpc_interfaces_per_dpu == 0
+                || self.dpu_config.service_vpc_slot_count > 0,
+            "dpu_config.max_active_service_vpc_interfaces_per_dpu requires service_vpc_slot_count > 0"
+        );
         eyre::ensure!(
             !self.tenant_prefix_overlap_enabled || self.dpu_config.service_vpc_slot_count == 0,
             "dpu_config.service_vpc_slot_count must be zero when tenant_prefix_overlap_enabled is true"
@@ -3955,9 +3973,15 @@ pub struct DpuConfig {
     #[serde(default)]
     pub num_of_vfs: u32,
 
-    /// Number of deterministic HBN interfaces reserved for service-VPC attachments.
+    /// Number of complete fixed service-VPC slots per DPU (default zero).
+    /// Each slot reserves an HBN SF, a DHCP SF and an isolated bridge with its HBN patch/chain.
     #[serde(default)]
     pub service_vpc_slot_count: u32,
+
+    /// Maximum active or terminating service-VPC interfaces per DPU (default zero).
+    /// Each endpoint reserves one SF, including services sharing a VPC slot.
+    #[serde(default)]
+    pub max_active_service_vpc_interfaces_per_dpu: u32,
 
     /// Additional SF capacity that is not assigned to an HBN interface.
     #[serde(default)]
@@ -4013,6 +4037,8 @@ impl<'de> Deserialize<'de> for DpuConfig {
             #[serde(default)]
             service_vpc_slot_count: Option<u32>,
             #[serde(default)]
+            max_active_service_vpc_interfaces_per_dpu: Option<u32>,
+            #[serde(default)]
             additional_managed_sf: Option<u32>,
             #[serde(default)]
             restart_ovs_on_use_admin_network_change: Option<bool>,
@@ -4048,6 +4074,9 @@ impl<'de> Deserialize<'de> for DpuConfig {
             service_vpc_slot_count: partial
                 .service_vpc_slot_count
                 .unwrap_or(default.service_vpc_slot_count),
+            max_active_service_vpc_interfaces_per_dpu: partial
+                .max_active_service_vpc_interfaces_per_dpu
+                .unwrap_or(default.max_active_service_vpc_interfaces_per_dpu),
             additional_managed_sf: partial
                 .additional_managed_sf
                 .unwrap_or(default.additional_managed_sf),
@@ -4182,6 +4211,7 @@ impl Default for DpuConfig {
             dpu_enable_secure_boot: false,
             num_of_vfs: DEFAULT_DPU_NUM_OF_VFS,
             service_vpc_slot_count: 0,
+            max_active_service_vpc_interfaces_per_dpu: 0,
             additional_managed_sf: 0,
             restart_ovs_on_use_admin_network_change: false,
         }
@@ -5910,6 +5940,7 @@ path = "credentials.yaml"
         assert!(config.validate_web_ui_sidebar_tools().is_err());
     }
 
+    /// Verifies static slots cannot bypass site isolation rules or reserve endpoints without a bridge.
     #[test]
     fn validate_service_vpc_slots_rejects_site_global_vpc_vni() {
         let mut config: CarbideConfig = Figment::new()
@@ -5917,9 +5948,20 @@ path = "credentials.yaml"
             .extract()
             .unwrap();
 
+        // An endpoint reservation without slots is unusable even before DPF initialization.
+        config.dpu_config.max_active_service_vpc_interfaces_per_dpu = 1;
+        assert!(config.validate_service_vpc_slots().is_err());
+
+        // Empty slots may be provisioned while endpoint admission remains disabled.
         config.dpu_config.service_vpc_slot_count = 1;
+        config.dpu_config.max_active_service_vpc_interfaces_per_dpu = 0;
         assert!(config.validate_service_vpc_slots().is_ok());
 
+        // A complete slot also permits endpoint admission without either site isolation conflict.
+        config.dpu_config.max_active_service_vpc_interfaces_per_dpu = 1;
+        assert!(config.validate_service_vpc_slots().is_ok());
+
+        // Overlapping tenant prefixes remain incompatible even with usable service capacity.
         config.tenant_prefix_overlap_enabled = true;
         assert!(
             config
@@ -5930,6 +5972,7 @@ path = "credentials.yaml"
         );
         config.tenant_prefix_overlap_enabled = false;
 
+        // A global VNI cannot represent the independent service slot's VRF.
         config.site_global_vpc_vni = Some(6_000);
         assert!(
             config
@@ -6132,12 +6175,21 @@ path = "credentials.yaml"
         );
     }
 
+    /// Verifies omitted configuration retains shipping defaults, including disabled service-VPC counts.
     #[test]
     fn deserialize_min_config() {
+        // The fixture omits the entire DPU configuration block.
         let config: CarbideConfig = Figment::new()
             .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
             .extract()
             .unwrap();
+        // An absent dpu_config block must not implicitly enable either service-VPC count.
+        assert_eq!(config.dpu_config.service_vpc_slot_count, 0);
+        assert_eq!(
+            config.dpu_config.max_active_service_vpc_interfaces_per_dpu,
+            0
+        );
+        assert_eq!(config.dpf.deployments.bf3.max_sf_per_pf, 126);
         assert_eq!(config.listen, "[::]:1081".parse().unwrap());
         assert_eq!(config.metrics_endpoint, None);
         assert_eq!(config.asn, 123);
@@ -7274,14 +7326,17 @@ underlay_ip_software_plane_id_bit_len = 7
         assert_eq!(config.astra.underlay_ip_software_plane_id_bit_len, 7);
     }
 
+    /// Verifies explicit service limits survive partial assembly so provisioning reserves the requested SFs.
     #[test]
     fn deserialize_dpu_config() {
+        // Override only the service limits and selected existing fields; firmware defaults remain available.
         let toml = r#"
 [dpu_config]
 bootstrap_ca_source = "embedded"
 dpu_enable_secure_boot = true
 num_of_vfs = 64
 service_vpc_slot_count = 5
+max_active_service_vpc_interfaces_per_dpu = 5
 additional_managed_sf = 2
 "#;
 
@@ -7291,6 +7346,7 @@ additional_managed_sf = 2
             .extract()
             .unwrap();
 
+        // Partial assembly must preserve each explicit value and the remaining defaults.
         assert_eq!(
             config.dpu_config.bootstrap_ca_source,
             BootstrapCaSource::Embedded
@@ -7298,8 +7354,32 @@ additional_managed_sf = 2
         assert!(config.dpu_config.dpu_enable_secure_boot);
         assert_eq!(config.dpu_config.num_of_vfs, 64);
         assert_eq!(config.dpu_config.service_vpc_slot_count, 5);
+        assert_eq!(
+            config.dpu_config.max_active_service_vpc_interfaces_per_dpu,
+            5
+        );
         assert_eq!(config.dpu_config.additional_managed_sf, 2);
         assert!(!config.dpu_config.dpu_models.is_empty());
+    }
+
+    /// Verifies partial blocks keep independent zero defaults so generic headroom cannot enable admission.
+    #[test]
+    fn service_vpc_counts_default_independently() {
+        value_scenarios!(
+            run = |input| {
+                // Deserialize the partial block through the production default assembly.
+                let config: DpuConfig = toml::from_str(input).expect("valid partial DPU configuration");
+                (config.service_vpc_slot_count, config.max_active_service_vpc_interfaces_per_dpu)
+            };
+            "partial service configuration" {
+                // An explicitly empty block retains both disabled counts.
+                "" => (0, 0),
+                // Generic capacity remains independent of service-VPC provisioning and admission.
+                "additional_managed_sf = 5" => (0, 0),
+                // Slots may be provisioned before any endpoint admission is enabled.
+                "service_vpc_slot_count = 5" => (5, 0),
+            }
+        );
     }
 
     #[test]
@@ -7586,6 +7666,26 @@ object_kind = "secret"
             "scoped Astra mode" {
                 // The BF4+CX9 deployment is valid only after opting into isolated resources.
                 (true, true) => true,
+            }
+        );
+    }
+
+    /// Verifies written deployment blocks default and override their SF ceiling independently of the pool.
+    #[test]
+    fn dpf_platform_sf_ceiling_defaults_and_deserializes() {
+        value_scenarios!(
+            run = |input| {
+                // Required identifiers provide a valid deployment; only its capacity declaration varies.
+                let config: DpfDeploymentConfig = toml::from_str(&format!(
+                    "flavor_name = 'flavor'\ndeployment_name = 'deployment'\nnode_label_key = 'nico/platform'\n{input}"
+                )).expect("valid deployment configuration");
+                config.max_sf_per_pf
+            };
+            "platform envelope" {
+                // A partial deployment block uses the same ceiling as programmatic defaults.
+                "" => 126,
+                // Operators can declare the smaller envelope qualified for their firmware.
+                "max_sf_per_pf = 64" => 64,
             }
         );
     }
@@ -8441,6 +8541,7 @@ helm_repo_url = "oci://registry.example.test/doca"
             flavor_name: "bf4-flavor".to_string(),
             deployment_name: "bf4-dep".to_string(),
             node_label_key: "carbide.nvidia.com/bf4".to_string(),
+            max_sf_per_pf: default_dpf_max_sf_per_pf(),
             services: None,
             extra_services: BTreeMap::new(),
             extra_bfcfg_parameters: Vec::new(),

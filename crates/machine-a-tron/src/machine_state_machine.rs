@@ -18,16 +18,16 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::net::Ipv4Addr;
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::{
-    ActionError, BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, MockPowerState,
-    ResourceResetType,
+    ActionError, BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, ResourceResetType,
 };
 use carbide_network::virtualization::build_dual_stack_list;
 use carbide_uuid::machine::{DpuMachineId, InvalidMachineType, MachineId, MachineInterfaceId};
+use nv_redfish::schema::resource::PowerState;
 use rpc::forge::{MachineArchitecture, MachineDiscoveryResult, ManagedHostNetworkConfigResponse};
 use rpc::forge_agent_control_response::Action;
 use serde::{Deserialize, Serialize};
@@ -184,7 +184,10 @@ impl LiveStateCallbacks {
     }
 
     pub(crate) fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
-        self.get_power_state().validate_reset_type(reset_type)?;
+        crate::power_state::validate_reset_type(
+            self.state.read().unwrap().power_state,
+            reset_type,
+        )?;
         self.command_channel
             .send(BmcCommand::SetSystemPower {
                 request: reset_type,
@@ -195,8 +198,8 @@ impl LiveStateCallbacks {
 }
 
 impl Callbacks for LiveStateCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        self.state.read().unwrap().power_state
+    fn get_power_state(&self) -> bmc_mock::MockPowerState {
+        unreachable!("machine-a-tron publishes power state to the Redfish model")
     }
 
     async fn computer_system_reset(
@@ -233,7 +236,7 @@ impl HostnameQuerying for LiveStateHostnameQuery {
 #[derive(Debug)]
 pub(super) struct LiveState {
     pub(super) is_up: bool,
-    pub(super) power_state: MockPowerState, // reflects the "desired" power state of the machine. Affects whether next_state will boot the machine or not.
+    pub(super) power_state: PowerState, // Latest power observation from the machine FSM.
     pub(super) observed_machine_id: Option<MachineId>,
     pub(super) machine_ip: Option<Ipv4Addr>,
     pub(super) bmc_ip: Option<Ipv4Addr>,
@@ -254,33 +257,16 @@ pub(super) struct LiveState {
     /// firmware is applied.  Used by `persisted()` so restarts resume from the
     /// last observed versions rather than the operator-configured starting point.
     pub(super) active_host_firmware: Option<bmc_mock::HostFirmwareVersions>,
-    /// BMC account passwords restored from the previous snapshot at startup,
-    /// used to re-apply rotated passwords onto a freshly built BMC mock so they
-    /// survive a machine-a-tron restart (issue #5966).
-    pub(super) bmc_credentials: Option<Vec<bmc_mock::BmcAccountCredential>>,
-    /// Live BMC account service, so `persisted()` can export the current
-    /// passwords at shutdown rather than a stale mirror (issue #5966).
-    pub(super) bmc_account_service: Option<Weak<bmc_mock::AccountServiceState>>,
-}
-
-impl LiveState {
-    /// Credentials to write into the next device snapshot: the current live BMC
-    /// passwords when the mock is running, else the passwords restored at
-    /// startup so they aren't dropped for a machine whose BMC never came up.
-    pub(super) fn bmc_accounts_for_snapshot(&self) -> Option<Vec<bmc_mock::BmcAccountCredential>> {
-        match self.bmc_account_service.as_ref().and_then(Weak::upgrade) {
-            Some(account_service) => Some(account_service.export_credentials()),
-            None => self.bmc_credentials.clone(),
-        }
-    }
+    /// Live snapshot access with startup fallback for a BMC not yet constructed.
+    pub(super) bmc_persistence: crate::bmc_mock_wrapper::BmcPersistence,
 }
 
 impl Default for LiveState {
     fn default() -> Self {
-        let power_state = MockPowerState::default();
+        let power_state = PowerState::On;
         LiveState {
-            is_up: matches!(power_state, MockPowerState::On),
-            power_state: MockPowerState::default(),
+            is_up: matches!(power_state, PowerState::On),
+            power_state: PowerState::On,
             observed_machine_id: None,
             machine_ip: None,
             bmc_ip: None,
@@ -295,8 +281,7 @@ impl Default for LiveState {
             infiniband_port_states: HashMap::new(),
             dpu_flipped_to_nic_mode: false,
             active_host_firmware: None,
-            bmc_credentials: None,
-            bmc_account_service: None,
+            bmc_persistence: Default::default(),
         }
     }
 }
@@ -304,7 +289,7 @@ impl Default for LiveState {
 impl LiveState {
     fn for_machine(
         machine_info: &MachineInfo,
-        power_state: MockPowerState,
+        power_state: PowerState,
         tpm_ek_certificate: Option<Vec<u8>>,
     ) -> Self {
         let infiniband_port_states = match machine_info {
@@ -385,9 +370,17 @@ impl MachineStateMachine {
         dpu_dhcp_relay: Option<DpuDhcpRelay>,
         mat_host_id: Uuid,
     ) -> MachineStateMachine {
-        let (initial_os_image, tpm_ek_certificate, bmc_credentials) = match persisted_machine {
-            PersistedMachine::Host(h) => (h.installed_os, h.tpm_ek_certificate, h.bmc_accounts),
-            PersistedMachine::Dpu(d) => (d.installed_os, None, d.bmc_accounts),
+        let (initial_os_image, tpm_ek_certificate, bmc_persistence) = match persisted_machine {
+            PersistedMachine::Host(h) => (
+                h.installed_os,
+                h.tpm_ek_certificate,
+                crate::bmc_mock_wrapper::BmcPersistence::from_saved(h.bmc_state),
+            ),
+            PersistedMachine::Dpu(d) => (
+                d.installed_os,
+                None,
+                crate::bmc_mock_wrapper::BmcPersistence::from_saved(d.bmc_state),
+            ),
         };
         let (fsm, actions) = MachineFsm::init(true, Self::is_bmc_only(&machine_info, &config));
         let resolved_timings = Self::resolve_timings(&machine_info, &config);
@@ -397,8 +390,8 @@ impl MachineStateMachine {
             initial_os_image,
         );
         let mut live_state =
-            LiveState::for_machine(&machine_info, MockPowerState::On, tpm_ek_certificate);
-        live_state.bmc_credentials = bmc_credentials;
+            LiveState::for_machine(&machine_info, PowerState::On, tpm_ek_certificate);
+        live_state.bmc_persistence = bmc_persistence;
         MachineStateMachine {
             fsm,
             actions: actions.into_iter().collect(),
@@ -449,7 +442,7 @@ impl MachineStateMachine {
         MachineStateMachine {
             live_state: Arc::new(RwLock::new(LiveState::for_machine(
                 &machine_info,
-                MockPowerState::Off,
+                PowerState::Off,
                 tpm_ek_certificate,
             ))),
             fsm,
@@ -1135,6 +1128,11 @@ impl MachineStateMachine {
         }
         live_state.state_string = Some(self.fsm.state_string());
         live_state.power_state = self.fsm.power_state();
+        if let Some(bmc_state) = &self.bmc_state {
+            bmc_state
+                .system_state
+                .set_power_state(live_state.power_state);
+        }
         live_state.booted_os = self.booted_os();
         live_state.dpu_flipped_to_nic_mode = matches!(&self.machine_info, MachineInfo::Dpu(_))
             && self
@@ -1432,6 +1430,11 @@ impl MachineStateMachine {
             Some(&self.resolved_timings),
         );
 
+        bmc_mock
+            .state()
+            .system_state
+            .set_power_state(self.fsm.power_state());
+
         let pw_override = match &self.machine_info {
             MachineInfo::Host(_) => self.app_context.app_config.host_bmc_password.as_deref(),
             MachineInfo::Dpu(_) => self.app_context.app_config.dpu_bmc_password.as_deref(),
@@ -1443,19 +1446,11 @@ impl MachineStateMachine {
                 .change_factory_default_password(pw);
         }
 
-        // Restore the passwords saved in the device snapshot so a rotated BMC
-        // password survives a machine-a-tron restart instead of resetting to
-        // the factory default (issue #5966). Applied after the password
-        // override above so the restored (most recent) credentials win.
-        let saved_credentials = self.live_state.read().unwrap().bmc_credentials.clone();
-        if let Some(saved_credentials) = saved_credentials {
-            bmc_mock
-                .state()
-                .account_service_state
-                .restore_credentials(&saved_credentials);
+        {
+            let mut live_state = self.live_state.write().unwrap();
+            live_state.bmc_persistence.restore(bmc_mock.state())?;
+            live_state.bmc_persistence.attach(bmc_mock.state());
         }
-        self.live_state.write().unwrap().bmc_account_service =
-            Some(Arc::downgrade(&bmc_mock.state().account_service_state));
 
         let maybe_bmc_mock_handle = {
             self.app_context
@@ -1568,6 +1563,8 @@ pub(super) enum MachineStateError {
     PxeError(#[from] PxeError),
     #[error("BMC mock TLS error: {0}")]
     BmcMockTls(#[from] bmc_mock::tls::Error),
+    #[error("failed to restore BMC state: {0}")]
+    BmcPersistence(#[from] bmc_mock::persistence::PersistenceError),
     #[error("failed to start IPMI simulator: {0}")]
     IpmiSim(#[from] bmc_mock::ipmi_sim::Error),
     #[error("mock SSH server error: {0}")]

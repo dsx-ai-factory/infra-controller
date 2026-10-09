@@ -14,10 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 use std::time::Duration;
 
-use bmc_mock::{BmcEvent, MockPowerState};
+use bmc_mock::BmcEvent;
+use nv_redfish::schema::resource::PowerState;
 
 use crate::dhcp_retry_fsm::{
     Action as RetryAction, DhcpRetryFsm, Event as RetryEvent, Milliseconds,
@@ -91,7 +91,7 @@ impl MachineFsm {
         matches!(self.state, MachineState::BmcInit { .. })
     }
 
-    pub(super) fn power_state(&self) -> MockPowerState {
+    pub(super) fn power_state(&self) -> PowerState {
         self.state.power_state()
     }
 
@@ -146,20 +146,20 @@ impl MachineState {
         matches!(self, Self::MachineUp { .. } | Self::BmcOnlyMachineUp)
     }
 
-    fn power_state(&self) -> MockPowerState {
+    fn power_state(&self) -> PowerState {
         match self {
-            Self::BmcInit { power_on: true, .. } => MockPowerState::On,
+            Self::BmcInit { power_on: true, .. } => PowerState::On,
             Self::BmcInit {
                 power_on: false, ..
-            } => MockPowerState::Off,
-            Self::PoweringOn => MockPowerState::PoweringOn,
-            Self::Init { .. } => MockPowerState::On,
-            Self::MachineDown => MockPowerState::Off,
-            Self::DhcpComplete => MockPowerState::On,
-            Self::MachineUp { .. } => MockPowerState::On,
-            Self::PoweringOff => MockPowerState::PoweringOff,
-            Self::BmcOnlyMachineUp => MockPowerState::On,
-            Self::BmcOnlyMachineDown => MockPowerState::Off,
+            } => PowerState::Off,
+            Self::PoweringOn => PowerState::PoweringOn,
+            Self::Init { .. } => PowerState::On,
+            Self::MachineDown => PowerState::Off,
+            Self::DhcpComplete => PowerState::On,
+            Self::MachineUp { .. } => PowerState::On,
+            Self::PoweringOff => PowerState::PoweringOff,
+            Self::BmcOnlyMachineUp => PowerState::On,
+            Self::BmcOnlyMachineDown => PowerState::Off,
         }
     }
 
@@ -842,7 +842,7 @@ mod tests {
                         .any(|a| matches!(a, Action::SetTimer(Timer::PowerOffGraceful))),
                 "{start}: cleanup now, no graceful timer: {actions:?}"
             );
-            assert!(matches!(fsm.power_state(), MockPowerState::Off));
+            assert!(matches!(fsm.power_state(), PowerState::Off));
         }
     }
 
@@ -852,7 +852,7 @@ mod tests {
     fn os_ready_phase_splits_the_power_on() {
         // PoweringOn: power requested, BMC has not reported the host On.
         let fsm = host_at("PoweringOn");
-        assert!(matches!(fsm.power_state(), MockPowerState::PoweringOn));
+        assert!(matches!(fsm.power_state(), PowerState::PoweringOn));
         assert!(!fsm.is_up());
         assert_eq!(fsm.state_string(), "PoweringOn");
 
@@ -867,7 +867,7 @@ mod tests {
                 Action::SetTimer(Timer::OsReady)
             ]
         ));
-        assert!(matches!(fsm.power_state(), MockPowerState::On));
+        assert!(matches!(fsm.power_state(), PowerState::On));
         assert!(!fsm.is_up());
 
         // OsReady: the host asks for DHCP; the BMC event is not repeated.
@@ -900,7 +900,7 @@ mod tests {
                 Action::SetTimer(Timer::PowerCycle)
             ]
         ));
-        assert!(matches!(fsm.power_state(), MockPowerState::Off));
+        assert!(matches!(fsm.power_state(), PowerState::Off));
 
         let (fsm, actions) = fsm.event(Event::TimerAlert(Timer::PowerCycle));
         assert!(matches!(fsm.state, MachineState::PoweringOn));
@@ -911,7 +911,7 @@ mod tests {
                 Action::SetTimer(Timer::MachineOn)
             ]
         ));
-        assert!(matches!(fsm.power_state(), MockPowerState::PoweringOn));
+        assert!(matches!(fsm.power_state(), PowerState::PoweringOn));
     }
 
     #[test]
@@ -966,7 +966,7 @@ mod tests {
                 ),
                 "{description}: cleanup must wait for the graceful timer"
             );
-            assert!(matches!(fsm.power_state(), MockPowerState::PoweringOff));
+            assert!(matches!(fsm.power_state(), PowerState::PoweringOff));
             assert!(!fsm.is_up());
             assert_eq!(fsm.state_string(), "PoweringOff");
 
@@ -976,7 +976,7 @@ mod tests {
                 actions.as_slice(),
                 [Action::ConsoleOutputStop, Action::CleanupOnPowerOff]
             ));
-            assert!(matches!(fsm.power_state(), MockPowerState::Off));
+            assert!(matches!(fsm.power_state(), PowerState::Off));
         }
 
         // ForceOff from a running host is immediate, as before.

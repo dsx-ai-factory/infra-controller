@@ -239,6 +239,7 @@ func buildActivityOptions(step operationrules.SequenceStep) workflow.ActivityOpt
 type childWorkflowEntry struct {
 	future        workflow.ChildWorkflowFuture
 	componentType devicetypes.ComponentType
+	stageNumber   int
 }
 
 const componentActionBatchingChangeID = "component-action-max-parallel"
@@ -319,12 +320,15 @@ func childWorkflowExecutionTimeout(
 // Within each type, components are batched according to the step's max_parallel setting.
 func executeGenericStageParallel(
 	ctx workflow.Context,
+	taskID uuid.UUID,
+	tracker *report.Tracker,
 	steps []operationrules.SequenceStep,
 	typeToTargets map[devicetypes.ComponentType]common.Target,
 	allTargets map[devicetypes.ComponentType]common.Target,
 	activityInfo any,
 ) error {
 	batchingEnabled := componentActionBatchingEnabled(ctx)
+	progressEnabled := firmwareProgressReportingEnabled(ctx, steps)
 
 	// Launch a child workflow for each component type that has targets.
 	// Pair each future with its component type so error attribution is always
@@ -373,10 +377,16 @@ func executeGenericStageParallel(
 		futures = append(futures, childWorkflowEntry{
 			future:        future,
 			componentType: step.ComponentType,
+			stageNumber:   step.Stage,
 		})
 	}
 
-	// Wait for all child workflows and attribute any error to the correct type.
+	if progressEnabled {
+		return waitForChildrenAndFirmwareProgress(ctx, taskID, tracker, futures)
+	}
+
+	// Existing histories wait for child workflows without consuming the new
+	// progress signal, preserving their recorded command sequence.
 	for _, entry := range futures {
 		if err := entry.future.Get(ctx, nil); err != nil {
 			return fmt.Errorf("component type %s failed: %w",
@@ -459,6 +469,8 @@ func executeRuleBasedOperation(
 
 		err := executeGenericStageParallel(
 			ctx,
+			taskID,
+			tracker,
 			stage.Steps,
 			typeToTargets,
 			allTargets,

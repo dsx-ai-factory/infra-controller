@@ -246,7 +246,6 @@ fn sensor_metric_values<'a, C: Callbacks>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use axum::Router;
     use nv_redfish::bmc_http::{BmcCredentials, HttpClient};
@@ -255,10 +254,10 @@ mod tests {
 
     use super::{REPORT_ID, SENSING_INTERVAL_MS, STALE_REPORT_ID};
     use crate::test_support::axum_http_client::AxumRouterHttpClient;
-    use crate::test_support::{TEST_MAC_POOL, TestCallbacks};
+    use crate::test_support::{TEST_MAC_POOL, TestBmcConfig, create_test_bmc};
     use crate::{
         DpuMachineInfo, DpuSettings, HardwareType, HostMachineInfo, MachineInfo,
-        MachineRouterOptions, machine_router,
+        MachineRouterOptions,
     };
 
     fn test_host_mock() -> Router {
@@ -266,7 +265,7 @@ mod tests {
         let hw_type = HardwareType::DellPowerEdgeR750;
         let ranges_config = mac_pool.allocate_range_config().unwrap();
 
-        machine_router(
+        create_test_bmc(
             &MachineInfo::Host(HostMachineInfo::new(
                 hw_type,
                 vec![DpuMachineInfo::new(
@@ -277,7 +276,7 @@ mod tests {
                 &mut mac_pool,
                 ranges_config,
             )),
-            Arc::new(TestCallbacks::default()),
+            TestBmcConfig::default(),
             "test-host-id".to_string(),
             false,
             MachineRouterOptions::default(),

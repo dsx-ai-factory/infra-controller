@@ -17,16 +17,17 @@
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use bmc_mock::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    ActionError, Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, MockPowerState,
-    POWER_CYCLE_DELAY, ResourceResetType,
+    ActionError, Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, POWER_CYCLE_DELAY,
+    ResourceResetType,
 };
+use nv_redfish::schema::resource::PowerState;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -45,20 +46,14 @@ fn abandon_nvos_dhcp_on_power_change(actions: &mut VecDeque<Action>) {
 
 #[derive(Debug)]
 struct SwitchLiveState {
-    power_state: MockPowerState,
+    power_state: PowerState,
     bmc_ip: Option<Ipv4Addr>,
     nvos_ip: Option<Ipv4Addr>,
     ipmi_port: Option<u16>,
     ssh_endpoint_port: Option<u16>,
     ssh_host_key: Option<String>,
     state: &'static str,
-    /// BMC account passwords restored from the previous snapshot at startup,
-    /// re-applied onto a freshly built BMC mock so a rotated password survives a
-    /// machine-a-tron restart (issue #5966).
-    bmc_credentials: Option<Vec<bmc_mock::BmcAccountCredential>>,
-    /// Live BMC account service, so `persisted()` can export the current
-    /// passwords at shutdown rather than a stale mirror (issue #5966).
-    bmc_account_service: Option<Weak<bmc_mock::AccountServiceState>>,
+    bmc_persistence: crate::bmc_mock_wrapper::BmcPersistence,
 }
 
 impl SwitchLiveState {
@@ -71,18 +66,7 @@ impl SwitchLiveState {
             ssh_endpoint_port: None,
             ssh_host_key: None,
             state: fsm.state_string(),
-            bmc_credentials: None,
-            bmc_account_service: None,
-        }
-    }
-
-    /// Credentials to write into the next device snapshot: the current live BMC
-    /// passwords when the mock is running, else the passwords restored at
-    /// startup.
-    fn bmc_accounts_for_snapshot(&self) -> Option<Vec<bmc_mock::BmcAccountCredential>> {
-        match self.bmc_account_service.as_ref().and_then(Weak::upgrade) {
-            Some(account_service) => Some(account_service.export_credentials()),
-            None => self.bmc_credentials.clone(),
+            bmc_persistence: Default::default(),
         }
     }
 }
@@ -95,7 +79,10 @@ struct SwitchCallbacks {
 
 impl SwitchCallbacks {
     pub(crate) fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
-        self.get_power_state().validate_reset_type(reset_type)?;
+        crate::power_state::validate_reset_type(
+            self.state.read().unwrap().power_state,
+            reset_type,
+        )?;
         self.mailbox
             .send(SwitchMessage::Bmc(BmcCommand::SetSystemPower {
                 request: reset_type,
@@ -106,8 +93,8 @@ impl SwitchCallbacks {
 }
 
 impl Callbacks for SwitchCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        self.state.read().unwrap().power_state
+    fn get_power_state(&self) -> bmc_mock::MockPowerState {
+        unreachable!("switch profiles do not expose power state through callbacks")
     }
 
     async fn computer_system_reset(
@@ -209,7 +196,8 @@ impl SwitchActor {
         let (fsm, actions) = SwitchFsm::init(true);
         let first_run_delay = Some(first_run_offset(config.run_interval_idle));
         let mut live_state = SwitchLiveState::new(&fsm);
-        live_state.bmc_credentials = persisted.bmc_accounts;
+        live_state.bmc_persistence =
+            crate::bmc_mock_wrapper::BmcPersistence::from_saved(persisted.bmc_state);
         Self {
             mat_id: persisted.mat_id,
             machine_config_section,
@@ -449,17 +437,11 @@ impl SwitchActor {
                 .change_factory_default_password(password);
         }
 
-        // Restore snapshot-saved passwords onto the freshly built BMC mock so a
-        // rotated password survives a restart (issue #5966).
-        let saved_credentials = self.live_state.read().unwrap().bmc_credentials.clone();
-        if let Some(saved_credentials) = saved_credentials {
-            bmc_mock
-                .state()
-                .account_service_state
-                .restore_credentials(&saved_credentials);
+        {
+            let mut live_state = self.live_state.write().unwrap();
+            live_state.bmc_persistence.restore(bmc_mock.state())?;
+            live_state.bmc_persistence.attach(bmc_mock.state());
         }
-        self.live_state.write().unwrap().bmc_account_service =
-            Some(Arc::downgrade(&bmc_mock.state().account_service_state));
 
         let bmc_handle = {
             self.app_context
@@ -634,7 +616,7 @@ impl SwitchHandle {
         .set_power_state(request)
     }
 
-    pub(crate) fn power_state(&self) -> MockPowerState {
+    pub(crate) fn power_state(&self) -> PowerState {
         self.0.live_state.read().unwrap().power_state
     }
 
@@ -666,7 +648,7 @@ impl SwitchHandle {
             hardware_type: Some(self.0.host_info.hw_type),
             mat_state: Some(state.state.to_string()),
             api_state: "Unknown".to_string(),
-            power_state: state.power_state.to_string(),
+            power_state: state.power_state,
             machine_ip: None,
             nvos_ip: state.nvos_ip.map(|ip| ip.to_string()),
             infiniband_ports: None,
@@ -681,6 +663,13 @@ impl SwitchHandle {
     }
 
     pub(crate) fn persisted(&self) -> PersistedDevice {
+        let bmc_state = self
+            .0
+            .live_state
+            .read()
+            .unwrap()
+            .bmc_persistence
+            .persisted();
         PersistedDevice {
             hw_type: self.0.host_info.hw_type,
             mat_id: self.0.mat_id,
@@ -698,13 +687,8 @@ impl SwitchHandle {
                 base: self.0.host_info.hw_mac_addr_pool.base(),
                 host_bits: self.0.host_info.hw_mac_addr_pool.host_bits(),
             }),
+            bmc_state,
             active_host_firmware: None,
-            bmc_accounts: self
-                .0
-                .live_state
-                .read()
-                .unwrap()
-                .bmc_accounts_for_snapshot(),
         }
     }
 

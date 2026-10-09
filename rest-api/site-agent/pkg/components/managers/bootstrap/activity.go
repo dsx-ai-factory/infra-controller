@@ -67,6 +67,9 @@ func (o *OTPHandler) ReceiveAndSaveOTP(ctx context.Context, base64EncodedEncrypt
 	// Update the OTP in the bootstrap secret without base64 encoding
 	bootstrapSecret.Data["otp"] = []byte(decryptedOtp)
 
+	// Recorded before the write, so the liveness check never takes this OTP for a re-pair.
+	ManagerAccess.Data.EB.Managers.Bootstrap.Registration.AddOTP(string(decryptedOtp))
+
 	_, err = o.SecretInterface.Update(ctx, bootstrapSecret, metav1.UpdateOptions{})
 	if err != nil {
 		logger.Error().Err(err).Str("Secret", bootstrapSecretName).Msg("Failed to update bootstrap secret")

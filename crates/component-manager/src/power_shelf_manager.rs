@@ -8,6 +8,7 @@ use carbide_secrets::credentials::Credentials;
 use mac_address::MacAddress;
 use model::component_manager::{FirmwareState, PowerAction, PowerShelfComponent};
 
+use crate::component_common::ComponentPowerStateResult;
 use crate::error::ComponentManagerError;
 use crate::types::FirmwareUpdateOptions;
 
@@ -73,28 +74,11 @@ pub struct PowerShelfFirmwareVersions {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct PowerShelfPowerStateResult {
-    pub pmc_mac: MacAddress,
-    pub power_state: Option<String>,
-    pub error: Option<String>,
-}
-
-impl crate::component_common::ComponentPowerStateResult for PowerShelfPowerStateResult {
-    fn power_state(&self) -> Option<&str> {
-        self.power_state.as_deref()
-    }
-
-    fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
-}
-
 /// Backend trait for power shelf management operations.
 ///
 /// Implementations receive physical endpoint information (PMC IP/MAC + vendor)
 /// and handle registration with the backend service internally. Results are
-/// keyed by `pmc_mac`.
+/// keyed by the PMC MAC (`pmc_mac`, or `mac_address` for power observations).
 #[async_trait::async_trait]
 pub trait PowerShelfManager: Send + Sync + Debug + 'static {
     fn name(&self) -> &str;
@@ -127,8 +111,12 @@ pub trait PowerShelfManager: Send + Sync + Debug + 'static {
         endpoints: &[PowerShelfEndpoint],
     ) -> Result<Vec<PowerShelfFirmwareVersions>, ComponentManagerError>;
 
+    /// Reads power observations in endpoint order, identified by each shelf's
+    /// PMC MAC. Per-shelf absence and errors are represented in each result;
+    /// an error preparing or fetching the batch can fail the whole call.
+    /// The PSM backend registers endpoints before reading its cached inventory.
     async fn get_power_state(
         &self,
         endpoints: &[PowerShelfEndpoint],
-    ) -> Result<Vec<PowerShelfPowerStateResult>, ComponentManagerError>;
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError>;
 }
