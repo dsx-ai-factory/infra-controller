@@ -23,6 +23,7 @@ use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
 use eyre::WrapErr;
+use nv_redfish::schema::resource::PowerState;
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer};
 use tokio::io::AsyncReadExt;
@@ -36,7 +37,10 @@ use url::Url;
 use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
 use crate::persistence::PersistenceError;
 use crate::redfish::computer_system::{SingleSystemState, SystemState};
-use crate::{ActionError, BmcState, BootOptionKind, Callbacks, MockPowerState, ResourceResetType};
+use crate::{
+    ActionError, BmcState, BootOptionKind, Callbacks, ResourceResetType, VirtualMediaContents,
+    VirtualMediaUpdate, validate_power_reset,
+};
 
 mod persistence;
 use persistence::StateFile;
@@ -51,12 +55,18 @@ const VIRSH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const POWER_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const PERSISTENCE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
+#[derive(Debug)]
+struct PowerObservation {
+    state: PowerState,
+    cycling: bool,
+}
+
 pub struct LibvirtActor {
     actor: Actor<LibvirtMessage>,
     mailbox: ActorMailbox<LibvirtMessage>,
     config: Config,
     refresh_pending: Arc<AtomicBool>,
-    power_state: Arc<RwLock<MockPowerState>>,
+    power_state: Arc<RwLock<PowerObservation>>,
 }
 
 impl LibvirtActor {
@@ -64,7 +74,10 @@ impl LibvirtActor {
     /// Call `run` to initialize the backend and spawn it in the owner's supervised task set.
     pub fn new(config: Config, guard: DropGuard) -> (Self, LibvirtCallbacks) {
         let refresh_pending = Arc::new(AtomicBool::new(false));
-        let power_state = Arc::new(RwLock::new(MockPowerState::Unknown));
+        let power_state = Arc::new(RwLock::new(PowerObservation {
+            state: PowerState::Off,
+            cycling: false,
+        }));
         let (actor, mailbox) = Actor::new();
         (
             LibvirtActor {
@@ -134,25 +147,33 @@ pub struct Config {
 /// Backend handle that sends operations to one sequential libvirt actor.
 ///
 /// Commands use an unbounded mailbox. Refresh notifications coalesce into one pending signal.
-/// Power reads return the last completed observation, initially Unknown, updated at actor startup,
+/// Power observations are published to Redfish, initially Off, updated at actor startup,
 /// after power commands and refresh notifications, and by polling with a five-second
 /// delay after each attempt. Actor work can delay polling; each virsh attempt has a 30-second
-/// deadline and up to five seconds of cleanup. Failed or unrecognized observations return Unknown.
+/// deadline and up to five seconds of cleanup. Failed or unrecognized observations retain the last state.
 /// Power commands return once enqueued; execution failures are logged by the actor.
+/// Virtual-media operations await execution and publish Redfish contents only on success.
+/// Resets are rejected while a power-cycle command is executing.
 /// Dropping the handle cancels the actor. Cancelling `LibvirtActor::run` during
 /// initialization interrupts it before the actor task is spawned.
 #[derive(Debug)]
 pub struct LibvirtCallbacks {
     mailbox: ActorMailbox<LibvirtMessage>,
     refresh_pending: Arc<AtomicBool>,
-    power_state: Arc<RwLock<MockPowerState>>,
+    power_state: Arc<RwLock<PowerObservation>>,
     _stop: DropGuard,
 }
 
 #[derive(Debug)]
 enum LibvirtMessage {
     PollPower,
-    SendPowerCommand { reset_type: ResourceResetType },
+    SendPowerCommand {
+        reset_type: ResourceResetType,
+    },
+    SetVirtualMedia {
+        update: VirtualMediaUpdate,
+        reply: oneshot::Sender<Result<(), ActionError>>,
+    },
     Refresh,
     PersistState,
     Stop(oneshot::Sender<Result<(), PersistenceError>>),
@@ -166,14 +187,13 @@ struct LibvirtBackend {
     system_state: Option<Weak<SystemState<LibvirtCallbacks>>>,
     applied_state: AppliedState,
     refresh_pending: Arc<AtomicBool>,
-    power_state: Arc<RwLock<MockPowerState>>,
+    power_state: Arc<RwLock<PowerObservation>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct AppliedState {
     persistent_boot_selection: Option<BootOptionKind>,
     boot_source_override: serde_json::Value,
-    virtual_media: BTreeMap<String, serde_json::Value>,
 }
 
 impl LibvirtBackend {
@@ -210,6 +230,7 @@ impl LibvirtBackend {
             .await?;
         self.system_state = Some(Arc::downgrade(&state));
         self.applied_state = applied;
+        self.publish_power_state(PowerState::Off);
         self.refresh_power_state().await;
         Ok(())
     }
@@ -455,37 +476,22 @@ impl LibvirtBackend {
         self.detach_target(target).await
     }
 
-    async fn apply_virtual_media(&self, state: &serde_json::Value) -> Result<(), ActionError> {
-        let device_id = state
-            .get("Id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| ActionError::BadRequest(eyre::eyre!("virtual media state has no id")))?;
-        let inserted = state
-            .get("Inserted")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        if !inserted {
-            return self
-                .eject_virtual_media(device_id)
-                .await
-                .map_err(ActionError::Internal);
+    async fn apply_virtual_media(
+        &self,
+        device_id: &str,
+        contents: &VirtualMediaContents,
+    ) -> Result<(), ActionError> {
+        match contents {
+            VirtualMediaContents::Empty => self.eject_virtual_media(device_id).await,
+            VirtualMediaContents::Inserted {
+                image,
+                write_protected,
+            } => {
+                self.insert_virtual_media(device_id, image, *write_protected)
+                    .await
+            }
         }
-        let image = state
-            .get("Image")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                ActionError::BadRequest(eyre::eyre!(
-                    "inserted virtual media device {} has no image",
-                    device_id
-                ))
-            })?;
-        let write_protected = state
-            .get("WriteProtected")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
-        self.insert_virtual_media(device_id, image, write_protected)
-            .await
-            .map_err(ActionError::Internal)
+        .map_err(ActionError::Internal)
     }
 
     async fn reconcile_state(&mut self, desired: AppliedState) -> Result<(), String> {
@@ -507,39 +513,15 @@ impl LibvirtBackend {
         }
         self.applied_state.boot_source_override = desired.boot_source_override;
         self.applied_state.persistent_boot_selection = desired.persistent_boot_selection;
-        for (device_id, desired_device) in desired.virtual_media {
-            if self.applied_state.virtual_media.get(&device_id) == Some(&desired_device) {
-                continue;
-            }
-            self.apply_virtual_media(&desired_device)
-                .await
-                .map_err(|error| error.to_string())?;
-            self.applied_state
-                .virtual_media
-                .insert(device_id, desired_device);
-        }
         Ok(())
     }
 }
 
 impl<C: Callbacks> From<&SingleSystemState<C>> for AppliedState {
     fn from(system: &SingleSystemState<C>) -> Self {
-        let virtual_media = system
-            .virtual_media()
-            .into_iter()
-            .flat_map(|virtual_media| virtual_media.desired_state())
-            .filter_map(|state| {
-                let device_id = state
-                    .get("Id")
-                    .and_then(serde_json::Value::as_str)?
-                    .to_string();
-                Some((device_id, state))
-            })
-            .collect();
         Self {
             persistent_boot_selection: system.resolve_persistent_boot_selection(),
             boot_source_override: system.boot_source_override(),
-            virtual_media,
         }
     }
 }
@@ -555,16 +537,16 @@ fn boot_source_override_is_active(boot_source_override: &serde_json::Value) -> b
 }
 
 impl LibvirtBackend {
-    async fn get_power_state(&self) -> MockPowerState {
+    async fn observe_power_state(&self) -> Option<PowerState> {
         match self.virsh(&["domstate", &self.config.domain]).await {
             Ok(output) => match String::from_utf8_lossy(&output.stdout).trim() {
                 "running" | "idle" | "blocked" | "paused" | "in shutdown" | "pmsuspended" => {
-                    MockPowerState::On
+                    Some(PowerState::On)
                 }
-                "shut off" | "crashed" => MockPowerState::Off,
+                "shut off" | "crashed" => Some(PowerState::Off),
                 state => {
                     tracing::warn!(domain = %self.config.domain, state, "unrecognized libvirt domain power state");
-                    MockPowerState::Unknown
+                    None
                 }
             },
             Err(error) => {
@@ -573,14 +555,25 @@ impl LibvirtBackend {
                     error = ?error,
                     "could not read libvirt domain power state",
                 );
-                MockPowerState::Unknown
+                None
             }
         }
     }
 
+    fn publish_power_state(&self, state: PowerState) {
+        self.power_state
+            .write()
+            .expect("power state lock poisoned")
+            .state = state;
+        if let Some(system_state) = self.system_state.as_ref().and_then(Weak::upgrade) {
+            system_state.set_power_state(state);
+        }
+    }
+
     async fn refresh_power_state(&self) {
-        let observed = self.get_power_state().await;
-        *self.power_state.write().expect("power state lock poisoned") = observed;
+        if let Some(observed) = self.observe_power_state().await {
+            self.publish_power_state(observed);
+        }
     }
 
     async fn send_power_command(
@@ -672,6 +665,17 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
         message: LibvirtMessage,
     ) -> ActorResult {
         match message {
+            LibvirtMessage::SetVirtualMedia { update, reply } => {
+                let result = self
+                    .apply_virtual_media(&update.device_id, &update.contents)
+                    .await;
+                if result.is_ok() {
+                    update.commit();
+                }
+                // Publication belongs to the actor even if the HTTP caller has gone away.
+                reply.send(result).ok();
+                ActorResult::Noop
+            }
             LibvirtMessage::Stop(reply) => {
                 reply.send(self.save_state()).ok();
                 ActorResult::Stop
@@ -694,15 +698,20 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
             }
             LibvirtMessage::SendPowerCommand { reset_type } => {
                 if matches!(reset_type, ResourceResetType::PowerCycle) {
-                    *self.power_state.write().expect("power state lock poisoned") =
-                        MockPowerState::PowerCycling {
-                            since: Instant::now(),
-                        };
+                    self.power_state
+                        .write()
+                        .expect("power state lock poisoned")
+                        .cycling = true;
+                    self.publish_power_state(PowerState::Off);
                 }
                 if let Err(error) = self.send_power_command(reset_type).await {
                     tracing::error!(domain = %self.config.domain, ?reset_type, %error, "libvirt power command failed");
                 }
                 self.refresh_power_state().await;
+                self.power_state
+                    .write()
+                    .expect("power state lock poisoned")
+                    .cycling = false;
                 ActorResult::Noop
             }
             LibvirtMessage::Refresh => {
@@ -729,15 +738,29 @@ impl LibvirtCallbacks {
 }
 
 impl Callbacks for LibvirtCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        *self.power_state.read().expect("power state lock poisoned")
+    async fn set_virtual_media(&self, update: VirtualMediaUpdate) -> Result<(), ActionError> {
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(LibvirtMessage::SetVirtualMedia { update, reply })
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))?
     }
 
     async fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,
     ) -> Result<(), ActionError> {
-        self.get_power_state().validate_reset_type(reset_type)?;
+        {
+            let observation = self.power_state.read().expect("power state lock poisoned");
+            if observation.cycling {
+                return Err(ActionError::BadRequest(eyre::eyre!(
+                    "libvirt backend is in the middle of power cycling"
+                )));
+            }
+            validate_power_reset(observation.state, reset_type)?;
+        }
         self.mailbox
             .send(LibvirtMessage::SendPowerCommand { reset_type })
             .map_err(|err| ActionError::Internal(err.into()))
@@ -926,6 +949,111 @@ mod tests {
     use crate::{HardwareType, MachineRouterOptions, machine_router};
 
     #[tokio::test]
+    async fn virtual_media_errors_reach_redfish_without_changing_committed_contents() {
+        let directory = tempfile::tempdir().unwrap();
+        let virsh = directory.path().join("virsh");
+        std::fs::write(
+            &virsh,
+            r#"#!/bin/sh
+case "$3" in
+    domstate) printf '%s\n' 'shut off' ;;
+    dumpxml) printf '%s\n' '<domain><os><type>hvm</type></os><devices/></domain>' ;;
+    define) exit 0 ;;
+    domblklist) printf '%s\n' 'file cdrom sdb media.iso' ;;
+    detach-disk|attach-device)
+        printf '%s\n' "$3" >> "$0.calls"
+        [ ! -f "$0.fail" ] || { printf '%s\n' 'injected media failure' >&2; exit 1; }
+        ;;
+    *) exit 2 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&virsh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut tasks = JoinSet::new();
+        let stop = CancellationToken::new();
+        let (actor, callbacks) = LibvirtActor::new(
+            Config {
+                state_file: None,
+                virsh_path: virsh,
+                uri: "test:///default".to_owned(),
+                domain: "test-domain".to_owned(),
+                virtual_media_targets: BTreeMap::from([("Cd".to_owned(), "sdb".to_owned())]),
+            },
+            stop.clone().drop_guard(),
+        );
+        let callbacks = Arc::new(callbacks);
+        let (router, state) = machine_router(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            callbacks.clone(),
+            "test-host".to_owned(),
+            false,
+            MachineRouterOptions {
+                virtual_media_devices: Some(vec![crate::VirtualMediaDeviceConfig {
+                    id: "Cd".into(),
+                    name: "Virtual CD".into(),
+                    media_types: vec!["CD".into()],
+                }]),
+                ..Default::default()
+            },
+        );
+        actor.run(&state, &mut tasks, stop).await.unwrap();
+        let drive = "/redfish/v1/Systems/System.Embedded.1/VirtualMedia/Cd";
+        let post = |action: &str, body: serde_json::Value| {
+            Request::builder()
+                .method("POST")
+                .uri(format!("{drive}/Actions/VirtualMedia.{action}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let response = router
+            .clone()
+            .oneshot(post(
+                "InsertMedia",
+                serde_json::json!({"Image": "first.iso"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("virsh.calls")).unwrap(),
+            "detach-disk\nattach-device\n"
+        );
+        std::fs::write(directory.path().join("virsh.fail"), "fail").unwrap();
+        for (action, body) in [
+            (
+                "InsertMedia",
+                serde_json::json!({"Image": "replacement.iso"}),
+            ),
+            ("EjectMedia", serde_json::json!({})),
+        ] {
+            let response = router.clone().oneshot(post(action, body)).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{action}"
+            );
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["message"], "virtual media update failed");
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(drive).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["Image"], "first.iso", "{action}");
+            assert_eq!(body["Inserted"], true, "{action}");
+        }
+        drop(router);
+        drop(state);
+        drop(callbacks);
+        tasks.join_all().await;
+    }
+
+    #[tokio::test]
     async fn observes_external_power_changes_and_recovers_from_unavailable_state() {
         let directory = tempfile::tempdir().unwrap();
         let virsh = directory.path().join("virsh");
@@ -935,6 +1063,7 @@ mod tests {
 case "$3" in
     domstate)
         IFS= read -r state < "$0.state"
+        printf '%s\n' "$state" > "$0.observed"
         [ "$state" != error ] || exit 1
         printf '%s\n' "$state"
         ;;
@@ -961,10 +1090,6 @@ esac
             stop.clone().drop_guard(),
         );
         let callbacks = Arc::new(callbacks);
-        assert!(matches!(
-            callbacks.get_power_state(),
-            MockPowerState::Unknown
-        ));
         let (router, state) = machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
             callbacks.clone(),
@@ -977,9 +1102,9 @@ esac
         for (observation, expected) in [
             ("running", serde_json::json!("On")),
             ("shut off", serde_json::json!("Off")),
-            ("error", serde_json::Value::Null),
+            ("error", serde_json::json!("Off")),
             ("running", serde_json::json!("On")),
-            ("unrecognized", serde_json::Value::Null),
+            ("unrecognized", serde_json::json!("On")),
         ] {
             let replacement = directory.path().join("next-state");
             std::fs::write(&replacement, observation).unwrap();
@@ -999,7 +1124,12 @@ esac
                     assert_eq!(response.status(), StatusCode::OK);
                     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
                     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                    if body.get("PowerState") == Some(&expected) {
+                    if body.get("PowerState") == Some(&expected)
+                        && std::fs::read_to_string(directory.path().join("virsh.observed"))
+                            .unwrap_or_default()
+                            .trim()
+                            == observation
+                    {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(20)).await;
