@@ -64,6 +64,7 @@ sqlx = { workspace = true, features = [
 tempfile = { workspace = true }
 tokio.workspace = true
 tonic = { workspace = true }
+tonic-client-wrapper = { path = "../tonic-client-wrapper", default-features = false }
 tokio-util.workspace = true
 tracing = { workspace = true }
 tracing-subscriber = { features = [
