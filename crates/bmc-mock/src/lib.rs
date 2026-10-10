@@ -115,7 +115,9 @@ pub use redfish::account_service::AccountServiceState;
 pub use redfish::event_service::{
     EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState, EventServiceStats,
 };
-pub use redfish::virtual_media::DeviceConfig as VirtualMediaDeviceConfig;
+pub use redfish::virtual_media::{
+    DeviceConfig as VirtualMediaDeviceConfig, VirtualMediaContents, VirtualMediaUpdate,
+};
 pub use sse::StreamStep;
 
 pub const DUMMY_FACTORY_USERNAME: &str = "root";
@@ -250,6 +252,21 @@ pub trait Callbacks: Send + Sync + 'static {
         &self,
         reset_type: ResourceResetType,
     ) -> impl Future<Output = Result<(), ActionError>> + Send;
+
+    /// Applies one virtual-media operation before reporting success.
+    ///
+    /// External backends must complete their I/O, then commit the update before
+    /// returning `Ok(())`. On failure, drop it without committing and return an
+    /// error. Actor implementations must transfer the whole update to retain
+    /// serialization and state publication if the requesting future is cancelled.
+    /// Backends without external media effects publish the requested state directly.
+    fn set_virtual_media(
+        &self,
+        update: VirtualMediaUpdate,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send {
+        update.commit();
+        std::future::ready(Ok(()))
+    }
 
     fn state_refresh_indication(&self);
 }
