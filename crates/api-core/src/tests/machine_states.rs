@@ -1354,6 +1354,103 @@ async fn test_dell_boss_initial_discovery_skips_lockdown_states(pool: sqlx::PgPo
 }
 
 #[crate::sqlx_test]
+async fn test_dell_boss_deprovision_lockhost_honors_disable_lockdown(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+
+    for disable_lockdown in [false, true] {
+        let mut expected_machine_data = ExpectedMachineData::default();
+        expected_machine_data
+            .host_lifecycle_profile
+            .disable_lockdown = Some(disable_lockdown);
+        let mh = create_managed_host_with_config(
+            &env,
+            ManagedHostConfig::default().with_expected_machine_data(expected_machine_data),
+        )
+        .await;
+
+        // BOSS cleanup unlocks the host before reaching LockHost.
+        env.redfish_sim
+            .set_lockdown(libredfish::EnabledDisabled::Disabled);
+        let platform_action_count = env.redfish_sim.platform_actions().len();
+        let enabled_lockdown_count = env
+            .redfish_sim
+            .lockdown_states()
+            .into_iter()
+            .filter(|state| *state == libredfish::EnabledDisabled::Enabled)
+            .count();
+
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        db::machine::advance(
+            &host,
+            &mut txn,
+            &ManagedHostState::WaitingForCleanup {
+                cleanup_state: CleanupState::CreateBossVolume {
+                    create_boss_volume_context: CreateBossVolumeContext {
+                        boss_controller_id: "RAID.Slot.1".to_string(),
+                        create_boss_volume_jid: None,
+                        create_boss_volume_state: CreateBossVolumeState::LockHost,
+                        iteration: Some(0),
+                    },
+                },
+                cleanup_context: CleanupContext::Deprovision,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+
+        env.run_machine_state_controller_iteration().await;
+
+        let platform_actions = env.redfish_sim.platform_actions();
+        let lockdown_actions: Vec<_> = platform_actions[platform_action_count..]
+            .iter()
+            .filter_map(|action| match action {
+                RedfishSimPlatformAction::SetIdracLockdown { enabled, .. } => Some(*enabled),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lockdown_actions,
+            if disable_lockdown {
+                Vec::new()
+            } else {
+                vec![libredfish::EnabledDisabled::Enabled]
+            },
+            "Redfish lockdown operation should follow disable_lockdown={disable_lockdown}",
+        );
+
+        let enabled_lockdown_count_after = env
+            .redfish_sim
+            .lockdown_states()
+            .into_iter()
+            .filter(|state| *state == libredfish::EnabledDisabled::Enabled)
+            .count();
+        assert_eq!(
+            enabled_lockdown_count_after,
+            enabled_lockdown_count + usize::from(!disable_lockdown),
+            "simulated BMC lockdown state should follow the host policy",
+        );
+
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert!(
+            matches!(
+                host.current_state(),
+                ManagedHostState::BomValidating {
+                    bom_validating_state: BomValidating::UpdatingInventory(BomValidatingContext {
+                        machine_validation_context: Some(MachineValidationContext::Cleanup),
+                        ..
+                    }),
+                }
+            ),
+            "LockHost should advance to cleanup inventory validation after applying the lockdown policy",
+        );
+    }
+}
+
+#[crate::sqlx_test]
 async fn test_repeated_initial_discovery_cleanup_failure_preserves_host_init_source(
     pool: sqlx::PgPool,
 ) {

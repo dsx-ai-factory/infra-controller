@@ -664,10 +664,22 @@ pub struct RedfishSimTimepoint {
 /// Platform-configuration calls recorded separately from power actions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedfishSimPlatformAction {
-    SetHostRshim { host: String },
-    SetHostPrivilegeLevel { host: String },
-    IsBiosSetup { host: String },
-    UefiSetup { dpu: bool },
+    SetHostRshim {
+        host: String,
+    },
+    SetIdracLockdown {
+        host: String,
+        enabled: EnabledDisabled,
+    },
+    SetHostPrivilegeLevel {
+        host: String,
+    },
+    IsBiosSetup {
+        host: String,
+    },
+    UefiSetup {
+        dpu: bool,
+    },
 }
 
 /// Owned form of the boot-interface reference observed by the Redfish
@@ -2201,9 +2213,17 @@ impl Redfish for RedfishSimClient {
 
     fn set_idrac_lockdown<'a>(
         &'a self,
-        _enabled: EnabledDisabled,
+        enabled: EnabledDisabled,
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
-        Box::pin(async move { Ok(()) })
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            let host = self._host.clone();
+            state.hosts.get_mut(&host).unwrap().lockdown = enabled;
+            state
+                .platform_actions
+                .push(RedfishSimPlatformAction::SetIdracLockdown { host, enabled });
+            Ok(())
+        })
     }
 
     fn get_boss_controller<'a>(
