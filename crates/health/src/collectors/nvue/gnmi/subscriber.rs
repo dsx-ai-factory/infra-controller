@@ -265,6 +265,13 @@ struct ExtendedGnmiStreamState {
     processor: ExtendedGnmiProcessor,
 }
 
+/// Endpoint-owned incremental readings retained through collector metadata replacement.
+#[derive(Default)]
+pub(crate) struct GnmiRetainedCache {
+    event_rows: super::on_change_processor::SharedEventRows,
+    extended: HashMap<String, super::reconciliation::SharedMetricSources>,
+}
+
 struct GnmiCollectorPlan {
     sample: GnmiSampleStreamState,
     interface: Option<GnmiSampleStreamState>,
@@ -723,6 +730,7 @@ fn build_gnmi_collector_plan(
     collector_registry: &CollectorRegistry,
     data_sink: Option<Arc<dyn DataSink>>,
     switch_id: String,
+    retained: &mut GnmiRetainedCache,
 ) -> Result<GnmiCollectorPlan, HealthError> {
     gnmi_config.validate().map_err(HealthError::GnmiError)?;
 
@@ -845,6 +853,13 @@ fn build_gnmi_collector_plan(
                 data_sink.clone(),
                 extended_context.clone(),
                 switch_id.clone(),
+                Some(
+                    retained
+                        .extended
+                        .entry(subscription.name.clone())
+                        .or_default()
+                        .clone(),
+                ),
             ),
         });
     }
@@ -879,6 +894,7 @@ fn build_gnmi_collector_plan(
                 data_sink,
                 event_context,
                 switch_id,
+                Some(retained.event_rows.clone()),
             ),
         })
     } else {
@@ -904,12 +920,9 @@ pub(crate) fn spawn_gnmi_collector(
     collector_registry: Arc<CollectorRegistry>,
     data_sink: Option<Arc<dyn DataSink>>,
     tls_config: Option<MtlsProfileConfig>,
+    retained: &mut GnmiRetainedCache,
 ) -> Result<Collector, HealthError> {
-    let switch_id = endpoint
-        .metadata
-        .as_ref()
-        .and_then(|m| m.serial_number().map(str::to_string))
-        .unwrap_or_else(|| endpoint.key());
+    let switch_id = endpoint.log_identity().into_owned();
 
     let switch_connect_host = endpoint.switch_connect_host_for_uri().into_owned();
 
@@ -934,7 +947,17 @@ pub(crate) fn spawn_gnmi_collector(
         &collector_registry,
         data_sink.clone(),
         switch_id,
+        retained,
     )?;
+
+    // Plan construction must succeed before cached readings reach the new contexts.
+    if let Some(state) = &plan.on_change {
+        state.processor.republish();
+    }
+
+    for state in &plan.extended {
+        state.processor.reconciliation.republish();
+    }
 
     let sample_enabled = !plan.sample.config.paths.is_empty();
 
@@ -1540,6 +1563,7 @@ mod tests {
                 collector_registry,
                 None,
                 None,
+                &mut Default::default(),
             )
             .expect("gNMI collector should initialize");
 
@@ -2380,6 +2404,7 @@ mod tests {
                 collector_registry,
                 None,
                 None,
+                &mut Default::default(),
             )
             .expect("gNMI collector should initialize for leak sensor metrics");
 
@@ -2431,6 +2456,7 @@ mod tests {
             collector_registry,
             Some(sink.clone()),
             None,
+            &mut Default::default(),
         )
         .expect("leak-only gNMI collector should initialize");
 
@@ -2476,6 +2502,7 @@ mod tests {
             registry,
             Some(sink.clone()),
             None,
+            &mut Default::default(),
         )
         .expect("selected interface collector");
 
@@ -2543,6 +2570,7 @@ mod tests {
                 registry.clone(),
                 None,
                 None,
+                &mut Default::default(),
             );
 
             let error = result.err().expect("invalid config must fail").to_string();

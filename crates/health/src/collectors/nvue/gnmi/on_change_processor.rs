@@ -32,6 +32,7 @@ use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample};
 
 type ParsedRow = HashMap<String, String>;
 type CachedRows = HashMap<String, ParsedRow>;
+pub(super) type SharedEventRows = Arc<Mutex<CachedRows>>;
 
 enum DeleteTarget {
     All,
@@ -224,7 +225,7 @@ pub(crate) struct GnmiOnChangeProcessor {
     pub(crate) data_sink: Option<Arc<dyn DataSink>>,
     pub(crate) event_context: EventContext,
     pub(crate) switch_id: String,
-    cached_rows: Mutex<CachedRows>,
+    cached_rows: SharedEventRows,
     reconciliation_candidates: Mutex<HashSet<String>>,
 }
 
@@ -235,6 +236,7 @@ impl GnmiOnChangeProcessor {
         data_sink: Option<Arc<dyn DataSink>>,
         event_context: EventContext,
         switch_id: String,
+        cached_rows: Option<SharedEventRows>,
     ) -> Self {
         Self {
             collector_name,
@@ -242,8 +244,20 @@ impl GnmiOnChangeProcessor {
             data_sink,
             event_context,
             switch_id,
-            cached_rows: Mutex::new(HashMap::new()),
+            cached_rows: cached_rows.unwrap_or_default(),
             reconciliation_candidates: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Republishes cached rows without recording a new device observation.
+    pub(super) fn republish(&self) {
+        let rows = self
+            .cached_rows
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        for (instance_id, row) in rows.iter() {
+            self.emit_row_as_metric(instance_id, row, false);
         }
     }
 
@@ -481,31 +495,33 @@ impl GnmiOnChangeProcessor {
         self.prune_rows(&rows_to_prune);
 
         for (instance_id, row) in rows_to_emit {
-            self.emit_row_as_metric(&instance_id, &row);
+            self.emit_row_as_metric(&instance_id, &row, true);
         }
 
         entity_count
     }
 
-    fn emit_row_as_metric(&self, instance_id: &str, row: &ParsedRow) {
+    fn emit_row_as_metric(&self, instance_id: &str, row: &ParsedRow, received: bool) {
         let severity = row.get("severity").map(String::as_str).unwrap_or("unknown");
         let text = row.get("text").map(String::as_str).unwrap_or("");
 
-        self.stream_metrics.last_row_timestamp.set(now_unix_secs());
-        self.stream_metrics
-            .rows_total
-            .with_label_values(&[severity])
-            .inc();
+        if received {
+            self.stream_metrics.last_row_timestamp.set(now_unix_secs());
+            self.stream_metrics
+                .rows_total
+                .with_label_values(&[severity])
+                .inc();
 
-        tracing::info!(
-            switch_id = %self.switch_id,
-            stream = %self.collector_name,
-            instance_id,
-            severity,
-            text,
-            rack_id = self.event_context.rack_id().map(tracing::field::display),
-            "nvue_gnmi ON_CHANGE: row received"
-        );
+            tracing::info!(
+                switch_id = %self.switch_id,
+                stream = %self.collector_name,
+                instance_id,
+                severity,
+                text,
+                rack_id = self.event_context.rack_id().map(tracing::field::display),
+                "nvue_gnmi ON_CHANGE: row received"
+            );
+        }
 
         let Some(sink) = &self.data_sink else { return };
 
@@ -664,6 +680,7 @@ mod tests {
             data_sink,
             test_event_context(TEST_COLLECTOR_NAME),
             "SN1234".to_string(),
+            None,
         )
     }
 
@@ -1064,6 +1081,7 @@ mod tests {
                 rack_id: Some(RackId::new("RACK_2")),
             },
             "SN-SWITCH-001".to_string(),
+            None,
         );
         let notification = proto::Notification {
             prefix: Some(proto::Path {
@@ -1200,6 +1218,22 @@ mod tests {
         );
 
         assert_eq!(metrics.notifications_received_total.get(), 0.0);
+
+        processor.stream_metrics.last_row_timestamp.set(1.0);
+
+        let timestamp_before = processor.stream_metrics.last_row_timestamp.get();
+
+        processor.republish();
+
+        assert_eq!(
+            received.with_label_values(&["critical"]).get(),
+            received_before
+        );
+
+        assert_eq!(
+            processor.stream_metrics.last_row_timestamp.get(),
+            timestamp_before
+        );
     }
 
     #[test]

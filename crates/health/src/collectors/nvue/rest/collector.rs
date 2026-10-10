@@ -26,7 +26,7 @@ use crate::HealthError;
 use crate::bmc::{CREDENTIAL_REFRESH_TIMEOUT, CredentialProvider, is_auth_error};
 use crate::collectors::{IterationResult, PeriodicCollector};
 use crate::config::NvueRestConfig;
-use crate::endpoint::{BmcAddr, BmcCredentials, BmcEndpoint, EndpointMetadata};
+use crate::endpoint::{BmcAddr, BmcCredentials, BmcEndpoint};
 use crate::sink::{
     Classification, CollectorEvent, DataSink, EventContext, HealthReport, HealthReportAlert,
     HealthReportSuccess, HealthReportTarget, LogRecord, LogSeverity, MetricSample, Probe,
@@ -245,10 +245,7 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
         endpoint: Arc<BmcEndpoint>,
         config: Self::Config,
     ) -> Result<Self, HealthError> {
-        let switch_id = match &endpoint.metadata {
-            Some(EndpointMetadata::Switch(s)) => s.serial.clone().unwrap_or_else(|| endpoint.key()),
-            _ => endpoint.key(),
-        };
+        let switch_id = endpoint.log_identity().into_owned();
 
         let event_context = EventContext::from_endpoint(endpoint.as_ref(), COLLECTOR_NAME);
 
@@ -885,6 +882,7 @@ mod tests {
     use super::*;
     use crate::bmc::BoxFuture;
     use crate::config::NvueRestPaths;
+    use crate::endpoint::EndpointMetadata;
 
     /// Assert StateSet semantics: one 0/1 series per state (current => 1.0),
     /// each with unit "state" and a `state` label. `entity` (if set) is present
@@ -1168,9 +1166,36 @@ mod tests {
     #[test]
     fn test_reboot_reason_emits_log_metadata_and_limits_metric_labels_to_reason() {
         let sink = Arc::new(CapturingSink::default());
-        let mut collector = collector_with_provider(ScriptedProvider::new(vec![]));
-        collector.data_sink = Some(sink.clone());
-        collector.log_event_sink_enabled = true;
+
+        let mut endpoint = crate::endpoint::test_support::test_endpoint(
+            crate::endpoint::test_support::mac("aa:bb:cc:dd:ee:ff"),
+        );
+
+        endpoint.metadata = Some(EndpointMetadata::Switch(crate::endpoint::SwitchData {
+            log_checkpoint_identity: Some("test-switch".to_string()),
+            id: None,
+            serial: Some("MT2515600ZYB".to_string()),
+            slot_number: None,
+            tray_index: None,
+            nvlink_domain_uuid: None,
+            endpoint_role: crate::endpoint::SwitchEndpointRole::Host,
+            is_primary: true,
+            nmxc_enabled: false,
+            nmxt_enabled: false,
+        }));
+
+        let collector = NvueRestCollector::new_runner(
+            endpoint.bmc.clone(),
+            Arc::new(endpoint),
+            NvueRestCollectorConfig {
+                rest_config: NvueRestConfig::default(),
+                data_sink: Some(sink.clone()),
+                log_event_sink_enabled: true,
+                credential_provider: ScriptedProvider::new(vec![]),
+                tls_http_client_provider: None,
+            },
+        )
+        .unwrap();
 
         let reason = RebootReasonResponse {
             reason: Some("package upgrade".to_string()),
@@ -1189,6 +1214,11 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert_eq!(log.body, "nvue_rest: collected system reboot reason");
         assert_eq!(log.severity, LogSeverity::Info);
+
+        assert_eq!(
+            collector.event_context.serial_number(),
+            Some("MT2515600ZYB")
+        );
 
         assert_eq!(
             log.attributes,

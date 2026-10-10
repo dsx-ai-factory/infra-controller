@@ -21,30 +21,56 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use super::proto::{self, PathElem};
-use crate::sink::{DataSink, EventContext, MetricSample};
+use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample};
 
 type MetricKey = (String, String, String);
 type SourcePath = Vec<(String, BTreeMap<String, String>)>;
 
-#[derive(Default)]
-struct RetainedSources {
-    sources: HashMap<MetricKey, SourcePath>,
-    eligible: HashMap<SourcePath, HashSet<MetricKey>>,
-}
+pub(super) type SharedMetricSources =
+    Arc<Mutex<HashMap<MetricKey, (SourcePath, Option<MetricSample>)>>>;
 
 /// Retains source ownership and protects readings touched during a snapshot.
 pub(super) struct MetricReconciler {
-    retained: Mutex<RetainedSources>,
+    sources: SharedMetricSources,
+    eligible: Mutex<HashMap<SourcePath, HashSet<MetricKey>>>,
+    retain_samples: bool,
     sink: Option<Arc<dyn DataSink>>,
     context: EventContext,
 }
 
 impl MetricReconciler {
-    pub(super) fn new(sink: Option<Arc<dyn DataSink>>, context: EventContext) -> Self {
+    pub(super) fn new(
+        sink: Option<Arc<dyn DataSink>>,
+        context: EventContext,
+        sources: Option<SharedMetricSources>,
+    ) -> Self {
         Self {
-            retained: Mutex::new(RetainedSources::default()),
+            retain_samples: sources.is_some(),
+            sources: sources.unwrap_or_default(),
+            eligible: Mutex::new(HashMap::new()),
             sink,
             context,
+        }
+    }
+
+    /// Publishes retained readings with this collector's current endpoint metadata.
+    pub(super) fn republish(&self) {
+        let Some(sink) = &self.sink else {
+            return;
+        };
+
+        let sources = self
+            .sources
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        for (_, sample) in sources.values() {
+            if let Some(sample) = sample {
+                sink.handle_event(
+                    &self.context,
+                    &CollectorEvent::Metric(Box::new(sample.clone())),
+                );
+            }
         }
     }
 
@@ -55,26 +81,30 @@ impl MetricReconciler {
             sample.unit.clone(),
         );
 
-        let mut retained = self
-            .retained
+        let mut sources = self
+            .sources
             .lock()
             .unwrap_or_else(|error| error.into_inner());
 
         let path = source_path(path.iter().copied());
 
-        retained.eligible.remove(&path);
-        retained.sources.insert(key, path);
+        self.eligible
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&path);
+
+        sources.insert(key, (path, self.retain_samples.then(|| sample.clone())));
     }
 
     /// A live update protects its source even if the new value cannot be projected.
     pub(super) fn touch(&self, path: &[&PathElem]) {
-        let mut retained = self
-            .retained
+        let mut eligible = self
+            .eligible
             .lock()
             .unwrap_or_else(|error| error.into_inner());
 
-        if !retained.eligible.is_empty() {
-            retained.eligible.remove(&source_path(path.iter().copied()));
+        if !eligible.is_empty() {
+            eligible.remove(&source_path(path.iter().copied()));
         }
     }
 
@@ -82,12 +112,12 @@ impl MetricReconciler {
     pub(super) fn delete(&self, path: &[&PathElem]) {
         let deleted = source_path(path.iter().copied());
 
-        let mut retained = self
-            .retained
+        let mut sources = self
+            .sources
             .lock()
             .unwrap_or_else(|error| error.into_inner());
 
-        retained.sources.retain(|(key, kind, unit), source| {
+        sources.retain(|(key, kind, unit), (source, _)| {
             if !covers(&deleted, source) {
                 return true;
             }
@@ -105,25 +135,28 @@ impl MetricReconciler {
             return None;
         };
 
-        let mut retained = self
-            .retained
+        let sources = self
+            .sources
             .lock()
             .unwrap_or_else(|error| error.into_inner());
 
-        if retained.sources.is_empty() {
+        if sources.is_empty() {
             return None;
         }
 
         let mut eligible: HashMap<SourcePath, HashSet<MetricKey>> = HashMap::new();
 
-        for (key, source) in &retained.sources {
+        for (key, (source, _)) in sources.iter() {
             eligible
                 .entry(source.clone())
                 .or_default()
                 .insert(key.clone());
         }
 
-        retained.eligible = eligible;
+        *self
+            .eligible
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = eligible;
 
         let prefix = list.prefix.clone().unwrap_or_default();
 
@@ -141,7 +174,7 @@ impl MetricReconciler {
         let mut key_schemas = HashMap::new();
         let mut leaf_paths = HashSet::new();
 
-        for source in retained.sources.values() {
+        for (source, _) in sources.values() {
             let mut names = Vec::new();
 
             for (name, keys) in source {
@@ -153,7 +186,7 @@ impl MetricReconciler {
         }
 
         Some(MetricSnapshot {
-            candidates: retained.sources.values().cloned().collect(),
+            candidates: sources.values().map(|(source, _)| source.clone()).collect(),
             present: HashSet::new(),
             requested,
             target: prefix.target,
@@ -165,12 +198,17 @@ impl MetricReconciler {
 
     /// A failed or cancelled snapshot discards eligibility without pruning.
     pub(super) fn finish(&self, snapshot: Option<MetricSnapshot>) -> usize {
-        let mut retained = self
-            .retained
+        let mut sources = self
+            .sources
             .lock()
             .unwrap_or_else(|error| error.into_inner());
 
-        let eligible = std::mem::take(&mut retained.eligible);
+        let eligible = std::mem::take(
+            &mut *self
+                .eligible
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
 
         let Some(snapshot) = snapshot else {
             return 0;
@@ -178,7 +216,7 @@ impl MetricReconciler {
 
         let mut removed = 0;
 
-        retained.sources.retain(|(key, kind, unit), source| {
+        sources.retain(|(key, kind, unit), (source, _)| {
             if !eligible
                 .get(source)
                 .is_some_and(|keys| keys.contains(&(key.clone(), kind.clone(), unit.clone())))

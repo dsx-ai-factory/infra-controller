@@ -52,6 +52,7 @@ impl GnmiSampleProcessor {
                 Arc::new(MetricReconciler::new(
                     data_sink.clone(),
                     event_context.clone(),
+                    None,
                 ))
             }),
             data_sink,

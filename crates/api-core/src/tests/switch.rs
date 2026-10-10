@@ -66,7 +66,7 @@ async fn test_find_switch_by_id(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
     let report = model::site_explorer::EndpointExplorationReport {
         chassis: vec![model::site_explorer::Chassis {
             id: "MGX_NVSwitch_0".to_string(),
-            serial_number: Some("BMC-SERIAL".to_string()),
+            serial_number: Some(" BMC-SERIAL ".to_string()),
             ..Default::default()
         }],
         ..Default::default()
@@ -77,26 +77,43 @@ async fn test_find_switch_by_id(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
     db::explored_endpoints::insert(bmc_ip, &report, false, &mut txn).await?;
     txn.commit().await?;
 
-    for response in [
-        env.api
-            .find_switches(tonic::Request::new(SwitchQuery {
-                switch_id: Some(switch_id),
-                name: None,
-            }))
-            .await?,
-        env.api
-            .find_switches_by_ids(tonic::Request::new(rpc::forge::SwitchesByIdsRequest {
-                switch_ids: vec![switch_id],
-            }))
-            .await?,
+    for (statement, expected_serial) in [
+        (
+            "ALTER TABLE explored_endpoints RENAME COLUMN preingestion_state TO unavailable_preingestion_state",
+            None,
+        ),
+        (
+            "ALTER TABLE explored_endpoints RENAME COLUMN unavailable_preingestion_state TO preingestion_state",
+            Some("BMC-SERIAL"),
+        ),
     ] {
-        let switches = response.into_inner().switches;
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(&env.pool)
+            .await?;
 
-        assert_eq!(switches.len(), 1);
+        for response in [
+            env.api
+                .find_switches(tonic::Request::new(SwitchQuery {
+                    switch_id: Some(switch_id),
+                    name: None,
+                }))
+                .await?,
+            env.api
+                .find_switches_by_ids(tonic::Request::new(rpc::forge::SwitchesByIdsRequest {
+                    switch_ids: vec![switch_id],
+                }))
+                .await?,
+        ] {
+            let switches = response.into_inner().switches;
 
-        let status = switches[0].status.as_ref().unwrap();
+            assert_eq!(switches.len(), 1);
+            assert_eq!(switches[0].id, Some(switch_id));
+            assert_eq!(switches[0].config.as_ref().unwrap().name, "Switch1");
 
-        assert_eq!(status.serial_number.as_deref(), Some("BMC-SERIAL"));
+            let status = switches[0].status.as_ref().unwrap();
+
+            assert_eq!(status.serial_number.as_deref(), expected_serial);
+        }
     }
 
     Ok(())

@@ -1004,6 +1004,7 @@ fn spawn_switch_host_collectors(
             collector_registry,
             data_sink.clone(),
             ctx.tls_config.clone(),
+            ctx.collectors.gnmi_cache_for(&key),
         ) {
             Ok(handle) => {
                 ctx.collectors
