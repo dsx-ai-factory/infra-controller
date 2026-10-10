@@ -60,11 +60,19 @@ Without these prerequisites, BMS events do not create NICo rack health reports.
 
 ### Health Reporting and Allocation Protection
 
-NICo provides **health visibility and allocation protection** for leak-related conditions. For BMS-based leak detection, rack leak health alerts come with these classifications:
+NICo provides **health visibility and allocation protection** for leak-related conditions. Tray leak health alerts come with these classifications:
 
-- `PreventAllocations`
-- `SensorCritical`
+- `TrayLeak`
 - `Hardware`
+- `SensorCritical`
+- `PreventAllocations`
+
+BMS-based and derived rack leak health alerts come with these classifications:
+
+- `RackLeak`
+- `Hardware`
+- `SensorCritical`
+- `PreventAllocations`
 
 `PreventAllocations` blocks new allocations for hosts affected by the active tray- or rack-health condition. When the health alert clears later, NICo recalculates aggregate health; allocation eligibility can recover when no other active health condition prevents allocation.
 

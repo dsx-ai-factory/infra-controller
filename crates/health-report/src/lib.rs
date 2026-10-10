@@ -729,6 +729,11 @@ impl HealthAlertClassification {
         Self("SensorCritical".to_string())
     }
 
+    /// Identifies an active rack-level leak.
+    pub fn rack_leak() -> Self {
+        Self("RackLeak".to_string())
+    }
+
     /// Excludes the host from state machine SLA tracking.
     /// When this classification is present on any alert in the aggregate health report,
     /// the host will not be counted as violating its state machine SLA.

@@ -68,18 +68,28 @@ Special case for sensor classifications:
 if thresholds indicate warning/critical/fatal/failure but the BMC explicitly reports sensor health as `Ok`,
 the probe is treated as success and no alert classification is emitted.
 
+## `TrayLeak`
+
+Indicates an active leak in a compute or NVSwitch tray. Derived tray leak
+alerts also include `Hardware`, `SensorCritical`, and `PreventAllocations`.
+
+## `RackLeak`
+
+Indicates an active rack-level leak reported by the BMS or derived from the
+configured leaking-tray threshold. Rack leak alerts also include `Hardware`,
+`SensorCritical`, and `PreventAllocations`.
+
 ## `Leak`
 
-Indicates an active leak reported by an NVUE leakage sensor or by a derived
-tray-level or rack-level leak report. The operational effect depends on the
-configured leak-processing thresholds and the object that the report targets.
+Identifies a raw active-leak observation from an NVUE leakage sensor. Configured
+leak processing converts these observations into a derived `TrayLeak` alert.
 
 ## `LeakDetector`
 
 Indicates that an enabled BMC Redfish leak detector reported a warning or
 critical state. This classification marks the raw detector observation;
 configured leak processing can combine detector observations into a derived
-alert with the `Leak` classification.
+alert with the `TrayLeak` classification.
 
 ## `SerialConsole`
 
