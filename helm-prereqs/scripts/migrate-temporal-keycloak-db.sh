@@ -136,16 +136,17 @@ echo "nico-pg-cluster master pod: ${NICO_PG_POD}"
 
 # ---------------------------------------------------------------------------
 # Preflight: target database/user already provisioned by the postgres
-# operator (i.e. the corresponding useHaPostgres toggle was applied before this
-# script ran). Checked for every database up front, before any Deployment is
-# scaled down, so a missing target aborts cleanly with nothing stopped.
+# operator (i.e. nico-prereqs synced with the corresponding useHaPostgres value
+# set to auto or true before this script ran). Checked for every database up
+# front, before any Deployment is scaled down, so a missing target aborts
+# cleanly with nothing stopped.
 # ---------------------------------------------------------------------------
 _require_target_db() {
     local _db="$1"
     if ! kubectl exec -n postgres "${NICO_PG_POD}" -- \
         psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${_db}'" 2>/dev/null | grep -q 1; then
         echo "ERROR: database '${_db}' does not exist on nico-pg-cluster yet." >&2
-        echo "  Set the matching useHaPostgres toggle in ${PREREQS_DIR}/values.yaml and run 'helmfile sync' (or setup.sh) first." >&2
+        echo "  Set the matching useHaPostgres value to true in ${PREREQS_DIR}/values.yaml and run 'helmfile sync -l name=nico-prereqs' first." >&2
         exit 1
     fi
 }
@@ -156,6 +157,50 @@ if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
 fi
 if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
     _require_target_db "keycloak"
+fi
+
+# ---------------------------------------------------------------------------
+# Migration receipt: what preflight requires before setup.sh moves a workload
+# onto nico-pg-cluster. It lists each stopped Deployment's uid/generation, which
+# any later restart, scale, or recreate changes. The old receipt is cleared
+# before anything is copied, so a failed retry can't leave a past success in
+# place. Keep the ConfigMap name in sync with _DB_RECORD_CONFIGMAP in
+# preflight.sh.
+# ---------------------------------------------------------------------------
+DB_RECORD_CONFIGMAP="nico-workload-databases"
+
+_clear_receipt() {
+    if kubectl get configmap "${DB_RECORD_CONFIGMAP}" -n postgres >/dev/null 2>&1; then
+        _run kubectl patch configmap "${DB_RECORD_CONFIGMAP}" -n postgres --type merge \
+            -p "{\"data\":{\"$1-migrated\":null}}"
+    fi
+}
+
+_write_receipt() {
+    kubectl get configmap "${DB_RECORD_CONFIGMAP}" -n postgres >/dev/null 2>&1 \
+        || _run kubectl create configmap "${DB_RECORD_CONFIGMAP}" -n postgres
+    _run kubectl patch configmap "${DB_RECORD_CONFIGMAP}" -n postgres --type merge \
+        -p "{\"data\":{\"$1-migrated\":\"$2\"}}"
+}
+
+# Prints "<deployment>=<uid>/<generation>" for each Deployment, space-separated.
+_deployment_states() {
+    local _ns="$1" _dep _state
+    local -a _states=()
+    shift
+    for _dep in "$@"; do
+        _state="$(kubectl get deploy "${_dep}" -n "${_ns}" \
+            -o jsonpath='{.metadata.uid}/{.metadata.generation}')"
+        _states+=("${_dep}=${_state}")
+    done
+    printf '%s\n' "${_states[*]}"
+}
+
+if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
+    _clear_receipt temporal
+fi
+if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
+    _clear_receipt keycloak
 fi
 
 # ---------------------------------------------------------------------------
@@ -282,6 +327,7 @@ _dump_restore_db() {
 if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
     _TEMPORAL_DEPLOYMENTS=(temporal-frontend temporal-history temporal-matching temporal-worker)
     _scale_down temporal "${_TEMPORAL_DEPLOYMENTS[@]}"
+    _TEMPORAL_RECEIPT="$(_deployment_states temporal "${_TEMPORAL_DEPLOYMENTS[@]}")"
     _dump_restore_db "temporal" "temporal.nico"
     _dump_restore_db "temporal_visibility" "temporal.nico"
 fi
@@ -293,6 +339,7 @@ if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
     _KEYCLOAK_NS="${KEYCLOAK_NS:-$(_yaml_toplevel_value "${PREREQS_DIR}/values.yaml" keycloak namespace)}"
     _KEYCLOAK_NS="${_KEYCLOAK_NS:-nico-rest}"
     _scale_down "${_KEYCLOAK_NS}" keycloak
+    _KEYCLOAK_RECEIPT="$(_deployment_states "${_KEYCLOAK_NS}" keycloak)"
     _dump_restore_db "keycloak" "keycloak.nico"
 fi
 
@@ -308,6 +355,13 @@ if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
     _disarm_group "${_KEYCLOAK_NS}"
 fi
 
+if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
+    _write_receipt temporal "${_TEMPORAL_RECEIPT}"
+fi
+if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
+    _write_receipt keycloak "${_KEYCLOAK_RECEIPT}"
+fi
+
 echo ""
 echo "=== Migration complete ==="
 echo "Migrated workloads are left at zero replicas — they stay stopped until"
@@ -315,10 +369,11 @@ echo "setup.sh repoints them at nico-pg-cluster, so nothing writes to the"
 echo "already-migrated legacy database in the meantime."
 echo "Next steps:"
 if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
-    echo "  - Confirm temporal.useHaPostgres: true in ${PREREQS_DIR}/values.yaml"
+    echo "  - Set temporal.useHaPostgres: true in ${PREREQS_DIR}/values.yaml (auto keeps Temporal on postgres.postgres)"
 fi
 if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
-    echo "  - Confirm keycloak.useHaPostgres: true in ${PREREQS_DIR}/values.yaml"
+    echo "  - Set keycloak.useHaPostgres: true in ${PREREQS_DIR}/values.yaml (auto keeps Keycloak on postgres.postgres)"
 fi
 echo "  - Re-run setup.sh so phases 7d/7f point Temporal/Keycloak at nico-pg-cluster and scale workloads back up"
+echo "  - Don't scale the workloads up before that. Preflight would treat this copy as stale and ask for a new migration"
 echo "  - Once verified, the legacy temporal/temporal_visibility/keycloak databases on postgres.postgres can be dropped"
