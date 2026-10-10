@@ -272,6 +272,25 @@ pub(crate) struct GnmiRetainedCache {
     extended: HashMap<String, super::reconciliation::SharedMetricSources>,
 }
 
+#[cfg(test)]
+impl GnmiRetainedCache {
+    /// Seeds a retained reading to exercise discovery's cache handoff without a live stream.
+    pub(crate) fn seed_metric(&mut self, subscription: &str, sample: crate::sink::MetricSample) {
+        let key = (
+            sample.key.clone(),
+            sample.metric_type.clone(),
+            sample.unit.clone(),
+        );
+
+        let sources = self.extended.entry(subscription.to_string()).or_default();
+
+        sources
+            .lock()
+            .unwrap()
+            .insert(key, (Vec::new(), Some(sample)));
+    }
+}
+
 struct GnmiCollectorPlan {
     sample: GnmiSampleStreamState,
     interface: Option<GnmiSampleStreamState>,
