@@ -48,7 +48,12 @@ const VIRSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const VIRSH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Delay after each periodic observation; the actor retains at most one polling alarm.
-const POWER_POLL_INTERVAL: Duration = Duration::from_secs(5);
+// Unit tests exercise polling and recovery without waiting for the production cadence.
+const POWER_POLL_INTERVAL: Duration = if cfg!(test) {
+    Duration::from_millis(20)
+} else {
+    Duration::from_secs(5)
+};
 const PERSISTENCE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct LibvirtActor {
