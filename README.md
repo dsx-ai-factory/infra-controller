@@ -31,12 +31,12 @@
 
 NICo delivers lifecycle automation for bare-metal systems that secures
 datacenter infrastructure at its foundation. It is an open source suite of
-microservices that runs next to the hardware it manages and automates
-the full bare-metal lifecycle: hardware discovery, firmware validation,
-BlueField DPU provisioning, network isolation, tenant provisioning, and secure
-sanitization between tenants. NVIDIA Cloud Partners (NCPs) and infrastructure
-operators use it to stand up and operate AI factory-scale infrastructure
-through APIs instead of runbooks.
+microservices that run next to the hardware, managing and automating the full
+bare-metal lifecycle: hardware discovery, firmware validation, BlueField DPU
+provisioning, network isolation, tenant provisioning, and secure sanitization
+between tenants. NVIDIA Cloud Partners (NCPs) and infrastructure operators can
+use NICo to stand up and operate AI factory-scale infrastructure through APIs
+instead of runbooks.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/static/readme/hero-dark.svg">
@@ -56,7 +56,7 @@ alignment on every rack bring-up, no single enforcement point for tenant
 isolation across Ethernet, InfiniBand, and NVLink, custom scripts for
 sanitization and attestation, and firmware drift across hardware generations.
 
-NICo closes that gap. In the default configuration, a managed host is a
+NICo closes these gaps. In the default configuration, a managed host is a
 server with one or more BlueField DPUs, and the DPU is the enforcement
 boundary. NICo provisions and controls the DPU directly, independently of
 whatever the tenant runs on the host, so the layers above it can treat bare
@@ -195,7 +195,7 @@ to the pool.
   <img src="docs/static/readme/lifecycle-light.svg" alt="The NICo lifecycle: Day 0 bring-up (discovery, validation, firmware baseline, DPU provisioning, attestation, network setup), Day 1 provisioning (isolation, lockdown, iPXE install, hand off), and Day 2 operations (health, firmware upgrades, release, sanitize and re-attest), with released hosts returning to the pool." width="100%">
 </picture>
 
-**Day 0: Discovery, Validation, and Ingestion.** The provider registers each
+**Day 0: Discovery, Validation, and Ingestion**: The provider registers each
 host as an Expected Machine with its BMC MAC address, chassis serial, and
 factory BMC credentials. From there NICo takes over: it discovers the host
 over Redfish, links each DPU to its host, validates the machine against its
@@ -204,12 +204,12 @@ installs the DPU OS and HBN, attests the host with measured boot and TPM
 checks, and allocates its IP addresses. Component inventory is collected
 automatically, so no manual component entry is required.
 
-**Day 1: Isolation, Lockdown, and Provisioning.** Before a tenant receives a
+**Day 1: Isolation, Lockdown, and Provisioning**: Before a tenant receives a
 host, NICo establishes isolation on every network plane, locks down UEFI and
 the BMC, and coordinates the iPXE boot of the tenant's chosen OS image. The
 provider allocates hosts to tenants as instances through the REST API.
 
-**Day 2: Operations, Health, and Tenant Transitions.** NICo monitors health
+**Day 2: Operations, Health, and Tenant Transitions**: NICo monitors health
 continuously, schedules firmware upgrades on unoccupied hosts, upgrades itself
 in place, and sanitizes and re-attests every released host before it returns
 to the available pool.
