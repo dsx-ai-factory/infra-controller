@@ -38,7 +38,8 @@ use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
 use crate::persistence::PersistenceError;
 use crate::redfish::computer_system::{SingleSystemState, SystemState};
 use crate::{
-    ActionError, BmcState, BootOptionKind, Callbacks, ResourceResetType, validate_power_reset,
+    ActionError, BmcState, BootOptionKind, Callbacks, ResourceResetType, VirtualMediaContents,
+    VirtualMediaUpdate, validate_power_reset,
 };
 
 mod persistence;
@@ -156,6 +157,7 @@ pub struct Config {
 /// delay after each attempt. Actor work can delay polling; each virsh attempt has a 30-second
 /// deadline and up to five seconds of cleanup. Failed or unrecognized observations retain the last state.
 /// Power commands return once enqueued; execution failures are logged by the actor.
+/// Virtual-media operations await execution and publish Redfish contents only on success.
 /// Resets are rejected while a power-cycle command is executing.
 /// Dropping the handle cancels the actor. Cancelling `LibvirtActor::run` during
 /// initialization interrupts it before the actor task is spawned.
@@ -170,7 +172,13 @@ pub struct LibvirtCallbacks {
 #[derive(Debug)]
 enum LibvirtMessage {
     PollPower,
-    SendPowerCommand { reset_type: ResourceResetType },
+    SendPowerCommand {
+        reset_type: ResourceResetType,
+    },
+    SetVirtualMedia {
+        update: VirtualMediaUpdate,
+        reply: oneshot::Sender<Result<(), ActionError>>,
+    },
     Refresh,
     PersistState,
     Stop(oneshot::Sender<Result<(), PersistenceError>>),
@@ -191,7 +199,6 @@ struct LibvirtBackend {
 struct AppliedState {
     persistent_boot_selection: Option<BootOptionKind>,
     boot_source_override: serde_json::Value,
-    virtual_media: BTreeMap<String, serde_json::Value>,
 }
 
 impl LibvirtBackend {
@@ -474,37 +481,22 @@ impl LibvirtBackend {
         self.detach_target(target).await
     }
 
-    async fn apply_virtual_media(&self, state: &serde_json::Value) -> Result<(), ActionError> {
-        let device_id = state
-            .get("Id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| ActionError::BadRequest(eyre::eyre!("virtual media state has no id")))?;
-        let inserted = state
-            .get("Inserted")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        if !inserted {
-            return self
-                .eject_virtual_media(device_id)
-                .await
-                .map_err(ActionError::Internal);
+    async fn apply_virtual_media(
+        &self,
+        device_id: &str,
+        contents: &VirtualMediaContents,
+    ) -> Result<(), ActionError> {
+        match contents {
+            VirtualMediaContents::Empty => self.eject_virtual_media(device_id).await,
+            VirtualMediaContents::Inserted {
+                image,
+                write_protected,
+            } => {
+                self.insert_virtual_media(device_id, image, *write_protected)
+                    .await
+            }
         }
-        let image = state
-            .get("Image")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                ActionError::BadRequest(eyre::eyre!(
-                    "inserted virtual media device {} has no image",
-                    device_id
-                ))
-            })?;
-        let write_protected = state
-            .get("WriteProtected")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
-        self.insert_virtual_media(device_id, image, write_protected)
-            .await
-            .map_err(ActionError::Internal)
+        .map_err(ActionError::Internal)
     }
 
     async fn reconcile_state(&mut self, desired: AppliedState) -> Result<(), String> {
@@ -526,39 +518,15 @@ impl LibvirtBackend {
         }
         self.applied_state.boot_source_override = desired.boot_source_override;
         self.applied_state.persistent_boot_selection = desired.persistent_boot_selection;
-        for (device_id, desired_device) in desired.virtual_media {
-            if self.applied_state.virtual_media.get(&device_id) == Some(&desired_device) {
-                continue;
-            }
-            self.apply_virtual_media(&desired_device)
-                .await
-                .map_err(|error| error.to_string())?;
-            self.applied_state
-                .virtual_media
-                .insert(device_id, desired_device);
-        }
         Ok(())
     }
 }
 
 impl<C: Callbacks> From<&SingleSystemState<C>> for AppliedState {
     fn from(system: &SingleSystemState<C>) -> Self {
-        let virtual_media = system
-            .virtual_media()
-            .into_iter()
-            .flat_map(|virtual_media| virtual_media.desired_state())
-            .filter_map(|state| {
-                let device_id = state
-                    .get("Id")
-                    .and_then(serde_json::Value::as_str)?
-                    .to_string();
-                Some((device_id, state))
-            })
-            .collect();
         Self {
             persistent_boot_selection: system.resolve_persistent_boot_selection(),
             boot_source_override: system.boot_source_override(),
-            virtual_media,
         }
     }
 }
@@ -702,6 +670,17 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
         message: LibvirtMessage,
     ) -> ActorResult {
         match message {
+            LibvirtMessage::SetVirtualMedia { update, reply } => {
+                let result = self
+                    .apply_virtual_media(&update.device_id, &update.contents)
+                    .await;
+                if result.is_ok() {
+                    update.commit();
+                }
+                // Publication belongs to the actor even if the HTTP caller has gone away.
+                reply.send(result).ok();
+                ActorResult::Noop
+            }
             LibvirtMessage::Stop(reply) => {
                 reply.send(self.save_state()).ok();
                 ActorResult::Stop
@@ -764,6 +743,16 @@ impl LibvirtCallbacks {
 }
 
 impl Callbacks for LibvirtCallbacks {
+    async fn set_virtual_media(&self, update: VirtualMediaUpdate) -> Result<(), ActionError> {
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(LibvirtMessage::SetVirtualMedia { update, reply })
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))?
+    }
+
     async fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,
