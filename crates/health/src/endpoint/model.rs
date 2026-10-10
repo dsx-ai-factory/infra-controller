@@ -148,8 +148,9 @@ impl BmcEndpoint {
 
     /// Returns the endpoint identity used for collector log state.
     ///
-    /// Machines prefer their NICo ID, switches use their serial number, and PowerShelves prefer
-    /// their serial number followed by their NICo ID. Other cases use the endpoint key.
+    /// Machines prefer their NICo ID. Switches prefer their configured checkpoint
+    /// identity, then their serial number and NICo ID. PowerShelves prefer their
+    /// serial number, then their NICo ID. Other cases use the endpoint key.
     pub fn log_identity(&self) -> Cow<'_, str> {
         match &self.metadata {
             Some(EndpointMetadata::Machine(MachineData {
@@ -165,7 +166,17 @@ impl BmcEndpoint {
                     Cow::Owned(self.key())
                 }
             }
-            Some(EndpointMetadata::Switch(switch)) => Cow::Borrowed(&switch.serial),
+            Some(EndpointMetadata::Switch(switch)) => {
+                if let Some(identity) = switch.log_checkpoint_identity.as_deref() {
+                    Cow::Borrowed(identity)
+                } else if let Some(serial) = switch.serial.as_deref() {
+                    Cow::Borrowed(serial)
+                } else if let Some(id) = switch.id {
+                    Cow::Owned(id.to_string())
+                } else {
+                    Cow::Owned(self.key())
+                }
+            }
             _ => Cow::Owned(self.key()),
         }
     }
@@ -222,14 +233,11 @@ impl EndpointMetadata {
     }
 
     /// Returns the hardware serial number when the endpoint metadata provides one.
-    ///
-    /// Machine and PowerShelf serial numbers may be absent; switch serial numbers are always
-    /// present.
     pub fn serial_number(&self) -> Option<&str> {
         match self {
             EndpointMetadata::Machine(machine) => machine.machine_serial.as_deref(),
             EndpointMetadata::PowerShelf(power_shelf) => power_shelf.serial.as_deref(),
-            EndpointMetadata::Switch(switch) => Some(switch.serial.as_str()),
+            EndpointMetadata::Switch(switch) => switch.serial.as_deref(),
         }
     }
 
@@ -299,7 +307,14 @@ pub enum SwitchEndpointRole {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SwitchData {
     pub id: Option<SwitchId>,
-    pub serial: String,
+
+    /// Hardware serial discovered by NICo, or the static endpoint identity.
+    pub serial: Option<String>,
+
+    /// Configured switch name used to preserve API-discovered log checkpoint paths.
+    /// Static endpoints use the serial, NICo ID, or endpoint key when absent.
+    pub(crate) log_checkpoint_identity: Option<String>,
+
     pub slot_number: Option<i32>,
     pub tray_index: Option<i32>,
 
@@ -466,8 +481,9 @@ mod tests {
     #[test]
     fn periodic_log_collection_endpoint_eligibility() {
         let switch_bmc = SwitchData {
+            log_checkpoint_identity: None,
             id: None,
-            serial: "switch".to_string(),
+            serial: Some("switch".to_string()),
             slot_number: Some(1),
             tray_index: Some(2),
             nvlink_domain_uuid: None,

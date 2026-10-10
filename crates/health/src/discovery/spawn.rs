@@ -1004,6 +1004,7 @@ fn spawn_switch_host_collectors(
             collector_registry,
             data_sink.clone(),
             ctx.tls_config.clone(),
+            ctx.collectors.gnmi_cache_for(&key),
         ) {
             Ok(handle) => {
                 ctx.collectors
@@ -1037,11 +1038,13 @@ mod tests {
     use carbide_test_support::{Check, check_values};
     use mac_address::MacAddress;
 
+    use super::super::cleanup::stop_stale_switch_collectors;
     use super::*;
     use crate::collectors::DowngradeReason;
     use crate::config::{
         AutoModeConfig, CarbideApiConnectionConfig, Config, Configurable, LogsCollectorConfig,
-        NvLinkDomainHealthReportSinkConfig, NvueCollectorConfig, NvueGnmiConfig, PeriodicLogConfig,
+        NvLinkDomainHealthReportSinkConfig, NvueCollectorConfig, NvueGnmiConfig,
+        NvueGnmiMetricConfig, NvueGnmiMetricOutput, NvueGnmiSubscriptionConfig, PeriodicLogConfig,
         TracingSinkConfig,
     };
     use crate::endpoint::test_support::endpoint_with_creds;
@@ -1051,7 +1054,7 @@ mod tests {
     };
     use crate::limiter::{NoopLimiter, RateLimiter};
     use crate::metrics::MetricsManager;
-    use crate::sink::{CollectorEvent, EventContext};
+    use crate::sink::{CollectorEvent, EventContext, MetricSample, PrometheusSink};
 
     struct NoopSink;
 
@@ -1116,8 +1119,9 @@ mod tests {
         serial: &str,
     ) -> EndpointMetadata {
         EndpointMetadata::Switch(SwitchData {
+            log_checkpoint_identity: None,
             id: None,
-            serial: serial.to_string(),
+            serial: Some(serial.to_string()),
             slot_number: None,
             tray_index: None,
             nvlink_domain_uuid: None,
@@ -1401,7 +1405,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_switch_host_primary_starts_nmxt_and_nvue_collectors_when_globally_enabled() {
+    async fn test_switch_host_primary_starts_collectors_and_reuses_gnmi_cache() {
         let mut config = Config::default();
         config.collectors.sensors = Configurable::Disabled;
         config.collectors.logs = Configurable::Disabled;
@@ -1412,11 +1416,27 @@ mod tests {
 
         config.collectors.nvue = Configurable::Enabled(NvueCollectorConfig {
             rest: Configurable::Enabled(Default::default()),
-            gnmi: Configurable::Enabled(NvueGnmiConfig::default()),
+            gnmi: Configurable::Enabled(NvueGnmiConfig {
+                additional_subscriptions: vec![NvueGnmiSubscriptionConfig {
+                    name: "retained".into(),
+                    paths: vec![vec!["value".into()]],
+                    metrics: vec![NvueGnmiMetricConfig {
+                        path: vec!["value".into()],
+                        metric_type: "retained_scalar".into(),
+                        output: NvueGnmiMetricOutput::Gauge {
+                            unit: "count".into(),
+                        },
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
         });
 
         let mut ctx = context_with_config(config, "test_switch_host_nmxt_nvue_enabled");
-        let endpoint = test_endpoint(
+
+        let mut endpoint = test_endpoint(
             Ipv4Addr::new(10, 0, 0, 9),
             "55:66:77:88:99:cc",
             Some(switch_metadata_with_role(
@@ -1427,7 +1447,26 @@ mod tests {
             )),
         );
 
-        spawn_collectors_for_endpoint(&mut ctx, &endpoint, None, "test")
+        let key = endpoint.key();
+
+        ctx.collectors.gnmi_cache_for(&key).seed_metric(
+            "retained",
+            MetricSample {
+                key: "value".into(),
+                name: "nvue_gnmi_extended".into(),
+                metric_type: "retained_scalar".into(),
+                unit: "count".into(),
+                value: 42.0,
+                labels: vec![],
+                context: None,
+            },
+        );
+
+        let sink = Arc::new(PrometheusSink::new(ctx.metrics_manager.clone(), "test").unwrap());
+
+        stop_stale_switch_collectors(&mut ctx, std::slice::from_ref(&endpoint)).await;
+
+        spawn_collectors_for_endpoint(&mut ctx, &endpoint, Some(sink.clone()), "test")
             .expect("spawn should succeed");
 
         assert_eq!(ctx.collectors.len(CollectorKind::Sensor), 0);
@@ -1435,6 +1474,29 @@ mod tests {
         assert_eq!(ctx.collectors.len(CollectorKind::Nmxc), 0);
         assert_eq!(ctx.collectors.len(CollectorKind::NvueRest), 1);
         assert_eq!(ctx.collectors.len(CollectorKind::NvueGnmi), 1);
+
+        let Some(EndpointMetadata::Switch(switch)) = Arc::make_mut(&mut endpoint).metadata.as_mut()
+        else {
+            panic!("expected switch metadata");
+        };
+
+        switch.serial = Some("MT2515600ZYB".into());
+
+        stop_stale_switch_collectors(&mut ctx, std::slice::from_ref(&endpoint)).await;
+
+        spawn_collectors_for_endpoint(&mut ctx, &endpoint, Some(sink), "test")
+            .expect("respawn should succeed");
+
+        let exported = ctx.metrics_manager.export_telemetry().unwrap();
+
+        let reading = exported
+            .lines()
+            .find(|line| line.starts_with("test_nvue_gnmi_extended_retained_scalar_count{"))
+            .expect("retained reading must survive discovery respawn");
+
+        assert!(reading.contains("serial_number=\"MT2515600ZYB\""));
+        assert!(reading.ends_with(" 42"));
+        assert!(!exported.contains("serial_number=\"switch-host\""));
     }
 
     #[tokio::test]

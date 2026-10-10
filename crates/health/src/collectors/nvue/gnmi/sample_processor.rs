@@ -52,6 +52,7 @@ impl GnmiSampleProcessor {
                 Arc::new(MetricReconciler::new(
                     data_sink.clone(),
                     event_context.clone(),
+                    None,
                 ))
             }),
             data_sink,
@@ -1691,8 +1692,9 @@ mod tests {
                 collector_type: NVUE_GNMI_SAMPLE_STREAM_ID,
                 labels: Default::default(),
                 metadata: Some(EndpointMetadata::Switch(SwitchData {
+                    log_checkpoint_identity: None,
                     id: Some(switch_id),
-                    serial: "SN-SWITCH-001".to_string(),
+                    serial: Some("SN-SWITCH-001".to_string()),
                     slot_number: Some(7),
                     tray_index: Some(3),
                     nvlink_domain_uuid: None,
