@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-//! Operator-owned NIC firmware definitions, independent of device selection.
+//! Operator-owned NIC firmware definitions and read-only target selection.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -119,6 +119,15 @@ impl fmt::Debug for NicFirmwareArtifact {
 }
 
 impl NicFirmwareProfileConfig {
+    /// `entry_for` matches literal hardware identifiers, not device family names.
+    /// A match selects firmware; it does not qualify the card for flashing.
+    pub fn entry_for(&self, hardware: &NicFirmwareHardware) -> Option<&NicFirmwareProfileEntry> {
+        self.entries.iter().find(|entry| {
+            entry.firmware.part_number == hardware.part_number
+                && entry.firmware.psid == hardware.psid
+        })
+    }
+
     /// `validate_and_normalize` checks the hardware entries and artifact sources,
     /// and lowercases SHA-256 digests. Entry order and valid
     /// exact targets are preserved without trimming or version ordering.
@@ -158,6 +167,151 @@ impl NicFirmwareProfileConfig {
         }
         Ok(self)
     }
+}
+
+/// `NicFirmwareHardware` identifies the exact profile entry a device needs.
+#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
+pub struct NicFirmwareHardware {
+    /// Manufacturer part number, compared literally.
+    pub part_number: String,
+    /// Firmware parameter-set identifier, compared literally.
+    pub psid: String,
+}
+
+impl NicFirmwareHardware {
+    /// `validate` accepts identifiers up to 256 UTF-8 bytes each, without
+    /// surrounding whitespace or controls. The bound keeps hardware selectors
+    /// usable as an indexed assignment key rather than failing during a write.
+    pub fn validate(self) -> Result<Self, ConfigValidationError> {
+        if [&self.part_number, &self.psid].iter().any(|value| {
+            value.is_empty()
+                || value.len() > 256
+                || value.trim() != value.as_str()
+                || value.chars().any(char::is_control)
+        }) {
+            return Err(ConfigValidationError::InvalidValue(
+                "part number and PSID must each contain 1-256 UTF-8 bytes without surrounding whitespace or control characters".into(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
+/// `NicFirmwareSiteDefault` selects a live profile for one hardware pair.
+/// Its version tracks assignment edits, independently of profile edits.
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct NicFirmwareSiteDefault {
+    /// Literal part-number/PSID pair identifying this assignment.
+    #[sqlx(flatten)]
+    pub hardware: NicFirmwareHardware,
+    /// Live profile selected for this hardware, not a pinned revision.
+    pub profile_id: NicFirmwareProfileId,
+    /// Assignment edit token required to replace or clear this default.
+    pub version: ConfigVersion,
+}
+
+/// `NicFirmwareBaseline` groups operator selections in order of precedence.
+/// These are resolver inputs, not persisted machine or card overrides.
+#[derive(Default)]
+pub struct NicFirmwareBaseline<'a> {
+    /// Operator override for this card, taking precedence over machine settings.
+    pub card_override: Option<&'a NicFirmwareProfileId>,
+    /// Operator override for this machine when no card override is selected.
+    pub machine_override: Option<&'a NicFirmwareProfileId>,
+    /// Hardware default used when neither an override nor an allocation selects a profile.
+    pub site_default: Option<&'a NicFirmwareProfileId>,
+}
+
+/// `NicFirmwareSelectionSource` tells operators which setting selected a target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NicFirmwareSelectionSource {
+    /// The operator selected a profile for this card within its machine.
+    CardOverride,
+    /// The operator selected a machine profile, without a card override.
+    MachineOverride,
+    /// The allocation selected a profile, without an operator override.
+    Allocation,
+    /// The hardware default applied, without an override or allocation selection.
+    SiteDefault,
+}
+
+/// `NicFirmwareResolution` preserves the selected profile revision and exact entry.
+/// It is a read-only decision, not an admitted operation or permission to flash.
+#[derive(Clone, Debug)]
+pub struct NicFirmwareResolution {
+    /// Setting that selected this profile under the resolver's precedence rules.
+    pub source: NicFirmwareSelectionSource,
+    /// Catalog identity of the selected profile.
+    pub profile_id: NicFirmwareProfileId,
+    /// Profile revision read for this resolution, not the assignment edit token.
+    pub profile_version: ConfigVersion,
+    /// Exact firmware target and artifacts matching the requested hardware pair.
+    pub entry: NicFirmwareProfileEntry,
+}
+
+/// `resolve_nic_firmware` applies card > machine > allocation > site precedence.
+/// No selection returns `None`. An invalid selected profile returns an error
+/// without falling back. An operator pin conflicting with an allocation's
+/// exact version or artifact digests also fails; source URLs do not change
+/// firmware identity. Firmware versions are exact, with no ordering.
+pub fn resolve_nic_firmware(
+    hardware: &NicFirmwareHardware,
+    profiles: &[NicFirmwareProfile],
+    baseline: NicFirmwareBaseline<'_>,
+    allocation: Option<&NicFirmwareProfileId>,
+) -> Result<Option<NicFirmwareResolution>, ConfigValidationError> {
+    use NicFirmwareSelectionSource::*;
+
+    let selected = baseline
+        .card_override
+        .map(|id| (CardOverride, id))
+        .or_else(|| baseline.machine_override.map(|id| (MachineOverride, id)))
+        .or_else(|| allocation.map(|id| (Allocation, id)))
+        .or_else(|| baseline.site_default.map(|id| (SiteDefault, id)));
+    let Some((source, id)) = selected else {
+        return Ok(None);
+    };
+    let entry_for = |id: &NicFirmwareProfileId| {
+        let profile = profiles
+            .iter()
+            .find(|profile| &profile.id == id)
+            .ok_or_else(|| {
+                ConfigValidationError::InvalidValue(format!("NIC firmware profile {id} is missing"))
+            })?;
+        let entry = profile.config.entry_for(hardware).ok_or_else(|| {
+            ConfigValidationError::InvalidValue(format!(
+                "NIC firmware profile {id} does not support this part number/PSID"
+            ))
+        })?;
+        Ok::<_, ConfigValidationError>((profile, entry))
+    };
+    let (profile, entry) = entry_for(id)?;
+    if matches!(source, CardOverride | MachineOverride)
+        && let Some(required_id) = allocation
+    {
+        let required = entry_for(required_id)?.1;
+        if entry.firmware != required.firmware
+            || entry.image.sha256 != required.image.sha256
+            || entry
+                .device_config
+                .as_ref()
+                .map(|artifact| &artifact.sha256)
+                != required
+                    .device_config
+                    .as_ref()
+                    .map(|artifact| &artifact.sha256)
+        {
+            return Err(ConfigValidationError::InvalidValue(
+                "operator NIC firmware override conflicts with the allocation requirement".into(),
+            ));
+        }
+    }
+    Ok(Some(NicFirmwareResolution {
+        source,
+        profile_id: profile.id.clone(),
+        profile_version: profile.version,
+        entry: entry.clone(),
+    }))
 }
 
 impl NicFirmwareArtifact {

@@ -17,7 +17,7 @@
 
 use std::collections::BTreeSet;
 
-use carbide_uuid::machine::HostMachineId;
+use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use mac_address::MacAddress;
 use model::machine::MachineInterfaceSnapshot;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -70,19 +70,7 @@ fn identity_report(
         .devices
         .iter()
         .map(|device| {
-            let mac = device.base_mac.filter(valid_mac);
-
-            // Site exploration records the DPU's host PF MAC on its host
-            // interface, normally from Redfish's `base_mac`. If a fallback
-            // derives a different MAC, ownership stays unknown here.
-            // These are current database associations, not proof that an old
-            // observation still describes the installed hardware. Preserve
-            // conflicts instead of choosing the first matching DPU.
-            let managed_dpu_machine_ids = interfaces
-                .iter()
-                .filter(|interface| Some(interface.mac_address) == mac)
-                .filter_map(|interface| interface.attached_dpu_machine_id)
-                .collect::<BTreeSet<_>>()
+            let managed_dpu_machine_ids = managed_dpu_machine_ids(device.base_mac, interfaces)
                 .into_iter()
                 .map(Into::into)
                 .collect();
@@ -98,6 +86,25 @@ fn identity_report(
         observed_at: Some(observation.observed_at.into()),
         devices,
     }
+}
+
+/// `managed_dpu_machine_ids` shares the stored identity report's association
+/// rules with firmware planning. Empty means unknown ownership, not a SuperNIC.
+pub(super) fn managed_dpu_machine_ids(
+    base_mac: Option<MacAddress>,
+    interfaces: &[MachineInterfaceSnapshot],
+) -> Vec<DpuMachineId> {
+    let mac = base_mac.filter(valid_mac);
+    // Site exploration records the host PF MAC, normally from Redfish's
+    // `base_mac`. A fallback MAC may differ. Preserve conflicting associations;
+    // neither an association nor an old report proves what is installed now.
+    interfaces
+        .iter()
+        .filter(|interface| Some(interface.mac_address) == mac)
+        .filter_map(|interface| interface.attached_dpu_machine_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn valid_mac(mac: &MacAddress) -> bool {

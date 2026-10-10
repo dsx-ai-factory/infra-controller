@@ -716,6 +716,10 @@ impl InternalRBACRules {
         x.perm("FindNicFirmwareProfilesByIds", vec![ForgeAdminCLI]);
         x.perm("UpdateNicFirmwareProfile", vec![ForgeAdminCLI]);
         x.perm("DeleteNicFirmwareProfile", vec![ForgeAdminCLI]);
+        x.perm("SetNicFirmwareSiteDefault", vec![ForgeAdminCLI]);
+        x.perm("FindNicFirmwareSiteDefaultIds", vec![ForgeAdminCLI]);
+        x.perm("FindNicFirmwareSiteDefaultsByIds", vec![ForgeAdminCLI]);
+        x.perm("GetNicFirmwarePlan", vec![ForgeAdminCLI]);
         x.perm("CreateSku", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GenerateSkuFromMachine", vec![ForgeAdminCLI]);
         x.perm("AssignSkuToMachine", vec![ForgeAdminCLI]);
@@ -1330,6 +1334,10 @@ mod rbac_rule_tests {
                 "FindNicFirmwareProfilesByIds",
                 "UpdateNicFirmwareProfile",
                 "DeleteNicFirmwareProfile",
+                "SetNicFirmwareSiteDefault",
+                "FindNicFirmwareSiteDefaultIds",
+                "FindNicFirmwareSiteDefaultsByIds",
+                "GetNicFirmwarePlan",
             ] {
                 assert_eq!(
                     InternalRBACRules::allowed_from_static(

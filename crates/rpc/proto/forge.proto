@@ -905,12 +905,21 @@ service Forge {
   rpc UpsertHostFirmwareConfig(UpsertHostFirmwareConfigRequest) returns (HostFirmwareConfigResponse);
   rpc DeleteHostFirmwareConfig(DeleteHostFirmwareConfigRequest) returns (google.protobuf.Empty);
 
-  // Operator-only NIC firmware definitions; these methods do not update devices.
+  // Operator-only NIC firmware profiles, site defaults and read-only plans.
+  // These methods do not update devices or change machine readiness.
   rpc CreateNicFirmwareProfile(CreateNicFirmwareProfileRequest) returns (NicFirmwareProfileResponse);
   rpc FindNicFirmwareProfileIds(FindNicFirmwareProfileIdsRequest) returns (FindNicFirmwareProfileIdsResponse);
   rpc FindNicFirmwareProfilesByIds(FindNicFirmwareProfilesByIdsRequest) returns (FindNicFirmwareProfilesByIdsResponse);
   rpc UpdateNicFirmwareProfile(UpdateNicFirmwareProfileRequest) returns (NicFirmwareProfileResponse);
   rpc DeleteNicFirmwareProfile(DeleteNicFirmwareProfileRequest) returns (google.protobuf.Empty);
+  // Select or clear the site default for an exact hardware pair.
+  rpc SetNicFirmwareSiteDefault(SetNicFirmwareSiteDefaultRequest) returns (NicFirmwareSiteDefaultResponse);
+  // List hardware keys for all defaults or those selecting one profile.
+  rpc FindNicFirmwareSiteDefaultIds(NicFirmwareSiteDefaultSearchFilter) returns (FindNicFirmwareSiteDefaultIdsResponse);
+  // Retrieve existing assignments for a bounded batch of hardware keys.
+  rpc FindNicFirmwareSiteDefaultsByIds(FindNicFirmwareSiteDefaultsByIdsRequest) returns (FindNicFirmwareSiteDefaultsByIdsResponse);
+  // Preview firmware selections using stored host observations.
+  rpc GetNicFirmwarePlan(GetNicFirmwarePlanRequest) returns (GetNicFirmwarePlanResponse);
 
   // Create A SKU to be assigned to a machine so the machine hardware can be validated.
   rpc CreateSku(SkuList) returns (SkuIdList);
@@ -11956,10 +11965,15 @@ message NicFirmwareProfileResponse {
 }
 
 message FindNicFirmwareProfileIdsRequest {
+  // Optional literal hardware filter. Omission lists every profile.
+  // A present but invalid pair rejects the request with INVALID_ARGUMENT.
+  // Finish upgrading Core before using the filter; older replicas ignore it.
+  // Matching selects an entry; it does not establish flash/reset eligibility.
+  optional NicFirmwareHardware hardware = 1;
 }
 
 message FindNicFirmwareProfileIdsResponse {
-  // All registered IDs, ascending in database collation order. Empty if none exist.
+  // Matching registered IDs, ascending in database collation order. Empty if none match.
   repeated string profile_ids = 1;
 }
 
@@ -11978,7 +11992,9 @@ message FindNicFirmwareProfilesByIdsResponse {
 message UpdateNicFirmwareProfileRequest {
   // Profile name; follows the NicFirmwareProfile.id contract.
   string id = 1;
-  // Required complete replacement, not a merge or patch.
+  // Required complete replacement, not a merge or patch. Removing a hardware
+  // pair selected by a site default returns FAILED_PRECONDITION. This compatibility
+  // check precedes the stored-version check.
   NicFirmwareProfileConfig config = 2;
   // Required edit-version token from a previous read. Missing or malformed
   // tokens return INVALID_ARGUMENT; stale tokens return FAILED_PRECONDITION
@@ -11987,10 +12003,164 @@ message UpdateNicFirmwareProfileRequest {
 }
 
 message DeleteNicFirmwareProfileRequest {
-  // Profile name; follows the NicFirmwareProfile.id contract.
+  // Profile name; follows the NicFirmwareProfile.id contract. A profile selected
+  // by a site default cannot be deleted (FAILED_PRECONDITION).
   string id = 1;
   // Required edit-version token from a previous read. Missing or malformed
   // tokens return INVALID_ARGUMENT; stale tokens return FAILED_PRECONDITION
   // without deleting the profile. Missing profiles return NOT_FOUND.
   optional string if_version_match = 2;
+}
+
+// Exact hardware key: both identifiers require 1–256 UTF-8 bytes, case-sensitive
+// and literal, without surrounding whitespace or controls. Wildcards are not expanded.
+// Catalog entries have no length bound, but longer identifiers cannot be selected
+// through this key or resolved by the plan API.
+message NicFirmwareHardware {
+  // Manufacturer part number, matched literally.
+  string part_number = 1;
+  // Firmware parameter-set identifier, matched literally.
+  string psid = 2;
+}
+
+// A revisioned site-wide assignment from a hardware pair to a live profile.
+message NicFirmwareSiteDefault {
+  // Composite identity of this assignment, not a machine or physical-card identity.
+  NicFirmwareHardware hardware = 1;
+  // Selects the live profile, not a pinned catalog revision. Follows NicFirmwareProfile.id.
+  string profile_id = 2;
+  // Assignment edit token, independent of the profile's version.
+  string version = 3;
+}
+
+// Finish upgrading Core before assigning site defaults so every replica
+// validates profile edits against the hardware selected by those defaults.
+message SetNicFirmwareSiteDefaultRequest {
+  // Required hardware pair; missing or invalid hardware returns INVALID_ARGUMENT.
+  // Only operator callers may change defaults.
+  NicFirmwareHardware hardware = 1;
+  // Required action. Omission returns INVALID_ARGUMENT without changing the default.
+  oneof action {
+    // Assign a compatible live profile. Follows NicFirmwareProfile.id validation;
+    // malformed IDs return INVALID_ARGUMENT, missing profiles NOT_FOUND, and
+    // incompatible profiles FAILED_PRECONDITION. Profile validation happens
+    // before the assignment version check.
+    string profile_id = 2;
+    // Delete the assignment without changing the selected profile.
+    google.protobuf.Empty clear = 4;
+  }
+  // Omit only when creating a new assignment (ALREADY_EXISTS if one exists).
+  // Replacement and clearing require the complete current assignment token.
+  // Malformed tokens return INVALID_ARGUMENT, stale tokens FAILED_PRECONDITION,
+  // and absent assignments NOT_FOUND. Clearing without a token is INVALID_ARGUMENT.
+  optional string if_version_match = 3;
+}
+
+// The assignment saved by Set, or its absence after Clear.
+message NicFirmwareSiteDefaultResponse {
+  // Absent after a successful clear. Clearing deletes the assignment.
+  optional NicFirmwareSiteDefault site_default = 1;
+}
+
+// Optional exact filter for listing assignment keys. An empty filter lists all keys.
+message NicFirmwareSiteDefaultSearchFilter {
+  // Profile name following NicFirmwareProfile.id validation. Malformed IDs return
+  // INVALID_ARGUMENT; an unknown valid ID returns an empty list.
+  optional string profile_id = 1;
+}
+
+// Hardware keys matching the requested site-default filter.
+message FindNicFirmwareSiteDefaultIdsResponse {
+  // Matching hardware keys, ordered by part number then PSID in database collation
+  // order. Fetch assignment details in batches with FindNicFirmwareSiteDefaultsByIds.
+  repeated NicFirmwareHardware hardware = 1;
+}
+
+// Hardware keys whose site-default assignments should be returned.
+message FindNicFirmwareSiteDefaultsByIdsRequest {
+  // Required batch of 1 through max_find_by_ids hardware pairs. Invalid pairs or
+  // an empty or oversized batch reject the entire request with INVALID_ARGUMENT.
+  repeated NicFirmwareHardware hardware = 1;
+}
+
+// Existing site-default assignments for the requested keys.
+message FindNicFirmwareSiteDefaultsByIdsResponse {
+  // Existing assignments once each, ordered by part number then PSID in database
+  // collation order. Unknown valid keys are omitted; duplicate keys are collapsed.
+  repeated NicFirmwareSiteDefault site_defaults = 1;
+}
+
+// A host and optional allocation profile for a read-only firmware preview.
+message GetNicFirmwarePlanRequest {
+  // Required host ID. A missing, malformed or non-host ID returns INVALID_ARGUMENT;
+  // an unknown host returns NOT_FOUND. Reads stored observations without contacting Scout.
+  common.MachineId machine_id = 1;
+  // Optional operator-supplied profile to preview against every observed device
+  // with valid hardware and no managed-DPU association, even without a site default.
+  // This is a machine-wide preview, not attachment-target selection.
+  // Omission resolves site defaults. Malformed IDs return INVALID_ARGUMENT;
+  // missing or incompatible profiles produce per-device errors without fallback.
+  // No observation means an empty plan, not validation of this profile's existence.
+  // Does not persist tenant settings or change the machine.
+  optional string allocation_profile_id = 2;
+}
+
+// Resolver precedence is card > machine > allocation > site. The plan API
+// supplies only allocation and site selections; persisted overrides are not included.
+enum NicFirmwareSelectionSource {
+  // Site-wide selection for the device's hardware pair.
+  NicFirmwareSelectionSourceSiteDefault = 0;
+  // Operator-supplied allocation selection, above the site default.
+  NicFirmwareSelectionSourceAllocation = 1;
+  // Per-machine selection, above an allocation or site default.
+  NicFirmwareSelectionSourceMachineOverride = 2;
+  // Per-card selection, above every other selection.
+  NicFirmwareSelectionSourceCardOverride = 3;
+}
+
+// The selected profile and compatible firmware entry from one catalog snapshot.
+message NicFirmwareResolution {
+  // Setting that selected the profile; an allocation preview supersedes site defaults.
+  NicFirmwareSelectionSource source = 1;
+  // Selected live catalog profile, following NicFirmwareProfile.id.
+  string profile_id = 2;
+  // Profile revision from this read, independent of any assignment edit token.
+  string profile_version = 3;
+  // Exact target and artifacts from this read, including a possible downgrade.
+  NicFirmwareProfileEntry entry = 4;
+}
+
+// One observed device's selected firmware, returned error or unmanaged result.
+message NicFirmwareTargetPlan {
+  // Original device facts and current managed-DPU associations, without grouping
+  // PCI functions into physical cards. Missing associations mean unknown ownership.
+  mlx_device.MlxDeviceIdentity identity = 1;
+  // For devices with valid PN/PSID and no managed-DPU association, unset means
+  // no allocation profile or matching site default was selected (unmanaged).
+  // An invalid selected profile returns an error without fallback.
+  oneof result {
+    // Selected compatible firmware and the catalog revision used to resolve it.
+    NicFirmwareResolution firmware = 2;
+    // Error text for missing or malformed PN/PSID, managed-DPU exclusion,
+    // or an invalid selection; not a machine-readable error code.
+    // These errors are returned in the report without failing the request
+    // or hiding other devices' results. Selection source and profile revision
+    // are returned only for successful resolutions.
+    string error = 3;
+  }
+  // Assignment revision for a non-excluded device with valid hardware and a
+  // matching site default, even when an allocation preview supersedes that
+  // default or fails. Managed-DPU exclusions omit this field.
+  optional string site_default_version = 4;
+}
+
+// Resolves database-backed selections and the optional allocation preview only.
+// Legacy supernic_firmware_profiles used by the DPA controller are not included.
+message GetNicFirmwarePlanResponse {
+  // Absent, with an empty target list, when no Scout observation has been stored.
+  optional google.protobuf.Timestamp observed_at = 1;
+  // One result per observed device in report order, including per-device errors.
+  // The plan is read-only: it does not qualify hardware, admit an update,
+  // or change machine readiness.
+  repeated NicFirmwareTargetPlan targets = 2;
 }
