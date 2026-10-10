@@ -212,8 +212,8 @@ The tables below summarize the keys that must be set per site.
 | `postgresql.instances` | `3` | No | Number of PostgreSQL replicas |
 | `postgresql.volumeSize` | `"10Gi"` | No | PVC size per PostgreSQL replica |
 | `postgresql.storageClass` | `"local-path-persistent"` | No | StorageClass for the nico-prereqs PostgreSQL PVCs. Override through Helm values when using a non-local StorageClass. |
-| `temporal.useHaPostgres` | `auto` | No | Where Temporal's default and visibility databases live. When set to `auto`, the DBs will be created in `nico-pg-cluster`, but database location is left unchanged for an existing Site. `true` means the DB location is `nico-pg-cluster`, and `false` means the DB lives on the deprecated standalone `postgres.postgres` StatefulSet. The flag only decides database location, not whether Temporal is deployed. Refer to [Consolidating Temporal/Keycloak onto nico-pg-cluster](#consolidating-temporalkeycloak-onto-nico-pg-cluster). |
-| `keycloak.useHaPostgres` | `auto` | No | Where Keycloak's database lives. When set to `auto`, the DB will be created in `nico-pg-cluster`, but database location is left unchanged for an existing Site. `true` means the DB location is `nico-pg-cluster`, and `false` means the DB lives on the deprecated standalone `postgres.postgres` StatefulSet. The flag only decides database location, not whether Keycloak is deployed. |
+| `temporal.useHaPostgres` | `auto` | No | Where Temporal's default and visibility databases live. When set to `auto`, the DBs will be created in `nico-pg-cluster`, but database location is left unchanged for an existing Site. With `postgresql.enabled: false`, `auto` means `false`. `true` means the DB location is `nico-pg-cluster`, and `false` means the DB lives on the deprecated standalone `postgres.postgres` StatefulSet. The flag only decides database location, not whether Temporal is deployed. Refer to [Consolidating Temporal/Keycloak onto nico-pg-cluster](#consolidating-temporalkeycloak-onto-nico-pg-cluster). |
+| `keycloak.useHaPostgres` | `auto` | No | Where Keycloak's database lives. When set to `auto`, the DB will be created in `nico-pg-cluster`, but database location is left unchanged for an existing Site. With `postgresql.enabled: false`, `auto` means `false`. `true` means the DB location is `nico-pg-cluster`, and `false` means the DB lives on the deprecated standalone `postgres.postgres` StatefulSet. The flag only decides database location, not whether Keycloak is deployed. |
 | `siteCredentials.enabled` | `false` | No | Render the site-wide BMC root and the Unified Extensible Firmware Interface (UEFI) site defaults as a credential-file Secret for `nico-api`. Refer to [Site Credentials Secret](#site-credentials-secret). |
 | `siteCredentials.secretName` | `"nico-site-credentials"` | No | Name of that Secret in `nico-system`. It must match `nico-api.credentials.file.existingSecret.name` in the Core values and, on a machine-a-tron site, `machineATron.siteCredentialsSecret.name` in the machine-a-tron values. |
 | `siteCredentials.bmcRoot.username` / `.password` | `"root"` / `""` | No | Site-wide BMC root password that site-explorer rotates every BMC to. Leave the password empty to generate a random 32-character value on the first install, which upgrades keep. An explicit value must differ from the factory defaults, which is not checked. The username is stored but not used by NICo. |
@@ -509,9 +509,9 @@ NICo Core                  (../helm - nico-core.yaml values)
   └── unbound               (Deployment - .forge zone DNS, opt-in)
 NICo REST                  (../helm/rest/nico-rest)
   ├── nico-rest-ca-issuer   (ClusterIssuer - cert-manager.io)
-  ├── postgres StatefulSet  (deprecated standalone DB, only while Temporal or Keycloak still uses it)
-  ├── keycloak              (dev OIDC IdP, nico-dev realm - DB on nico-pg-cluster for a new Site)
-  ├── temporal              (temporal-helm/temporal, mTLS - DB on nico-pg-cluster for a new Site)
+  ├── postgres StatefulSet  (deprecated standalone DB, only while Temporal or Keycloak uses it)
+  ├── keycloak              (dev OIDC IdP, nico realm - DB on nico-pg-cluster unless useHaPostgres resolves to false)
+  ├── temporal              (temporal-helm/temporal, mTLS - DB on nico-pg-cluster unless useHaPostgres resolves to false)
   └── nico-rest             (API, cert-manager, workflow, site-manager - DB on nico-pg-cluster)
 NICo Flow                  (../helm/nico-flow - task, policy, and automation service)
 NICo REST site-agent       (../helm/rest/nico-rest-site-agent - StatefulSet, bootstrap via site-manager)
@@ -541,7 +541,7 @@ decide where the Temporal and Keycloak databases live:
 
 | Value | Database |
 | --- | --- |
-| `auto` (default) | The databases are created in `nico-pg-cluster`, but their location is left unchanged for an existing Site. |
+| `auto` (default) | The databases are created in `nico-pg-cluster`, but their location is left unchanged for an existing Site. With `postgresql.enabled: false`, it means `false`. |
 | `true` | The databases live in `nico-pg-cluster`. |
 | `false` | The databases live on the deprecated standalone StatefulSet. |
 
@@ -565,25 +565,26 @@ With `postgresql.enabled: false`, the chart creates no `nico-pg-cluster`, so
 `auto` resolves to `false`.
 
 Phase 7c only deploys the StatefulSet while either value resolves to `false`.
-So a new Site never gets it. While either database stays on it, preflight warns
+So a new Site never gets it, unless `postgresql.enabled` is `false`. While
+either database stays on it, preflight warns
 that it's deprecated, and `setup.sh` repeats the warning at the end of the run.
 
-Unless the value is `false`, the `nico-prereqs` chart creates the `temporal`,
-`temporal_visibility`, and `keycloak` databases on `nico-pg-cluster` ahead of
-time. It also creates their `temporal.nico` and `keycloak.nico` users, and the
+When `postgresql.enabled` is `true` and the value isn't `false`, the
+`nico-prereqs` chart creates the `temporal`, `temporal_visibility`, and
+`keycloak` databases on `nico-pg-cluster` ahead of time. It also creates their `temporal.nico` and `keycloak.nico` users, and the
 ESO `ClusterExternalSecret`s that sync their credentials. So an existing Site
 on `auto` already has empty databases to migrate into.
 
 These values only decide where the databases live, not whether Temporal or
-Keycloak is deployed. `keycloak.enabled` in `values/nico-rest.yaml` decides
-that for Keycloak.
+Keycloak is deployed. `nico-rest-api.config.keycloak.enabled` in
+`values/nico-rest.yaml` decides that for Keycloak.
 
 ### Migrating an existing Site's data
 
 1. Set `temporal.useHaPostgres: true`, `keycloak.useHaPostgres: true`, or
    both. `auto` isn't enough, because it leaves an existing Site's databases
-   where they are. Then run `helmfile sync -l name=nico-prereqs`, or
-   `setup.sh --skip-rest`, to create the users, databases, and
+   where they are. Then run `helmfile sync -l name=nico-prereqs` from
+   `helm-prereqs/` to create the users, databases, and
    `ClusterExternalSecret`s above. A Site that was on `auto` already has them.
 2. Run `helm-prereqs/scripts/migrate-temporal-keycloak-db.sh` with
    `--db temporal`, `--db keycloak`, or `--db both`, to match the values you
