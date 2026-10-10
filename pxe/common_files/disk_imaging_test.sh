@@ -76,6 +76,9 @@ lsblk() {
 		MAJ:MIN,TYPE:/dev/targetp2)
 			printf '%s\n' "259:2 part" "259:0 disk"
 			;;
+		MAJ:MIN,TYPE:/dev/targetp16)
+			printf '%s\n' "259:16 part" "259:0 disk"
+			;;
 		MAJ:MIN,TYPE:/dev/otherp1)
 			printf '%s\n' "259:9 part" "259:8 disk"
 			;;
@@ -214,5 +217,119 @@ if parse_kernel_cmdline_argument \
 fi
 assert_eq "unknown argument leaves image_url unchanged" "unchanged-url" "$image_url"
 assert_eq "unknown argument leaves image_disk unchanged" "unchanged-disk" "$image_disk"
+
+echo "partition identifier types"
+set_blkid_result 0 "/dev/targetp16" ""
+devices=()
+find_devices_by_identifier PARTUUID boot devices >/dev/null 2>&1 ||
+	fail "PARTUUID lookup was rejected"
+assert_eq "PARTUUID lookup device" "/dev/targetp16" "${devices[0]}"
+if find_devices_by_identifier DEVNAME boot devices >/dev/null 2>&1; then
+	fail "unsupported identifier type was accepted"
+fi
+assert_log_contains "Unsupported block device identifier type: DEVNAME"
+
+fstab="$temp_dir/fstab"
+stderr_file="$temp_dir/stderr"
+image_disk=/dev/target
+bootfs_uuid=
+
+assert_stderr_contains() {
+	local expected=$1
+
+	if ! grep -Fq -- "$expected" "$stderr_file"; then
+		fail "stderr does not contain [$expected]"
+	fi
+}
+
+echo "partition naming"
+assert_eq "nvme partition name" "/dev/nvme0n1p16" "$(partition_on_disk /dev/nvme0n1 16)"
+assert_eq "sd partition name" "/dev/sda2" "$(partition_on_disk /dev/sda 2)"
+
+echo "fstab: dedicated /boot partition"
+printf '%s\n' \
+	'# /etc/fstab: static file system information.' \
+	'' \
+	'LABEL=cloudimg-rootfs	/	ext4	discard,commit=30,errors=remount-ro	0 1' \
+	'LABEL=UEFI	/boot/efi	vfat	umask=0077	0 1' \
+	'#LABEL=OLDBOOT	/boot	ext4	defaults	0 2' \
+	'   LABEL=BOOT	/boot/	ext4	defaults,x-systemd.device-timeout=30	0 2  ' \
+	'none	/tmp	tmpfs	defaults	0 0' >"$fstab"
+set_blkid_result 0 "/dev/targetp16" ""
+resolved=$(resolve_fstab_mount_device /boot /dev/target "$fstab") ||
+	fail "fstab /boot entry was not resolved"
+assert_eq "fstab /boot device" "/dev/targetp16" "$resolved"
+resolve_boot_partition "$fstab" >/dev/null ||
+	fail "resolve_boot_partition failed on a split /boot image"
+assert_eq "split /boot partition" "/dev/targetp16" "$boot_part"
+assert_eq "split /boot source" "fstab" "$boot_part_source"
+assert_log_contains "Resolved /boot from $fstab to /dev/targetp16"
+
+echo "fstab: PARTLABEL source with an escaped space"
+printf '%s\n' 'PARTLABEL=boot\040fs	/boot	ext4	defaults	0 2' >"$fstab"
+set_blkid_result 0 "/dev/targetp16" ""
+resolved=$(resolve_fstab_mount_device /boot /dev/target "$fstab") ||
+	fail "PARTLABEL /boot entry was not resolved"
+assert_eq "PARTLABEL /boot device" "/dev/targetp16" "$resolved"
+
+echo "fstab: /boot on another disk"
+printf '%s\n' 'LABEL=BOOT	/boot	ext4	defaults	0 2' >"$fstab"
+set_blkid_result 0 "/dev/otherp1" ""
+if resolve_boot_partition "$fstab" >/dev/null 2>&1; then
+	fail "off-target /boot was accepted"
+fi
+assert_log_contains \
+	"Device /dev/otherp1 with LABEL=BOOT is not exclusively backed by image disk /dev/target"
+
+echo "fstab: /boot inside the root filesystem"
+printf '%s\n' 'LABEL=cloudimg-rootfs	/	ext4	defaults	0 1' >"$fstab"
+set_blkid_result 2 "" ""
+resolve_boot_partition "$fstab" >/dev/null ||
+	fail "resolve_boot_partition failed on a merged /boot image"
+assert_eq "merged /boot partition" "" "$boot_part"
+assert_eq "merged /boot source" "" "$boot_part_source"
+assert_log_contains "$fstab has no /boot entry"
+
+echo "fstab: device path source"
+printf '%s\n' '/dev/sda2	/boot	ext4	defaults	0 2' >"$fstab"
+set_blkid_result 2 "" ""
+resolve_boot_partition "$fstab" >/dev/null 2>"$stderr_file" ||
+	fail "resolve_boot_partition failed on a device-path fstab source"
+assert_eq "device-path partition" "/dev/target2" "$boot_part"
+assert_eq "device-path source" "guess" "$boot_part_source"
+assert_stderr_contains "names /boot by [/dev/sda2], which cannot be resolved on /dev/target"
+assert_log_contains "Assuming /boot is /dev/target2, from the $fstab device path /dev/sda2"
+
+echo "fstab: unsupported source"
+printf '%s\n' 'none	/boot	tmpfs	defaults	0 0' >"$fstab"
+set_blkid_result 2 "" ""
+resolve_boot_partition "$fstab" >/dev/null 2>"$stderr_file" ||
+	fail "resolve_boot_partition failed on an unsupported fstab source"
+assert_eq "unsupported-source fallback" "/dev/target1" "$boot_part"
+assert_eq "unsupported-source source" "guess" "$boot_part_source"
+assert_stderr_contains "names /boot by [none], which cannot be resolved on /dev/target"
+assert_log_contains "Assuming /boot is /dev/target1"
+
+echo "fstab: missing"
+rm -f "$fstab"
+set_blkid_result 2 "" ""
+resolve_boot_partition "$fstab" >"$temp_dir/stdout" 2>&1 ||
+	fail "resolve_boot_partition failed without an fstab"
+grep -Fq -- "No $fstab in the image" "$temp_dir/stdout" ||
+	fail "missing fstab was not reported"
+assert_eq "missing-fstab fallback" "/dev/target1" "$boot_part"
+assert_eq "missing-fstab source" "guess" "$boot_part_source"
+assert_log_contains "Assuming /boot is /dev/target1"
+
+echo "bootfs_uuid overrides fstab"
+printf '%s\n' 'LABEL=BOOT	/boot	ext4	defaults	0 2' >"$fstab"
+bootfs_uuid=boot-override
+set_blkid_result 0 "/dev/targetp2" ""
+resolve_boot_partition "$fstab" >/dev/null ||
+	fail "bootfs_uuid override failed"
+assert_eq "override partition" "/dev/targetp2" "$boot_part"
+assert_eq "override source" "override" "$boot_part_source"
+assert_log_contains "Resolved /boot from bootfs_uuid=boot-override to /dev/targetp2"
+bootfs_uuid=
 
 echo "disk imaging identifier tests passed"

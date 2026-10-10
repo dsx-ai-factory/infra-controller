@@ -81,6 +81,19 @@ the image is written:
 - `bootfs_id` (`--bootfs-id`): optional `/boot` UUID
 - `efifs_id` (`--efifs-id`): optional EFI filesystem UUID
 
+`bootfs_id` is optional for images that ship an `/etc/fstab`. When it is not
+set, disk imaging reads the image's `/etc/fstab` and resolves its `/boot` entry
+(`UUID=`, `LABEL=`, `PARTUUID=`, or `PARTLABEL=`) to a partition on the image
+disk, so images with a dedicated `/boot` partition—for example Ubuntu 24.04
+cloud images, where `/boot` is partition 16—work without extra configuration.
+An fstab `/boot` entry that does not resolve to exactly one filesystem on the
+image disk fails the installation, like an unresolvable `rootfs_id`. An fstab
+without a `/boot` entry means `/boot` stays on the root filesystem. Images with
+no `/etc/fstab` fall back to assuming `/boot` is the first partition; an entry
+that names `/boot` by a device path such as `/dev/sda2` is mapped to that
+partition number on the image disk. Both fallbacks are logged. Set `bootfs_id`
+to override the fstab lookup.
+
 When an OS image is created through Core—for example, with
 `nico-admin-cli os-image create`—`--rootfs-id` and `--rootfs-label` are
 optional. If both are omitted, disk imaging uses the default root filesystem
