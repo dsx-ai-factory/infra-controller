@@ -52,6 +52,7 @@ use futures_util::FutureExt;
 use libredfish::model::task::TaskState;
 use libredfish::model::update_service::TransferProtocolType;
 use libredfish::{PowerState, Redfish, RedfishError, SystemPowerControl};
+use model::DpuModel;
 use model::firmware::{Firmware, FirmwareComponent, FirmwareComponentType, FirmwareEntry};
 use model::rack_type::RackProfileConfig;
 use model::site_explorer::{
@@ -1949,7 +1950,10 @@ impl PreingestionManagerStatic {
                 return false;
             }
         };
-        if status != PowerState::Off {
+        // BlueField-3 reports stable StandbyOffline as Paused after the Arm OS shuts down.
+        let is_bluefield3 = endpoint.report.identify_dpu() == Some(DpuModel::BlueField3);
+        let is_off = status == PowerState::Off || (status == PowerState::Paused && is_bluefield3);
+        if !is_off {
             tracing::warn!(
                 bmc_ip_address = %endpoint.address,
                 power_state = %status,
