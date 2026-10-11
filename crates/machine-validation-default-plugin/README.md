@@ -30,8 +30,9 @@ use another entry in `checks`; they do not require a new plugin contract.
 
 The plugin uses the host-installed DCGM through
 `chroot /host /usr/bin/dcgmi`. It requires the privileged full-host plugin
-profile. A missing or unusable host DCGM installation is a plugin execution
-error.
+profile, which shares the host PID namespace so host DCGM can resolve diagnostic
+processes through `/proc`. A missing or unusable host DCGM installation is a
+plugin execution error.
 
 Scout sets `NICO_MV_CONTRACT_DIR` to the container-visible contract directory
 when it starts the plugin. The plugin reads `input/input.json` and writes
