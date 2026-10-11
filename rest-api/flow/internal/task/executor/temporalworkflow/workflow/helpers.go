@@ -357,12 +357,16 @@ func executeGenericStageParallel(
 
 		childStep := step
 		childStep.MaxParallel = maxParallel
+		childTimeout := childWorkflowExecutionTimeout(childStep, target.Len())
+		if stepReportsFirmwareProgress(childStep) && firmwareTimeoutBudgetEnabled(ctx) {
+			childTimeout = firmwareStepExecutionTimeout(childStep, target.Len())
+		}
 		childOptions := workflow.ChildWorkflowOptions{
 			WorkflowID: fmt.Sprintf("component-step-%s-%s",
 				workflow.GetInfo(ctx).WorkflowExecution.ID,
 				devicetypes.ComponentTypeToString(step.ComponentType)),
 			// Give the child workflow enough time to run all retry attempts.
-			WorkflowExecutionTimeout: childWorkflowExecutionTimeout(childStep, target.Len()),
+			WorkflowExecutionTimeout: childTimeout,
 		}
 		childCtx := workflow.WithChildOptions(ctx, childOptions)
 
