@@ -67,14 +67,33 @@ pub struct NvLinkConfig {
 
 /// Outcome of [`NvLinkConfig::apply_default_nmx_c_tls`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DefaultNmxCTls {
-    /// The mounted client certificate is now the NMX-C TLS configuration.
+pub struct DefaultNmxCTls {
+    pub client: DefaultNmxCClientTls,
+    pub ca: DefaultNmxCCa,
+}
+
+/// Outcome of defaulting the NMX-C client certificate, key, and TLS authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DefaultNmxCClientTls {
+    /// The mounted client certificate and `initial_domain_name` authority are now in use.
     Applied,
-    /// Partitioning is disabled or insecure, or NMX-C TLS is already configured.
+    /// Partitioning is disabled or insecure, or an `nmx_c_tls_*` key is configured.
     NotNeeded,
     /// Secure partitioning has no NMX-C TLS configuration and no mounted client certificate,
     /// so NMX-C connections will present no client certificate.
     CertificateMissing,
+}
+
+/// Outcome of defaulting the NMX-C CA bundle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DefaultNmxCCa {
+    /// A default CA bundle is now in use.
+    Applied,
+    /// Partitioning is disabled, NMX-C is reached over plain HTTP, or a CA is configured.
+    NotNeeded,
+    /// NMX-C is reached over HTTPS with no configured or default CA bundle, so no NMX-C
+    /// server certificate can be verified.
+    Missing,
 }
 
 impl NvLinkConfig {
@@ -89,42 +108,73 @@ impl NvLinkConfig {
         true
     }
 
-    /// When no NMX-C TLS setting is configured and `client_tls_dir` holds a client
-    /// certificate, use it for mTLS and verify NMX-C against `default_authority`. The CA is
-    /// `client_tls_dir/ca.crt`, or `fallback_ca_cert` when that is absent.
+    /// Whether NMX-C is reached over HTTPS rather than plain HTTP.
+    pub(crate) fn nmx_c_uses_https(&self) -> bool {
+        !self.allow_insecure
+            || (self.nmx_c_tls_client_cert_path.is_some()
+                && self.nmx_c_tls_client_key_path.is_some())
+    }
+
+    /// Fills in NMX-C TLS settings the site configuration leaves unset.
+    ///
+    /// The client certificate, key, and authority are defaulted together, and only when none of
+    /// the four `nmx_c_tls_*` keys is set: the certificate and key come from `client_tls_dir`
+    /// and the authority is `default_authority`. The CA bundle is defaulted on its own whenever
+    /// it is unset and NMX-C is reached over HTTPS: `client_tls_dir/ca.crt`, or else
+    /// `fallback_ca_cert`.
     pub fn apply_default_nmx_c_tls(
         &mut self,
         client_tls_dir: &std::path::Path,
         fallback_ca_cert: &std::path::Path,
         default_authority: Option<&str>,
     ) -> DefaultNmxCTls {
+        if !self.enabled {
+            return DefaultNmxCTls {
+                client: DefaultNmxCClientTls::NotNeeded,
+                ca: DefaultNmxCCa::NotNeeded,
+            };
+        }
+
         let tls_configured = self.nmx_c_tls_ca_cert_path.is_some()
             || self.nmx_c_tls_client_cert_path.is_some()
             || self.nmx_c_tls_client_key_path.is_some()
             || self.nmx_c_tls_authority.is_some();
-        if !self.enabled || self.allow_insecure || tls_configured {
-            return DefaultNmxCTls::NotNeeded;
-        }
+        let client = if self.allow_insecure || tls_configured {
+            DefaultNmxCClientTls::NotNeeded
+        } else {
+            let cert = client_tls_dir.join("tls.crt");
+            let key = client_tls_dir.join("tls.key");
+            if cert.is_file() && key.is_file() {
+                self.nmx_c_tls_client_cert_path = Some(cert.to_string_lossy().into_owned());
+                self.nmx_c_tls_client_key_path = Some(key.to_string_lossy().into_owned());
+                self.nmx_c_tls_authority = default_authority
+                    .filter(|authority| !authority.is_empty())
+                    .map(str::to_owned);
+                DefaultNmxCClientTls::Applied
+            } else {
+                DefaultNmxCClientTls::CertificateMissing
+            }
+        };
 
-        let cert = client_tls_dir.join("tls.crt");
-        let key = client_tls_dir.join("tls.key");
-        if !(cert.is_file() && key.is_file()) {
-            return DefaultNmxCTls::CertificateMissing;
-        }
-        let ca = [
-            client_tls_dir.join("ca.crt"),
-            fallback_ca_cert.to_path_buf(),
-        ]
-        .into_iter()
-        .find(|path| path.is_file());
+        let ca = if self.nmx_c_tls_ca_cert_path.is_some() || !self.nmx_c_uses_https() {
+            DefaultNmxCCa::NotNeeded
+        } else {
+            let default_ca = [
+                client_tls_dir.join("ca.crt"),
+                fallback_ca_cert.to_path_buf(),
+            ]
+            .into_iter()
+            .find(|path| path.is_file());
+            match default_ca {
+                Some(path) => {
+                    self.nmx_c_tls_ca_cert_path = Some(path.to_string_lossy().into_owned());
+                    DefaultNmxCCa::Applied
+                }
+                None => DefaultNmxCCa::Missing,
+            }
+        };
 
-        self.nmx_c_tls_ca_cert_path = ca.map(|path| path.to_string_lossy().into_owned());
-        self.nmx_c_tls_client_cert_path = Some(cert.to_string_lossy().into_owned());
-        self.nmx_c_tls_client_key_path = Some(key.to_string_lossy().into_owned());
-        self.nmx_c_tls_authority = default_authority
-            .filter(|authority| !authority.is_empty())
-            .map(str::to_owned);
-        DefaultNmxCTls::Applied
+        DefaultNmxCTls { client, ca }
     }
 
     pub const fn default_monitor_run_interval() -> std::time::Duration {
@@ -138,8 +188,8 @@ impl NvLinkConfig {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct NmxCCertificateRotationConfig {
-    /// Enables NMX-C server certificate expiry checks and rotation.
-    #[serde(default)]
+    /// Enables NMX-C server certificate expiry checks and rotation. Defaults to true.
+    #[serde(default = "NmxCCertificateRotationConfig::default_enabled")]
     pub enabled: bool,
 
     /// How often carbide checks the certificate served by NMX-C.
@@ -169,6 +219,10 @@ pub struct NmxCCertificateRotationConfig {
 }
 
 impl NmxCCertificateRotationConfig {
+    pub const fn default_enabled() -> bool {
+        true
+    }
+
     pub const fn default_run_interval() -> std::time::Duration {
         std::time::Duration::from_secs(60 * 60)
     }
@@ -185,7 +239,7 @@ impl NmxCCertificateRotationConfig {
 impl Default for NmxCCertificateRotationConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: Self::default_enabled(),
             run_interval: Self::default_run_interval(),
             rotate_before_expiry: Self::default_rotate_before_expiry(),
             probe_timeout: Self::default_probe_timeout(),
@@ -245,6 +299,11 @@ mod test {
         assert_eq!(config, NvLinkConfig::default());
         assert!(config.enabled);
         assert!(!config.allow_insecure);
+        assert!(config.nmx_c_certificate_rotation.enabled);
+
+        let rotation: NmxCCertificateRotationConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(rotation, NmxCCertificateRotationConfig::default());
+        assert!(rotation.enabled);
     }
 
     #[test]
@@ -252,6 +311,7 @@ mod test {
         enum Mount {
             ClientWithCa,
             ClientWithoutCa,
+            RootsOnly,
             Nothing,
         }
 
@@ -259,51 +319,90 @@ mod test {
             name: &'static str,
             config: NvLinkConfig,
             mount: Mount,
-            outcome: DefaultNmxCTls,
+            client: DefaultNmxCClientTls,
+            ca: DefaultNmxCCa,
             expected_ca: Option<&'static str>,
         }
+
+        let operator_tls =
+            |ca: Option<&str>, cert: Option<&str>, authority: Option<&str>| NvLinkConfig {
+                nmx_c_tls_ca_cert_path: ca.map(str::to_owned),
+                nmx_c_tls_client_cert_path: cert.map(str::to_owned),
+                nmx_c_tls_client_key_path: cert.map(|_| "/operator/tls.key".to_owned()),
+                nmx_c_tls_authority: authority.map(str::to_owned),
+                ..NvLinkConfig::default()
+            };
 
         let cases = [
             Case {
                 name: "client secret with ca.crt",
                 config: NvLinkConfig::default(),
                 mount: Mount::ClientWithCa,
-                outcome: DefaultNmxCTls::Applied,
+                client: DefaultNmxCClientTls::Applied,
+                ca: DefaultNmxCCa::Applied,
                 expected_ca: Some("client/ca.crt"),
             },
             Case {
                 name: "client secret without ca.crt uses fallback CA",
                 config: NvLinkConfig::default(),
                 mount: Mount::ClientWithoutCa,
-                outcome: DefaultNmxCTls::Applied,
+                client: DefaultNmxCClientTls::Applied,
+                ca: DefaultNmxCCa::Applied,
                 expected_ca: Some("roots/ca.crt"),
             },
             Case {
-                name: "client certificate not mounted",
+                name: "client certificate not mounted still defaults CA",
+                config: NvLinkConfig::default(),
+                mount: Mount::RootsOnly,
+                client: DefaultNmxCClientTls::CertificateMissing,
+                ca: DefaultNmxCCa::Applied,
+                expected_ca: Some("roots/ca.crt"),
+            },
+            Case {
+                name: "nothing mounted",
                 config: NvLinkConfig::default(),
                 mount: Mount::Nothing,
-                outcome: DefaultNmxCTls::CertificateMissing,
+                client: DefaultNmxCClientTls::CertificateMissing,
+                ca: DefaultNmxCCa::Missing,
                 expected_ca: None,
             },
             Case {
-                name: "explicit authority keeps operator TLS settings",
-                config: NvLinkConfig {
-                    nmx_c_tls_authority: Some("nmxc.example".to_string()),
-                    ..NvLinkConfig::default()
-                },
+                name: "server-only TLS with explicit authority gets only a default CA",
+                config: operator_tls(None, None, Some("nmxc.example")),
                 mount: Mount::ClientWithCa,
-                outcome: DefaultNmxCTls::NotNeeded,
+                client: DefaultNmxCClientTls::NotNeeded,
+                ca: DefaultNmxCCa::Applied,
+                expected_ca: Some("client/ca.crt"),
+            },
+            Case {
+                name: "explicit CA is kept",
+                config: operator_tls(Some("/operator/ca.crt"), None, None),
+                mount: Mount::ClientWithCa,
+                client: DefaultNmxCClientTls::NotNeeded,
+                ca: DefaultNmxCCa::NotNeeded,
                 expected_ca: None,
             },
             Case {
-                name: "insecure NMX-C",
+                name: "insecure plain HTTP",
                 config: NvLinkConfig {
                     allow_insecure: true,
                     ..NvLinkConfig::default()
                 },
                 mount: Mount::ClientWithCa,
-                outcome: DefaultNmxCTls::NotNeeded,
+                client: DefaultNmxCClientTls::NotNeeded,
+                ca: DefaultNmxCCa::NotNeeded,
                 expected_ca: None,
+            },
+            Case {
+                name: "insecure with operator client certificate uses HTTPS",
+                config: NvLinkConfig {
+                    allow_insecure: true,
+                    ..operator_tls(None, Some("/operator/tls.crt"), None)
+                },
+                mount: Mount::ClientWithCa,
+                client: DefaultNmxCClientTls::NotNeeded,
+                ca: DefaultNmxCCa::Applied,
+                expected_ca: Some("client/ca.crt"),
             },
             Case {
                 name: "disabled",
@@ -312,7 +411,8 @@ mod test {
                     ..NvLinkConfig::default()
                 },
                 mount: Mount::ClientWithCa,
-                outcome: DefaultNmxCTls::NotNeeded,
+                client: DefaultNmxCClientTls::NotNeeded,
+                ca: DefaultNmxCCa::NotNeeded,
                 expected_ca: None,
             },
         ];
@@ -323,51 +423,43 @@ mod test {
             let fallback_ca = root.path().join("roots/ca.crt");
             std::fs::create_dir_all(&client_dir).unwrap();
             std::fs::create_dir_all(fallback_ca.parent().unwrap()).unwrap();
-            std::fs::write(&fallback_ca, "pem").unwrap();
-            let client_files: &[&str] = match case.mount {
-                Mount::ClientWithCa => &["ca.crt", "tls.crt", "tls.key"],
-                Mount::ClientWithoutCa => &["tls.crt", "tls.key"],
-                Mount::Nothing => &[],
+            let (client_files, roots_ca): (&[&str], bool) = match case.mount {
+                Mount::ClientWithCa => (&["ca.crt", "tls.crt", "tls.key"], true),
+                Mount::ClientWithoutCa => (&["tls.crt", "tls.key"], true),
+                Mount::RootsOnly => (&[], true),
+                Mount::Nothing => (&[], false),
             };
             for name in client_files {
                 std::fs::write(client_dir.join(name), "pem").unwrap();
             }
-            let path =
-                |relative: &str| Some(root.path().join(relative).to_string_lossy().into_owned());
+            if roots_ca {
+                std::fs::write(&fallback_ca, "pem").unwrap();
+            }
+            let path = |relative: &str| root.path().join(relative).to_string_lossy().into_owned();
 
             let mut config = case.config.clone();
             let outcome =
                 config.apply_default_nmx_c_tls(&client_dir, &fallback_ca, Some("site.example"));
 
-            assert_eq!(outcome, case.outcome, "{}", case.name);
-            if let Some(expected_ca) = case.expected_ca {
-                assert_eq!(
-                    config.nmx_c_tls_ca_cert_path,
-                    path(expected_ca),
-                    "{}",
-                    case.name
-                );
-                assert_eq!(
-                    config.nmx_c_tls_client_cert_path,
-                    path("client/tls.crt"),
-                    "{}",
-                    case.name
-                );
-                assert_eq!(
-                    config.nmx_c_tls_client_key_path,
-                    path("client/tls.key"),
-                    "{}",
-                    case.name
-                );
-                assert_eq!(
-                    config.nmx_c_tls_authority.as_deref(),
-                    Some("site.example"),
-                    "{}",
-                    case.name
-                );
-            } else {
-                assert_eq!(config, case.config, "{}", case.name);
+            assert_eq!(
+                outcome,
+                DefaultNmxCTls {
+                    client: case.client,
+                    ca: case.ca,
+                },
+                "{}",
+                case.name
+            );
+            let mut expected = case.config.clone();
+            if case.client == DefaultNmxCClientTls::Applied {
+                expected.nmx_c_tls_client_cert_path = Some(path("client/tls.crt"));
+                expected.nmx_c_tls_client_key_path = Some(path("client/tls.key"));
+                expected.nmx_c_tls_authority = Some("site.example".to_owned());
             }
+            if let Some(expected_ca) = case.expected_ca {
+                expected.nmx_c_tls_ca_cert_path = Some(path(expected_ca));
+            }
+            assert_eq!(config, expected, "{}", case.name);
         }
     }
 

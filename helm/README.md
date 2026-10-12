@@ -98,9 +98,11 @@ The profiles are deliberately fixed to the capabilities each peer needs:
 `spiffe://<global.spiffe.trustDomain>/<release namespace>/sa/nico-nmxc`, for
 example `spiffe://nico.local/nico-system/sa/nico-nmxc`. If the site configuration
 sets none of the `nvlink_config.nmx_c_tls_*` keys and `mountPath` keeps its
-default, nico-api uses this certificate for NMX-C mTLS, with the CA taken from
-`ca.crt` in the client Secret or else `/var/run/secrets/nico-roots/ca.crt`, and
-`initial_domain_name` as the TLS authority. `switchServer` is off by default.
+default, nico-api uses this certificate for NMX-C mTLS, with
+`initial_domain_name` as the TLS authority. Whenever
+`nvlink_config.nmx_c_tls_ca_cert_path` is unset, nico-api verifies NMX-C with
+`ca.crt` from the client Secret or else `/var/run/secrets/nico-roots/ca.crt`.
+`switchServer` is off by default.
 Enable it only when this Helm release should own the server artifact. Configure `dnsNames` or `ipAddresses`,
 as appropriate, with a SAN that exactly matches `nmx_c_tls_authority` in the
 NICo site configuration.

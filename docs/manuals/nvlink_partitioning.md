@@ -206,12 +206,19 @@ allow_insecure = false
 
 | Field | Purpose |
 | ----- | ------- |
-| `nmx_c_tls_ca_cert_path` | Optional PEM containing additional CAs for normal NMX-C connectivity. The certificate monitor requires this file and does not use the system trust store |
+| `nmx_c_tls_ca_cert_path` | PEM containing the CAs that verify NMX-C over HTTPS. It is the only trust source: neither the partition monitor nor the certificate monitor uses the system trust store |
 | `nmx_c_tls_client_cert_path` | Optional client certificate for mTLS to NMX-C |
 | `nmx_c_tls_client_key_path` | Optional client key matching the certificate above |
 | `nmx_c_tls_authority` | Optional override for the expected server name during certificate verification (SNI / hostname check) |
 | `nmx_c_endpoint_port` | Optional gRPC port used when deriving an endpoint from a switch NVOS IP; defaults to `9370` |
 | `allow_insecure` | Development option that can select plaintext HTTP for rack-derived endpoints when no client certificate and key are configured. It does not disable certificate-monitor TLS verification |
+
+`enabled` and the certificate monitor's `nmx_c_certificate_rotation.enabled`
+default to `true`, including when `[nvlink_config]` is omitted. When the TLS
+keys are omitted, `nico-api` takes them from the nico-api Helm chart's
+`nvSwitchTls.nicoClient` mount and `initial_domain_name`. The
+[`NvLinkConfig` reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#nvlinkconfig)
+describes exactly when each default applies.
 
 Rack-associated machines use the NVOS IP of a ready Fabric Manager
 control-plane switch in the rack. Machines without a rack association use an
