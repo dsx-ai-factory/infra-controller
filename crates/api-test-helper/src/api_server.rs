@@ -43,7 +43,7 @@ pub struct StartArgs {
     pub bmc_proxy: Option<HostPortPair>,
     pub firmware_directory: PathBuf,
     pub cancel_token: CancellationToken,
-    pub ready_channel: Sender<carbide::ApiServerAddresses>,
+    pub ready_channel: Sender<carbide::ApiServerReady>,
     pub credential_config: CredentialConfig,
     pub insecure_discovery: bool,
 }

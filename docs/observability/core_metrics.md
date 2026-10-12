@@ -204,8 +204,21 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_measured_boot_profiles_total</td><td>gauge</td><td>Number of measured boot profiles.</td></tr>
 <tr><td>carbide_measured_boot_verification_failures_total</td><td>counter</td><td>Number of measured boot verification failures, across quote verification and attestation handling, by cause</td></tr>
 <tr><td>carbide_metrics_scrape_failures_total</td><td>counter</td><td>Number of /metrics scrape failures, by outcome.</td></tr>
+<tr><td>carbide_mqtt_connected</td><td>gauge</td><td>Number of active broker connections held by the MQTT client (1 while connected, 0 otherwise)</td></tr>
 <tr><td>carbide_mqtt_dispatch_dropped_total</td><td>counter</td><td>Number of received MQTT messages dropped because the handler concurrency semaphore could not be acquired</td></tr>
+<tr><td>carbide_mqtt_dropped_bytes_total</td><td>counter</td><td>Number of bytes of received MQTT messages dropped because the client&#39;s processing queue was full</td></tr>
+<tr><td>carbide_mqtt_event_loop_errors_total</td><td>counter</td><td>Number of connection errors encountered by the MQTT client&#39;s event loop</td></tr>
+<tr><td>carbide_mqtt_messages_dropped_total</td><td>counter</td><td>Number of received MQTT messages dropped because the client&#39;s processing queue was full</td></tr>
+<tr><td>carbide_mqtt_messages_failed_total</td><td>counter</td><td>Number of received MQTT messages whose handler failed or that had no handler registered</td></tr>
+<tr><td>carbide_mqtt_messages_processed_total</td><td>counter</td><td>Number of received MQTT messages successfully processed by a registered handler</td></tr>
+<tr><td>carbide_mqtt_messages_published_total</td><td>counter</td><td>Number of MQTT messages successfully queued for publishing to the broker</td></tr>
+<tr><td>carbide_mqtt_processed_bytes_total</td><td>counter</td><td>Number of bytes of received MQTT messages successfully processed by a registered handler</td></tr>
+<tr><td>carbide_mqtt_publish_failures_total</td><td>counter</td><td>Number of failed MQTT message publish attempts</td></tr>
+<tr><td>carbide_mqtt_published_bytes_total</td><td>counter</td><td>Number of bytes of MQTT messages successfully queued for publishing to the broker</td></tr>
+<tr><td>carbide_mqtt_queue_pending_bytes</td><td>gauge</td><td>Number of bytes of received MQTT messages currently waiting in the client&#39;s processing queue</td></tr>
+<tr><td>carbide_mqtt_queue_pending_messages</td><td>gauge</td><td>Number of received MQTT messages currently waiting in the client&#39;s processing queue</td></tr>
 <tr><td>carbide_mqtt_reconnects_total</td><td>counter</td><td>Number of times an MQTT client re-established its broker connection after the initial connect</td></tr>
+<tr><td>carbide_mqtt_unmatched_topics_total</td><td>counter</td><td>Number of received MQTT messages whose topic matched no registered handler pattern</td></tr>
 <tr><td>carbide_network_segments_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_network_segments in the system</td></tr>
 <tr><td>carbide_network_segments_handler_latency_in_state_milliseconds</td><td>histogram</td><td>The amount of time it took to invoke the state handler for objects of type carbide_network_segments in a certain state</td></tr>
 <tr><td>carbide_network_segments_iteration_latency_milliseconds</td><td>histogram</td><td>The elapsed time in the last state processor iteration to handle objects of type carbide_network_segments</td></tr>
