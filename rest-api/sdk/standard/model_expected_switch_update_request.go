@@ -37,8 +37,8 @@ type ExpectedSwitchUpdateRequest struct {
 	NvOsUsername NullableString `json:"nvOsUsername,omitempty"`
 	// NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
 	NvOsPassword NullableString `json:"nvOsPassword,omitempty"`
-	// MAC addresses of the Expected Switch's NvOS management interfaces
-	NvosMacAddresses []string `json:"nvosMacAddresses,omitempty"`
+	// Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array clears them. Mark one entry primary to choose eth0.
+	NvosInterfaces []NvosInterface `json:"nvosInterfaces,omitempty"`
 	// Optional rack identifier for this component
 	RackId NullableString `json:"rackId,omitempty"`
 	// Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value. It must not be unspecified, multicast, or IPv4 limited broadcast.
@@ -382,36 +382,36 @@ func (o *ExpectedSwitchUpdateRequest) UnsetNvOsPassword() {
 	o.NvOsPassword.Unset()
 }
 
-// GetNvosMacAddresses returns the NvosMacAddresses field value if set, zero value otherwise.
-func (o *ExpectedSwitchUpdateRequest) GetNvosMacAddresses() []string {
-	if o == nil || IsNil(o.NvosMacAddresses) {
-		var ret []string
+// GetNvosInterfaces returns the NvosInterfaces field value if set, zero value otherwise.
+func (o *ExpectedSwitchUpdateRequest) GetNvosInterfaces() []NvosInterface {
+	if o == nil || IsNil(o.NvosInterfaces) {
+		var ret []NvosInterface
 		return ret
 	}
-	return o.NvosMacAddresses
+	return o.NvosInterfaces
 }
 
-// GetNvosMacAddressesOk returns a tuple with the NvosMacAddresses field value if set, nil otherwise
+// GetNvosInterfacesOk returns a tuple with the NvosInterfaces field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-func (o *ExpectedSwitchUpdateRequest) GetNvosMacAddressesOk() ([]string, bool) {
-	if o == nil || IsNil(o.NvosMacAddresses) {
+func (o *ExpectedSwitchUpdateRequest) GetNvosInterfacesOk() ([]NvosInterface, bool) {
+	if o == nil || IsNil(o.NvosInterfaces) {
 		return nil, false
 	}
-	return o.NvosMacAddresses, true
+	return o.NvosInterfaces, true
 }
 
-// HasNvosMacAddresses returns a boolean if a field has been set.
-func (o *ExpectedSwitchUpdateRequest) HasNvosMacAddresses() bool {
-	if o != nil && !IsNil(o.NvosMacAddresses) {
+// HasNvosInterfaces returns a boolean if a field has been set.
+func (o *ExpectedSwitchUpdateRequest) HasNvosInterfaces() bool {
+	if o != nil && !IsNil(o.NvosInterfaces) {
 		return true
 	}
 
 	return false
 }
 
-// SetNvosMacAddresses gets a reference to the given []string and assigns it to the NvosMacAddresses field.
-func (o *ExpectedSwitchUpdateRequest) SetNvosMacAddresses(v []string) {
-	o.NvosMacAddresses = v
+// SetNvosInterfaces gets a reference to the given []NvosInterface and assigns it to the NvosInterfaces field.
+func (o *ExpectedSwitchUpdateRequest) SetNvosInterfaces(v []NvosInterface) {
+	o.NvosInterfaces = v
 }
 
 // GetRackId returns the RackId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -864,8 +864,8 @@ func (o ExpectedSwitchUpdateRequest) ToMap() (map[string]interface{}, error) {
 	if o.NvOsPassword.IsSet() {
 		toSerialize["nvOsPassword"] = o.NvOsPassword.Get()
 	}
-	if !IsNil(o.NvosMacAddresses) {
-		toSerialize["nvosMacAddresses"] = o.NvosMacAddresses
+	if !IsNil(o.NvosInterfaces) {
+		toSerialize["nvosInterfaces"] = o.NvosInterfaces
 	}
 	if o.RackId.IsSet() {
 		toSerialize["rackId"] = o.RackId.Get()

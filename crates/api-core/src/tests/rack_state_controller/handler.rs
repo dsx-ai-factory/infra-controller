@@ -5484,10 +5484,11 @@ async fn test_configure_nmx_cluster_dual_port_certificates_match_v2_endpoints(
 
     let extra_nvos_mac = EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL.allocate();
 
+    // Add a second, non-primary NVOS port so the switch is dual-port. Ports live
+    // in their own table; the seeded port stays the primary.
     sqlx::query(
-        "UPDATE expected_switches
-         SET nvos_mac_addresses = array_prepend($1, nvos_mac_addresses)
-         WHERE bmc_mac_address = $2",
+        "INSERT INTO expected_switch_nvos_interfaces (mac_address, bmc_mac_address, is_primary)
+         VALUES ($1, $2, false)",
     )
     .bind(extra_nvos_mac)
     .bind(expected.bmc_mac)
@@ -5603,8 +5604,8 @@ async fn test_configure_nmx_cluster_requires_usable_nvos_endpoint_before_rotatio
     sqlx::query(
         "DELETE FROM machine_interface_addresses WHERE interface_id IN (
         SELECT mi.id FROM machine_interfaces mi
-        JOIN expected_switches es ON mi.mac_address = ANY(es.nvos_mac_addresses)
-        JOIN switches s ON s.bmc_mac_address = es.bmc_mac_address WHERE s.id = $1)",
+        JOIN expected_switch_nvos_interfaces esi ON mi.mac_address = esi.mac_address
+        JOIN switches s ON s.bmc_mac_address = esi.bmc_mac_address WHERE s.id = $1)",
     )
     .bind(switch_ids[0])
     .execute(txn.as_mut())

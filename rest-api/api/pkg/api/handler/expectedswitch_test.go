@@ -173,7 +173,7 @@ func TestCreateExpectedSwitchHandler_Handle(t *testing.T) {
 				SwitchSerialNumber: "SWITCH123",
 				NvOsUsername:       cutil.GetPtr("nvos-admin"),
 				NvOsPassword:       cutil.GetPtr("nvos-password"),
-				NvosMacAddresses:   []string{"00:11:22:33:44:66", "00:11:22:33:44:67"},
+				NvosInterfaces:     model.APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00:11:22:33:44:67"}},
 				BmcIpAddress:       cutil.GetPtr("192.168.1.10"),
 				Labels:             map[string]string{"env": "test"},
 			},
@@ -272,7 +272,7 @@ func TestCreateExpectedSwitchHandler_Handle(t *testing.T) {
 				DefaultBmcUsername: cutil.GetPtr("admin"),
 				DefaultBmcPassword: cutil.GetPtr("password"),
 				SwitchSerialNumber: "NVOS-DUP-SWITCH-001",
-				NvosMacAddresses:   []string{"aa-bb-cc-dd-ee-22"},
+				NvosInterfaces:     model.APINvosInterfaces{{MacAddress: "aa-bb-cc-dd-ee-22"}},
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -318,8 +318,8 @@ func TestCreateExpectedSwitchHandler_Handle(t *testing.T) {
 						assert.Equal(t, *tt.requestBody.BmcIpAddress, *response.BmcIpAddress, "BmcIpAddress in response should match request")
 					}
 				}
-				if tt.requestBody.NvosMacAddresses != nil {
-					assert.Equal(t, tt.requestBody.NvosMacAddresses, response.NvosMacAddresses, "NvosMacAddresses in response should match request")
+				if tt.requestBody.NvosInterfaces != nil {
+					assert.Equal(t, tt.requestBody.NvosInterfaces.MacAddresses(), response.NvosInterfaces.MacAddresses(), "NVOS MACs in response should match request")
 				}
 			}
 		})
@@ -1019,10 +1019,10 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 			coreError:            swe.WrapErr(status.Error(codes.InvalidArgument, "BMC IP update rejected")),
 		},
 		{
-			name: "successful update with NvosMacAddresses",
+			name: "successful update with NvosInterfaces",
 			id:   testES.ID.String(),
 			requestBody: model.APIExpectedSwitchUpdateRequest{
-				NvosMacAddresses: []string{"00:11:22:33:44:66", "00:11:22:33:44:67"},
+				NvosInterfaces: model.APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00:11:22:33:44:67"}},
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -1030,13 +1030,13 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				c.SetParamValues(org, testES.ID.String())
 			},
 			expectedStatus: http.StatusOK,
-			expectedPaths:  []string{"nvos_mac_addresses"},
+			expectedPaths:  []string{"nvos_interfaces"},
 		},
 		{
-			name: "update re-asserting its own NvosMacAddresses is not a conflict",
+			name: "update re-asserting its own NvosInterfaces is not a conflict",
 			id:   testES.ID.String(),
 			requestBody: model.APIExpectedSwitchUpdateRequest{
-				NvosMacAddresses: []string{"00:11:22:33:44:66", "00:11:22:33:44:67"},
+				NvosInterfaces: model.APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00:11:22:33:44:67"}},
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -1044,13 +1044,13 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				c.SetParamValues(org, testES.ID.String())
 			},
 			expectedStatus: http.StatusOK,
-			expectedPaths:  []string{"nvos_mac_addresses"},
+			expectedPaths:  []string{"nvos_interfaces"},
 		},
 		{
 			name: "update claiming another switch's NVOS MAC should return 409",
 			id:   testES.ID.String(),
 			requestBody: model.APIExpectedSwitchUpdateRequest{
-				NvosMacAddresses: []string{"aa-bb-cc-dd-ee-33"},
+				NvosInterfaces: model.APINvosInterfaces{{MacAddress: "aa-bb-cc-dd-ee-33"}},
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -1060,10 +1060,10 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusConflict,
 		},
 		{
-			name: "successful update clearing NvosMacAddresses with an explicit empty list",
+			name: "successful update clearing NvosInterfaces with an explicit empty list",
 			id:   testES.ID.String(),
 			requestBody: model.APIExpectedSwitchUpdateRequest{
-				NvosMacAddresses: []string{},
+				NvosInterfaces: model.APINvosInterfaces{},
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -1071,7 +1071,7 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				c.SetParamValues(org, testES.ID.String())
 			},
 			expectedStatus: http.StatusOK,
-			expectedPaths:  []string{"nvos_mac_addresses"},
+			expectedPaths:  []string{"nvos_interfaces"},
 		},
 		{
 			name: "body ID mismatch with URL should return 400",
@@ -1213,16 +1213,16 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				}
 			}
 
-			// Verify NvosMacAddresses round-trips through the update response when
+			// Verify NvosInterfaces round-trips through the update response when
 			// set; an explicit empty list clears the value
-			if tt.expectedStatus == http.StatusOK && tt.requestBody.NvosMacAddresses != nil {
+			if tt.expectedStatus == http.StatusOK && tt.requestBody.NvosInterfaces != nil {
 				var response model.APIExpectedSwitch
 				err := json.Unmarshal(rec.Body.Bytes(), &response)
 				assert.Nil(t, err)
-				if len(tt.requestBody.NvosMacAddresses) == 0 {
-					assert.Empty(t, response.NvosMacAddresses, "NvosMacAddresses should be cleared in response")
+				if len(tt.requestBody.NvosInterfaces) == 0 {
+					assert.Empty(t, response.NvosInterfaces, "NvosInterfaces should be cleared in response")
 				} else {
-					assert.Equal(t, tt.requestBody.NvosMacAddresses, response.NvosMacAddresses, "NvosMacAddresses in response should match request")
+					assert.Equal(t, tt.requestBody.NvosInterfaces.MacAddresses(), response.NvosInterfaces.MacAddresses(), "NVOS MACs in response should match request")
 				}
 			}
 		})

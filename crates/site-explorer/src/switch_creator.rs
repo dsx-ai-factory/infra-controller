@@ -298,7 +298,8 @@ fn changed_nvos_mac_addresses<'a>(
     expected_switch: &ExpectedSwitch,
 ) -> Option<&'a [MacAddress]> {
     let explored_macs = explored_managed_switch.nv_os_mac_addresses.as_slice();
-    (!explored_macs.is_empty() && explored_macs != expected_switch.nvos_mac_addresses)
+    let expected_macs = expected_switch.nvos_mac_addresses();
+    (!explored_macs.is_empty() && explored_macs != expected_macs.as_slice())
         .then_some(explored_macs)
 }
 
@@ -313,7 +314,16 @@ mod tests {
     fn changed_nvos_mac_addresses_cases() {
         let mac = |last| MacAddress::new([0x02, 0, 0, 0, 0, last]);
         let expected_switch = ExpectedSwitch {
-            nvos_mac_addresses: vec![mac(1), mac(2)],
+            nvos_interfaces: vec![
+                model::expected_switch::ExpectedNvosInterface {
+                    mac_address: mac(1),
+                    is_primary: true,
+                },
+                model::expected_switch::ExpectedNvosInterface {
+                    mac_address: mac(2),
+                    is_primary: false,
+                },
+            ],
             ..ExpectedSwitch::default()
         };
         let explored = |nv_os_mac_addresses| ExploredManagedSwitch {

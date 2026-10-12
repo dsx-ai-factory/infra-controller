@@ -76,7 +76,7 @@ stateDiagram-v2
 | *(create)* | Created | Switch created |
 | Created | Initializing (`WaitForOsMachineInterface`) | Controller processes switch |
 | Initializing (`WaitForOsMachineInterface`) | Configuring (`ConfigureCertificate` `Start`) | All NVOS interfaces associated for expected switch |
-| Initializing (`WaitForOsMachineInterface`) | Error | Expected switch has empty `nvos_mac_addresses` or MAC owned by another switch |
+| Initializing (`WaitForOsMachineInterface`) | Error | Expected switch declares no NVOS ethernet ports or a MAC owned by another switch |
 | Configuring (`ConfigureCertificate` `Start`) | Configuring (`ConfigureCertificate` `WaitForComplete`) | Component manager returns RMS job ID (`domain_name` = `rack_id`) |
 | Configuring (`ConfigureCertificate` `Start`) | Configuring (`RotateOsPassword`) | No `rack_id` or no component manager (skip certificate step) |
 | Configuring (`ConfigureCertificate` `WaitForComplete`) | Configuring (`RotateOsPassword`) | RMS job `Completed` |

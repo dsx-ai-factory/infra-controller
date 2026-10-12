@@ -6220,9 +6220,11 @@ paths:
                   switchSerialNumber: SWITCH-12345
                   nvOsUsername: nvadmin
                   nvOsPassword: nvpassword123
-                  nvosMacAddresses:
-                    - '00:1A:2B:3C:4D:60'
-                    - '00:1A:2B:3C:4D:61'
+                  nvosInterfaces:
+                    - macAddress: '00:1A:2B:3C:4D:60'
+                      isPrimary: true
+                    - macAddress: '00:1A:2B:3C:4D:61'
+                      isPrimary: false
                   labels:
                     environment: production
                     rack: A1
@@ -6460,9 +6462,11 @@ paths:
                   switchSerialNumber: SWITCH-54321
                   nvOsUsername: newnvadmin
                   nvOsPassword: newnvpassword123
-                  nvosMacAddresses:
-                    - '00:1A:2B:3C:4D:62'
-                    - '00:1A:2B:3C:4D:63'
+                  nvosInterfaces:
+                    - macAddress: '00:1A:2B:3C:4D:62'
+                      isPrimary: true
+                    - macAddress: '00:1A:2B:3C:4D:63'
+                      isPrimary: false
                   labels:
                     environment: staging
                     rack: B2
@@ -31139,6 +31143,20 @@ components:
           type: string
           minLength: 1
           description: Non-blank opaque external device inventory identifier.
+    NvosInterface:
+      title: NvosInterface
+      type: object
+      description: One NVOS ethernet port of an Expected Switch.
+      required:
+        - macAddress
+      properties:
+        macAddress:
+          type: string
+          pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
+          description: MAC address of this NVOS ethernet port.
+        isPrimary:
+          type: boolean
+          description: Whether this port is the primary (eth0) NVOS port NICo manages via RMS. At most one port per switch may be primary; when no port is marked, the first port on a multi-port switch defaults to primary and a single-port switch is always its own primary.
     ExpectedSwitch:
       title: ExpectedSwitch
       type: object
@@ -31152,9 +31170,11 @@ components:
           bmcMacAddress: '00:1A:2B:3C:4D:5E'
           bmcIpAddress: '192.168.1.100'
           switchSerialNumber: SWITCH-12345
-          nvosMacAddresses:
-            - '00:1A:2B:3C:4D:60'
-            - '00:1A:2B:3C:4D:61'
+          nvosInterfaces:
+            - macAddress: '00:1A:2B:3C:4D:60'
+              isPrimary: true
+            - macAddress: '00:1A:2B:3C:4D:61'
+              isPrimary: false
           rackId: rack-01
           manufacturer: NVIDIA
           labels:
@@ -31180,13 +31200,11 @@ components:
         switchSerialNumber:
           type: string
           description: Serial number of the Expected Switch
-        nvosMacAddresses:
+        nvosInterfaces:
           type: array
-          uniqueItems: true
-          description: MAC addresses of the Expected Switch's NvOS management interfaces
+          description: NVOS ethernet ports of the Expected Switch, with the primary (eth0) port flagged.
           items:
-            type: string
-            pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
+            $ref: '#/components/schemas/NvosInterface'
         rackId:
           type:
             - string
@@ -31264,9 +31282,11 @@ components:
           switchSerialNumber: SWITCH-12345
           nvOsUsername: nvadmin
           nvOsPassword: nvpassword123
-          nvosMacAddresses:
-            - '00:1A:2B:3C:4D:60'
-            - '00:1A:2B:3C:4D:61'
+          nvosInterfaces:
+            - macAddress: '00:1A:2B:3C:4D:60'
+              isPrimary: true
+            - macAddress: '00:1A:2B:3C:4D:61'
+              isPrimary: false
           rackId: rack-01
           manufacturer: NVIDIA
           labels:
@@ -31307,13 +31327,11 @@ components:
             - string
             - 'null'
           description: NvOS password for the Expected Switch
-        nvosMacAddresses:
+        nvosInterfaces:
           type: array
-          uniqueItems: true
-          description: MAC addresses of the Expected Switch's NvOS management interfaces
+          description: NVOS ethernet ports of the Expected Switch. Mark one entry primary to choose eth0; when none is marked, the first entry on a multi-port switch defaults to primary and a single-port switch is always its own primary.
           items:
-            type: string
-            pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
+            $ref: '#/components/schemas/NvosInterface'
         rackId:
           type:
             - string
@@ -31379,8 +31397,9 @@ components:
             - siteId: f97df110-f4de-492e-8849-4a6af68026b0
               bmcMacAddress: '00:1A:2B:3C:4D:60'
               switchSerialNumber: SWITCH-12345
-              nvosMacAddresses:
-                - '00:1A:2B:3C:4D:61'
+              nvosInterfaces:
+                - macAddress: '00:1A:2B:3C:4D:61'
+                  isPrimary: true
               defaultBmcUsername: admin
               defaultBmcPassword: password123
               labels:
@@ -31412,9 +31431,11 @@ components:
           switchSerialNumber: SWITCH-54321
           nvOsUsername: newnvadmin
           nvOsPassword: newnvpassword123
-          nvosMacAddresses:
-            - '00:1A:2B:3C:4D:62'
-            - '00:1A:2B:3C:4D:63'
+          nvosInterfaces:
+            - macAddress: '00:1A:2B:3C:4D:62'
+              isPrimary: true
+            - macAddress: '00:1A:2B:3C:4D:63'
+              isPrimary: false
           rackId: rack-02
           manufacturer: NVIDIA
           labels:
@@ -31475,13 +31496,11 @@ components:
           minLength: 1
           writeOnly: true
           description: NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
-        nvosMacAddresses:
+        nvosInterfaces:
           type: array
-          uniqueItems: true
-          description: MAC addresses of the Expected Switch's NvOS management interfaces
+          description: Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array clears them. Mark one entry primary to choose eth0.
           items:
-            type: string
-            pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
+            $ref: '#/components/schemas/NvosInterface'
         rackId:
           type:
             - string

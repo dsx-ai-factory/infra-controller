@@ -392,7 +392,7 @@ async fn test_suppression_skips_cached_switch_and_power_shelf_ingestion(
         model::expected_switch::ExpectedSwitch {
             expected_switch_id: None,
             bmc_mac_address: devices[0].mac,
-            nvos_mac_addresses: Vec::new(),
+            nvos_interfaces: Vec::new(),
             serial_number: "SUPPRESSED-SWITCH".to_string(),
             bmc_username: "admin".to_string(),
             bmc_password: "password".to_string(),

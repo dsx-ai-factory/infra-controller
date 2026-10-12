@@ -2641,7 +2641,7 @@ impl SiteExplorer {
             // ...but re-check here just incase, with the failure case being a
             // log and skip for this pass.
             if let Some(nvos_ip) = expected_switch.nvos_ip_address {
-                match expected_switch.nvos_mac_addresses.as_slice() {
+                match expected_switch.nvos_mac_addresses().as_slice() {
                     [nvos_mac] => {
                         try_preallocate_one(
                             &self.database_connection,
@@ -2726,8 +2726,7 @@ impl SiteExplorer {
             .chain(
                 expected_switches
                     .iter()
-                    .flat_map(|switch| &switch.nvos_mac_addresses)
-                    .copied(),
+                    .flat_map(|switch| switch.nvos_mac_addresses()),
             )
             // An explicit BMC identity wins if legacy data assigns the same
             // MAC address to both a BMC and an OS interface.

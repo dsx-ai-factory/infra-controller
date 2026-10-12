@@ -133,6 +133,7 @@ pub async fn is_dhcp_acknowledgement_pending(
                 SELECT 1 FROM machine_interface_addresses address
                 WHERE address.interface_id = interface.id AND address.allocation_type = $4
             ) AND NOT EXISTS (
+<<<<<<< HEAD
                 SELECT 1 FROM machine_interface_addresses address
                 JOIN network_prefixes prefix ON address.address <<= prefix.prefix
                 WHERE address.interface_id = interface.id
@@ -140,6 +141,32 @@ pub async fn is_dhcp_acknowledgement_pending(
             FROM machine_interfaces interface
             WHERE interface.mac_address = $1
         ), false)";
+=======
+                SELECT 1 FROM machine_interfaces
+                WHERE mac_address = $1 AND last_dhcp IS NOT NULL
+            ) AND (
+                EXISTS (
+                    SELECT 1 FROM expected_machines
+                    WHERE bmc_mac_address = $1 AND bmc_ip_address IS NOT NULL
+                ) OR EXISTS (
+                    SELECT 1 FROM expected_machines,
+                        LATERAL jsonb_array_elements(host_nics) AS interface
+                    WHERE interface->>'mac_address' = $4
+                        AND interface->>'fixed_ip' IS NOT NULL
+                ) OR EXISTS (
+                    SELECT 1 FROM expected_switches
+                    WHERE bmc_mac_address = $1 AND bmc_ip_address IS NOT NULL
+                ) OR EXISTS (
+                    SELECT 1 FROM expected_switch_nvos_interfaces esi
+                        JOIN expected_switches es ON es.bmc_mac_address = esi.bmc_mac_address
+                    WHERE esi.mac_address = $1 AND es.nvos_ip_address IS NOT NULL
+                ) OR EXISTS (
+                    SELECT 1 FROM expected_power_shelves
+                    WHERE bmc_mac_address = $1 AND bmc_ip_address IS NOT NULL
+                )
+            )
+        )";
+>>>>>>> 9849b632e (feat: enable operators to specify the primary nvos interface; if the REST/cli does not specify one of the nvos ethernet ports as the primary interface, the first port will be marked as the primary by default)
 
     sqlx::query_scalar(QUERY)
         .bind(mac_address)

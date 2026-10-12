@@ -48,7 +48,7 @@ async fn associated_switch_macs(
 
     let mut macs = vec![bmc_mac];
     if let Some(expected) = db::expected_switch::find_by_bmc_mac_address(txn, bmc_mac).await? {
-        macs.extend(expected.nvos_mac_addresses);
+        macs.extend(expected.nvos_mac_addresses());
     }
     Ok(macs)
 }
@@ -90,6 +90,7 @@ async fn load_switch_nvos_info(
                     mac: Some(mac),
                     service_port: None,
                     addresses: address.into_iter().collect(),
+                    is_primary: row.is_primary,
                 });
             }
         }
@@ -818,6 +819,7 @@ mod switch_nvos_info_tests {
             mac: Some(mac.to_string()),
             service_port: None,
             addresses,
+            is_primary: false,
         }
     }
 

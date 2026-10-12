@@ -143,6 +143,23 @@ pub(super) async fn show(
     Ok(())
 }
 
+/// Render the NVOS ports one per line, tagging the primary port (eth0) NICo
+/// talks to. A lone port is implicitly primary and is tagged too.
+fn format_nvos_interfaces(interfaces: &[::rpc::forge::ExpectedNvosInterface]) -> String {
+    let lone = interfaces.len() == 1;
+    interfaces
+        .iter()
+        .map(|interface| {
+            if interface.is_primary || lone {
+                format!("{} (primary)", interface.mac_address)
+            } else {
+                interface.mac_address.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn format_interface_ip(
     machine_interface: Option<&::rpc::forge::MachineInterface>,
     linked: Option<&LinkedExpectedSwitch>,
@@ -201,7 +218,7 @@ async fn convert_and_print_into_nice_table(
         table.add_row(row![
             expected_switch.switch_serial_number,
             expected_switch.bmc_mac_address,
-            expected_switch.nvos_mac_addresses.join(", "),
+            format_nvos_interfaces(&expected_switch.nvos_interfaces),
             format_interface_ip(machine_interface, linked),
             associated_switch,
             expected_switch
