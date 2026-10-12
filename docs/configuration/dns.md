@@ -1,6 +1,6 @@
 # DNS <Badge intent="info">v2.0</Badge>
 
-NICo answers DNS for everything it manages. Records are never authored by hand: they derive from the machine, BMC, and instance inventory in the `nico-api` database, appear when an interface or instance gains an address, and disappear when it loses one. This page covers the names NICo serves, site zones and per-segment subdomains, reverse (PTR) resolution, and IPv6 Service configuration. For the overall DNS deployment, including the recursive resolver and fixed infrastructure service names, refer to [IP and Network Configuration](../provisioning/ip-and-network-configuration.md#3-dns-configuration).
+NICo publishes DNS records from the machine, BMC, and instance inventory in `nico-api`. Records appear when an interface or instance gains an address and disappear when it loses one. For deployment, recursive resolvers, and fixed infrastructure service names, see [IP and Network Configuration](../provisioning/ip-and-network-configuration.md#3-dns-configuration).
 
 ## What Gets a Name
 
@@ -13,44 +13,70 @@ Every managed machine interface gets a hostname; [Host Naming](host-naming.md) c
 | `<machine-id>.bmc.<domain>` | A machine's BMC interface | Host, predicted-host, and DPU machine ids |
 | `<ip-hostname>.<segment subdomain>` | An overlay (DPU-managed) instance address | Always IP-derived (`10-1-2-3`, or the fully expanded IPv6 form), independent of the host-naming strategy |
 
-Records serve as A or AAAA per address family, with a 300-second TTL by default. An interface that loses all of its addresses drops out of DNS until it has one again. Instances on `host_inband` segments publish no instance record: their address is the host's own interface address, which the machine records above already serve.
+Records are A or AAAA according to their address family, with a 300-second TTL unless the domain sets `default_ttl`. Instances on `host_inband` segments publish no instance record: the machine records above already serve the host's interface address.
 
 ## The Site Zone and Segment Subdomains
 
-The site's forward zone is seeded once, at first startup, from the `nico-api` config:
+Set the initial forward domain in the `nico-api` config:
 
 ```toml
 initial_domain_name = "mysite.example.com"
 ```
 
-The domain is created only when no domain exists yet, and most sites use a single domain for their lifetime. Network segments then decide which of their interfaces and instances get names:
+NICo inserts the initial domain only when the domains table is empty. Even deleted rows prevent insertion. Changing `initial_domain_name` does not rename an existing domain.
+
+At startup, initial networks use the configured forward domain if it exists. Otherwise, they use the sole forward domain. Reverse domains are excluded. If no forward domain can be selected unambiguously, startup logs a warning and skips initial network creation.
+
+Network segments select the domain for their interfaces and instances:
 
 - Segments seeded from the config (`[networks.*]`) inherit the site domain automatically.
 - Segments created later through the API or CLI name their subdomain explicitly: `nico-admin-cli network-segment create ... --subdomain-id <domain-id>` (required for `host-inband` segments; list domains with `nico-admin-cli domain show`).
-- A segment with no subdomain produces no DNS at all: its interfaces and instances have no zone to live in.
+- A segment with no subdomain publishes no interface or instance records.
+
+### Domain Names and Publication
+
+Domain names must be valid lowercase DNS names and cannot be renamed. Domains have no VPC owner. A domain cannot be deleted while a live network segment or machine interface references it.
+
+### Record TTL and SOA Serials
+
+The domain's optional `default_ttl` applies to A, AAAA, and PTR records and accepts 30 through 86,400 seconds, inclusive. Omitting it at creation uses 300 seconds; omitting it on update preserves the stored value. The update API cannot clear an explicit value.
+
+New domains have an SOA record TTL of 3,600 seconds and an SOA minimum of 120 seconds, both independent of `default_ttl`. Forward-zone SOA serials advance with domain updates and inventory changes that affect published records. They do not enable zone transfers or invalidate cached answers.
 
 ## Reverse DNS
 
-Reverse resolution mirrors the forward records that matter to humans:
+PTR queries return these names:
 
-- An address on a primary interface or a BMC interface answers PTR with `<hostname>.<domain>`.
-- An overlay instance address answers PTR with its instance name.
+- Primary and BMC interface addresses return `<hostname>.<domain>`.
+- Overlay instance addresses return the instance name.
 - The `adm` and `bmc` machine-id forms are forward-only.
 
-NICo derives reverse zones when it creates a segment or [adds a prefix to an existing underlay](../provisioning/dhcpv6-deployment.md#add-ipv6-to-an-existing-bmc-underlay). Startup also repairs missing zones for the persisted prefixes of site-configured networks. For example, `192.0.2.0/24` produces `2.0.192.in-addr.arpa`. NICo creates zones only for octet-aligned IPv4 prefixes (/8, /16, /24, /32) and nonzero IPv6 prefix lengths divisible by four. It removes the zone when the last segment prefix using it is deleted. PTR answers come from assigned addresses, not zone rows: an unaligned prefix does not prevent a PTR answer when the query reaches NICo.
+PTR lookup uses the complete IPv4 or IPv6 address encoded in the query name, regardless of prefix alignment or stored reverse zones. It returns a name only when exactly one inventory owner holds the address and has a publishable name. Multiple owners suppress the answer, even if only one has DNS metadata. Retained overlay addresses can count as owners during segment deletion until their address rows are removed.
 
-Configure your recursive resolver to forward reverse lookups for NICo-managed addresses to `nico-dns`. Do not delegate the reverse zone to NICo: even when the zone exists in the database, `nico-dns` returns `REFUSED` for reverse SOA queries and for PTR queries without a published record.
+NICo derives reverse-zone rows when it creates a segment or [adds a prefix to an existing underlay](../provisioning/dhcpv6-deployment.md#add-ipv6-to-an-existing-bmc-underlay). Startup also repairs missing rows for persisted prefixes of site-configured networks. For example, `192.0.2.0/24` produces `2.0.192.in-addr.arpa`.
 
-## Server Behavior Worth Knowing
+Rows are created only for octet-aligned IPv4 prefixes (/8, /16, /24, /32) and nonzero IPv6 prefix lengths divisible by four. NICo removes a row when the last segment prefix using it is deleted. These rows support rollback compatibility; they do not enable reverse-zone authority.
 
-- `nico-dns` forwards A, AAAA, PTR, SOA, NS, CNAME, MX, and TXT queries to the API; any other type, and zone transfers, answer "not implemented". It never recurses. It publishes no NS or CNAME/MX/TXT records, so those types answer NOERROR with an empty answer section inside a held zone. SOA at a zone apex is answered. Put it behind your recursive resolver (a forward zone works best) rather than in a client's resolver list.
-- Positive answers reflect the database live: there is no positive cache and no zone-serial machinery. A new or changed record is visible on the next query for it unless a negative answer for that name and type is cached as described in the next items. In that case, the record appears when the cache entry expires.
-- Inside a zone NICo holds, a name that exists without the requested type (for example, only the other address family) answers NOERROR with an empty answer section, and a name that does not exist answers NXDomain; both carry the zone SOA and set the AA bit. A name outside every held zone answers Refused rather than NXDomain, since it may exist elsewhere.
-- `nico-dns` caches the negative answers it gets from the API. A cached answer replays the same response code, AA bit, and SOA.
-- NOERROR-with-no-data and NXDomain are cached for the shortest of the zone SOA record TTL, the SOA minimum, and `negative_cache_ttl_secs`, which defaults to 120 seconds. The SOA TTL in the first answer and in each replay is the time the cache entry has left.
-- Refused carries no SOA and is cached for `negative_cache_ttl_secs`. ServFail from an upstream failure is cached for `negative_cache_servfail_ttl_secs`, which defaults to 5 seconds and is clamped to 1–300 seconds. This collapses a retry storm into one upstream call without outliving the recovery.
-- The "not implemented" answer for an unsupported query type and the FORMERR for an unreadable query are decided before the API is asked and are not cached.
-- Hosts learn their own FQDN over DHCP option 12 on every path; hosts served by a DPU also receive it as DHCP option 15.
+Published PTR responses set the authoritative-answer (AA) bit without establishing authority over the enclosing `in-addr.arpa` or `ip6.arpa` zone. Missing, ambiguous, or incomplete PTR queries return REFUSED without an SOA or AA bit. Supported non-PTR queries in either reverse tree, including SOA and NS, also return REFUSED.
+
+Configure the site's recursive resolver to forward the required reverse lookups to `nico-dns`. Do not delegate reverse zones to NICo: it does not serve reverse SOAs or reverse-zone delegation records. Explicit reverse-domain creation is rejected.
+
+## DNS Process Configuration
+
+The `carbide-dns run` subcommand reads a TOML file only when `--config-file` is supplied. Omitted keys use built-in defaults; unknown keys are ignored. An unreadable file or invalid TOML prevents startup. Explicit CLI options override the file.
+
+The following TOML settings control caching and API lookup timeouts. All are optional, and none has a CLI override:
+
+| Key | Default | Behavior |
+|---|---|---|
+| `negative_cache_ttl_secs` | `120` | Maximum cache lifetime for non-transient negative answers, in seconds; zero expires entries immediately |
+| `negative_cache_servfail_ttl_secs` | `5` | Cache lifetime for transient failures, in seconds, clamped to 1 through 300 |
+| `negative_cache_entries_max_count` | `50000` | Maximum entries; a new key at capacity evicts the least-recently-used entry; zero selects a capacity of one |
+| `upstream_lookup_timeout_secs` | `5` | API record lookup timeout in seconds; returns SERVFAIL on timeout |
+
+The stock Helm chart does not mount a DNS TOML file or pass `--config-file`, so these settings keep their defaults. The chart passes `listenAddress` (default `[::]:53` for UDP and TCP) and the `NICO_API` ConfigMap value as CLI arguments. The `NICO_API` value overrides the binary's default API URI, `https://nico-api.nico-system.svc.cluster.local:1079`.
+
+The binary exposes `/metrics`, `/health`, and `/ready` on `metrics_listen_address` (default `[::]:8053`). Health and readiness do not query DNS or check ongoing API connectivity; verify DNS responses separately. Trace export requires an OTLP endpoint. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` overrides the CLI or TOML endpoint.
 
 ## Resolvers Handed to Hosts
 
@@ -184,5 +210,5 @@ The following table lists common situations and where to look:
 |---|---|
 | A machine interface has no name | Only primary and BMC interfaces publish records; the interface can also be addressless, or its segment can lack a subdomain. `nico-admin-cli managed-host show <machine-id>` shows interfaces and the primary flag; the `/admin/ipam/dns` web page lists every record NICo is serving. |
 | An instance has no name | The segment's `--subdomain-id` is unset, the address predates instance-hostname population (records populate for addresses allocated going forward), or the instance is on a `host_inband` segment (the host's machine record serves that address). |
-| PTR is missing while the forward name resolves | Only the `<hostname>.<domain>` and instance forms answer PTR; the `adm` and `bmc` machine-id forms are forward-only. |
+| PTR is missing while the forward name resolves | Only the `<hostname>.<domain>` and instance forms answer PTR; the `adm` and `bmc` machine-id forms are forward-only. Check for another inventory owner of the address, including retained overlay addresses during cleanup. Ambiguous ownership returns REFUSED. |
 | Hosts cannot resolve external names | DHCP option 6 points at `nico-dns` (authoritative only) instead of the recursive resolver. Refer to [IP and Network Configuration](../provisioning/ip-and-network-configuration.md#32-unbound-recursive-resolver-for-managed-machines). |
