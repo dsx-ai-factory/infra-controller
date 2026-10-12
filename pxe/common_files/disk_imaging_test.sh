@@ -286,6 +286,30 @@ fi
 assert_eq "failed mktemp leaves auth empty" "0" "${#image_auth[@]}"
 unset -f mktemp
 
+echo "image auth header file cleanup when a later step fails"
+# mktemp can succeed while chmod or the write still fails (e.g. a quota or a
+# filesystem that rejects the mode change). The partially-created file must
+# not be left behind.
+known_auth_file="$temp_dir/chmod-fail-header"
+mktemp() {
+	: >"$known_auth_file"
+	printf '%s\n' "$known_auth_file"
+}
+chmod() {
+	return 1
+}
+image_auth_token="my-token"
+image_auth_type="Bearer"
+if build_image_auth_args; then
+	fail "build_image_auth_args accepted a failed chmod"
+fi
+assert_eq "chmod failure clears the header file variable" "" "$image_auth_header_file"
+if [ -e "$known_auth_file" ]; then
+	fail "build_image_auth_args left the temp file behind after chmod failed"
+fi
+unset -f chmod
+unset -f mktemp
+
 echo "curl_url forwards the url and the auth config as separate arguments, never the raw token"
 # curl_url pipes through tee, so curl runs in a subshell: capture its
 # arguments via a file rather than a variable, which would not survive

@@ -73,9 +73,13 @@ function build_image_auth_args() {
 		escaped_token=${escaped_token//\"/\\\"}
 
 		image_auth_header_file=$(mktemp) || return 1
-		chmod 600 "$image_auth_header_file" || return 1
-		printf 'header = "Authorization: %s %s"\n' "$escaped_type" "$escaped_token" \
-			>"$image_auth_header_file" || return 1
+		if ! chmod 600 "$image_auth_header_file" ||
+			! printf 'header = "Authorization: %s %s"\n' "$escaped_type" "$escaped_token" \
+				>"$image_auth_header_file"; then
+			rm -f "$image_auth_header_file"
+			image_auth_header_file=
+			return 1
+		fi
 		image_auth=(-K "$image_auth_header_file")
 	fi
 }
@@ -1093,7 +1097,7 @@ function main() {
 	fi
 
 	if ! build_image_auth_args; then
-		echo "Failed to prepare image authentication" | tee $log_output
+		echo "Failed to prepare image authentication" | tee "$log_output"
 		return 1
 	fi
 	if [ -n "$image_auth_header_file" ]; then
