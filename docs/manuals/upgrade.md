@@ -167,7 +167,7 @@ git diff upstream/release/v2.0..upstream/release/v2.1 -- helm-prereqs/values.yam
 
 ### Update image tags
 
-Build and push images from the same repository revision as the target release checkout, then set their tags below. The chart and setup script must come from that revision too; see the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration).
+Build and push images from the same repository revision as the target release checkout, then set their tags below. The chart and setup script must come from that revision too; refer to the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration) for more details.
 
 ```bash
 export NICO_IMAGE_REGISTRY=registry.example.com/nico   # your registry
