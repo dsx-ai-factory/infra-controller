@@ -1389,6 +1389,7 @@ impl NvlPartitionMonitor {
             &PARTITION_HEALTH_STATES,
             aggregate_partition_health(&partition_info_list),
         );
+        log_partition_multicast_usage(domain_uuid, &partition_info_list);
 
         // GPU health for metrics, best-effort: log and skip on failure, never blocking reconciliation.
         match nmxc_client
@@ -2497,6 +2498,42 @@ fn partition_health_label(h: i32) -> &'static str {
         Ok(NmxPartitionHealthDegraded) => "degraded",
         Ok(NmxPartitionHealthUnhealthy) => "unhealthy",
         Ok(NmxPartitionHealthUnknown) | Err(_) => "unknown",
+    }
+}
+
+/// Logs multicast group usage for each NMX-C partition that has allocated groups.
+/// Wans when a partition with a non-zero limit has allocated all of its groups.
+fn log_partition_multicast_usage(domain_uuid: NvLinkDomainId, partitions: &[PartitionInfo]) {
+    for partition in partitions {
+        let allocated = partition.num_allocated_multicast_groups;
+        if allocated == 0 {
+            continue;
+        }
+        let limit = partition
+            .attr
+            .as_ref()
+            .map(|attr| attr.multicast_groups_limit)
+            .unwrap_or_default();
+        let nmx_c_partition_id = nmx_c_partition_id_string(partition);
+        if limit != 0 && allocated >= limit {
+            tracing::warn!(
+                %domain_uuid,
+                nmx_c_partition_id,
+                partition_name = %partition.name,
+                multicast_groups_allocated = allocated,
+                multicast_groups_limit = limit,
+                "NMX-C partition has allocated all of its multicast groups"
+            );
+        } else {
+            tracing::info!(
+                %domain_uuid,
+                nmx_c_partition_id,
+                partition_name = %partition.name,
+                multicast_groups_allocated = allocated,
+                multicast_groups_limit = limit,
+                "NMX-C partition multicast group usage"
+            );
+        }
     }
 }
 
