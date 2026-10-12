@@ -352,7 +352,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
             .inspect_err(
                 |error| tracing::warn!(%error, "Failed to fetch forge secure boot status."),
             )
-            .ok(),
+            .ok()
+            .flatten(),
     };
 
     let machine_setup_status = hw_type
@@ -1152,7 +1153,7 @@ fn machine_setup_status<B: Bmc>(
         hw::HwType::Gb200 => {
             if explored_system
                 .secure_boot_status()
-                .is_ok_and(|s| s.is_enabled)
+                .is_ok_and(|s| s.is_some_and(|s| s.is_enabled))
             {
                 diffs.push(MachineSetupDiff {
                     key: "SecureBoot".to_string(),
@@ -1192,7 +1193,7 @@ fn machine_setup_status<B: Bmc>(
         hw::HwType::VeraRubin => {
             if explored_system
                 .secure_boot_status()
-                .is_ok_and(|s| s.is_enabled)
+                .is_ok_and(|s| s.is_some_and(|s| s.is_enabled))
             {
                 diffs.push(MachineSetupDiff {
                     key: "SecureBoot".to_string(),
@@ -1233,7 +1234,7 @@ fn machine_setup_status<B: Bmc>(
             // TODO(dgx-gb300): add EXPECTED_BIOS_ATTRS once the tray BIOS is characterized.
             if explored_system
                 .secure_boot_status()
-                .is_ok_and(|s| s.is_enabled)
+                .is_ok_and(|s| s.is_some_and(|s| s.is_enabled))
             {
                 diffs.push(MachineSetupDiff {
                     key: "SecureBoot".to_string(),

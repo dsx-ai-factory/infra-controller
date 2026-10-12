@@ -334,7 +334,7 @@ async fn device_identity_requests_require_an_existing_host(pool: sqlx::PgPool) {
 
 // Feed the real Tonic decoder so these tests exercise Init authentication and
 // the production forwarding task, not a separate observation-only entry point.
-async fn scout_connection(
+pub(super) async fn scout_connection(
     api: &Api,
     machine_id: MachineId,
     authenticated_machine_id: Option<MachineId>,
@@ -368,7 +368,7 @@ async fn scout_connection(
     Ok((sender, response.into_inner()))
 }
 
-async fn live_report(
+pub(super) async fn live_report(
     api: &Api,
     machine_id: MachineId,
     sender: &mpsc::Sender<ScoutStreamApiBoundMessage>,

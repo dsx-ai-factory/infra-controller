@@ -249,8 +249,9 @@ mod tests {
     fn endpoint(mac: MacAddress, switch: bool, rack_id: Option<RackId>) -> Arc<BmcEndpoint> {
         let metadata = switch.then(|| {
             EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: None,
-                serial: format!("serial-{mac}"),
+                serial: Some(format!("serial-{mac}")),
                 slot_number: None,
                 tray_index: None,
                 nvlink_domain_uuid: None,
@@ -298,8 +299,9 @@ mod tests {
                 password: Some("pass".to_string()),
             },
             Some(EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: None,
-                serial: format!("serial-{mac}"),
+                serial: Some(format!("serial-{mac}")),
                 slot_number: None,
                 tray_index: None,
                 nvlink_domain_uuid: None,
@@ -376,8 +378,9 @@ mod tests {
             component: ComponentInventory {
                 rack_id,
                 metadata: EndpointMetadata::Switch(SwitchData {
+                    log_checkpoint_identity: None,
                     id: None,
-                    serial: "switch-retained-after-failure".to_string(),
+                    serial: Some("switch-retained-after-failure".to_string()),
                     slot_number: Some(1),
                     tray_index: None,
                     nvlink_domain_uuid: None,

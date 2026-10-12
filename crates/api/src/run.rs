@@ -23,6 +23,7 @@ use carbide_api_core::start_runtime;
 use carbide_secrets::CredentialConfig;
 use eyre::WrapErr;
 use ipnetwork::IpNetwork;
+use opentelemetry::metrics::Meter;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot::Sender;
 use tokio::task::JoinSet;
@@ -42,10 +43,20 @@ pub struct ApiServerAddresses {
     pub metrics_address: Option<SocketAddr>,
 }
 
+/// Listener addresses and metric registration handle owned by a running API server.
+#[derive(Clone, Debug)]
+pub struct ApiServerReady {
+    /// Effective listener addresses after startup.
+    pub addresses: ApiServerAddresses,
+    /// Registers instruments exported by this server's metrics listener.
+    pub meter: Meter,
+}
+
 /// Run the carbide-api server until `cancel_token` is cancelled.
 ///
 /// Once startup completes, `ready_channel` receives the effective API and metrics listener
-/// addresses. This includes OS-selected ports when either endpoint is configured with port zero.
+/// addresses and the server's metric registration handle. This includes OS-selected ports when
+/// either endpoint is configured with port zero.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     debug: u8,
@@ -54,7 +65,7 @@ pub async fn run(
     credential_config: CredentialConfig,
     skip_logging_setup: bool,
     cancel_token: CancellationToken,
-    ready_channel: Sender<ApiServerAddresses>,
+    ready_channel: Sender<ApiServerReady>,
 ) -> eyre::Result<()> {
     let carbide_config = carbide_api_core::cfg::load::parse_carbide_config(
         &config_path,
@@ -168,7 +179,7 @@ pub async fn run(
     let listen_address = start_runtime(RuntimeInputs {
         carbide_config,
         initial_objects,
-        meter,
+        meter: meter.clone(),
         per_object_metrics,
         join_set: &mut join_set,
         runtime_prelude,
@@ -183,9 +194,12 @@ pub async fn run(
     .await?;
 
     if ready_channel
-        .send(ApiServerAddresses {
-            listen_address,
-            metrics_address,
+        .send(ApiServerReady {
+            addresses: ApiServerAddresses {
+                listen_address,
+                metrics_address,
+            },
+            meter,
         })
         .is_err()
     {

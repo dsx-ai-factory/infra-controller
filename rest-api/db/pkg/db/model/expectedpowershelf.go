@@ -15,6 +15,7 @@ import (
 	otrace "go.opentelemetry.io/otel/trace"
 
 	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -146,6 +147,7 @@ func (eps *ExpectedPowerShelf) ToProto(creds ExpectedPowerShelfCredentials) *cor
 // reported by a Site. A nil proto is a no-op. An invalid or missing
 // proto.ExpectedPowerShelfId leaves eps.ID unchanged so the caller can
 // validate the proto's UUID before calling.
+// Name and description come from `Metadata`; empty strings become nil.
 func (eps *ExpectedPowerShelf) FromProto(proto *corev1.ExpectedPowerShelf) {
 	if proto == nil {
 		return
@@ -169,10 +171,10 @@ func (eps *ExpectedPowerShelf) FromProto(proto *corev1.ExpectedPowerShelf) {
 	} else {
 		eps.RackID = nil
 	}
-	eps.Name = proto.Name
+	eps.Name = cutil.GetPtrIfNotZero(proto.Metadata.GetName())
 	eps.Manufacturer = proto.Manufacturer
 	eps.Model = proto.Model
-	eps.Description = proto.Description
+	eps.Description = cutil.GetPtrIfNotZero(proto.Metadata.GetDescription())
 	eps.SlotID = proto.SlotId
 	eps.TrayIdx = proto.TrayIdx
 	eps.HostID = proto.HostId

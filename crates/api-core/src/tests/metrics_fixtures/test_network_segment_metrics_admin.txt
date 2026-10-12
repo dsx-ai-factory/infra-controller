@@ -59,7 +59,7 @@ carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",subs
 carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="+Inf"} 1
 carbide_machines_handler_latency_in_state_milliseconds_sum{state="ready",substate=""} 4.693521
 carbide_machines_handler_latency_in_state_milliseconds_count{state="ready",substate=""} 1
-# HELP carbide_machines_iteration_latency_milliseconds The elapsed time in the last state processor iteration to handle objects of type carbide_machines
+# HELP carbide_machines_iteration_latency_milliseconds Elapsed time of each completed state processor iteration for objects of type carbide_machines
 # TYPE carbide_machines_iteration_latency_milliseconds histogram
 carbide_machines_iteration_latency_milliseconds_bucket{le="0"} 0
 carbide_machines_iteration_latency_milliseconds_bucket{le="5"} 1
@@ -91,6 +91,9 @@ carbide_machines_object_tasks_enqueued_total 1
 # HELP carbide_machines_object_tasks_requeued_total Number of object handling tasks requeued for objects of type carbide_machines
 # TYPE carbide_machines_object_tasks_requeued_total counter
 carbide_machines_object_tasks_requeued_total 1
+# HELP carbide_machines_object_tasks_running Number of object handling tasks currently running of type carbide_machines
+# TYPE carbide_machines_object_tasks_running gauge
+carbide_machines_object_tasks_running 0
 # HELP carbide_machines_per_state Number of carbide_machines in the system with a given state
 # TYPE carbide_machines_per_state gauge
 carbide_machines_per_state{fresh="true",state="deleting",substate="drainallocatedips"} 1

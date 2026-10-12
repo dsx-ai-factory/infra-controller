@@ -3063,6 +3063,34 @@ impl Forge for Api {
         crate::handlers::nic_firmware::update(self, request).await
     }
 
+    async fn set_nic_firmware_site_default(
+        &self,
+        request: Request<rpc::SetNicFirmwareSiteDefaultRequest>,
+    ) -> Result<Response<rpc::NicFirmwareSiteDefaultResponse>, Status> {
+        crate::handlers::nic_firmware::set_site_default(self, request).await
+    }
+
+    async fn find_nic_firmware_site_default_ids(
+        &self,
+        request: Request<rpc::NicFirmwareSiteDefaultSearchFilter>,
+    ) -> Result<Response<rpc::FindNicFirmwareSiteDefaultIdsResponse>, Status> {
+        crate::handlers::nic_firmware::find_site_default_ids(self, request).await
+    }
+
+    async fn find_nic_firmware_site_defaults_by_ids(
+        &self,
+        request: Request<rpc::FindNicFirmwareSiteDefaultsByIdsRequest>,
+    ) -> Result<Response<rpc::FindNicFirmwareSiteDefaultsByIdsResponse>, Status> {
+        crate::handlers::nic_firmware::find_site_defaults_by_ids(self, request).await
+    }
+
+    async fn get_desired_nic_firmware(
+        &self,
+        request: Request<rpc::GetDesiredNicFirmwareRequest>,
+    ) -> Result<Response<rpc::GetDesiredNicFirmwareResponse>, Status> {
+        crate::handlers::nic_firmware::get_desired(self, request).await
+    }
+
     async fn delete_nic_firmware_profile(
         &self,
         request: Request<rpc::DeleteNicFirmwareProfileRequest>,

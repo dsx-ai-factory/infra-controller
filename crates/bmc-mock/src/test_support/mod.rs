@@ -37,8 +37,8 @@ use crate::machine_info::DpuSettings;
 use crate::redfish::computer_system::SystemState;
 use crate::{
     ActionError, BmcState, Callbacks, CombinedServer, DpuMachineInfo, HardwareType,
-    HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions, MockPowerState,
-    POWER_CYCLE_DELAY, ResourceResetType,
+    HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions, POWER_CYCLE_DELAY,
+    ResourceResetType,
 };
 
 pub mod axum_http_client;
@@ -101,19 +101,7 @@ impl TestActor {
             )));
         }
         use ResourceResetType::*;
-        match (reset_type, self.power_state) {
-            (GracefulShutdown | ForceOff | GracefulRestart | ForceRestart, PowerState::Off) => {
-                return Err(ActionError::BadRequest(eyre::eyre!(
-                    "machine is already off"
-                )));
-            }
-            (On | ForceOn, PowerState::On) => {
-                return Err(ActionError::BadRequest(eyre::eyre!(
-                    "machine is already on"
-                )));
-            }
-            _ => {}
-        }
+        crate::validate_power_reset(self.power_state, reset_type)?;
         match reset_type {
             On | ForceOn | GracefulRestart | ForceRestart | PushPowerButton | Pause | Resume => {
                 self.publish(PowerState::On);
@@ -225,10 +213,6 @@ impl TestCallbacks {
 }
 
 impl Callbacks for TestCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        panic!("test backend publishes power state instead of using the legacy callback")
-    }
-
     async fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,

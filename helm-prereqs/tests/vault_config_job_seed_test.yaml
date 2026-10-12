@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The configuration Job is a post-upgrade hook, so its KV seeds must never
+# overwrite a value an operator stored after install (the UEFI site defaults
+# are seeded empty on purpose and filled in with `credential add-uefi`).
+suite: Vault configuration job seeds are first-write only
+templates:
+  - templates/vault-config-job.yaml
+tests:
+  - it: skips a seed whose key already has a value and writes new ones with cas=0
+    documentIndex: 3
+    set:
+      vault.kvMount: secrets
+      vault.kvSeeds:
+        - path: machines/all_hosts/site_default/uefi-metadata-items/auth
+          data:
+            UsernamePassword:
+              username: ""
+              password: ""
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'if vault kv get secrets/machines/all_hosts/site_default/uefi-metadata-items/auth >/dev/null 2>&1; then'
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'vault kv put -cas=0 secrets/machines/all_hosts/site_default/uefi-metadata-items/auth -'
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'Keeping secrets/machines/all_hosts/site_default/uefi-metadata-items/auth \(already set; seeds never overwrite\)'
+
+  - it: still runs on upgrades, where the guard matters
+    documentIndex: 3
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: post-install,post-upgrade

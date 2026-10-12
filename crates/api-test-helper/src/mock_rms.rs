@@ -42,7 +42,12 @@ use std::sync::Arc;
 
 use librms::protos::rack_manager as rms;
 use librms::{RackManagerError, RmsApi};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
+
+struct BlockedPowerStateRead {
+    entered: oneshot::Sender<()>,
+    resume: oneshot::Receiver<()>,
+}
 
 /// A configurable mock `RmsApi` client that lets tests queue responses
 /// per method and inspect what requests were sent.
@@ -70,6 +75,7 @@ pub struct MockRmsApi {
     batch_get_power_state_responses:
         Mutex<VecDeque<Result<rms::BatchGetPowerStateResponse, RackManagerError>>>,
     batch_get_power_state_calls: Mutex<Vec<rms::BatchGetPowerStateRequest>>,
+    blocked_power_state_read: Mutex<Option<BlockedPowerStateRead>>,
 
     sequence_rack_power_responses:
         Mutex<VecDeque<Result<rms::SequenceRackPowerResponse, RackManagerError>>>,
@@ -282,6 +288,7 @@ impl MockRmsApi {
             get_power_state_calls: Default::default(),
             batch_get_power_state_responses: Default::default(),
             batch_get_power_state_calls: Default::default(),
+            blocked_power_state_read: Default::default(),
             sequence_rack_power_responses: Default::default(),
             sequence_rack_power_calls: Default::default(),
             list_node_inventory_responses: Default::default(),
@@ -419,6 +426,25 @@ impl MockRmsApi {
         rms::SequenceRackPowerRequest,
         rms::SequenceRackPowerResponse
     );
+
+    /// Pauses the next batch power read after recording it, before consuming
+    /// its queued response. The receiver signals arrival; sending or dropping
+    /// the sender releases the read. After arrival, a closed sender means the
+    /// waiting read was dropped. Another blocker can be armed after arrival.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an earlier blocker has not yet been taken by a read.
+    pub async fn block_next_batch_get_power_state(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, arrival) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let mut blocked = self.blocked_power_state_read.lock().await;
+        assert!(blocked.is_none(), "a power read blocker is already armed");
+        *blocked = Some(BlockedPowerStateRead { entered, resume });
+        (arrival, release)
+    }
 
     // Inventory
     impl_enqueue_inspect!(
@@ -1174,6 +1200,11 @@ impl RmsApi for MockRmsApi {
         cmd: rms::BatchGetPowerStateRequest,
     ) -> Result<rms::BatchGetPowerStateResponse, RackManagerError> {
         self.batch_get_power_state_calls.lock().await.push(cmd);
+        let blocked = self.blocked_power_state_read.lock().await.take();
+        if let Some(blocked) = blocked {
+            blocked.entered.send(()).ok();
+            blocked.resume.await.ok();
+        }
         pop_or_err(&mut self.batch_get_power_state_responses.lock().await)
     }
 

@@ -15,8 +15,9 @@
  * limitations under the License.
  */
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use bmc_mock::mac_address_pool::MacAddressPool;
 use forge_tls::client_config::get_root_ca_path;
@@ -25,11 +26,36 @@ use machine_a_tron::{
     BmcMockRegistry, DeviceHandle, DhcpClient, MachineATron, MachineATronConfig,
     MachineATronContext, UdpDhcpService, api_throttler,
 };
-use rpc::forge_api_client::FailOverOn;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig, RetryConfig};
+use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig, ForgeClientT, RetryConfig};
 use rpc::protos::forge_api_client::ForgeApiClient;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+
+/// Emulate a load balancer while retaining each server's connection.
+#[derive(Debug)]
+struct RoundRobinConnectionProvider {
+    clients: Vec<ForgeApiClient>,
+    next_client: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl tonic_client_wrapper::ConnectionProvider<ForgeClientT> for RoundRobinConnectionProvider {
+    async fn provide_connection(&self) -> Result<ForgeClientT, tonic::Status> {
+        let index = self.next_client.fetch_add(1, Ordering::Relaxed) % self.clients.len();
+        let client = &self.clients[index];
+        tracing::debug!(url = client.url(), "Selecting MAT test API server");
+        client.connection().await
+    }
+
+    async fn connection_is_stale(&self, _last_connected: SystemTime) -> bool {
+        // Select another server for each RPC; its client handles connection reuse and cert renewal.
+        true
+    }
+
+    fn connection_url(&self) -> &str {
+        self.clients[0].url()
+    }
+}
 
 /// Run a machine-a-tron instance with the given config in the background, returning a JoinHandle
 /// that can be waited on.
@@ -60,10 +86,23 @@ pub async fn run_local(
         },
     );
 
-    // We want the API client to constantly switch between API servers if the test has more than one,
-    // to emulate what a load balancer would do.
-    let forge_api_client =
-        ForgeApiClient::new_with_failover_behavior(&api_config, FailOverOn::EveryApiCall);
+    // Switch servers on each RPC without rebuilding their TLS connections.
+    let forge_api_client = if additional_api_urls.is_empty() {
+        ForgeApiClient::new(&api_config)
+    } else {
+        ForgeApiClient::build(RoundRobinConnectionProvider {
+            clients: std::iter::once(&app_config.carbide_api_url)
+                .chain(additional_api_urls.iter())
+                .map(|url| {
+                    ForgeApiClient::new(
+                        &ApiConfig::new(url, &forge_client_config)
+                            .with_retry_config(api_config.retry_config),
+                    )
+                })
+                .collect(),
+            next_client: AtomicUsize::new(0),
+        })
+    };
 
     let api_throttler = api_throttler::run(
         tokio::time::interval(Duration::from_secs(2)),

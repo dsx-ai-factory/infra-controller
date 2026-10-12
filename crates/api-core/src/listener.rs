@@ -100,6 +100,31 @@ fn read_client_ca(tls_config: &ApiTlsConfig) -> Option<Vec<u8>> {
         .ok()
 }
 
+/// Adds every certificate in `pem` to `roots`, or returns `None` if the bundle
+/// has no certificates or any of them is not a valid trust anchor. PEM framing
+/// alone does not prove a certificate is usable DER, and
+/// `add_parsable_certificates` silently drops the ones that are not; accepting a
+/// partial bundle would let a bad rotation replace working trust.
+fn add_ca_bundle(roots: &mut RootCertStore, pem: &[u8], path: &str) -> Option<()> {
+    let certs = rustls_pemfile::certs(&mut std::io::Cursor::new(pem))
+        .collect::<Result<Vec<_>, _>>()
+        .inspect_err(|error| {
+            tracing::error!(path, ?error, "error parsing ca cert file");
+        })
+        .ok()?;
+    let (added, ignored) = roots.add_parsable_certificates(certs);
+    if added == 0 || ignored > 0 {
+        tracing::error!(
+            path,
+            added,
+            ignored,
+            "ca cert file has no valid trust anchors or contains invalid certificates"
+        );
+        return None;
+    }
+    Some(())
+}
+
 /// this function blocks, don't use it in a raw async context
 fn get_tls_acceptor(tls_config: &ApiTlsConfig, client_ca_pem: &[u8]) -> Option<TlsAcceptor> {
     let certs = {
@@ -139,24 +164,24 @@ fn get_tls_acceptor(tls_config: &ApiTlsConfig, client_ca_pem: &[u8]) -> Option<T
 
     let roots = {
         let mut roots = RootCertStore::empty();
-        let mut cert_cursor = std::io::Cursor::new(client_ca_pem);
-        let certs_to_add = rustls_pemfile::certs(&mut cert_cursor)
-            .collect::<Result<Vec<_>, _>>()
-            .inspect_err(|error| {
-                tracing::error!(?error, "error parsing root ca cert file");
-            })
-            .ok()?;
-        let (_added, _ignored) = roots.add_parsable_certificates(certs_to_add);
+        add_ca_bundle(&mut roots, client_ca_pem, &tls_config.root_cafile_path)?;
 
-        if let Ok(pem_file) = std::fs::read(&tls_config.admin_root_cafile_path) {
-            let mut cert_cursor = std::io::Cursor::new(&pem_file[..]);
-            let certs_to_add = rustls_pemfile::certs(&mut cert_cursor)
-                .collect::<Result<Vec<_>, _>>()
-                .inspect_err(|error| {
-                    tracing::error!(?error, "error parsing admin ca cert file");
-                })
-                .ok()?;
-            let (_added, _ignored) = roots.add_parsable_certificates(certs_to_add);
+        // A missing admin CA file means no admin CA is deployed. Any other
+        // outcome must fail the rebuild, or a bad rotation would silently
+        // drop admin trust while the site CA still lets the acceptor build.
+        match std::fs::read(&tls_config.admin_root_cafile_path) {
+            Ok(pem_file) => {
+                add_ca_bundle(&mut roots, &pem_file, &tls_config.admin_root_cafile_path)?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::error!(
+                    path = %tls_config.admin_root_cafile_path,
+                    ?error,
+                    "error reading admin ca cert file"
+                );
+                return None;
+            }
         }
         Arc::new(roots)
     };
@@ -442,7 +467,7 @@ pub(crate) async fn start(
             (node_jwt_validator, true, false) => {
                 eyre::bail!(
                     "the TLS acceptor could not be built from the configured identity \
-                     certificate and key; refusing to start, because the listener would \
+                     certificate and key, or the site or admin client CA bundle; refusing to start, because the listener would \
                      serve plaintext on a TLS-configured port{}",
                     if node_jwt_validator.is_some() {
                         " while accepting node-auth bearer tokens"
@@ -785,8 +810,8 @@ mod tests {
     use tokio_rustls::rustls::ServerConfig;
 
     use super::{
-        ConnectionFailReason, TcpAcceptFailed, TlsAcceptError, TlsCertsRefreshed,
-        accept_tls_connection,
+        ApiTlsConfig, ConnectionFailReason, TcpAcceptFailed, TlsAcceptError, TlsCertsRefreshed,
+        accept_tls_connection, get_tls_acceptor,
     };
 
     const FAILURE_METRIC: &str = "carbide_api_tls_connection_fail_total";
@@ -908,6 +933,111 @@ mod tests {
         .expect("test certificate and key form a valid server identity");
 
         TlsAcceptor::from(Arc::new(config))
+    }
+
+    /// What the admin CA file holds when the acceptor is rebuilt.
+    enum AdminCa {
+        Valid,
+        Missing,
+        Empty,
+        /// Valid PEM framing and base64, but the body is not a DER certificate.
+        InvalidDer,
+        /// A valid certificate followed by one that is not DER.
+        PartiallyInvalid,
+    }
+
+    fn ca_pem() -> String {
+        let params = rcgen::CertificateParams::new(vec![]).expect("params");
+        let key = rcgen::KeyPair::generate().expect("key");
+        params.self_signed(&key).expect("self-signed").pem()
+    }
+
+    fn invalid_der_pem() -> String {
+        "-----BEGIN CERTIFICATE-----\naW52YWxpZA==\n-----END CERTIFICATE-----\n".to_string()
+    }
+
+    /// A rebuild that cannot trust every configured admin CA must fail, so the
+    /// refresh keeps the previous acceptor instead of dropping admin trust.
+    #[test]
+    fn acceptor_rebuild_requires_fully_valid_ca_bundles() {
+        use p256::pkcs8::{DecodePrivateKey, LineEnding};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let identity = generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("test certificate generation succeeds");
+        let sec1_key = p256::SecretKey::from_pkcs8_pem(&identity.signing_key.serialize_pem())
+            .expect("pkcs8 parses")
+            .to_sec1_pem(LineEnding::LF)
+            .expect("sec1 encodes");
+        let write = |name: &str, contents: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, contents).expect("write fixture");
+            path.to_string_lossy().into_owned()
+        };
+        let site_ca = ca_pem();
+        let invalid_site_ca = invalid_der_pem();
+        let config = ApiTlsConfig {
+            identity_pemfile_path: write("identity.pem", &identity.cert.pem()),
+            identity_keyfile_path: write("identity.key", sec1_key.as_str()),
+            root_cafile_path: write("site_ca.pem", &site_ca),
+            admin_root_cafile_path: dir
+                .path()
+                .join("admin_ca.pem")
+                .to_string_lossy()
+                .into_owned(),
+        };
+
+        check_values(
+            [
+                Check {
+                    scenario: "valid admin CA",
+                    input: AdminCa::Valid,
+                    expect: true,
+                },
+                Check {
+                    scenario: "no admin CA deployed",
+                    input: AdminCa::Missing,
+                    expect: true,
+                },
+                Check {
+                    scenario: "empty admin CA file",
+                    input: AdminCa::Empty,
+                    expect: false,
+                },
+                Check {
+                    scenario: "admin CA that is not DER",
+                    input: AdminCa::InvalidDer,
+                    expect: false,
+                },
+                Check {
+                    scenario: "admin CA bundle with one invalid certificate",
+                    input: AdminCa::PartiallyInvalid,
+                    expect: false,
+                },
+            ],
+            |admin_ca| {
+                let _ = std::fs::remove_file(&config.admin_root_cafile_path);
+                let contents = match admin_ca {
+                    AdminCa::Valid => Some(ca_pem()),
+                    AdminCa::Missing => None,
+                    AdminCa::Empty => Some(String::new()),
+                    AdminCa::InvalidDer => Some(invalid_der_pem()),
+                    AdminCa::PartiallyInvalid => Some(ca_pem() + invalid_der_pem().as_str()),
+                };
+                if let Some(contents) = contents {
+                    std::fs::write(&config.admin_root_cafile_path, contents).expect("write admin");
+                }
+                get_tls_acceptor(&config, site_ca.as_bytes()).is_some()
+            },
+        );
+
+        // The site bundle is held to the same standard, and no admin CA can
+        // make up for it.
+        std::fs::write(&config.admin_root_cafile_path, ca_pem()).expect("write admin");
+        assert!(
+            get_tls_acceptor(&config, invalid_site_ca.as_bytes()).is_none(),
+            "site CA that is not DER"
+        );
     }
 
     /// A peer that opens TCP but sends no TLS bytes cannot retain the server

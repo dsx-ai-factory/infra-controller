@@ -9,7 +9,7 @@ use model::machine::PowerState;
 /// `ComponentPowerStateResult` identifies a component and its power observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComponentPowerStateResult {
-    /// Management-controller MAC: BMC for switches, PMC for power shelves.
+    /// Management-controller MAC: BMC for compute trays/switches, PMC for shelves.
     pub mac_address: MacAddress,
     /// `Ok(Some(_))` is an observation, including an explicit `Unknown` state.
     /// `Ok(None)` means the backend supplied no state; `Err` describes a failed

@@ -89,8 +89,8 @@ async fn test_ssh_console() -> eyre::Result<()> {
     env.start_console_output();
 
     // Run new ssh-console
-    // Keep the complete continuous-output interval so lifecycle markers and all three transport
-    // streams can be checked together. Log rotation has a dedicated integration test below.
+    // Capture lifecycle markers and continuous output from all transport streams together.
+    // Log rotation has a dedicated integration test below.
     let handle = ssh_console_test_helper::spawn(
         env.mock_api_server.addr.port(),
         Some(ssh_console_test_helper::ConfigOverrides {
@@ -459,7 +459,7 @@ async fn test_ssh_console_reconnect() -> eyre::Result<()> {
     let Some(env) = run_baseline_test_environment(vec![MockBmcType::Ssh]).await? else {
         return Ok(());
     };
-    let reconnect_interval_max = Duration::from_secs(5);
+    let reconnect_interval_max = Duration::from_millis(200);
 
     // Run new ssh-console
     let handle = ssh_console_test_helper::spawn(
@@ -467,7 +467,7 @@ async fn test_ssh_console_reconnect() -> eyre::Result<()> {
         // Exercise reconnect backoff without letting randomized exponential delays exceed the
         // prompt wait below.
         Some(ssh_console_test_helper::ConfigOverrides {
-            reconnect_interval_base: Some(Duration::from_secs(3)),
+            reconnect_interval_base: Some(Duration::from_millis(100)),
             reconnect_interval_max: Some(reconnect_interval_max),
             successful_connection_minimum_duration: Some(Duration::from_secs(60)),
             ..Default::default()
@@ -559,7 +559,7 @@ async fn test_ssh_console_reconnect() -> eyre::Result<()> {
     for _ in 0..5 {
         while prompt_seen_rx.try_recv().is_ok() {}
 
-        let mut newline_interval = tokio::time::interval(Duration::from_secs(1));
+        let mut newline_interval = tokio::time::interval(Duration::from_millis(100));
         let wait_for_prompt_timeout =
             Instant::now() + reconnect_interval_max + Duration::from_secs(5);
         // Send newlines to wait for prompt to appear
@@ -596,6 +596,7 @@ async fn test_ssh_console_reconnect() -> eyre::Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_ssh_console_log_rotation() -> eyre::Result<()> {
+    const MAX_LOG_SIZE: u64 = 2 * 1024;
     if std::env::var("REPO_ROOT").is_err() {
         tracing::info!("Skipping running ssh-console integration tests, as REPO_ROOT is not set");
         return Ok(());
@@ -607,14 +608,23 @@ async fn test_ssh_console_log_rotation() -> eyre::Result<()> {
     };
 
     // Run new ssh-console
-    let handle = ssh_console_test_helper::spawn(env.mock_api_server.addr.port(), None).await?;
+    let handle = ssh_console_test_helper::spawn(
+        env.mock_api_server.addr.port(),
+        Some(ssh_console_test_helper::ConfigOverrides {
+            log_rotate_max_size: Some(size::Size::from_bytes(MAX_LOG_SIZE)),
+            ..Default::default()
+        }),
+    )
+    .await?;
 
     // Run the same assertions we do with legacy ssh-console
     env.run_baseline_assertions(
         handle.addr,
         "new-ssh-console",
-        // 50 kilobytes should be enough to show log rotation behavior
-        &[BaselineTestAssertion::FillLogsAsMachineId(50 * 1024)],
+        // Five files' worth of output exercises rotation beyond the three retained archives.
+        &[BaselineTestAssertion::FillLogsAsMachineId(
+            5 * MAX_LOG_SIZE as usize,
+        )],
         || None,
         false,
     )
@@ -654,8 +664,8 @@ async fn test_ssh_console_log_rotation() -> eyre::Result<()> {
             assert!(path.exists(), "did not see any logs at {}", path.display());
             let size = path.metadata()?.len();
             assert!(
-                size <= 1024 * 10,
-                "logs at {} exceeded configured size: {} > 10 KiB",
+                size <= MAX_LOG_SIZE,
+                "logs at {} exceeded configured size: {} > {MAX_LOG_SIZE} bytes",
                 path.display(),
                 size
             );
@@ -670,8 +680,8 @@ async fn test_ssh_console_log_rotation() -> eyre::Result<()> {
         for path in &[&log_path_0, &log_path_1, &log_path_2] {
             let size = path.metadata()?.len();
             assert!(
-                size > 1024 * 10 - 100,
-                "rotated log at {} was rotated while too-small, {} < (10KiB - 100 bytes)",
+                size > MAX_LOG_SIZE - 100,
+                "rotated log at {} was rotated while too-small, {} < ({MAX_LOG_SIZE} - 100 bytes)",
                 path.display(),
                 size
             );

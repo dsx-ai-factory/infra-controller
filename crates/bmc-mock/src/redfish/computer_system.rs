@@ -31,10 +31,7 @@ use serde_json::json;
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch, json_patch};
 use crate::redfish::Builder;
-use crate::{
-    ActionError, BootOptionKind, Callbacks, MachineRouterOptions, MockPowerState,
-    POWER_CYCLE_DELAY, http, redfish,
-};
+use crate::{ActionError, BootOptionKind, Callbacks, MachineRouterOptions, http, redfish};
 
 pub(super) fn collection() -> redfish::Collection<'static> {
     redfish::Collection {
@@ -279,7 +276,8 @@ pub(crate) enum Oem {
 }
 
 impl<C: Callbacks> SystemState<C> {
-    /// Publishes power for the controlled system, taking precedence over its callback.
+    /// Updates the power observation exposed for the controlled system.
+    /// `PowerState` is omitted from Redfish responses until an observation is published.
     /// Returns false when this BMC has no controlled system.
     pub fn set_power_state(&self, power_state: PowerState) -> bool {
         let Some(system) = self.controlled_system() else {
@@ -680,14 +678,12 @@ async fn get_system<C: Callbacks>(
 
     let config = &system_state.config;
 
-    let published_power_state = *system_state
+    let power_state = *system_state
         .power_state
         .lock()
         .expect("power state lock poisoned");
-    if let Some(power_state) = published_power_state {
-        b = b.apply_patch(json!({"PowerState": power_state}));
-    } else if let Some(callbacks) = &config.callbacks {
-        b = b.power_state(callbacks.get_power_state());
+    if let Some(power_state) = power_state {
+        b = b.power_state(power_state);
     }
     if config.callbacks.is_some() {
         b = b.reset_action(&system_id);
@@ -1461,22 +1457,8 @@ impl SystemBuilder {
         self.apply_patch(resource.nav_property("Bios"))
     }
 
-    fn power_state(self, state: MockPowerState) -> Self {
-        let power_state = match state {
-            MockPowerState::Unknown => return self.apply_patch(json!({"PowerState": null})),
-            MockPowerState::On => "On",
-            MockPowerState::Off => "Off",
-            MockPowerState::PoweringOn => "PoweringOn",
-            MockPowerState::PoweringOff => "PoweringOff",
-            MockPowerState::PowerCycling { since } => {
-                if since.elapsed() < POWER_CYCLE_DELAY {
-                    "Off"
-                } else {
-                    "On"
-                }
-            }
-        };
-        self.add_str_field("PowerState", power_state)
+    fn power_state(self, state: PowerState) -> Self {
+        self.apply_patch(json!({"PowerState": state}))
     }
 
     fn log_services(self, log_services: &redfish::Collection<'_>) -> Self {

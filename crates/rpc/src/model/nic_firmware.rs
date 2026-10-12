@@ -17,8 +17,9 @@
 
 use model::ConfigValidationError;
 use model::nic_firmware::{
-    NicFirmwareApproach, NicFirmwareArtifact, NicFirmwareProfile, NicFirmwareProfileConfig,
-    NicFirmwareProfileEntry,
+    NicFirmwareApproach, NicFirmwareArtifact, NicFirmwareHardware, NicFirmwareProfile,
+    NicFirmwareProfileConfig, NicFirmwareProfileEntry, NicFirmwareResolution,
+    NicFirmwareSelectionSource, NicFirmwareSiteDefault,
 };
 
 use crate::forge as rpc;
@@ -91,18 +92,76 @@ impl From<NicFirmwareArtifact> for rpc::NicFirmwareArtifact {
 impl From<NicFirmwareProfileConfig> for rpc::NicFirmwareProfileConfig {
     fn from(config: NicFirmwareProfileConfig) -> Self {
         Self {
-            entries: config
-                .entries
-                .into_iter()
-                .map(|entry| rpc::NicFirmwareProfileEntry {
-                    firmware: Some(entry.firmware.into()),
-                    image: Some(entry.image.into()),
-                    device_config: entry.device_config.map(Into::into),
-                    approach: match entry.approach {
-                        NicFirmwareApproach::Scout => rpc::NicFirmwareApproach::Scout.into(),
-                    },
-                })
-                .collect(),
+            entries: config.entries.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<NicFirmwareProfileEntry> for rpc::NicFirmwareProfileEntry {
+    fn from(entry: NicFirmwareProfileEntry) -> Self {
+        Self {
+            firmware: Some(entry.firmware.into()),
+            image: Some(entry.image.into()),
+            device_config: entry.device_config.map(Into::into),
+            approach: match entry.approach {
+                NicFirmwareApproach::Scout => rpc::NicFirmwareApproach::Scout.into(),
+            },
+        }
+    }
+}
+
+impl TryFrom<rpc::NicFirmwareHardware> for NicFirmwareHardware {
+    type Error = ConfigValidationError;
+
+    fn try_from(hardware: rpc::NicFirmwareHardware) -> Result<Self, Self::Error> {
+        Self {
+            part_number: hardware.part_number,
+            psid: hardware.psid,
+        }
+        .validate()
+    }
+}
+
+impl From<NicFirmwareHardware> for rpc::NicFirmwareHardware {
+    fn from(hardware: NicFirmwareHardware) -> Self {
+        Self {
+            part_number: hardware.part_number,
+            psid: hardware.psid,
+        }
+    }
+}
+
+impl From<NicFirmwareSiteDefault> for rpc::NicFirmwareSiteDefault {
+    fn from(binding: NicFirmwareSiteDefault) -> Self {
+        Self {
+            hardware: Some(binding.hardware.into()),
+            profile_id: binding.profile_id.to_string(),
+            version: binding.version.to_string(),
+        }
+    }
+}
+
+impl From<NicFirmwareResolution> for rpc::NicFirmwareResolution {
+    fn from(resolution: NicFirmwareResolution) -> Self {
+        Self {
+            source: match resolution.source {
+                NicFirmwareSelectionSource::SiteDefault => {
+                    rpc::NicFirmwareSelectionSource::SiteDefault
+                }
+                NicFirmwareSelectionSource::Allocation => {
+                    rpc::NicFirmwareSelectionSource::Allocation
+                }
+                NicFirmwareSelectionSource::MachineOverride => {
+                    rpc::NicFirmwareSelectionSource::MachineOverride
+                }
+                NicFirmwareSelectionSource::CardOverride => {
+                    rpc::NicFirmwareSelectionSource::CardOverride
+                }
+            }
+            .into(),
+            profile_id: resolution.profile_id.to_string(),
+            profile_version: resolution.profile_version.to_string(),
+            entry: Some(resolution.entry.into()),
         }
     }
 }
@@ -152,6 +211,48 @@ mod tests {
         input.entries[0].image.as_mut().unwrap().sha256 = "ab".repeat(32);
         input.entries[0].device_config.as_mut().unwrap().sha256 = "cd".repeat(32);
         assert_eq!(rpc::NicFirmwareProfileConfig::from(model), input);
+    }
+
+    #[test]
+    fn resolution_preserves_operator_override_sources() {
+        let mut expected_entry = config().entries.remove(0);
+        expected_entry.image.as_mut().unwrap().sha256 = "ab".repeat(32);
+        expected_entry.device_config.as_mut().unwrap().sha256 = "cd".repeat(32);
+        let entry = NicFirmwareProfileConfig::try_from(config())
+            .unwrap()
+            .entries
+            .remove(0);
+
+        check_values(
+            [
+                Check {
+                    scenario: "machine override",
+                    input: NicFirmwareSelectionSource::MachineOverride,
+                    expect: rpc::NicFirmwareSelectionSource::MachineOverride as i32,
+                },
+                Check {
+                    scenario: "card override",
+                    input: NicFirmwareSelectionSource::CardOverride,
+                    expect: rpc::NicFirmwareSelectionSource::CardOverride as i32,
+                },
+            ],
+            |source| {
+                let resolution = rpc::NicFirmwareResolution::from(NicFirmwareResolution {
+                    source,
+                    profile_id: "operator-override".parse().unwrap(),
+                    profile_version: "V7-T123456".parse().unwrap(),
+                    entry: entry.clone(),
+                });
+                assert_eq!(resolution.profile_id, "operator-override", "{source:?}");
+                assert_eq!(resolution.profile_version, "V7-T123456", "{source:?}");
+                assert_eq!(
+                    resolution.entry.as_ref(),
+                    Some(&expected_entry),
+                    "{source:?}"
+                );
+                resolution.source
+            },
+        );
     }
 
     #[test]

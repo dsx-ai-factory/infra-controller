@@ -360,6 +360,23 @@ in the pull request.
 - Keep pull requests focused on a single change.
 - Be responsive to feedback and code review comments.
 - Ensure all CI checks pass before requesting review.
+- The pull request description is what ends-up in the final immutable git
+  message, it needs to be as concise as possible.
+- Do not put test results or irrelevant details into the pull request
+  description, add them as comments if you really feel the need to explain how
+  it was tested.
+
+### AI Submitted Pull requests
+
+The AI agent must use the .github/PULL_REQUEST_TEMPLATE.md file and adhere to
+the structure.
+
+The human submitter must proofread the pull request text before submitting, the
+human is accountable for the pull-request description, comments, and code
+that's being assisted with AI.
+
+Do not submit AI slop in pull requests or in comments.  A human is reviewing
+your submission, treat their time with respect.
 
 ### Pull request review
 

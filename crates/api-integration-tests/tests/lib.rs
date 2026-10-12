@@ -156,6 +156,12 @@ async fn test_integration() -> eyre::Result<()> {
     )
     .await?;
 
+    // Observable MQTT instruments export their initial zeros without a broker
+    // connection. Register them on the server's meter for the catalogue scrape.
+    let mqtt_client =
+        mqttea::MqtteaClient::new("localhost", 1883, "test-metric-catalogue", None).await?;
+    mqtt_client.register_metrics(&server_handle_2.ready.meter, "test_catalogue");
+
     assert_ne!(test_env.carbide_api_addrs[0], test_env.carbide_api_addrs[1]);
     assert_ne!(
         test_env.carbide_metrics_addrs[0],
@@ -374,6 +380,7 @@ async fn test_integration() -> eyre::Result<()> {
         "the MaT scout path must exercise PCI comparison observability",
     );
     generate_core_metric_docs(&test_env.carbide_metrics_addrs);
+    drop(mqtt_client);
 
     cancel_token.cancel();
     server_handle_1.wait().await?;
@@ -1439,6 +1446,7 @@ where
                 host_reboot_delay: 1,
                 timing_overrides: Some(LifecycleTimingOverrides {
                     host: PartialLifecycleTimings {
+                        power_off_force: Some(Duration::from_millis(100)),
                         reboot: Some(Duration::from_secs(1)),
                         // ZERO disables the BMC self-reset offline window entirely,
                         // keeping ingestion at its pre-feature pace
@@ -1446,6 +1454,7 @@ where
                         ..Default::default()
                     },
                     dpu: PartialLifecycleTimings {
+                        power_off_force: Some(Duration::from_millis(100)),
                         reboot: Some(Duration::from_secs(1)),
                         // ZERO disables the BMC self-reset offline window entirely,
                         // keeping ingestion at its pre-feature pace

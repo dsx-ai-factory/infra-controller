@@ -184,10 +184,7 @@ impl LiveStateCallbacks {
     }
 
     pub(crate) fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
-        crate::power_state::validate_reset_type(
-            self.state.read().unwrap().power_state,
-            reset_type,
-        )?;
+        bmc_mock::validate_power_reset(self.state.read().unwrap().power_state, reset_type)?;
         self.command_channel
             .send(BmcCommand::SetSystemPower {
                 request: reset_type,
@@ -198,10 +195,6 @@ impl LiveStateCallbacks {
 }
 
 impl Callbacks for LiveStateCallbacks {
-    fn get_power_state(&self) -> bmc_mock::MockPowerState {
-        unreachable!("machine-a-tron publishes power state to the Redfish model")
-    }
-
     async fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,
@@ -304,6 +297,7 @@ impl LiveState {
             MachineInfo::Dpu(_) => HashMap::new(),
         };
         Self {
+            is_up: matches!(power_state, PowerState::On),
             power_state,
             tpm_ek_certificate,
             infiniband_port_states,

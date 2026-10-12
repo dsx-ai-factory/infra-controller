@@ -322,7 +322,7 @@ The embedded IMDS identity handler (`GET .../latest/meta-data/identity` and comp
 | `sign-proxy-url` | When set, the agent issues **`GET {url}/latest/meta-data/identity`** with the same query string as the workload request (e.g. repeated `aud=`). Scheme must be `http` or `https`. Trailing slashes on the base URL are normalized. |
 | `sign-proxy-tls-root-ca` | Optional path to a PEM file (one or more certs) added as trusted roots for **`https`** sign-proxy URLs (e.g. private CA). Ignored for `http:`. Requires `sign-proxy-url`. |
 
-When `sign-proxy-url` is **omitted**, the agent uses **NICo `SignMachineIdentity`** over mTLS by default. When it is **set**, the identity path uses **only** the HTTP forward for that request; the upstream response (status, `Content-Type`, body) is returned to the workload.
+When `sign-proxy-url` is **omitted**, the agent uses **NICo `SignMachineIdentity`** over mTLS by default. When it is **set**, the identity path uses **only** the HTTP forward for that request; the upstream response (status, `Content-Type`, all `Cache-Control` fields, body) is returned to the workload.
 
 **Standalone FMDS:** `nico-dpu-agent` pushes `FmdsConfigUpdate.machine_identity` to the FMDS service as **`FmdsMachineIdentityConfig`** (`crates/rpc/proto/fmds.proto`), mirroring the same numeric fields and optional `sign_proxy_url` / `sign_proxy_tls_root_ca`. If a later `UpdateConfig` **omits** `machine_identity`, FMDS **retains** the previously applied settings.
 
@@ -1119,7 +1119,7 @@ Use standard gRPC `Status` codes, aligned with REST:
 2. NICo REST is served over HTTPS and supports SSO integration
 3. The IMDS service is exposed over link-local and is exposed only to the node instance. Short-lived tokens (configurable TTL) limit the replay window. Adding Metadata: true HTTP header to the requests to limit SSRF attacks. In order to ensure that requests are directly intended for IMDS and prevent unintended or unwanted redirection of requests, requests:  
    * Must contain the header `Metadata: true`
-   * Must not contain an `X-Forwarded-For` header
+   * Must not contain `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, or `X-Forwarded-Proto` headers, including empty values
 
    Any request that doesn't meet both of these requirements is rejected by the service.
 

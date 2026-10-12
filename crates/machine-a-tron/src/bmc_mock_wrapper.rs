@@ -256,7 +256,7 @@ mod persistence_tests {
 
     use super::*;
 
-    fn state() -> BmcState<bmc_mock::simulated::SimulatedCallbacks> {
+    fn state() -> BmcState<bmc_mock::test_support::TestCallbacks> {
         let base = MacAddress::new([2, 0, 0, 0, 0, 1]);
         let range = PoolConfig::new(base, 24).unwrap();
         let mut pool = MacAddressPool::new(Config {
@@ -271,7 +271,7 @@ mod persistence_tests {
         ));
         bmc_mock::machine_router(
             &info,
-            Arc::new(bmc_mock::simulated::SimulatedCallbacks::new()),
+            Arc::new(bmc_mock::test_support::TestCallbacks::default()),
             "test".into(),
             false,
             Default::default(),
