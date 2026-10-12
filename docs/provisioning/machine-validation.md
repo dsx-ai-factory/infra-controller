@@ -271,7 +271,7 @@ Plugins run unprivileged by default. A privileged plugin requires
 `--privileged` and `allow_privileged_plugins = true` in the site policy.
 A plugin that also needs a writable host-root mount requires
 `--host-access-full`, `allow_full_host_plugins = true`, and the approval in the
-next step.
+next step. The full-host profile also shares the host PID namespace.
 
 ### 4. Qualify, verify, approve, and enable
 
