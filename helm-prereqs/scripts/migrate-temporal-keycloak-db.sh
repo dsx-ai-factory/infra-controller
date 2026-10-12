@@ -226,16 +226,30 @@ fi
 # ---------------------------------------------------------------------------
 DB_RECORD_CONFIGMAP="nico-workload-databases"
 
+# Sets _RECEIPT_CONFIGMAP to the ConfigMap's name, or to empty when it doesn't
+# exist, and exits on any other read failure. Treating a failed read as absent
+# would skip clearing a receipt that a failed copy then leaves looking valid.
+_read_receipt_configmap() {
+    if ! _RECEIPT_CONFIGMAP="$(kubectl get configmap "${DB_RECORD_CONFIGMAP}" -n postgres \
+        --ignore-not-found -o name)"; then
+        echo "ERROR: could not read the ${DB_RECORD_CONFIGMAP} ConfigMap in postgres." >&2
+        exit 1
+    fi
+}
+
 _clear_receipt() {
-    if kubectl get configmap "${DB_RECORD_CONFIGMAP}" -n postgres >/dev/null 2>&1; then
+    _read_receipt_configmap
+    if [[ -n "${_RECEIPT_CONFIGMAP}" ]]; then
         _run kubectl patch configmap "${DB_RECORD_CONFIGMAP}" -n postgres --type merge \
             -p "{\"data\":{\"$1-migrated\":null}}"
     fi
 }
 
 _write_receipt() {
-    kubectl get configmap "${DB_RECORD_CONFIGMAP}" -n postgres >/dev/null 2>&1 \
-        || _run kubectl create configmap "${DB_RECORD_CONFIGMAP}" -n postgres
+    _read_receipt_configmap
+    if [[ -z "${_RECEIPT_CONFIGMAP}" ]]; then
+        _run kubectl create configmap "${DB_RECORD_CONFIGMAP}" -n postgres
+    fi
     _run kubectl patch configmap "${DB_RECORD_CONFIGMAP}" -n postgres --type merge \
         -p "{\"data\":{\"$1-migrated\":\"$2\"}}"
 }

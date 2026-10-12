@@ -157,36 +157,36 @@ for row in "${resolver_cases[@]}"; do
     IFS='|' read -r name component value temporal_host keycloak_url standalone record \
         reads_fail expected expected_error <<< "${row}"
     write_values "${component}" "${value}"
-    ERRORS=()
+    BLOCKING_ERRORS=()
     FAKE_TEMPORAL_HOST="${temporal_host}" FAKE_KEYCLOAK_URL="${keycloak_url}" \
         FAKE_STANDALONE="${standalone}" FAKE_RECORD="${record}" FAKE_DEPLOYMENT_STATE="" \
         FAKE_READS_FAIL="${reads_fail}" PATH="${TEST_TMP_DIR}/bin:${PATH}" \
         _resolve_use_ha_postgres "${component}"
     if [[ "${_USE_HA_POSTGRES}" != "${expected}" ]]; then
-        echo "FAIL ${name}: resolved '${_USE_HA_POSTGRES}', want '${expected}' (errors: ${ERRORS[*]:-none})" >&2
+        echo "FAIL ${name}: resolved '${_USE_HA_POSTGRES}', want '${expected}' (errors: ${BLOCKING_ERRORS[*]:-none})" >&2
         failures=$((failures + 1))
         continue
     fi
-    check_errors "${name}" "${ERRORS[*]:-}" "${expected_error}"
+    # Phase 7 can't run without a resolved value, so -y must not continue.
+    check_errors "${name}" "${BLOCKING_ERRORS[*]:-}" "${expected_error}"
 done
 
 # On external Postgres the chart creates no nico-pg-cluster, so a new Site's
 # auto can't pick it.
 write_values temporal auto false
-ERRORS=()
+BLOCKING_ERRORS=()
 FAKE_TEMPORAL_HOST="" FAKE_KEYCLOAK_URL="" FAKE_STANDALONE="" FAKE_RECORD="" \
     FAKE_DEPLOYMENT_STATE="" FAKE_READS_FAIL=false PATH="${TEST_TMP_DIR}/bin:${PATH}" \
     _resolve_use_ha_postgres temporal
 if [[ "${_USE_HA_POSTGRES}" != "false" ]]; then
-    echo "FAIL external Postgres: resolved '${_USE_HA_POSTGRES}', want 'false' (errors: ${ERRORS[*]:-none})" >&2
+    echo "FAIL external Postgres: resolved '${_USE_HA_POSTGRES}', want 'false' (errors: ${BLOCKING_ERRORS[*]:-none})" >&2
     failures=$((failures + 1))
 fi
-check_errors "external Postgres" "${ERRORS[*]:-}" ""
+check_errors "external Postgres" "${BLOCKING_ERRORS[*]:-}" ""
 
 # Without nico-pg-cluster an explicit true can't be honored, so preflight
 # stops before setup changes anything.
 write_values temporal true false
-ERRORS=()
 BLOCKING_ERRORS=()
 FAKE_TEMPORAL_HOST="" FAKE_KEYCLOAK_URL="" FAKE_STANDALONE="" FAKE_RECORD="" \
     FAKE_DEPLOYMENT_STATE="" FAKE_READS_FAIL=false PATH="${TEST_TMP_DIR}/bin:${PATH}" \

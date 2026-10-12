@@ -2850,7 +2850,7 @@ fi
 if [[ -n "${_STANDALONE_PG_WORKLOADS:-}" ]]; then
     echo ""
     echo "  WARNING: the standalone postgres.postgres StatefulSet still serves ${_STANDALONE_PG_WORKLOADS}."
-    echo "  It is deprecated and support for it will be removed in a future release."
+    echo "  It is deprecated and support for it will be removed in 2.5."
     echo "  Migrate to nico-pg-cluster with the guide in helm-prereqs/README.md,"
     echo "  \"Consolidating Temporal/Keycloak onto nico-pg-cluster\"."
 fi

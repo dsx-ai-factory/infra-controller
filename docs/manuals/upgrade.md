@@ -28,7 +28,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 ### What is preserved across upgrades
 
 - **Vault cluster**: init state, unseal keys, PKI chain, AppRole credentials, all secrets. Vault is never re-initialized on an upgrade run.
-- **PostgreSQL data**: all NICo Core and NICo REST database state, including host records, machine state, and site config in `nico-pg-cluster`. Keycloak realm data and Temporal workflow history are preserved too. They stay on `nico-pg-cluster`, or on the deprecated standalone `postgres` StatefulSet in the same namespace for a Site that still uses it. An upgrade never moves them from one to the other. Refer to [Standalone Temporal/Keycloak PostgreSQL deprecated](#23--24-standalone-temporalkeycloak-postgresql-deprecated).
+- **PostgreSQL data**: all NICo Core and NICo REST database state, including host records, machine state, and site config in `nico-pg-cluster`. Keycloak realm data and Temporal workflow history are preserved too. They stay on `nico-pg-cluster`, or on the deprecated standalone `postgres` StatefulSet in the same namespace for a Site that still uses it. Upgrading with `auto` never moves a deployed database from one to the other. Refer to [Standalone Temporal/Keycloak PostgreSQL deprecated](#23--24-standalone-temporalkeycloak-postgresql-deprecated).
 - **MetalLB site config**: `IPAddressPool`, `BGPPeer`, `BGPAdvertisement`, and `L2Advertisement` instances. These are re-applied on every run so any manual changes outside `setup.sh` are reconciled back to the values in `values/metallb-config.yaml`.
 - **SSH host key**: the cluster SSH identity is preserved so BMC consoles do not require known-host updates.
 - **Site UUID**: the REST site identity and site-agent registration are preserved — as long as `NICO_SITE_UUID` is unset or identical to the initial install; a different value deletes and re-creates the `site-registration` Secret.
@@ -262,7 +262,7 @@ credential rotation is tracked by
 [Credential Sources](../configuration/credential-sources.md#site-wide-bmc-root-version-0-ownership-policy).
 
 <Warning>
-`setup.sh -y` does **not** stop on preflight errors. With `-y` set, hard errors are printed and the run continues ("Things may fail"). The preflight gate is only enforced interactively, so genuinely resolve every error here rather than relying on the script to stop you. The one exception is the database checks for Temporal and Keycloak. When a value would repoint either one away from its data, or can't be honored, setup stops even with `-y`. That covers a move off the standalone `postgres` StatefulSet without a valid migration receipt, and `false` on a database already on `nico-pg-cluster`. It also covers a database host `setup.sh` doesn't manage, `true` with `postgresql.enabled: false`, a `KEYCLOAK_NS` that differs from `keycloak.namespace`, and cluster state preflight can't read.
+`setup.sh -y` does **not** stop on preflight errors. With `-y` set, hard errors are printed and the run continues ("Things may fail"). The preflight gate is only enforced interactively, so genuinely resolve every error here rather than relying on the script to stop you. The one exception is the database checks for Temporal and Keycloak. When a value would repoint either one away from its data, or can't be honored, setup stops even with `-y`. That covers a move off the standalone `postgres` StatefulSet without a valid migration receipt, and `false` on a database already on `nico-pg-cluster`. It also covers an invalid value, a database host `setup.sh` doesn't manage, `true` with `postgresql.enabled: false`, a `KEYCLOAK_NS` that differs from `keycloak.namespace`, and cluster state preflight can't read.
 </Warning>
 
 </Steps>
@@ -419,7 +419,7 @@ changes. For the network-version and migration details, refer to the
 ### 2.3 → 2.4: Standalone Temporal/Keycloak PostgreSQL deprecated
 
 <Warning>
-The standalone `postgres` StatefulSet for the Temporal and Keycloak databases is deprecated. Support for it will be removed in a future release. Sites still on it are highly encouraged to migrate to `nico-pg-cluster`, which already holds the NICo Core and REST databases. Follow the [migration guide](../../helm-prereqs/README.md#migrating-an-existing-sites-data) to move them.
+The standalone `postgres` StatefulSet for the Temporal and Keycloak databases is deprecated. Support for it will be removed in `2.5`. Sites still on it are highly encouraged to migrate to `nico-pg-cluster`, which already holds the NICo Core and REST databases. Follow the [migration guide](../../helm-prereqs/README.md#migrating-an-existing-sites-data) to move them.
 </Warning>
 
 Before 2.4, `temporal.useHaPostgres` and `keycloak.useHaPostgres` in `helm-prereqs/values.yaml` defaulted to `false`, so every new Site got the StatefulSet. They now default to `auto`. With `auto`, both databases are created in `nico-pg-cluster`, but their location is left unchanged for an existing Site. So an existing Site needs no changes for the upgrade, and a new Site only gets the StatefulSet when a value is set to `false`. With `postgresql.enabled: false`, `auto` means `false` too. While either database stays on the StatefulSet, preflight warns that it's deprecated, and `setup.sh` repeats the warning at the end of the run.

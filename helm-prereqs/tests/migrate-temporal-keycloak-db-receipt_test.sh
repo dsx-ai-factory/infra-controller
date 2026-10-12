@@ -33,8 +33,11 @@ case "${args}" in
     'exec -n postgres nico-pg-cluster-0 -- psql -U postgres -tAc SELECT 1 FROM pg_database WHERE datname='*)
         echo 1
         ;;
-    'get configmap nico-workload-databases -n postgres')
-        [[ -f "${S}/configmap.json" ]]
+    'get configmap nico-workload-databases -n postgres --ignore-not-found -o name')
+        [[ "${FAKE_CONFIGMAP_READ_FAILS:-false}" != "true" ]]
+        if [[ -f "${S}/configmap.json" ]]; then
+            echo configmap/nico-workload-databases
+        fi
         ;;
     'create configmap nico-workload-databases -n postgres')
         echo '{"data":{}}' > "${S}/configmap.json"
@@ -177,6 +180,19 @@ if [[ "$(jq -r '.data.temporal' "${STATE}/configmap.json")" != "standalone" ]]; 
 fi
 if [[ "$(head -1 "${STATE}/log")" != 'patch {"data":{"temporal-migrated":null}}' ]]; then
     fail "retry did not clear the receipt before its first restore: $(tr '\n' ';' < "${STATE}/log")"
+fi
+
+# A retry whose Deployments are already at zero keeps their generations, so the
+# old receipt would still match. A failed ConfigMap read must stop the retry
+# before it restores anything, or a failed copy would hide behind that receipt.
+reset_state 0 4
+jq -n --arg r "$(receipt_for_generation 4)" '{data: {temporal: "standalone", "temporal-migrated": $r}}' \
+    > "${STATE}/configmap.json"
+if FAKE_CONFIGMAP_READ_FAILS=true FAKE_RESTORE_FAILS=temporal_visibility run_migration; then
+    fail "retry with a failing ConfigMap read exited zero"
+fi
+if [[ -s "${STATE}/log" ]]; then
+    fail "retry with a failing ConfigMap read changed the cluster: $(tr '\n' ';' < "${STATE}/log")"
 fi
 
 # A failed receipt write brings Temporal back up on postgres.postgres, since
