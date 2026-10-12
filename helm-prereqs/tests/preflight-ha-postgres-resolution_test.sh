@@ -10,7 +10,7 @@ TEST_TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TEST_TMP_DIR}"' EXIT
 
 for fn in _yaml_toplevel_value _keycloak_ns _deployed_db_host _db_location \
-    _resolve_use_ha_postgres _check_db_cutover; do
+    _resolve_use_ha_postgres _check_db_cutover _can_move_db _check_keycloak_ns; do
     definition="$(sed -n "/^${fn}()/,/^}/p" "${PREFLIGHT_SH}")"
     if [[ -z "${definition}" ]]; then
         echo "could not extract ${fn} from preflight.sh" >&2
@@ -183,31 +183,77 @@ if [[ "${_USE_HA_POSTGRES}" != "false" ]]; then
 fi
 check_errors "external Postgres" "${ERRORS[*]:-}" ""
 
-# The cutover check runs for an explicit true only. Same columns as above
-# without value and expected, plus the current uid/generation every Deployment
-# of the workload reports.
+# Without nico-pg-cluster an explicit true can't be honored, so preflight
+# stops before setup changes anything.
+write_values temporal true false
+ERRORS=()
+BLOCKING_ERRORS=()
+FAKE_TEMPORAL_HOST="" FAKE_KEYCLOAK_URL="" FAKE_STANDALONE="" FAKE_RECORD="" \
+    FAKE_DEPLOYMENT_STATE="" FAKE_READS_FAIL=false PATH="${TEST_TMP_DIR}/bin:${PATH}" \
+    _resolve_use_ha_postgres temporal
+if [[ -n "${_USE_HA_POSTGRES}" ]]; then
+    echo "FAIL explicit true on external Postgres: resolved '${_USE_HA_POSTGRES}', want ''" >&2
+    failures=$((failures + 1))
+fi
+check_errors "explicit true on external Postgres" "${BLOCKING_ERRORS[*]:-}" \
+    "temporal.useHaPostgres: true needs postgresql.enabled: true"
+
+# The move check runs for an explicit value, or auto forced to false. Same
+# columns as above without expected, plus the current uid/generation every
+# Deployment of the workload reports.
 temporal_receipt="temporal-migrated=temporal-frontend=uid-t/4 temporal-history=uid-t/4 temporal-matching=uid-t/4 temporal-worker=uid-t/4"
 cutover_cases=(
-    "migrated Site already on nico-pg-cluster|temporal|nico-pg-cluster.postgres.svc.cluster.local||statefulset||uid-t/9|false|"
-    "Temporal cutover after a migration, Deployments unchanged|temporal|postgres.postgres.svc.cluster.local.||statefulset|${temporal_receipt}|uid-t/4|false|"
-    "Keycloak cutover after a migration, Deployment unchanged|keycloak||jdbc:postgresql://postgres.postgres:5432/keycloak?sslmode=disable|statefulset|keycloak-migrated=keycloak=uid-k/2|uid-k/2|false|"
-    "explicit true for a Keycloak never deployed while the StatefulSet serves Temporal|keycloak|||statefulset|||false|"
-    "Temporal on the StatefulSet without a migration|temporal|postgres.postgres.svc.cluster.local.||statefulset||uid-t/4|false|true moves temporal off the standalone postgres.postgres StatefulSet, but its data hasn't been migrated"
-    "Temporal restarted and stopped again after its migration|temporal|postgres.postgres.svc.cluster.local.||statefulset|${temporal_receipt}|uid-t/6|false|temporal/temporal-frontend changed after the migration"
-    "unreadable cluster state|temporal||||||true|so it can't rule out moving temporal off the standalone postgres.postgres StatefulSet"
+    "migrated Site already on nico-pg-cluster|temporal|true|nico-pg-cluster.postgres.svc.cluster.local||statefulset||uid-t/9|false|"
+    "Temporal cutover after a migration, Deployments unchanged|temporal|true|postgres.postgres.svc.cluster.local.||statefulset|${temporal_receipt}|uid-t/4|false|"
+    "Keycloak cutover after a migration, Deployment unchanged|keycloak|true||jdbc:postgresql://postgres.postgres:5432/keycloak?sslmode=disable|statefulset|keycloak-migrated=keycloak=uid-k/2|uid-k/2|false|"
+    "explicit true for a Keycloak never deployed while the StatefulSet serves Temporal|keycloak|true|||statefulset|||false|"
+    "Temporal on the StatefulSet without a migration|temporal|true|postgres.postgres.svc.cluster.local.||statefulset||uid-t/4|false|true moves temporal off the standalone postgres.postgres StatefulSet, but its data hasn't been migrated"
+    "Temporal restarted and stopped again after its migration|temporal|true|postgres.postgres.svc.cluster.local.||statefulset|${temporal_receipt}|uid-t/6|false|temporal/temporal-frontend changed after the migration"
+    "explicit false keeps an existing Site on the StatefulSet|temporal|false|postgres.postgres.svc.cluster.local.||statefulset||uid-t/4|false|"
+    "explicit false on a Site already on nico-pg-cluster|temporal|false|nico-pg-cluster.postgres.svc.cluster.local||statefulset||uid-t/9|false|false would move temporal off nico-pg-cluster onto the standalone postgres.postgres StatefulSet"
+    "explicit true on an unrecognized host|temporal|true|pg.example.com||||uid-t/4|false|setup.sh only runs temporal on nico-pg-cluster or the standalone postgres.postgres StatefulSet"
+    "unreadable cluster state|temporal|true||||||true|so it can't rule out moving temporal between the standalone postgres.postgres StatefulSet and nico-pg-cluster"
 )
 
 for row in "${cutover_cases[@]}"; do
-    IFS='|' read -r name component temporal_host keycloak_url standalone record deployment_state \
+    IFS='|' read -r name component value temporal_host keycloak_url standalone record deployment_state \
         reads_fail expected_error <<< "${row}"
-    write_values "${component}" true
+    write_values "${component}" "${value}"
     BLOCKING_ERRORS=()
     FAKE_TEMPORAL_HOST="${temporal_host}" FAKE_KEYCLOAK_URL="${keycloak_url}" \
         FAKE_STANDALONE="${standalone}" FAKE_RECORD="${record}" \
         FAKE_DEPLOYMENT_STATE="${deployment_state}" FAKE_READS_FAIL="${reads_fail}" \
-        PATH="${TEST_TMP_DIR}/bin:${PATH}" _check_db_cutover "${component}"
+        PATH="${TEST_TMP_DIR}/bin:${PATH}" _check_db_cutover "${component}" "${value}"
     check_errors "cutover: ${name}" "${BLOCKING_ERRORS[*]:-}" "${expected_error}"
 done
+
+# Preflight runs the move check above for every value that can move a
+# database. Columns: value|postgresql.enabled|whether the check runs.
+can_move_cases=(
+    "false|true|yes"
+    "auto|true|no"
+    "auto|false|yes"
+)
+for row in "${can_move_cases[@]}"; do
+    IFS='|' read -r value postgresql_enabled expected <<< "${row}"
+    write_values temporal "${value}" "${postgresql_enabled}"
+    actual=no
+    if _can_move_db temporal; then
+        actual=yes
+    fi
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "FAIL move check for ${value} with postgresql.enabled ${postgresql_enabled}: runs ${actual}, want ${expected}" >&2
+        failures=$((failures + 1))
+    fi
+done
+
+# ESO syncs Keycloak's credentials only into keycloak.namespace (kc-ns here),
+# so a different KEYCLOAK_NS would wait for them in the wrong namespace.
+write_values keycloak true
+BLOCKING_ERRORS=()
+KEYCLOAK_NS=other-ns _check_keycloak_ns
+check_errors "KEYCLOAK_NS mismatch" "${BLOCKING_ERRORS[*]:-}" \
+    "KEYCLOAK_NS is other-ns, but keycloak.namespace is kc-ns"
 
 # -y continues past ordinary preflight errors but never past a blocking one.
 sed -n '/^# Output and prompts/,$p' "${PREFLIGHT_SH}" > "${TEST_TMP_DIR}/output.sh"

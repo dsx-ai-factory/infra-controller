@@ -1177,8 +1177,8 @@ override:
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `envConfig.DB_ADDR` | `postgres.postgres.svc.cluster.local` | Postgres host (the REST-side cluster, separate from NICo Core's). |
-| `envConfig.DB_DATABASE` | `elektratest` | Database name. |
+| `envConfig.DB_ADDR` | `nico-pg-cluster.postgres.svc.cluster.local` | Postgres host (`nico-pg-cluster`, shared with NICo REST and NICo Core). |
+| `envConfig.DB_DATABASE` | `nico_rest` | Database name. |
 | `envConfig.DEV_MODE` | `"true"` | **Production must set to `"false"`.** |
 | `envConfig.NICO_SEC_OPT` | `"2"` | Security mode: `0` insecure, `1` TLS, `2` mTLS. Production requires `2`. |
 | `CLUSTER_ID` | — (set by `setup.sh`) | Site UUID (`NICO_SITE_UUID`). |
@@ -1195,10 +1195,13 @@ for the value table and an override example.
 
 ### REST-side PostgreSQL
 
-NICo REST runs its own simple StatefulSet Postgres in the `nico-rest`
-namespace (not the HA Patroni cluster used by NICo Core). It hosts the
-Temporal, Keycloak (when enabled), and site-manager databases. The
-StatefulSet is templated by `setup.sh` and configurable via `nico-rest.yaml`.
+The NICo REST database, `nico_rest`, lives on `nico-pg-cluster` in the
+`postgres` namespace, next to the NICo Core databases. The Temporal and
+Keycloak databases live there too, unless `temporal.useHaPostgres` or
+`keycloak.useHaPostgres` in `helm-prereqs/values.yaml` keeps a Site on the
+deprecated standalone `postgres` StatefulSet. Refer to
+[Consolidating Temporal/Keycloak onto nico-pg-cluster](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#consolidating-temporalkeycloak-onto-nico-pg-cluster)
+for these values and the migration guide.
 
 ### Temporal
 

@@ -812,8 +812,16 @@ _resolve_use_ha_postgres() {
     _USE_HA_POSTGRES=""
     _value="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" "${_component}" useHaPostgres)"
     case "${_value}" in
-        true|false)
-            _USE_HA_POSTGRES="${_value}"
+        true)
+            if [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" postgresql enabled)" == "false" ]]; then
+                BLOCKING_ERRORS+=("${_component}.useHaPostgres: true needs postgresql.enabled: true, because the chart only creates nico-pg-cluster and its credentials then")
+                return 0
+            fi
+            _USE_HA_POSTGRES=true
+            return 0
+            ;;
+        false)
+            _USE_HA_POSTGRES=false
             return 0
             ;;
         auto) ;;
@@ -835,28 +843,48 @@ _resolve_use_ha_postgres() {
         standalone)
             _USE_HA_POSTGRES=false
             ;;
+        other)
+            ERRORS+=("${_component}.useHaPostgres: auto ${_DB_LOCATION_ERROR}. setup.sh only runs ${_component} on nico-pg-cluster or the standalone postgres.postgres StatefulSet")
+            ;;
         *)
-            ERRORS+=("${_component}.useHaPostgres: auto ${_DB_LOCATION_ERROR}. Set it to true or false")
+            ERRORS+=("${_component}.useHaPostgres: auto ${_DB_LOCATION_ERROR}. Check cluster access and re-run")
             ;;
     esac
     return 0
 }
 
-# Records a blocking error unless an explicit true can safely move the
-# component's database onto nico-pg-cluster. Moving it off the standalone
-# StatefulSet needs the receipt migrate-temporal-keycloak-db.sh leaves after a
-# complete copy. Every Deployment it stopped also has to keep the uid and
-# generation the receipt lists. A restart, scale, or recreate changes them,
-# and may have let the standalone database take writes the copy doesn't have.
+# Records a blocking error unless the resolved value (true or false) can
+# safely keep or move the component's database. Moving it off the standalone
+# StatefulSet onto nico-pg-cluster needs the receipt
+# migrate-temporal-keycloak-db.sh leaves after a complete copy. Every Deployment
+# it stopped also has to keep the uid and generation the receipt lists. A
+# restart, scale, or recreate changes them, and may have let the standalone
+# database take writes the copy doesn't have. A move back off nico-pg-cluster
+# has no supported reverse migration, and a workload on any other host would be
+# repointed without its data, so both stop setup too.
 _check_db_cutover() {
-    local _component="$1" _ns _receipt _state _recorded _entry _dep _hint
+    local _component="$1" _target="$2" _ns _receipt _state _recorded _entry _dep _hint
     local -a _deployments _entries
     _hint="helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db ${_component}"
     _db_location "${_component}"
     case "${_DB_LOCATION}" in
-        standalone) ;;
+        standalone)
+            if [[ "${_target}" != "true" ]]; then
+                return 0
+            fi
+            ;;
+        nico-pg-cluster)
+            if [[ "${_target}" == "false" ]]; then
+                BLOCKING_ERRORS+=("${_component}.useHaPostgres: false would move ${_component} off nico-pg-cluster onto the standalone postgres.postgres StatefulSet, which has no supported reverse migration. Set it to auto or true")
+            fi
+            return 0
+            ;;
+        other)
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: preflight ${_DB_LOCATION_ERROR}. setup.sh only runs ${_component} on nico-pg-cluster or the standalone postgres.postgres StatefulSet, so either value would repoint it without its data")
+            return 0
+            ;;
         "")
-            BLOCKING_ERRORS+=("${_component}.useHaPostgres: preflight ${_DB_LOCATION_ERROR}, so it can't rule out moving ${_component} off the standalone postgres.postgres StatefulSet. Check cluster access and re-run")
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: preflight ${_DB_LOCATION_ERROR}, so it can't rule out moving ${_component} between the standalone postgres.postgres StatefulSet and nico-pg-cluster. Check cluster access and re-run")
             return 0
             ;;
         *) return 0 ;;
@@ -899,6 +927,27 @@ _check_db_cutover() {
             return 0
         fi
     done
+    return 0
+}
+
+# Succeeds when the resolved value can move the component's database: an
+# explicit true or false, or auto forced to false by postgresql.enabled false.
+# Otherwise auto follows wherever the database already is.
+_can_move_db() {
+    [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" "$1" useHaPostgres)" != "auto" \
+        || "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" postgresql enabled)" == "false" ]]
+}
+
+# Records a blocking error when KEYCLOAK_NS differs from keycloak.namespace.
+# ESO syncs Keycloak's nico-pg-cluster credentials only into keycloak.namespace,
+# so phase 7d would wait for them in the wrong namespace until it times out.
+_check_keycloak_ns() {
+    local _values_ns
+    _values_ns="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" keycloak namespace)"
+    _values_ns="${_values_ns:-nico-rest}"
+    if [[ -n "${KEYCLOAK_NS:-}" && "${KEYCLOAK_NS}" != "${_values_ns}" ]]; then
+        BLOCKING_ERRORS+=("KEYCLOAK_NS is ${KEYCLOAK_NS}, but keycloak.namespace is ${_values_ns}. ESO only syncs Keycloak's database credentials into keycloak.namespace, so set keycloak.namespace instead, or unset KEYCLOAK_NS")
+    fi
     return 0
 }
 
@@ -1277,16 +1326,22 @@ EOF
         WARNINGS+=("Deprecated: the standalone postgres.postgres StatefulSet still serves ${_STANDALONE_PG_WORKLOADS}. Support for it will be removed in a future release. Migrate to nico-pg-cluster with the guide in helm-prereqs/README.md, \"Consolidating Temporal/Keycloak onto nico-pg-cluster\"")
     fi
 
-    # auto never moves a deployed database, so only an explicit true can. These
-    # errors stop setup even under -y. Nothing moves when phase 7 is skipped,
-    # and phase 7d doesn't deploy a Keycloak that nico-rest.yaml disables.
+    # auto never moves a deployed database, so only an explicit value can, or
+    # auto forced to false because postgresql.enabled is false. These errors
+    # stop setup even under -y. Nothing moves when phase 7 is skipped, and
+    # phase 7d doesn't deploy a Keycloak that nico-rest.yaml disables.
     if [[ "${SKIP_REST:-false}" != "true" ]]; then
-        if [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" temporal useHaPostgres)" == "true" ]]; then
-            _check_db_cutover temporal
+        if [[ -n "${_TEMPORAL_USE_HA_POSTGRES}" ]] && _can_move_db temporal; then
+            _check_db_cutover temporal "${_TEMPORAL_USE_HA_POSTGRES}"
         fi
-        if [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" keycloak useHaPostgres)" == "true" \
-            && "$(_yaml_toplevel_value "${SCRIPT_DIR}/values/nico-rest.yaml" keycloak enabled)" == "true" ]]; then
-            _check_db_cutover keycloak
+        if [[ -n "${_KEYCLOAK_USE_HA_POSTGRES}" ]] \
+            && [[ "$(_yaml_toplevel_value "${SCRIPT_DIR}/values/nico-rest.yaml" keycloak enabled)" == "true" ]]; then
+            if _can_move_db keycloak; then
+                _check_db_cutover keycloak "${_KEYCLOAK_USE_HA_POSTGRES}"
+            fi
+            if [[ "${_KEYCLOAK_USE_HA_POSTGRES}" == "true" ]]; then
+                _check_keycloak_ns
+            fi
         fi
     fi
 

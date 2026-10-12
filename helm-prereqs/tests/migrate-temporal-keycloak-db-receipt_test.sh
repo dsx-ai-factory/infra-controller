@@ -39,7 +39,13 @@ case "${args}" in
     'create configmap nico-workload-databases -n postgres')
         echo '{"data":{}}' > "${S}/configmap.json"
         ;;
+    'get deployment keycloak -n '*' -o jsonpath='*KC_DB_URL*)
+        echo "${FAKE_KEYCLOAK_URL:-jdbc:postgresql://postgres.postgres:5432/keycloak?sslmode=disable}"
+        ;;
     'patch configmap nico-workload-databases -n postgres --type merge -p '*)
+        if [[ "${FAKE_RECEIPT_WRITE_FAILS:-false}" == "true" && "${!#}" == *'-migrated":"'* ]]; then
+            exit 1
+        fi
         jq --argjson p "${!#}" \
             '.data = (((.data // {}) + $p.data) | with_entries(select(.value != null)))' \
             "${S}/configmap.json" > "${S}/configmap.tmp"
@@ -78,6 +84,23 @@ esac
 FAKE_KUBECTL
 chmod +x "${TEST_TMP_DIR}/bin/kubectl"
 
+# Without a host override the temporal release falls back to the chart's
+# postgres.postgres default, like a Site still on the StatefulSet.
+cat > "${TEST_TMP_DIR}/bin/helm" <<'FAKE_HELM'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" != 'get values temporal -n temporal -o json' ]]; then
+    echo "unexpected: helm $*" >&2
+    exit 2
+fi
+if [[ -n "${FAKE_TEMPORAL_HOST:-}" ]]; then
+    jq -n --arg h "${FAKE_TEMPORAL_HOST}" '{server: {config: {persistence: {default: {sql: {host: $h}}}}}}'
+else
+    echo '{}'
+fi
+FAKE_HELM
+chmod +x "${TEST_TMP_DIR}/bin/helm"
+
 DEPLOYMENTS=(temporal-frontend temporal-history temporal-matching temporal-worker)
 failures=0
 
@@ -102,8 +125,15 @@ receipt_for_generation() {
 }
 
 run_migration() {
-    PATH="${TEST_TMP_DIR}/bin:${PATH}" bash "${MIGRATE_SH}" --db temporal \
+    PATH="${TEST_TMP_DIR}/bin:${PATH}" bash "${MIGRATE_SH}" --db "${1:-temporal}" \
         > "${STATE}/output" 2>&1
+}
+
+replicas() {
+    local dep
+    for dep in "${DEPLOYMENTS[@]}"; do
+        cat "${STATE}/replicas-${dep}"
+    done | sort -u | tr '\n' ' '
 }
 
 receipt() {
@@ -148,6 +178,37 @@ fi
 if [[ "$(head -1 "${STATE}/log")" != 'patch {"data":{"temporal-migrated":null}}' ]]; then
     fail "retry did not clear the receipt before its first restore: $(tr '\n' ';' < "${STATE}/log")"
 fi
+
+# A failed receipt write brings Temporal back up on postgres.postgres, since
+# preflight would never let setup.sh move it without that receipt.
+reset_state 1 3
+if FAKE_RECEIPT_WRITE_FAILS=true run_migration; then
+    fail "migration with a failing receipt write exited zero"
+fi
+if [[ "$(replicas)" != "1 " ]]; then
+    fail "migration with a failing receipt write left replicas at '$(replicas)', want '1 '"
+fi
+
+# The script refuses a workload that already moved, before stopping or
+# copying anything. Columns: name|--db|Temporal host|Keycloak KC_DB_URL|output.
+refusal_cases=(
+    "repeat run after the Temporal cutover|temporal|nico-pg-cluster.postgres.svc.cluster.local||ERROR: temporal already uses nico-pg-cluster"
+    "--db both with only Keycloak moved|both||jdbc:postgresql://nico-pg-cluster.postgres.svc.cluster.local:5432/keycloak?sslmode=require|ERROR: keycloak already uses nico-pg-cluster"
+    "Temporal on an unrecognized host|temporal|pg.example.com||ERROR: temporal uses pg.example.com, not postgres.postgres"
+)
+for row in "${refusal_cases[@]}"; do
+    IFS='|' read -r name db temporal_host keycloak_url expected_output <<< "${row}"
+    reset_state 1 3
+    if FAKE_TEMPORAL_HOST="${temporal_host}" FAKE_KEYCLOAK_URL="${keycloak_url}" run_migration "${db}"; then
+        fail "${name}: exited zero"
+    fi
+    if ! grep -qF -- "${expected_output}" "${STATE}/output"; then
+        fail "${name}: output does not contain '${expected_output}': $(tail -3 "${STATE}/output")"
+    fi
+    if [[ -s "${STATE}/log" || "$(replicas)" != "1 " ]]; then
+        fail "${name}: changed the cluster before refusing: $(tr '\n' ';' < "${STATE}/log") replicas $(replicas)"
+    fi
+done
 
 if (( failures > 0 )); then
     exit 1

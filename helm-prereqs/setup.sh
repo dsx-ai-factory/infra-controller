@@ -2120,7 +2120,7 @@ if [[ "${_KC_ENABLED}" == "true" ]]; then
     # agrees with it. An operator-supplied KEYCLOAK_NS env var still wins, same
     # as every other script in this feature (keycloak/setup.sh, clean.sh,
     # migrate-temporal-keycloak-db.sh) — don't clobber it with the values.yaml
-    # default.
+    # default. On nico-pg-cluster, preflight requires the two to match.
     if [[ -z "${KEYCLOAK_NS:-}" ]]; then
         export KEYCLOAK_NS="$(_yaml_toplevel_value "${SCRIPT_DIR}/values.yaml" keycloak namespace)"
         export KEYCLOAK_NS="${KEYCLOAK_NS:-nico-rest}"

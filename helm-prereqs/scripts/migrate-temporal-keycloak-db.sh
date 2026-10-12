@@ -159,6 +159,63 @@ if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
     _require_target_db "keycloak"
 fi
 
+# values.yaml::keycloak.namespace is the canonical source (matches what
+# setup.sh and the ESO ClusterExternalSecret target); KEYCLOAK_NS lets an
+# operator override it explicitly, same as keycloak/setup.sh honors.
+_KEYCLOAK_NS="${KEYCLOAK_NS:-$(_yaml_toplevel_value "${PREREQS_DIR}/values.yaml" keycloak namespace)}"
+_KEYCLOAK_NS="${_KEYCLOAK_NS:-nico-rest}"
+
+# ---------------------------------------------------------------------------
+# Preflight: every selected workload still uses postgres.postgres. auto
+# provisions both targets, so without this a second run, or --db both on a
+# partly migrated Site, would overwrite live nico-pg-cluster data with the old
+# standalone copy. Keep the host handling in sync with _deployed_db_host and
+# _db_location in preflight.sh.
+# ---------------------------------------------------------------------------
+_require_standalone_source() {
+    local _component="$1" _host _values
+    case "${_component}" in
+        temporal)
+            if ! _values="$(helm get values temporal -n temporal -o json 2>/dev/null)"; then
+                echo "ERROR: could not read the temporal Helm release, so this can't tell which PostgreSQL Temporal uses." >&2
+                exit 1
+            fi
+            _host="$(jq -r '.server.config.persistence.default.sql.host // "postgres.postgres"' <<< "${_values}")"
+            ;;
+        keycloak)
+            if ! _host="$(kubectl get deployment keycloak -n "${_KEYCLOAK_NS}" \
+                -o jsonpath='{.spec.template.spec.containers[?(@.name=="keycloak")].env[?(@.name=="KC_DB_URL")].value}' 2>/dev/null)"; then
+                echo "ERROR: could not read ${_KEYCLOAK_NS}/keycloak, so this can't tell which PostgreSQL Keycloak uses." >&2
+                exit 1
+            fi
+            _host="${_host#jdbc:postgresql://}"
+            _host="${_host%%[:/]*}"
+            ;;
+    esac
+    case "${_host}" in
+        postgres.postgres | postgres.postgres.svc \
+            | postgres.postgres.svc.cluster.local | postgres.postgres.svc.cluster.local.)
+            ;;
+        nico-pg-cluster.postgres | nico-pg-cluster.postgres.svc \
+            | nico-pg-cluster.postgres.svc.cluster.local | nico-pg-cluster.postgres.svc.cluster.local.)
+            echo "ERROR: ${_component} already uses nico-pg-cluster. Migrating it again would overwrite its live data with the old standalone copy." >&2
+            echo "  Run the script only for workloads still on postgres.postgres, with --db temporal or --db keycloak." >&2
+            exit 1
+            ;;
+        *)
+            echo "ERROR: ${_component} uses ${_host:-an unknown host}, not postgres.postgres, so this script can't migrate it." >&2
+            exit 1
+            ;;
+    esac
+}
+
+if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
+    _require_standalone_source temporal
+fi
+if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
+    _require_standalone_source keycloak
+fi
+
 # ---------------------------------------------------------------------------
 # Migration receipt: what preflight requires before setup.sh moves a workload
 # onto nico-pg-cluster. It lists each stopped Deployment's uid/generation, which
@@ -333,33 +390,28 @@ if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
 fi
 
 if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
-    # values.yaml::keycloak.namespace is the canonical source (matches what
-    # setup.sh and the ESO ClusterExternalSecret target); KEYCLOAK_NS lets an
-    # operator override it explicitly, same as keycloak/setup.sh honors.
-    _KEYCLOAK_NS="${KEYCLOAK_NS:-$(_yaml_toplevel_value "${PREREQS_DIR}/values.yaml" keycloak namespace)}"
-    _KEYCLOAK_NS="${_KEYCLOAK_NS:-nico-rest}"
     _scale_down "${_KEYCLOAK_NS}" keycloak
     _KEYCLOAK_RECEIPT="$(_deployment_states "${_KEYCLOAK_NS}" keycloak)"
     _dump_restore_db "keycloak" "keycloak.nico"
 fi
 
-# Disarm only once every requested migration above has succeeded (set -e
-# means we never reach here if any of them failed) — with --db both, a
-# Keycloak failure after Temporal's dump/restore must still leave Temporal
-# tracked by the EXIT trap, or it would be stuck at zero replicas with no
-# setup.sh run to bring it back (Temporal itself was never cut over).
-if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
-    _disarm_group temporal
-fi
-if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
-    _disarm_group "${_KEYCLOAK_NS}"
-fi
-
+# Disarm only once every requested migration above has succeeded and every
+# receipt is written (set -e means we never reach the disarm otherwise). With
+# --db both, a Keycloak failure after Temporal's dump/restore must still leave
+# Temporal tracked by the EXIT trap, or it would be stuck at zero replicas with
+# no setup.sh run to bring it back. A failed receipt write likewise brings the
+# workloads back up on postgres.postgres instead of leaving them stopped.
 if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
     _write_receipt temporal "${_TEMPORAL_RECEIPT}"
 fi
 if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
     _write_receipt keycloak "${_KEYCLOAK_RECEIPT}"
+fi
+if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
+    _disarm_group temporal
+fi
+if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
+    _disarm_group "${_KEYCLOAK_NS}"
 fi
 
 echo ""
@@ -376,4 +428,4 @@ if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
 fi
 echo "  - Re-run setup.sh so phases 7d/7f point Temporal/Keycloak at nico-pg-cluster and scale workloads back up"
 echo "  - Don't scale the workloads up before that. Preflight would treat this copy as stale and ask for a new migration"
-echo "  - Once verified, the legacy temporal/temporal_visibility/keycloak databases on postgres.postgres can be dropped"
+echo "  - Once both run on nico-pg-cluster, follow 'Removing the standalone StatefulSet' in ${PREREQS_DIR}/README.md"
