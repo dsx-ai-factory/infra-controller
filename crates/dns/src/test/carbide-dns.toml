@@ -16,8 +16,9 @@
 #
 # Example configuration for carbide-dns (TOML).
 #
-# Every setting is shown commented out with its built-in default; uncomment a
-# line to override that default. Key names must match the fields on `Config` in
+# Settings are commented out with their built-in defaults, except for the
+# optional OTLP endpoint example. Uncomment a line to configure it.
+# Key names must match the fields on `Config` in
 # src/config.rs; an unrecognized key is silently ignored.
 
 # Address (host:port) the DNS server listens on for UDP and TCP.
@@ -35,10 +36,11 @@
 # Path to the client private key presented to nico-api for mTLS.
 # client_key_path = "/var/run/secrets/spiffe.io/tls.key"
 
-# OTLP gRPC endpoint that traces are exported to.
+# OTLP gRPC endpoint that traces are exported to. Unset by default, which
+# disables trace export. The following address is an example, not a default.
 # otlp_endpoint = "http://opentelemetry-collector.otel.svc.cluster.local:4317"
 
-# How long to cache NXDomain and Refused responses, in seconds.
+# Maximum lifetime for non-transient negative answers, in seconds.
 # negative_cache_ttl_secs = 120
 
 # How long to cache ServFail responses (transient nico-api failures), in
@@ -46,13 +48,12 @@
 # clamped to [1, 300]. Default: 5.
 # negative_cache_servfail_ttl_secs = 5
 
-# Maximum number of entries the negative cache may hold. Once reached, new
-# negative responses are not cached, bounding memory under a flood of distinct
-# non-existent names.
+# Maximum number of entries the negative cache may hold. At capacity, inserting
+# a new key evicts the least-recently-used entry. Zero selects a capacity of one.
 # negative_cache_entries_max_count = 50000
 
 # Maximum time to wait for a single upstream lookup_record call before giving up
-# and returning ServFail, in seconds. Default: 3.
+# and returning ServFail, in seconds. Default: 5.
 # upstream_lookup_timeout_secs = 5
 
 # Address (host:port) the Prometheus metrics server listens on.

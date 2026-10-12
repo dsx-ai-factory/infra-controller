@@ -209,7 +209,7 @@ The pod:
 ### NICo DNS
 
 **Role**  
-`nico-dns` is the **authoritative DNS service** for NICo‑managed hosts and internal services. It answers queries for the internal zones and forwards anything else to a recursive resolver such as the Unbound deployment.
+`nico-dns` is the **authoritative DNS service** for NICo-managed machine and instance records. It reads record data from `nico-api` and does not recurse or forward external names. Configure a recursive resolver, such as Unbound, to forward NICo-managed zones to this service and to resolve other names separately. Refer to [DNS](../docs/configuration/dns.md) for supported records and response behavior.
 
 **What it deploys**
 
@@ -225,9 +225,9 @@ Path: `deploy/nico-base/dns/`
 
 **External inputs you must provide**
 
-- ConfigMap `<NICO_DNS_CONFIGMAP>` with at least:
+- ConfigMap `<NICO_DNS_CONFIGMAP>` with:
   - `NICO_API` – URL for the nico‑api gRPC endpoint (e.g. `https://nico-api.<NICO_NAMESPACE>.svc.cluster.local:1079`).
-  - Any additional DNS or zone settings your environment requires.
+- <Note> To configure domains and network-segment subdomains, use `nico-api`; the DNS StatefulSet reads only `NICO_API` from this ConfigMap.</Note>
 - A cert‑manager `ClusterIssuer` for `nico-dns-certificate`.
 
 **Quick start**
@@ -431,7 +431,7 @@ Key settings live in `config-files/config.toml` (nico‑api URL, SPIFFE cert pat
 ### NICo Unbound Base
 
 **Role**  
-`nico-unbound` provides a **recursive DNS resolver** for NICo deployments. Authoritative services (like `nico-dns`) can forward unknown lookups here, and the included exporter publishes Prometheus metrics for Unbound.
+`nico-unbound` provides a **recursive DNS resolver** for NICo deployments. The authoritative `nico-dns` service does not forward unknown lookups here. The included exporter publishes Prometheus metrics for Unbound.
 
 **What it deploys**
 
