@@ -100,6 +100,7 @@ impl From<&Method> for MethodLabel {
 enum AuthorizationLayer {
     PrincipalAllowList,
     RequestAcl,
+    RequestPath,
 }
 
 /// The one metric the Events below record.
@@ -114,6 +115,42 @@ pub(crate) struct BmcProxyAuthorizationDenied {
     authorization_layer: AuthorizationLayer,
     #[label(name = "method")]
     method_label: MethodLabel,
+}
+
+/// An ambiguous or structurally unsafe path rejected before ACL evaluation.
+/// Paths are log context; the counter uses only bounded layer and method labels.
+#[derive(Event)]
+#[event(
+    event_name = "bmc_proxy_request_path_rejected",
+    metric_family = BmcProxyAuthorizationDenied,
+    log = info,
+    message = "Request refused: the path cannot be safely authorized"
+)]
+pub(crate) struct RequestPathRejected {
+    #[label]
+    authorization_layer: AuthorizationLayer,
+    #[label]
+    method_label: MethodLabel,
+    #[context]
+    path: String,
+    #[context]
+    reason: &'static str,
+    #[context]
+    method: String,
+}
+
+impl RequestPathRejected {
+    /// Creates a path rejection event with bounded method and layer labels.
+    /// The original method, path, and rejection reason are retained as log context.
+    pub(crate) fn new(method: &Method, path: String, reason: &'static str) -> Self {
+        Self {
+            authorization_layer: AuthorizationLayer::RequestPath,
+            method_label: method.into(),
+            path,
+            reason,
+            method: method.as_str().to_string(),
+        }
+    }
 }
 
 /// The request reached the per-principal ACL, but no configured rule allowed

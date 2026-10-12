@@ -108,9 +108,13 @@ impl AclEntry {
         }
     }
 
-    /// Returns whether this ACL entry's pattern matches `method` and `path`.
+    /// Allow rules must spell each percent escape explicitly, ignoring hex
+    /// case. Deny wildcards remain broad so escapes cannot evade those denials.
     fn matches(&self, method: &http::Method, path: &str) -> bool {
-        self.pattern.matches(method, path)
+        match self.action {
+            AclAction::Allow => self.pattern.matches_literal_escapes(method, path),
+            AclAction::Deny => self.pattern.matches(method, path),
+        }
     }
 }
 
@@ -124,8 +128,10 @@ impl FromStr for AclEntry {
             (true, input.trim())
         };
 
+        let pattern: RequestPattern = s.parse()?;
+        pattern.validate_percent_escapes()?;
         Ok(Self {
-            pattern: s.parse()?,
+            pattern,
             action: allowed.into(),
         })
     }
@@ -209,6 +215,15 @@ mod tests {
                 ),
             }
 
+            "literal percent escapes" {
+                "GET /redfish/v1/Registries/%23*" => Yields(
+                    "GET /redfish/v1/Registries/%23*".to_string()
+                ),
+                "GET /redfish/v1/Oem/%aBResource" => Yields(
+                    "GET /redfish/v1/Oem/%ABResource".to_string()
+                ),
+            }
+
             "canonical spacing" {
                 "!/redfish/v1/**" => Yields("! /redfish/v1/**".to_string()),
                 "!GET,PUT,POST /redfish/v1/**" => Yields(
@@ -236,6 +251,10 @@ mod tests {
                 "GET /foo/ba r*" => Fails,
                 "GET /foo/*ba r" => Fails,
                 "GET /foo#fragment" => Fails,
+                "GET /foo/%2" => Fails,
+                "GET /foo/%GG" => Fails,
+                "GET /foo/%+1" => Fails,
+                "GET /foo/%2*" => Fails,
             }
         );
     }
@@ -430,6 +449,93 @@ mod tests {
                 } => false,
             }
 
+            "allow entries require literal percent escapes" {
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/**",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => false,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => false,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/%23*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => true,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/%23*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23Smart%20StorageMessages",
+                } => false,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/**/%23SmartStorageMessages",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => true,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/**/SmartStorageMessages",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/%23Registries/SmartStorageMessages",
+                } => false,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/%4A*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%4aResource",
+                } => true,
+            }
+
+            "hex case normalization preserves other literal distinctions" {
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/%4aResource",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%4AResource",
+                } => true,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/%4AResource",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%4aresource",
+                } => false,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/J*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%4aResource",
+                } => false,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/%4A*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/JResource",
+                } => false,
+            }
+
+            "suffix wildcard literals must name every escape" {
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Oem/*%3aThing",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Oem/Vendor%3AThing",
+                } => true,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Oem/*%3aThing",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Oem/Vendor%20Name%3aThing",
+                } => false,
+            }
+
+            "deny entries remain broad for percent escapes" {
+                EntryMatchInput {
+                    entry: "!GET /redfish/v1/**",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => true,
+                EntryMatchInput {
+                    entry: "!GET /redfish/v1/Registries/*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => true,
+            }
+
             "verbless entries" {
                 EntryMatchInput {
                     entry: "/redfish/v1/**",
@@ -511,6 +617,35 @@ mod tests {
                     method: http::Method::GET,
                     path: "/redfish/v1/Systems/System1",
                 } => true,
+            }
+        );
+    }
+
+    #[test]
+    fn acl_config_requires_an_explicit_allow_for_percent_escapes() {
+        let acls = parse_acl_config(
+            r#"
+        [acls]
+        explicit_after_broad_allow = ["/**", "GET /redfish/v1/Registries/%23*"]
+        broad_deny_first = ["!GET /redfish/v1/**", "GET /redfish/v1/Registries/%23*"]
+        explicit_allow_first = ["GET /redfish/v1/Registries/%23*", "!GET /redfish/v1/**"]
+        escaped_deny_first = ["!GET /redfish/v1/Registries/%4aResource", "GET /redfish/v1/Registries/%4A*"]
+        "#,
+        );
+
+        value_scenarios!(
+            run = |(principal, path)| acls.allows(principal, &http::Method::GET, path);
+            "a broad allow is skipped but a later literal allow matches" {
+                ("explicit_after_broad_allow", "/redfish/v1/Registries/%23SmartStorageMessages") => true,
+            }
+            "a broad denial still wins" {
+                ("broad_deny_first", "/redfish/v1/Registries/%23SmartStorageMessages") => false,
+            }
+            "a literal allow can precede a broad denial" {
+                ("explicit_allow_first", "/redfish/v1/Registries/%23SmartStorageMessages") => true,
+            }
+            "changing hex case cannot bypass an explicit denial" {
+                ("escaped_deny_first", "/redfish/v1/Registries/%4AResource") => false,
             }
         );
     }
