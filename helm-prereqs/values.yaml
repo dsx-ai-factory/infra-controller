@@ -238,7 +238,7 @@ flow:
 ##   true   The database lives in nico-pg-cluster.
 ##   false  The database lives on the standalone postgres.postgres
 ##          StatefulSet. It's deprecated, and support for it will be removed
-##          in a future release.
+##          in 2.5.
 ##
 ## Sites still on the StatefulSet are highly encouraged to migrate. Refer to
 ## "Consolidating Temporal/Keycloak onto nico-pg-cluster" in README.md.

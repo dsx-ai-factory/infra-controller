@@ -805,8 +805,8 @@ _db_location() {
 # _USE_HA_POSTGRES as true or false. `auto` keeps the database where
 # _db_location finds it, so it never moves an existing database, and a new Site
 # gets nico-pg-cluster. With postgresql.enabled false, the chart creates no
-# nico-pg-cluster, so `auto` means false. Records an error and leaves
-# _USE_HA_POSTGRES empty when it can't decide.
+# nico-pg-cluster, so `auto` means false. Records a blocking error and leaves
+# _USE_HA_POSTGRES empty when it can't decide, since phase 7 can't run then.
 _resolve_use_ha_postgres() {
     local _component="$1" _value
     _USE_HA_POSTGRES=""
@@ -826,7 +826,7 @@ _resolve_use_ha_postgres() {
             ;;
         auto) ;;
         *)
-            ERRORS+=("values.yaml: ${_component}.useHaPostgres must be true, false, or auto (got '${_value}')")
+            BLOCKING_ERRORS+=("values.yaml: ${_component}.useHaPostgres must be true, false, or auto (got '${_value}')")
             return 0
             ;;
     esac
@@ -844,10 +844,10 @@ _resolve_use_ha_postgres() {
             _USE_HA_POSTGRES=false
             ;;
         other)
-            ERRORS+=("${_component}.useHaPostgres: auto ${_DB_LOCATION_ERROR}. setup.sh only runs ${_component} on nico-pg-cluster or the standalone postgres.postgres StatefulSet")
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: auto ${_DB_LOCATION_ERROR}. setup.sh only runs ${_component} on nico-pg-cluster or the standalone postgres.postgres StatefulSet")
             ;;
         *)
-            ERRORS+=("${_component}.useHaPostgres: auto ${_DB_LOCATION_ERROR}. Check cluster access and re-run")
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: auto ${_DB_LOCATION_ERROR}. Check cluster access and re-run")
             ;;
     esac
     return 0
@@ -1310,27 +1310,28 @@ EOF
     # either stays on the deprecated standalone postgres.postgres StatefulSet.
     # Stops setup before it moves a database off the StatefulSet without a
     # complete migration. See "Consolidating Temporal/Keycloak onto
-    # nico-pg-cluster" in README.md.
+    # nico-pg-cluster" in README.md. Only phase 7 uses these databases, so a
+    # --skip-rest run skips the section rather than stop on errors about them.
     # -----------------------------------------------------------------------
-    _resolve_use_ha_postgres temporal
-    _TEMPORAL_USE_HA_POSTGRES="${_USE_HA_POSTGRES}"
-    _resolve_use_ha_postgres keycloak
-    _KEYCLOAK_USE_HA_POSTGRES="${_USE_HA_POSTGRES}"
-
-    # Also read by setup.sh for its closing summary.
-    _STANDALONE_PG_WORKLOADS=""
-    [[ "${_TEMPORAL_USE_HA_POSTGRES}" == "false" ]] && _STANDALONE_PG_WORKLOADS="Temporal"
-    [[ "${_KEYCLOAK_USE_HA_POSTGRES}" == "false" ]] && \
-        _STANDALONE_PG_WORKLOADS="${_STANDALONE_PG_WORKLOADS:+${_STANDALONE_PG_WORKLOADS} and }Keycloak"
-    if [[ -n "${_STANDALONE_PG_WORKLOADS}" ]]; then
-        WARNINGS+=("Deprecated: the standalone postgres.postgres StatefulSet still serves ${_STANDALONE_PG_WORKLOADS}. Support for it will be removed in a future release. Migrate to nico-pg-cluster with the guide in helm-prereqs/README.md, \"Consolidating Temporal/Keycloak onto nico-pg-cluster\"")
-    fi
-
-    # auto never moves a deployed database, so only an explicit value can, or
-    # auto forced to false because postgresql.enabled is false. These errors
-    # stop setup even under -y. Nothing moves when phase 7 is skipped, and
-    # phase 7d doesn't deploy a Keycloak that nico-rest.yaml disables.
     if [[ "${SKIP_REST:-false}" != "true" ]]; then
+        _resolve_use_ha_postgres temporal
+        _TEMPORAL_USE_HA_POSTGRES="${_USE_HA_POSTGRES}"
+        _resolve_use_ha_postgres keycloak
+        _KEYCLOAK_USE_HA_POSTGRES="${_USE_HA_POSTGRES}"
+
+        # Also read by setup.sh for its closing summary.
+        _STANDALONE_PG_WORKLOADS=""
+        [[ "${_TEMPORAL_USE_HA_POSTGRES}" == "false" ]] && _STANDALONE_PG_WORKLOADS="Temporal"
+        [[ "${_KEYCLOAK_USE_HA_POSTGRES}" == "false" ]] && \
+            _STANDALONE_PG_WORKLOADS="${_STANDALONE_PG_WORKLOADS:+${_STANDALONE_PG_WORKLOADS} and }Keycloak"
+        if [[ -n "${_STANDALONE_PG_WORKLOADS}" ]]; then
+            WARNINGS+=("Deprecated: the standalone postgres.postgres StatefulSet still serves ${_STANDALONE_PG_WORKLOADS}. Support for it will be removed in 2.5. Migrate to nico-pg-cluster with the guide in helm-prereqs/README.md, \"Consolidating Temporal/Keycloak onto nico-pg-cluster\"")
+        fi
+
+        # auto never moves a deployed database, so only an explicit value can,
+        # or auto forced to false because postgresql.enabled is false. These
+        # errors stop setup even under -y. Phase 7d doesn't deploy a Keycloak
+        # that nico-rest.yaml disables.
         if [[ -n "${_TEMPORAL_USE_HA_POSTGRES}" ]] && _can_move_db temporal; then
             _check_db_cutover temporal "${_TEMPORAL_USE_HA_POSTGRES}"
         fi

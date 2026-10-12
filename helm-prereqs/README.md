@@ -527,7 +527,7 @@ Observability (opt-in)     (observability/ - only with --with-observability; als
 
 > [!WARNING]
 > The standalone `postgres.postgres` StatefulSet for Temporal and Keycloak is
-> deprecated. Support for it will be removed in a future release. Sites still
+> deprecated. Support for it will be removed in `2.5`. Sites still
 > on it are highly encouraged to migrate to `nico-pg-cluster`. Refer to
 > [Migrating an existing Site's data](#migrating-an-existing-sites-data).
 
@@ -610,12 +610,25 @@ Keycloak is deployed. `nico-rest-api.config.keycloak.enabled` in
    [Removing the standalone StatefulSet](#removing-the-standalone-statefulset)
    describes.
 
-If step 3 fails before it repoints a workload, fix the cause and run
-`setup.sh` again. The receipt stays valid while the stopped Deployments are
-untouched. To bring a workload back on `postgres.postgres` instead, scale its
-Deployments to the replica counts the script printed, for example
-`kubectl scale deploy temporal-frontend -n temporal --replicas=1`. That makes
-the copy stale, so run the script again before the next cutover.
+If step 3 fails before it repoints a workload, there are two ways forward:
+
+- **Retry the cutover.** Leave every Deployment the script stopped at zero,
+  fix the cause, and run `setup.sh` again. The receipt stays valid while those
+  Deployments are untouched.
+- **Abandon the cutover.** Set the value back to `auto`, which keeps the
+  workload on `postgres.postgres`. Then scale every Deployment the script
+  stopped back to the replica count it printed for that Deployment, for
+  example:
+
+  ```bash
+  kubectl scale -n temporal --replicas=1 deploy/temporal-frontend deploy/temporal-history \
+    deploy/temporal-matching deploy/temporal-worker
+  kubectl scale -n nico-rest --replicas=1 deploy/keycloak
+  ```
+
+  Scaling them up makes the copy stale, so a later migration starts again
+  from step 2. Leaving the value at `true` would stop the next `setup.sh` run
+  on that stale receipt.
 
 `preflight.sh` stops `setup.sh` from moving a database off the StatefulSet
 before step 2 is done. When `true` would move it, preflight requires the
