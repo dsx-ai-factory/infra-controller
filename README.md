@@ -8,6 +8,7 @@
 [![NICo Core CI](https://img.shields.io/github/actions/workflow/status/dsx-ai-factory/infra-controller/ci.yaml?branch=main&label=NICo%20Core%20CI)](https://github.com/dsx-ai-factory/infra-controller/actions/workflows/ci.yaml)
 [![NICo REST CI](https://img.shields.io/github/actions/workflow/status/dsx-ai-factory/infra-controller/rest-ci.yml?branch=main&label=NICo%20REST%20CI)](https://github.com/dsx-ai-factory/infra-controller/actions/workflows/rest-ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/dsx-ai-factory/infra-controller?label=release&color=76B900)](https://github.com/dsx-ai-factory/infra-controller/releases/latest)
+[![Contributors](https://img.shields.io/github/contributors/dsx-ai-factory/infra-controller?color=76B900)](https://github.com/dsx-ai-factory/infra-controller/graphs/contributors)
 [![Documentation](https://img.shields.io/badge/docs-docs.nvidia.com-76B900.svg)](https://docs.nvidia.com/infra-controller/documentation/home)
 
 [Documentation](https://docs.nvidia.com/infra-controller/documentation/home) |
@@ -96,34 +97,34 @@ to the [glossary](docs/glossary.md#zero-dpu-host) for both host types.
     <td valign="top">
       <img src="docs/static/readme/icon-trust.svg" width="40" height="40" alt="">
       <h3>Trust and Attestation</h3>
-      Treats every host as untrusted by default. Verifies measured boot PCRs
-      and TPM signatures, locks down UEFI during tenant use, manages BMC and
-      UEFI credentials, and never relies on in-band host reporting for
-      security decisions.
+      Treats every host as untrusted by default. When attestation is enabled,
+      verifies measured boot PCRs and TPM signatures. Locks down UEFI during
+      tenant use, manages BMC and UEFI credentials, and never relies on
+      in-band host reporting for security decisions.
     </td>
     <td valign="top">
       <img src="docs/static/readme/icon-firmware.svg" width="40" height="40" alt="">
       <h3>Firmware Upgrades</h3>
       Keeps the fleet on a site-wide firmware baseline. Operators declare the
-      expected host and DPU versions, NICo detects drift, and it schedules
-      out-of-band updates on healthy, unoccupied hosts without disrupting
-      active tenants.
+      expected host and DPU versions and, when automatic updates are enabled,
+      NICo detects drift and schedules out-of-band updates on healthy,
+      unoccupied hosts without disrupting active tenants.
     </td>
     <td valign="top">
       <img src="docs/static/readme/icon-provisioning.svg" width="40" height="40" alt="">
       <h3>Provisioning and Sanitization</h3>
       Boots any iPXE-installable OS, allocates IP addresses, and configures
-      BGP, DHCP, and DNS. When a tenant leaves, securely erases NVMe, GPU, and
-      system memory, resets the TPM, re-attests, and tears down the tenant
-      network before reuse.
+      BGP, DHCP, and DNS. When a tenant leaves, erases NVMe and SAS/SATA
+      drives, verifies the UEFI memory-overwrite request, resets InfiniBand
+      devices, and tears down the tenant network before reuse.
     </td>
   </tr>
 </table>
 
 For GB200 NVL72 systems, **NICo Flow** extends all of this to the rack. It
-treats racks and NVL domains as first-class entities, sequences power and
-firmware operations across trays, and gates allocation on NVLink fabric
-health. Refer to [Key Capabilities](docs/overview/capabilities.md) for the
+treats racks and NVL domains as first-class entities and sequences power and
+firmware operations across trays. NICo also gates instance allocation on
+NVLink fabric health. Refer to [Key Capabilities](docs/overview/capabilities.md) for the
 complete list and to the [Hardware Compatibility List](docs/hcl.md) for
 supported servers and DPUs.
 
@@ -176,7 +177,7 @@ including the typical API call flows for each persona.
 
 **Service Account mode** is the third option. NICo REST can be configured so
 that one organization holds both the provider and tenant roles through a
-service account, with no separate tenant organizations. This suits
+service account. This suits
 deployments that manage tenancy in a system above NICo and call it as one
 principal. Refer to [Tenant Management with Keycloak](docs/configuration/tenant-management-keycloak.md)
 for the service-account client setup and to the
@@ -201,18 +202,19 @@ factory BMC credentials. From there NICo takes over: it discovers the host
 over Redfish, links each DPU to its host, validates the machine against its
 SKU, runs burn-in and fabric tests, brings firmware to the site baseline,
 installs the DPU OS and HBN, attests the host with measured boot and TPM
-checks, and allocates its IP addresses. Component inventory is collected
+checks when attestation is enabled, and allocates its IP addresses. Component inventory is collected
 automatically, so no manual component entry is required.
 
 **Day 1: Isolation, Lockdown, and Provisioning**: Before a tenant receives a
 host, NICo establishes isolation on every network plane, locks down UEFI and
 the BMC, and coordinates the iPXE boot of the tenant's chosen OS image. The
-provider allocates hosts to tenants as instances through the REST API.
+provider grants the tenant an allocation of hosts, and the tenant creates
+instances from it through the REST API.
 
 **Day 2: Operations, Health, and Tenant Transitions**: NICo monitors health
 continuously, schedules firmware upgrades on unoccupied hosts, upgrades itself
-in place, and sanitizes and re-attests every released host before it returns
-to the available pool.
+in place, and sanitizes every released host before it returns to the
+available pool, re-attesting it when attestation is enabled.
 
 Refer to [Day 0, Day 1, and Day 2 Lifecycle](docs/overview/lifecycle.md) for
 the detail behind each step.
@@ -246,6 +248,26 @@ scheduling, tenancy policy, or workloads are managed above it.
   <img src="docs/static/readme/layers-light.svg" alt="Where NICo fits: below ISV or NCP control planes and Kubernetes, BMaaS, or VMaaS layers, and above the BlueField DPUs, host servers, BMCs, and fabrics." width="100%">
 </picture>
 
+### How NICo Relates to Other Tools
+
+- **Kubernetes, SLURM, and workload schedulers** run above NICo. NICo
+  provisions hosts and hands them off at boot. Assembling them into clusters,
+  scheduling workloads, and patching the OS belong to the platform layer.
+- **BMaaS, VMaaS, and ISV control planes** consume the NICo REST and gRPC APIs
+  to allocate and provision bare metal, and they own tenancy policy.
+- **UFM, NMX-C, and the switch fabric** stay under the network team. NICo
+  calls the UFM and NMX-C APIs for InfiniBand and NVLink partitions and
+  programs isolation on the DPU, but it does not configure switches or install
+  UFM, NMX-C, or Cumulus Linux.
+- **DPF and RMS** are NVIDIA components that NICo integrates with. The DOCA
+  Platform Framework provisions DPUs for NICo, and the Rack Management Service
+  carries out rack-level hardware operations that Flow sequences.
+- **PostgreSQL, Vault, Temporal, cert-manager, and the telemetry stack** are
+  off-the-shelf dependencies. NICo uses them but does not operate them.
+
+Refer to [Scope and Boundaries](docs/overview/scope-and-boundaries.md) for
+the full division of responsibility.
+
 ## How It Is Built
 
 The **Site Controller** is the on-site control plane: Rust services deployed
@@ -258,11 +280,12 @@ their Site Agents.
 
 | Service | Role |
 | --- | --- |
-| **API Service (NICo Core)** | Single source of truth and the only PostgreSQL writer. Runs the state machines for hosts, network segments, and InfiniBand and NVLink partitions. |
+| **API Service (NICo Core)** | Single source of truth and the only writer to the Core database. Runs the state machines for hosts, network segments, and InfiniBand and NVLink partitions. |
 | **DHCP, PXE, and DNS** | Stateless front doors for the physical network. They forward every decision to NICo Core, which owns IP address management and boot artifacts. |
 | **Hardware Health** | Scrapes host and DPU BMCs over Redfish and exports Prometheus metrics and per-sensor telemetry. |
 | **SSH Console** | Holds persistent BMC console sessions, streams them to Loki, and gives tenants and operators live serial access. |
 | **Site Agent and NICo REST** | Connect the on-site controller to the REST API over Temporal, so operators and ISVs integrate with HTTP and JWT. |
+| **NICo Flow** | Rack inventory and durable orchestration of power, firmware, ingestion, and bring-up operations, grouped by rack. Persists its tasks in its own PostgreSQL database and runs them through Temporal. |
 | **Scout and DPU Agent** | Run on the managed hosts. Scout collects in-band inventory and runs validation during discovery. The DPU agent applies network state, serves instance metadata, and self-updates. |
 
 Refer to [Architecture: Overview and Components](docs/architecture/overview.md)
@@ -284,10 +307,8 @@ and uses Machine-a-Tron to supply mock hosts, so you can exercise the REST API
 and the Core gRPC API end to end without hardware.
 
 ```bash
-# 1. Install the toolchain: rustup with the Rust version pinned in rust-toolchain.toml,
-#    the Go version in rest-api/go.mod, Docker, kind, kubectl, helm, and devspace.
-#    Then install cargo-make:
-cargo install cargo-make
+# 1. Install Docker, kind, kubectl, helm, and devspace. DevSpace builds every
+#    image inside Docker, so no Rust or Go toolchain is needed for this path.
 
 # 2. Create a local cluster. The bootstrap script works on your current
 #    Kubernetes context, so this must exist first.
@@ -301,7 +322,9 @@ dev/deployment/devspace/bootstrap-prereqs.sh
 devspace deploy
 ```
 
-For a plain build and test loop without a cluster:
+For a plain build and test loop without a cluster, install rustup with the
+Rust version pinned in `rust-toolchain.toml`, the Go version in
+`rest-api/go.mod`, and `cargo install cargo-make`, then:
 
 ```bash
 cargo build                              # all Rust workspace crates
@@ -324,13 +347,20 @@ reference.
 ### Production Deployment
 
 `helm-prereqs/setup.sh` deploys the full NICo stack onto a bare-metal
-Kubernetes cluster in three layers:
+Kubernetes cluster in layers. The first three always install. DPF and RMS
+install by default and can be skipped. Flow installs whenever REST does.
 
 | Layer | What it installs | Helm release |
 | --- | --- | --- |
 | **Common services** | MetalLB, cert-manager, Vault, External Secrets Operator, and PostgreSQL | via `helmfile` in `helm-prereqs/` |
 | **NICo Core** | The Site Controller services from this repo's `helm/` chart | `nico` in `nico-system` |
 | **NICo REST** | The REST API, Temporal, Keycloak, and Site Agent | `nico-rest` and `nico-rest-site-agent` in `nico-rest` |
+| **NICo Flow** | Rack-level task and automation service | `flow` in `flow` |
+| **DPF** (`--skip-dpf` to opt out) | The DOCA Platform Framework stack that provisions DPUs | `dpf-operator` in `dpf-operator-system` |
+| **RMS** (`--skip-rms` to opt out) | The Rack Management Service | `rack` in `rack-manager` |
+
+Refer to [What gets deployed](helm-prereqs/README.md#what-gets-deployed) for
+the complete list with chart versions.
 
 #### Prerequisites
 
@@ -343,15 +373,16 @@ Kubernetes cluster in three layers:
 ```bash
 # 1. Build and push amd64/arm64 container images from this clone.
 #    Refer to docs/manuals/building_nico_containers.md for the build-host prerequisites.
+#    The values below are examples: replace every one of them with your own.
 export IMAGE_REGISTRY=my-registry.example.com/infra-controller
-make images IMAGE_REGISTRY="${IMAGE_REGISTRY}"   # NICo Core and REST service images
+export IMAGE_TAG=v2.2.0
+make images IMAGE_REGISTRY="${IMAGE_REGISTRY}" IMAGE_TAG="${IMAGE_TAG}"   # NICo Core and REST service images
 
-# 2. Set environment variables. The values below are examples: replace
-#    every one of them with your own before running setup.
+# 2. Set environment variables, reusing the registry and tag from step 1.
 export KUBECONFIG=/path/to/kubeconfig
 export NICO_IMAGE_REGISTRY="${IMAGE_REGISTRY}"
-export NICO_CORE_IMAGE_TAG=v2.2.0
-export NICO_REST_IMAGE_TAG=v2.2.0
+export NICO_CORE_IMAGE_TAG="${IMAGE_TAG}"
+export NICO_REST_IMAGE_TAG="${IMAGE_TAG}"
 # For an authenticated registry, read the pull secret from a prompt so it
 # never appears in shell history:
 # read -r -s -p 'Registry pull secret: ' REGISTRY_PULL_SECRET && export REGISTRY_PULL_SECRET
@@ -420,6 +451,16 @@ Runnable inputs and reference configurations that ship with the repository:
 | [`dev/`](dev/) | Local development tooling, including the DevSpace deployment with mock hardware |
 | [`bluefield/`](bluefield/) and [`pxe/`](pxe/) | DPU image components and PXE boot artifact generation |
 | [`deploy/`](deploy/) | Kubernetes manifests and Kustomize overlays |
+
+## Roadmap
+
+NICo publishes a three-month rolling roadmap as a pinned GitHub issue,
+maintained alongside the monthly release cadence. It is directional rather
+than a commitment, and each item links to its tracking issue.
+
+- [Public roadmap](https://github.com/dsx-ai-factory/infra-controller/issues/3603)
+- [Milestones](https://github.com/dsx-ai-factory/infra-controller/milestones) for the current implementation status of each release
+- [Release Policy](RELEASE.md#three-month-rolling-roadmap) for how the roadmap and the release cycle fit together
 
 ## Community and Support
 

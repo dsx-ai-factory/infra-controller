@@ -23,7 +23,7 @@
 <circle cx="110" cy="232" r="5" fill="#76B900"/>
 <text x="128" y="238" font-size="19" font-weight="normal" fill="#1f2328" text-anchor="start" >DPU OS and HBN provisioning</text>
 <circle cx="110" cy="266" r="5" fill="#76B900"/>
-<text x="128" y="272" font-size="19" font-weight="normal" fill="#1f2328" text-anchor="start" >Attestation</text>
+<text x="128" y="272" font-size="19" font-weight="normal" fill="#1f2328" text-anchor="start" >Attestation, when enabled</text>
 <circle cx="110" cy="300" r="5" fill="#76B900"/>
 <text x="128" y="306" font-size="19" font-weight="normal" fill="#1f2328" text-anchor="start" >IP, DHCP, and DNS setup</text>
 <path d="M518 190.0L592 190.0" stroke="#76B900" stroke-width="3" fill="none" marker-end="url(#arrowg)"/>
@@ -51,7 +51,7 @@
 <circle cx="1170" cy="198" r="5" fill="#76B900"/>
 <text x="1188" y="204" font-size="19" font-weight="normal" fill="#1f2328" text-anchor="start" >Tenant release</text>
 <circle cx="1170" cy="232" r="5" fill="#76B900"/>
-<text x="1188" y="238" font-size="19" font-weight="normal" fill="#1f2328" text-anchor="start" >Sanitize and re-attest</text>
+<text x="1188" y="238" font-size="19" font-weight="normal" fill="#1f2328" text-anchor="start" >Sanitize and clean up</text>
 <path d="M1350.0 340L1350.0 384L820.0 384L820.0 350" stroke="#656d76" stroke-width="2.5" fill="none" stroke-dasharray="8 7" marker-end="url(#arrow)"/>
 <rect x="895.0" y="368" width="380" height="32" rx="10" fill="#ffffff" stroke="#ffffff" stroke-width="1.5"/>
 <text x="1085.0" y="390" font-size="17" font-weight="normal" fill="#656d76" text-anchor="middle" >released hosts return to the available pool</text>
