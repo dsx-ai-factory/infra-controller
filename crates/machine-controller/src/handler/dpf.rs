@@ -910,7 +910,7 @@ pub(super) async fn handle_dpf_deployment_migration(
         ));
     }
 
-    let host_nics = machine_host_nics(state, ctx).await?;
+    let host_nics = get_expected_host_nics_for_mh(state, ctx).await?;
     let astra_nics = host_nics
         .iter()
         .any(|nic| nic.nic_type.as_deref() == Some("CX9"));
@@ -1040,39 +1040,11 @@ async fn handle_dpf_reprovisioning(
 
 // Use declared inventory for both deployment selection and DPUDevice values;
 // discovered DPA interfaces may not yet be populated during ingestion.
-async fn machine_host_nics(
+async fn get_expected_host_nics_for_mh(
     state: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<Vec<ExpectedInterface>, StateHandlerError> {
-    // its unlikely we got here without a bmc mac
-    let Some(bmc_mac_address) = state.host_snapshot.status.bmc_info.mac else {
-        tracing::error!(
-            machine_id = %state.host_snapshot.id,
-            "machine_host_nics: No BMC MAC address configured"
-        );
-        return Err(StateHandlerError::MissingData {
-            object_id: state.host_snapshot.id.to_string(),
-            missing: "bmc_mac_address",
-        });
-    };
-
-    let mut txn = ctx.services.db_pool.begin().await?;
-
-    // Retrieve the expected_machines table entry for this managed host.
-    let expected_machine =
-        db::expected_machine::find_by_bmc_mac_address(txn.as_mut(), bmc_mac_address)
-            .await
-            .map_err(|err| {
-                tracing::error!(
-                    machine_id = %state.host_snapshot.id,
-                    %bmc_mac_address,
-                    error = %err,
-                    "machine_host_nics: Failed to look up expected machine for Astra enablement"
-                );
-                StateHandlerError::DBError(Box::new(err))
-            })?;
-
-    txn.commit().await?;
+    let expected_machine = super::get_expected_machine_for_mh(state, ctx).await?;
 
     Ok(expected_machine
         .map(|machine| machine.data.interfaces)
@@ -1096,7 +1068,7 @@ pub(super) async fn handle_dpf_state(
     let dpu_machine_id = dpu_snapshot.id;
     let node_name = dpu_node_cr_name(&dpf_id(&state.host_snapshot)?);
 
-    let host_nics = machine_host_nics(state, ctx).await?;
+    let host_nics = get_expected_host_nics_for_mh(state, ctx).await?;
     let astra_nics = host_nics
         .iter()
         .any(|nic| nic.nic_type.as_deref() == Some("CX9"));

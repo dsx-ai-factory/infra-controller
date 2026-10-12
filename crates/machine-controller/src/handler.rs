@@ -2363,12 +2363,6 @@ impl MachineStateHandler {
             StateHandlerError::GenericError(eyre!("invalid SPX NIC MAC address {mac_address}: {e}"))
         })?;
 
-        // Now enable EastWestControlEnabled on this card.
-        redfish_client
-            .set_spx_nic_east_west_control_enabled(nic_index, true)
-            .await
-            .map_err(|e| redfish_error("set_spx_nic_east_west_control_enabled", e))?;
-
         let cage_mpo_encoded_string =
             model::machine::astra::astra_get_cage_mpo_encoded_string(nic_index);
 
@@ -2384,7 +2378,7 @@ impl MachineStateHandler {
                     .as_deref()
                     .is_some_and(|name| name.starts_with(&cage_mpo_encoded_string))
             })
-            .map(|nic| nic.fixed_ip);
+            .and_then(|nic| nic.fixed_ip);
 
         // If fixed_ip is not found above, print an error and retrun error.
         // Otherwise, keep the fixed_ip to use in the dpa_interface object.
@@ -2416,6 +2410,12 @@ impl MachineStateHandler {
             )));
         };
 
+        // Now enable EastWestControlEnabled on this card.
+        redfish_client
+            .set_spx_nic_east_west_control_enabled(nic_index, true)
+            .await
+            .map_err(|e| redfish_error("set_spx_nic_east_west_control_enabled", e))?;
+
         // We have successfully enabled EastWestControlEnabled on this card.
         // Now add an entry for this NIC in the dpa_interface table.
         // Note that this entry will be added with the predicted host id, and when we
@@ -2438,7 +2438,7 @@ impl MachineStateHandler {
         )
         .await?;
 
-        dpa_interface.underlay_ip = fixed_ip;
+        dpa_interface.underlay_ip = Some(fixed_ip);
 
         // Call the update_ip routine to update the underlay_ip address of this dpa object,
         // obtaining the underlay ip from the fixed_ip field of the ExpectedInterface object.
@@ -2477,7 +2477,7 @@ impl MachineStateHandler {
         // Look at the entry in the expected_machines table for this managed host, and retrieve the host_nics
         // field. If the host_nics is empty, just return.
 
-        let expected_machine = get_expected_machine_for_mh(mh_snapshot, ctx).await;
+        let expected_machine = get_expected_machine_for_mh(mh_snapshot, ctx).await?;
 
         // No expected-machine entry means there are no declared host NICs to act on.
         let Some(expected_machine) = expected_machine else {
@@ -2504,13 +2504,9 @@ impl MachineStateHandler {
             .iter()
             .filter(|nic| nic.nic_type.as_deref() == Some("CX9"))
             .collect();
-        let enabled_any_cx9 = cx9_nics.iter().any(|nic| nic.mac_address.is_some());
+        let enabled_any_cx9 = !cx9_nics.is_empty();
 
         for nic_index in 0..cx9_nics.len() {
-            // Keep the inventory index stable, but defer Cerebro-only declarations.
-            if cx9_nics[nic_index].mac_address.is_none() {
-                continue;
-            }
             if let Err(e) = self
                 .enable_astra_nic(nic_index as u8, mh_snapshot, ctx, &cx9_nics)
                 .await
@@ -2747,55 +2743,38 @@ impl MachineStateHandler {
 async fn get_expected_machine_for_mh(
     mh_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-) -> Option<model::expected_machine::ExpectedMachine> {
+) -> Result<Option<model::expected_machine::ExpectedMachine>, StateHandlerError> {
     // its unlikely we got here without a bmc mac
     let Some(bmc_mac_address) = mh_snapshot.host_snapshot.status.bmc_info.mac else {
-        tracing::debug!(
+        tracing::error!(
             machine_id = %mh_snapshot.host_snapshot.id,
-            "No BMC MAC address configured"
+            "get_expected_machine_for_mh: No BMC MAC address configured"
         );
-        return None;
+        return Err(StateHandlerError::MissingData {
+            object_id: mh_snapshot.host_snapshot.id.to_string(),
+            missing: "bmc_mac_address",
+        });
     };
 
-    let mut txn = match ctx.services.db_pool.begin().await {
-        Ok(txn) => txn,
-        Err(err) => {
-            tracing::error!(
-                machine_id = %mh_snapshot.host_snapshot.id,
-                %bmc_mac_address,
-                error = %err,
-                "Failed to begin transaction to look up expected machine"
-            );
-            return None;
-        }
-    };
+    let mut txn = ctx.services.db_pool.begin().await?;
 
     // Retrieve the expected_machines table entry for this managed host.
     let expected_machine =
-        match db::expected_machine::find_by_bmc_mac_address(txn.as_mut(), bmc_mac_address).await {
-            Ok(expected_machine) => expected_machine,
-            Err(err) => {
+        db::expected_machine::find_by_bmc_mac_address(txn.as_mut(), bmc_mac_address)
+            .await
+            .map_err(|err| {
                 tracing::error!(
                     machine_id = %mh_snapshot.host_snapshot.id,
                     %bmc_mac_address,
                     error = %err,
-                    "Failed to look up expected machine"
+                    "get_expected_machine_for_mh: Failed to look up expected machine"
                 );
-                return None;
-            }
-        };
+                StateHandlerError::DBError(Box::new(err))
+            })?;
 
-    if let Err(err) = txn.commit().await {
-        tracing::error!(
-            machine_id = %mh_snapshot.host_snapshot.id,
-            %bmc_mac_address,
-            error = %err,
-            "Failed to commit transaction after expected machine lookup"
-        );
-        return None;
-    }
+    txn.commit().await?;
 
-    expected_machine
+    Ok(expected_machine)
 }
 
 fn is_reprovision_restartable_failure(

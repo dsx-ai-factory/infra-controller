@@ -257,5 +257,5 @@ pub fn astra_get_mpo_index(nic_index: u8) -> u8 {
 pub fn astra_get_cage_mpo_encoded_string(nic_index: u8) -> String {
     let cage_index = astra_get_cage_index(nic_index);
     let mpo_index = astra_get_mpo_index(nic_index);
-    format!("C{cage_index}_{mpo_index}")
+    format!("C{cage_index}-{mpo_index}")
 }
