@@ -271,6 +271,19 @@ kubectl apply -k deploy/kustomize/base/keycloak -n nico-rest
 | `--tls-port` | `8000` | HTTPS listen port |
 | `--insecure-port` | `8001` | HTTP health port |
 | `--ca-base-dns` | `nico.local` | DNS suffix used in issued certs |
+| `--dns-name` | the Service's four in-cluster names plus `localhost` | SAN stamped on the HTTPS listener's own certificate |
+
+`--dns-name` is repeatable, and the first value supplied replaces the built-in
+default (`credsmgr.csm` and `localhost`, the latter matching site-manager's own
+default `--creds-manager-url`) rather than adding to it. Every hostname a client
+dials over port 8000 has to be listed, because TLS hostname verification
+consults only the certificate's SANs. The manifests pass
+`nico-rest-cert-manager`, `nico-rest-cert-manager.nico-rest`,
+`nico-rest-cert-manager.nico-rest.svc`,
+`nico-rest-cert-manager.nico-rest.svc.cluster.local`, and `localhost`. Deploying
+into a namespace other than `nico-rest` means editing these to match, otherwise
+clients using the namespace-qualified hostname fail verification with
+`no alternative certificate subject name matches target hostname`.
 
 ### Apply
 
@@ -511,10 +524,24 @@ status:
 | Flag | Value | Description |
 |---|---|---|
 | `--listen-port` | `8100` | HTTPS listen port |
-| `--creds-manager-url` | `https://nico-rest-cert-manager.nico-rest:8000` | URL to nico-rest-cert-manager |
+| `--creds-manager-url` | `https://nico-rest-cert-manager.nico-rest:8000` | URL to nico-rest-cert-manager; the hostname must be one of that service's `--dns-name` SANs |
+| `--creds-manager-ca-path` | `/etc/credsmgr-ca/ca.crt` | CA bundle verifying nico-rest-cert-manager (`tls.crt` from `ca-signing-secret`) |
 | `--tls-cert-path` | `/etc/tls/tls.crt` | TLS cert path (from `site-manager-tls` secret) |
 | `--tls-key-path` | `/etc/tls/tls.key` | TLS key path (from `site-manager-tls` secret) |
 | `--namespace` | `nico-rest` | Kubernetes namespace to watch for Site CRs |
+
+Connections to nico-rest-cert-manager are verified, so `--creds-manager-ca-path`
+must point at a readable PEM bundle containing the CA that signed that service's
+listener. Site Manager exits at startup if the file is missing or holds no
+certificates, rather than falling back to an unverified connection.
+
+That bundle is `ca-signing-secret`, the CA nico-rest-cert-manager signs with,
+projected into the pod at `/etc/credsmgr-ca/ca.crt`. Only `tls.crt` is mounted,
+so the signing key stays in the secret. Note that this is deliberately not the
+issuer of Site Manager's own `site-manager-tls` certificate: the two are
+configured independently, and pointing `site-manager-tls` at a different issuer
+would otherwise leave Site Manager trusting a CA that never signed the listener
+it is verifying.
 
 ### Apply
 
@@ -949,7 +976,7 @@ curl -s "http://<api-host>:8388/v2/org/<org>/nico/site" \
 
 | Secret | Namespace | Created by | Required by |
 |---|---|---|---|
-| `ca-signing-secret` | `nico-rest` | Operator (Step 2) | `nico-rest-cert-manager`, `nico-rest-ca-issuer` |
+| `ca-signing-secret` | `nico-rest` | Operator (Step 2) | `nico-rest-cert-manager`, `nico-rest-ca-issuer`, `nico-rest-site-manager` (`tls.crt` only) |
 | `image-pull-secret` | `nico-rest` | `base/common/image-pull-secret.yaml` | All workload pods |
 | `db-creds` | `nico-rest` | `base/common/db-creds.yaml` | `nico-rest-db-migration`, `nico-rest-api`, workflow workers |
 | `keycloak-client-secret` | `nico-rest` | `base/common/keycloak-client-secret.yaml` | `nico-rest-api` |
