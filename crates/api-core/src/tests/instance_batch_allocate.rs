@@ -326,6 +326,7 @@ async fn test_batch_allocate_instances_rollback_on_failure(
                     labels: vec![],
                 }),
                 allow_unhealthy_machine: false,
+                external_validation_request_id: None,
             },
             build_test_instance_allocation_request(&env, &mh2, segment_id),
         ],
@@ -595,5 +596,6 @@ fn build_test_instance_allocation_request(
             labels: vec![],
         }),
         allow_unhealthy_machine: false,
+        external_validation_request_id: None,
     }
 }

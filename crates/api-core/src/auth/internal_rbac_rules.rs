@@ -561,6 +561,14 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI],
         );
         x.perm("ReWrapSecrets", vec![ForgeAdminCLI]);
+        // Register the contract RPCs without granting access before tenant/site
+        // authorization and the external-validation workflow are implemented.
+        x.perm("FindExternalValidationHoldIds", vec![]);
+        x.perm("FindExternalValidationHoldsByIds", vec![]);
+        x.perm("StartExternalValidation", vec![]);
+        x.perm("CancelExternalValidation", vec![]);
+        x.perm("CompleteExternalValidation", vec![]);
+        x.perm("RemoveExternalValidationHold", vec![]);
         x.perm("GetIpxeTemplate", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ListIpxeTemplates", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindRackStateHistories", vec![ForgeAdminCLI, Machineatron]);
@@ -1868,6 +1876,22 @@ mod rbac_rule_tests {
         }
 
         Ok(())
+    }
+
+    /// Contract publication must not authorize any internal principal.
+    #[test]
+    fn external_validation_contract_has_no_static_grants() {
+        let rules = InternalRBACRules::new();
+        for method in [
+            "FindExternalValidationHoldIds",
+            "FindExternalValidationHoldsByIds",
+            "StartExternalValidation",
+            "CancelExternalValidation",
+            "CompleteExternalValidation",
+            "RemoveExternalValidationHold",
+        ] {
+            assert!(rules.perms[method].principals.is_empty(), "{method}");
+        }
     }
 
     #[test]

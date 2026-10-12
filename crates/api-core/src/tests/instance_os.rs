@@ -363,6 +363,7 @@ async fn test_allocate_instance_rejects_inactive_os(_: PgPoolOptions, options: P
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await;
 
@@ -451,6 +452,7 @@ async fn test_allocate_instance_rejects_not_ready_os(_: PgPoolOptions, options: 
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await;
 
