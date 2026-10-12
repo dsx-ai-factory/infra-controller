@@ -40,7 +40,7 @@ How NICo component tracing works, what it covers, how to turn it on and off and 
   enable recording (see [W3C trace-context propagation](#w3c-trace-context-propagation)).
 - **NICo REST API services** share one OpenTelemetry bootstrap configured through standard `OTEL_*`
   variables. Unlike nico-api, they export over OTLP/HTTP by default and can use TLS. See
-  [REST service tracing](#7-rest-service-tracing).
+  [REST service tracing](#7-nico-rest-api-service-tracing).
 
 ---
 
@@ -66,7 +66,7 @@ The following binaries build an OTLP span exporter:
   [nico-dhcp tracing](#nico-dhcp-tracing)).
 - **NICo REST API services** (`rest-api/common/pkg/otel`), off by default until an OTLP endpoint
   variable is set, plus `tracing.enabled` on nico-rest-api and the workflow workers (see
-  [REST service tracing](#7-rest-service-tracing)).
+  [REST service tracing](#7-nico-rest-api-service-tracing)).
 
 The other binaries (nico-hardware-health, nico-ssh-console-rs, and nico-dsx-exchange-consumer)
 carry the OpenTelemetry crates in the workspace but do not build a span exporter, so they do not
@@ -74,7 +74,7 @@ emit traces.
 
 Unless noted otherwise, the rest of this document describes **nico-api** tracing.
 nico-dns differs as described in [nico-dns tracing](#nico-dns-tracing-separate-opt-in).
-NICo REST API services are described separately in [REST service tracing](#7-rest-service-tracing).
+NICo REST API services are described separately in [REST service tracing](#7-nico-rest-api-service-tracing).
 
 ### What operations are covered
 
