@@ -164,7 +164,8 @@ of affected GPUs or their classifications changes, so an alert's `message` label
 may lag a GPU that moves between unhealthy states until the set next changes.
 If the stored copy of an alert loses `PreventAllocations` (for example, through
 a manual edit of this source's report), the monitor restores it on the next pass
-while NMX-C still reports that GPU unhealthy.
+for as long as the alert is retained, including while NMX-C reports that GPU
+`Unknown` or omits it.
 
 The monitor removes its merge report once every affected GPU's alert has
 cleared. Replacing a GPU with a different UID does not clear the old GPU's
