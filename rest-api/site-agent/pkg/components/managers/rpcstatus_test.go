@@ -5,6 +5,7 @@ package managers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -77,14 +78,24 @@ func testRPCStatus(t *testing.T) {
 		assert.NoError(t, elektra.Managers.FlowGrpc.GetClient().Close())
 	})
 
+	readStatus := func(t *testing.T) siteAgentStatus {
+		t.Helper()
+		response := httptest.NewRecorder()
+		newStatusServeMux().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/status", nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		var status siteAgentStatus
+		require.NoError(t, json.Unmarshal(response.Body.Bytes(), &status))
+		return status
+	}
+
 	tests := []struct {
 		name     string
-		prefix   string
+		section  func(siteAgentStatus) *grpcStatus
 		call     func(context.Context) error
 		recreate func()
 	}{
 		{
-			name: "Core", prefix: " GRPC",
+			name: "Core", section: func(status siteAgentStatus) *grpcStatus { return &status.CoreGrpc },
 			call: func(ctx context.Context) error {
 				_, err := manager.API.CoreGrpc.GetGrpcClient().GrpcServiceClient().Version(ctx, &corev1.VersionRequest{})
 				return err
@@ -97,7 +108,7 @@ func testRPCStatus(t *testing.T) {
 			},
 		},
 		{
-			name: "Flow", prefix: " Flow GRPC",
+			name: "Flow", section: func(status siteAgentStatus) *grpcStatus { return status.FlowGrpc },
 			call: func(ctx context.Context) error {
 				_, err := manager.API.FlowGrpc.GetGrpcClient().GrpcServiceClient().Version(ctx, &flowv1.VersionRequest{})
 				return err
@@ -114,8 +125,7 @@ func testRPCStatus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Recreate using the retained config, as the certificate reload path does.
 			tc.recreate()
-			succeeded, failed := 2, 0 // Initial and replacement Version probes.
-			lastError := ""
+			succeeded, failed := uint64(2), uint64(0) // Initial and replacement Version probes.
 			for _, step := range []struct {
 				name   string
 				code   codes.Code
@@ -136,16 +146,14 @@ func testRPCStatus(t *testing.T) {
 						succeeded++
 					} else {
 						failed++
-						lastError = rpcErr.Error()
 					}
-					response := httptest.NewRecorder()
-					newStatusServeMux().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/status", nil))
-					body := response.Body.String()
-					assert.Contains(t, body, fmt.Sprintf("%s Succeeded: %d\n", tc.prefix, succeeded))
-					assert.Contains(t, body, fmt.Sprintf("%s Failed: %d\n", tc.prefix, failed))
-					assert.Contains(t, body, tc.prefix+" Status: "+step.health+"\n")
-					assert.Contains(t, body, tc.prefix+" Last Error: "+lastError+"\n")
-					assert.Contains(t, body, " Site Agent Health:  "+step.health+"\n")
+					status := readStatus(t)
+					section := tc.section(status)
+					require.NotNil(t, section)
+					assert.Equal(t, succeeded, section.RequestsSucceeded)
+					assert.Equal(t, failed, section.RequestsFailed)
+					assert.Equal(t, step.health, section.Health)
+					assert.Equal(t, step.health, status.Health)
 					metrics := httptest.NewRecorder()
 					newMetricsServeMux().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 					health := computils.CompHealthy
@@ -171,10 +179,9 @@ func testRPCStatus(t *testing.T) {
 					})
 				}
 				wg.Wait()
-				response := httptest.NewRecorder()
-				newStatusServeMux().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/status", nil))
-				assert.Contains(t, response.Body.String(), fmt.Sprintf("%s Failed: %d\n", tc.prefix, failed+8))
-				assert.Contains(t, response.Body.String(), " Site Agent Health:  Unhealthy\n")
+				status := readStatus(t)
+				assert.Equal(t, failed+8, tc.section(status).RequestsFailed)
+				assert.Equal(t, "Unhealthy", status.Health)
 				responseCode.Store(uint32(codes.OK))
 				require.NoError(t, tc.call(ctx))
 			})

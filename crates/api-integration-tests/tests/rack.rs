@@ -171,6 +171,7 @@ async fn run_machine_a_tron_racks_test(
                             host_reboot_delay: 1,
                             timing_overrides: Some(LifecycleTimingOverrides {
                                 host: PartialLifecycleTimings {
+                                    power_off_force: Some(Duration::from_millis(100)),
                                     reboot: Some(Duration::from_secs(1)),
                                     // ZERO disables the BMC self-reset offline window entirely,
                                     // keeping ingestion at its pre-feature pace
@@ -178,6 +179,7 @@ async fn run_machine_a_tron_racks_test(
                                     ..Default::default()
                                 },
                                 dpu: PartialLifecycleTimings {
+                                    power_off_force: Some(Duration::from_millis(100)),
                                     reboot: Some(Duration::from_secs(1)),
                                     // ZERO disables the BMC self-reset offline window entirely,
                                     // keeping ingestion at its pre-feature pace
@@ -212,6 +214,7 @@ async fn run_machine_a_tron_racks_test(
                             host_reboot_delay: 1,
                             timing_overrides: Some(LifecycleTimingOverrides {
                                 host: PartialLifecycleTimings {
+                                    power_off_force: Some(Duration::from_millis(100)),
                                     reboot: Some(Duration::from_secs(1)),
                                     // ZERO disables the BMC self-reset offline window entirely,
                                     // keeping ingestion at its pre-feature pace
@@ -219,6 +222,7 @@ async fn run_machine_a_tron_racks_test(
                                     ..Default::default()
                                 },
                                 dpu: PartialLifecycleTimings {
+                                    power_off_force: Some(Duration::from_millis(100)),
                                     reboot: Some(Duration::from_secs(1)),
                                     // ZERO disables the BMC self-reset offline window entirely,
                                     // keeping ingestion at its pre-feature pace

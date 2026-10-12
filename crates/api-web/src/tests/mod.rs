@@ -27,6 +27,7 @@ mod explored_endpoint;
 mod firmware;
 mod health;
 mod ipam;
+mod machine_validation;
 mod managed_host;
 mod network_segment;
 mod vpc;

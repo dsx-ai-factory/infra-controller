@@ -17,7 +17,7 @@
 
 use std::convert::Infallible;
 use std::net::{SocketAddr, TcpListener};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -100,6 +100,16 @@ pub(super) fn setup_agent_run_env(
         }
     }
 
+    setup_agent_run_options(addr, td, acf, test_metadata_service, &root_dir).map(Some)
+}
+
+pub(super) fn setup_agent_run_options(
+    addr: &SocketAddr,
+    td: &TempDir,
+    acf: &NamedTempFile,
+    test_metadata_service: bool,
+    root_dir: &Path,
+) -> eyre::Result<Options> {
     let hbn_root = td.path();
     tracing::info!(?hbn_root, "Using HBN root");
     fs::create_dir_all(hbn_root.join("etc/frr"))?;
@@ -131,7 +141,7 @@ pub(super) fn setup_agent_run_env(
         }))),
     };
 
-    Ok(Some(opts))
+    Ok(opts)
 }
 
 pub(super) async fn run_grpc_server(

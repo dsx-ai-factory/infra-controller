@@ -40,7 +40,7 @@ use opentelemetry::StringValue;
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer};
 
-use crate::config::{BreakerConfig, BreakerConfigError, BreakerSettings};
+use crate::config::{BreakerConfig, BreakerConfigError, BreakerSettings, SloTarget};
 use crate::pattern::RequestPattern;
 
 /// The implicit class for requests no configured class matches.
@@ -132,6 +132,9 @@ struct ClassDefinition {
     /// The class's breaker settings, over `[admission.breaker]`'s.
     #[serde(default)]
     breaker: Option<BreakerSettings>,
+    /// The class's latency target at each BMC.
+    #[serde(default)]
+    slo: Option<SloTarget>,
 }
 
 fn default_upstream_timeout() -> Duration {
@@ -169,6 +172,8 @@ pub(crate) struct RequestClass {
     /// The class's breaker at each BMC, once
     /// [`ClassTable::resolve_breakers`] has settled it; `None` without one.
     pub(crate) breaker: Option<BreakerConfig>,
+    /// The class's latency target at each BMC; `None` without one.
+    pub(crate) slo: Option<SloTarget>,
 }
 
 impl RequestClass {
@@ -183,6 +188,7 @@ impl RequestClass {
             max_queued: DEFAULT_MAX_QUEUED,
             breaker_settings: None,
             breaker: None,
+            slo: None,
         }
     }
 
@@ -252,6 +258,8 @@ pub(crate) enum ClassTableError {
     QueueTooLong(String),
     #[error("class {0:?} {1}")]
     Breaker(String, BreakerConfigError),
+    #[error("class {0:?} slo latency exceeds its upstream_timeout")]
+    SloBeyondBudget(String),
 }
 
 impl ClassTable {
@@ -275,6 +283,12 @@ impl ClassTable {
             }
             if definition.max_queued.get() > MAX_QUEUED {
                 return Err(ClassTableError::QueueTooLong(name));
+            }
+            if definition
+                .slo
+                .is_some_and(|slo| slo.latency > definition.upstream_timeout)
+            {
+                return Err(ClassTableError::SloBeyondBudget(name));
             }
 
             let is_default = name == DEFAULT_CLASS_NAME;
@@ -312,6 +326,7 @@ impl ClassTable {
                 max_queued: definition.max_queued,
                 breaker_settings: definition.breaker,
                 breaker: None,
+                slo: definition.slo,
             };
             if is_default {
                 table.default = class;

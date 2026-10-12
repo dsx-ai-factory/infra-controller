@@ -1797,12 +1797,6 @@ async fn update_instance_network_config(
         return Err(ConfigValidationError::InstanceDeletionIsRequested.into());
     }
 
-    // Service-interface records are managed by Core and are absent from public
-    // requests. Preserve them while applying the caller's tenant-network definition.
-    network
-        .service_interfaces
-        .clone_from(&instance.config.network.service_interfaces);
-
     // Preserve caller intent long enough to enforce prefix family and VPC allocation policy.
     // Resource reuse below deliberately restores stored requested addresses for matching explicit
     // prefixes, which must not erase a newly requested address before validation.

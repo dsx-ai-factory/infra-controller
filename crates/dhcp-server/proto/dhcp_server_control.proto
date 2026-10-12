@@ -20,8 +20,17 @@ package dhcp_server_control;
 
 service DhcpServerControl {
     // Update the DHCP config and immediately reload/restart the DHCP server.
-    // The server skips the restart if the incoming config is identical to the
-    // currently active config.
+    // A running server skips the restart if both config and interfaces are
+    // unchanged. An empty interface list stages the config for a
+    // later update and leaves any running listeners unchanged. Otherwise,
+    // success acknowledges application, not readiness of every listener socket.
+    // DHCP settings replace the previous settings. Supplied host settings also
+    // replace the previous settings; omission retains the live host file.
+    // Invalid caller configuration returns
+    // INVALID_ARGUMENT; storage or application failures return INTERNAL. A full
+    // update queue returns RESOURCE_EXHAUSTED; an unavailable control loop returns
+    // UNAVAILABLE. Completion waits at most 30 seconds including queue time.
+    // DEADLINE_EXCEEDED does not cancel an application that has already started.
     rpc UpdateAndReloadConfig(UpdateAndReloadConfigRequest) returns (UpdateAndReloadConfigResponse);
 
     // Return the last DHCP request timestamp for each known host interface.
@@ -37,7 +46,7 @@ service DhcpServerControl {
 
 // ── UpdateAndReloadConfig ─────────────────────────────────────────────────────
 
-// Mirrors utils::models::dhcp::DhcpConfig.
+// Mirrors carbide_rpc_utils::dhcp::DhcpConfig.
 // IPv4 addresses are encoded as dotted-decimal strings (e.g. "192.168.1.1").
 message DhcpConfig {
     uint32 lease_time_secs = 1;
@@ -46,6 +55,8 @@ message DhcpConfig {
     repeated string carbide_nameservers = 4;
     optional string carbide_api_url = 5;
     repeated string carbide_ntpservers = 6;
+    // Both IPv4 fields must be nonempty or both empty. Empty disables DHCPv4;
+    // older servers reject it without applying the update.
     string carbide_provisioning_server_ipv4 = 7;
     string carbide_dhcp_server = 8;
     repeated string carbide_nameservers_v6 = 9;
@@ -59,6 +70,12 @@ message DhcpConfig {
     // disables generation; an explicit InterfaceInfo.booturl (even empty)
     // takes precedence. Invalid or non-IPv6 addresses reject the update.
     optional string carbide_provisioning_server_ipv6 = 15;
+    // NVIDIA DUID-EN: 7–130 bytes, starting with 00 02 00 00 16 47
+    // (type 2, enterprise 5703) and a nonempty identifier. Present-but-empty or
+    // malformed bytes return INVALID_ARGUMENT even if a saved identity exists.
+    // Omission requires either an IPv4 pair or a retained identity. The saved
+    // .duid takes precedence, then the live config, then this request's identity.
+    optional bytes dhcpv6_server_id = 16;
 }
 
 // Mirrors utils::models::dhcp::InterfaceInfo.
@@ -90,7 +107,11 @@ message HostConfig {
 
 message UpdateAndReloadConfigRequest {
     DhcpConfig dhcp_config = 1;
-    HostConfig host_config = 2;  // absent when not applicable (e.g. Controller mode)
+    // In DPU mode, omission retains the live host file and discards any staged
+    // replacement. That file must exist when applying the configuration; an
+    // unreadable retained file is a storage failure (INTERNAL). Controller mode
+    // does not use host settings.
+    HostConfig host_config = 2;
     repeated string interfaces = 3;  // network interfaces for the DHCP server to listen on
 }
 

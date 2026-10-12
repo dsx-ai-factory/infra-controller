@@ -71,6 +71,7 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 		Description: "Power on rack",
 		Status:      flowv1.TaskStatus_TASK_STATUS_RUNNING,
 		Message:     "Processing",
+		Report:      `{"version":1,"stages":[{"number":1,"status":"completed","steps":[{"component_type":"Compute","status":"skipped"}]}]}`,
 	}
 
 	ctx := context.Background()
@@ -194,6 +195,7 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 			assert.Equal(t, "Running", apiTask.Status)
 			assert.Equal(t, "Power on rack", apiTask.Description)
 			assert.Equal(t, "Processing", apiTask.Message)
+			assertZeroTaskReportCounters(t, rec.Body.Bytes())
 		})
 	}
 }
@@ -202,17 +204,18 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 // handlers with a shared case matrix. pathFmt and the path parameter differ per
 // handler; all invoke Flow ListTasks through the generic proxy.
 type GetTasksHandlerTestCase struct {
-	name           string
-	reqOrg         string
-	user           *cdbm.User
-	pathParam      string
-	queryParams    map[string]string
-	mockTasks      []*flowv1.Task
-	expectedStatus int
-	expectedPage   *pagination.PageResponse
-	expectedFlowID string
-	assertFlowReq  func(t *testing.T, req *flowv1.ListTasksRequest, pathParam string)
-	assertResponse func(t *testing.T, tasks []model.APITask)
+	name              string
+	reqOrg            string
+	user              *cdbm.User
+	pathParam         string
+	queryParams       map[string]string
+	mockTasks         []*flowv1.Task
+	expectedStatus    int
+	expectedPage      *pagination.PageResponse
+	expectedFlowID    string
+	assertFlowReq     func(t *testing.T, req *flowv1.ListTasksRequest, pathParam string)
+	assertResponse    func(t *testing.T, tasks []model.APITask)
+	assertRawResponse func(t *testing.T, body []byte)
 }
 
 func ExecuteGetTasksHandlerTestCases(t *testing.T, pathFmt string, handle func(echo.Context) error, scp *sc.ClientPool, siteID string, testCases []GetTasksHandlerTestCase) {
@@ -288,8 +291,19 @@ func ExecuteGetTasksHandlerTestCases(t *testing.T, pathFmt string, handle func(e
 			if tt.assertResponse != nil {
 				tt.assertResponse(t, tasks)
 			}
+			if tt.assertRawResponse != nil {
+				tt.assertRawResponse(t, rec.Body.Bytes())
+			}
 		})
 	}
+}
+
+func assertZeroTaskReportCounters(t *testing.T, body []byte) {
+	t.Helper()
+	for _, field := range []string{"totalComponents", "succeededComponents", "failedComponents"} {
+		assert.Contains(t, string(body), `"`+field+`":0`)
+	}
+	assert.NotContains(t, string(body), `"completedComponents"`)
 }
 
 func TestGetAllTaskHandler_Handle(t *testing.T) {
@@ -323,7 +337,7 @@ func TestGetAllTaskHandler_Handle(t *testing.T) {
 		RackId:      &flowv1.UUID{Id: uuid.New().String()},
 		Description: "Power on rack",
 		Status:      flowv1.TaskStatus_TASK_STATUS_RUNNING,
-		Report:      `{"version":1,"stages":[]}`,
+		Report:      `{"version":1,"stages":[{"number":1,"status":"completed","steps":[{"component_type":"Compute","status":"skipped"}]}]}`,
 	}}
 	defaultPageNumber, defaultPageSize := 1, 20
 	filteredPageNumber, filteredPageSize := 2, 10
@@ -363,14 +377,15 @@ func TestGetAllTaskHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name:           "success - filters and pagination pass through",
-			reqOrg:         org,
-			user:           providerUser,
-			queryParams:    map[string]string{"siteId": site.ID.String(), "activeOnly": "true", "includeReport": "true", "pageNumber": "2", "pageSize": "10"},
-			mockTasks:      listed,
-			expectedStatus: http.StatusOK,
-			expectedPage:   &pagination.PageResponse{PageNumber: 2, PageSize: 10, Total: 1},
-			expectedFlowID: filteredFlowID,
+			name:              "success - filters and pagination pass through",
+			assertRawResponse: assertZeroTaskReportCounters,
+			reqOrg:            org,
+			user:              providerUser,
+			queryParams:       map[string]string{"siteId": site.ID.String(), "activeOnly": "true", "includeReport": "true", "pageNumber": "2", "pageSize": "10"},
+			mockTasks:         listed,
+			expectedStatus:    http.StatusOK,
+			expectedPage:      &pagination.PageResponse{PageNumber: 2, PageSize: 10, Total: 1},
+			expectedFlowID:    filteredFlowID,
 			assertFlowReq: func(t *testing.T, req *flowv1.ListTasksRequest, _ string) {
 				t.Helper()
 				assert.True(t, req.GetActiveOnly())

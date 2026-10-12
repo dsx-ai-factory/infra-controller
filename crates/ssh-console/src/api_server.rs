@@ -445,8 +445,7 @@ pub(crate) async fn spawn(
     let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
 
     let acceptor = Arc::new(ArcSwap::from_pointee(load_tls_acceptor(&config)?));
-    let listener = tokio::net::TcpListener::bind(config.api_listen_address).await?;
-    let listen_address = listener.local_addr()?;
+    let (listener, listen_address) = crate::tcp_listener::bind(config.api_listen_address).await?;
     let (incoming_tx, incoming_rx) =
         mpsc::channel::<Result<AuthorizedTlsStream, std::io::Error>>(128);
     let accept_task = tokio::spawn({

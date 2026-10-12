@@ -1592,6 +1592,19 @@ fn validate_dpu_reprovisioning_request(
         ));
     }
 
+    if snapshot.host_snapshot.config.dpf.used_for_ingestion
+        && machine_id.machine_type().is_dpu()
+        && snapshot.dpu_snapshots.len() > 1
+    {
+        // DPF siblings share a DPUNode and must use the same deployment template.
+        // Require the host ID for Set/Clear/Restart to handle all attached DPUs together.
+        return Err(CarbideError::FailedPrecondition(format!(
+            "DPF-ingested host {} requires reprovisioning every attached DPU together; \
+             use host machine ID {} for set, clear, or restart",
+            snapshot.host_snapshot.id, snapshot.host_snapshot.id,
+        )));
+    }
+
     if mode == rpc::dpu_reprovisioning_request::Mode::Set {
         reject_dpf_migration_that_would_strand_extension_services(api, snapshot, machine_id)?;
     }

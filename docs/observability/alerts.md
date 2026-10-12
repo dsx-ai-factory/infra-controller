@@ -80,12 +80,6 @@ because the default histogram buckets max at 10 seconds.
 | NicoAPIDown | `max(carbide_api_ready) == 0 or absent(carbide_api_ready)` | 15m |
 | NicoAPIFluctuating | `changes(carbide_api_ready[15m]) > 5` | 15m |
 
-### DPU metrics
-
-| Alert | Condition | Duration |
-|-------|-----------|----------|
-| DPU metrics missing | Scrape target down or absent | 10m |
-
 ## 2. SLO targets
 
 These are operational SLO targets, separate from alert thresholds:
@@ -167,7 +161,7 @@ The alert rules include these groups:
 | `nico-api` | API down, API fluctuating, state-handler latency |
 | `nico-sla` | Machines stuck, network segments stuck, IB partitions stuck |
 | `nico-capacity` | Low IP availability |
-| `nico-health` | Hosts unhealthy, DPU metrics missing |
+| `nico-health` | Hosts unhealthy |
 
 ## 5. Per-object alerting
 

@@ -5,6 +5,9 @@ package infinibandpartition
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -67,15 +70,12 @@ func (mibp ManageInfiniBandPartition) UpdateInfiniBandPartitionsInDB(ctx context
 		return err
 	}
 
-	// Construct a map of Controller InfiniBandPartition ID to InfiniBandPartition
+	// Construct a map of InfiniBand Partition ID to InfiniBand Partition.
 	existingIbpIDMap := make(map[string]*cdbm.InfiniBandPartition)
 
 	for _, ibp := range existingIbps {
 		curIbp := ibp
 		existingIbpIDMap[ibp.ID.String()] = &curIbp
-		if ibp.ControllerIBPartitionID != nil {
-			existingIbpIDMap[ibp.ControllerIBPartitionID.String()] = &curIbp
-		}
 	}
 
 	reportedIbpIDMap := map[uuid.UUID]bool{}
@@ -101,13 +101,16 @@ func (mibp ManageInfiniBandPartition) UpdateInfiniBandPartitionsInDB(ctx context
 
 		// TODO: Since Site is the source of truth, we must auto-create any Partitions that are in the Site inventory but not in the DB
 		ibp, ok := existingIbpIDMap[controllerIbp.Id.Value]
-		if !ok && controllerIbp.Config != nil {
-			ibp, ok = existingIbpIDMap[controllerIbp.Config.Name]
-		}
 
 		if !ok {
-			slogger.Error().Str("Controller IB Partition ID", controllerIbp.Id.Value).Msg("InfiniBand Partition does not have a record in DB, possibly created directly on Site")
-			continue
+			ibp = mibp.createOrUpdateInfiniBandPartitionFromSite(ctx, site, controllerIbp)
+			if ibp == nil {
+				continue
+			}
+
+			existingIbpIDMap[ibp.ID.String()] = ibp
+
+			slogger.Info().Str("InfiniBand Partition ID", ibp.ID.String()).Msg("created or undeleted InfiniBand Partition from Site inventory")
 		}
 
 		reportedIbpIDMap[ibp.ID] = true
@@ -221,13 +224,7 @@ func (mibp ManageInfiniBandPartition) UpdateInfiniBandPartitionsInDB(ctx context
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
 	if util.ShouldReconcileDeletions(ibpInventory.GetInventoryPage()) {
 		for _, ibp := range existingIbpIDMap {
-			found := false
-
-			_, found = reportedIbpIDMap[ibp.ID]
-			if !found && ibp.ControllerIBPartitionID != nil {
-				// Additional check if controller IBPartition ID != Instance ID
-				_, found = reportedIbpIDMap[*ibp.ControllerIBPartitionID]
-			}
+			_, found := reportedIbpIDMap[ibp.ID]
 
 			if !found {
 				// The InfiniBandPartition was not found in the InfiniBandPartition Inventory, so add it to list of InfiniBandPartition to potentially delete
@@ -275,6 +272,327 @@ func (mibp ManageInfiniBandPartition) UpdateInfiniBandPartitionsInDB(ctx context
 	}
 
 	return nil
+}
+
+// createOrUpdateInfiniBandPartitionFromSite creates a REST InfiniBand Partition from Site
+// inventory, or undeletes a matching soft-deleted row. Returns nil when skipped or on failure.
+//
+//nolint:cyclop,exhaustruct,funlen,gocognit,gocyclo,maintidx,nestif,nilnil,varnamelen // Recovery is one transactional flow, matching VPC Prefix recovery.
+func (mibp ManageInfiniBandPartition) createOrUpdateInfiniBandPartitionFromSite(
+	ctx context.Context,
+	site *cdbm.Site,
+	controllerIbp *corev1.IBPartition,
+) *cdbm.InfiniBandPartition {
+	logger := log.With().
+		Str("Activity", "UpdateInfiniBandPartitionsInDB").
+		Str("Site ID", site.ID.String()).
+		Str("InfiniBand Partition Controller ID", controllerIbp.GetId().GetValue()).
+		Logger()
+
+	controllerIbpID, err := uuid.Parse(controllerIbp.GetId().GetValue())
+	if err != nil {
+		logger.Warn().Msgf("unable to create InfiniBand Partition found on Site: failed to parse ID, not a valid UUID %s", controllerIbp.GetId().GetValue())
+
+		return nil
+	}
+
+	reportedIbp := new(cdbm.InfiniBandPartition)
+	reportedIbp.FromProto(controllerIbp)
+
+	if reportedIbp.Org == "" {
+		logger.Warn().Msg("unable to create InfiniBand Partition found on Site: Partition is reporting empty Tenant organization ID")
+
+		return nil
+	}
+
+	if reportedIbp.Name == "" {
+		reportedIbp.Name = "recovered-" + controllerIbpID.String()[:8]
+	}
+
+	status := cdbm.InfiniBandPartitionStatusReady
+
+	var (
+		partitionKey, partitionName *string
+		serviceLevel, mtu           *int
+		rateLimit                   *float32
+		enableSharp                 *bool
+	)
+
+	if controllerIbp.GetStatus() != nil {
+		reportedState := controllerIbp.GetStatus().GetState()
+		if reportedState == corev1.TenantState_TERMINATING || reportedState == corev1.TenantState_TERMINATED {
+			logger.Info().Msgf("skipping create or undelete of InfiniBand Partition from Site inventory: Site reports state %s", reportedState)
+
+			return nil
+		}
+
+		reportedStatus := cdbm.InfiniBandPartitionStatus("")
+		reportedStatus.FromProto(reportedState)
+
+		if reportedStatus == "" {
+			logger.Warn().Msgf("unable to create InfiniBand Partition found on Site: unsupported state %s", reportedState)
+
+			return nil
+		}
+
+		status = reportedStatus
+
+		partitionKey = controllerIbp.GetStatus().Pkey
+		partitionName = controllerIbp.GetStatus().Partition
+
+		if controllerIbp.GetStatus().ServiceLevel != nil {
+			serviceLevel = cwutil.GetPtr(int(controllerIbp.GetStatus().GetServiceLevel()))
+		}
+
+		if controllerIbp.GetStatus().RateLimit != nil {
+			rateLimit = cwutil.GetPtr(float32(controllerIbp.GetStatus().GetRateLimit()))
+		}
+
+		if controllerIbp.GetStatus().Mtu != nil {
+			mtu = cwutil.GetPtr(int(controllerIbp.GetStatus().GetMtu()))
+		}
+
+		enableSharp = controllerIbp.GetStatus().EnableSharp
+	}
+
+	if partitionKey == nil && controllerIbp.GetConfig() != nil {
+		partitionKey = controllerIbp.GetConfig().Pkey
+	}
+
+	statusMessage := "InfiniBand Partition was found on Site"
+	if status == cdbm.InfiniBandPartitionStatusReady {
+		statusMessage += ", ready for use"
+	}
+
+	ibp, err := cdb.WithTxResult(ctx, mibp.dbSession, func(tx *cdb.Tx) (*cdbm.InfiniBandPartition, error) {
+		ibpDAO := cdbm.NewInfiniBandPartitionDAO(mibp.dbSession)
+
+		tenants, _, tenantErr := cdbm.NewTenantDAO(mibp.dbSession).GetAll(
+			ctx,
+			tx,
+			cdbm.TenantFilterInput{Orgs: []string{reportedIbp.Org}},
+			cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		if tenantErr != nil {
+			return nil, fmt.Errorf("unable to create InfiniBand Partition found on Site: failed to retrieve Tenant by organization, DB error: %w", tenantErr)
+		}
+
+		if len(tenants) == 0 {
+			logger.Warn().Msgf("unable to create InfiniBand Partition found on Site: no Tenants were found for org: %s", reportedIbp.Org)
+
+			return nil, nil
+		}
+
+		tenant := &tenants[0]
+
+		_, tenantSiteErr := cdbm.NewTenantSiteDAO(mibp.dbSession).GetByTenantIDAndSiteID(ctx, tx, tenant.ID, site.ID, nil)
+		if tenantSiteErr != nil {
+			if errors.Is(tenantSiteErr, cdb.ErrDoesNotExist) {
+				logger.Warn().Msgf("unable to create InfiniBand Partition found on Site: Tenant for org %s does not have access to Site", reportedIbp.Org)
+
+				return nil, nil
+			}
+
+			return nil, fmt.Errorf("unable to create InfiniBand Partition found on Site: failed to validate Tenant access to Site, DB error: %w", tenantSiteErr)
+		}
+
+		lockErr := tx.TryAcquireAdvisoryLock(
+			ctx,
+			cdb.GetAdvisoryLockIDFromString(
+				fmt.Sprintf("infiniband-partition-recovery-%s-%s", tenant.ID, site.ID),
+			),
+			nil,
+		)
+		if lockErr != nil {
+			return nil, fmt.Errorf("unable to create InfiniBand Partition found on Site: failed to acquire recovery lock, DB error: %w", lockErr)
+		}
+
+		matches, _, reloadErr := ibpDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.InfiniBandPartitionFilterInput{
+				InfiniBandPartitionIDs: []uuid.UUID{controllerIbpID},
+				IncludeDeleted:         true,
+			},
+			cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		if reloadErr != nil {
+			return nil, fmt.Errorf("unable to create InfiniBand Partition found on Site: failed to retrieve Partition by ID, DB error: %w", reloadErr)
+		}
+
+		var existingIbp *cdbm.InfiniBandPartition
+		if len(matches) > 0 {
+			existingIbp = &matches[0]
+			if existingIbp.SiteID != site.ID {
+				logger.Warn().Msg("unable to create InfiniBand Partition found on Site: Partition ID belongs to a different Site in REST cache")
+
+				return nil, nil
+			}
+
+			if existingIbp.TenantID != tenant.ID || existingIbp.Org != reportedIbp.Org {
+				logger.Warn().Msgf("unable to create InfiniBand Partition found on Site: tenant organization differs in REST cache and Site record %s", reportedIbp.Org)
+
+				return nil, nil
+			}
+
+			if existingIbp.Deleted == nil {
+				return existingIbp, nil
+			}
+
+			if site.IsTimeWithinStaleInventoryThreshold(*existingIbp.Deleted) {
+				logger.Info().Msgf("not undeleting InfiniBand Partition %s yet because it was deleted more recently than the inventory interval", controllerIbpID)
+
+				return nil, nil
+			}
+
+			if reportedIbp.Name == existingIbp.ID.String() {
+				reportedIbp.Name = existingIbp.Name
+			}
+		}
+
+		baseName := reportedIbp.Name
+		baseNameRunes := []rune(baseName)
+
+		if len(baseNameRunes) < cdbm.InfiniBandPartitionNameMinLength ||
+			len(baseNameRunes) > cdbm.InfiniBandPartitionNameMaxLength ||
+			strings.TrimSpace(baseName) != baseName {
+			baseName = "recovered-" + controllerIbpID.String()[:8]
+		}
+
+		reportedIbp.Name = baseName
+		for attempt := 1; ; attempt++ {
+			nameConflicts, _, nameErr := ibpDAO.GetAll(
+				ctx,
+				tx,
+				cdbm.InfiniBandPartitionFilterInput{
+					Names:     []string{reportedIbp.Name},
+					SiteIDs:   []uuid.UUID{site.ID},
+					TenantIDs: []uuid.UUID{tenant.ID},
+				},
+				cdbp.PageInput{Limit: cwutil.GetPtr(1)},
+				nil,
+			)
+			if nameErr != nil {
+				return nil, fmt.Errorf("unable to create InfiniBand Partition found on Site: failed to retrieve Partition by name, DB error: %w", nameErr)
+			}
+
+			if len(nameConflicts) == 0 {
+				break
+			}
+
+			suffix := "-recovered-" + controllerIbpID.String()[:8]
+			if attempt > 1 {
+				suffix = fmt.Sprintf("%s-%d", suffix, attempt)
+			}
+
+			maxBaseRunes := cdbm.InfiniBandPartitionNameMaxLength - len([]rune(suffix))
+			nameRunes := []rune(baseName)
+
+			if len(nameRunes) > maxBaseRunes {
+				nameRunes = nameRunes[:maxBaseRunes]
+			}
+
+			reportedIbp.Name = string(nameRunes) + suffix
+		}
+
+		if existingIbp != nil {
+			restored, clearErr := ibpDAO.Clear(ctx, tx, cdbm.InfiniBandPartitionClearInput{
+				InfiniBandPartitionID: existingIbp.ID,
+				Description:           reportedIbp.Description == nil,
+				PartitionKey:          partitionKey == nil,
+				PartitionName:         partitionName == nil,
+				ServiceLevel:          serviceLevel == nil,
+				RateLimit:             rateLimit == nil,
+				Mtu:                   mtu == nil,
+				EnableSharp:           enableSharp == nil,
+				Labels:                reportedIbp.Labels == nil,
+				Deleted:               true,
+			})
+			if clearErr != nil {
+				return nil, fmt.Errorf("unable to create InfiniBand Partition found on Site: failed to clear soft-delete timestamp, DB error: %w", clearErr)
+			}
+
+			restored, updateErr := ibpDAO.Update(ctx, tx, cdbm.InfiniBandPartitionUpdateInput{
+				InfiniBandPartitionID:   restored.ID,
+				Name:                    &reportedIbp.Name,
+				Description:             reportedIbp.Description,
+				ControllerIBPartitionID: &controllerIbpID,
+				PartitionKey:            partitionKey,
+				PartitionName:           partitionName,
+				ServiceLevel:            serviceLevel,
+				RateLimit:               rateLimit,
+				Mtu:                     mtu,
+				EnableSharp:             enableSharp,
+				Labels:                  map[string]string(reportedIbp.Labels),
+				Status:                  &status,
+				IsMissingOnSite:         cwutil.GetPtr(false),
+			})
+			if updateErr != nil {
+				return nil, fmt.Errorf("unable to create InfiniBand Partition found on Site: failed to restore Partition data, DB error: %w", updateErr)
+			}
+
+			_, statusErr := cdbm.NewStatusDetailDAO(mibp.dbSession).Create(
+				ctx,
+				tx,
+				cdbm.StatusDetailCreateInput{
+					EntityID: restored.ID.String(),
+					Status:   string(status),
+					Message:  &statusMessage,
+				},
+			)
+			if statusErr != nil {
+				return nil, fmt.Errorf("unable to create InfiniBand Partition found on Site: failed to create Status Detail after undelete, DB error: %w", statusErr)
+			}
+
+			return restored, nil
+		}
+
+		created, createErr := ibpDAO.Create(ctx, tx, cdbm.InfiniBandPartitionCreateInput{
+			InfiniBandPartitionID:   &controllerIbpID,
+			Name:                    reportedIbp.Name,
+			Description:             reportedIbp.Description,
+			TenantOrg:               reportedIbp.Org,
+			SiteID:                  site.ID,
+			TenantID:                tenant.ID,
+			ControllerIBPartitionID: &controllerIbpID,
+			PartitionKey:            partitionKey,
+			PartitionName:           partitionName,
+			ServiceLevel:            serviceLevel,
+			RateLimit:               rateLimit,
+			Mtu:                     mtu,
+			EnableSharp:             enableSharp,
+			Labels:                  map[string]string(reportedIbp.Labels),
+			Status:                  status,
+			CreatedBy:               tenant.CreatedBy,
+		})
+		if createErr != nil {
+			return nil, fmt.Errorf("unable to create InfiniBand Partition found on Site: failed to create Partition, DB error: %w", createErr)
+		}
+
+		_, statusErr := cdbm.NewStatusDetailDAO(mibp.dbSession).Create(
+			ctx,
+			tx,
+			cdbm.StatusDetailCreateInput{
+				EntityID: created.ID.String(),
+				Status:   string(status),
+				Message:  &statusMessage,
+			},
+		)
+		if statusErr != nil {
+			return nil, fmt.Errorf("unable to create InfiniBand Partition found on Site: failed to create Status Detail, DB error: %w", statusErr)
+		}
+
+		return created, nil
+	})
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to recover InfiniBand Partition from Site inventory")
+
+		return nil
+	}
+
+	return ibp
 }
 
 // updateIBPStatusInDB is helper function to write InfiniBandPartition updates to DB

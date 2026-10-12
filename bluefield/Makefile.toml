@@ -569,7 +569,7 @@ dependencies = ["setup-dpu-agent-deb-local"]
 
 [tasks.build-otel-dpu-deb-local]
 category = "Build"
-description = "Build the otel-dpu.deb package locally for otel without dpu agent"
+description = "Build the otel-dpu.deb package locally without building the dpu agent or dhcp server"
 workspace = false
 script = '''
     export vers=${DPU_AGENT_PKG_VERSION}
@@ -592,13 +592,17 @@ script = '''
     cp misc/site-controller/otel-agent.service "otel-dpu_${vers}_arm64/lib/systemd/system/"
     cp ${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/forge-dpu-otel-agent "otel-dpu_${vers}_arm64/usr/bin/otel-agent"
     cp otel/otel-agent-config.toml "otel-dpu_${vers}_arm64/etc/otelcol-contrib/otel-agent.toml"
-    cp "forge-dpu_${vers}_arm64/usr/bin/otelcol-contrib" "otel-dpu_${vers}_arm64/usr/bin/"
+    cp "${REPO_ROOT}/bluefield/otel/ocb-build/otelcol-contrib" "otel-dpu_${vers}_arm64/usr/bin/"
     cp -r misc/site-controller/DEBIAN "otel-dpu_${vers}_arm64/"
     sed -i "s/SED__DPU_AGENT_PKG_VERSION/${vers}/" otel-dpu_${vers}_arm64/DEBIAN/control
 
+    mkdir -p ${REPO_ROOT}/target/debs/
     dpkg-deb --build otel-dpu_${DPU_AGENT_PKG_VERSION}_arm64 ${REPO_ROOT}/target/debs/
 '''
-dependencies = ["build-forge-dpu-deb-local"]
+# Builds only the two binaries the otel-dpu package ships, not the dpu agent,
+# dhcp server or forge-dpu package. Run cleanup-custom-otelcol-build afterwards
+# to remove the ocb-build output.
+dependencies = ["build-otelcol", "build-dpu-otel-agent"]
 
 [tasks.build-forge-dpu-deb]
 category = "Build"

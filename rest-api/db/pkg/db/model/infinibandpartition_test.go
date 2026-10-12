@@ -788,6 +788,39 @@ func TestInfiniBandPartition_GetAll(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("include deleted returns a soft-deleted partition", func(t *testing.T) {
+		ibpDAO := NewInfiniBandPartitionDAO(dbSession)
+		deletedID := InfiniBandPartitions[0].ID
+		err := ibpDAO.Delete(ctx, nil, deletedID)
+		require.NoError(t, err)
+
+		active, _, err := ibpDAO.GetAll(
+			ctx,
+			nil,
+			InfiniBandPartitionFilterInput{InfiniBandPartitionIDs: []uuid.UUID{deletedID}},
+			paginator.PageInput{},
+			nil,
+		)
+		require.NoError(t, err)
+		assert.Empty(t, active)
+
+		withDeleted, _, err := ibpDAO.GetAll(
+			ctx,
+			nil,
+			InfiniBandPartitionFilterInput{
+				InfiniBandPartitionIDs: []uuid.UUID{deletedID},
+				IncludeDeleted:         true,
+			},
+			paginator.PageInput{},
+			nil,
+		)
+		require.NoError(t, err)
+
+		if assert.Len(t, withDeleted, 1) {
+			assert.NotNil(t, withDeleted[0].Deleted)
+		}
+	})
 }
 
 func TestInfiniBandPartitionSQLDAO_Create(t *testing.T) {
@@ -1222,4 +1255,20 @@ func TestInfiniBandPartitionSQLDAO_Clear(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("can clear soft-delete timestamp", func(t *testing.T) {
+		ibpDAO := NewInfiniBandPartitionDAO(dbSession)
+		err := ibpDAO.Delete(ctx, nil, pt.ID)
+		require.NoError(t, err)
+
+		restored, err := ibpDAO.Clear(ctx, nil, InfiniBandPartitionClearInput{
+			InfiniBandPartitionID: pt.ID,
+			Deleted:               true,
+		})
+		require.NoError(t, err)
+
+		if assert.NotNil(t, restored) {
+			assert.Nil(t, restored.Deleted)
+		}
+	})
 }

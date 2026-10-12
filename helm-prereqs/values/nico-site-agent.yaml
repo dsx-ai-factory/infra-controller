@@ -45,8 +45,6 @@ certificate:
     - "spiffe://nico.local/nico-system/sa/elektra-site-agent"
 
 envConfig:
-  ESA_PORT: "8080"
-  METRICS_PORT: "2112"
   DEV_MODE: "true"
   ENABLE_DEBUG: "true"
   ENABLE_TLS: "true"

@@ -50,11 +50,17 @@ impl From<ModelDhcpConfig> for proto::DhcpConfig {
                 .iter()
                 .map(|ip| ip.to_string())
                 .collect(),
-            carbide_provisioning_server_ipv4: c.carbide_provisioning_server_ipv4.to_string(),
+            carbide_provisioning_server_ipv4: c
+                .carbide_provisioning_server_ipv4
+                .map(|ip| ip.to_string())
+                .unwrap_or_default(),
             carbide_provisioning_server_ipv6: c
                 .carbide_provisioning_server_ipv6
                 .map(|address| address.to_string()),
-            carbide_dhcp_server: c.carbide_dhcp_server.to_string(),
+            carbide_dhcp_server: c
+                .carbide_dhcp_server
+                .map(|ip| ip.to_string())
+                .unwrap_or_default(),
             carbide_nameservers_v6: c
                 .carbide_nameservers_v6
                 .iter()
@@ -69,6 +75,7 @@ impl From<ModelDhcpConfig> for proto::DhcpConfig {
             dhcpv6_preferred_lifetime_secs: c.dhcpv6_preferred_lifetime_secs,
             dhcpv6_valid_lifetime_secs: c.dhcpv6_valid_lifetime_secs,
             dhcpv6_server_preference: c.dhcpv6_server_preference.map(u32::from),
+            dhcpv6_server_id: c.dhcpv6_server_id.map(Into::into),
         }
     }
 }
@@ -178,9 +185,10 @@ pub(super) async fn stop_server(grpc_addr: &str) -> eyre::Result<()> {
 /// Pushes new DHCP config to the dhcp-server control service and triggers an
 /// immediate reload in a single RPC.
 ///
-/// The server only restarts the DHCP process if the incoming config differs
-/// from what is already active, so this function is safe to call on every
-/// agent tick.
+/// Matching configuration and interfaces do not restart a running server, so
+/// this function is safe to call on every agent tick. Success acknowledges
+/// application, not listener readiness; an empty interface list only stages
+/// configuration for a later request that includes interfaces.
 pub(super) async fn update_and_reload(
     grpc_addr: &str,
     dhcp_config: ModelDhcpConfig,
@@ -213,6 +221,35 @@ mod tests {
     use carbide_test_support::value_scenarios;
 
     use super::*;
+
+    // The control request must preserve absent IPv4 fields and keep the DHCP
+    // server address separate from the provisioning address when both exist.
+    #[test]
+    fn control_request_preserves_ipv4_presence_and_identity() {
+        let id = carbide_rpc_utils::dhcp::DhcpV6ServerId::from_remote_id("dpu-remote-id").unwrap();
+        value_scenarios!(run = |config| {
+                let wire = proto::DhcpConfig::from(config);
+                (
+                    wire.carbide_dhcp_server,
+                    wire.carbide_provisioning_server_ipv4,
+                    wire.dhcpv6_server_id,
+                )
+            };
+            "IPv6-only configuration" {
+                ModelDhcpConfig {
+                    dhcpv6_server_id: Some(id.clone()),
+                    ..Default::default()
+                } => (String::new(), String::new(), Some(id.as_bytes().to_vec())),
+            }
+            "complete IPv4 configuration" {
+                ModelDhcpConfig {
+                    carbide_dhcp_server: Some("192.0.2.1".parse().unwrap()),
+                    carbide_provisioning_server_ipv4: Some("192.0.2.2".parse().unwrap()),
+                    ..Default::default()
+                } => ("192.0.2.1".to_string(), "192.0.2.2".to_string(), None),
+            }
+        );
+    }
 
     #[test]
     fn provisioning_ipv6_preserves_presence_in_control_request() {

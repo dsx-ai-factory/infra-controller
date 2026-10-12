@@ -4,15 +4,17 @@
 use carbide_instrument::red;
 use carbide_secrets::credentials::Credentials;
 use model::component_manager::{FirmwareState, PowerAction, PowerShelfComponent};
+use model::machine::PowerState;
 use tonic::transport::Channel;
 use trace_propagation::TraceInjectService;
 use tracing::instrument;
 
+use crate::component_common::ComponentPowerStateResult;
 use crate::config::BackendTlsConfig;
 use crate::error::ComponentManagerError;
 use crate::power_shelf_manager::{
     PowerShelfComponentResult, PowerShelfEndpoint, PowerShelfFirmwareUpdateStatus,
-    PowerShelfFirmwareVersions, PowerShelfManager, PowerShelfPowerStateResult, PowerShelfVendor,
+    PowerShelfFirmwareVersions, PowerShelfManager, PowerShelfVendor,
 };
 use crate::proto::psm;
 use crate::types::parse_mac;
@@ -401,7 +403,7 @@ impl PowerShelfManager for PsmPowerShelfBackend {
     async fn get_power_state(
         &self,
         endpoints: &[PowerShelfEndpoint],
-    ) -> Result<Vec<PowerShelfPowerStateResult>, ComponentManagerError> {
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
         register_with_psm(&mut self.client.clone(), endpoints).await?;
 
         let request = psm::PowershelfRequest {
@@ -423,19 +425,21 @@ impl PowerShelfManager for PsmPowerShelfBackend {
                     .as_ref()
                     .is_some_and(|pmc| pmc.mac_address == ep.pmc_mac.to_string())
             }) else {
-                results.push(PowerShelfPowerStateResult {
-                    pmc_mac: ep.pmc_mac,
-                    power_state: None,
-                    error: Some("power shelf not found in PSM inventory".into()),
+                results.push(ComponentPowerStateResult {
+                    mac_address: ep.pmc_mac,
+                    power_state: Err("power shelf not found in PSM inventory".into()),
                 });
                 continue;
             };
 
             let powered_on = shelf.psus.iter().any(|psu| psu.power_state);
-            results.push(PowerShelfPowerStateResult {
-                pmc_mac: ep.pmc_mac,
-                power_state: Some(if powered_on { "on" } else { "off" }.into()),
-                error: None,
+            results.push(ComponentPowerStateResult {
+                mac_address: ep.pmc_mac,
+                power_state: Ok(Some(if powered_on {
+                    PowerState::On
+                } else {
+                    PowerState::Off
+                })),
             });
         }
 

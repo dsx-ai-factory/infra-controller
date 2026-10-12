@@ -4,10 +4,12 @@
 package flowgrpc
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
 
+	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	"github.com/prometheus/client_golang/prometheus"
@@ -79,7 +81,7 @@ func (flowgrpc *API) Start() {
 			break
 		}
 		if time.Since(start) >= client.FlowGrpcConnectionRetryTimeout {
-			panic(fmt.Errorf("Flow gRPC: failed to create gRPC client within %s: %w", client.FlowGrpcConnectionRetryTimeout, err))
+			panic(fmt.Errorf("flow gRPC: failed to create gRPC client within %s: %w", client.FlowGrpcConnectionRetryTimeout, err))
 		}
 		ManagerAccess.Data.EB.Log.Error().Err(err).Dur("RetryIn", backoff).Msg("Flow gRPC: failed to create gRPC client, retrying")
 		time.Sleep(backoff)
@@ -100,6 +102,32 @@ func (flowgrpc *API) GetState() []string {
 	strs = append(strs, fmt.Sprintln(" Flow GRPC Last Error:", state.Err.Load()))
 
 	return strs
+}
+
+// CheckConnection calls Flow's Version RPC and records whether it succeeded in the Flow
+// gRPC state. Each Flow RPC also records its result, but readiness needs the state kept
+// current while no workflow calls Flow.
+func (flowgrpc *API) CheckConnection(ctx context.Context) {
+	grpcServiceClient, err := ManagerAccess.Data.EB.Managers.FlowGrpc.Client.GrpcServiceClient()
+	if err == nil {
+		_, err = grpcServiceClient.Version(ctx, &flowv1.VersionRequest{})
+	}
+
+	state := ManagerAccess.Data.EB.Managers.FlowGrpc.State
+	if err != nil {
+		state.Err.Store(err.Error())
+		// Logs every change to Unhealthy, including from NotKnown when Flow was never
+		// reachable. The probes and the status page leave the error out.
+		previous := state.HealthStatus.Swap(uint64(computils.CompUnhealthy))
+		if computils.CompStatus(previous) != computils.CompUnhealthy {
+			ManagerAccess.Data.EB.Log.Warn().Err(err).Msg("Flow gRPC: health check failed")
+		}
+		return
+	}
+	previous := state.HealthStatus.Swap(uint64(computils.CompHealthy))
+	if computils.CompStatus(previous) != computils.CompHealthy {
+		ManagerAccess.Data.EB.Log.Info().Msg("Flow gRPC: health check passed")
+	}
 }
 
 // GetGrpcClientVersion returns the current version of the Flow gRPC client

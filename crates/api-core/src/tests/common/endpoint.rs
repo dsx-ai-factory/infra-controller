@@ -119,6 +119,7 @@ fn build_exploration_report(
             boot_order: None,
             bios_version: None,
             serial_console_ssh_port: None,
+            processors: None,
         }],
         chassis: vec![Chassis {
             model: Some(model.to_string()),
@@ -149,10 +150,7 @@ fn build_exploration_report(
         lockdown_status: None,
         power_shelf_id: None,
         switch_id: None,
-        compute_tray_index: None,
-        physical_slot_number: None,
-        revision_id: None,
-        topology_id: None,
         remediation_error: None,
+        ..Default::default()
     }
 }

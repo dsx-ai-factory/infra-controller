@@ -1,6 +1,12 @@
 {{- if .Values.externalService.enabled }}
 {{- $replicas := int .Values.replicas }}
 {{- range $i := until $replicas }}
+{{- $perPod := $.Values.externalService.perPodAnnotations }}
+{{- $podAnnotations := dict }}
+{{- if and $perPod (gt (len $perPod) $i) }}
+{{- $podAnnotations = index $perPod $i }}
+{{- end }}
+{{- $annotations := include "nico.sharedIpAnnotations" (dict "service" $.Values.externalService "group" (printf "%s-instance-%d" (include "nico-dns.name" $) $i) "annotations" $podAnnotations) | fromYaml }}
 ---
 apiVersion: v1
 kind: Service
@@ -9,15 +15,10 @@ metadata:
   namespace: {{ include "nico-dns.namespace" $ }}
   labels:
     app.kubernetes.io/part-of: {{ include "nico-dns.name" $ }}-instance-{{ $i }}
+  {{- with $annotations }}
   annotations:
-    metallb.universe.tf/allow-shared-ip: "{{ include "nico-dns.name" $ }}-instance-{{ $i }}"
-    {{- $annotations := "" }}
-    {{- if and $.Values.externalService.perPodAnnotations (gt (len $.Values.externalService.perPodAnnotations) $i) }}
-    {{- $annotations = index $.Values.externalService.perPodAnnotations $i }}
-    {{- end }}
-    {{- with $annotations }}
     {{- toYaml . | nindent 4 }}
-    {{- end }}
+  {{- end }}
 spec:
   type: {{ $.Values.externalService.type | default "LoadBalancer" }}
   {{- with $.Values.externalService.ipFamilyPolicy }}
@@ -26,6 +27,9 @@ spec:
   {{- with $.Values.externalService.ipFamilies }}
   ipFamilies:
     {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $.Values.externalService.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
   {{- end }}
   selector:
     app.kubernetes.io/name: {{ include "nico-dns.name" $ }}
@@ -43,15 +47,10 @@ metadata:
   namespace: {{ include "nico-dns.namespace" $ }}
   labels:
     app.kubernetes.io/part-of: {{ include "nico-dns.name" $ }}-instance-{{ $i }}
+  {{- with $annotations }}
   annotations:
-    metallb.universe.tf/allow-shared-ip: "{{ include "nico-dns.name" $ }}-instance-{{ $i }}"
-    {{- $annotations := "" }}
-    {{- if and $.Values.externalService.perPodAnnotations (gt (len $.Values.externalService.perPodAnnotations) $i) }}
-    {{- $annotations = index $.Values.externalService.perPodAnnotations $i }}
-    {{- end }}
-    {{- with $annotations }}
     {{- toYaml . | nindent 4 }}
-    {{- end }}
+  {{- end }}
 spec:
   type: {{ $.Values.externalService.type | default "LoadBalancer" }}
   {{- with $.Values.externalService.ipFamilyPolicy }}
@@ -60,6 +59,9 @@ spec:
   {{- with $.Values.externalService.ipFamilies }}
   ipFamilies:
     {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $.Values.externalService.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
   {{- end }}
   selector:
     app.kubernetes.io/name: {{ include "nico-dns.name" $ }}

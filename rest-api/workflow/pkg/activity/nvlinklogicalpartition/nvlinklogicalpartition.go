@@ -100,7 +100,7 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 		nvllp, ok := existingNVLinkLogicalPartitionIDMap[controllerNvllp.Id.Value]
 		if !ok {
 			// TODO: Since Site is the source of truth, we must auto-create any Partitions that are in the Site inventory but not in the DB
-			slogger.Error().Str("NVLink Logical Partition ID", controllerNvllp.Id.Value).Msg("NVLink Logical Partition does not have a record in DB, possibly created directly on Site")
+			slogger.Error().Msg("NVLink Logical Partition does not have a record in DB, possibly created directly on Site")
 			continue
 		}
 

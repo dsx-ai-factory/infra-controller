@@ -232,6 +232,8 @@ upstream_timeout = "90s"
 - `breaker`: a table of settings for the class's circuit breaker at each BMC,
   over those of `[admission.breaker]`; see
   [`admission.breaker`](#admissionbreaker). Optional.
+- `slo`: the class's latency target at each BMC; see
+  [`admission.slo`](#admissionslo). Optional.
 
 The budget covers looking up the BMC's credentials in nico-api and any wait
 for a slot at the BMC (see [`admission`](#admission)), then runs from
@@ -287,6 +289,8 @@ max_in_flight = 2
 - `breaker`: the settings of every class's circuit breaker at each BMC; see
   [`admission.breaker`](#admissionbreaker). Optional; without it, only
   classes with a `breaker` table of their own have a breaker.
+- `slo`: how the slots of classes without a latency target follow the
+  classes with one; see [`admission.slo`](#admissionslo). Optional.
 
 An `[admission]` table with a key not listed here stops the proxy from
 starting.
@@ -416,6 +420,92 @@ them, and its next request finds them closed. Each replica has breakers of its
 own. The proxy counts each opening in
 `carbide_bmc_proxy_breaker_opened_total`, by `class`, and logs it with the
 BMC's address.
+
+#### `admission.slo`
+
+A class can set a latency target, so that the proxy holds back the other
+classes at a BMC while that class's requests there are slow. Here, DPS's
+power requests should see the BMC's answer within 2 seconds of reaching the
+proxy, nine times in ten:
+
+```toml
+[admission]
+max_in_flight_per_bmc = 4
+
+[admission.slo]
+window = 20
+increase = 1
+decrease = 0.5
+min_in_flight = 1
+reset_after = "1m"
+
+[[class]]
+name = "dps"
+principals = ["spiffe-service-id/nv-dps"]
+match = ["/redfish/v1/**"]
+priority = 1
+
+[class.slo]
+latency = "2s"
+percentile = 0.9
+```
+
+A class's `slo` table has:
+
+- `latency`: how long the class's requests may take, from reaching the proxy
+  to the BMC's response headers, as a duration string above zero and at most
+  the class's `upstream_timeout`. Required.
+- `percentile`: the fraction of the class's requests that must meet `latency`,
+  above 0 and at most 1. Optional, 0.9 by default.
+
+`[admission.slo]` tunes how the proxy follows the targets, and has:
+
+- `window`: how many of a class's requests to a BMC the proxy weighs at once,
+  from 1 to 1024. Optional, 20 by default.
+- `increase`: how many slots a window that meets its target gives back, at
+  least 1. Optional, 1 by default.
+- `decrease`: the fraction of their slots the other classes keep after a
+  window that misses its target, above 0 and below 1. Optional, 0.5 by
+  default.
+- `min_in_flight`: the fewest slots a cut leaves the other classes, from 1 to
+  `max_in_flight_per_bmc`. Optional, 1 by default.
+- `reset_after`: how long a BMC's classes with a target may go without a
+  request counted, and none waiting on the BMC, before the other classes get
+  its whole limit back, as a duration string above zero and at most an hour.
+  Optional, 1 minute by default.
+
+A class with a target needs `max_in_flight_per_bmc`, the limit the targets
+share out; without it, or with a key not listed here or a value out of bounds,
+the proxy does not start.
+
+At each BMC, the classes without a target share one pool of slots, which
+starts as all of `max_in_flight_per_bmc`. Each time a class with a target has
+had `window` requests end there, the proxy compares their `percentile`
+latency, by nearest rank, with `latency`: a miss cuts the pool to `decrease`
+of what it was, rounded down, but no smaller than `min_in_flight`, and a
+target met grows it by `increase`, up to the whole limit. A cut takes no slot
+from a request already holding one, and the queues of the classes without a
+target hold `max_queued` beyond the slots still free in the pool, refusing the
+next request at once. Once no class with a target has had a request counted at
+the BMC for `reset_after`, and none is waiting on the BMC, the pool is whole
+again and partly filled windows start over. The classes with a target are
+never held back, so give them a `priority` above the others for their requests
+to go first as slots free.
+
+A request's latency runs from its arrival at the proxy: it includes finding
+the BMC's address, reading the caller's request body, looking up the BMC's
+credentials, and waiting for a slot. It ends at the BMC's response headers,
+after any replay with fresh credentials, or, for a request that gets none,
+when it ends: one that timed out at the BMC, waited out its budget for a slot,
+or whose caller went away counts as taking that long. A request the proxy
+refuses without queueing it, one that could not reach the BMC, and one the
+proxy fails on its own do not count.
+
+Each BMC follows its own targets, in each replica. A BMC left without requests
+for a minute or more starts over with the whole pool, whatever `reset_after`
+is. `[admission.slo]` without a class target changes nothing, though its
+settings must still be in bounds. The proxy counts each miss in
+`carbide_bmc_proxy_slo_missed_total`, by `class`.
 
 ## Example Request
 

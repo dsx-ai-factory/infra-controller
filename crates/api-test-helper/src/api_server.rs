@@ -202,7 +202,7 @@ pub async fn start(
 
         [site_explorer]
         enabled = true
-        run_interval = "1s"
+        run_interval = "100ms"
         concurrent_explorations = 30
         explorations_per_run = 90
         create_machines = true
@@ -217,8 +217,8 @@ pub async fn start(
         dpu_up_threshold = "31449600s"
 
         [machine_state_controller.controller]
-        iteration_time = "1s"
-        processor_dispatch_interval = "500ms"
+        iteration_time = "100ms"
+        processor_dispatch_interval = "50ms"
         max_object_handling_time = "180s"
         max_concurrency = 10
         metric_emission_interval = "1s"
@@ -228,8 +228,8 @@ pub async fn start(
         network_segment_drain_time = "60s"
 
         [network_segment_state_controller.controller]
-        iteration_time = "2s"
-        processor_dispatch_interval = "500ms"
+        iteration_time = "200ms"
+        processor_dispatch_interval = "50ms"
         max_object_handling_time = "180s"
         max_concurrency = 10
         metric_emission_interval = "1s"

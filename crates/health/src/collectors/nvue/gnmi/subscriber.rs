@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+mod snapshot;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -30,9 +32,10 @@ use tokio::time::{Instant, Sleep};
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
+use self::snapshot::{Reconciliation, ReconciliationProcessor};
 use super::client::{
     GnmiClient, GnmiClientConfig, GnmiSubscription, build_extended_subscribe_request,
-    build_on_change_subscribe_request, build_sample_subscribe_request,
+    build_on_change_subscribe_request, build_sample_subscribe_request, build_snapshot_request,
     nvue_interface_subscribe_paths, nvue_leak_sensor_subscribe_path, nvue_subscribe_paths,
     system_events_prefix, system_events_subscribe_path,
 };
@@ -222,6 +225,7 @@ struct GnmiStreamConfig {
     client_provider: GnmiClientProvider,
     paths: Vec<proto::Path>,
     sample_interval_nanos: u64,
+    reconcile_interval: Duration,
 }
 
 fn request_path_names(paths: &[proto::Path]) -> Vec<String> {
@@ -247,12 +251,14 @@ struct GnmiSampleStreamState {
 }
 
 struct GnmiOnChangeStreamState {
+    reconcile_interval: Duration,
     client_provider: GnmiClientProvider,
     stream_metrics: GnmiStreamMetrics,
     processor: GnmiOnChangeProcessor,
 }
 
 struct ExtendedGnmiStreamState {
+    reconcile_interval: Duration,
     client_provider: GnmiClientProvider,
     request: proto::SubscribeRequest,
     stream_metrics: GnmiStreamMetrics,
@@ -718,6 +724,8 @@ fn build_gnmi_collector_plan(
     data_sink: Option<Arc<dyn DataSink>>,
     switch_id: String,
 ) -> Result<GnmiCollectorPlan, HealthError> {
+    gnmi_config.validate().map_err(HealthError::GnmiError)?;
+
     if let Some(paths) = &gnmi_config.paths.interface_paths {
         for (index, path) in paths.iter().enumerate() {
             if !supports_interface_path(path) {
@@ -734,6 +742,7 @@ fn build_gnmi_collector_plan(
     let endpoint_key = endpoint.key();
     let sample_event_context = EventContext::from_endpoint(endpoint, NVUE_GNMI_SAMPLE_STREAM_ID);
     let extended_context = EventContext::from_endpoint(endpoint, EXTENDED_GNMI_STREAM_ID);
+    let reconcile_interval = gnmi_config.reconcile_interval.unwrap_or_default();
 
     let extended_event_context =
         (!gnmi_config.additional_subscriptions.is_empty()).then(|| extended_context.clone());
@@ -747,17 +756,19 @@ fn build_gnmi_collector_plan(
         client_provider: client_provider.clone(),
         paths: nvue_subscribe_paths(&gnmi_config.paths),
         sample_interval_nanos: gnmi_config.sample_interval.as_nanos() as u64,
+        reconcile_interval,
     };
 
     let sample = GnmiSampleStreamState {
         config: sample_config,
         stream_metrics: sample_stream_metrics,
-        processor: GnmiSampleProcessor {
-            data_sink: data_sink.clone(),
-            event_context: sample_event_context.clone(),
-            switch_id: switch_id.clone(),
-            diagnostic_stream: None,
-        },
+        processor: GnmiSampleProcessor::new(
+            data_sink.clone(),
+            sample_event_context.clone(),
+            switch_id.clone(),
+            None,
+            !reconcile_interval.is_zero(),
+        ),
     };
 
     // Keep selected paths on their own stream so a rejected leaf does not
@@ -774,14 +785,16 @@ fn build_gnmi_collector_plan(
                 client_provider: client_provider.clone(),
                 paths: nvue_interface_subscribe_paths(&gnmi_config.paths),
                 sample_interval_nanos: gnmi_config.sample_interval.as_nanos() as u64,
+                reconcile_interval,
             },
             stream_metrics,
-            processor: GnmiSampleProcessor {
-                data_sink: data_sink.clone(),
-                event_context: sample_event_context.clone(),
-                switch_id: switch_id.clone(),
-                diagnostic_stream: Some(INTERFACE_STREAM_NAME),
-            },
+            processor: GnmiSampleProcessor::new(
+                data_sink.clone(),
+                sample_event_context.clone(),
+                switch_id.clone(),
+                Some(INTERFACE_STREAM_NAME),
+                !reconcile_interval.is_zero(),
+            ),
         })
     } else {
         None
@@ -799,14 +812,16 @@ fn build_gnmi_collector_plan(
                 client_provider: client_provider.clone(),
                 paths: vec![nvue_leak_sensor_subscribe_path()],
                 sample_interval_nanos: gnmi_config.sample_interval.as_nanos() as u64,
+                reconcile_interval,
             },
             stream_metrics,
-            processor: GnmiSampleProcessor {
-                data_sink: data_sink.clone(),
-                event_context: sample_event_context.clone(),
-                switch_id: switch_id.clone(),
-                diagnostic_stream: Some(LEAK_SENSOR_STREAM_NAME),
-            },
+            processor: GnmiSampleProcessor::new(
+                data_sink.clone(),
+                sample_event_context.clone(),
+                switch_id.clone(),
+                Some(LEAK_SENSOR_STREAM_NAME),
+                !reconcile_interval.is_zero(),
+            ),
         })
     } else {
         None
@@ -821,6 +836,7 @@ fn build_gnmi_collector_plan(
         labels.insert("subscription".to_string(), subscription.name.clone());
 
         extended.push(ExtendedGnmiStreamState {
+            reconcile_interval,
             client_provider: client_provider.clone(),
             request: build_extended_subscribe_request(subscription)?,
             stream_metrics: GnmiStreamMetrics::new(registry, prefix, "_extended", labels)?,
@@ -854,6 +870,7 @@ fn build_gnmi_collector_plan(
         on_change_event_context = Some(event_context.clone());
 
         Some(GnmiOnChangeStreamState {
+            reconcile_interval,
             client_provider,
             stream_metrics,
             processor: GnmiOnChangeProcessor::new(
@@ -974,6 +991,7 @@ pub(crate) fn spawn_gnmi_collector(
                 state.client_provider,
                 state.stream_metrics,
                 state.processor,
+                state.reconcile_interval,
             ))
         });
 
@@ -1020,6 +1038,7 @@ pub(crate) fn spawn_gnmi_collector(
 
 async fn gnmi_extended_task(cancel_token: CancellationToken, mut state: ExtendedGnmiStreamState) {
     let subscription_name = state.processor.subscription_name.clone();
+    let reconciliation = state.processor.reconciliation.clone();
 
     run_subscription(
         &cancel_token,
@@ -1031,6 +1050,12 @@ async fn gnmi_extended_task(cancel_token: CancellationToken, mut state: Extended
             subscription: Some(&subscription_name),
             paths: None,
         },
+        Some(Reconciliation {
+            processor: ReconciliationProcessor::Metrics(&reconciliation),
+            interval: state.reconcile_interval,
+            request: build_snapshot_request(state.request.clone()),
+            stream_name: &subscription_name,
+        }),
         || subscribe_with_cached_credentials(&state.client_provider, state.request.clone()),
         |response| {
             state
@@ -1086,6 +1111,20 @@ async fn run_gnmi_sample_task<S, F, Fut>(
             subscription: None,
             paths,
         },
+        sample_processor
+            .reconciliation
+            .as_deref()
+            .map(|reconciliation| Reconciliation {
+                processor: ReconciliationProcessor::Metrics(reconciliation),
+                interval: config.reconcile_interval,
+                request: build_snapshot_request(build_sample_subscribe_request(
+                    &config.paths,
+                    config.sample_interval_nanos,
+                )),
+                stream_name: sample_processor
+                    .diagnostic_stream
+                    .unwrap_or(NVUE_GNMI_SAMPLE_STREAM_ID),
+            }),
         subscribe,
         |response| {
             sample_processor.process_subscribe_response(response, stream_metrics);
@@ -1100,6 +1139,7 @@ async fn gnmi_on_change_task(
     client_provider: GnmiClientProvider,
     stream_metrics: GnmiStreamMetrics,
     on_change_processor: GnmiOnChangeProcessor,
+    reconcile_interval: Duration,
 ) {
     let request =
         build_on_change_subscribe_request(&system_events_prefix(), &system_events_subscribe_path());
@@ -1114,6 +1154,12 @@ async fn gnmi_on_change_task(
             subscription: None,
             paths: None,
         },
+        Some(Reconciliation {
+            processor: ReconciliationProcessor::Events(&on_change_processor, &stream_metrics),
+            interval: reconcile_interval,
+            request: build_snapshot_request(request.clone()),
+            stream_name: &on_change_processor.collector_name,
+        }),
         || subscribe_with_cached_credentials(&client_provider, request.clone()),
         |response| {
             on_change_processor.process_subscribe_response(response, &stream_metrics);
@@ -1133,6 +1179,7 @@ async fn run_subscription<S, F, Fut, P>(
     client_provider: &GnmiClientProvider,
     stream_metrics: &GnmiStreamMetrics,
     diagnostics: StreamDiagnostics<'_>,
+    reconciliation: Option<Reconciliation<'_>>,
     mut subscribe: F,
     mut process_response: P,
 ) where
@@ -1213,7 +1260,7 @@ async fn run_subscription<S, F, Fut, P>(
                     "gNMI stream synchronized"
                 );
 
-                let result = consume_subscription(
+                let live = consume_subscription(
                     cancel_token,
                     &mut stream,
                     client_provider,
@@ -1228,8 +1275,13 @@ async fn run_subscription<S, F, Fut, P>(
 
                         Ok(())
                     },
-                )
-                .await;
+                );
+
+                let result = if let Some(reconciliation) = &reconciliation {
+                    reconciliation.consume(live, client_provider).await
+                } else {
+                    live.await
+                };
 
                 // Release readiness and the failed RPC before credential refresh can block.
                 drop(stream);
@@ -1594,9 +1646,9 @@ mod tests {
     }
 
     fn test_sample_processor(diagnostic_stream: Option<&'static str>) -> GnmiSampleProcessor {
-        GnmiSampleProcessor {
-            data_sink: None,
-            event_context: EventContext {
+        GnmiSampleProcessor::new(
+            None,
+            EventContext {
                 endpoint_key: "test-endpoint".to_string(),
                 addr: test_addr(),
                 collector_type: NVUE_GNMI_SAMPLE_STREAM_ID,
@@ -1604,9 +1656,10 @@ mod tests {
                 rack_id: None,
                 labels: Default::default(),
             },
-            switch_id: "switch-1".to_string(),
+            "switch-1".to_string(),
             diagnostic_stream,
-        }
+            false,
+        )
     }
 
     fn test_labels() -> HashMap<String, String> {
@@ -1881,6 +1934,7 @@ mod tests {
             client_provider,
             paths: Vec::new(),
             sample_interval_nanos: 1,
+            reconcile_interval: Duration::ZERO,
         };
 
         let metrics = test_gnmi_stream_metrics();
@@ -1976,6 +2030,7 @@ mod tests {
                     subscription: None,
                     paths: None,
                 },
+                None,
                 || {
                     attempts += 1;
 
@@ -2038,6 +2093,7 @@ mod tests {
                 client_provider: test_client_provider(provider.clone()),
                 paths: Vec::new(),
                 sample_interval_nanos: 1,
+                reconcile_interval: Duration::ZERO,
             };
 
             let (_, generation) = config
@@ -2162,6 +2218,7 @@ mod tests {
             client_provider,
             paths: Vec::new(),
             sample_interval_nanos: 1,
+            reconcile_interval: Duration::ZERO,
         };
 
         let primary_metrics = test_gnmi_stream_metrics();
@@ -2444,7 +2501,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unmapped_interface_path_is_rejected_before_subscription() {
+    async fn invalid_gnmi_config_is_rejected_before_subscription() {
         let endpoint = test_bmc_endpoint(
             "55:66:77:88:99:cc"
                 .parse()
@@ -2459,26 +2516,43 @@ mod tests {
                 .expect("collector registry"),
         );
 
-        let mut config = NvueGnmiConfig::default();
-        config.paths.interface_paths = Some(vec![vec!["state".into(), "not-mapped".into()]]);
+        let mut unmapped = NvueGnmiConfig::default();
+        unmapped.paths.interface_paths = Some(vec![vec!["state".into(), "not-mapped".into()]]);
 
-        let result = spawn_gnmi_collector(
-            &endpoint,
-            &config,
-            RecordingProvider::responding_with(ProviderResponse::Pending),
-            registry,
-            None,
-            None,
-        );
+        let overflow = NvueGnmiConfig {
+            reconcile_interval: Some(Duration::MAX),
+            ..Default::default()
+        };
 
-        let error = result.err().expect("unmapped path must fail").to_string();
+        for (config, expected) in [
+            (
+                unmapped,
+                [
+                    "interface_paths[0]",
+                    "/interfaces/interface/state/not-mapped",
+                ],
+            ),
+            (overflow, ["reconcile_interval", "366 days"]),
+        ] {
+            let provider = RecordingProvider::responding_with(ProviderResponse::Pending);
 
-        assert!(error.contains("interface_paths[0]"), "{error}");
+            let result = spawn_gnmi_collector(
+                &endpoint,
+                &config,
+                provider.clone(),
+                registry.clone(),
+                None,
+                None,
+            );
 
-        assert!(
-            error.contains("/interfaces/interface/state/not-mapped"),
-            "{error}"
-        );
+            let error = result.err().expect("invalid config must fail").to_string();
+
+            for message in expected {
+                assert!(error.contains(message), "{error}");
+            }
+
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        }
     }
 
     #[tokio::test]

@@ -17,6 +17,74 @@
 
 use super::*;
 
+#[test]
+fn ipv6_only_network_requires_dhcp_acceptance() {
+    for (scenario, loopback, dhcp_changed, expected_error) in [
+        (
+            "missing primary loopback",
+            "",
+            None,
+            Some("missing loopback IP"),
+        ),
+        ("IPv6-only accepted", "2001:db8::1", Some(true), None),
+        (
+            "IPv6-only already applied",
+            "2001:db8::1",
+            Some(false),
+            None,
+        ),
+        (
+            "IPv6 primary rejection",
+            "2001:db8::1",
+            None,
+            Some("IPv6-only network update is waiting for DHCP"),
+        ),
+        ("legacy independent update", "192.0.2.10", None, None),
+        (
+            "malformed primary",
+            "not-an-address",
+            Some(true),
+            Some("invalid primary loopback IP: not-an-address"),
+        ),
+    ] {
+        let mut config = comparison_network_config();
+        config.managed_host_config.as_mut().unwrap().loopback_ip = loopback.to_string();
+        let dhcp_result = dhcp_changed.ok_or_else(|| eyre::eyre!("injected DHCP rejection"));
+        let result = require_dhcp_before_ipv6_only_network_update(&config, &dhcp_result);
+        match expected_error {
+            Some(expected) => assert!(
+                format!("{:#}", result.expect_err(scenario)).contains(expected),
+                "{scenario}"
+            ),
+            None => assert!(result.is_ok(), "{scenario}: {result:?}"),
+        }
+    }
+}
+
+/// A failed stop must not prevent secondary-admin isolation, while DPUs that
+/// configure DHCP must still wait for acceptance before applying IPv6 networking.
+#[test]
+fn dhcp_stop_failure_does_not_block_secondary_admin_isolation() {
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::scenarios;
+
+    scenarios!(run = |(is_primary_dpu, use_admin_network)| {
+        let mut config = comparison_network_config();
+        config.managed_host_config.as_mut().unwrap().loopback_ip = "2001:db8::1".to_string();
+        config.is_primary_dpu = is_primary_dpu;
+        config.use_admin_network = use_admin_network;
+        let dhcp_result = Err(eyre::eyre!("injected DHCP operation failure"));
+
+        require_dhcp_before_ipv6_only_network_update(&config, &dhcp_result).map_err(drop)
+    };
+        // Only this role stops DHCP instead of applying a replacement config.
+        "secondary admin" { (false, true) => Yields(()) }
+        // Neither being secondary nor using the admin network alone bypasses it.
+        "secondary tenant" { (false, false) => Fails }
+        "primary admin" { (true, true) => Fails }
+    );
+}
+
 /// Builds a routing profile with multiple entries in each set-like
 /// collection used by the fingerprint tests.
 fn comparison_routing_profile() -> rpc::RoutingProfile {

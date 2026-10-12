@@ -115,7 +115,7 @@ func (msxp ManageSpectrumXPartition) UpdateSpectrumXPartitionsInDB(ctx context.C
 
 			// Keep the in-memory map in sync so later inventory entries see this Partition.
 			existingSxpIDMap[sxp.ID.String()] = sxp
-			slogger.Info().Str("SpectrumX Partition ID", sxp.ID.String()).Msg("created or undeleted SpectrumX Partition from Site inventory")
+			slogger.Info().Msg("created or undeleted SpectrumX Partition from Site inventory")
 		}
 
 		reportedSxpIDMap[sxp.ID] = true

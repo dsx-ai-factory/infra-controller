@@ -481,6 +481,8 @@ kind-redeploy: docker-build-local kind-load
 	kubectl -n nico-rest rollout restart deployment/nico-rest-cert-manager
 	kubectl -n nico-rest rollout restart deployment/nico-rest-site-manager
 	kubectl -n nico-rest rollout restart statefulset/nico-rest-site-agent
+	@# A Site Agent that is not Ready would block its own rollout, so replace the pod.
+	kubectl -n nico-rest delete pod -l app=nico-rest-site-agent --wait=false
 	@echo "Waiting for rollouts..."
 	kubectl -n nico-rest rollout status deployment/nico-rest-api --timeout=120s
 	kubectl -n nico-rest rollout status deployment/nico-rest-cloud-worker --timeout=120s
@@ -636,10 +638,11 @@ kind-reset-kustomize: kind-reset-infra
 			-p '{"data":{"CORE_GRPC_ADDRESS":"nico-rest-mock-core:11079","CORE_GRPC_SEC_OPT":"0"}}' ; \
 		kubectl -n nico-rest rollout restart statefulset/nico-rest-site-agent ; \
 	fi
-	kubectl -n nico-rest rollout status statefulset/nico-rest-site-agent --timeout=240s
 
 	@echo "Setting up Site Agent secrets..."
-	./scripts/setup-local.sh site-agent
+	@# With LOCAL_CORE=true the Site Agent cannot be Ready until
+	@# configure-local-core-site-agent points it at the local Core, which waits instead.
+	$(if $(filter true,$(LOCAL_CORE)),WAIT_FOR_SITE_AGENT=0) ./scripts/setup-local.sh site-agent
 	@if [ "$(LOCAL_CORE)" = "true" ]; then \
 		$(MAKE) configure-local-core-site-agent ; \
 	fi
@@ -725,7 +728,9 @@ helm-deploy-site-agent:
 		$(if $(filter-out true,$(LOCAL_CORE)),--set envConfig.CORE_GRPC_ADDRESS=nico-rest-mock-core:11079 --set envConfig.CORE_GRPC_SEC_OPT=0) \
 		--timeout 1m || true
 	@echo "Running site bootstrap (setup-local.sh site-agent)..."
-	./scripts/setup-local.sh site-agent
+	@# With LOCAL_CORE=true the Site Agent cannot be Ready until
+	@# configure-local-core-site-agent points it at the local Core.
+	$(if $(filter true,$(LOCAL_CORE)),WAIT_FOR_SITE_AGENT=0) ./scripts/setup-local.sh site-agent
 	@if [ "$(LOCAL_CORE)" = "true" ]; then \
 		$(MAKE) configure-local-core-site-agent ; \
 	fi
@@ -805,6 +810,7 @@ configure-local-core-site-agent:
 		-p "{\"data\":{\"CORE_GRPC_ADDRESS\":\"$$CORE_ADDRESS\",\"CORE_GRPC_SEC_OPT\":\"1\",\"CORE_GRPC_CA_CERT_PATH\":\"/etc/core-grpc/ca.crt\",\"CORE_GRPC_CLIENT_CERT_PATH\":\"/etc/core-grpc/tls.crt\",\"CORE_GRPC_CLIENT_KEY_PATH\":\"/etc/core-grpc/tls.key\",\"CARBIDE_ADDRESS\":\"$$CORE_ADDRESS\",\"CARBIDE_SEC_OPT\":\"1\",\"SKIP_GRPC_SERVER_AUTH\":\"true\"}}" ; \
 	echo "Restarting site-agent to pick up local core settings..." ; \
 	kubectl -n nico-rest rollout restart statefulset/nico-rest-site-agent ; \
+	kubectl -n nico-rest delete pod -l app=nico-rest-site-agent --wait=false ; \
 	kubectl -n nico-rest rollout status statefulset/nico-rest-site-agent --timeout=120s
 
 # Setup site-agent with a real site created via the API

@@ -12,6 +12,7 @@ import (
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
@@ -74,9 +75,6 @@ func testInfiniBandPartitionSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create User table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.User)(nil))
 	assert.Nil(t, err)
-	// create Allocation table
-	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Allocation)(nil))
-	assert.Nil(t, err)
 	// create Status Details table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.StatusDetail)(nil))
 	assert.Nil(t, err)
@@ -111,10 +109,17 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 
 	st1 := util.TestBuildSite(t, dbSession, ip, "test-site-1", cdbm.SiteStatusRegistered, nil, ipu)
 	st2 := util.TestBuildSite(t, dbSession, ip, "test-site-2", cdbm.SiteStatusRegistered, nil, ipu)
+	st3 := util.TestBuildSite(t, dbSession, ip, "test-site-3", cdbm.SiteStatusRegistered, nil, ipu)
+	st4 := util.TestBuildSite(t, dbSession, ip, "test-site-4", cdbm.SiteStatusRegistered, nil, ipu)
+	st5 := util.TestBuildSite(t, dbSession, ip, "test-site-5", cdbm.SiteStatusRegistered, nil, ipu)
+	st6 := util.TestBuildSite(t, dbSession, ip, "test-site-6", cdbm.SiteStatusRegistered, nil, ipu)
 
 	ts1 := util.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st1.ID, tn.ID)
 	assert.NotNil(t, ts1)
-
+	util.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st3.ID, tnu.ID)
+	util.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st4.ID, tnu.ID)
+	util.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st5.ID, tnu.ID)
+	util.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st6.ID, tnu.ID)
 	ibp1 := util.TestBuildInfiniBandPartition(t, dbSession, "test-ibp-1", st1, tn, nil, cdbm.InfiniBandPartitionStatusPending, false)
 	assert.NotNil(t, ibp1)
 
@@ -154,6 +159,61 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 	_, err = dbSession.DB.Exec("UPDATE infiniband_partition SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), ibp11.ID.String())
 	assert.NoError(t, err)
 
+	recoveredIbpID := uuid.New()
+	failedRecoveredIbpID := uuid.New()
+	terminalIbpID := uuid.New()
+	recoveredDescription := "recovered from Site inventory"
+	recoveredLabelValue := "recovered"
+
+	util.TestBuildInfiniBandPartition(
+		t,
+		dbSession,
+		"site-only-ibp",
+		st3,
+		tn,
+		nil,
+		cdbm.InfiniBandPartitionStatusReady,
+		false,
+	)
+
+	softDeletedIbp := util.TestBuildInfiniBandPartition(
+		t,
+		dbSession,
+		"test-ibp-soft-deleted",
+		st4,
+		tn,
+		nil,
+		cdbm.InfiniBandPartitionStatusDeleting,
+		true,
+	)
+	restoredControllerID := softDeletedIbp.ID
+	oldPartitionKey := "0x111"
+	oldPartitionName := "old-partition"
+	oldServiceLevel := 1
+	oldRateLimit := float32(2)
+	oldMtu := 2048
+	oldSharp := true
+	ibpDAO := cdbm.NewInfiniBandPartitionDAO(dbSession)
+	_, err = ibpDAO.Update(ctx, nil, cdbm.InfiniBandPartitionUpdateInput{
+		InfiniBandPartitionID: softDeletedIbp.ID,
+		PartitionKey:          &oldPartitionKey,
+		PartitionName:         &oldPartitionName,
+		ServiceLevel:          &oldServiceLevel,
+		RateLimit:             &oldRateLimit,
+		Mtu:                   &oldMtu,
+		EnableSharp:           &oldSharp,
+		Labels:                map[string]string{"old": "label"},
+	})
+	require.NoError(t, err)
+	err = ibpDAO.Delete(ctx, nil, softDeletedIbp.ID)
+	require.NoError(t, err)
+	_, err = dbSession.DB.Exec(
+		"UPDATE infiniband_partition SET deleted = ? WHERE id = ?",
+		time.Now().Add(-cutil.DefaultInventoryReceiptInterval*2),
+		softDeletedIbp.ID,
+	)
+	require.NoError(t, err)
+
 	// Build InfiniBand Partition inventory that is paginated
 	// Generate data for 34 InfiniBand Partitions reported from Site Agent while Cloud has 38 InfiniBand Partitions
 	pagedIbps := []*cdbm.InfiniBandPartition{}
@@ -164,13 +224,13 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 		_, err = dbSession.DB.Exec("UPDATE infiniband_partition SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), ibp.ID.String())
 		assert.NoError(t, err)
 		pagedIbps = append(pagedIbps, ibp)
-		pagedInvIds = append(pagedInvIds, ibp.ControllerIBPartitionID.String())
+		pagedInvIds = append(pagedInvIds, ibp.ID.String())
 	}
 
 	pagedCtrlIbps := []*corev1.IBPartition{}
 	for i := 0; i < 34; i++ {
 		ctrlIbp := &corev1.IBPartition{
-			Id: &corev1.IBPartitionId{Value: pagedIbps[i].ControllerIBPartitionID.String()},
+			Id: &corev1.IBPartitionId{Value: pagedIbps[i].ID.String()},
 			Config: &corev1.IBPartitionConfig{
 				Name: pagedIbps[i].ID.String(),
 			},
@@ -212,6 +272,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 		unpairedInfiniBandPartitions []*cdbm.InfiniBandPartition
 
 		wantErr bool
+		check   func(t *testing.T)
 	}{
 		{
 			name: "test InfiniBandPartition inventory processing error, non-existent Site",
@@ -269,13 +330,13 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 							},
 						},
 						{
-							Id: &corev1.IBPartitionId{Value: ibp4.ControllerIBPartitionID.String()},
+							Id: &corev1.IBPartitionId{Value: ibp4.ID.String()},
 							Config: &corev1.IBPartitionConfig{
 								Name: ibp4.ID.String(),
 							},
 						},
 						{
-							Id: &corev1.IBPartitionId{Value: ibp8.ControllerIBPartitionID.String()},
+							Id: &corev1.IBPartitionId{Value: ibp8.ID.String()},
 							Config: &corev1.IBPartitionConfig{
 								Name: ibp8.ID.String(),
 							},
@@ -284,7 +345,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 							},
 						},
 						{
-							Id: &corev1.IBPartitionId{Value: uuid.NewString()},
+							Id: &corev1.IBPartitionId{Value: ibp9.ID.String()},
 							Config: &corev1.IBPartitionConfig{
 								Name: ibp9.ID.String(),
 							},
@@ -293,7 +354,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 							},
 						},
 						{
-							Id: &corev1.IBPartitionId{Value: uuid.NewString()},
+							Id: &corev1.IBPartitionId{Value: ibp10.ID.String()},
 							Config: &corev1.IBPartitionConfig{
 								Name: ibp10.ID.String(),
 							},
@@ -310,6 +371,238 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 			restoredInfiniBandPartition:  ibp8,
 			unpairedInfiniBandPartitions: []*cdbm.InfiniBandPartition{ibp9, ibp10},
 			wantErr:                      false,
+		},
+		{
+			name: "test InfiniBand Partition inventory auto-creates partition found only on Site",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st3.ID,
+				infiniBandPartitionInventory: &corev1.InfiniBandPartitionInventory{
+					IbPartitions: []*corev1.IBPartition{
+						{
+							Id: &corev1.IBPartitionId{Value: recoveredIbpID.String()},
+							Config: &corev1.IBPartitionConfig{
+								Name:                 "legacy-recovered-name",
+								TenantOrganizationId: tn.Org,
+								Pkey:                 cutil.GetPtr("0x222"),
+							},
+							Metadata: &corev1.Metadata{
+								Name:        "site-only-ibp",
+								Description: recoveredDescription,
+								Labels: []*corev1.Label{
+									{Key: "source", Value: &recoveredLabelValue},
+								},
+							},
+							Status: &corev1.IBPartitionStatus{
+								State:        corev1.TenantState_READY,
+								Pkey:         cutil.GetPtr("0x222"),
+								Partition:    cutil.GetPtr("site-only-partition"),
+								ServiceLevel: &serviceLevel,
+								RateLimit:    &rateLimit,
+								Mtu:          &mtu,
+								EnableSharp:  cutil.GetPtr(true),
+							},
+						},
+					},
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				},
+			},
+			check: func(t *testing.T) {
+				t.Helper()
+
+				recovered, rerr := cdbm.NewInfiniBandPartitionDAO(dbSession).GetByID(ctx, nil, recoveredIbpID, nil)
+				require.NoError(t, rerr)
+
+				if !assert.NotNil(t, recovered) {
+					return
+				}
+
+				assert.Equal(t, recoveredIbpID, recovered.ID)
+				require.NotNil(t, recovered.ControllerIBPartitionID)
+				assert.Equal(t, recoveredIbpID, *recovered.ControllerIBPartitionID)
+				assert.Equal(t, "site-only-ibp-recovered-"+recoveredIbpID.String()[:8], recovered.Name)
+				require.NotNil(t, recovered.Description)
+				assert.Equal(t, recoveredDescription, *recovered.Description)
+				assert.Equal(t, tn.Org, recovered.Org)
+				assert.Equal(t, st3.ID, recovered.SiteID)
+				assert.Equal(t, tn.ID, recovered.TenantID)
+				assert.Equal(t, tn.CreatedBy, recovered.CreatedBy)
+				assert.Equal(t, cdbm.InfiniBandPartitionStatusReady, recovered.Status)
+				assert.Equal(t, map[string]string{"source": recoveredLabelValue}, map[string]string(recovered.Labels))
+				require.NotNil(t, recovered.PartitionKey)
+				assert.Equal(t, "0x222", *recovered.PartitionKey)
+				require.NotNil(t, recovered.PartitionName)
+				assert.Equal(t, "site-only-partition", *recovered.PartitionName)
+
+				statusDetails, total, rerr := cdbm.NewStatusDetailDAO(dbSession).GetAll(
+					ctx,
+					nil,
+					cdbm.StatusDetailFilterInput{EntityIDs: []string{recovered.ID.String()}},
+					cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+				)
+				require.NoError(t, rerr)
+				assert.Equal(t, 1, total)
+
+				if assert.Len(t, statusDetails, 1) {
+					assert.Equal(t, string(cdbm.InfiniBandPartitionStatusReady), statusDetails[0].Status)
+					assert.Equal(t, cutil.GetPtr("InfiniBand Partition was found on Site, ready for use"), statusDetails[0].Message)
+				}
+			},
+		},
+		{
+			name: "test InfiniBand Partition inventory recovers failed partition with error history",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st6.ID,
+				infiniBandPartitionInventory: &corev1.InfiniBandPartitionInventory{
+					IbPartitions: []*corev1.IBPartition{
+						{
+							Id: &corev1.IBPartitionId{Value: failedRecoveredIbpID.String()},
+							Config: &corev1.IBPartitionConfig{
+								Name:                 "failed-site-only-ibp",
+								TenantOrganizationId: tn.Org,
+							},
+							Status: &corev1.IBPartitionStatus{
+								State: corev1.TenantState_FAILED,
+							},
+						},
+					},
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				},
+			},
+			check: func(t *testing.T) {
+				t.Helper()
+
+				recovered, rerr := cdbm.NewInfiniBandPartitionDAO(dbSession).GetByID(ctx, nil, failedRecoveredIbpID, nil)
+				require.NoError(t, rerr)
+				require.NotNil(t, recovered)
+				assert.Equal(t, cdbm.InfiniBandPartitionStatusError, recovered.Status)
+
+				statusDetails, total, rerr := cdbm.NewStatusDetailDAO(dbSession).GetAll(
+					ctx,
+					nil,
+					cdbm.StatusDetailFilterInput{EntityIDs: []string{recovered.ID.String()}},
+					cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+				)
+				require.NoError(t, rerr)
+				assert.Equal(t, 1, total)
+				if assert.Len(t, statusDetails, 1) {
+					assert.Equal(t, string(cdbm.InfiniBandPartitionStatusError), statusDetails[0].Status)
+					assert.Equal(t, cutil.GetPtr("InfiniBand Partition was found on Site"), statusDetails[0].Message)
+				}
+			},
+		},
+		{
+			name: "test InfiniBand Partition inventory restores soft-deleted partition",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st4.ID,
+				infiniBandPartitionInventory: &corev1.InfiniBandPartitionInventory{
+					IbPartitions: []*corev1.IBPartition{
+						{
+							Id: &corev1.IBPartitionId{Value: restoredControllerID.String()},
+							Config: &corev1.IBPartitionConfig{
+								Name:                 softDeletedIbp.ID.String(),
+								TenantOrganizationId: tn.Org,
+							},
+							Metadata: &corev1.Metadata{Name: softDeletedIbp.ID.String()},
+							Status: &corev1.IBPartitionStatus{
+								State:       corev1.TenantState_READY,
+								Pkey:        cutil.GetPtr("0x333"),
+								EnableSharp: cutil.GetPtr(false),
+							},
+						},
+					},
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				},
+			},
+			check: func(t *testing.T) {
+				t.Helper()
+
+				restored, rerr := cdbm.NewInfiniBandPartitionDAO(dbSession).GetByID(ctx, nil, softDeletedIbp.ID, nil)
+				require.NoError(t, rerr)
+
+				if !assert.NotNil(t, restored) {
+					return
+				}
+
+				assert.Nil(t, restored.Deleted)
+				assert.Equal(t, softDeletedIbp.Name, restored.Name)
+				assert.Nil(t, restored.Description)
+				assert.Nil(t, restored.Labels)
+				assert.Equal(t, restoredControllerID, *restored.ControllerIBPartitionID)
+				assert.Equal(t, "0x333", *restored.PartitionKey)
+				assert.Nil(t, restored.PartitionName)
+				assert.Nil(t, restored.ServiceLevel)
+				assert.Nil(t, restored.RateLimit)
+				assert.Nil(t, restored.Mtu)
+				require.NotNil(t, restored.EnableSharp)
+				assert.False(t, *restored.EnableSharp)
+				assert.False(t, restored.IsMissingOnSite)
+				assert.Equal(t, cdbm.InfiniBandPartitionStatusReady, restored.Status)
+
+				statusDetails, total, rerr := cdbm.NewStatusDetailDAO(dbSession).GetAll(
+					ctx,
+					nil,
+					cdbm.StatusDetailFilterInput{EntityIDs: []string{restored.ID.String()}},
+					cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+				)
+				require.NoError(t, rerr)
+				assert.Equal(t, 1, total)
+
+				if assert.Len(t, statusDetails, 1) {
+					assert.Equal(t, string(cdbm.InfiniBandPartitionStatusReady), statusDetails[0].Status)
+					assert.Equal(t, cutil.GetPtr("InfiniBand Partition was found on Site, ready for use"), statusDetails[0].Message)
+				}
+			},
+		},
+		{
+			name: "test InfiniBand Partition inventory skips terminal Site-only partition",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st5.ID,
+				infiniBandPartitionInventory: &corev1.InfiniBandPartitionInventory{
+					IbPartitions: []*corev1.IBPartition{
+						{
+							Id: &corev1.IBPartitionId{Value: terminalIbpID.String()},
+							Config: &corev1.IBPartitionConfig{
+								Name:                 "terminating-site-only-ibp",
+								TenantOrganizationId: tn.Org,
+							},
+							Status: &corev1.IBPartitionStatus{
+								State: corev1.TenantState_TERMINATING,
+							},
+						},
+					},
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				},
+			},
+			check: func(t *testing.T) {
+				t.Helper()
+
+				_, rerr := cdbm.NewInfiniBandPartitionDAO(dbSession).GetByID(ctx, nil, terminalIbpID, nil)
+				assert.Equal(t, cdb.ErrDoesNotExist, rerr)
+			},
 		},
 		{
 			name: "test paged InfiniBand Partition inventory processing, empty inventory",
@@ -451,6 +744,10 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 				rv, _ := ibpDAO.GetByID(ctx, nil, tt.restoredInfiniBandPartition.ID, nil)
 				assert.False(t, rv.IsMissingOnSite)
 				assert.Equal(t, cdbm.InfiniBandPartitionStatusReady, rv.Status)
+			}
+
+			if tt.check != nil {
+				tt.check(t)
 			}
 		})
 	}

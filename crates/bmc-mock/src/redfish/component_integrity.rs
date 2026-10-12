@@ -59,6 +59,7 @@ pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcStat
 #[derive(Debug, Clone)]
 pub(crate) struct ComponentIntegrity {
     pub(crate) id: Cow<'static, str>,
+    pub(crate) target_component_uri: Cow<'static, str>,
     /// The attestation protocol, `SPDM` or `TPM`.
     pub(crate) integrity_type: Cow<'static, str>,
     /// Read-write on real hardware, so a configured device can be present and
@@ -71,6 +72,7 @@ impl ComponentIntegrity {
         builder(&resource(&self.id))
             .component_integrity_type(&self.integrity_type)
             .component_integrity_enabled(self.enabled)
+            .target_component_uri(&self.target_component_uri)
             .build()
     }
 }
@@ -99,6 +101,10 @@ impl Builder for ComponentIntegrityBuilder {
 }
 
 impl ComponentIntegrityBuilder {
+    fn target_component_uri(self, value: &str) -> Self {
+        self.add_str_field("TargetComponentURI", value)
+    }
+
     fn component_integrity_type(self, value: &str) -> Self {
         self.add_str_field("ComponentIntegrityType", value)
     }

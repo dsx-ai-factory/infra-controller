@@ -529,13 +529,22 @@ sample_interval = "5m"
 # Applied independently to connection establishment, opening the Subscribe RPC,
 # and initial synchronization. One attempt may take nearly three times this
 # duration before reconnect backoff. Updates before sync_response=true do not
-# extend the synchronization timeout.
+# extend the synchronization timeout. Each reconciliation attempt uses
+# this duration as one overall deadline, including credentials and snapshot reads.
+# Must be positive when gNMI reconciliation is enabled.
 request_timeout = "30s"
 # Keep strict TLS certificate and hostname verification by default. Set true only
 # for lab/self-signed NVOS gNMI endpoints where that dangerous bypass is required.
 dangerously_skip_tls_verification = false
 # streaming ON_CHANGE
 system_events_enabled = true
+# Omit or set 0s to disable cleanup. Positive intervals up to 366d enable it.
+# ONCE reads leave switch state unchanged and do not replay events into metrics.
+# Cleanup removes confirmed stale metrics; failed or incomplete snapshots preserve
+# metrics. Applies to every synchronized built-in SAMPLE, system-event, and
+# additional subscription stream. A complete empty snapshot removes cached metrics
+# except those updated concurrently.
+# reconcile_interval = "30m"
 
 [collectors.nvue.gnmi.paths]
 components_enabled = true

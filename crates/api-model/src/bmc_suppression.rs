@@ -43,7 +43,8 @@ pub enum BmcSuppressionSource {
 }
 
 /// An active suppression request for one BMC MAC address, subsystem, and source.
-#[derive(Clone, Debug, Eq, PartialEq, sqlx::FromRow)]
+#[derive(Clone, Debug, Eq, PartialEq, sqlx::FromRow, carbide_macros::DbTable)]
+#[db_table(name = "bmc_suppressions")]
 pub struct BmcSuppression {
     pub bmc_mac_address: MacAddress,
     pub subsystem: BmcSuppressionSubsystem,

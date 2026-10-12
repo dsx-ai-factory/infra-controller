@@ -158,8 +158,6 @@ spec:
               containerPort: 1079
             - name: metrics
               containerPort: 1080
-            - name: profiler
-              containerPort: 1081
           # Both probes target port 1080, which only exists when
           # `metrics_endpoint` is set in carbide-api-config.toml. Removing
           # that setting leaves the pod permanently un-Ready with no other

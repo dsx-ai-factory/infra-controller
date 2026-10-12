@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carbide_firmware::{
-    FirmwareConfigSnapshot, FirmwareDownloader, ResolvedFirmwareArtifactSource,
+    ArtifactStatus, FirmwareConfigSnapshot, FirmwareDownloader, ResolvedFirmwareArtifactSource,
     resolve_files_firmware_artifact,
 };
 use carbide_instrument::emit;
@@ -3321,15 +3321,28 @@ impl PreingestionManagerStatic {
         if !is_bfb_artifact(&artifact.local_path) {
             match &artifact.source {
                 ResolvedFirmwareArtifactSource::Remote { url, sha256 } => {
-                    if !self.downloader.available(&artifact.local_path, url, sha256) {
-                        tracing::debug!(
-                            bmc_ip_address = %endpoint_clone.address,
-                            path = %artifact.local_path.display(),
-                            %url,
-                            "Firmware artifact is being downloaded; update deferred"
-                        );
-
-                        return Ok(false);
+                    match self.downloader.available(&artifact.local_path, url, sha256) {
+                        ArtifactStatus::Available => {}
+                        ArtifactStatus::Downloading => {
+                            tracing::debug!(
+                                bmc_ip_address = %endpoint_clone.address,
+                                path = %artifact.local_path.display(),
+                                "Firmware artifact is being downloaded; update deferred"
+                            );
+                            return Ok(false);
+                        }
+                        // PreingestionState::Failed needs a force delete to leave, so a
+                        // download failure stays retryable: the next call to `available`
+                        // starts a new attempt.
+                        ArtifactStatus::Failed { error } => {
+                            tracing::warn!(
+                                bmc_ip_address = %endpoint_clone.address,
+                                path = %artifact.local_path.display(),
+                                %error,
+                                "Firmware artifact download failed; update deferred"
+                            );
+                            return Ok(false);
+                        }
                     }
                 }
                 ResolvedFirmwareArtifactSource::Local => {

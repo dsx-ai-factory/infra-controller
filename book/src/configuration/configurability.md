@@ -1474,13 +1474,6 @@ service. To ship metrics elsewhere:
 - **Tempo / Jaeger** (traces): NICo emits structured logs but does not currently emit distributed traces; tracing is a roadmap item.
 - **Loki** (logs): the SSH-console sidecar pattern (`nico-ssh-console-rs.lokiLogCollector.enabled`) is the only built-in log-shipper. For other services, use a cluster-wide Promtail / Vector / OTel-collector DaemonSet against pod stdout.
 
-### Profiler endpoint
-
-`nico-api` listens on port `1081` for pprof-style runtime profiling. The
-endpoint is disabled by default in production builds; enable via
-`nico-api.extraEnv` (`RUST_PROFILER=1`) and protect with a NetworkPolicy
-before exposing.
-
 ### nico-cli configuration
 
 The `nico-cli` (operator CLI) reads its config from

@@ -17,6 +17,7 @@
 //! Explicit backend selection and execution for typed resource pools.
 //!
 //! Typed pool descriptors remain in `model`; SQL mutations remain in `db`.
+//! [`ResourcePoolRegistry`] saves and checks each pool's backend selection.
 //! [`ResourcePoolWithBackend`] borrows a descriptor and its selected backend.
 //! This association does not resolve configuration or persist which backend is
 //! authoritative for allocations. Callers match the backend before supplying
@@ -25,13 +26,20 @@
 #![cfg_attr(test, allow(txn_held_across_await, txn_without_commit))]
 
 #[cfg(test)]
+mod registry_tests;
+#[cfg(test)]
 mod tests;
+
+mod registry;
 
 use std::str::FromStr;
 
 use db::resource_pool::{ResourcePoolAllocationNotOwned, ResourcePoolDatabaseError};
 use db::{ConditionalWrite, DatabaseError};
 use model::resource_pool::{OwnerType, ResourcePool};
+pub use registry::{
+    PoolDefinitionSource, ResolvedResourcePool, ResourcePoolRegistry, ResourcePoolRegistryError,
+};
 use sqlx::PgConnection;
 
 /// `ResourcePoolBackend` selects how a pool performs allocation and release.

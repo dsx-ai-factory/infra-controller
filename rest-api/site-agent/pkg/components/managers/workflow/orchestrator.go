@@ -23,6 +23,8 @@ import (
 
 	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
+	workflowtypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/workflow"
 	swu "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
 )
 
@@ -30,6 +32,9 @@ import (
 func Orchestrator() {
 	log := ManagerAccess.Data.EB.Log
 	state := ManagerAccess.Data.EB.Managers.Workflow.State
+
+	// Health checks treat the Site Agent as connecting until this attempt finishes.
+	state.SetWorker(nil)
 
 	// Cleanup resources
 	if ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker != nil {
@@ -47,23 +52,41 @@ func Orchestrator() {
 
 	// keep track how many events we've seen.
 	state.ConnectionAttempted.Inc()
-	state.SetConnectionTime(time.Now().String())
+	state.SetConnectionTime(time.Now())
 
-	err := workflowOrchestrator()
+	status, err := workflowOrchestrator()
 	if err != nil {
 		state.HealthStatus.Store(uint64(computils.CompUnhealthy))
 		errMsg := err.Error()
 		state.SetErr(errMsg)
 		log.Error().Msg(errMsg)
+		status = workflowtypes.NewWorkerStatus()
+		status.SetErr(err)
 	} else {
 		// keep track how many succeeded.
 		state.ConnectionSucc.Inc()
 		state.HealthStatus.Store(uint64(computils.CompHealthy))
 	}
+	state.SetWorker(status)
+}
+
+// stopWorker records that the Temporal SDK stopped the worker on an error it
+// does not retry. The SDK never restarts it, so the liveness check fails from
+// here on and Kubernetes restarts the Site Agent.
+func stopWorker(eb *elektratypes.Elektra, status *workflowtypes.WorkerStatus, err error) {
+	status.SetErr(err)
+	state := eb.Managers.Workflow.State
+	// A worker that a reload already replaced has nothing left to report.
+	if state.Worker() != status {
+		return
+	}
+	eb.Log.Error().Err(err).Msg("Workflow: Temporal worker stopped, failing the liveness check")
+	state.HealthStatus.Store(uint64(computils.CompUnhealthy))
+	state.SetErr(err.Error())
 }
 
 // StartWorkflow - Workflow init function
-func workflowOrchestrator() error {
+func workflowOrchestrator() (*workflowtypes.WorkerStatus, error) {
 	// Set the global handle here
 	log := ManagerAccess.Data.EB.Log
 
@@ -77,7 +100,7 @@ func workflowOrchestrator() error {
 	// otelErr, not err: `var err error` is declared further down.
 	otelInterceptor, otelErr := ctemporal.TracingInterceptor()
 	if otelErr != nil {
-		return fmt.Errorf("creating Temporal tracing interceptor: %w", otelErr)
+		return nil, fmt.Errorf("creating Temporal tracing interceptor: %w", otelErr)
 	}
 	if otelInterceptor != nil {
 		clientInterceptors = append(clientInterceptors, otelInterceptor)
@@ -111,7 +134,7 @@ func workflowOrchestrator() error {
 			fmt.Sprintf("%v/%v", TemporalClientCertPath, kpFileName[1]))
 		if err != nil {
 			log.Error().Msg("Workflow: Unable to read client certificates")
-			return err
+			return nil, err
 		}
 
 		// Each pod loads its own certificate on startup and reload.
@@ -130,7 +153,7 @@ func workflowOrchestrator() error {
 		caCert, err := os.ReadFile(TemporalCACertPath)
 		if err != nil {
 			log.Error().Msg("Workflow: Unable to read server certificates")
-			return err
+			return nil, err
 		}
 		caCertPool := x509.NewCertPool()
 		caCertPool.AppendCertsFromPEM(caCert)
@@ -184,7 +207,7 @@ func workflowOrchestrator() error {
 	}
 	if err != nil {
 		log.Error().Msg("Workflow: Failed to create Temporal client")
-		return err
+		return nil, err
 	}
 
 	// Initialize client for subscribe namespace
@@ -205,14 +228,21 @@ func workflowOrchestrator() error {
 	}
 	if err != nil {
 		log.Error().Msg("Workflow: Failed to create Temporal client")
-		return err
+		return nil, err
 	}
 
+	status := workflowtypes.NewWorkerStatus(
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Publisher,
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Subscriber)
+	eb := ManagerAccess.Data.EB
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker = worker.New(
 		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Subscriber,
 		ManagerAccess.Conf.EB.Temporal.TemporalSubscribeQueue,
 		worker.Options{
 			WorkflowPanicPolicy: worker.FailWorkflow,
+			OnFatalError: func(err error) {
+				stopWorker(eb, status, err)
+			},
 		})
 	log.Info().Msg("Workflow: Registering orchestrator workflows and activities for elektra cluster ")
 
@@ -226,7 +256,7 @@ func workflowOrchestrator() error {
 	// TODO: all RegisterSubscriber calls return an error and we ignore them. Should we?
 	err = ManagerAccess.API.Site.RegisterPublisher()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	ManagerAccess.API.VPC.RegisterSubscriber()
@@ -320,8 +350,8 @@ func workflowOrchestrator() error {
 	err = ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.Start()
 	if err != nil {
 		log.Error().Msg("Workflow: Failed to start orchestrator worker")
-		return err
+		return nil, err
 	}
 
-	return nil
+	return status, nil
 }

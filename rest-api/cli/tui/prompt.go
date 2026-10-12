@@ -15,9 +15,13 @@ import (
 
 // PromptText displays a label and reads a line of text input.
 func PromptText(label string, required bool) (string, error) {
+	return promptTextWithLimit(label, required, 0)
+}
+
+func promptTextWithLimit(label string, required bool, maxBytes int) (string, error) {
 	for {
 		fmt.Printf("%s: ", Bold(label))
-		input, err := readPromptLine()
+		input, err := readPromptLineWithLimit(maxBytes)
 		if err != nil {
 			return "", err
 		}
@@ -165,6 +169,16 @@ func PromptChoice(label string, options []string, defaultValue string) (string, 
 // scanner's private buffer. Byte-wise reads preserve terminal behavior while
 // keeping scripted input and tests deterministic.
 func readPromptLine() (string, error) {
+	return readPromptLineWithLimit(0)
+}
+
+// errPromptInputLimitExceeded leaves pending input unread; the enclosing prompt
+// must resynchronize it before returning control to the REPL.
+var errPromptInputLimitExceeded = errors.New("input exceeds limit")
+
+// readPromptLineWithLimit rejects a line before appending a byte beyond the
+// given limit. Zero preserves the unlimited behavior of ordinary prompts.
+func readPromptLineWithLimit(maxBytes int) (string, error) {
 	var result strings.Builder
 	var one [1]byte
 	for {
@@ -176,6 +190,9 @@ func readPromptLine() (string, error) {
 			case '\r':
 				continue
 			default:
+				if maxBytes > 0 && result.Len() >= maxBytes {
+					return "", fmt.Errorf("%w of %d-bytes", errPromptInputLimitExceeded, maxBytes)
+				}
 				result.WriteByte(one[0])
 			}
 		}

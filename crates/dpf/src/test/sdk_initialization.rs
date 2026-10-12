@@ -658,27 +658,56 @@ async fn sf_overflow_fails_before_initialization_writes() {
 }
 
 /// Verifies one-shot Astra initialization rejects global interfaces before its first write.
+/// Qualified local SF references must also fail before writes so SDK namespace forwarding
+/// cannot bypass the static profile boundary.
 #[tokio::test]
 async fn unscoped_astra_builder_initialization_writes_nothing() {
-    // Attempt an otherwise valid Astra initialization through the public builder.
-    let mock = InitializationMock::default();
-    let result = crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
-        .with_labeler(InitializationLabeler)
-        .initialize(&unscoped_astra_config())
-        .await;
+    // Target namespace qualification is the variable; the existing fixture supplies Astra defaults.
+    let mut qualified = unscoped_astra_config();
+    qualified.deployment_scoped_service_interfaces = true; // Pass the earlier scoping check.
+    qualified.services.push(ServiceDefinition {
+        interfaces: vec![ServiceInterface {
+            name: "direct_dhcp_if".to_string(), // Absent from effective service chains.
+            network: format!("{TEST_NS}/mybrsfc-dhcp-bf4astra"), // Names the local rendered NAD.
+        }],
+        service_nads: vec![ServiceNAD {
+            name: "mybrsfc-dhcp".to_string(), // Emitted with the Astra deployment suffix.
+            bridge: Some("br-sfc".to_string()),
+            resource_type: ServiceNADResourceType::Sf, // Makes the unchained consumer unsupported.
+            ipam: Some(false),
+            mtu: Some(1500),
+        }],
+        ..ServiceDefinition::new(DHCP_SERVER_SERVICE_NAME, "repo", "chart", "1")
+    });
 
-    // Pure preflight must reject before the builder writes even its shared Secret.
-    let Err(error) = result else {
-        panic!("unscoped Astra initialization must fail");
-    };
-    assert!(matches!(&error, DpfError::ConfigError(_)));
-    assert!(
-        error
-            .to_string()
-            .contains("BF4 Astra requires deployment_scoped_service_interfaces=true")
-    );
-    assert!(mock.secrets.is_empty());
-    assert_no_initialization_crs(&mock);
+    for (config, expected_error) in [
+        // Retain protection against global interfaces binding Astra nodes.
+        (
+            unscoped_astra_config(),
+            "BF4 Astra requires deployment_scoped_service_interfaces=true",
+        ),
+        // The SDK must supply its namespace before committing even the shared Secret.
+        (
+            qualified,
+            "BF4 Astra does not support direct SF-NAD consumers outside service chains",
+        ),
+    ] {
+        // Exercise the public initializer with a fresh repository for each failure boundary.
+        let mock = InitializationMock::default();
+        let result =
+            crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+                .with_labeler(InitializationLabeler)
+                .initialize(&config)
+                .await;
+
+        // Require the intended preflight failure and prove it precedes all initialization writes.
+        let Err(DpfError::ConfigError(message)) = result else {
+            panic!("invalid Astra initialization must fail during preflight");
+        };
+        assert_eq!(message, expected_error);
+        assert!(mock.secrets.is_empty());
+        assert_no_initialization_crs(&mock);
+    }
 }
 
 /// Verifies split-phase Astra initialization preserves its existing Secret and writes no CRs.
@@ -712,96 +741,327 @@ async fn unscoped_astra_split_initialization_writes_no_resources() {
     assert_no_initialization_crs(&mock);
 }
 
-/// Verifies the public initialization path rejects split HBN topology and emits matching
-/// configuration and chain references when the SDK-generated service interface is supplied.
+/// Verifies public initialization persists aligned HBN configuration and chain references.
+/// BF3's legacy BFB path and generic BF4's scoped software path must both retain slot wiring.
+/// Complete five-slot DHCP attachments must retain their bridges and MTU while ordinary DHCP/FMDS
+/// NADs keep their existing rendering and deployment-specific references; the flavor must render the configured pool.
 #[tokio::test]
 async fn service_vpc_initialization_keeps_hbn_configuration_and_chain_aligned() {
-    let mock = InitializationMock::default();
-    let slots = crate::ServiceVpcSlots::new(1).unwrap();
+    for (deployment_type, sf_pool, sf_bar_size, resource_suffix, interface_suffix) in [
+        // Legacy BF3 keeps unsuffixed references and the BFB path with 27 base SFs.
+        (DpuDeploymentType::Bf3, 42, 10, "", ""),
+        // Generic BF4 keeps scoped references and the software path with 28 base SFs.
+        (DpuDeploymentType::Bf4Generic, 43, 14, "-bf4generic", "-bf4"),
+    ] {
+        let mock = InitializationMock::default();
+        // Five slots and five endpoint reservations complete each platform's base inventory.
+        let slots = crate::ServiceVpcSlots::new(5).expect("valid five-slot inventory");
+        let interfaces = crate::build_deployment_dpu_interfaces(
+            deployment_type,
+            crate::DEFAULT_DPU_NUM_OF_VFS,
+            None,
+        );
+        // Retain the ordinary chained services so multiple NAD rendering also proves startup compatibility.
+        let chained_service = |name: &str, network: &str| ServiceDefinition {
+            interfaces: interfaces
+                .iter()
+                .flat_map(|interface| interface.chained_svc_if.iter().flatten())
+                .filter(|(service, _)| service == name)
+                .map(|(_, name)| ServiceInterface {
+                    name: name.clone(),
+                    network: network.to_string(),
+                })
+                .collect(),
+            service_nads: if name == DOCA_HBN_SERVICE_NAME {
+                Vec::new()
+            } else {
+                vec![ServiceNAD {
+                    name: network.to_string(),
+                    bridge: Some("br-sfc".to_string()),
+                    resource_type: ServiceNADResourceType::Sf,
+                    ipam: Some(false),
+                    mtu: Some(1500),
+                }]
+            },
+            ..ServiceDefinition::new(name, "repo", "chart", "1")
+        };
+        let mut hbn = chained_service(DOCA_HBN_SERVICE_NAME, DOCA_HBN_SERVICE_NETWORK);
+        slots.append_hbn_interfaces(&mut hbn.interfaces);
+        let mut dhcp = chained_service(DHCP_SERVER_SERVICE_NAME, "mybrsfc-dhcp");
+        slots.append_dhcp_interfaces(&mut dhcp);
+        let fmds = chained_service(FMDS_SERVICE_NAME, "mybrsfc-fmds");
+        let builder = InitDpfResourcesConfigBuilder::default()
+            .deployment_type(deployment_type)
+            .services(vec![hbn, dhcp, fmds])
+            .service_vpc_slots(slots)
+            .max_active_service_vpc_interfaces_per_dpu(5)
+            .pf_total_sf_reserved(sf_pool)
+            .deployment_scoped_service_interfaces(!interface_suffix.is_empty())
+            .interfaces(interfaces);
+        // Follow each platform's provisioning source so the BF3 case exercises the BFB path.
+        let config = if deployment_type == DpuDeploymentType::Bf3 {
+            builder.bfb_url("http://example.com/bf3.bfb")
+        } else {
+            builder.bluefield_software(BlueFieldSoftwareParams {
+                os_iso: "http://example.com/bf4.iso".to_string(),
+                pldm_fw_bundle: Some(BTreeMap::from([(
+                    "psid".to_string(),
+                    "http://example.com/fw.pldm".to_string(),
+                )])),
+            })
+        }
+        .build()
+        .expect("service-VPC initialization test configuration must be valid");
+
+        // Apply the complete inventory through the public SDK initializer.
+        // Startup's split initialization shares the same resource creation implementation.
+        crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+            .with_labeler(InitializationLabeler)
+            .initialize(&config)
+            .await
+            .unwrap();
+
+        // Read persisted CRs rather than trusting the input definitions or apply return values.
+        let hbn_config = DpuServiceConfigurationRepository::get(
+            &mock,
+            &format!("{DOCA_HBN_SERVICE_NAME}{resource_suffix}"),
+            TEST_NS,
+        )
+        .await
+        .unwrap()
+        .expect("HBN service configuration must exist");
+        let hbn_interfaces = hbn_config.spec.interfaces.unwrap();
+        assert!(hbn_interfaces.iter().any(|interface| {
+            interface.name == "iface_svc_0" && interface.network == DOCA_HBN_SERVICE_NETWORK
+        }));
+
+        let deployment = DpuDeploymentRepository::get(&mock, "dpu-deployment", TEST_NS)
+            .await
+            .unwrap()
+            .expect("DPU deployment must exist");
+        let slot_switch = deployment
+            .spec
+            .service_chains
+            .unwrap()
+            .switches
+            .into_iter()
+            .find(|switch| {
+                switch.ports.iter().any(|port| {
+                    port.service
+                        .as_ref()
+                        .is_some_and(|service| service.interface == "iface_svc_0")
+                })
+            })
+            .expect("service-VPC chain must reference the HBN interface");
+        assert!(slot_switch.ports.iter().any(|port| {
+            port.service_interface.as_ref().is_some_and(|interface| {
+                interface.match_labels.get("interface").map(String::as_str)
+                    == Some("service-vpc-slot-0")
+            })
+        }));
+
+        // DHCP consumes exactly one direct SF per slot and references each slot's own NAD.
+        let dhcp_config = DpuServiceConfigurationRepository::get(
+            &mock,
+            &format!("{DHCP_SERVER_SERVICE_NAME}{resource_suffix}"),
+            TEST_NS,
+        )
+        .await
+        .expect("DHCP configuration lookup succeeds")
+        .expect("DHCP configuration exists");
+        let listeners = dhcp_config.spec.interfaces.expect("DHCP listeners exist");
+        assert_eq!(
+            listeners
+                .iter()
+                .filter(|listener| listener.name.starts_with("d_iface_svc_"))
+                .count(),
+            5
+        );
+        assert_eq!(mock.nads.len(), 7);
+        let switches = DpuDeploymentRepository::get(&mock, "dpu-deployment", TEST_NS)
+            .await
+            .expect("deployment lookup succeeds")
+            .expect("deployment exists")
+            .spec
+            .service_chains
+            .expect("chains exist")
+            .switches;
+        for (index, listener) in listeners
+            .iter()
+            .filter(|listener| listener.name.starts_with("d_iface_svc_"))
+            .enumerate()
+        {
+            assert_eq!(listener.name, format!("d_iface_svc_{index}"));
+            assert!(listener.name.len() <= 15);
+            assert_eq!(
+                listener.network,
+                format!("service-vpc-dhcp-slot{index}{resource_suffix}")
+            );
+            let nad = DpuServiceNADRepository::get(&mock, &listener.network, TEST_NS)
+                .await
+                .expect("slot NAD lookup succeeds")
+                .expect("slot NAD exists");
+            assert_eq!(
+                nad.spec.bridge.as_deref(),
+                Some(format!("br-svc-{index}").as_str())
+            );
+            assert_eq!(nad.spec.ipam, Some(false));
+            assert_eq!(nad.spec.service_mtu, Some(crate::SERVICE_VPC_MTU));
+            assert!(matches!(
+                nad.spec.resource_type,
+                crate::crds::dpuservicenads_generated::DpuServiceNadResourceType::Sf
+            ));
+            let patch = DpuServiceInterfaceRepository::get(
+                &mock,
+                &format!("service-vpc-slot-{index}{interface_suffix}"),
+                TEST_NS,
+            )
+            .await
+            .expect("patch lookup succeeds")
+            .expect("slot patch exists");
+            // Legacy BF3 keeps selector-free parents; generic BF4 selects its deployment's DPU nodes.
+            let node_selector = patch.spec.template.spec.node_selector;
+            assert_eq!(node_selector.is_some(), !interface_suffix.is_empty());
+            assert_eq!(
+                node_selector.and_then(|selector| selector.match_labels),
+                (!interface_suffix.is_empty()).then(|| BTreeMap::from([(
+                    "svc.dpu.nvidia.com/owned-by-dpudeployment".to_string(),
+                    format!("{TEST_NS}_dpu-deployment")
+                )]))
+            );
+            assert_eq!(
+                patch
+                    .spec
+                    .template
+                    .spec
+                    .template
+                    .spec
+                    .patch
+                    .expect("patch endpoint")
+                    .peer_bridge,
+                format!("br-svc-{index}")
+            );
+            assert!(
+                switches
+                    .iter()
+                    .any(|switch| switch.ports.iter().any(|port| {
+                        port.service.as_ref().is_some_and(|service| {
+                            service.name == DOCA_HBN_SERVICE_NAME
+                                && service.interface == format!("iface_svc_{index}")
+                        })
+                    }))
+            );
+        }
+
+        // Ordinary service NADs retain their bridge, resource type, IPAM and MTU after the multi-NAD change.
+        for (service, network) in [
+            // DHCP's ordinary listeners keep their deployment-specific br-sfc SF network beside the new slot NADs.
+            (DHCP_SERVER_SERVICE_NAME, "mybrsfc-dhcp"),
+            // FMDS remains a separate ordinary br-sfc SF consumer with the same rendering contract.
+            (FMDS_SERVICE_NAME, "mybrsfc-fmds"),
+        ] {
+            let network = format!("{network}{resource_suffix}");
+            let nad = DpuServiceNADRepository::get(&mock, &network, TEST_NS)
+                .await
+                .expect("ordinary NAD lookup succeeds")
+                .expect("ordinary NAD exists");
+            assert_eq!(nad.spec.bridge.as_deref(), Some("br-sfc"));
+            assert_eq!(nad.spec.ipam, Some(false));
+            assert_eq!(nad.spec.service_mtu, Some(1500));
+            assert!(matches!(
+                nad.spec.resource_type,
+                crate::crds::dpuservicenads_generated::DpuServiceNadResourceType::Sf
+            ));
+            let service_config = DpuServiceConfigurationRepository::get(
+                &mock,
+                &format!("{service}{resource_suffix}"),
+                TEST_NS,
+            )
+            .await
+            .expect("ordinary service configuration lookup succeeds")
+            .expect("ordinary service configuration exists");
+            let ordinary_interfaces = service_config
+                .spec
+                .interfaces
+                .expect("ordinary service interfaces exist")
+                .into_iter()
+                .filter(|interface| !interface.name.starts_with("d_iface_svc_"))
+                .collect::<Vec<_>>();
+            assert!(!ordinary_interfaces.is_empty());
+            assert!(
+                ordinary_interfaces
+                    .iter()
+                    .all(|interface| interface.network == network)
+            );
+        }
+
+        // The persisted flavor renders each platform's configured SF pool and bootstraps all five isolated bridges.
+        let flavor_name = deployment
+            .spec
+            .dpus
+            .flavor
+            .expect("deployment flavor reference");
+        let flavor = DpuFlavorRepository::get(&mock, &flavor_name, TEST_NS)
+            .await
+            .expect("flavor lookup succeeds")
+            .expect("flavor exists");
+        let parameters = flavor.spec.nvconfig.expect("NVConfig exists")[0]
+            .parameters
+            .clone()
+            .expect("NVConfig parameters");
+        assert!(parameters.contains(&format!("PF_TOTAL_SF={sf_pool}")));
+        assert!(parameters.contains(&format!("PF_SF_BAR_SIZE={sf_bar_size}")));
+        let ovs = flavor
+            .spec
+            .ovs
+            .expect("OVS configuration")
+            .raw_config_script
+            .expect("OVS bootstrap");
+        for index in 0..5 {
+            assert!(ovs.contains(&format!("_ovs-vsctl --may-exist add-br br-svc-{index}")));
+        }
+        assert!(flavor.spec.dpu_resources.is_none());
+        assert!(flavor.spec.system_reserved_resources.is_none());
+    }
+}
+
+/// Verifies partial HBN inventory fails preflight so DHCP completeness cannot conceal a missing HBN SF.
+#[test]
+fn service_vpc_config_rejects_missing_hbn_interface() {
+    // Keep every base HBN endpoint but omit the slot interface; DHCP is complete.
+    let slots = crate::ServiceVpcSlots::new(1).expect("valid slot count");
     let interfaces = crate::build_deployment_dpu_interfaces(
         DpuDeploymentType::Bf3,
         crate::DEFAULT_DPU_NUM_OF_VFS,
         None,
     );
-    let mut hbn_interfaces = interfaces
-        .iter()
-        .filter_map(|interface| {
-            interface.chained_svc_if.as_ref().and_then(|chains| {
-                chains
-                    .iter()
-                    .find(|(service, _)| service == DOCA_HBN_SERVICE_NAME)
-                    .map(|(_, name)| ServiceInterface {
-                        name: name.clone(),
-                        network: DOCA_HBN_SERVICE_NETWORK.to_string(),
-                    })
-            })
-        })
-        .collect();
-    slots.append_hbn_interfaces(&mut hbn_interfaces);
     let hbn = ServiceDefinition {
-        interfaces: hbn_interfaces,
+        interfaces: interfaces
+            .iter()
+            .flat_map(|interface| interface.chained_svc_if.iter().flatten())
+            .filter(|(service, _)| service == DOCA_HBN_SERVICE_NAME)
+            .map(|(_, name)| ServiceInterface {
+                name: name.clone(),
+                network: DOCA_HBN_SERVICE_NETWORK.to_string(),
+            })
+            .collect(),
         ..ServiceDefinition::new(DOCA_HBN_SERVICE_NAME, "repo", "chart", "1")
     };
-    let config = InitDpfResourcesConfigBuilder::default()
-        .services(vec![hbn])
-        .service_vpc_slots(slots)
+    let mut dhcp = ServiceDefinition::new(DHCP_SERVER_SERVICE_NAME, "repo", "chart", "1");
+    slots.append_dhcp_interfaces(&mut dhcp);
+    let error = InitDpfResourcesConfigBuilder::default()
+        .services(vec![hbn, dhcp])
         .interfaces(interfaces)
+        .service_vpc_slots(slots)
         .build()
-        .expect("service-VPC initialization test configuration must be valid");
+        .expect_err("missing HBN slot interface");
 
-    crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
-        .initialize(&config)
-        .await
-        .unwrap();
-
-    let hbn_config = DpuServiceConfigurationRepository::get(&mock, DOCA_HBN_SERVICE_NAME, TEST_NS)
-        .await
-        .unwrap()
-        .expect("HBN service configuration must exist");
-    let hbn_interfaces = hbn_config.spec.interfaces.unwrap();
-    assert!(hbn_interfaces.iter().any(|interface| {
-        interface.name == "iface_svc_0" && interface.network == DOCA_HBN_SERVICE_NETWORK
-    }));
-
-    let deployment = DpuDeploymentRepository::get(&mock, "dpu-deployment", TEST_NS)
-        .await
-        .unwrap()
-        .expect("DPU deployment must exist");
-    let slot_switch = deployment
-        .spec
-        .service_chains
-        .unwrap()
-        .switches
-        .into_iter()
-        .find(|switch| {
-            switch.ports.iter().any(|port| {
-                port.service
-                    .as_ref()
-                    .is_some_and(|service| service.interface == "iface_svc_0")
-            })
-        })
-        .expect("service-VPC chain must reference the HBN interface");
-    assert!(slot_switch.ports.iter().any(|port| {
-        port.service_interface.as_ref().is_some_and(|interface| {
-            interface.match_labels.get("interface").map(String::as_str)
-                == Some("service-vpc-slot-0")
-        })
-    }));
-}
-
-#[test]
-fn service_vpc_config_rejects_missing_hbn_interface() {
-    let result = InitDpfResourcesConfigBuilder::default()
-        .services(vec![ServiceDefinition::new(
-            DOCA_HBN_SERVICE_NAME,
-            "repo",
-            "chart",
-            "1",
-        )])
-        .service_vpc_slots(crate::ServiceVpcSlots::new(1).unwrap())
-        .build();
-
-    assert!(matches!(result, Err(DpfError::ConfigError(_))));
+    // Require the HBN error so a missing-DHCP or capacity error cannot satisfy this proof.
+    assert!(
+        matches!(&error, DpfError::ConfigError(message)
+            if message == "doca-hbn interface inventory must exactly match the resolved DPF HBN chains"),
+        "{error}"
+    );
 }
 
 #[test]

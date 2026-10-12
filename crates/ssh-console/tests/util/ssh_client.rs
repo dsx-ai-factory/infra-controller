@@ -139,12 +139,12 @@ pub(crate) async fn assert_connection_works(
     let mut output_buf: Vec<u8> = Vec::new();
     let mut test_state = ConnectionTestState::WaitingForPrompt;
     let prompt_timeout = Instant::now().add(PROMPT_WAIT_TIMEOUT);
-    let mut assertion_timeout = Instant::now().add(Duration::from_secs(1));
-    let mut write_interval = tokio::time::interval(Duration::from_millis(100));
+    let assertion_window = Duration::from_millis(500);
+    let mut assertion_timeout = prompt_timeout;
+    let mut write_interval = tokio::time::interval(Duration::from_millis(20));
 
-    // Phase 1: Every second, write a newline to the connection, until we see a prompt, then every
-    // 100ms, try to break out with ctrl+\. If 3 seconds go by and we got a prompt but didn't break
-    // out, move to phase 2.
+    // Phase 1: Write a newline every 20ms until we see a prompt, then repeatedly try
+    // ctrl+\ for 500ms before moving to phase 2.
     //
     // Phase 2: send `backdoor_escape_console` to the server, which mock_ssh_server will use to
     // simulate the serial console getting disconnected and dropping back down to the BMC prompt. At
@@ -161,7 +161,7 @@ pub(crate) async fn assert_connection_works(
                     ConnectionTestState::TryingCtrlBackslash => {
                         tracing::info!("Successfully prevented ctrl+\\ from triggering escape, now simulating dropping to BMC prompt from other means");
                         test_state = ConnectionTestState::TryingBackdoorEscape;
-                        assertion_timeout = Instant::now().add(Duration::from_secs(3));
+                        assertion_timeout = Instant::now().add(assertion_window);
                     }
                     ConnectionTestState::TryingBackdoorEscape => {
                         tracing::info!("Test finished without seeing a bmc_prompt while using backdoor escape, success");
@@ -197,6 +197,7 @@ pub(crate) async fn assert_connection_works(
                                 if output_buf.windows(expected_prompt.len()).any(|w| w == *expected_prompt) {
                                     tracing::info!("Got expected prompt, trying ctrl-\\");
                                     test_state = ConnectionTestState::TryingCtrlBackslash;
+                                    assertion_timeout = Instant::now().add(assertion_window);
                                 }
                             }
                             ConnectionTestState::TryingCtrlBackslash | ConnectionTestState::TryingBackdoorEscape => {

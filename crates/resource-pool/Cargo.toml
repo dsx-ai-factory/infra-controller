@@ -29,6 +29,7 @@ carbide-api-db = { path = "../api-db" }
 carbide-api-model = { path = "../api-model", default-features = false }
 
 sqlx = { workspace = true, features = ["postgres"] }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 carbide-macros = { path = "../macros" }

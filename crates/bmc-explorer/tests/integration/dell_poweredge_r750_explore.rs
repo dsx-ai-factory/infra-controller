@@ -26,10 +26,9 @@ async fn explore_dell_poweredge_r750() {
     let h = test_support::dell_poweredge_r750_bmc().await;
     assert!(!h.state.has_enabled_ssh_serial_console());
     assert!(!h.state.set_serial_console_ssh_port(Some(3222)));
-    let report =
-        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
-            .await
-            .unwrap();
+    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
+        .await
+        .unwrap();
 
     assert_eq!(report.endpoint_type, EndpointType::Bmc);
     assert_eq!(report.vendor, Some(bmc_vendor::BMCVendor::Dell));
@@ -39,6 +38,7 @@ async fn explore_dell_poweredge_r750() {
     // This iDRAC advertises no ComponentIntegrity collection, which the report
     // records as absent rather than as one reported empty.
     assert_eq!(report.component_integrities, None);
+    assert!(!report.component_integrity_unavailable);
     assert!(
         report
             .service

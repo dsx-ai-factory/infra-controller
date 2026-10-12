@@ -9,6 +9,9 @@ API_URL="${API_URL:-http://localhost:8388}"
 KEYCLOAK_URL="${KEYCLOAK_URL:-http://localhost:8082}"
 ORG="${ORG:-test-org}"
 RESTART_API="${RESTART_API:-1}"
+# Set to 0 when the Site Agent cannot reach Core yet, since it is not Ready until it
+# connects to both Temporal and Core.
+WAIT_FOR_SITE_AGENT="${WAIT_FOR_SITE_AGENT:-1}"
 
 usage() {
     echo "Usage: $0 <command>"
@@ -307,7 +310,12 @@ configure_site_agent() {
     fi
 
     kubectl -n $NAMESPACE rollout restart sts/nico-rest-site-agent
-    kubectl -n $NAMESPACE rollout status sts/nico-rest-site-agent --timeout=240s
+    # The StatefulSet does not replace a pod that is not Ready, and the Site Agent is
+    # not Ready before it has a Site. So replace the pod directly.
+    kubectl -n $NAMESPACE delete pod -l app=nico-rest-site-agent --wait=false
+    if [ "$WAIT_FOR_SITE_AGENT" = "1" ]; then
+        kubectl -n $NAMESPACE rollout status sts/nico-rest-site-agent --timeout=240s
+    fi
 }
 
 setup_site_agent() {

@@ -24,11 +24,12 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
 use bmc_mock::injection::{InjectionStore, Rule, RuleId};
-use bmc_mock::{HardwareType, MockPowerState, RackPlacement, ResourceResetType, TrayPlacement};
+use bmc_mock::{HardwareType, RackPlacement, ResourceResetType, TrayPlacement};
 use carbide_uuid::rack::RackId;
 use chrono::{SecondsFormat, Utc};
 use mac_address::MacAddress;
 use nmxc_mock::{NmxcInventory, SimComputeNode, SimDomain, SimGpu, SimSwitch};
+use nv_redfish::schema::resource::PowerState;
 use rms_mock::{PowerOperation, RmsInventory, SimNode, SimNodeKind, SimPowerState};
 use tower::Service;
 use ufm_mock::{
@@ -289,15 +290,18 @@ impl RmsInventory for ControlState {
 
     fn power_state(&self, bmc_mac: MacAddress) -> eyre::Result<SimPowerState> {
         Ok(match self.device_by_bmc_mac(bmc_mac)?.power_state() {
-            MockPowerState::Unknown => eyre::bail!("device power state is unavailable"),
-            MockPowerState::On => SimPowerState::On,
-            // The Redfish mock reports a cycling device as off until the
-            // cycle's delay has run, and RMS has no state in between.
-            MockPowerState::Off | MockPowerState::PowerCycling { .. } => SimPowerState::Off,
-            // Likewise for the transitional Redfish states: RMS reports the
+            PowerState::Paused
+            | PowerState::Sleeping
+            | PowerState::Hibernating
+            | PowerState::UnsupportedValue => {
+                eyre::bail!("device power state is unavailable")
+            }
+            PowerState::On => SimPowerState::On,
+            PowerState::Off => SimPowerState::Off,
+            // For transitional Redfish states, RMS reports the
             // state the transition started from until it completes.
-            MockPowerState::PoweringOn => SimPowerState::Off,
-            MockPowerState::PoweringOff => SimPowerState::On,
+            PowerState::PoweringOn => SimPowerState::Off,
+            PowerState::PoweringOff => SimPowerState::On,
         })
     }
 

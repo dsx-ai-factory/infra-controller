@@ -153,15 +153,3 @@ spec:
           annotations:
             summary: "More than 10% of hosts unhealthy"
             description: "Excludes hosts with SuppressExternalAlerting classification."
-
-        # Production-validated: DPU metrics missing
-        - alert: NicoDPUMetricsMissing
-          expr: |
-            up{job=~".*dpu.*"} == 0
-            or absent(up{job=~".*dpu.*"})
-          for: 10m
-          labels:
-            severity: warning
-          annotations:
-            summary: "DPU metrics scrape target down"
-            description: "DPU metrics have not been collected for 10 minutes."

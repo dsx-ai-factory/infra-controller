@@ -1,5 +1,9 @@
 {{- if .Values.externalService.enabled }}
 {{- $replicas := int .Values.replicas }}
+{{- $trafficPolicy := "Local" }}
+{{- if hasKey .Values.externalService "externalTrafficPolicy" }}
+{{- $trafficPolicy = .Values.externalService.externalTrafficPolicy }}
+{{- end }}
 {{- range $i := until $replicas }}
 ---
 apiVersion: v1
@@ -26,7 +30,9 @@ spec:
   ipFamilies:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-  externalTrafficPolicy: Local
+  {{- with $trafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
   selector:
     app.kubernetes.io/name: {{ include "nico-ntp.name" $ }}
     statefulset.kubernetes.io/pod-name: {{ include "nico-ntp.name" $ }}-{{ $i }}

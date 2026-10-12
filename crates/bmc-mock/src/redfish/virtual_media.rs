@@ -262,21 +262,23 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
     use http_body_util::BodyExt;
+    use nv_redfish::schema::resource::PowerState;
     use tower::ServiceExt;
 
     use super::*;
-    use crate::test_support::{TestCallbacks, host_info};
-    use crate::{HardwareType, MachineRouterOptions, MockPowerState, machine_router};
+    use crate::test_support::{TestBmcConfig, TestCallbacks, create_test_bmc, host_info};
+    use crate::{HardwareType, MachineRouterOptions};
 
     fn test_router() -> (Router, Arc<TestCallbacks>) {
         test_router_for(HardwareType::DellPowerEdgeR750)
     }
 
     fn test_router_for(hardware_type: HardwareType) -> (Router, Arc<TestCallbacks>) {
-        let callbacks = Arc::new(TestCallbacks::new(MockPowerState::Off));
-        let router = machine_router(
+        let (router, state) = create_test_bmc(
             &host_info(hardware_type),
-            callbacks.clone(),
+            TestBmcConfig {
+                power_state: PowerState::Off,
+            },
             "test-host-id".to_string(),
             false,
             MachineRouterOptions {
@@ -296,9 +298,9 @@ mod tests {
                     },
                 ]),
             },
-        )
-        .0;
-        (router, callbacks)
+        );
+        let callbacks = state.callbacks.as_ref().unwrap();
+        (router, callbacks.clone())
     }
 
     #[tokio::test]

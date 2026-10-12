@@ -47,9 +47,6 @@ use crate::metrics::V6ReplyMessageType;
 use crate::modes::{DhcpMode, V6Outcome};
 use crate::{Config, util};
 
-const DUID_EN: u16 = 2;
-const NVIDIA_ENTERPRISE_NUMBER: u32 = 5703;
-
 #[derive(Debug)]
 struct DecodedPacketV6 {
     message: Message,
@@ -365,7 +362,7 @@ pub async fn process_packet(
     // lifetime configuration before crossing the API boundary. DPU discovery
     // is read-only and keeps serving address-less bindings without lifetimes.
     if requires_relay && message_kind != MessageKind::V6InfoRequest {
-        stateful_lifetimes(config)?;
+        config.stateful_lifetimes()?;
     }
 
     // DPU mode keys direct requests by the receiving interface; controller mode
@@ -447,25 +444,8 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 }
 
 /// Return the stable DUID-EN used as this server's DHCPv6 identifier.
-fn server_identifier(config: &Config) -> Vec<u8> {
-    let mut identifier = Vec::with_capacity(10);
-    identifier.extend_from_slice(&DUID_EN.to_be_bytes());
-    identifier.extend_from_slice(&NVIDIA_ENTERPRISE_NUMBER.to_be_bytes());
-    identifier.extend_from_slice(&config.dhcp_config.carbide_dhcp_server.octets());
-    identifier
-}
-
-/// Return validated lifetimes for a stateful DHCPv6 response.
-fn stateful_lifetimes(config: &Config) -> Result<(u32, u32), DhcpError> {
-    let preferred_lifetime = config.dhcp_config.dhcpv6_preferred_lifetime_secs;
-    let valid_lifetime = config.dhcp_config.dhcpv6_valid_lifetime_secs;
-    if preferred_lifetime == 0 || valid_lifetime == 0 || preferred_lifetime > valid_lifetime {
-        return Err(DhcpError::InvalidDhcpV6Lifetimes {
-            preferred_lifetime_secs: preferred_lifetime,
-            valid_lifetime_secs: valid_lifetime,
-        });
-    }
-    Ok((preferred_lifetime, valid_lifetime))
+fn server_identifier(config: &Config) -> Result<Vec<u8>, DhcpError> {
+    Ok(config.dhcp_config.server_identifier()?.into())
 }
 
 /// Reject messages explicitly selecting another server and require selection where mandated.
@@ -497,7 +477,7 @@ fn ensure_server_identifier(message: &Message, config: &Config) -> Result<(), Dh
     }
 
     if let Some(received) = received
-        && received != &server_identifier(config)
+        && received != &server_identifier(config)?
     {
         return Err(DhcpError::NotMyPacket(bytes_to_hex(received)));
     }
@@ -528,7 +508,7 @@ fn encode_mode_reply(
     config: &Config,
 ) -> Result<PacketV6, DhcpError> {
     let reply_type = reply_type_for(request.message.msg_type());
-    let mut reply = base_reply(request, reply_type, config);
+    let mut reply = base_reply(request, reply_type, config)?;
 
     // The client owns option-39 negotiation flags; its requested name is never trusted.
     let requested_fqdn_flags = match request.message.opts().get(OptionCode::ClientFqdn) {
@@ -595,7 +575,7 @@ fn encode_mode_reply(
             let association = request
                 .ia_na()?
                 .ok_or(DhcpError::MissingOptionV6(OptionCode::IANA))?;
-            let (preferred_lifetime, valid_lifetime) = stateful_lifetimes(config)?;
+            let (preferred_lifetime, valid_lifetime) = config.stateful_lifetimes()?;
             let address = record.address.parse::<Ipv6Addr>()?;
             let mut address_options = DhcpOptions::new();
             address_options.insert(DhcpOption::IAAddr(IAAddr {
@@ -654,7 +634,7 @@ fn encode_local_reply(
         MessageType::Release | MessageType::Decline => Status::Success,
         other => return Err(DhcpError::UnhandledMessageTypeV6(other)),
     };
-    let mut reply = base_reply(request, MessageType::Reply, config);
+    let mut reply = base_reply(request, MessageType::Reply, config)?;
     reply.opts_mut().insert(status_option(status));
     encode_packet(reply, request.relay.as_ref()).map(Some)
 }
@@ -711,14 +691,18 @@ fn confirm_status(
 }
 
 /// Create the common transaction and identity options for one response.
-fn base_reply(request: &DecodedPacketV6, message_type: MessageType, config: &Config) -> Message {
+fn base_reply(
+    request: &DecodedPacketV6,
+    message_type: MessageType,
+    config: &Config,
+) -> Result<Message, DhcpError> {
     let mut reply = Message::new_with_id(message_type, request.message.xid());
     reply
         .opts_mut()
         .insert(DhcpOption::ClientId(request.duid.clone()));
     reply
         .opts_mut()
-        .insert(DhcpOption::ServerId(server_identifier(config)));
+        .insert(DhcpOption::ServerId(server_identifier(config)?));
     // Preference participates in server selection and therefore belongs only
     // in ADVERTISE, not the eventual REPLY.
     if message_type == MessageType::Advertise
@@ -726,7 +710,7 @@ fn base_reply(request: &DecodedPacketV6, message_type: MessageType, config: &Con
     {
         reply.opts_mut().insert(DhcpOption::Preference(preference));
     }
-    reply
+    Ok(reply)
 }
 
 /// Append configured service options and request-negotiated API-owned naming options.
@@ -940,12 +924,16 @@ mod tests {
         }
 
         let config = Config::new(
-            DhcpConfig::default(),
+            DhcpConfig {
+                carbide_dhcp_server: Some(std::net::Ipv4Addr::LOCALHOST),
+                carbide_provisioning_server_ipv4: Some(std::net::Ipv4Addr::LOCALHOST),
+                ..Default::default()
+            },
             None,
             67,
             ForgeClientConfig::new(String::new(), None),
         );
-        let server_id = server_identifier(&config);
+        let server_id = server_identifier(&config).unwrap();
         let other_server_id = vec![0xff];
 
         value_scenarios!(run = |Row { message_type, server_ids }| {
@@ -1043,6 +1031,10 @@ mod tests {
                 let config = Config::new(
                     DhcpConfig {
                         dhcpv6_server_preference: preference,
+                        dhcpv6_server_id: Some(
+                            carbide_rpc_utils::dhcp::DhcpV6ServerId::from_remote_id("test-dpu")
+                                .unwrap(),
+                        ),
                         ..Default::default()
                     },
                     None,
@@ -1051,6 +1043,7 @@ mod tests {
                 );
 
                 match base_reply(&request, message_type, &config)
+                    .unwrap()
                     .opts()
                     .get(OptionCode::Preference)
                 {

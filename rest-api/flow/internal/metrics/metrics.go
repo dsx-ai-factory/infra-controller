@@ -112,7 +112,7 @@ func methodLabels(fullMethod string) (string, string) {
 	return service, method
 }
 
-// Server serves a Prometheus gatherer on /metrics.
+// Server serves a Prometheus gatherer on /metrics for GET and HEAD requests.
 type Server struct {
 	listener net.Listener
 	server   *http.Server
@@ -126,7 +126,7 @@ func NewServer(address string, gatherer prometheus.Gatherer) (*Server, error) {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
+	mux.Handle("GET /metrics", promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
 
 	return &Server{
 		listener: listener,

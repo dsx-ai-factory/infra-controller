@@ -55,6 +55,11 @@ const (
 
 	// InfiniBandPartitionOrderByDefault default field to be used for ordering when none specified
 	InfiniBandPartitionOrderByDefault = "created"
+
+	// InfiniBandPartitionNameMinLength is the minimum supported InfiniBand Partition name length.
+	InfiniBandPartitionNameMinLength = 2
+	// InfiniBandPartitionNameMaxLength is the maximum supported InfiniBand Partition name length.
+	InfiniBandPartitionNameMaxLength = 256
 )
 
 var (
@@ -155,7 +160,7 @@ func (ibp *InfiniBandPartition) Validate() error {
 	return validation.ValidateStruct(ibp,
 		validation.Field(&ibp.Name,
 			validation.Required.Error("InfiniBandPartition Name must be specified"),
-			validation.Length(2, 256).Error("InfiniBandPartition Name must be at least 2 characters and maximum 256 characters"),
+			validation.Length(InfiniBandPartitionNameMinLength, InfiniBandPartitionNameMaxLength).Error("InfiniBandPartition Name must be at least 2 characters and maximum 256 characters"),
 			validation.By(validateInfiniBandPartitionNameWhitespace)),
 		validation.Field(&ibp.Status,
 			validation.Required.Error("InfiniBandPartition Status must be specified"),
@@ -323,6 +328,8 @@ type InfiniBandPartitionClearInput struct {
 	Mtu                     bool
 	EnableSharp             bool
 	Labels                  bool
+	// Deleted clears the soft-delete timestamp.
+	Deleted bool
 }
 
 // InfiniBandPartitionFilterInput input parameters for Filter method
@@ -337,6 +344,8 @@ type InfiniBandPartitionFilterInput struct {
 	PartitionNames         []string
 	PartitionKeys          []string
 	SharpEnabled           *bool
+	// IncludeDeleted returns soft-deleted rows in addition to active rows.
+	IncludeDeleted bool
 }
 
 var _ bun.BeforeAppendModelHook = (*InfiniBandPartition)(nil)
@@ -421,6 +430,9 @@ func (ibpsd InfiniBandPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 	ibps := []InfiniBandPartition{}
 
 	query := db.GetIDB(tx, ibpsd.dbSession).NewSelect().Model(&ibps)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 	if filter.Names != nil {
 		query = query.Where("ibp.name IN (?)", bun.In(filter.Names))
 	}
@@ -552,7 +564,7 @@ func (ibpsd InfiniBandPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 	if input.Name != nil {
 		if err := validation.Validate(*input.Name,
 			validation.Required.Error("InfiniBandPartition Name must be specified"),
-			validation.Length(2, 256).Error("InfiniBandPartition Name must be at least 2 characters and maximum 256 characters"),
+			validation.Length(InfiniBandPartitionNameMinLength, InfiniBandPartitionNameMaxLength).Error("InfiniBandPartition Name must be at least 2 characters and maximum 256 characters"),
 			validation.By(validateInfiniBandPartitionNameWhitespace)); err != nil {
 			return nil, err
 		}
@@ -677,10 +689,22 @@ func (ibpsd InfiniBandPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx, inp
 		updatedFields = append(updatedFields, "labels")
 	}
 
+	if input.Deleted {
+		ibp.Deleted = nil
+
+		updatedFields = append(updatedFields, "deleted")
+	}
+
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, ibpsd.dbSession).NewUpdate().Model(ibp).Column(updatedFields...).Where("id = ?", ibp.ID).Exec(ctx)
+		query := db.GetIDB(tx, ibpsd.dbSession).NewUpdate().Model(ibp).Column(updatedFields...).Where("id = ?", ibp.ID)
+		// Soft-deleted rows are excluded by default; include them when undeleting.
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}
