@@ -12,6 +12,7 @@
 | 0.4 | 2026-09-29 | Sunil Kumar | Bind validation allocation to the request and define recovery |
 | 0.5 | 2026-10-01 | Sunil Kumar | Require successful Machine Validation, reuse Create Instance and tenant authorization, and remove workflow-specific timeouts |
 | 0.6 | 2026-10-07 | Sunil Kumar | Clarify shared targeted allocation and repair coexistence with an external-validation hold |
+| 0.7 | 2026-10-19 | Sunil Kumar | Align hold discovery with cursor-paginated IDs and tenant-scoped retrieval |
 
 ## Table of Contents
 
@@ -359,18 +360,19 @@ NICo provides these workflow APIs:
 
 | API | Purpose |
 | :--- | :--- |
-| `ListExternalValidationHolds()` | Returns all active holds and their current attempt status. This is the authoritative discovery and recovery API. |
+| `FindExternalValidationHoldIds()` | Discovers active hold IDs using tenant-scoped cursor pagination. |
+| `FindExternalValidationHoldsByIds()` | Returns current active holds and attempt status for a bounded batch of discovered IDs in the authorized tenant. Together these reads are the authoritative discovery and recovery path. |
 | `StartExternalValidation(machine_id, caller_idempotency_key)` | Opens an attempt for a pending hold and returns an opaque `request_id`. It reports no active hold or an already-open attempt without creating another one. |
 | `CancelExternalValidation(request_id, details)` | Closes an active attempt only before allocation starts. It is idempotent and leaves the hold in place. |
 | `CompleteExternalValidation(request_id, outcome, details, validation_instance_id)` | Records a result only for the matching active attempt. An identical completion replay is idempotent; a stale request or conflicting completion is rejected. |
-| `RemoveExternalValidationHold(machine_id, reason)` | Audited break-glass recovery; not the normal completion path. |
+| `RemoveExternalValidationHold(machine_id, hold_id, reason)` | Audited break-glass recovery, fenced by the expected hold ID; not the normal completion path. |
 
 There is no separate validation-instance creation API. The existing Create
 Instance API receives the additive request-binding field described below.
 
 ### **3.3.1 Phase 1 API Contract**
 
-Callers of `ListExternalValidationHolds`, `StartExternalValidation`,
+Callers of `FindExternalValidationHoldIds`, `FindExternalValidationHoldsByIds`, `StartExternalValidation`,
 `CancelExternalValidation`, and `CompleteExternalValidation` must be authenticated
 and authorized to manage validation for the configured tenant at that site.
 Another authorized caller in the same tenant may resume an attempt; it is not
@@ -388,11 +390,22 @@ The binding must reach the allocation commit; storing it only in the REST
 service after creation is insufficient. Requests without the new field retain
 existing behavior for machines without an external-validation hold.
 
-#### **ListExternalValidationHolds**
+#### **Hold ID discovery and retrieval**
 
-The service calls this on startup and periodically thereafter. It returns every
-active hold in its authorized scope, with pagination for large sites. Each item
-includes:
+The service calls `FindExternalValidationHoldIds` on startup and periodically
+thereafter, then fetches current state using `FindExternalValidationHoldsByIds`.
+Both operations require the authorized tenant organization ID at the connected
+site. ID discovery is paginated by an exclusive `(created_at, hold_id)` cursor
+over immutable creation timestamps and UUIDs in byte order, rather than a live
+offset. Removing or satisfying earlier holds cannot shift subsequent pages;
+the cursor remains usable after its hold disappears. Retrieval accepts bounded
+ID batches and omits unknown, inactive, removed, or out-of-tenant holds.
+
+Neither operation promises a frozen snapshot. State can change between calls,
+and newly visible holds behind a cursor are found on the next pass, starting
+without a cursor. An omitted hold does not prove allocation or cleanup finished.
+See the [gRPC integration contract](external-validation-api-contract.md#discovery-and-pagination)
+for cursor, page-size, and batch bounds. Each retrieved item includes:
 
 ```text
 machine_id
@@ -457,7 +470,7 @@ recovery without binding attempts to one service credential.
 The external service must persist the `caller_idempotency_key` before calling
 `StartExternalValidation` and persist the returned `request_id` before creating
 the targeted instance. If it crashes between either step, it calls `Start` again
-with the same key or uses `ListExternalValidationHolds()` to recover the durable
+with the same key or uses hold ID discovery and retrieval to recover the durable
 active `request_id`. NICo never relies on an in-memory request ID.
 
 #### **Existing Create Instance API**
@@ -809,7 +822,8 @@ new DSX Exchange event contract. NICo creates and owns the
 `PreventAllocations` hold after successful Machine Validation for an eligible
 machine, before making it `Ready`. The site-controlled external-validation
 service uses
-`ListExternalValidationHolds()` to discover and reconcile pending work, then
+`FindExternalValidationHoldIds()` and `FindExternalValidationHoldsByIds()` to
+discover and reconcile pending work, then
 uses `StartExternalValidation(machine_id, caller_idempotency_key)` to obtain a
 `request_id`. It creates the validation instance through the existing Create
 Instance API, supplying its OS and network inputs, `allowUnhealthyMachine: true`,
@@ -834,8 +848,8 @@ stable hold/cycle identifier.
 The external-validation service can then ignore ordinary `Ready` events without
 an API lookup and start work promptly when the event carries an active hold.
 Implementing this phase requires an AsyncAPI contract update and matching NICo
-state-change publisher and periodic-republisher changes. `ListExternalValidationHolds()`
-remains the source of truth for service startup, missed events, and
+state-change publisher and periodic-republisher changes. Hold ID discovery and
+retrieval remain the source of truth for service startup, missed events, and
 out-of-order delivery.
 
 Before external teams integrate, Phase 1 must publish the reviewed protobuf and
