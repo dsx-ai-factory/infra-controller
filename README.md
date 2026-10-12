@@ -464,6 +464,7 @@ than a commitment, and each item links to its tracking issue.
 
 ## Community and Support
 
+- **Chat:** join the [NICo community Slack](https://inviter.co/dsx-ai-factory)
 - **Questions and ideas:** [GitHub Discussions](https://github.com/dsx-ai-factory/infra-controller/discussions)
 - **Bugs and feature requests:** [GitHub Issues](https://github.com/dsx-ai-factory/infra-controller/issues)
 - **Releases:** [Release Notes](https://docs.nvidia.com/infra-controller/documentation/release-notes) for what changed, and the [Release Policy](RELEASE.md) for the monthly branch, version, and support cadence
