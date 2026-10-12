@@ -386,16 +386,14 @@ mod tests {
 
         // Simulate a switch whose NVOS management interface has never been discovered:
         // ready and control-plane-configured, but with no NVOS MAC/IP to resolve.
-        sqlx::query(
-            "UPDATE expected_switches SET nvos_mac_addresses = NULL WHERE bmc_mac_address = $1",
-        )
-        .bind(
-            switch
-                .bmc_mac_address
-                .expect("seeded switch should have a BMC MAC"),
-        )
-        .execute(txn.as_mut())
-        .await?;
+        sqlx::query("DELETE FROM expected_switch_nvos_interfaces WHERE bmc_mac_address = $1")
+            .bind(
+                switch
+                    .bmc_mac_address
+                    .expect("seeded switch should have a BMC MAC"),
+            )
+            .execute(txn.as_mut())
+            .await?;
 
         let switch = db::switch::find_by_id(txn.as_mut(), &switch.id)
             .await?

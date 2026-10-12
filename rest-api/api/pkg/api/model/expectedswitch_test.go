@@ -277,88 +277,113 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 			},
 			expectErr: false,
 		},
-		// NvosMacAddresses validation tests
+		// NvosInterfaces validation tests
 		{
-			desc: "ok when NvosMacAddresses entries are valid MACs",
+			desc: "ok when NvosInterfaces entries are valid MACs",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
-				NvosMacAddresses:   []string{"00:11:22:33:44:66", "00:11:22:33:44:77"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00:11:22:33:44:77"}},
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when NvosMacAddresses entry is not a MAC",
+			desc: "error when NvosInterfaces entry is not a MAC",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
-				NvosMacAddresses:   []string{"00:11:22:33:44:66", "not-a-mac"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "not-a-mac"}},
 			},
 			expectErr: true,
 		},
 		{
-			desc: "error when NvosMacAddresses entry is empty",
+			desc: "error when NvosInterfaces entry MAC is empty",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
-				NvosMacAddresses:   []string{""},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: ""}},
 			},
 			expectErr: true,
 		},
 		{
-			desc: "ok when NvosMacAddresses is an empty list",
+			desc: "ok when NvosInterfaces is an empty list",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
-				NvosMacAddresses:   []string{},
+				NvosInterfaces:     APINvosInterfaces{},
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when NvosMacAddresses has duplicate entries",
+			desc: "error when NvosInterfaces has duplicate MACs",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
-				NvosMacAddresses:   []string{"00:11:22:33:44:66", "00:11:22:33:44:66"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00:11:22:33:44:66"}},
 			},
 			expectErr: true,
 		},
 		{
-			desc: "error when NvosMacAddresses entries duplicate across separator styles",
+			desc: "error when NvosInterfaces MACs duplicate across separator styles",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
-				NvosMacAddresses:   []string{"00:11:22:33:44:66", "00-11-22-33-44-66"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00-11-22-33-44-66"}},
 			},
 			expectErr: true,
 		},
 		{
-			desc: "error when NvosMacAddresses entry is not in the published 6-octet format",
+			desc: "error when NvosInterfaces entry MAC is not in the published 6-octet format",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
-				NvosMacAddresses:   []string{"0011.2233.4455"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "0011.2233.4455"}},
+			},
+			expectErr: true,
+		},
+		// primary-marker validation tests
+		{
+			desc: "ok when a single NvosInterfaces entry is marked primary",
+			obj: APIExpectedSwitchCreateRequest{
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				DefaultBmcUsername: &validUsername,
+				DefaultBmcPassword: &validPassword,
+				SwitchSerialNumber: validSwitchSerial,
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00:11:22:33:44:77", IsPrimary: true}},
+			},
+			expectErr: false,
+		},
+		{
+			desc: "error when more than one NvosInterfaces entry is marked primary",
+			obj: APIExpectedSwitchCreateRequest{
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				DefaultBmcUsername: &validUsername,
+				DefaultBmcPassword: &validPassword,
+				SwitchSerialNumber: validSwitchSerial,
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66", IsPrimary: true}, {MacAddress: "00:11:22:33:44:77", IsPrimary: true}},
 			},
 			expectErr: true,
 		},
@@ -377,13 +402,14 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 func TestNewAPIExpectedSwitch(t *testing.T) {
 	bmcIP := "192.168.1.10"
 	dbES := &cdbm.ExpectedSwitch{
-		BmcMacAddress:      "00:11:22:33:44:55",
-		SwitchSerialNumber: "SWITCH123",
-		BmcIpAddress:       &bmcIP,
-		NvosMacAddresses:   []string{"00:11:22:33:44:66", "00:11:22:33:44:77"},
-		Labels:             map[string]string{"env": "test", "zone": "us-west-1"},
-		Created:            cdb.GetCurTime(),
-		Updated:            cdb.GetCurTime(),
+		BmcMacAddress:         "00:11:22:33:44:55",
+		SwitchSerialNumber:    "SWITCH123",
+		BmcIpAddress:          &bmcIP,
+		NvosMacAddresses:      []string{"00:11:22:33:44:66", "00:11:22:33:44:77"},
+		NvosPrimaryMacAddress: cutil.GetPtr("00:11:22:33:44:77"),
+		Labels:                map[string]string{"env": "test", "zone": "us-west-1"},
+		Created:               cdb.GetCurTime(),
+		Updated:               cdb.GetCurTime(),
 	}
 
 	tests := []struct {
@@ -404,7 +430,10 @@ func TestNewAPIExpectedSwitch(t *testing.T) {
 			assert.Equal(t, tc.dbObj.BmcMacAddress, got.BmcMacAddress)
 			assert.Equal(t, tc.dbObj.SwitchSerialNumber, got.SwitchSerialNumber)
 			assert.Equal(t, tc.dbObj.BmcIpAddress, got.BmcIpAddress)
-			assert.Equal(t, APINvosMacAddresses(tc.dbObj.NvosMacAddresses), got.NvosMacAddresses)
+			assert.Equal(t, APINvosInterfaces{
+				{MacAddress: "00:11:22:33:44:66", IsPrimary: false},
+				{MacAddress: "00:11:22:33:44:77", IsPrimary: true},
+			}, got.NvosInterfaces)
 			assert.Equal(t, APILabels(tc.dbObj.Labels), got.Labels)
 			assert.Equal(t, tc.dbObj.Created, got.Created)
 			assert.Equal(t, tc.dbObj.Updated, got.Updated)
@@ -620,60 +649,68 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 			},
 			expectErr: false,
 		},
-		// NvosMacAddresses validation tests
+		// NvosInterfaces validation tests
 		{
-			desc: "ok when NvosMacAddresses entries are valid MACs",
+			desc: "ok when NvosInterfaces entries are valid MACs",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				NvosMacAddresses:   []string{"00:11:22:33:44:66", "00:11:22:33:44:77"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00:11:22:33:44:77"}},
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when NvosMacAddresses entry is not a MAC",
+			desc: "error when NvosInterfaces entry is not a MAC",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				NvosMacAddresses:   []string{"not-a-mac"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "not-a-mac"}},
 			},
 			expectErr: true,
 		},
 		{
-			desc: "error when NvosMacAddresses entry is empty",
+			desc: "error when NvosInterfaces entry MAC is empty",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				NvosMacAddresses:   []string{""},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: ""}},
 			},
 			expectErr: true,
 		},
 		{
-			desc: "ok when NvosMacAddresses is an empty list",
+			desc: "ok when NvosInterfaces is an empty list",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				NvosMacAddresses:   []string{},
+				NvosInterfaces:     APINvosInterfaces{},
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when NvosMacAddresses has duplicate entries",
+			desc: "error when NvosInterfaces has duplicate MACs",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				NvosMacAddresses:   []string{"00:11:22:33:44:66", "00:11:22:33:44:66"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00:11:22:33:44:66"}},
 			},
 			expectErr: true,
 		},
 		{
-			desc: "error when NvosMacAddresses entries duplicate across separator styles",
+			desc: "error when NvosInterfaces MACs duplicate across separator styles",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				NvosMacAddresses:   []string{"00:11:22:33:44:66", "00-11-22-33-44-66"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00-11-22-33-44-66"}},
 			},
 			expectErr: true,
 		},
 		{
-			desc: "error when NvosMacAddresses entry is not in the published 6-octet format",
+			desc: "error when NvosInterfaces entry MAC is not in the published 6-octet format",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				NvosMacAddresses:   []string{"0011.2233.4455"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "0011.2233.4455"}},
+			},
+			expectErr: true,
+		},
+		{
+			desc: "error when more than one NvosInterfaces entry is marked primary",
+			obj: APIExpectedSwitchUpdateRequest{
+				SwitchSerialNumber: &validSwitchSerial,
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66", IsPrimary: true}, {MacAddress: "00:11:22:33:44:77", IsPrimary: true}},
 			},
 			expectErr: true,
 		},
@@ -821,7 +858,7 @@ func TestAPIExpectedSwitchUpdateRequest_ToProto(t *testing.T) {
 	}{
 		{name: "omitted fields preserve Core state", body: `{}`},
 		{name: "null fields preserve Core state", body: `{"defaultBmcUsername":null,"defaultBmcPassword":null,"nvOsUsername":null,"nvOsPassword":null,"labels":null}`},
-		{name: "explicit zero and empty values remain selected", body: `{"slotId":0,"labels":{},"nvosMacAddresses":[]}`, wantPaths: []string{"metadata.labels", "nvos_mac_addresses"}},
+		{name: "explicit zero and empty values remain selected", body: `{"slotId":0,"labels":{},"nvosInterfaces":[]}`, wantPaths: []string{"metadata.labels", "nvos_interfaces"}},
 		{name: "slot ID alone selects derived labels", body: `{"slotId":0}`, wantPaths: []string{"metadata.labels"}},
 		{name: "BMC username leaves the password unselected", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":null}`, wantPaths: []string{"bmc_username"}},
 		{name: "BMC password leaves the username unselected", body: `{"defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_password"}},
@@ -829,6 +866,7 @@ func TestAPIExpectedSwitchUpdateRequest_ToProto(t *testing.T) {
 		{name: "NVOS username leaves the password unselected", body: `{"nvOsUsername":"admin","nvOsPassword":null}`, wantPaths: []string{"nvos_username"}},
 		{name: "NVOS password leaves the username unselected", body: `{"nvOsPassword":"secret"}`, wantPaths: []string{"nvos_password"}},
 		{name: "NVOS pair leaves BMC unchanged", body: `{"nvOsUsername":"admin","nvOsPassword":"secret"}`, wantPaths: []string{"nvos_username", "nvos_password"}},
+		{name: "nvos interfaces select a single path", body: `{"nvosInterfaces":[{"macAddress":"00:11:22:33:44:66","isPrimary":true}]}`, wantPaths: []string{"nvos_interfaces"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

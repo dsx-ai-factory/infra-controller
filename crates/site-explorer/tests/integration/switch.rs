@@ -42,7 +42,10 @@ fn expected_switch_fixture(
     model::expected_switch::ExpectedSwitch {
         expected_switch_id: None,
         bmc_mac_address: bmc_mac,
-        nvos_mac_addresses: vec![nvos_mac],
+        nvos_interfaces: vec![model::expected_switch::ExpectedNvosInterface {
+            mac_address: nvos_mac,
+            is_primary: true,
+        }],
         serial_number: serial.to_string(),
         bmc_username: "ADMIN".to_string(),
         bmc_password: "Pwd2023".to_string(),
@@ -119,7 +122,10 @@ async fn test_site_explorer_switch_discovery(
     let expected_switch = model::expected_switch::ExpectedSwitch {
         expected_switch_id: None,
         bmc_mac_address: bmc_mac,
-        nvos_mac_addresses: vec![bmc_mac],
+        nvos_interfaces: vec![model::expected_switch::ExpectedNvosInterface {
+            mac_address: bmc_mac,
+            is_primary: true,
+        }],
         serial_number: serial_number.clone(),
         bmc_username: bmc_username.clone(),
         bmc_password: bmc_password.clone(),
@@ -269,7 +275,7 @@ async fn test_site_explorer_switch_discovery(
     );
     assert_eq!(expected_switches.len(), 1);
     assert_eq!(
-        expected_switches[0].nvos_mac_addresses,
+        expected_switches[0].nvos_mac_addresses(),
         vec![nvos_mac],
         "explored NVOS MAC addresses must replace the expected record"
     );

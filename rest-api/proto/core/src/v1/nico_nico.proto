@@ -3059,6 +3059,17 @@ message SwitchesByIdsRequest {
   repeated common.SwitchId switch_ids = 1;
 }
 
+// A single NVOS ethernet port of a switch. Both ports of a switch reach the
+// same NVOS instance; `is_primary` marks the one (eth0) NICo talks to via RMS.
+message ExpectedNvosInterface {
+  // MAC address of this NVOS ethernet port.
+  string mac_address = 1;
+  // Whether NICo treats this as the primary (eth0) NVOS port. Exactly one port
+  // per switch is primary; a switch with a single port is always its own primary
+  // regardless of this flag.
+  bool is_primary = 2;
+}
+
 message ExpectedSwitch {
   string bmc_mac_address = 1;
   string bmc_username = 2;
@@ -3071,13 +3082,16 @@ message ExpectedSwitch {
   optional string nvos_password = 8;
   // Unique identifier for the expected switch. When omitted, server generates one.
   optional common.UUID expected_switch_id = 9;
-  repeated string nvos_mac_addresses = 10;
+  // The switch's NVOS ethernet ports. Exactly one entry must be flagged
+  // `is_primary` when more than one is present; a single port is primary
+  // implicitly. On reads the flags report the current primary.
+  repeated ExpectedNvosInterface nvos_interfaces = 10;
   string bmc_ip_address = 11;
   // When true, site-explorer skips BMC password rotation and stores the
   // factory-default credentials in Vault as-is.
   optional bool bmc_retain_credentials = 12;
   // Static IP reservation for the single wired NVOS port. Only meaningful
-  // when `nvos_mac_addresses` has exactly one entry.
+  // when `nvos_interfaces` has exactly one entry.
   optional string nvos_ip_address = 13;
 
   // WARNING: Following fields are not present in Core, but added directly in REST snapshot
@@ -11574,9 +11588,9 @@ message PatchExpectedSwitchRequest {
   ExpectedSwitch expected_switch = 1;
   // Required; an empty mask checks existence without changing the row.
   // Paths: bmc_username, bmc_password, switch_serial_number, bmc_ip_address,
-  // bmc_retain_credentials, rack_id, nvos_mac_addresses, nvos_ip_address,
-  // nvos_username, nvos_password, metadata.name, metadata.description,
-  // metadata.labels.
+  // bmc_retain_credentials, rack_id, nvos_mac_addresses, nvos_primary_mac_address,
+  // nvos_ip_address, nvos_username, nvos_password, metadata.name,
+  // metadata.description, metadata.labels.
   // Unselected values are ignored. Selected values replace the stored field,
   // including empty collections, an absent `rack_id` (clear), and an empty BMC
   // IP (clear). A selected `nvos_ip_address` clears with an absent or empty value.
@@ -11728,6 +11742,9 @@ message SwitchNvosPortInfo {
   optional uint32 service_port = 2;
   // At most one address per family, ordered IPv4 before IPv6.
   repeated IpAddress addresses = 3;
+  // Whether this is the operator-declared primary (eth0) NVOS port that NICo
+  // uses to talk to NVOS via RMS.
+  bool is_primary = 4;
 }
 
 // A named definition, independent of site, machine, card or tenant selection.

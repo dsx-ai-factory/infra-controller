@@ -18,10 +18,12 @@
 use std::net::IpAddr;
 
 use carbide_uuid::rack::RackId;
-use clap::Parser;
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser};
 use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 
+use crate::expected_switch::common::NvosInterfaceArg;
 use crate::metadata::parse_rpc_labels;
 
 #[derive(Parser, Debug, Serialize, Deserialize)]
@@ -40,8 +42,13 @@ Add an expected switch and associate it with a rack:
 Add an expected switch with NVOS credentials and a static NVOS IP:
     $ nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 \
     --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB \
-    --nvos-mac-address aa:bb:cc:dd:ee:ff --nvos-username admin --nvos-password mypassword \
+    --nvos-interface aa:bb:cc:dd:ee:ff --nvos-username admin --nvos-password mypassword \
     --nvos-ip-address 192.0.2.10
+
+Add an expected switch with two NVOS ports, selecting the primary (eth0):
+    $ nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 \
+    --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB \
+    --nvos-interface aa:bb:cc:dd:ee:ff,primary --nvos-interface aa:bb:cc:dd:ee:00
 
 Add an expected switch with metadata name and a label:
     $ nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 \
@@ -63,8 +70,13 @@ pub(crate) struct Args {
     )]
     switch_serial_number: String,
 
-    #[clap(long = "nvos-mac-address", help = "NVOS MAC address(es) of the expected switch", action = clap::ArgAction::Append)]
-    nvos_mac_addresses: Vec<MacAddress>,
+    #[clap(
+        long = "nvos-interface",
+        value_name = "MAC[,primary]",
+        help = "An NVOS ethernet port of the expected switch. Repeat for each port. Append ',primary' to mark the primary port (eth0); when none is marked the first is primary and a single port is always primary",
+        action = clap::ArgAction::Append
+    )]
+    nvos_interfaces: Vec<NvosInterfaceArg>,
     #[clap(long, help = "NVOS username of the expected switch")]
     nvos_username: Option<String>,
     #[clap(long, help = "NVOS password of the expected switch")]
@@ -110,7 +122,7 @@ pub(crate) struct Args {
     #[clap(
         long = "nvos-ip-address",
         value_name = "NVOS_IP_ADDRESS",
-        help = "Static IP for the single wired NVOS port. Requires exactly one --nvos-mac-address"
+        help = "Static IP for the single wired NVOS port. Requires exactly one --nvos-interface"
     )]
     nvos_ip_address: Option<IpAddr>,
 
@@ -120,6 +132,19 @@ pub(crate) struct Args {
         help = "When true, site-explorer skips BMC password rotation and stores factory-default credentials in Vault as-is"
     )]
     bmc_retain_credentials: Option<bool>,
+}
+
+impl Args {
+    pub(super) fn validate(&self) -> Result<(), clap::Error> {
+        if let Err(message) =
+            crate::expected_switch::common::ensure_single_primary(&self.nvos_interfaces)
+        {
+            return Err(Self::command()
+                .bin_name("nico-admin-cli expected-switch add")
+                .error(ErrorKind::ValueValidation, message));
+        }
+        Ok(())
+    }
 }
 
 impl From<Args> for rpc::forge::ExpectedSwitch {
@@ -138,11 +163,9 @@ impl From<Args> for rpc::forge::ExpectedSwitch {
             switch_serial_number: value.switch_serial_number,
             metadata: Some(metadata),
             rack_id: value.rack_id,
-            nvos_mac_addresses: value
-                .nvos_mac_addresses
-                .iter()
-                .map(|m| m.to_string())
-                .collect(),
+            nvos_interfaces: crate::expected_switch::common::nvos_interfaces_wire(
+                &value.nvos_interfaces,
+            ),
             nvos_username: value.nvos_username,
             nvos_password: value.nvos_password,
             bmc_ip_address: value

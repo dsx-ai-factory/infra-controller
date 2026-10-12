@@ -351,8 +351,9 @@ async fn run_machine_a_tron_racks_test(
 
             let switch_nvos_ips: Vec<String> = sqlx::query_scalar(
                 "SELECT host(mia.address) \
-                 FROM expected_switches es \
-                 JOIN machine_interfaces mi ON mi.mac_address = ANY(es.nvos_mac_addresses) \
+                 FROM expected_switch_nvos_interfaces esi \
+                 JOIN expected_switches es ON es.bmc_mac_address = esi.bmc_mac_address \
+                 JOIN machine_interfaces mi ON mi.mac_address = esi.mac_address \
                  JOIN machine_interface_addresses mia ON mia.interface_id = mi.id \
                  WHERE es.rack_id = $1",
             )

@@ -80,7 +80,7 @@ async fn handle_wait_for_os_machine_interface(
         }
     };
 
-    let nvos_mac_addresses = &expected_switch.nvos_mac_addresses;
+    let nvos_mac_addresses = expected_switch.nvos_mac_addresses();
     if nvos_mac_addresses.is_empty() {
         tracing::warn!(
             switch_id = %switch_id,
@@ -101,7 +101,7 @@ async fn handle_wait_for_os_machine_interface(
     let mut associated_count = 0usize;
     let total = nvos_mac_addresses.len();
 
-    for mac_address in nvos_mac_addresses {
+    for mac_address in &nvos_mac_addresses {
         let mi = db::machine_interface::find_by_mac_address(&mut *txn, *mac_address).await?;
         let interface = match mi.first() {
             Some(iface) => iface,

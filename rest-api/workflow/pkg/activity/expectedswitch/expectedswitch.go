@@ -139,17 +139,18 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 		cur, found := existingByID[esID]
 		if !found {
 			_, cerr := esDAO.Create(ctx, nil, cdbm.ExpectedSwitchCreateInput{
-				ExpectedSwitchID:   esID,
-				SiteID:             siteID,
-				BmcMacAddress:      reported.BmcMacAddress,
-				SwitchSerialNumber: reported.SwitchSerialNumber,
-				BmcIpAddress:       reported.BmcIpAddress,
-				RackID:             reported.RackID,
-				Name:               reported.Name,
-				Description:        reported.Description,
-				NvosMacAddresses:   reported.NvosMacAddresses,
-				Labels:             reported.Labels,
-				CreatedBy:          siteID, /* This would normally be a user ID, but that isn't something NICo provides */
+				ExpectedSwitchID:      esID,
+				SiteID:                siteID,
+				BmcMacAddress:         reported.BmcMacAddress,
+				SwitchSerialNumber:    reported.SwitchSerialNumber,
+				BmcIpAddress:          reported.BmcIpAddress,
+				RackID:                reported.RackID,
+				Name:                  reported.Name,
+				Description:           reported.Description,
+				NvosMacAddresses:      reported.NvosMacAddresses,
+				NvosPrimaryMacAddress: reported.NvosPrimaryMacAddress,
+				Labels:                reported.Labels,
+				CreatedBy:             siteID, /* This would normally be a user ID, but that isn't something NICo provides */
 			})
 			if cerr != nil {
 				logger.Error().Err(cerr).Str("ID", esID.String()).Msg("failed to create ExpectedSwitch in DB")
@@ -196,15 +197,16 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 				}
 
 				_, uerr := esDAO.Update(ctx, tx, cdbm.ExpectedSwitchUpdateInput{
-					ExpectedSwitchID:   cur.ID,
-					BmcMacAddress:      &reported.BmcMacAddress,
-					SwitchSerialNumber: &reported.SwitchSerialNumber,
-					BmcIpAddress:       reported.BmcIpAddress,
-					RackID:             reported.RackID,
-					Name:               reported.Name,
-					Description:        reported.Description,
-					NvosMacAddresses:   reported.NvosMacAddresses,
-					Labels:             reported.Labels,
+					ExpectedSwitchID:      cur.ID,
+					BmcMacAddress:         &reported.BmcMacAddress,
+					SwitchSerialNumber:    &reported.SwitchSerialNumber,
+					BmcIpAddress:          reported.BmcIpAddress,
+					RackID:                reported.RackID,
+					Name:                  reported.Name,
+					Description:           reported.Description,
+					NvosMacAddresses:      reported.NvosMacAddresses,
+					NvosPrimaryMacAddress: reported.NvosPrimaryMacAddress,
+					Labels:                reported.Labels,
 				})
 				return uerr
 			})

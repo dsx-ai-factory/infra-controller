@@ -145,9 +145,10 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 
 	// NVOS MACs identify the switch's management ports during discovery, so a
 	// MAC claimed by another Expected Switch on the Site is a conflict.
-	if len(apiRequest.NvosMacAddresses) > 0 {
+	nvosMacAddresses := apiRequest.NvosInterfaces.MacAddresses()
+	if len(nvosMacAddresses) > 0 {
 		conflicts, _, derr := esDAO.GetAll(ctx, nil, cdbm.ExpectedSwitchFilterInput{
-			NvosMacAddresses: apiRequest.NvosMacAddresses,
+			NvosMacAddresses: nvosMacAddresses,
 			SiteIDs:          []uuid.UUID{site.ID},
 		}, paginator.PageInput{
 			Limit: cutil.GetPtr(1),
@@ -159,7 +160,7 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 		}
 
 		if len(conflicts) > 0 {
-			logger.Warn().Strs("NvosMacAddresses", apiRequest.NvosMacAddresses).Msg("Expected Switch with specified NVOS MAC address already exists on Site")
+			logger.Warn().Strs("NvosMacAddresses", nvosMacAddresses).Msg("Expected Switch with specified NVOS MAC address already exists on Site")
 
 			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Expected Switch with specified NVOS MAC address already exists on Site", validation.Errors{
 				"id": errors.New(conflicts[0].ID.String()),
@@ -176,22 +177,23 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 			ctx,
 			tx,
 			cdbm.ExpectedSwitchCreateInput{
-				ExpectedSwitchID:   uuid.New(),
-				SiteID:             site.ID,
-				BmcMacAddress:      apiRequest.BmcMacAddress,
-				BmcIpAddress:       apiRequest.BmcIpAddress,
-				SwitchSerialNumber: apiRequest.SwitchSerialNumber,
-				NvosMacAddresses:   apiRequest.NvosMacAddresses,
-				RackID:             apiRequest.RackID,
-				Name:               apiRequest.Name,
-				Manufacturer:       apiRequest.Manufacturer,
-				Model:              apiRequest.Model,
-				Description:        apiRequest.Description,
-				SlotID:             apiRequest.SlotID,
-				TrayIdx:            apiRequest.TrayIdx,
-				HostID:             apiRequest.HostID,
-				Labels:             apiRequest.Labels,
-				CreatedBy:          dbUser.ID,
+				ExpectedSwitchID:      uuid.New(),
+				SiteID:                site.ID,
+				BmcMacAddress:         apiRequest.BmcMacAddress,
+				BmcIpAddress:          apiRequest.BmcIpAddress,
+				SwitchSerialNumber:    apiRequest.SwitchSerialNumber,
+				NvosMacAddresses:      nvosMacAddresses,
+				NvosPrimaryMacAddress: apiRequest.NvosInterfaces.PrimaryMacAddress(),
+				RackID:                apiRequest.RackID,
+				Name:                  apiRequest.Name,
+				Manufacturer:          apiRequest.Manufacturer,
+				Model:                 apiRequest.Model,
+				Description:           apiRequest.Description,
+				SlotID:                apiRequest.SlotID,
+				TrayIdx:               apiRequest.TrayIdx,
+				HostID:                apiRequest.HostID,
+				Labels:                apiRequest.Labels,
+				CreatedBy:             dbUser.ID,
 			},
 		)
 		if err != nil {
@@ -620,9 +622,10 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 	// NVOS MACs identify the switch's management ports during discovery, so a
 	// MAC claimed by another Expected Switch on the Site is a conflict. The
 	// switch being updated is excluded so re-asserting its own MACs stays valid.
-	if len(apiRequest.NvosMacAddresses) > 0 {
+	nvosMacAddresses := apiRequest.NvosInterfaces.MacAddresses()
+	if len(nvosMacAddresses) > 0 {
 		conflicts, _, derr := esDAO.GetAll(ctx, nil, cdbm.ExpectedSwitchFilterInput{
-			NvosMacAddresses:         apiRequest.NvosMacAddresses,
+			NvosMacAddresses:         nvosMacAddresses,
 			SiteIDs:                  []uuid.UUID{site.ID},
 			ExcludeExpectedSwitchIDs: []uuid.UUID{expectedSwitch.ID},
 		}, paginator.PageInput{
@@ -635,7 +638,7 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 		}
 
 		if len(conflicts) > 0 {
-			logger.Warn().Strs("NvosMacAddresses", apiRequest.NvosMacAddresses).Msg("Expected Switch with specified NVOS MAC address already exists on Site")
+			logger.Warn().Strs("NvosMacAddresses", nvosMacAddresses).Msg("Expected Switch with specified NVOS MAC address already exists on Site")
 
 			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Expected Switch with specified NVOS MAC address already exists on Site", validation.Errors{
 				"id": errors.New(conflicts[0].ID.String()),
@@ -649,6 +652,13 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 		bmcIPAddress = nil
 	}
 
+	// NvosInterfaces replaces the whole NVOS port set when present. The primary
+	// is carried per-port, so a present set that marks no entry primary clears
+	// the stored primary and lets Core re-default it. An absent set preserves
+	// the stored ports and primary.
+	nvosPrimaryMacAddress := apiRequest.NvosInterfaces.PrimaryMacAddress()
+	clearNvosPrimaryMacAddress := apiRequest.NvosInterfaces != nil && nvosPrimaryMacAddress == nil
+
 	updatedExpectedSwitch, err := cdb.WithTxResult(ctx, uesh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedSwitch, error) {
 		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
 			return nil, apiErr
@@ -658,19 +668,20 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 			ctx,
 			tx,
 			cdbm.ExpectedSwitchUpdateInput{
-				ExpectedSwitchID:   expectedSwitch.ID,
-				BmcIpAddress:       bmcIPAddress,
-				SwitchSerialNumber: apiRequest.SwitchSerialNumber,
-				NvosMacAddresses:   apiRequest.NvosMacAddresses,
-				RackID:             apiRequest.RackID,
-				Name:               apiRequest.Name,
-				Manufacturer:       apiRequest.Manufacturer,
-				Model:              apiRequest.Model,
-				Description:        apiRequest.Description,
-				SlotID:             apiRequest.SlotID,
-				TrayIdx:            apiRequest.TrayIdx,
-				HostID:             apiRequest.HostID,
-				Labels:             apiRequest.Labels,
+				ExpectedSwitchID:      expectedSwitch.ID,
+				BmcIpAddress:          bmcIPAddress,
+				SwitchSerialNumber:    apiRequest.SwitchSerialNumber,
+				NvosMacAddresses:      nvosMacAddresses,
+				NvosPrimaryMacAddress: nvosPrimaryMacAddress,
+				RackID:                apiRequest.RackID,
+				Name:                  apiRequest.Name,
+				Manufacturer:          apiRequest.Manufacturer,
+				Model:                 apiRequest.Model,
+				Description:           apiRequest.Description,
+				SlotID:                apiRequest.SlotID,
+				TrayIdx:               apiRequest.TrayIdx,
+				HostID:                apiRequest.HostID,
+				Labels:                apiRequest.Labels,
 			},
 		)
 		if err != nil {
@@ -678,13 +689,14 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Switch due to DB error", nil)
 		}
 
-		if clearBmcIPAddress {
+		if clearBmcIPAddress || clearNvosPrimaryMacAddress {
 			es, err = esDAO.Clear(ctx, tx, cdbm.ExpectedSwitchClearInput{
-				ExpectedSwitchID: expectedSwitch.ID,
-				BmcIpAddress:     true,
+				ExpectedSwitchID:      expectedSwitch.ID,
+				BmcIpAddress:          clearBmcIPAddress,
+				NvosPrimaryMacAddress: clearNvosPrimaryMacAddress,
 			})
 			if err != nil {
-				logger.Error().Err(err).Msg("failed to clear ExpectedSwitch BMC IP address in DB")
+				logger.Error().Err(err).Msg("failed to clear ExpectedSwitch fields in DB")
 				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Switch due to DB error", nil)
 			}
 		}
@@ -893,8 +905,9 @@ func (h ReplaceAllExpectedSwitchesHandler) Handle(c echo.Context) error {
 		inputs = append(inputs, cdbm.ExpectedSwitchCreateInput{
 			ExpectedSwitchID: id, SiteID: site.ID, BmcMacAddress: expectedSwitch.BmcMacAddress,
 			SwitchSerialNumber: expectedSwitch.SwitchSerialNumber, BmcIpAddress: expectedSwitch.BmcIpAddress,
-			NvosMacAddresses: expectedSwitch.NvosMacAddresses, RackID: expectedSwitch.RackID,
-			Name: expectedSwitch.Name, Manufacturer: expectedSwitch.Manufacturer, Model: expectedSwitch.Model,
+			NvosMacAddresses: expectedSwitch.NvosInterfaces.MacAddresses(), NvosPrimaryMacAddress: expectedSwitch.NvosInterfaces.PrimaryMacAddress(),
+			RackID: expectedSwitch.RackID,
+			Name:   expectedSwitch.Name, Manufacturer: expectedSwitch.Manufacturer, Model: expectedSwitch.Model,
 			Description: expectedSwitch.Description, SlotID: expectedSwitch.SlotID, TrayIdx: expectedSwitch.TrayIdx,
 			HostID: expectedSwitch.HostID, Labels: expectedSwitch.Labels, CreatedBy: dbUser.ID,
 		})
