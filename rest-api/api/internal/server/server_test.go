@@ -233,21 +233,42 @@ func Test_InitMetricsServer(t *testing.T) {
 	type args struct {
 		e *echo.Echo
 	}
+	type metricsRequest struct {
+		method string
+		host   string
+	}
 	tests := []struct {
-		name  string
-		args  args
-		hosts []string
+		name       string
+		args       args
+		requests   []metricsRequest
+		wantStatus int
+		wantMethod string
 	}{
 		{
 			name: "bounds caller-controlled Host labels",
 			args: args{
 				e: echo.New(),
 			},
-			hosts: []string{
-				"nico-probe-a.invalid",
-				"nico-probe-b.invalid",
-				"nico-probe-a.invalid",
+			requests: []metricsRequest{
+				{method: http.MethodGet, host: "nico-probe-a.invalid"},
+				{method: http.MethodGet, host: "nico-probe-b.invalid"},
+				{method: http.MethodGet, host: "nico-probe-a.invalid"},
 			},
+			wantStatus: http.StatusUnauthorized,
+			wantMethod: http.MethodGet,
+		},
+		{
+			name: "bounds non-standard HTTP method labels",
+			args: args{
+				e: echo.New(),
+			},
+			requests: []metricsRequest{
+				{method: "BREW", host: "nico-probe.invalid"},
+				{method: "FROB", host: "nico-probe.invalid"},
+				{method: "CUSTOM-METHOD", host: "nico-probe.invalid"},
+			},
+			wantStatus: http.StatusUnauthorized,
+			wantMethod: "unknown",
 		},
 	}
 	for _, tt := range tests {
@@ -255,20 +276,56 @@ func Test_InitMetricsServer(t *testing.T) {
 			registry := useIsolatedPrometheusRegistry(t)
 
 			// A tracked route, since MetricsURLSkipper only records /v2/ and /metrics.
-			tt.args.e.GET("/v2/probe", func(c echo.Context) error {
+			handler := func(c echo.Context) error {
 				return c.NoContent(http.StatusUnauthorized)
-			})
+			}
+			registeredMethods := make(map[string]bool)
+			for _, metricReq := range tt.requests {
+				if registeredMethods[metricReq.method] {
+					continue
+				}
+				tt.args.e.Add(metricReq.method, "/v2/probe", handler)
+				registeredMethods[metricReq.method] = true
+			}
 			InitMetricsServer(tt.args.e, config.DefaultMetricsNamespace)
 
-			for _, host := range tt.hosts {
-				req := httptest.NewRequest(http.MethodGet, "/v2/probe", nil)
-				req.Host = host
+			for _, metricReq := range tt.requests {
+				req := httptest.NewRequest(metricReq.method, "/v2/probe", nil)
+				req.Host = metricReq.host
 				rec := httptest.NewRecorder()
 				tt.args.e.ServeHTTP(rec, req)
-				assert.Equal(t, http.StatusUnauthorized, rec.Code)
+				if tt.wantStatus != 0 {
+					assert.Equal(t, tt.wantStatus, rec.Code)
+				}
 			}
 
-			assertBoundedMetricsHostLabels(t, registry, config.DefaultMetricsNamespace)
+			assertBoundedMetricsLabels(t, registry, config.DefaultMetricsNamespace, tt.wantMethod)
+		})
+	}
+}
+
+func TestMetricsMethodLabel(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		want   string
+	}{
+		{name: "GET", method: http.MethodGet, want: http.MethodGet},
+		{name: "HEAD", method: http.MethodHead, want: http.MethodHead},
+		{name: "POST", method: http.MethodPost, want: http.MethodPost},
+		{name: "PUT", method: http.MethodPut, want: http.MethodPut},
+		{name: "PATCH", method: http.MethodPatch, want: http.MethodPatch},
+		{name: "DELETE", method: http.MethodDelete, want: http.MethodDelete},
+		{name: "CONNECT", method: http.MethodConnect, want: http.MethodConnect},
+		{name: "OPTIONS", method: http.MethodOptions, want: http.MethodOptions},
+		{name: "TRACE", method: http.MethodTrace, want: http.MethodTrace},
+		{name: "non-standard", method: "BREW", want: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, "/", nil)
+			ctx := echo.New().NewContext(req, httptest.NewRecorder())
+			assert.Equal(t, tt.want, metricsMethodLabel(ctx, nil))
 		})
 	}
 }
@@ -290,7 +347,7 @@ func useIsolatedPrometheusRegistry(t *testing.T) *prometheus.Registry {
 	return registry
 }
 
-func assertBoundedMetricsHostLabels(t *testing.T, registry *prometheus.Registry, namespace string) {
+func assertBoundedMetricsLabels(t *testing.T, registry *prometheus.Registry, namespace, method string) {
 	t.Helper()
 
 	families, err := registry.Gather()
@@ -313,19 +370,14 @@ func assertBoundedMetricsHostLabels(t *testing.T, registry *prometheus.Registry,
 		expectedFamilies[name] = true
 		require.Len(t, family.GetMetric(), 1, "%s must not create a series per HTTP Host", name)
 
-		hostLabels := 0
+		labels := make(map[string]string)
 
 		for _, label := range family.GetMetric()[0].GetLabel() {
-			if label.GetName() != "host" {
-				continue
-			}
-
-			hostLabels++
-
-			assert.Equal(t, namespace, label.GetValue())
+			labels[label.GetName()] = label.GetValue()
 		}
 
-		assert.Equal(t, 1, hostLabels, "%s must retain one bounded host label", name)
+		assert.Equal(t, namespace, labels["host"], "%s must retain one bounded host label", name)
+		assert.Equal(t, method, labels["method"], "%s must retain one bounded method label", name)
 	}
 
 	for name, found := range expectedFamilies {
