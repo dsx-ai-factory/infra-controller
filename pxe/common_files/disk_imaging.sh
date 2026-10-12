@@ -43,20 +43,31 @@ update_grub_cfg="yes"
 function curl_url() {
 	url=$1
 	shift
-	curl --retry 5 --retry-all-errors -k -L -O "$@" "$url" 2>&1 | tee $log_output
+	curl --retry 5 --retry-all-errors -k -L -O "$@" "$url" 2>&1 | tee "$log_output"
 }
 
 # build_image_auth_args populates the image_auth array with the curl arguments
 # needed to authenticate the image download, or leaves it empty when
 # image_auth_token is unset. Kept as an array, not a string, so the header
 # value survives as a single argument instead of being word-split.
+#
+# The header is written to a 0600 temporary file and passed via curl's -K
+# config-file flag, rather than -H on the command line, so the token does not
+# appear in this process's argument list (visible to other local processes
+# through /proc/<pid>/cmdline or ps). image_auth_header_file is left set so
+# the caller can remove it once the download is done.
 function build_image_auth_args() {
 	image_auth=()
+	image_auth_header_file=
 	if [ -n "$image_auth_token" ]; then
 		if [ -z "$image_auth_type" ]; then
 			image_auth_type=Bearer
 		fi
-		image_auth=(-H "Authorization: $image_auth_type $image_auth_token")
+		image_auth_header_file=$(mktemp) || return 1
+		chmod 600 "$image_auth_header_file"
+		printf 'header = "Authorization: %s %s"\n' "$image_auth_type" "$image_auth_token" \
+			>"$image_auth_header_file"
+		image_auth=(-K "$image_auth_header_file")
 	fi
 }
 
@@ -1076,6 +1087,9 @@ function main() {
 
 	echo "Downloading image from $image_url" | tee $log_output
 	curl_url "$image_url" "${image_auth[@]}"
+	if [ -n "$image_auth_header_file" ]; then
+		rm -f "$image_auth_header_file"
+	fi
 	if [ ! -z "$image_sha" ]; then
 		echo "Verifying image with digest $image_sha" | tee $log_output
 		verify_sha $image_sha
