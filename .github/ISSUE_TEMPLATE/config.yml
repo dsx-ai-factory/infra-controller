@@ -24,3 +24,6 @@ contact_links:
   - name: Ask a Question
     url: https://github.com/dsx-ai-factory/infra-controller/discussions
     about: Please ask any questions here.
+  - name: Report a Security Vulnerability Privately
+    url: https://github.com/dsx-ai-factory/infra-controller/security/policy
+    about: Review SECURITY.md. Do not file security vulnerabilities publicly.

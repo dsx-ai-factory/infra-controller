@@ -7,11 +7,11 @@
 # Default owners for everything in the repo
 * @dsx-ai-factory/carbide-sw-approvers
 
-# CODEOWNERS file itself - requires admin approval
-/.github/CODEOWNERS @dsx-ai-factory/carbide-sw-admins
-
 # CI/CD related files
 /.github/ @dsx-ai-factory/dsx-sw-cicd
+
+# CODEOWNERS file itself - requires admin approval
+/.github/CODEOWNERS @dsx-ai-factory/carbide-sw-admins
 
 # Helm charts
 /helm/ @dsx-ai-factory/dsx-sw-helm

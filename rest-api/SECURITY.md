@@ -22,5 +22,6 @@ REST-specific surfaces covered by the root policy include:
 - REST Helm charts, local development deployment files, OpenAPI contracts, and
   generated SDKs.
 
-Report potential vulnerabilities through NVIDIA PSIRT as described in the root
-policy. Do not open public issues or pull requests with vulnerability details.
+Report potential vulnerabilities through one of the private reporting channels
+described in the root policy. Do not open public issues or pull requests with
+vulnerability details.
