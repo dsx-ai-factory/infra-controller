@@ -505,6 +505,30 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 		assert.Equal(t, instance.ID.String(), *response.InstanceID)
 		assert.Equal(t, cdbm.MachineStatusReady, ready.Status)
 	})
+	t.Run("empty metadata inventories serialize as arrays", func(t *testing.T) {
+		machine := *dbm
+		machine.Metadata = &cdbm.SiteControllerMachine{
+			Machine: &corev1.Machine{
+				Status: &corev1.MachineStatus{
+					DiscoveryInfo: &corev1.DiscoveryInfo{},
+				},
+			},
+		}
+
+		response := NewAPIMachine(&machine, nil, nil, nil, nil, true, true)
+		require.NotNil(t, response.Metadata)
+
+		payload, err := json.Marshal(response.Metadata)
+		require.NoError(t, err)
+
+		var fields map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(payload, &fields))
+		for _, field := range []string{"gpus", "networkInterfaces", "infinibandInterfaces"} {
+			value, found := fields[field]
+			require.True(t, found, "%s must be present", field)
+			assert.JSONEq(t, `[]`, string(value))
+		}
+	})
 }
 
 func TestMachine_NewAPIMachineScoutVersion(t *testing.T) {
