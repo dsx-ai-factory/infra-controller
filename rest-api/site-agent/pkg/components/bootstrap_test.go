@@ -46,7 +46,7 @@ func Test_Bootstrap(t *testing.T) {
 			switch tc.descr {
 			case "read":
 				log.Info().Msg("Test Bootstrap read Start")
-				bCfg := bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.Config
+				bCfg := bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.ConfigSnapshot()
 				t.Log(bCfg.CACert)
 				t.Log(bCfg.CredsURL)
 				t.Log(bCfg.OTP)
@@ -97,10 +97,12 @@ func Test_Bootstrap(t *testing.T) {
 				assert.NotNil(t, s)
 
 				// Save current values
-				bCfg := bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.Config
+				bootstrapManager := bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap
+				bCfg := bootstrapManager.ConfigSnapshot()
 				bCfg.OTP = s.UUID1OTP
 				bCfg.CredsURL = s.MgrURL + "/v1/sitecreds"
 				bCfg.UUID = sitemgr.Testuuid1
+				bootstrapManager.ReplaceConfig(bCfg)
 
 				t.Logf("CredsURL: %s", bCfg.CredsURL)
 

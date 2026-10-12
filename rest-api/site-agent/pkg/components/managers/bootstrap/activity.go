@@ -125,7 +125,7 @@ func (o *OTPHandler) ReceiveAndSaveOTP(ctx context.Context, base64EncodedEncrypt
 
 	logger.Info().Msgf("Certificate expiration date: %v", certExpiry)
 
-	siteID := ManagerAccess.Data.EB.Managers.Bootstrap.Config.UUID
+	siteID := ManagerAccess.Data.EB.Managers.Bootstrap.ConfigSnapshot().UUID
 	workflowOptions := client.StartWorkflowOptions{
 		ID:        "update-agent-cert-expiry-" + siteID,
 		TaskQueue: ManagerAccess.Conf.EB.Temporal.TemporalPublishQueue,

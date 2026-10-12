@@ -111,7 +111,7 @@ func TestHandleSiteStatusRequest(t *testing.T) {
 			data.Conf = conf
 			ManagerAccess.Conf = &managerapi.ManagerConf{EB: conf}
 			bootstrap := data.Managers.Bootstrap
-			bootstrap.Config = &bootstraptypes.SecretConfig{UUID: siteID, OTP: otp, CredsURL: credsURL}
+			bootstrap.ReplaceConfig(bootstraptypes.SecretConfig{UUID: siteID, OTP: otp, CredsURL: credsURL})
 			bootstrap.State.DownloadAttempted.Store(1)
 			bootstrap.State.DownloadSucceeded.Store(1)
 			state := unconnectedState
