@@ -44,7 +44,7 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 		SkuID:                    cutil.GetPtr("old-sku"),
 		MachineID:                cutil.GetPtr("old-machine"),
 		FallbackDpuSerialNumbers: []string{"old-dpu"},
-		Interfaces:               []ExpectedMachineInterface{{MacAddress: "02:00:00:00:00:08"}},
+		Interfaces:               []ExpectedMachineInterface{{MacAddress: cutil.GetPtr("02:00:00:00:00:08")}},
 		IsDpfEnabled:             cutil.GetPtr(true),
 		HostLifecycleProfile:     HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
 	}
@@ -69,7 +69,7 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 				RackId:                   &corev1.RackId{Id: "rack-1"},
 				SkuId:                    cutil.GetPtr("sku-1"),
 				FallbackDpuSerialNumbers: []string{"dpu-1", "dpu-2"},
-				HostNics:                 []*corev1.ExpectedHostNic{{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIp: &fixedIP}},
+				HostNics:                 []*corev1.ExpectedHostNic{{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), NicType: &nicType, FixedIp: &fixedIP}},
 				IsDpfEnabled:             cutil.GetPtr(false),
 				HostLifecycleProfile:     &corev1.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
 				Name:                     cutil.GetPtr("obsolete-name"),
