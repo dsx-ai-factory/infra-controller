@@ -104,8 +104,10 @@ Common causes:
 
 Compare each alert's `target` GPU UID with the host's `nvlink-info` and current
 NMX-C health. An alert persists while that GPU reports `Unknown`, is absent
-from the response, or partition-list queries, GPU-health queries, or
-health-report writes fail. For a current fault,
+from the response, or the pass's initial partition-list fetch, GPU-health
+query, or health-report write fails. A failure of the later post-operation
+partition-list refresh does not retain the alert: evaluation has already run
+by then and may have set or cleared it. For a current fault,
 check GPU cabling and the NVSwitch tray. If the affected GPU was replaced or
 removed from the host's inventory, confirm recovery and follow the linked
 manual-removal procedure; a healthy replacement does not clear the old UID's

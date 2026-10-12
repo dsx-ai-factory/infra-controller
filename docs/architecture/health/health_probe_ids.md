@@ -156,9 +156,20 @@ with `Unknown` health, so a healthy sibling GPU never clears an affected one.
 GPUs that were never flagged create no alert while `Unknown` or absent. UID `0`
 is never treated as an identity on either side: NMX-C rows with UID `0` are
 ignored, and an inventory entry whose stored UID is `0` (an unparseable fabric
-GUID at discovery) is never evaluated. A failed partition-list or GPU-health
-query prevents reevaluation, and a failed health-report write leaves the stored
-report unchanged. An alert can therefore reflect an earlier fault rather than a
+GUID at discovery) is never evaluated. A failure of the pass's initial
+partition-list fetch or of the GPU-health query prevents reevaluation. The
+alert evaluation runs before the pass's later post-operation partition-list
+refresh, so a failure of that refresh does not mean the stored report was
+retained; it may already have been set or cleared on that pass. The two
+fetches are told apart by the `nmxc_connect_err` field of the monitor's
+per-pass metrics summary log and by the `error` label on
+`carbide_nvlink_partition_monitor_nmxc_connect_error_count`, which read
+`Failed to get NMX-C partition info list when updating db` for the later
+refresh. A failed health-report
+write leaves the stored report unchanged until the next pass retries it; each such failure increments
+`carbide_nvlink_partition_monitor_unhealthy_alert_write_failures_total`
+(label `write`: `set` or `clear`) and logs the machine ID and error. An alert
+can therefore reflect an earlier fault rather than a
 current unhealthy observation. The stored report is rewritten only when the set
 of affected GPUs or their classifications changes, so an alert's `message` label
 may lag a GPU that moves between unhealthy states until the set next changes.

@@ -52,7 +52,7 @@ use libnmxc::{Endpoint, NMX_C_GATEWAY_ID, Nmxc, NmxcPool};
 use metrics::{
     AppliedChange, ChassisNmxCUnreachableReason, NmxcMetricOperation, NmxcMetricOperationStatus,
     NmxcOperationFailureStage, NmxcOperationFinished, NvlPartitionMonitorIterationFinished,
-    NvlPartitionMonitorMetrics,
+    NvlPartitionMonitorMetrics, NvlinkUnhealthyAlertWrite, NvlinkUnhealthyAlertWriteFailed,
 };
 use model::hardware_info::{HardwareInfo, MachineNvLinkInfo, NvLinkGpu};
 use model::instance::status::SyncState;
@@ -2033,7 +2033,7 @@ impl NvlPartitionMonitor {
 
             let alerts = next_nvlink_unhealthy_alerts(previous, gpus, &health_by_guid);
 
-            let result = if !alerts.is_empty() {
+            let (write, result) = if !alerts.is_empty() {
                 let mut report = nvlink_unhealthy_report(alerts);
                 report.update_in_alert_since(existing);
                 // Skip the write when the affected GPUs and their blocking classifications
@@ -2054,25 +2054,33 @@ impl NvlPartitionMonitor {
                     total_gpu_count = gpus.len(),
                     "NVLink GPU(s) unhealthy - setting PreventAllocations alert"
                 );
-                set_nvlink_unhealthy_alert(&self.db_pool, machine_id, &report).await
+                (
+                    NvlinkUnhealthyAlertWrite::Set,
+                    set_nvlink_unhealthy_alert(&self.db_pool, machine_id, &report).await,
+                )
             } else if existing.is_some() {
                 tracing::info!(
                     %machine_id,
                     %domain_uuid,
                     "All affected NVLink GPUs report healthy - clearing NvlinkUnhealthy alert"
                 );
-                clear_nvlink_unhealthy_alert(&self.db_pool, machine_id).await
+                (
+                    NvlinkUnhealthyAlertWrite::Clear,
+                    clear_nvlink_unhealthy_alert(&self.db_pool, machine_id).await,
+                )
             } else {
                 continue;
             };
 
+            // The pass still reports success; this counter is the only signal that the
+            // allocation block was not applied or cleared. The write is retried next pass.
             if let Err(error) = result {
-                tracing::warn!(
-                    %machine_id,
-                    %domain_uuid,
-                    %error,
-                    "Failed to update NvlinkUnhealthy health alert"
-                );
+                carbide_instrument::emit(NvlinkUnhealthyAlertWriteFailed {
+                    write,
+                    machine_id: machine_id.to_string(),
+                    domain_uuid: domain_uuid.to_string(),
+                    error: error.to_string(),
+                });
             }
         }
     }
