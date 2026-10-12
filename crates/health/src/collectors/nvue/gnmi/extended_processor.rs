@@ -24,7 +24,7 @@ use std::time::Instant;
 
 use super::client::{typed_value_to_f64, typed_value_to_string};
 use super::proto::{self, PathElem};
-use super::reconciliation::MetricReconciler;
+use super::reconciliation::{MetricReconciler, SharedMetricSources};
 use super::sample_processor::now_unix_secs;
 use super::subscriber::GnmiStreamMetrics;
 use crate::config::{NvueGnmiMetricConfig, NvueGnmiMetricOutput, NvueGnmiSubscriptionConfig};
@@ -49,6 +49,7 @@ impl ExtendedGnmiProcessor {
         data_sink: Option<Arc<dyn DataSink>>,
         event_context: EventContext,
         switch_id: String,
+        sources: Option<SharedMetricSources>,
     ) -> Self {
         let mappings = config
             .metrics
@@ -64,6 +65,7 @@ impl ExtendedGnmiProcessor {
             reconciliation: Arc::new(MetricReconciler::new(
                 data_sink.clone(),
                 event_context.clone(),
+                sources,
             )),
             data_sink,
             event_context,
@@ -461,6 +463,7 @@ mod tests {
             Some(sink.clone()),
             event_context(),
             "switch-1".to_string(),
+            None,
         );
 
         (processor, sink)
@@ -944,8 +947,13 @@ mod tests {
         let manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
         let sink = Arc::new(PrometheusSink::new(manager.clone(), "test_sink").expect("sink"));
 
-        let mut processor =
-            ExtendedGnmiProcessor::new(&config, Some(sink), event_context(), "switch-1".into());
+        let mut processor = ExtendedGnmiProcessor::new(
+            &config,
+            Some(sink),
+            event_context(),
+            "switch-1".into(),
+            None,
+        );
 
         let mut initial = notification(
             Some(proto::TypedValue {
@@ -1004,8 +1012,13 @@ mod tests {
         let manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
         let sink = Arc::new(PrometheusSink::new(manager.clone(), "test_sink").expect("sink"));
 
-        let mut processor =
-            ExtendedGnmiProcessor::new(&config, Some(sink), event_context(), "switch-1".into());
+        let mut processor = ExtendedGnmiProcessor::new(
+            &config,
+            Some(sink),
+            event_context(),
+            "switch-1".into(),
+            None,
+        );
 
         let mut update = notification(
             Some(proto::TypedValue {
@@ -1061,8 +1074,13 @@ mod tests {
         let manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
         let sink = Arc::new(PrometheusSink::new(manager.clone(), "test_sink").expect("sink"));
 
-        let mut processor =
-            ExtendedGnmiProcessor::new(&config, Some(sink), event_context(), "switch-1".into());
+        let mut processor = ExtendedGnmiProcessor::new(
+            &config,
+            Some(sink),
+            event_context(),
+            "switch-1".into(),
+            None,
+        );
 
         let mut update = notification(
             Some(proto::TypedValue {
@@ -1138,8 +1156,13 @@ mod tests {
         let manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
         let sink = Arc::new(PrometheusSink::new(manager.clone(), "test_sink").expect("sink"));
 
-        let mut processor =
-            ExtendedGnmiProcessor::new(&config, Some(sink), event_context(), "switch-1".into());
+        let mut processor = ExtendedGnmiProcessor::new(
+            &config,
+            Some(sink),
+            event_context(),
+            "switch-1".into(),
+            None,
+        );
 
         let mut update = notification(
             Some(proto::TypedValue {

@@ -52,7 +52,7 @@ pub(crate) use nmxc_schema_override::{
 };
 pub(crate) use nmxt::NMXT_PORT;
 pub use nmxt::{NmxtCollector, NmxtCollectorConfig};
-pub(crate) use nvue::gnmi::subscriber::spawn_gnmi_collector;
+pub(crate) use nvue::gnmi::subscriber::{GnmiRetainedCache, spawn_gnmi_collector};
 pub use nvue::rest::collector::{NvueRestCollector, NvueRestCollectorConfig};
 pub(crate) use reachability::{
     COLLECTOR_TYPE as REACHABILITY_COLLECTOR_TYPE, ReachabilityCollector,

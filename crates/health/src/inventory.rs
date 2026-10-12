@@ -171,7 +171,7 @@ impl ComponentSeries {
                     .id
                     .as_ref()
                     .map(ToString::to_string)
-                    .unwrap_or_else(|| switch.serial.clone()),
+                    .or_else(|| switch.serial.clone())?,
                 component
                     .bmc_mac
                     .as_ref()
@@ -515,8 +515,9 @@ mod tests {
             rack_id: RackId::new(rack_id),
             bmc_mac: Some(MacAddress::from_str(mac).unwrap()),
             metadata: EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: Some(test_switch_id(switch_seed)),
-                serial: format!("switch-serial-{switch_seed}"),
+                serial: Some(format!("switch-serial-{switch_seed}")),
                 slot_number: Some(9),
                 tray_index: Some(3),
                 nvlink_domain_uuid: Some(NvLinkDomainId::from_str(nvl_domain).unwrap()),

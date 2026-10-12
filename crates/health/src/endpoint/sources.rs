@@ -171,8 +171,9 @@ impl StaticEndpointSource {
                 let nmxt_enabled = switch.nmxt_enabled.unwrap_or(switch.is_primary);
 
                 Some(EndpointMetadata::Switch(SwitchData {
+                    log_checkpoint_identity: None,
                     id,
-                    serial,
+                    serial: Some(serial),
                     slot_number: switch.slot_number,
                     tray_index: switch.tray_index,
                     nvlink_domain_uuid,
@@ -464,7 +465,7 @@ mod tests {
         match &endpoints[0].metadata {
             Some(EndpointMetadata::Switch(s)) => {
                 assert_eq!(s.id, Some(switch_id));
-                assert_eq!(s.serial, "SN-001");
+                assert_eq!(s.serial.as_deref(), Some("SN-001"));
                 assert_eq!(s.slot_number, Some(7));
                 assert_eq!(s.tray_index, Some(3));
                 assert_eq!(s.nvlink_domain_uuid, Some(nvlink_domain_uuid));
