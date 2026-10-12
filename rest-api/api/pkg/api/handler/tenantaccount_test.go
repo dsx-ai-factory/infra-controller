@@ -1821,6 +1821,7 @@ func TestTenantAccountHandler_Delete(t *testing.T) {
 		expectedErr        bool
 		expectedStatus     int
 		verifyChildSpanner bool
+		contendLock        bool
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -1894,6 +1895,7 @@ func TestTenantAccountHandler_Delete(t *testing.T) {
 			taID:           ta4.ID.String(),
 			expectedErr:    false,
 			expectedStatus: http.StatusAccepted,
+			contendLock:    true,
 		},
 	}
 	for _, tc := range tests {
@@ -1921,6 +1923,21 @@ func TestTenantAccountHandler_Delete(t *testing.T) {
 				tc:        tempClient,
 				cfg:       cfg,
 			}
+			if tc.contendLock {
+				lockKey := fmt.Sprintf("tenant-account-capabilities-%s-%s", tn4.ID, ip2.ID)
+				testWithAdvisoryLocks(t, ctx, dbSession, []string{lockKey}, func(_ *cdb.Tx) error {
+					err := tah.Handle(ec)
+					assert.NoError(t, err)
+					assert.Equal(t, http.StatusInternalServerError, rec.Code)
+					_, err = cdbm.NewTenantAccountDAO(dbSession).GetByID(ctx, nil, ta4.ID, nil)
+					assert.NoError(t, err, "lock contention preserves the TenantAccount")
+					_, err = cdbm.NewTenantSiteDAO(dbSession).GetByID(ctx, nil, tn4Site.ID, nil)
+					assert.NoError(t, err, "lock contention preserves the Tenant/Site association")
+					return nil
+				})
+				rec = httptest.NewRecorder()
+				ec.SetResponse(echo.NewResponse(rec, e))
+			}
 			err := tah.Handle(ec)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusAccepted)
@@ -1938,8 +1955,10 @@ func TestTenantAccountHandler_Delete(t *testing.T) {
 		})
 	}
 
+	_, err := cdbm.NewTenantAccountDAO(dbSession).GetByID(ctx, nil, ta4.ID, nil)
+	assert.ErrorIs(t, err, cdb.ErrDoesNotExist, "deleting the TenantAccount succeeds after releasing the lock")
 	tsDAO := cdbm.NewTenantSiteDAO(dbSession)
-	_, err := tsDAO.GetByID(ctx, nil, tn4Site.ID, nil)
+	_, err = tsDAO.GetByID(ctx, nil, tn4Site.ID, nil)
 	assert.ErrorIs(t, err, cdb.ErrDoesNotExist, "deleting the TenantAccount removes associations with the Provider's Sites")
 	_, err = tsDAO.GetByID(ctx, nil, tn4OtherProviderSite.ID, nil)
 	assert.NoError(t, err, "associations with other Providers' Sites are kept")

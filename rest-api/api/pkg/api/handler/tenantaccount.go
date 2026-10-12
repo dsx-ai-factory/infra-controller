@@ -1158,46 +1158,53 @@ func (dtah DeleteTenantAccountHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "InfrastructureProvider for Org does not match InfrastructureProvider in TenantAccount", nil)
 	}
 
-	if ta.TenantID != nil {
-		// Verify that Tenant does not have any Allocations with the Provider
-		allocationDAO := cdbm.NewAllocationDAO(dtah.dbSession)
-		allocationFilter := cdbm.AllocationFilterInput{InfrastructureProviderIDs: []uuid.UUID{ip.ID}}
+	err = cdb.WithTx(ctx, dtah.dbSession, func(tx *cdb.Tx) error {
 		if ta.TenantID != nil {
+			// Serialize cleanup with ensurePrivilegedTenantSites.
+			lockKey := fmt.Sprintf("tenant-account-capabilities-%s-%s", ta.TenantID.String(), ta.InfrastructureProviderID.String())
+			err := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
+			if err != nil {
+				return err
+			}
+
+			// Verify that Tenant does not have any Allocations with the Provider
+			allocationDAO := cdbm.NewAllocationDAO(dtah.dbSession)
+			allocationFilter := cdbm.AllocationFilterInput{InfrastructureProviderIDs: []uuid.UUID{ip.ID}}
 			allocationFilter.TenantIDs = append(allocationFilter.TenantIDs, *ta.TenantID)
-		}
-		aCount, err := allocationDAO.GetCount(ctx, nil, allocationFilter)
-		if err != nil {
-			logger.Error().Str("ip", ip.ID.String()).Str("tenant", ta.TenantID.String()).Err(err).Msg("error getting allocations")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Error getting allocations for InfrastructureProvider, Tenant", nil)
-		}
+			aCount, err := allocationDAO.GetCount(ctx, tx, allocationFilter)
+			if err != nil {
+				logger.Error().Str("ip", ip.ID.String()).Str("tenant", ta.TenantID.String()).Err(err).Msg("error getting allocations")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Error getting allocations for InfrastructureProvider, Tenant", nil)
+			}
 
-		if aCount > 0 {
-			logger.Warn().Str("tenant", ta.TenantID.String()).Msg("allocations exist for tenant")
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Allocations exist for Tenant", nil)
-		}
+			if aCount > 0 {
+				logger.Warn().Str("tenant", ta.TenantID.String()).Msg("allocations exist for tenant")
+				return cutil.NewAPIError(http.StatusBadRequest, "Allocations exist for Tenant", nil)
+			}
 
-		// Delete Tenant/Site associations with the Provider's Sites
-		tsDAO := cdbm.NewTenantSiteDAO(dtah.dbSession)
-		tss, _, err := tsDAO.GetAll(ctx, nil, cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{*ta.TenantID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, []string{"Site"})
-		if err != nil {
-			logger.Error().Err(err).Msg("error retrieving Tenant/Site associations")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to delete TenantAccount, DB error retrieving Tenant/Site associations", nil)
-		}
-		for _, ts := range tss {
-			if ts.Site != nil && ts.Site.InfrastructureProviderID == ip.ID {
-				if err = tsDAO.Delete(ctx, nil, ts.ID); err != nil {
-					logger.Error().Err(err).Msg("error deleting Tenant/Site association")
-					return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to delete TenantAccount, DB error deleting Tenant/Site association", nil)
+			// Delete Tenant/Site associations with the Provider's Sites
+			tsDAO := cdbm.NewTenantSiteDAO(dtah.dbSession)
+			tss, _, err := tsDAO.GetAll(ctx, tx, cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{*ta.TenantID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, []string{"Site"})
+			if err != nil {
+				logger.Error().Err(err).Msg("error retrieving Tenant/Site associations")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete TenantAccount, DB error retrieving Tenant/Site associations", nil)
+			}
+			for _, ts := range tss {
+				if ts.Site != nil && ts.Site.InfrastructureProviderID == ip.ID {
+					err = tsDAO.Delete(ctx, tx, ts.ID)
+					if err != nil {
+						logger.Error().Err(err).Msg("error deleting Tenant/Site association")
+						return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete TenantAccount, DB error deleting Tenant/Site association", nil)
+					}
 				}
 			}
 		}
-	}
 
-	// Delete TenantAccount in DB
-	err = taDAO.Delete(ctx, nil, taID)
+		// Delete TenantAccount in DB
+		return taDAO.Delete(ctx, tx, taID)
+	})
 	if err != nil {
-		logger.Error().Err(err).Msg("error deleting TenantAccount in DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to delete Tenant", nil)
+		return common.HandleTxError(c, logger, err, "Failed to delete Tenant")
 	}
 
 	// Create response
