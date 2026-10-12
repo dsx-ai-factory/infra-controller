@@ -32,13 +32,17 @@ pub struct RevisionData {
 }
 
 impl RevisionData {
+    /// Classify the revision state for the apply polling loop.
+    ///
+    /// NVUE reports both `applied` and `applied_and_saved` for completed
+    /// revisions; error issues take precedence over either success state.
     pub(crate) fn apply_status(&self) -> RevisionApplyStatus {
         let error_issues = self.error_issue_summaries();
         if !error_issues.is_empty() {
             return RevisionApplyStatus::Failed(error_issues);
         }
 
-        if self.state.as_deref() == Some("applied") {
+        if matches!(self.state.as_deref(), Some("applied" | "applied_and_saved")) {
             return RevisionApplyStatus::Applied;
         }
 
@@ -195,6 +199,12 @@ mod tests {
             Case {
                 name: "applied revision without issues succeeds",
                 revision: revision(Some("applied"), None, vec![]),
+                expected_status: RevisionApplyStatus::Applied,
+                expected_progress: None,
+            },
+            Case {
+                name: "applied and saved revision without issues succeeds",
+                revision: revision(Some("applied_and_saved"), None, vec![]),
                 expected_status: RevisionApplyStatus::Applied,
                 expected_progress: None,
             },
