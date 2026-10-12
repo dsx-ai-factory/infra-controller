@@ -104,6 +104,37 @@ type Bootstrap struct {
 	Secret       coreV1Types.SecretInterface
 	Secretfiles  map[string]bool
 	Registration *Registration
+	configMu     sync.RWMutex
+}
+
+// ConfigSnapshot returns a consistent copy of the active bootstrap configuration.
+func (b *Bootstrap) ConfigSnapshot() SecretConfig {
+	b.configMu.RLock()
+	defer b.configMu.RUnlock()
+	if b.Config == nil {
+		return SecretConfig{}
+	}
+	return *b.Config
+}
+
+// ReplaceConfig atomically replaces all bootstrap configuration fields.
+func (b *Bootstrap) ReplaceConfig(config SecretConfig) {
+	b.configMu.Lock()
+	defer b.configMu.Unlock()
+	if b.Config == nil {
+		b.Config = &SecretConfig{}
+	}
+	*b.Config = config
+}
+
+// SetOTP replaces only the active bootstrap OTP.
+func (b *Bootstrap) SetOTP(otp string) {
+	b.configMu.Lock()
+	defer b.configMu.Unlock()
+	if b.Config == nil {
+		b.Config = &SecretConfig{}
+	}
+	b.Config.OTP = otp
 }
 
 // NewBootstrapInstance - creates a new instance of Bootstrap
