@@ -105,7 +105,7 @@ pub use crate::errors::CarbideError;
 pub use crate::handlers::redfish::NUM_REQUIRED_APPROVALS;
 pub use crate::listener::AdminUiRoutesBuilder;
 pub use crate::logging::stream::{LogLine, LogStream};
-pub use crate::setup::start_runtime;
+pub use crate::setup::{start_runtime, validate_resource_pool_config};
 
 /// Process-global tool list rendered in the admin web UI's "Tools" sidebar.
 ///

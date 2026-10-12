@@ -61,6 +61,7 @@ carbide-preingestion-manager = { path = "../preingestion-manager" }
 carbide-rack = { path = "../rack" }
 carbide-rack-controller = { path = "../rack-controller" }
 carbide-redfish = { path = "../redfish" }
+carbide-resource-pool = { path = "../resource-pool" }
 carbide-rpc = { path = "../rpc", features = ["sqlx", "model"] }
 carbide-secrets = { path = "../secrets" }
 carbide-site-explorer = { path = "../site-explorer" }

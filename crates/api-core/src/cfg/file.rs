@@ -47,6 +47,7 @@ use carbide_utils::none_if_empty::NoneIfEmpty;
 use chrono::Duration;
 use db::host_naming::HostNamingStrategyKind;
 use duration_str::{deserialize_duration, deserialize_duration_chrono};
+use eyre::WrapErr;
 use figment::Figment;
 use figment::providers::Serialized;
 use health_report::HealthAlertClassification;
@@ -66,13 +67,14 @@ use model::network_security_group::{
     NetworkSecurityGroupRuleNet, NetworkSecurityGroupRuleProtocol,
 };
 use model::network_segment::NetworkDefinition;
-use model::resource_pool::define::ResourcePoolDef;
+use model::resource_pool::define::ResourcePoolConfig;
 use model::tenant::identity_config::SigningAlgorithm;
 use model::vpc::VpcConfig;
 pub use model::vpc::{PrefixFilterPolicyEntry, RouteTargetConfig};
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use super::resource_pool::ResourcePoolBackendConfig;
 use crate::CarbideError;
 
 pub(crate) const DEFAULT_DPU_NUM_OF_VFS: u32 = carbide_dpf::DEFAULT_DPU_NUM_OF_VFS;
@@ -353,10 +355,21 @@ pub struct CarbideConfig {
     /// trust settings.
     pub auth: Option<AuthConfig>,
 
-    /// Resource pools that allocate IPs, VNIs, etc.
-    /// Required, but wrapped in `Option` so partial configs
-    /// can be deserialized and merged.
-    pub pools: Option<HashMap<String, ResourcePoolDef>>,
+    /// `pools` defines resource pools that allocate IPs, VNIs, etc.
+    /// Prefer the `pools` table in `initial_objects_file` over this legacy source.
+    /// Authoritative startup requires the table in at least one source; an
+    /// explicit empty table satisfies that check. Listen-only startup permits
+    /// both sources to omit it. Each pool accepts optional `backend` and
+    /// `remote_pool` selectors; omission uses Integrated and the pool's name.
+    pub pools: Option<HashMap<String, ResourcePoolConfig>>,
+
+    /// Named resource-pool backends selected by `backend` in ordinary pool and
+    /// `ib_fabrics` definitions.
+    /// Defaults to empty. Defining a backend does not select it for any pool;
+    /// omitted pool selectors use Integrated. Unknown references fail startup.
+    /// Selections are resolved at startup and cannot redirect existing bindings.
+    #[serde(default)]
+    pub resource_pool_backends: HashMap<String, ResourcePoolBackendConfig>,
 
     /// Networks to create at startup. Use the
     /// `CreateNetworkSegment` gRPC to create them later
@@ -439,8 +452,12 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub scout_boot_interface_correction_enabled: bool,
 
-    /// Infiniband fabrics managed by the site
-    /// Note: At the moment, only a single fabric is supported
+    /// `ib_fabrics` defines the InfiniBand fabrics managed by the site.
+    /// When `ib_config.enabled` is true, v2.4 accepts at most one fabric,
+    /// named `default`. Each fabric accepts `backend` and `remote_pool`
+    /// selectors for its `ib_fabrics.<fabric>.pkey` pool. Disabled IB still
+    /// validates selectors, but fabric configuration alone creates no binding.
+    /// Existing pool inventory can still receive a missing binding.
     #[serde(default)]
     pub ib_fabrics: HashMap<String, IbFabricDefinition>,
 
@@ -3357,6 +3374,22 @@ impl CarbideConfig {
         Ok(())
     }
 
+    /// `validate_resource_pool_backends` checks backend names, endpoints, and
+    /// TLS options without connecting to providers or reading certificate files.
+    /// Pool selection is checked separately; definitions need not be selected.
+    pub(crate) fn validate_resource_pool_backends(&self) -> eyre::Result<()> {
+        for (name, backend) in &self.resource_pool_backends {
+            eyre::ensure!(
+                !name.is_empty(),
+                "resource-pool backend name must not be empty"
+            );
+            backend
+                .validate()
+                .wrap_err_with(|| format!("invalid resource-pool backend {name:?}"))?;
+        }
+        Ok(())
+    }
+
     /// validate_supernic_firmware_profiles checks that each profile's inner
     /// part_number and psid match the HashMap keys they are nested under.
     /// Logs a warning for any mismatches (the inner values are authoritative
@@ -3740,10 +3773,12 @@ pub struct SpdmStateControllerConfig {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitialObjectsConfig {
-    /// Resource pools that allocate IPs, VNIs, etc.
-    /// Required, but wrapped in `Option` so partial configs
-    /// can be deserialized and merged.
-    pub pools: Option<HashMap<String, ResourcePoolDef>>,
+    /// `pools` defines resource pools that allocate IPs, VNIs, etc.
+    /// Authoritative startup requires this table or the legacy `CarbideConfig::pools`
+    /// table; an explicit empty table satisfies that check. Listen-only startup
+    /// permits both sources to omit it. Each pool accepts optional `backend`
+    /// and `remote_pool` selectors; omission uses Integrated and the pool's name.
+    pub pools: Option<HashMap<String, ResourcePoolConfig>>,
     /// Network Segment definitions
     pub networks: Option<HashMap<String, NetworkDefinition>>,
     /// VPC definitions
@@ -6239,6 +6274,7 @@ path = "credentials.yaml"
         assert!(config.tls.is_none());
         assert!(config.auth.is_none());
         assert!(config.pools.is_none());
+        assert!(config.resource_pool_backends.is_empty());
         assert!(config.ib_config.is_none());
         assert!(config.ib_fabrics.is_empty());
         assert_eq!(config.credentials, CredentialsConfig::default());
@@ -7068,6 +7104,9 @@ path = "credentials.yaml"
                 "[machine_state_controller.controller]\nunknown_controller_field = true" => Fails,
                 "[auth]\npermissive_mode = true\nunknown_auth_field = true" => Fails,
                 "[pools.test-pool]\ntype = \"integer\"\nunknown_pool_field = true" => Fails,
+                "[resource_pool_backends.shared]\ntype = \"grpc\"\nendpoint = \"https://allocator.example\"\nunknown_backend_field = true" => Fails,
+                "[resource_pool_backends.shared]\ntype = \"grpc\"\nendpoint = \"https://allocator.example\"\n[resource_pool_backends.shared.tls]\nunknown_tls_field = true" => Fails,
+                "[ib_fabrics.test]\nendpoints = []\npkeys = []\nunknown_fabric_field = true" => Fails,
                 "[dpu_config]\nunknown_dpu_field = true" => Fails,
                 "[fnn]\nunknown_fnn_field = true" => Fails,
                 "[fnn.routing_profiles.test]\nunknown_routing_profile_field = true" => Fails,
@@ -7087,6 +7126,8 @@ path = "credentials.yaml"
 
             "dynamic map keys and valid partial sections remain accepted" {
                 "[pools.an-arbitrary-pool-name]\ntype = \"integer\"" => Yields(()),
+                r#"[resource_pool_backends.local]
+        type = "integrated""# => Yields(()),
                 "[tracing]\nenabled = true" => Yields(()),
             }
         );
@@ -7182,6 +7223,10 @@ priority = 1
 
             "dynamic object names remain accepted" {
                 "[pools.an-arbitrary-pool-name]\ntype = \"integer\"" => Yields(()),
+                r#"[pools.vpc-vni]
+type = "integer"
+backend = "local"
+ranges = [{ start = "10000", end = "19999" }]"# => Yields(()),
             }
         );
     }
