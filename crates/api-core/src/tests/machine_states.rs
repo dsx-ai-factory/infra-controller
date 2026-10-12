@@ -7576,6 +7576,7 @@ async fn test_scout_heartbeat_timeout_alert_cleared_on_instance_creation_transit
                 labels: vec![],
             }),
             allow_unhealthy_machine: true,
+            external_validation_request_id: None,
         }))
         .await
         .unwrap();
@@ -7659,6 +7660,7 @@ async fn test_scout_heartbeat_timeout_alert_not_cleared_when_unhealthy_allocatio
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
         .unwrap_err();

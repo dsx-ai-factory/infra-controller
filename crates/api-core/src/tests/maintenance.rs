@@ -69,6 +69,7 @@ async fn test_maintenance_multi_dpu(db_pool: sqlx::PgPool) -> Result<(), eyre::R
             labels: Vec::new(),
         }),
         allow_unhealthy_machine: false,
+        external_validation_request_id: None,
     };
     match env.api.allocate_instance(tonic::Request::new(req)).await {
         Ok(_) => {
@@ -136,6 +137,7 @@ async fn test_maintenance_multi_dpu(db_pool: sqlx::PgPool) -> Result<(), eyre::R
             labels: Vec::new(),
         }),
         allow_unhealthy_machine: false,
+        external_validation_request_id: None,
     };
     env.api.allocate_instance(tonic::Request::new(req)).await?;
 

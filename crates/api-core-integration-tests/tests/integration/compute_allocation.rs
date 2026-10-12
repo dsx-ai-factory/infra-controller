@@ -275,6 +275,7 @@ async fn allocate_instance(
             }),
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
 }

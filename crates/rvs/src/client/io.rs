@@ -118,6 +118,7 @@ impl NicoClient {
                 instance_type_id: None,
                 metadata: None,
                 allow_unhealthy_machine: false,
+                external_validation_request_id: None,
             })
             .await?;
         Ok(response.id.map(|id| id.to_string()).unwrap_or_default())

@@ -2084,6 +2084,7 @@ async fn test_deleted_vpc_prefix_cannot_allocate_new_instance_interface(
             }),
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await;
 
