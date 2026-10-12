@@ -589,9 +589,8 @@ if not enable_rest:
     postgres_values['cluster']['roles'] = []
 if enable_observability:
     # CNPG manages the preload library and extension when this parameter is set.
-    postgres_values['cluster']['postgresql'] = {
-        'parameters': {'pg_stat_statements.track': 'top'},
-    }
+    pg_config = postgres_values['cluster'].setdefault('postgresql', {})
+    pg_config.setdefault('parameters', {})['pg_stat_statements.track'] = 'top'
     # The application owner also monitors statements issued by the other dev roles.
     postgres_values['cluster']['roles'].append({
         'name': postgres_values['cluster']['initdb']['owner'],
