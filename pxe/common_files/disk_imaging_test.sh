@@ -260,6 +260,32 @@ assert_eq "token auth header file content" \
 	'header = "Authorization: Token my-token"' "$(<"$image_auth_header_file")"
 rm -f "$image_auth_header_file"
 
+echo "image auth header escaping"
+# A token containing curl config-file special characters: a double quote and
+# a backslash. If these are not escaped, the config file either breaks curl's
+# quoted-value parsing or changes the header curl actually sends.
+image_auth_token='weird"token\with-specials'
+image_auth_type="Bearer"
+build_image_auth_args
+assert_eq "escaped header file content" \
+	'header = "Authorization: Bearer weird\"token\\with-specials"' \
+	"$(<"$image_auth_header_file")"
+rm -f "$image_auth_header_file"
+
+echo "image auth header file creation failure"
+# mktemp failing (e.g. a full or read-only /tmp) must stop the download
+# rather than silently falling back to an unauthenticated fetch.
+mktemp() {
+	return 1
+}
+image_auth_token="my-token"
+image_auth_type="Bearer"
+if build_image_auth_args; then
+	fail "build_image_auth_args accepted a failed mktemp"
+fi
+assert_eq "failed mktemp leaves auth empty" "0" "${#image_auth[@]}"
+unset -f mktemp
+
 echo "curl_url forwards the url and the auth config as separate arguments, never the raw token"
 # curl_url pipes through tee, so curl runs in a subshell: capture its
 # arguments via a file rather than a variable, which would not survive

@@ -63,10 +63,19 @@ function build_image_auth_args() {
 		if [ -z "$image_auth_type" ]; then
 			image_auth_type=Bearer
 		fi
+
+		# Escape curl's quoted config-value syntax (backslash first, so the
+		# backslash this introduces for a literal quote is not itself
+		# re-escaped).
+		escaped_type=${image_auth_type//\\/\\\\}
+		escaped_type=${escaped_type//\"/\\\"}
+		escaped_token=${image_auth_token//\\/\\\\}
+		escaped_token=${escaped_token//\"/\\\"}
+
 		image_auth_header_file=$(mktemp) || return 1
-		chmod 600 "$image_auth_header_file"
-		printf 'header = "Authorization: %s %s"\n' "$image_auth_type" "$image_auth_token" \
-			>"$image_auth_header_file"
+		chmod 600 "$image_auth_header_file" || return 1
+		printf 'header = "Authorization: %s %s"\n' "$escaped_type" "$escaped_token" \
+			>"$image_auth_header_file" || return 1
 		image_auth=(-K "$image_auth_header_file")
 	fi
 }
@@ -1083,12 +1092,21 @@ function main() {
 		file=$(basename $image_url)
 	fi
 
-	build_image_auth_args
+	if ! build_image_auth_args; then
+		echo "Failed to prepare image authentication" | tee $log_output
+		return 1
+	fi
+	if [ -n "$image_auth_header_file" ]; then
+		# Safety net for an interrupted download: the normal-path cleanup
+		# below removes the file and clears this trap once curl_url returns.
+		trap 'rm -f "$image_auth_header_file"' EXIT INT TERM
+	fi
 
 	echo "Downloading image from $image_url" | tee $log_output
 	curl_url "$image_url" "${image_auth[@]}"
 	if [ -n "$image_auth_header_file" ]; then
 		rm -f "$image_auth_header_file"
+		trap - EXIT INT TERM
 	fi
 	if [ ! -z "$image_sha" ]; then
 		echo "Verifying image with digest $image_sha" | tee $log_output
