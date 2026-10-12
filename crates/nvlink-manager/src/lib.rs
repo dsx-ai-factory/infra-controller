@@ -70,10 +70,10 @@ use tracing::Instrument;
 /// Default NMX-M instance identifier for credentials and client lookup when none is specified.
 pub const DEFAULT_NMX_M_NAME: &str = "default";
 
-/// Multicast groups limit for new NMX-C partitions. Must be a multiple of 4. Assuming at most 2
-/// partitions per tray and 18 tray default partitions, this is floor(1024 / (36+18)) rounded down
+/// Multicast groups limit for new NMX-C partitions. Must be a multiple of 4. Assuming at most 1
+/// partition per tray and 18 tray default partitions, this is floor(1024 / 18) rounded down
 /// to the nearest multiple of 4.
-const NMX_C_PARTITION_MULTICAST_GROUPS_LIMIT: u32 = 16;
+const NMX_C_PARTITION_MULTICAST_GROUPS_LIMIT: u32 = 56;
 
 fn rack_id_from_chassis_snapshots(
     chassis_snapshots: &[&ManagedHostStateSnapshot],
