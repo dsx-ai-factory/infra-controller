@@ -963,7 +963,7 @@ impl ProcessorMetricsEmitter {
         let iteration_latency = meter
             .f64_histogram(format!("{object_type}_iteration_latency"))
             .with_description(format!(
-                "The elapsed time in the last state processor iteration to handle objects of type {object_type}"
+                "Elapsed time of each completed state processor iteration for objects of type {object_type}"
             ))
             .with_unit("ms")
             .build();

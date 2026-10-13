@@ -36,10 +36,12 @@ func NewCommand() *cli.Command {
 				Value: "8001",
 				Usage: "http port to listen to",
 			},
-			&cli.StringFlag{
+			&cli.StringSliceFlag{
 				Name:  "dns-name",
-				Value: "credsmgr.csm",
-				Usage: "DNS name for incluster tls access",
+				Value: cli.NewStringSlice("credsmgr.csm", "localhost"),
+				Usage: "DNS name for incluster tls access. Repeat or comma-separate " +
+					"to cover every hostname clients dial; the first value supplied " +
+					"replaces the default rather than adding to it",
 			},
 			&cli.StringFlag{
 				Name:  "ca-base-dns",
@@ -102,7 +104,7 @@ func NewCommand() *cli.Command {
 			o := Options{
 				Addr:         ":" + c.String("tls-port"),
 				InsecureAddr: ":" + c.String("insecure-port"),
-				DNSName:      c.String("dns-name"),
+				DNSNames:     c.StringSlice("dns-name"),
 				CABaseDNS:    c.String("ca-base-dns"),
 				sentryDSN:    c.String("sentry-dsn"),
 			}

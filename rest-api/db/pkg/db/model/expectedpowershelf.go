@@ -15,6 +15,7 @@ import (
 	otrace "go.opentelemetry.io/otel/trace"
 
 	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -146,6 +147,7 @@ func (eps *ExpectedPowerShelf) ToProto(creds ExpectedPowerShelfCredentials) *cor
 // reported by a Site. A nil proto is a no-op. An invalid or missing
 // proto.ExpectedPowerShelfId leaves eps.ID unchanged so the caller can
 // validate the proto's UUID before calling.
+// Name and description come from `Metadata`; empty strings become nil.
 func (eps *ExpectedPowerShelf) FromProto(proto *corev1.ExpectedPowerShelf) {
 	if proto == nil {
 		return
@@ -169,10 +171,10 @@ func (eps *ExpectedPowerShelf) FromProto(proto *corev1.ExpectedPowerShelf) {
 	} else {
 		eps.RackID = nil
 	}
-	eps.Name = proto.Name
+	eps.Name = cutil.GetPtrIfNotZero(proto.Metadata.GetName())
 	eps.Manufacturer = proto.Manufacturer
 	eps.Model = proto.Model
-	eps.Description = proto.Description
+	eps.Description = cutil.GetPtrIfNotZero(proto.Metadata.GetDescription())
 	eps.SlotID = proto.SlotId
 	eps.TrayIdx = proto.TrayIdx
 	eps.HostID = proto.HostId
@@ -272,6 +274,9 @@ type ExpectedPowerShelfDAO interface {
 	Update(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfUpdateInput) (*ExpectedPowerShelf, error)
 	// Delete used to delete row
 	Delete(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID) error
+	// DeleteIfUnchanged deletes only the version observed by inventory reconciliation.
+	// It returns false if the row changed or no longer exists.
+	DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID, updated time.Time) (bool, error)
 	// DeleteAll deletes all rows matching a required filter
 	DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput) error
 	// ReplaceAll replaces all rows matching a required filter
@@ -682,6 +687,22 @@ func (epsd ExpectedPowerShelfSQLDAO) Delete(ctx context.Context, tx *db.Tx, expe
 	}
 
 	return nil
+}
+
+// DeleteIfUnchanged deletes a row only if its Updated timestamp matches updated.
+// It returns false if the row changed or no longer exists.
+func (epsd ExpectedPowerShelfSQLDAO) DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID, updated time.Time) (_ bool, retErr error) {
+	ctx, expectedPowerShelfDAOSpan := cotel.StartSpan(ctx, "ExpectedPowerShelfDAO.DeleteIfUnchanged")
+	defer func() { cotel.EndSpan(expectedPowerShelfDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedPowerShelfDAOSpan, attribute.String("id", expectedPowerShelfID.String()))
+
+	result, err := db.GetIDB(tx, epsd.dbSession).NewDelete().Model((*ExpectedPowerShelf)(nil)).
+		Where("id = ?", expectedPowerShelfID).Where("updated = ?", updated).Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
 }
 
 // DeleteAll deletes all ExpectedPowerShelves matching the supplied filter. An

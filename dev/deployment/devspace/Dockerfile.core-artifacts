@@ -22,6 +22,7 @@ RUN --mount=type=cache,id=nico-devspace-cargo-home,target=/cargo-home,sharing=lo
     -p carbide-dhcp --lib \
     -p carbide-ssh-console --bin ssh-console \
     -p carbide-machine-a-tron --bin machine-a-tron \
+    -p carbide-pxe --bin carbide \
     -p nico-postgres-exporter --bin nico-postgres-exporter && \
   mkdir -p /artifacts && \
   cp \
@@ -31,6 +32,7 @@ RUN --mount=type=cache,id=nico-devspace-cargo-home,target=/cargo-home,sharing=lo
     /cargo-target/debug/libdhcp.so \
     /cargo-target/debug/ssh-console \
     /cargo-target/debug/machine-a-tron \
+    /cargo-target/debug/carbide \
     /cargo-target/debug/nico-postgres-exporter \
     /artifacts/
 

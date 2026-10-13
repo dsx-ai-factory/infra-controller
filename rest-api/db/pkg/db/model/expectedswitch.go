@@ -15,6 +15,7 @@ import (
 	otrace "go.opentelemetry.io/otel/trace"
 
 	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -163,6 +164,7 @@ func (es *ExpectedSwitch) ToProto(creds ExpectedSwitchCredentials) *corev1.Expec
 // by a Site. A nil proto is a no-op. An invalid or missing
 // proto.ExpectedSwitchId leaves es.ID unchanged so the caller can validate
 // the proto's UUID before calling.
+// Name and description come from `Metadata`; empty strings become nil.
 func (es *ExpectedSwitch) FromProto(proto *corev1.ExpectedSwitch) {
 	if proto == nil {
 		return
@@ -187,10 +189,10 @@ func (es *ExpectedSwitch) FromProto(proto *corev1.ExpectedSwitch) {
 	} else {
 		es.RackID = nil
 	}
-	es.Name = proto.Name
+	es.Name = cutil.GetPtrIfNotZero(proto.Metadata.GetName())
 	es.Manufacturer = proto.Manufacturer
 	es.Model = proto.Model
-	es.Description = proto.Description
+	es.Description = cutil.GetPtrIfNotZero(proto.Metadata.GetDescription())
 	es.SlotID = proto.SlotId
 	es.TrayIdx = proto.TrayIdx
 	es.HostID = proto.HostId
@@ -299,6 +301,9 @@ type ExpectedSwitchDAO interface {
 	Update(ctx context.Context, tx *db.Tx, input ExpectedSwitchUpdateInput) (*ExpectedSwitch, error)
 	// Delete used to delete row
 	Delete(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID) error
+	// DeleteIfUnchanged deletes only the version observed by inventory reconciliation.
+	// It returns false if the row changed or no longer exists.
+	DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID, updated time.Time) (bool, error)
 	// DeleteAll deletes all rows matching a required filter
 	DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) error
 	// ReplaceAll replaces all rows matching a required filter
@@ -729,6 +734,22 @@ func (essd ExpectedSwitchSQLDAO) Delete(ctx context.Context, tx *db.Tx, expected
 	}
 
 	return nil
+}
+
+// DeleteIfUnchanged deletes a row only if its Updated timestamp matches updated.
+// It returns false if the row changed or no longer exists.
+func (essd ExpectedSwitchSQLDAO) DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID, updated time.Time) (_ bool, retErr error) {
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.DeleteIfUnchanged")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedSwitchDAOSpan, attribute.String("id", expectedSwitchID.String()))
+
+	result, err := db.GetIDB(tx, essd.dbSession).NewDelete().Model((*ExpectedSwitch)(nil)).
+		Where("id = ?", expectedSwitchID).Where("updated = ?", updated).Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
 }
 
 // DeleteAll deletes all ExpectedSwitches matching the supplied filter. An

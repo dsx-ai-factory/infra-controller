@@ -37,6 +37,11 @@ spec:
         kubectl.kubernetes.io/default-container: {{ include "nico-pxe.name" . }}
     spec:
       serviceAccountName: {{ include "nico-pxe.name" . }}
+      securityContext:
+        # The artifact init containers need root to copy from their images.
+        # Only the serving container runs as UID/GID 10001. The final artifact
+        # init container makes restrictive source modes readable by that group.
+        fsGroup: 10001
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -64,6 +69,28 @@ spec:
         {{- $container := omit $entry "repository" "tag" }}
         {{- $_ := set $container "image" (include "nico.containerImage" (dict "container" $entry "path" (printf "%s.initContainers[%d]" $.Chart.Name $index))) }}
         {{- toYaml (list $container) | nindent 8 }}
+        {{- end }}
+        {{- if .Values.bootArtifactContainers }}
+        - name: boot-artifacts-permissions
+          image: "{{ include "nico-pxe.image" . }}"
+          imagePullPolicy: {{ include "nico-pxe.imagePullPolicy" . }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              chgrp -R 10001 /forge-boot-artifacts/blobs/internal
+              chmod -R g+rX /forge-boot-artifacts/blobs/internal
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+          volumeMounts:
+            - name: boot-artifacts
+              mountPath: /forge-boot-artifacts/blobs/internal
         {{- end }}
       {{- end }}
       containers:
@@ -102,8 +129,11 @@ spec:
                 name: {{ include "nico-pxe.name" . }}-env-config
                 optional: {{ .Values.envFrom.pxeEnvConfig.optional | default true }}
           {{- end }}
-          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          imagePullPolicy: {{ include "nico-pxe.imagePullPolicy" . }}
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
             capabilities:
               add:
                 - SYS_PTRACE
@@ -123,7 +153,7 @@ spec:
             {{- end }}
             {{- if .Values.bootArtifactContainers }}
             - name: boot-artifacts
-              mountPath: /forge-boot-artifacts/blobs/internal
+              mountPath: {{ printf "%s/blobs/internal" (trimSuffix "/" .Values.bootArtifacts.servePath) | quote }}
             {{- end }}
       volumes:
         - name: spiffe

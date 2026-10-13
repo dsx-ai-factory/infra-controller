@@ -56,7 +56,7 @@ carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",subs
 carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="+Inf"} 1
 carbide_machines_handler_latency_in_state_milliseconds_sum{state="ready",substate=""} 4.765817999999999
 carbide_machines_handler_latency_in_state_milliseconds_count{state="ready",substate=""} 1
-# HELP carbide_machines_iteration_latency_milliseconds The elapsed time in the last state processor iteration to handle objects of type carbide_machines
+# HELP carbide_machines_iteration_latency_milliseconds Elapsed time of each completed state processor iteration for objects of type carbide_machines
 # TYPE carbide_machines_iteration_latency_milliseconds histogram
 carbide_machines_iteration_latency_milliseconds_bucket{le="0"} 0
 carbide_machines_iteration_latency_milliseconds_bucket{le="5"} 0

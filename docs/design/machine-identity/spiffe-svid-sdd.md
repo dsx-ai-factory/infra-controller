@@ -12,6 +12,7 @@
 | 0.4 | 05/11/2026 | Binu Ramakrishnan | Signing key rotation (two slots), overlap policy on rotate only |
 | 0.5 | 06/02/2026 | Binu Ramakrishnan | Site master encryption key re-wrap (`ReencryptTenantIdentitySecrets` gRPC); envelope `key_id` in ciphertext (drop DB `encryption_key_id` column) |
 | 0.6 | 08/07/2026 | Parham Armani | Expose re-wrap via NICo REST (`POST .../tenant-identity/re-encrypt`, provider-admin), keeping `dryRun`; previously gRPC/Forge-Admin-CLI only |
+| 0.7 | 09/02/2026 | Bill Minckler | Read the signing-key master key through the credential chain rather than only from Vault |
 |  |  |  |  |
 
 ## 1. Introduction
@@ -153,7 +154,7 @@ Per-org signing private keys and token-delegation credentials are encrypted at r
 | Concept | Where it lives |
 | :------ | :------------- |
 | Site **current** master key id | `[machine_identity].current_encryption_key_id` in site config |
-| Master key material | Site secrets `machine_identity.encryption_keys` (e.g. Vault `.../machine_identity/encryption_keys/kv1`) |
+| Master key material | Credential chain path `machine_identity/encryption_keys/{key_id}` (environment, watched file, Postgres, or Vault) |
 | Key id used to encrypt a given blob | **`key_id` inside the ciphertext envelope JSON** (standard base64 in DB), not a table column |
 
 **New encrypts** (first org provisioning, signing-key rotation, token-delegation writes) use the site **`current_encryption_key_id`**. **Decrypt** loads the AES key named by the envelope’s embedded **`key_id`**, so older keys must remain in secrets until all blobs are re-wrapped.
@@ -322,7 +323,7 @@ The embedded IMDS identity handler (`GET .../latest/meta-data/identity` and comp
 | `sign-proxy-url` | When set, the agent issues **`GET {url}/latest/meta-data/identity`** with the same query string as the workload request (e.g. repeated `aud=`). Scheme must be `http` or `https`. Trailing slashes on the base URL are normalized. |
 | `sign-proxy-tls-root-ca` | Optional path to a PEM file (one or more certs) added as trusted roots for **`https`** sign-proxy URLs (e.g. private CA). Ignored for `http:`. Requires `sign-proxy-url`. |
 
-When `sign-proxy-url` is **omitted**, the agent uses **NICo `SignMachineIdentity`** over mTLS by default. When it is **set**, the identity path uses **only** the HTTP forward for that request; the upstream response (status, `Content-Type`, body) is returned to the workload.
+When `sign-proxy-url` is **omitted**, the agent uses **NICo `SignMachineIdentity`** over mTLS by default. When it is **set**, the identity path uses **only** the HTTP forward for that request; the upstream response (status, `Content-Type`, all `Cache-Control` fields, body) is returned to the workload.
 
 **Standalone FMDS:** `nico-dpu-agent` pushes `FmdsConfigUpdate.machine_identity` to the FMDS service as **`FmdsMachineIdentityConfig`** (`crates/rpc/proto/fmds.proto`), mirroring the same numeric fields and optional `sign_proxy_url` / `sign_proxy_tls_root_ca`. If a later `UpdateConfig` **omits** `machine_identity`, FMDS **retains** the previously applied settings.
 
@@ -364,7 +365,7 @@ NICo Tenant issue JWT-SVID to tenant workload, routed back through NICo
 
 #### 3.4.1 Database Design
 
-A new table will be created to store tenant signing key pairs and optional token delegation config. The private key will be encrypted with a master key stored in Vault. Token delegation columns are nullable when an org does not use delegation.
+A new table will be created to store tenant signing key pairs and optional token delegation config. The private key is encrypted with a site master key read through the credential chain (`machine_identity/encryption_keys/{key_id}`), which may be served by Postgres, Vault, or a local environment or file source. Token delegation columns are nullable when an org does not use delegation.
 
 | tenant_identity_config |  |  |
 | :---- | :---- | :---- |
@@ -393,7 +394,7 @@ A new table will be created to store tenant signing key pairs and optional token
 
 #### 3.4.2 Configuration
 
-The JWT spec and vault related configs are passed to the NICo Core server during startup through `site_config.toml` config file.
+The JWT and machine-identity configurations are passed to the NICo Core server during startup through the `site_config.toml` config file.
 
 ```toml
 # In site config file (e.g., site_config.toml)
@@ -1119,7 +1120,7 @@ Use standard gRPC `Status` codes, aligned with REST:
 2. NICo REST is served over HTTPS and supports SSO integration
 3. The IMDS service is exposed over link-local and is exposed only to the node instance. Short-lived tokens (configurable TTL) limit the replay window. Adding Metadata: true HTTP header to the requests to limit SSRF attacks. In order to ensure that requests are directly intended for IMDS and prevent unintended or unwanted redirection of requests, requests:  
    * Must contain the header `Metadata: true`
-   * Must not contain an `X-Forwarded-For` header
+   * Must not contain `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, or `X-Forwarded-Proto` headers, including empty values
 
    Any request that doesn't meet both of these requirements is rejected by the service.
 

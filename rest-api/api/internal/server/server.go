@@ -272,6 +272,18 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 	return e
 }
 
+// metricsMethodLabel returns the request method when it is a standard HTTP
+// method, and "unknown" otherwise, matching promhttp's bounded label behavior.
+func metricsMethodLabel(c echo.Context, _ error) string {
+	method := c.Request().Method
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace:
+		return method
+	}
+	return "unknown"
+}
+
 func InitMetricsServer(e *echo.Echo, namespace string) *echo.Echo {
 	ep := echo.New()
 	ep.HideBanner = true
@@ -281,6 +293,13 @@ func InitMetricsServer(e *echo.Echo, namespace string) *echo.Echo {
 		// its own "echo" for an empty one.
 		Subsystem: namespace,
 		Skipper:   api.MetricsURLSkipper,
+		// echoprometheus otherwise takes host and method from the request, and
+		// the caller controls both. Keep the published labels but bound their
+		// values so unauthenticated requests cannot create unbounded time series.
+		LabelFuncs: map[string]echoPrometheus.LabelValueFunc{
+			"host":   func(echo.Context, error) string { return namespace },
+			"method": metricsMethodLabel,
+		},
 	}
 
 	p := echoPrometheus.NewMiddlewareWithConfig(conf)

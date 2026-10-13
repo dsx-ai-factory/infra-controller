@@ -288,38 +288,19 @@ impl CredentialProvider for ApiCredentialProvider {
     }
 }
 
-fn switch_endpoint_metadata(
-    switch: &rpc::forge::Switch,
-    endpoint_role: SwitchEndpointRole,
-    nmxt_enabled: bool,
-) -> Result<EndpointMetadata, HealthError> {
-    if switch.config.is_none() {
-        return Err(HealthError::GenericError(
-            "switch endpoint does not have serial".into(),
-        ));
-    }
-
-    Ok(EndpointMetadata::Switch(switch_data(
-        switch,
-        endpoint_role,
-        nmxt_enabled,
-    )))
-}
-
 fn switch_data(
     switch: &rpc::forge::Switch,
     endpoint_role: SwitchEndpointRole,
     nmxt_enabled: bool,
 ) -> SwitchData {
-    let serial = switch
-        .config
-        .as_ref()
-        .map(|config| config.name.clone())
-        .unwrap_or_default();
-
     SwitchData {
+        log_checkpoint_identity: switch.config.as_ref().map(|config| config.name.clone()),
         id: switch.id,
-        serial,
+        serial: switch
+            .status
+            .as_ref()
+            .and_then(|status| status.serial_number.clone())
+            .filter(|serial| !serial.is_empty()),
         slot_number: switch
             .placement_in_rack
             .as_ref()
@@ -549,6 +530,7 @@ impl ApiEndpointSource {
                 }
             }
         }
+
         match self.fetch_switch_endpoints().await {
             Ok(switches) => {
                 endpoints.extend(switches.endpoints);
@@ -919,8 +901,11 @@ impl ApiEndpointSource {
                 "Could not extract switch endpoint without BMC Info".to_string(),
             ));
         };
+
         let addr = BmcAddr::try_from(bmc_info)?;
-        let metadata = switch_endpoint_metadata(switch, SwitchEndpointRole::Bmc, false)?;
+
+        let metadata =
+            EndpointMetadata::Switch(switch_data(switch, SwitchEndpointRole::Bmc, false));
 
         self.endpoint_for(
             addr,
@@ -941,9 +926,14 @@ impl ApiEndpointSource {
         let switch_id = switch.id.ok_or_else(|| {
             HealthError::GenericError("switch host endpoint missing switch ID".to_string())
         })?;
+
         let addr = BmcAddr::try_from(nvos_info)?;
-        let metadata =
-            switch_endpoint_metadata(switch, SwitchEndpointRole::Host, switch.is_primary)?;
+
+        let metadata = EndpointMetadata::Switch(switch_data(
+            switch,
+            SwitchEndpointRole::Host,
+            switch.is_primary,
+        ));
 
         let endpoint = self.endpoint_for(
             addr,
@@ -1285,6 +1275,108 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
+    fn switch_discovery_exports_hardware_serial() {
+        use crate::otlp::convert::build_metrics_export_request;
+        use crate::sink::{EventContext, MetricSample};
+
+        let client = ForgeApiClient::new(&ApiConfig::new(
+            "http://127.0.0.1:1079",
+            &ForgeClientConfig::default(),
+        ));
+
+        let source = ApiEndpointSource::new(
+            Arc::new(ApiClientWrapper { client }),
+            reqwest(),
+            None,
+            10,
+            None,
+        );
+
+        for (serial, expected) in [
+            (Some(Some("MT2515600ZYB")), Some("MT2515600ZYB")),
+            (Some(None), None),
+            (Some(Some("")), None),
+            (None, None),
+        ] {
+            let switch = rpc::forge::Switch {
+                id: Some(test_switch_id()),
+                status: serial.map(|serial| rpc::forge::SwitchStatus {
+                    serial_number: serial.map(str::to_string),
+                    ..Default::default()
+                }),
+                config: Some(rpc::forge::SwitchConfig {
+                    name: "switch-name".to_string(),
+                    ..Default::default()
+                }),
+                bmc_info: Some(rpc::forge::BmcInfo {
+                    ip: Some("192.0.2.1".to_string()),
+                    mac: Some("02:00:00:00:00:01".to_string()),
+                    ..Default::default()
+                }),
+                nvos_info: Some(rpc::forge::SwitchNvosInfo {
+                    ip: Some("192.0.2.2".to_string()),
+                    mac: Some("02:00:00:00:00:02".to_string()),
+                    ..Default::default()
+                }),
+                rack_id: Some(RackId::new("RACK_1")),
+                ..Default::default()
+            };
+
+            let inventory = switch_component_inventory(&switch).unwrap().unwrap();
+
+            assert_eq!(inventory.metadata.serial_number(), expected);
+
+            for endpoint in [
+                source.extract_switch_endpoint(&switch).unwrap(),
+                source
+                    .extract_switch_host_endpoint(&switch)
+                    .unwrap()
+                    .unwrap(),
+            ] {
+                let context = EventContext::from_endpoint(&endpoint, "nvue_gnmi");
+
+                let sample = MetricSample {
+                    key: "temperature".to_string(),
+                    name: "nvue_gnmi".to_string(),
+                    metric_type: "temperature".to_string(),
+                    unit: "celsius".to_string(),
+                    value: 25.0,
+                    labels: vec![],
+                    context: None,
+                };
+
+                let exported = build_metrics_export_request(
+                    &[(context, sample)],
+                    1,
+                    "carbide_hardware_health",
+                );
+
+                let attributes = &exported.resource_metrics[0]
+                    .resource
+                    .as_ref()
+                    .unwrap()
+                    .attributes;
+
+                let actual = attributes
+                    .iter()
+                    .find(|attr| attr.key == "switch_serial_number")
+                    .and_then(|attr| attr.value.as_ref())
+                    .and_then(|value| value.value.as_ref());
+
+                let expected_value = expected.map(|serial| {
+                    opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
+                        serial.to_string(),
+                    )
+                });
+
+                assert_eq!(actual, expected_value.as_ref());
+                assert_eq!(endpoint.log_identity(), "switch-name");
+            }
+        }
+    }
+
+    #[test]
     fn inventory_page_size_honors_server_limit() {
         check_values(
             [
@@ -1380,7 +1472,7 @@ mod tests {
     }
 
     #[test]
-    fn switch_endpoint_metadata_uses_non_nil_api_domain() {
+    fn switch_data_uses_non_nil_api_domain() {
         let domain = NvLinkDomainId::from_str("9f4b45ec-705a-4af4-89f7-a112bc9c8f4e")
             .expect("valid domain UUID");
 
@@ -1403,7 +1495,7 @@ mod tests {
                 },
             ],
             |nvlink_domain_uuid| {
-                let metadata = switch_endpoint_metadata(
+                let switch = switch_data(
                     &rpc::forge::Switch {
                         config: Some(rpc::forge::SwitchConfig {
                             name: "switch-a".to_string(),
@@ -1414,12 +1506,7 @@ mod tests {
                     },
                     SwitchEndpointRole::Bmc,
                     false,
-                )
-                .expect("switch metadata");
-
-                let EndpointMetadata::Switch(switch) = metadata else {
-                    panic!("expected switch metadata");
-                };
+                );
 
                 switch.nvlink_domain_uuid
             },
@@ -1466,8 +1553,8 @@ mod tests {
     }
 
     #[test]
-    fn switch_endpoint_metadata_enables_nmxc_for_primary_switch() {
-        let metadata = switch_endpoint_metadata(
+    fn switch_data_enables_nmxc_for_primary_switch() {
+        let switch = switch_data(
             &rpc::forge::Switch {
                 config: Some(rpc::forge::SwitchConfig {
                     name: "switch-a".to_string(),
@@ -1478,12 +1565,7 @@ mod tests {
             },
             SwitchEndpointRole::Host,
             false,
-        )
-        .expect("switch metadata");
-
-        let EndpointMetadata::Switch(switch) = metadata else {
-            panic!("expected switch metadata");
-        };
+        );
 
         assert!(switch.nmxc_enabled);
     }

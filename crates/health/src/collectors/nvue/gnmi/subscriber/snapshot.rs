@@ -314,7 +314,7 @@ mod tests {
                 labels: Default::default(),
             };
 
-            let processor = MetricReconciler::new(None, context);
+            let processor = MetricReconciler::new(None, context, None);
 
             let request = build_snapshot_request(build_sample_subscribe_request(
                 &[proto::Path::default()],

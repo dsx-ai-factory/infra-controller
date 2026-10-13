@@ -140,6 +140,46 @@ fn populate_switch_nvos_info(
     }
 }
 
+/// Loads cached BMC serials for a switch response without querying devices.
+///
+/// Cache lookup failures are logged and omit serials from the response.
+async fn load_switch_serial_numbers(
+    db: impl DbReader<'_>,
+    switches: &[Switch],
+) -> HashMap<IpAddr, String> {
+    let addresses: Vec<_> = switches
+        .iter()
+        .filter_map(|switch| switch.bmc_info.as_ref()?.ip)
+        .collect();
+
+    if addresses.is_empty() {
+        return HashMap::new();
+    }
+
+    let endpoints = match db::explored_endpoints::find_by_ips(db, addresses).await {
+        Ok(endpoints) => endpoints,
+        Err(error) => {
+            tracing::warn!(%error, "Failed to load cached switch chassis serials");
+            return HashMap::new();
+        }
+    };
+
+    endpoints
+        .into_iter()
+        .filter_map(|endpoint| {
+            let serial = endpoint
+                .report
+                .switch_chassis()?
+                .serial_number
+                .as_deref()?
+                .trim()
+                .to_string();
+
+            Some((endpoint.address, serial))
+        })
+        .collect()
+}
+
 pub(crate) async fn find_switch(
     api: &Api,
     request: Request<rpc::SwitchQuery>,
@@ -197,13 +237,24 @@ pub(crate) async fn find_switch(
         message: format!("Failed to commit transaction: {}", e),
     })?;
 
+    // Optional cache reads use the pool so a failure cannot abort the switch transaction.
+    let serials_by_address =
+        load_switch_serial_numbers(&api.database_connection, &switch_list).await;
+
     let switches: Vec<rpc::Switch> = switch_list
         .into_iter()
         .map(|s| {
             let id = s.id;
             let nvos_ports = nvos_info_by_switch.remove(&id).unwrap_or_default();
 
+            let serial_number = s
+                .bmc_info
+                .as_ref()
+                .and_then(|bmc| bmc.ip)
+                .and_then(|ip| serials_by_address.get(&ip).cloned());
+
             rpc::Switch::try_from(s).map(|mut rpc_switch| {
+                rpc_switch.status.get_or_insert_default().serial_number = serial_number;
                 populate_switch_nvos_info(&mut rpc_switch, nvos_ports);
                 rpc_switch
             })
@@ -266,13 +317,23 @@ pub(crate) async fn find_by_ids(
     txn.rollback_or_log("read-only load of switches by id")
         .await;
 
+    let serials_by_address =
+        load_switch_serial_numbers(&api.database_connection, &switch_list).await;
+
     let switches: Vec<rpc::Switch> = switch_list
         .into_iter()
         .map(|s| {
             let id = s.id;
             let nvos_ports = nvos_info_by_switch.remove(&id).unwrap_or_default();
 
+            let serial_number = s
+                .bmc_info
+                .as_ref()
+                .and_then(|bmc| bmc.ip)
+                .and_then(|ip| serials_by_address.get(&ip).cloned());
+
             rpc::Switch::try_from(s).map(|mut rpc_switch| {
+                rpc_switch.status.get_or_insert_default().serial_number = serial_number;
                 populate_switch_nvos_info(&mut rpc_switch, nvos_ports);
                 rpc_switch
             })

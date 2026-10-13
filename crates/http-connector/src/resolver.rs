@@ -38,6 +38,11 @@ const MGMT_VRF_NAME: &[u8] = "mgmt".as_bytes();
 
 type HickoryResolverFuture = Pin<Box<dyn Future<Output = Result<SocketAddrs, NetError>> + Send>>;
 
+/// `ForgeRuntimeProvider` creates Hickory sockets with optional management-VRF binding.
+/// Each TCP connection attempt uses the supplied timeout, or five seconds for `None`.
+/// Expiry returns `TimedOut` and drops the connection future and its socket; cancelling
+/// the caller's future also drops the attempt. Hickory starts its separate DNS query
+/// timeout after the connection succeeds.
 #[derive(Clone, Default)]
 pub struct ForgeRuntimeProvider {
     handle: TokioHandle,
@@ -74,6 +79,22 @@ impl ForgeRuntimeProvider {
         }
         Ok(socket)
     }
+
+    /// Applies the same DNS connect deadline to management-VRF and ordinary sockets.
+    async fn connect_tcp_with_timeout(
+        connection: impl Future<Output = std::io::Result<TokioTcpStream>>,
+        timeout: Option<Duration>,
+    ) -> std::io::Result<AsyncIoTokioAsStd<TokioTcpStream>> {
+        // Match Hickory's five-second connect limit when none is supplied.
+        let timeout = timeout.unwrap_or(Duration::from_secs(5));
+        tokio::time::timeout(timeout, connection)
+            .await
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "DNS TCP connect timed out")
+            })?
+            .map(AsyncIoTokioAsStd)
+    }
+
     fn create_udp_socket(
         local_addr: SocketAddr,
         use_mgmt: bool,
@@ -106,7 +127,7 @@ impl RuntimeProvider for ForgeRuntimeProvider {
         &self,
         server_addr: SocketAddr,
         _bind_addr: Option<SocketAddr>,
-        _timeout: Option<Duration>,
+        timeout: Option<Duration>,
     ) -> Pin<Box<dyn Send + Future<Output = std::io::Result<Self::Tcp>>>> {
         if self.use_mgmt_vrf {
             let socket = match ForgeRuntimeProvider::create_tcp_socket(server_addr, true) {
@@ -117,21 +138,18 @@ impl RuntimeProvider for ForgeRuntimeProvider {
             };
 
             Box::pin(async move {
-                //  Set non_blocking which is required for Tokio::TcpSocket
                 let raw_fd = socket.into_raw_fd();
                 // SAFETY: `into_raw_fd` consumes `socket` and transfers ownership of its
                 // nonblocking descriptor; `from_raw_fd` immediately assumes that ownership
                 // exactly once.
                 let tcp_socket: TcpSocket = unsafe { TcpSocket::from_raw_fd(raw_fd) };
 
-                tcp_socket.connect(server_addr).await.map(AsyncIoTokioAsStd)
+                Self::connect_tcp_with_timeout(tcp_socket.connect(server_addr), timeout).await
             })
         } else {
             Box::pin(async move {
                 // Without management VRF, we can just use the default TCP socket
-                TokioTcpStream::connect(server_addr)
-                    .await
-                    .map(AsyncIoTokioAsStd)
+                Self::connect_tcp_with_timeout(TokioTcpStream::connect(server_addr), timeout).await
             })
         }
     }
@@ -382,10 +400,112 @@ impl SocketAddrs {
 
 #[cfg(test)]
 mod tests {
+    use std::task::Poll;
+
+    use carbide_test_support::Outcome::FailsWith;
+    use carbide_test_support::{Case, check_cases_async};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     use super::*;
+
+    /// A never-ready dial must report `TimedOut` without relying on OS routing
+    /// to simulate a blackholed DNS server.
+    #[tokio::test(start_paused = true)]
+    async fn dns_tcp_connect_uses_supplied_or_default_timeout() {
+        check_cases_async(
+            [
+                Case {
+                    scenario: "supplied timeout shorter than the default",
+                    input: Some(Duration::from_millis(10)),
+                    expect: FailsWith((std::io::ErrorKind::TimedOut, Duration::from_millis(10))),
+                },
+                Case {
+                    scenario: "supplied timeout longer than the default",
+                    input: Some(Duration::from_secs(6)),
+                    expect: FailsWith((std::io::ErrorKind::TimedOut, Duration::from_secs(6))),
+                },
+                Case {
+                    scenario: "omitted timeout uses the default",
+                    input: None,
+                    expect: FailsWith((std::io::ErrorKind::TimedOut, Duration::from_secs(5))),
+                },
+            ],
+            |timeout| async move {
+                let expected = timeout.unwrap_or(Duration::from_secs(5));
+                let start = tokio::time::Instant::now();
+                let connection =
+                    ForgeRuntimeProvider::connect_tcp_with_timeout(std::future::pending(), timeout);
+                tokio::pin!(connection);
+                assert!(
+                    futures_util::poll!(&mut connection).is_pending(),
+                    "connect completed immediately for {timeout:?}"
+                );
+                tokio::time::advance(expected - Duration::from_millis(1)).await;
+                // `advance` moves the clock but does not guarantee expired timers
+                // have been processed. Wait for a timer at each boundary before polling.
+                tokio::time::sleep_until(start + expected - Duration::from_millis(1)).await;
+                assert!(
+                    futures_util::poll!(&mut connection).is_pending(),
+                    "connect expired before {expected:?} for {timeout:?}"
+                );
+                tokio::time::advance(Duration::from_millis(1)).await;
+                tokio::time::sleep_until(start + expected).await;
+                let Poll::Ready(result) = futures_util::poll!(&mut connection) else {
+                    panic!("connect remained pending at {expected:?} for {timeout:?}");
+                };
+                result
+                    .map(drop)
+                    .map_err(|error| (error.kind(), start.elapsed()))
+            },
+        )
+        .await;
+    }
+
+    /// An immediate dial failure keeps its original cause and does not wait for the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn dns_tcp_connect_preserves_an_immediate_error() {
+        let start = tokio::time::Instant::now();
+        let original_error = std::io::Error::from_raw_os_error(111);
+        let original_kind = original_error.kind();
+        let original_message = original_error.to_string();
+        let result = ForgeRuntimeProvider::connect_tcp_with_timeout(
+            std::future::ready(Err(original_error)),
+            Some(Duration::from_secs(5)),
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("failed connect must preserve its error");
+        };
+        assert_eq!(error.kind(), original_kind);
+        assert_eq!(error.to_string(), original_message);
+        assert_eq!(error.raw_os_error(), Some(111));
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    /// Exercise the provider entrypoint; the socket-family tests bypass its deadline.
+    #[tokio::test]
+    async fn dns_tcp_connect_returns_a_usable_stream() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+            let server_addr = listener.local_addr()?;
+            let AsyncIoTokioAsStd(mut client) = ForgeRuntimeProvider::new()
+                .connect_tcp(server_addr, None, Some(Duration::from_secs(5)))
+                .await?;
+            let (mut server, client_addr) = listener.accept().await?;
+            assert_eq!(client.peer_addr()?, server_addr);
+            assert_eq!(client.local_addr()?, client_addr);
+
+            client.write_all(b"query").await?;
+            let mut received = [0; 5];
+            server.read_exact(&mut received).await?;
+            assert_eq!(&received, b"query");
+            Ok::<(), std::io::Error>(())
+        })
+        .await
+        .expect("DNS TCP exchange timed out")
+        .expect("DNS TCP exchange failed");
+    }
 
     #[tokio::test]
     async fn tcp_socket_connects_with_the_server_address_family() {

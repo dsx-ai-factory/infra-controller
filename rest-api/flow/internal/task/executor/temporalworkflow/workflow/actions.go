@@ -306,18 +306,14 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 
 	// Determine poll parameters from action config
 	pollInterval := 2 * time.Minute
-	pollTimeout := 30 * time.Minute
+	pollTimeout := firmwarePollTimeout(actx.config)
 
 	if v, ok := actx.config.Parameters[operationrules.ParamPollInterval]; ok {
 		if d := parseDurationParam(v); d > 0 {
 			pollInterval = d
 		}
 	}
-	if v, ok := actx.config.Parameters[operationrules.ParamPollTimeout]; ok {
-		if d := parseDurationParam(v); d > 0 {
-			pollTimeout = d
-		}
-	}
+	boundedPolling := firmwareTimeoutBudgetEnabled(ctx)
 
 	componentStr := devicetypes.ComponentTypeToString(target.Type)
 	startTime := workflow.Now(ctx)
@@ -349,7 +345,7 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 		Msg("Polling firmware update status")
 
 	for {
-		if workflow.Now(ctx).After(deadline) {
+		if workflow.Now(ctx).After(deadline) || (boundedPolling && !workflow.Now(ctx).Before(deadline)) {
 			if reconcileTargets {
 				failedComponents := make([]string, 0)
 				unresolvedComponents := make([]string, 0)
@@ -374,9 +370,17 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 		}
 
 		var result activity.GetFirmwareStatusResult
-		err := workflow.ExecuteActivity(
-			ctx, activity.NameGetFirmwareStatus, target,
-		).Get(ctx, &result)
+		var err error
+		if boundedPolling {
+			err = executeActivityBeforeDeadline(ctx, deadline, &result, activity.NameGetFirmwareStatus, target)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+		} else {
+			err = workflow.ExecuteActivity(
+				ctx, activity.NameGetFirmwareStatus, target,
+			).Get(ctx, &result)
+		}
 		if err != nil {
 			log.Warn().Err(err).
 				Str("target", target.String()).
@@ -450,7 +454,12 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 			}
 		}
 
-		if err := workflow.Sleep(ctx, pollInterval); err != nil {
+		if boundedPolling {
+			err = sleepBeforeDeadline(ctx, deadline, pollInterval)
+		} else {
+			err = workflow.Sleep(ctx, pollInterval)
+		}
+		if err != nil {
 			return fmt.Errorf("workflow sleep interrupted: %w", err)
 		}
 	}
@@ -505,17 +514,28 @@ func verifyPowerStatus(
 	attempt := 0
 	// Existing histories retain their original completion decision on replay.
 	checkRequested := workflow.GetVersion(ctx, "power-status-response-presence", workflow.DefaultVersion, 1) != workflow.DefaultVersion
+	boundedPolling := workflow.GetVersion(ctx, "power-status-poll-deadline", workflow.DefaultVersion, 1) != workflow.DefaultVersion
+	timeoutError := func() error {
+		return fmt.Errorf("timeout after %v waiting for power status %s (attempts: %d)", timeout, expected, attempt)
+	}
 
 	for {
+		if boundedPolling && !workflow.Now(ctx).Before(deadline) {
+			return timeoutError()
+		}
 		attempt++
 
 		// Call GetPowerStatus activity
 		var statusMap map[string]operations.PowerStatus
-		actErr := workflow.ExecuteActivity(
-			ctx,
-			activity.NameGetPowerStatus,
-			target,
-		).Get(ctx, &statusMap)
+		var actErr error
+		if boundedPolling {
+			actErr = executeActivityBeforeDeadline(ctx, deadline, &statusMap, activity.NameGetPowerStatus, target)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+		} else {
+			actErr = workflow.ExecuteActivity(ctx, activity.NameGetPowerStatus, target).Get(ctx, &statusMap)
+		}
 
 		if actErr == nil {
 			identifiers := target.Identifiers
@@ -570,7 +590,13 @@ func verifyPowerStatus(
 		}
 
 		// Sleep before next poll (durable sleep in workflow)
-		_ = workflow.Sleep(ctx, pollInterval)
+		if boundedPolling {
+			if err := sleepBeforeDeadline(ctx, deadline, pollInterval); err != nil {
+				return err
+			}
+		} else {
+			_ = workflow.Sleep(ctx, pollInterval)
+		}
 	}
 }
 

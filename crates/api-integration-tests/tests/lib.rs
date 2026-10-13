@@ -43,6 +43,8 @@ use itertools::Itertools;
 use mac_address::MacAddress;
 use model::machine_boot_interface::BootInterfaceSelectionSource;
 use model::metadata::Metadata;
+use model::resource_pool::binding::INTEGRATED_AUTHORITY_ID;
+use model::resource_pool::{ResourcePoolBackendKind, ResourcePoolValueDomain};
 use model::site_prefix::{NewTenantManagedSitePrefix, SitePrefixLifecycleState};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
@@ -140,6 +142,21 @@ async fn test_integration() -> eyre::Result<()> {
         cancel_token.clone(),
     )
     .await?;
+    let first_startup_bindings = db::resource_pool::binding::all(&test_env.db_pool).await?;
+    let vni_binding = first_startup_bindings
+        .iter()
+        .find(|binding| binding.pool_name == "vni")
+        .context("first authoritative startup did not bind the configured VNI pool")?;
+    assert_eq!(vni_binding.value_domain, ResourcePoolValueDomain::Integer);
+    assert_eq!(
+        vni_binding.backend_kind,
+        ResourcePoolBackendKind::Integrated
+    );
+    assert_eq!(vni_binding.authority_id, INTEGRATED_AUTHORITY_ID);
+    assert_eq!(vni_binding.remote_pool, "vni");
+    assert_eq!(vni_binding.backend_name, None);
+    assert!(!vni_binding.binding_id.is_nil());
+
     let server_handle_2 = utils::start_api_server(
         &mut test_env,
         TestApiServerArgs {
@@ -155,6 +172,18 @@ async fn test_integration() -> eyre::Result<()> {
         cancel_token.clone(),
     )
     .await?;
+
+    assert_eq!(
+        db::resource_pool::binding::all(&test_env.db_pool).await?,
+        first_startup_bindings,
+        "the second server must reuse the first server's pool bindings"
+    );
+
+    // Observable MQTT instruments export their initial zeros without a broker
+    // connection. Register them on the server's meter for the catalogue scrape.
+    let mqtt_client =
+        mqttea::MqtteaClient::new("localhost", 1883, "test-metric-catalogue", None).await?;
+    mqtt_client.register_metrics(&server_handle_2.ready.meter, "test_catalogue");
 
     assert_ne!(test_env.carbide_api_addrs[0], test_env.carbide_api_addrs[1]);
     assert_ne!(
@@ -374,6 +403,7 @@ async fn test_integration() -> eyre::Result<()> {
         "the MaT scout path must exercise PCI comparison observability",
     );
     generate_core_metric_docs(&test_env.carbide_metrics_addrs);
+    drop(mqtt_client);
 
     cancel_token.cancel();
     server_handle_1.wait().await?;

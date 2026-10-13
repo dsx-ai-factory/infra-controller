@@ -16,17 +16,18 @@
  */
 
 use std::borrow::Cow;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::extract::{Json, Path, State};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
 use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch};
-use crate::{Callbacks, http, redfish};
+use crate::{ActionError, Callbacks, http, redfish};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceConfig {
@@ -35,20 +36,55 @@ pub struct DeviceConfig {
     pub media_types: Vec<Cow<'static, str>>,
 }
 
-#[derive(Default)]
-struct Media {
-    image: Option<String>,
-    inserted: bool,
-    write_protected: bool,
+/// Contents of a virtual-media drive, independent of its Redfish JSON representation.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum VirtualMediaContents {
+    /// Empty drive after ejecting its media.
+    #[default]
+    Empty,
+    /// Inserted media and its write policy.
+    Inserted {
+        /// Local path or URI of the media image.
+        image: String,
+        /// Whether the backend must expose the media read-only.
+        write_protected: bool,
+    },
 }
 
+/// One serialized virtual-media operation awaiting backend application.
+///
+/// The operation retains its drive lock when transferred to a backend actor, even
+/// if the requesting HTTP future is cancelled. Call [`Self::commit`] after applying
+/// it successfully, before replying. Dropping it without committing preserves the
+/// previous Redfish state and releases the lock.
+#[derive(Debug)]
+pub struct VirtualMediaUpdate {
+    /// ComputerSystem containing the drive.
+    pub system_id: String,
+    /// Configured virtual-media device identifier.
+    pub device_id: String,
+    /// Requested drive contents.
+    pub contents: VirtualMediaContents,
+    device: Arc<DeviceState>,
+    _operation: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl VirtualMediaUpdate {
+    /// Publishes successfully applied contents to Redfish and releases the drive lock.
+    pub fn commit(self) {
+        *self.device.media.lock().expect("mutex poisoned") = self.contents;
+    }
+}
+
+#[derive(Debug)]
 struct DeviceState {
     config: DeviceConfig,
-    media: Mutex<Media>,
+    media: Mutex<VirtualMediaContents>,
+    operation: Arc<tokio::sync::Mutex<()>>,
 }
 
 pub(crate) struct VirtualMediaState {
-    devices: Vec<DeviceState>,
+    devices: Vec<Arc<DeviceState>>,
 }
 
 impl VirtualMediaState {
@@ -56,25 +92,21 @@ impl VirtualMediaState {
         Self {
             devices: devices
                 .into_iter()
-                .map(|config| DeviceState {
-                    config,
-                    media: Mutex::new(Media {
-                        write_protected: true,
-                        ..Default::default()
-                    }),
+                .map(|config| {
+                    Arc::new(DeviceState {
+                        config,
+                        media: Mutex::new(VirtualMediaContents::Empty),
+                        operation: Arc::new(tokio::sync::Mutex::new(())),
+                    })
                 })
                 .collect(),
         }
     }
 
-    fn find_device(&self, device_id: &str) -> Option<&DeviceState> {
+    fn find_device(&self, device_id: &str) -> Option<&Arc<DeviceState>> {
         self.devices
             .iter()
             .find(|device| device.config.id == device_id)
-    }
-
-    pub(crate) fn desired_state(&self) -> Vec<serde_json::Value> {
-        self.devices.iter().map(DeviceState::state_json).collect()
     }
 }
 
@@ -198,12 +230,16 @@ async fn insert_media<C: Callbacks>(
         None => true,
         Some(_) => return http::bad_request("WriteProtected must be a boolean"),
     };
-    *device.media.lock().expect("mutex poisoned") = Media {
-        image: Some(image.to_string()),
-        inserted: true,
-        write_protected,
-    };
-    http::ok_no_content()
+    device
+        .update(
+            &state,
+            system_id,
+            VirtualMediaContents::Inserted {
+                image: image.to_string(),
+                write_protected,
+            },
+        )
+        .await
 }
 
 async fn eject_media<C: Callbacks>(
@@ -218,21 +254,58 @@ async fn eject_media<C: Callbacks>(
     else {
         return http::not_found();
     };
-    *device.media.lock().expect("mutex poisoned") = Media {
-        write_protected: true,
-        ..Default::default()
-    };
-    http::ok_no_content()
+    device
+        .update(&state, system_id, VirtualMediaContents::Empty)
+        .await
 }
 
 impl DeviceState {
+    async fn update<C: Callbacks>(
+        self: &Arc<Self>,
+        state: &BmcState<C>,
+        system_id: String,
+        contents: VirtualMediaContents,
+    ) -> Response {
+        let Some(callbacks) = &state.callbacks else {
+            return http::redfish_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "virtual media has no backend",
+            );
+        };
+        let update = VirtualMediaUpdate {
+            system_id,
+            device_id: self.config.id.to_string(),
+            contents,
+            device: self.clone(),
+            _operation: self.operation.clone().lock_owned().await,
+        };
+        match callbacks.set_virtual_media(update).await {
+            Ok(()) => http::ok_no_content(),
+            Err(ActionError::BadRequest(error)) => http::bad_request(&error.to_string()),
+            Err(ActionError::Internal(error)) => {
+                tracing::warn!(device_id = %self.config.id, error = ?error, "virtual media update failed");
+                http::redfish_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "virtual media update failed",
+                )
+            }
+        }
+    }
+
     fn state_json(&self) -> serde_json::Value {
         let media = self.media.lock().expect("mutex poisoned");
+        let (image, inserted, write_protected) = match &*media {
+            VirtualMediaContents::Empty => (None, false, true),
+            VirtualMediaContents::Inserted {
+                image,
+                write_protected,
+            } => (Some(image), true, *write_protected),
+        };
         json!({
             "Id": self.config.id,
-            "Image": media.image,
-            "Inserted": media.inserted,
-            "WriteProtected": media.write_protected,
+            "Image": image,
+            "Inserted": inserted,
+            "WriteProtected": write_protected,
         })
     }
 
@@ -263,11 +336,108 @@ mod tests {
     use axum::http::{Method, Request, StatusCode};
     use http_body_util::BodyExt;
     use nv_redfish::schema::resource::PowerState;
+    use tokio::sync::{mpsc, oneshot};
     use tower::ServiceExt;
 
     use super::*;
     use crate::test_support::{TestBmcConfig, TestCallbacks, create_test_bmc, host_info};
     use crate::{HardwareType, MachineRouterOptions};
+
+    struct ControlledMediaCallbacks {
+        requests:
+            mpsc::UnboundedSender<(VirtualMediaUpdate, oneshot::Sender<Result<(), ActionError>>)>,
+    }
+
+    impl Callbacks for ControlledMediaCallbacks {
+        async fn computer_system_reset(
+            &self,
+            _: crate::ResourceResetType,
+        ) -> Result<(), ActionError> {
+            Ok(())
+        }
+
+        async fn set_virtual_media(&self, update: VirtualMediaUpdate) -> Result<(), ActionError> {
+            let (reply, response) = oneshot::channel();
+            self.requests.send((update, reply)).unwrap();
+            response.await.unwrap()
+        }
+
+        fn state_refresh_indication(&self) {}
+    }
+
+    #[tokio::test]
+    async fn serializes_media_updates_after_http_cancellation() {
+        let (requests, mut operations) = mpsc::unbounded_channel();
+        let (router, _state) = crate::machine_router(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            Arc::new(ControlledMediaCallbacks { requests }),
+            "test-host".to_owned(),
+            false,
+            MachineRouterOptions {
+                virtual_media_devices: Some(vec![DeviceConfig {
+                    id: "Cd".into(),
+                    name: "Virtual CD".into(),
+                    media_types: vec!["CD".into()],
+                }]),
+                ..Default::default()
+            },
+        );
+        let drive = "/redfish/v1/Systems/System.Embedded.1/VirtualMedia/Cd";
+        let insert = format!("{drive}/Actions/VirtualMedia.InsertMedia");
+        let eject = format!("{drive}/Actions/VirtualMedia.EjectMedia");
+        let mut first = Box::pin(request(
+            &router,
+            Method::POST,
+            &insert,
+            Some(json!({"Image": "first.iso"})),
+        ));
+        let (first_update, first_reply) = tokio::select! {
+            result = &mut first => panic!("request completed before backend reply: {result:?}"),
+            operation = operations.recv() => operation.unwrap(),
+        };
+        drop(first);
+        let (_, body) = request(&router, Method::GET, drive, None).await;
+        assert_eq!(
+            body.unwrap()["Inserted"],
+            false,
+            "pending contents are not published"
+        );
+
+        let mut second = Box::pin(request(&router, Method::POST, &eject, Some(json!({}))));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(second.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(
+            operations.try_recv().is_err(),
+            "cancelling HTTP must not release the drive lock"
+        );
+        first_update.commit();
+        assert!(
+            first_reply.send(Ok(())).is_err(),
+            "the original caller is gone"
+        );
+
+        let (second_update, second_reply) = tokio::select! {
+            result = &mut second => panic!("request completed before backend reply: {result:?}"),
+            operation = operations.recv() => operation.unwrap(),
+        };
+        assert_eq!(second_update.contents, VirtualMediaContents::Empty);
+        let (_, body) = request(&router, Method::GET, drive, None).await;
+        assert_eq!(body.unwrap()["Image"], "first.iso");
+        drop(second_update);
+        second_reply
+            .send(Err(ActionError::Internal(eyre::eyre!("backend failed"))))
+            .unwrap();
+        assert_eq!(second.await.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let (_, body) = request(&router, Method::GET, drive, None).await;
+        assert_eq!(
+            body.unwrap()["Image"],
+            "first.iso",
+            "failed eject retains committed contents"
+        );
+    }
 
     fn test_router() -> (Router, Arc<TestCallbacks>) {
         test_router_for(HardwareType::DellPowerEdgeR750)

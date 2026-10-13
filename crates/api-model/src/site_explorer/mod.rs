@@ -1308,21 +1308,25 @@ impl EndpointExplorationReport {
             .filter(|c| Self::is_switch_chassis_valid(c))
     }
 
-    //TODO: refactor for common code with generate_power_shelf_id
-    /// Tries to generate and store a MachineId for the discovered endpoint if
-    /// enough data for generation is available
-    pub fn generate_switch_id(&mut self) -> ModelResult<Option<SwitchId>> {
+    /// Returns the discovered switch chassis used for hardware identity.
+    /// Missing, blank, and `"NA"` serials are excluded.
+    pub fn switch_chassis(&self) -> Option<&Chassis> {
         // On GB200 (N5200_LD) the switch serial is reported by the
         // `MGX_NVSwitch_0` chassis. On Vera Rubin (N6100_LD) that chassis
         // reports `"NA"` and the usable serial is surfaced by `Chassis_0`
         // instead, so fall back to it when the primary chassis has no valid
         // serial.
-        let chassis = self
-            .query_switch_chassis_subsystem("mgx_nvswitch_0")
+        self.query_switch_chassis_subsystem("mgx_nvswitch_0")
             .or_else(|| self.query_switch_chassis_subsystem("chassis_0"))
-            .ok_or(ModelError::HardwareInfo(
-                HardwareInfoError::MissingHardwareInfo(MissingHardwareInfo::Serial),
-            ))?;
+    }
+
+    //TODO: refactor for common code with generate_power_shelf_id
+    /// Tries to generate and store a SwitchId from the discovered chassis identity.
+    pub fn generate_switch_id(&mut self) -> ModelResult<Option<SwitchId>> {
+        let chassis = self.switch_chassis().ok_or(ModelError::HardwareInfo(
+            HardwareInfoError::MissingHardwareInfo(MissingHardwareInfo::Serial),
+        ))?;
+
         let serial_number = chassis.serial_number.clone();
         let manufacturer = chassis.manufacturer.clone().unwrap_or("NVIDIA".to_string());
         let model = "Switch".to_string();
@@ -4748,7 +4752,7 @@ mod tests {
 
         value_scenarios!(
             run = |primary_serial: Option<&'static str>| {
-                EndpointExplorationReport {
+                let mut report = EndpointExplorationReport {
                     chassis: vec![
                         Chassis {
                             id: "MGX_NVSwitch_0".to_string(),
@@ -4762,29 +4766,32 @@ mod tests {
                         },
                     ],
                     ..Default::default()
-                }
-                .generate_switch_id()
-                .unwrap()
-                .unwrap()
+                };
+
+                let switch_id = report.generate_switch_id().unwrap().unwrap();
+                let serial = report.switch_chassis().unwrap().serial_number.clone().unwrap();
+
+                (switch_id, serial)
             };
+
             "valid primary serial is used" {
-                Some("MGX0") => expected_switch_id("MGX0"),
+                Some("MGX0") => (expected_switch_id("MGX0"), "MGX0".to_string()),
             }
 
             "missing primary serial falls back to Chassis_0" {
-                None => expected_switch_id("CHASSIS0"),
+                None => (expected_switch_id("CHASSIS0"), "CHASSIS0".to_string()),
             }
 
             "NA primary serial falls back to Chassis_0" {
-                Some("NA") => expected_switch_id("CHASSIS0"),
+                Some("NA") => (expected_switch_id("CHASSIS0"), "CHASSIS0".to_string()),
             }
 
             "empty primary serial falls back to Chassis_0" {
-                Some("") => expected_switch_id("CHASSIS0"),
+                Some("") => (expected_switch_id("CHASSIS0"), "CHASSIS0".to_string()),
             }
 
             "whitespace-only primary serial falls back to Chassis_0" {
-                Some("   ") => expected_switch_id("CHASSIS0"),
+                Some("   ") => (expected_switch_id("CHASSIS0"), "CHASSIS0".to_string()),
             }
         );
     }

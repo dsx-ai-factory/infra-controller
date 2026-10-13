@@ -1259,6 +1259,8 @@ paths:
               description: Pagination result in JSON format
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       operationId: get-site-status-history
       description: |-
         Retrieve a specific Site status history
@@ -3657,6 +3659,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       operationId: get-all-vpc-peering
       description: |-
         Get all VPC peerings.
@@ -9251,6 +9255,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       operationId: get-instance
       description: |
         Get an Instance by ID
@@ -11457,6 +11463,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       operationId: get-machine
       description: |
         Org must have either an Infrastructure Provider entity or a Tenant entity.
@@ -16682,6 +16690,8 @@ paths:
                 $ref: '#/components/schemas/DpuExtensionService'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       description: |-
         Retrieve a DPU Extension Service for the current Tenant by ID
 

@@ -59,6 +59,7 @@ use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::io::RackStateControllerIO;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
+use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
 use carbide_secrets::credentials::{CredentialManager, CredentialReader};
 use carbide_site_explorer::{AuthenticatedBmcClient, EndpointExplorationService, SiteExplorer};
 use carbide_spdm_controller::context::SpdmStateHandlerServices;
@@ -83,7 +84,11 @@ use model::expected_machine::ExpectedMachine;
 use model::ib::DEFAULT_IB_FABRIC_NAME;
 use model::machine::HostHealthConfig;
 use model::network_segment::NetworkDefinition;
-use model::resource_pool::{self, ResourcePoolDef};
+use model::resource_pool::binding::{
+    INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolSelection,
+    ResourcePoolValueDomain,
+};
+use model::resource_pool::{self, ResourcePoolConfig, ResourcePoolDef, ValueType};
 use model::route_server::RouteServerSourceType;
 use model::vpc::VpcDefinition;
 use opentelemetry::metrics::Meter;
@@ -102,6 +107,7 @@ use crate::cfg::file::{
     CarbideConfig, DpfExtraService, InitialObjectsConfig, ListenMode, VmaasConfig,
 };
 use crate::cfg::load::all_configuration_files;
+use crate::cfg::resource_pool::ResourcePoolBackendConfig;
 use crate::dpa::handler::start_svpc_handler;
 use crate::handlers::machine_validation::apply_config_on_startup;
 use crate::listener::ApiListenMode;
@@ -278,6 +284,23 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         cancel_token,
     } = runtime_inputs;
 
+    // Seed data is the initial networks, VPCs, and resource pools defined in
+    // `initial_objects_file` or the older sections in the main API config.
+    // Check pool selectors and merge their definitions before opening clients
+    // or writing to the database. Authoritative instances also merge networks
+    // and VPCs here, then create them once the API has its required pools.
+    let pool_config = resolve_resource_pool_config(&carbide_config, initial_objects.as_ref())?;
+    let seed_data = if carbide_config.listen_only {
+        tracing::info!("Not populating initial seed data in database, as listen_only=true");
+        None
+    } else {
+        Some(SeedData::resolve(
+            &carbide_config,
+            initial_objects.as_ref(),
+            pool_config.definitions,
+        )?)
+    };
+
     let (shared_redfish_pool, bmc_credential_ops) =
         create_redfish_pool(&carbide_config, credential_manager.clone())?;
     // Ordinary BMC traffic goes through nico-bmc-proxy when configured,
@@ -350,34 +373,42 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         true => carbide_config.ib_fabrics.keys().cloned().collect(),
     };
 
-    // Resolve initial seed data up-front so any configuration conflicts surface
-    // before we touch the database. The actual reconcile/creation runs inside
-    // `initialize_and_start_controllers`.
-    let seed_data = if carbide_config.listen_only {
-        tracing::info!("Not populating initial seed data in database, as listen_only=true");
-        None
+    // Record which backend allocates each pool's values, or check its saved binding,
+    // before adding any pool values. This also checks pools already in the
+    // database that are no longer in the config. Listen-only replicas check
+    // these bindings and record any missing ones for existing pools, but do
+    // not create pools or add values from the config.
+    let mut txn = Transaction::begin(&db_pool).await?;
+    let pool_definition_source = if carbide_config.listen_only {
+        PoolDefinitionSource::ListenOnly
     } else {
-        Some(SeedData::resolve(
-            &carbide_config,
-            initial_objects.as_ref(),
-        )?)
+        PoolDefinitionSource::SeedConfiguration
     };
-
-    // Note: Normally we want initialize_and_start_controllers to be responsible for populating
-    // information into the database, but resource pools, route servers, and configured site
-    // prefixes need to be defined first. The controllers rely on a fully-hydrated Api object, which
-    // relies on route_servers and common_pools being populated, while site-prefix inventory must
-    // reflect the complete configured set before the API starts serving it. So if we're configured
-    // for listen_only, strictly read them from the database (assuming another instance has populated
-    // them), otherwise, populate them now.
-    //
-    // Pool reconciliation specifically must happen before `create_common_pools` runs below, because
-    // that call queries `resource_pool` and bails if any mandatory pool is missing or empty.
+    let registry =
+        ResourcePoolRegistry::resolve(pool_definition_source, &mut txn, &pool_config.selections)
+            .await?;
+    // Ordinary seed definitions keep their stored values when TOML ranges or
+    // types change. PKey initialization adds configured integer ranges later,
+    // so it must not reuse a pool that already contains IP addresses.
+    for fabric_id in &ib_fabric_ids {
+        let name = resource_pool::common::ib_pkey_pool_name(fabric_id);
+        if let Some(pool) = registry.get(&name) {
+            eyre::ensure!(
+                pool.binding.value_domain == ResourcePoolValueDomain::Integer,
+                "PKey pool `{name}` requires integer values, but its stored value domain is {}",
+                pool.binding.value_domain,
+            );
+        }
+    }
     if let Some(seed_data) = seed_data.as_ref() {
-        // Determine the authoritative list of resource_pools to seed into the database
-        let mut txn = Transaction::begin(&db_pool).await?;
+        // Pool inventory is the set of values, such as VNIs or IP addresses,
+        // that NICo can allocate. Seed new pools here, preserving existing
+        // inventory when its configured ranges change. `create_common_pools`
+        // below requires the mandatory pools to exist and have free values
+        // before it builds the handles used by the API and controllers. Route
+        // servers and site prefixes also need to reflect the config before
+        // the API starts serving requests.
         db::resource_pool::reconcile_pool_defs(&mut txn, &seed_data.initial_pools).await?;
-
         // We'll always update whatever route servers are in the config
         // to the database, and then leverage the enable_route_servers
         // flag where needed to determine if we actually want to use
@@ -397,9 +428,13 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         db::site_prefix::reconcile_configured(&mut txn, &carbide_config.site_fabric_prefixes)
             .await?;
 
-        // Persisted roots can be retiring after the final configured root is
-        // removed, so current configuration alone cannot decide whether
-        // legacy VpcPrefix lineage must be repaired and validated.
+        // Older `VpcPrefix` records may have no `site_prefix_id`. Match each
+        // to its containing operator-managed site prefix where possible,
+        // rejecting ambiguous matches. If site prefixes are configured,
+        // every VPC prefix must have a match before startup can continue.
+        // A site prefix removed from the config stays in `Deleting` until
+        // its VPC prefixes are gone, so check the database even
+        // when no site prefixes remain in the config.
         if db::site_prefix::operator_managed_prefixes_exist(&mut txn).await? {
             let lineage =
                 db::site_prefix::backfill_vpc_prefix_site_prefix_lineage(&mut txn).await?;
@@ -417,9 +452,10 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
                 lineage.ambiguous,
             );
         }
+    }
+    txn.commit().await?;
 
-        txn.commit().await?;
-
+    if !carbide_config.listen_only {
         // Idempotently seed the dedicated site-wide lockdown IKM (v0) from the
         // site-wide BMC root, so existing sites converge onto the decoupled
         // lockdown key without operator action. No-op once seeded; if the BMC
@@ -1233,16 +1269,166 @@ fn build_deployment_type_labels(
     map
 }
 
+/// `validate_resource_pool_config` checks backend definitions, pool selectors,
+/// and supported IB fabrics before the binary opens external connections.
+/// It merges both pool sources, rejects conflicting definitions, and requires a
+/// pools table unless `listen_only` is enabled. Using pools from the main API
+/// config emits the existing deprecation warning.
+///
+/// `start_runtime` repeats this resolution because callers can bypass the binary
+/// entry point. Neither path contacts providers or reads certificate files.
+#[doc(hidden)]
+pub fn validate_resource_pool_config(
+    carbide_config: &CarbideConfig,
+    initial_objects: Option<&InitialObjectsConfig>,
+) -> eyre::Result<()> {
+    resolve_resource_pool_config(carbide_config, initial_objects).map(|_| ())
+}
+
+#[derive(Debug)]
+struct ResourcePoolStartupConfig {
+    definitions: HashMap<String, ResourcePoolDef>,
+    selections: HashMap<String, ResourcePoolSelection>,
+}
+
+fn resolve_resource_pool_config(
+    carbide_config: &CarbideConfig,
+    initial_objects: Option<&InitialObjectsConfig>,
+) -> eyre::Result<ResourcePoolStartupConfig> {
+    carbide_config.validate_resource_pool_backends()?;
+    let ib_enabled = carbide_config
+        .ib_config
+        .as_ref()
+        .is_some_and(|config| config.enabled);
+    if ib_enabled {
+        // Reject unsupported fabrics before startup can persist their bindings.
+        eyre::ensure!(
+            carbide_config.ib_fabrics.len() <= 1,
+            "only a single IB fabric definition is supported"
+        );
+        if let Some(fabric_id) = carbide_config.ib_fabrics.keys().next() {
+            eyre::ensure!(
+                fabric_id == DEFAULT_IB_FABRIC_NAME,
+                "ib_fabrics contains an entry \"{fabric_id}\", but only \"{DEFAULT_IB_FABRIC_NAME}\" is supported"
+            );
+        }
+    }
+    let initial_pools = initial_objects.and_then(|objects| objects.pools.as_ref());
+    let legacy_pools = carbide_config.pools.as_ref();
+
+    // Check both sources before merging. A duplicate in the other file must not
+    // hide an invalid backend reference or a remote selection.
+    for source in [initial_pools, legacy_pools].into_iter().flatten() {
+        for (name, pool) in source {
+            resolve_pool_selection(
+                carbide_config,
+                name,
+                pool.definition.pool_type.into(),
+                pool.backend.as_deref(),
+                pool.remote_pool.as_deref(),
+            )?;
+        }
+    }
+    let pools = SeedData::merge_objects(
+        initial_pools,
+        legacy_pools,
+        carbide_config,
+        !carbide_config.listen_only,
+    )?;
+    let mut definitions = HashMap::new();
+    let mut selections = HashMap::new();
+    for (name, pool) in pools.iter() {
+        selections.insert(
+            name.clone(),
+            resolve_pool_selection(
+                carbide_config,
+                name,
+                pool.definition.pool_type.into(),
+                pool.backend.as_deref(),
+                pool.remote_pool.as_deref(),
+            )?,
+        );
+        definitions.insert(name.clone(), pool.definition.clone());
+    }
+
+    for (fabric_id, fabric) in &carbide_config.ib_fabrics {
+        let name = resource_pool::common::ib_pkey_pool_name(fabric_id);
+        let selection = resolve_pool_selection(
+            carbide_config,
+            &name,
+            ValueType::Integer,
+            fabric.backend.as_deref(),
+            fabric.remote_pool.as_deref(),
+        )?;
+        if !ib_enabled {
+            continue;
+        }
+        if let Some(ordinary) = selections.get(&name) {
+            eyre::ensure!(
+                ordinary.value_domain == selection.value_domain,
+                "resource pool `{name}` conflicts with the PKey pool for IB fabric `{fabric_id}`",
+            );
+        } else {
+            selections.insert(name, selection);
+        }
+    }
+    Ok(ResourcePoolStartupConfig {
+        definitions,
+        selections,
+    })
+}
+
+fn resolve_pool_selection(
+    carbide_config: &CarbideConfig,
+    name: &str,
+    value_type: ValueType,
+    backend_name: Option<&str>,
+    remote_pool: Option<&str>,
+) -> eyre::Result<ResourcePoolSelection> {
+    eyre::ensure!(
+        !name.trim().is_empty(),
+        "resource pool name must not be empty"
+    );
+    if let Some(backend_name) = backend_name {
+        let backend = carbide_config
+            .resource_pool_backends
+            .get(backend_name)
+            .ok_or_else(|| {
+                eyre::eyre!("resource pool `{name}` references unknown backend `{backend_name}`")
+            })?;
+        eyre::ensure!(
+            matches!(backend, ResourcePoolBackendConfig::Integrated),
+            "resource pool `{name}` selects gRPC backend `{backend_name}`; v2.4 requires integrated allocation",
+        );
+    }
+    let remote_pool = remote_pool.unwrap_or(name);
+    eyre::ensure!(
+        remote_pool == name,
+        "integrated resource pool `{name}` requires remote_pool to equal its logical name",
+    );
+    Ok(ResourcePoolSelection {
+        pool_name: name.to_owned(),
+        value_domain: value_type.into(),
+        backend_name: backend_name.map(str::to_owned),
+        backend_kind: ResourcePoolBackendKind::Integrated,
+        authority_id: INTEGRATED_AUTHORITY_ID.to_owned(),
+        remote_pool: remote_pool.to_owned(),
+    })
+}
+
 #[derive(Debug)]
 struct SeedData<'a> {
     initial_networks: Cow<'a, HashMap<String, NetworkDefinition>>,
     initial_vpcs: Cow<'a, HashMap<String, VpcDefinition>>,
-    initial_pools: Cow<'a, HashMap<String, ResourcePoolDef>>,
+    initial_pools: HashMap<String, ResourcePoolDef>,
 }
 
 trait SeedKind: Clone + PartialEq {
     fn name() -> &'static str;
     fn source_description(cfg: &CarbideConfig, name: &str) -> String;
+    fn equivalent(&self, other: &Self) -> bool {
+        self == other
+    }
 }
 
 impl SeedKind for NetworkDefinition {
@@ -1275,7 +1461,14 @@ impl SeedKind for VpcDefinition {
     }
 }
 
-impl SeedKind for ResourcePoolDef {
+impl SeedKind for ResourcePoolConfig {
+    fn equivalent(&self, other: &Self) -> bool {
+        // `resolve_resource_pool_config` checks both sources before this merge.
+        // They select the same Integrated allocator and pool name, so different
+        // backend configuration names do not change the pool.
+        self.definition == other.definition
+    }
+
     fn name() -> &'static str {
         "Resource pool"
     }
@@ -1291,12 +1484,12 @@ impl SeedKind for ResourcePoolDef {
 }
 
 impl<'a> SeedData<'a> {
-    /// Determines the authoritative set of seed data definitions to reconcile
-    /// against the database at startup, merging e.g. `InitialObjectsConfig.networks`
-    /// with the legacy `CarbideConfig.networks` source.
+    /// `resolve` merges and validates the initial networks and VPCs, and groups
+    /// them with the pool definitions from `resolve_resource_pool_config`.
     fn resolve(
         carbide_config: &'a CarbideConfig,
         initial_objects: Option<&'a InitialObjectsConfig>,
+        initial_pools: HashMap<String, ResourcePoolDef>,
     ) -> eyre::Result<Self> {
         let initial_networks = Self::merge_objects(
             initial_objects.and_then(|io| io.networks.as_ref()),
@@ -1316,13 +1509,6 @@ impl<'a> SeedData<'a> {
             false,
         )?;
         db_init::validate_initial_vpcs(&initial_vpcs)?;
-
-        let initial_pools = Self::merge_objects(
-            initial_objects.and_then(|io| io.pools.as_ref()),
-            carbide_config.pools.as_ref(),
-            carbide_config,
-            true,
-        )?;
 
         Ok(Self {
             initial_networks,
@@ -1370,7 +1556,7 @@ impl<'a> SeedData<'a> {
                     .iter()
                     .filter(|(name, legacy_def)| {
                         io.get(name.as_str())
-                            .is_some_and(|new_def| new_def != *legacy_def)
+                            .is_some_and(|new_def| !new_def.equivalent(legacy_def))
                     })
                     .map(|(name, _)| name.as_str())
                     .collect();
@@ -1526,23 +1712,6 @@ async fn initialize_and_start_controllers<'a>(
     let ib_config = carbide_config.ib_config.clone().unwrap_or_default();
 
     if ib_config.enabled {
-        // These are some sanity checks until full multi-fabric support is available
-        // Right now there is only one fabric supported, and it needs to be called `default`
-        if carbide_config.ib_fabrics.len() > 1 {
-            return Err(eyre::eyre!(
-                "only a single IB fabric definition is allowed at the moment"
-            ));
-        }
-
-        if !carbide_config.ib_fabrics.is_empty() {
-            let fabric_id = carbide_config.ib_fabrics.iter().next().unwrap().0;
-            if fabric_id != DEFAULT_IB_FABRIC_NAME {
-                return Err(eyre::eyre!(
-                    "ib_fabrics contains an entry \"{fabric_id}\", but only \"{DEFAULT_IB_FABRIC_NAME}\" is supported at the moment"
-                ));
-            }
-        }
-
         // Populate IB specific resource pools
         let mut txn = Transaction::begin(db_pool).await?;
 
@@ -2988,14 +3157,15 @@ mod tests {
                 source: SeedSource::InitialObjects,
             } => {
                 config.pools = None;
-                initial_objects.pools = Some(seed_map(&[("test-pool", ipv4_pool("10.0.0.0/24"))]));
+                initial_objects.pools =
+                    Some(seed_map(&[("test-pool", ipv4_pool("10.0.0.0/24").into())]));
                 use_initial_objects = true;
             }
             ResolveInput::Object {
                 kind: SeedObjectKind::Pool,
                 source: SeedSource::LegacyConfig,
             } => {
-                config.pools = Some(seed_map(&[("test-pool", ipv4_pool("10.0.0.0/24"))]));
+                config.pools = Some(seed_map(&[("test-pool", ipv4_pool("10.0.0.0/24").into())]));
             }
             ResolveInput::ConflictingNetwork => {
                 initial_objects.networks =
@@ -3046,7 +3216,14 @@ mod tests {
             }
         }
 
-        match SeedData::resolve(&config, use_initial_objects.then_some(&initial_objects)) {
+        match resolve_resource_pool_config(&config, use_initial_objects.then_some(&initial_objects))
+            .and_then(|pools| {
+                SeedData::resolve(
+                    &config,
+                    use_initial_objects.then_some(&initial_objects),
+                    pools.definitions,
+                )
+            }) {
             Ok(seed_data) => Ok(SeedSummary {
                 networks: seed_data.initial_networks.keys().cloned().collect(),
                 vpcs: seed_data.initial_vpcs.keys().cloned().collect(),
@@ -3186,6 +3363,231 @@ attributes = { attribute1 = "site", additional_attribute3 = "site" }
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn pool_sources_compare_effective_integrated_defaults() {
+        let mut config = minimal_carbide_config();
+        config.resource_pool_backends = HashMap::from([
+            ("primary".to_owned(), ResourcePoolBackendConfig::Integrated),
+            ("alias".to_owned(), ResourcePoolBackendConfig::Integrated),
+        ]);
+        let definition = ipv4_pool("10.0.0.0/24");
+        let initial_objects = InitialObjectsConfig {
+            pools: Some(HashMap::from([(
+                "test-pool".to_owned(),
+                ResourcePoolConfig {
+                    definition: definition.clone(),
+                    backend: Some("primary".to_owned()),
+                    remote_pool: Some("test-pool".to_owned()),
+                },
+            )])),
+            networks: None,
+            vpcs: None,
+        };
+        for backend in [None, Some("alias")] {
+            config.pools = Some(HashMap::from([(
+                "test-pool".to_owned(),
+                ResourcePoolConfig {
+                    definition: definition.clone(),
+                    backend: backend.map(str::to_owned),
+                    remote_pool: None,
+                },
+            )]));
+            let resolved = resolve_resource_pool_config(&config, Some(&initial_objects)).unwrap();
+            assert_eq!(resolved.definitions["test-pool"], definition);
+            assert_eq!(resolved.selections["test-pool"].remote_pool, "test-pool");
+            assert_eq!(
+                resolved.selections["test-pool"].backend_name.as_deref(),
+                Some("primary")
+            );
+        }
+        config
+            .pools
+            .as_mut()
+            .unwrap()
+            .get_mut("test-pool")
+            .unwrap()
+            .definition = ipv4_pool("10.0.1.0/24");
+        let error = resolve_resource_pool_config(&config, Some(&initial_objects))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("conflicting definitions"), "{error}");
+        assert!(error.contains("test-pool"), "{error}");
+    }
+
+    #[test]
+    fn listen_only_accepts_no_configured_pools() {
+        let mut config = minimal_carbide_config();
+        config.listen_only = true;
+        config.pools = None;
+        let resolved = resolve_resource_pool_config(&config, None).unwrap();
+        assert!(resolved.definitions.is_empty());
+        assert!(resolved.selections.is_empty());
+    }
+
+    #[test]
+    fn pool_preflight_rejects_invalid_unused_backend() {
+        let mut config = minimal_carbide_config();
+        config.pools = Some(HashMap::new());
+        config.resource_pool_backends.insert(
+            "unused".to_owned(),
+            ResourcePoolBackendConfig::Grpc {
+                endpoint: "https://allocator.example?unsupported=true"
+                    .parse()
+                    .unwrap(),
+                tls: None,
+            },
+        );
+
+        let error = validate_resource_pool_config(&config, None).unwrap_err();
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("invalid resource-pool backend \"unused\""),
+            "{error}"
+        );
+        assert!(
+            error.contains("endpoint must not contain credentials, a query, or a fragment"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn pool_fabric_selections_follow_ib_enablement() {
+        let mut config = minimal_carbide_config();
+        config.pools = Some(HashMap::new());
+        config.resource_pool_backends.insert(
+            "fabric-local".to_owned(),
+            ResourcePoolBackendConfig::Integrated,
+        );
+        config.ib_fabrics = toml::from_str(
+            r#"
+            [default]
+            endpoints = ["https://ufm.example"]
+            pkeys = [{ start = "1", end = "100" }]
+            backend = "fabric-local"
+            "#,
+        )
+        .unwrap();
+        let name = resource_pool::common::ib_pkey_pool_name("default");
+        let expected = ResourcePoolSelection {
+            pool_name: name.clone(),
+            value_domain: model::resource_pool::binding::ResourcePoolValueDomain::Integer,
+            backend_name: Some("fabric-local".to_owned()),
+            backend_kind: ResourcePoolBackendKind::Integrated,
+            authority_id: INTEGRATED_AUTHORITY_ID.to_owned(),
+            remote_pool: name.clone(),
+        };
+        let fabric = config.ib_fabrics[DEFAULT_IB_FABRIC_NAME].clone();
+        check_cases(
+            [
+                Case {
+                    scenario: "enabled IB accepts no configured fabrics",
+                    input: (true, vec![]),
+                    expect: Yields(HashMap::new()),
+                },
+                Case {
+                    scenario: "enabled IB resolves the default fabric binding",
+                    input: (true, vec![DEFAULT_IB_FABRIC_NAME]),
+                    expect: Yields(HashMap::from([(name, expected)])),
+                },
+                Case {
+                    scenario: "enabled IB rejects an unsupported fabric name",
+                    input: (true, vec!["other"]),
+                    expect: FailsWith(format!(
+                        "ib_fabrics contains an entry \"other\", but only \"{DEFAULT_IB_FABRIC_NAME}\" is supported"
+                    )),
+                },
+                Case {
+                    scenario: "enabled IB rejects multiple fabrics before resolving selections",
+                    input: (true, vec![DEFAULT_IB_FABRIC_NAME, "other"]),
+                    expect: FailsWith("only a single IB fabric definition is supported".to_owned()),
+                },
+                Case {
+                    scenario: "disabled IB leaves unsupported fabrics unbound",
+                    input: (false, vec![DEFAULT_IB_FABRIC_NAME, "other"]),
+                    expect: Yields(HashMap::new()),
+                },
+            ],
+            |(enabled, fabric_ids)| {
+                let mut config = config.clone();
+                config.ib_config = Some(carbide_ib_fabric::config::IBFabricConfig {
+                    enabled,
+                    ..Default::default()
+                });
+                config.ib_fabrics = fabric_ids
+                    .into_iter()
+                    .map(|fabric_id| (fabric_id.to_owned(), fabric.clone()))
+                    .collect();
+                resolve_resource_pool_config(&config, None)
+                    .map(|resolved| {
+                        assert!(resolved.definitions.is_empty());
+                        resolved.selections
+                    })
+                    .map_err(|error| error.to_string())
+            },
+        );
+
+        // A disabled fabric still validates its explicitly configured selectors.
+        config
+            .ib_fabrics
+            .get_mut(DEFAULT_IB_FABRIC_NAME)
+            .unwrap()
+            .remote_pool = Some("another-pool".to_owned());
+        let error = resolve_resource_pool_config(&config, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ib_fabrics.default.pkey"), "{error}");
+        assert!(
+            error.contains("requires remote_pool to equal its logical name"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn pool_preflight_rejects_invalid_legacy_selection_hidden_by_duplicate() {
+        let mut config = minimal_carbide_config();
+        config.resource_pool_backends = HashMap::from([
+            ("local".to_owned(), ResourcePoolBackendConfig::Integrated),
+            (
+                "remote".to_owned(),
+                ResourcePoolBackendConfig::Grpc {
+                    endpoint: "http://unused.invalid:50051".parse().unwrap(),
+                    tls: None,
+                },
+            ),
+        ]);
+        let pool: ResourcePoolConfig = ipv4_pool("10.0.0.0/24").into();
+        let initial_objects = InitialObjectsConfig {
+            pools: Some(HashMap::from([("test-pool".to_owned(), pool.clone())])),
+            networks: None,
+            vpcs: None,
+        };
+        value_scenarios!(
+            run = |(backend, remote_pool, expected)| {
+                let mut config = config.clone();
+                config.pools = Some(HashMap::from([(
+                    "test-pool".to_owned(),
+                    ResourcePoolConfig {
+                        backend: backend.map(str::to_owned),
+                        remote_pool: remote_pool.map(str::to_owned),
+                        ..pool.clone()
+                    },
+                )]));
+                let error = validate_resource_pool_config(&config, Some(&initial_objects))
+                    .unwrap_err().to_string();
+                assert!(error.contains(expected), "{error}");
+                assert!(error.contains("test-pool"), "{error}");
+            };
+            "every explicit backend must name a supported definition" {
+                (Some("missing"), None, "unknown backend") => (),
+                (Some("remote"), None, "v2.4 requires integrated") => (),
+            }
+            "Integrated SQL inventory requires the logical pool name" {
+                (Some("local"), Some("different"), "logical name") => (),
+                (None, Some(""), "logical name") => (),
+            }
+        );
     }
 
     #[test]
