@@ -32,8 +32,10 @@ use crate::ConfigValidationError;
 mod tests;
 
 /// `NicFirmwareProfileId` is an immutable, case-sensitive catalog name.
-/// Parsing rejects empty names, surrounding whitespace and control characters.
-#[derive(Clone, Debug, PartialEq, Eq, sqlx::Type)]
+/// Serialized as a string. Parsing and deserialization reject empty names,
+/// surrounding whitespace and control characters.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, sqlx::Type)]
+#[serde(transparent)]
 #[sqlx(transparent)]
 pub struct NicFirmwareProfileId(String);
 
@@ -54,6 +56,17 @@ impl FromStr for NicFirmwareProfileId {
             ));
         }
         Ok(Self(value.to_string()))
+    }
+}
+
+impl<'de> Deserialize<'de> for NicFirmwareProfileId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -211,7 +224,7 @@ pub struct NicFirmwareSiteDefault {
 }
 
 /// `NicFirmwareBaseline` groups operator selections in order of precedence.
-/// These are resolver inputs, not persisted machine or card overrides.
+/// Callers supply the selected profile IDs; the resolver does not persist them.
 #[derive(Default)]
 pub struct NicFirmwareBaseline<'a> {
     /// Operator override for this card, taking precedence over machine settings.

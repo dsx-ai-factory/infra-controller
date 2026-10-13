@@ -888,8 +888,7 @@ pub struct Machine<ID: MachineIdSubtypeTrait> {
     /// Machine metadata
     pub metadata: Metadata,
 
-    /// Version field that tracks changes to
-    /// - Metadata
+    /// Shared edit version, including metadata and NIC firmware override changes.
     pub version: ConfigVersion,
     // Columns for these exist, but are unused in rust code
     // /// When this machine record was created
