@@ -7849,7 +7849,14 @@ async fn create_bf4_astra_host(env: &TestEnv, cx9_mac_suffix: u8) -> TestManaged
     // Keep parallel hosts distinct while adding the expected-machine signal used with the
     // persisted BF4 product.
     expected_machine.data.interfaces.push(ExpectedInterface {
-        mac_address: mac_address::MacAddress::from([0x02, 0, 0, 0, 0, cx9_mac_suffix]),
+        mac_address: Some(mac_address::MacAddress::from([
+            0x02,
+            0,
+            0,
+            0,
+            0,
+            cx9_mac_suffix,
+        ])),
         nic_type: Some("CX9".to_string()), // Drives profile classification with the DPU product.
         ..ExpectedInterface::default()
     });
