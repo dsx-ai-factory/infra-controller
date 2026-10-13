@@ -4,12 +4,8 @@
 package certs
 
 import (
-	"time"
-
 	"github.com/sirupsen/logrus"
 	cli "github.com/urfave/cli/v2"
-	authenticationclient "k8s.io/client-go/kubernetes/typed/authentication/v1"
-	"k8s.io/client-go/rest"
 
 	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
 	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/pki"
@@ -26,9 +22,20 @@ func NewCommand() *cli.Command {
 		Usage: "NICo Credentials Service",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "allowed-service-account",
-				Usage:    "Only this Kubernetes identity may issue certificates (system:serviceaccount:namespace:name)",
-				Required: true,
+				Name:    "authorization-mode",
+				Value:   authModeAudit,
+				EnvVars: []string{"CERT_AUTH_MODE"},
+				Usage:   "AUDIT logs rejected callers and permits issuance; ENFORCE rejects them",
+			},
+			&cli.StringSliceFlag{
+				Name:    "allowed-identities",
+				EnvVars: []string{"CERT_AUTH_ALLOWED_IDENTITIES"},
+				Usage:   "Exact SPIFFE workload URIs allowed to issue certificates; repeat or comma-separate; required in ENFORCE",
+			},
+			&cli.StringFlag{
+				Name:    "client-ca-file",
+				EnvVars: []string{"CERT_AUTH_CLIENT_CA_FILE"},
+				Usage:   "Client certificate CA bundle; empty uses the effective signing CA",
 			},
 			&cli.BoolFlag{
 				Name:  "debug",
@@ -110,24 +117,15 @@ func NewCommand() *cli.Command {
 			ctx := c.Context
 			log := core.GetLogger(ctx)
 
-			cfg, err := rest.InClusterConfig()
-			if err != nil {
-				return err
-			}
-			cfg.Timeout = 5 * time.Second
-			authClient, err := authenticationclient.NewForConfig(cfg)
-			if err != nil {
-				return err
-			}
-
 			o := Options{
-				AllowedServiceAccount: c.String("allowed-service-account"),
-				TokenReviewer:         authClient.TokenReviews(),
-				Addr:                  ":" + c.String("tls-port"),
-				InsecureAddr:          ":" + c.String("insecure-port"),
-				DNSNames:              c.StringSlice("dns-name"),
-				CABaseDNS:             c.String("ca-base-dns"),
-				sentryDSN:             c.String("sentry-dsn"),
+				AuthorizationMode: c.String("authorization-mode"),
+				AllowedIdentities: c.StringSlice("allowed-identities"),
+				ClientCAFile:      c.String("client-ca-file"),
+				Addr:              ":" + c.String("tls-port"),
+				InsecureAddr:      ":" + c.String("insecure-port"),
+				DNSNames:          c.StringSlice("dns-name"),
+				CABaseDNS:         c.String("ca-base-dns"),
+				sentryDSN:         c.String("sentry-dsn"),
 			}
 
 			// Use native Go PKI for certificate generation

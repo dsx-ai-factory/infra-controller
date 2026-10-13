@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,25 +65,43 @@ func TestNativeCertificateIssuer_NewCertificate(t *testing.T) {
 		t.Fatalf("NewNativeCertificateIssuer failed: %v", err)
 	}
 
-	ctx := context.Background()
-	req := &types.CertificateRequest{
-		Name: "myservice",
-		App:  "myapp",
-		TTL:  24,
+	for _, tc := range []struct {
+		name      string
+		app       string
+		ttl       int
+		wantError bool
+	}{
+		{name: "explicit lifetime", app: "site", ttl: 24},
+		{name: "default site lifetime", app: "site"},
+		{name: "maximum site lifetime", app: "site", ttl: 90 * 24},
+		{name: "excessive site lifetime", app: "site", ttl: 90*24 + 1, wantError: true},
+		{name: "maximum serving lifetime", ttl: 365 * 24},
+		{name: "excessive serving lifetime", ttl: 365*24 + 1, wantError: true},
+		{name: "negative lifetime", ttl: -1, wantError: true},
+		{name: "overflowing lifetime", ttl: int(^uint(0) >> 1), wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cert, key, err := issuer.NewCertificate(context.Background(), &types.CertificateRequest{Name: "client", App: tc.app, TTL: tc.ttl})
+			if tc.wantError {
+				require.Error(t, err)
+				assert.Empty(t, cert)
+				assert.Empty(t, key)
+				return
+			}
+			require.NoError(t, err)
+			block, _ := pem.Decode([]byte(cert))
+			require.NotNil(t, block)
+			leaf, err := x509.ParseCertificate(block.Bytes)
+			require.NoError(t, err)
+			hours := tc.ttl
+			if hours == 0 {
+				hours = 90 * 24
+			}
+			assert.Equal(t, time.Duration(hours)*time.Hour, leaf.NotAfter.Sub(leaf.NotBefore))
+			assert.True(t, strings.HasPrefix(key, "-----BEGIN RSA PRIVATE KEY-----"))
+		})
 	}
 
-	cert, key, err := issuer.NewCertificate(ctx, req)
-	if err != nil {
-		t.Fatalf("NewCertificate failed: %v", err)
-	}
-
-	if !strings.HasPrefix(cert, "-----BEGIN CERTIFICATE-----") {
-		t.Error("Certificate should be PEM encoded")
-	}
-
-	if !strings.HasPrefix(key, "-----BEGIN RSA PRIVATE KEY-----") {
-		t.Error("Key should be PEM encoded")
-	}
 }
 
 func TestNativeCertificateIssuer_RawCertificate(t *testing.T) {
