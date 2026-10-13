@@ -523,7 +523,7 @@ operator needs when the overview shows a problem but not its cause. It uses the 
 workload panels at the end.
 
 **Service health** - API status, build version, open tracing spans, Postgres connection
-pool and resource pool utilization. A pool at 1 means new allocations fail.
+pool and resource pool utilization. A pool at 100% utilization means new allocations from it fail.
 
 **Capacity and tenancy** - Host and GPU totals split into usable and in-use, per-tenant
 allocation, SKU and device-type breakdown, managed entity counts, and IP addresses per
