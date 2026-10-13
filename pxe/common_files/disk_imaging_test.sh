@@ -473,10 +473,24 @@ assert_eq "unauthenticated curl output filename" "$file" "${mock_curl_args[6]}"
 assert_eq "unauthenticated curl url is the last argument" "$image_url" "${mock_curl_args[7]}"
 
 file=
-image_url="https://images.example/image.qcow2?token=synthetic"
+query_marker="synthetic-query-marker"
+image_url="https://images.example/image.qcow2?token=$query_marker"
 image_auth_token="my-token"
 image_auth_type="Bearer"
 build_image_auth_args
+
+# Exercise the production announcement independently of main so no hardware
+# discovery or imaging can run.
+: >"$log_output"
+announcement_stdout=$(announce_image_download)
+assert_eq "download announcement stdout" "Downloading image" "$announcement_stdout"
+case "$announcement_stdout" in
+	*"$query_marker"*) fail "download announcement exposed the URL query on stdout" ;;
+esac
+if grep -Fq -- "$query_marker" "$log_output"; then
+	fail "download announcement exposed the URL query in the imaging log"
+fi
+
 curl_url "$image_url" "${image_auth[@]}"
 read_mock_curl_args
 assert_eq "authenticated query selects the path filename" "image.qcow2" "$file"

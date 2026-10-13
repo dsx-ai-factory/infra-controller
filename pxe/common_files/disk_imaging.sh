@@ -54,6 +54,12 @@ function curl_url() {
 		--output "$file" "$url" 2>&1 | tee "$log_output"
 }
 
+# Announces the download without exposing URL queries, which may contain
+# credentials, to stdout or the imaging log.
+function announce_image_download() {
+	echo "Downloading image" | tee "$log_output"
+}
+
 # build_image_auth_args populates the image_auth array with the curl arguments
 # needed to authenticate the image download, or leaves it empty when
 # image_auth_token is unset. Kept as an array, not a string, so the header
@@ -1110,7 +1116,7 @@ function main() {
 		trap 'rm -f "$image_auth_header_file"' EXIT INT TERM
 	fi
 
-	echo "Downloading image from $image_url" | tee $log_output
+	announce_image_download
 	curl_url "$image_url" "${image_auth[@]}"
 	if [ -n "$image_auth_header_file" ]; then
 		rm -f "$image_auth_header_file"
