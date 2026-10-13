@@ -183,9 +183,9 @@ cannot push the set past the 1 MiB object limit. Each name is
 `<release-namespace>-<release-name>-<dashboard>`, where the dashboard part is
 the JSON filename without its extension. The prefix is the Helm release
 namespace and release name, not `grafanaDashboards.namespace`. The namespace
-and release parts are truncated to 16 characters each and the full name to 63,
-so long namespaces or release names shorten the rendered name; read it back
-with `helm get manifest` before referencing it from a `configMapRef`.
+and release parts are truncated to 16 characters each, and the full name to 63.
+Long namespaces or release names therefore shorten the rendered name. Read the
+name back with `helm get manifest` before you reference it from a `configMapRef`.
 
 The target namespace must exist before Helm runs, and the Helm identity must be
 allowed to create ConfigMaps there. The Grafana sidecar must also watch that
