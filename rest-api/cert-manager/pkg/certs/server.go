@@ -23,9 +23,12 @@ const (
 type Options struct {
 	Addr         string
 	InsecureAddr string
-	DNSName      string
-	CABaseDNS    string
-	sentryDSN    string
+	// DNSNames are the hostnames the TLS listener's certificate must match.
+	// Every name clients dial has to appear here, because hostname
+	// verification only consults the certificate's SANs.
+	DNSNames  []string
+	CABaseDNS string
+	sentryDSN string
 }
 
 // Server defines a server
@@ -124,7 +127,7 @@ func (s *Server) PKICloudCertificateHandler(_ context.Context) http.Handler {
 
 func (s *Server) tlsSetup(ctx context.Context) error {
 	i := s.certificateIssuer
-	cert, key, err := i.RawCertificate(ctx, s.DNSName, svcTTL)
+	cert, key, err := i.RawCertificate(ctx, s.DNSNames, svcTTL)
 	if err != nil {
 		return err
 	}

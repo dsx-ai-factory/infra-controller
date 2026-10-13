@@ -105,6 +105,29 @@ func (h *testExpectedSwitchAfterReadHook) AfterQuery(ctx context.Context, event 
 	afterRead()
 }
 
+type testExpectedSwitchBeforeDeleteHook struct {
+	rowID        uuid.UUID
+	beforeDelete func()
+	fired        bool
+	err          error
+}
+
+func (h *testExpectedSwitchBeforeDeleteHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !h.fired && event.Operation() == "DELETE" && strings.Contains(event.Query, `FROM "expected_switch"`) && strings.Contains(event.Query, h.rowID.String()) {
+		h.fired = true
+		if h.beforeDelete != nil {
+			h.beforeDelete()
+		}
+	}
+	return ctx
+}
+
+func (h *testExpectedSwitchBeforeDeleteHook) AfterQuery(ctx context.Context, event *bun.QueryEvent) {
+	if event.Operation() == "DELETE" && strings.Contains(event.Query, `FROM "expected_switch"`) && strings.Contains(event.Query, h.rowID.String()) {
+		h.err = event.Err
+	}
+}
+
 func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 	ctx := context.Background()
 
@@ -583,6 +606,122 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, cutil.GetPtr("inventory-name"), stored.Name)
 		assert.Equal(t, cutil.GetPtr("inventory-description"), stored.Description)
+	})
+
+	t.Run("API write after inventory read survives deletion", func(t *testing.T) {
+		site := cwu.TestBuildSite(t, dbSession, ip, "concurrent-delete-site", cdbm.SiteStatusRegistered, nil, ipu)
+		row, err := esDAO.Create(ctx, nil, cdbm.ExpectedSwitchCreateInput{
+			ExpectedSwitchID:   uuid.New(),
+			SiteID:             site.ID,
+			BmcMacAddress:      "00:11:22:33:99:03",
+			SwitchSerialNumber: "SN-CONCURRENT-DELETE",
+			Name:               cutil.GetPtr("original-name"),
+			Description:        cutil.GetPtr("original-description"),
+			CreatedBy:          ipu.ID,
+		})
+		require.NoError(t, err)
+		companion, err := esDAO.Create(ctx, nil, cdbm.ExpectedSwitchCreateInput{
+			ExpectedSwitchID:   uuid.New(),
+			SiteID:             site.ID,
+			BmcMacAddress:      "00:11:22:33:99:04",
+			SwitchSerialNumber: "SN-UNCHANGED-DELETE",
+			CreatedBy:          ipu.ID,
+		})
+		require.NoError(t, err)
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedSwitch)(nil))
+		beforeRead, err := esDAO.Get(ctx, nil, row.ID, nil, false)
+		require.NoError(t, err)
+		require.False(t, site.IsTimeWithinStaleInventoryThreshold(beforeRead.Updated))
+
+		// Commit the API edit immediately before `DELETE` executes. An unlocked
+		// version recheck followed by an unconditional delete would lose it.
+		var newer *cdbm.ExpectedSwitch
+		var writeErr error
+		hook := &testExpectedSwitchBeforeDeleteHook{rowID: row.ID, beforeDelete: func() {
+			newer, writeErr = esDAO.Update(ctx, nil, cdbm.ExpectedSwitchUpdateInput{
+				ExpectedSwitchID: row.ID,
+				Name:             cutil.GetPtr("API-name"),
+				Description:      cutil.GetPtr("API-description"),
+			})
+		}}
+		dbSession.DB.AddQueryHook(hook)
+		defer func() { hook.beforeDelete = nil }()
+		inventory := &corev1.ExpectedSwitchInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		}
+		mei := ManageExpectedSwitch{dbSession: dbSession}
+		err = mei.UpdateExpectedSwitchesInDB(ctx, site.ID, inventory)
+		require.NoError(t, err)
+		require.True(t, hook.fired)
+		require.NoError(t, hook.err)
+		require.NoError(t, writeErr)
+		require.True(t, newer.Updated.After(beforeRead.Updated))
+		stored, err := esDAO.Get(ctx, nil, row.ID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, newer, stored, "both API values and Updated must survive")
+		_, err = esDAO.Get(ctx, nil, companion.ID, nil, false)
+		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	})
+
+	t.Run("delete failure allows other deletions and retries on later inventory", func(t *testing.T) {
+		site := cwu.TestBuildSite(t, dbSession, ip, "failed-delete-site", cdbm.SiteStatusRegistered, nil, ipu)
+		row, err := esDAO.Create(ctx, nil, cdbm.ExpectedSwitchCreateInput{
+			ExpectedSwitchID:   uuid.New(),
+			SiteID:             site.ID,
+			BmcMacAddress:      "00:11:22:33:99:05",
+			SwitchSerialNumber: "SN-FAILED-DELETE",
+			CreatedBy:          ipu.ID,
+		})
+		require.NoError(t, err)
+		companion, err := esDAO.Create(ctx, nil, cdbm.ExpectedSwitchCreateInput{
+			ExpectedSwitchID:   uuid.New(),
+			SiteID:             site.ID,
+			BmcMacAddress:      "00:11:22:33:99:06",
+			SwitchSerialNumber: "SN-CONTINUE-DELETE",
+			CreatedBy:          ipu.ID,
+		})
+		require.NoError(t, err)
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedSwitch)(nil))
+		// `GetAll` orders by `created`, so process the failing row first.
+		_, err = dbSession.DB.NewUpdate().Model((*cdbm.ExpectedSwitch)(nil)).
+			Set("created = ?", companion.Created.Add(-time.Hour)).Where("id = ?", row.ID).Exec(ctx)
+		require.NoError(t, err)
+		rows, _, err := esDAO.GetAll(ctx, nil, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{site.ID}}, cdbp.PageInput{}, nil)
+		require.NoError(t, err)
+		require.Len(t, rows, 2)
+		require.Equal(t, row.ID, rows[0].ID)
+		require.Equal(t, companion.ID, rows[1].ID)
+
+		_, err = dbSession.DB.ExecContext(ctx, `CREATE FUNCTION fail_expected_switch_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected database failure'; END $$`)
+		require.NoError(t, err)
+		defer func() {
+			_, cleanupErr := dbSession.DB.ExecContext(ctx, "DROP FUNCTION fail_expected_switch_delete() CASCADE")
+			require.NoError(t, cleanupErr)
+		}()
+		_, err = dbSession.DB.ExecContext(ctx, fmt.Sprintf("CREATE TRIGGER fail_delete BEFORE DELETE ON expected_switch FOR EACH ROW WHEN (OLD.id = '%s') EXECUTE FUNCTION fail_expected_switch_delete()", row.ID))
+		require.NoError(t, err)
+		deleted, err := esDAO.DeleteIfUnchanged(ctx, nil, row.ID, rows[0].Updated)
+		require.False(t, deleted)
+		require.ErrorContains(t, err, "injected database failure")
+		hook := &testExpectedSwitchBeforeDeleteHook{rowID: row.ID}
+		dbSession.DB.AddQueryHook(hook)
+		inventory := &corev1.ExpectedSwitchInventory{InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS}
+		mei := ManageExpectedSwitch{dbSession: dbSession}
+		require.NoError(t, mei.UpdateExpectedSwitchesInDB(ctx, site.ID, inventory))
+		require.True(t, hook.fired)
+		require.ErrorContains(t, hook.err, "injected database failure")
+		stored, err := esDAO.Get(ctx, nil, row.ID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, &rows[0], stored)
+		_, err = esDAO.Get(ctx, nil, companion.ID, nil, false)
+		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+
+		// A later inventory retries the row once the database accepts writes.
+		_, err = dbSession.DB.ExecContext(ctx, "DROP TRIGGER fail_delete ON expected_switch")
+		require.NoError(t, err)
+		require.NoError(t, mei.UpdateExpectedSwitchesInDB(ctx, site.ID, inventory))
+		_, err = esDAO.Get(ctx, nil, row.ID, nil, false)
+		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
 	})
 
 	t.Run("row lock protects reconciliation through commit", func(t *testing.T) {

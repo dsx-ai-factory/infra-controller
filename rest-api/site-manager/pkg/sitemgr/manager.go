@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -38,12 +39,16 @@ const (
 // Options are args passed to the site manager at boot
 type Options struct {
 	credsMgrURL string
-	ingressHost string
-	listenPort  string
-	tlsKeyPath  string
-	tlsCertPath string
-	namespace   string
-	sentryDSN   string
+	// credsMgrCAPath is the CA bundle used to verify credsMgrURL. It is the
+	// ca.crt of the same CA that signs the cert-manager's listener, so the
+	// certificate chain and the hostname both have to check out.
+	credsMgrCAPath string
+	ingressHost    string
+	listenPort     string
+	tlsKeyPath     string
+	tlsCertPath    string
+	namespace      string
+	sentryDSN      string
 }
 
 // SiteMgr defines an instance of site manager
@@ -87,24 +92,20 @@ func NewSiteManager(ctx context.Context, o Options) (*SiteMgr, error) {
 }
 
 func newSiteManager(ctx context.Context, o Options, c crdclient.Interface) (*SiteMgr, error) {
+	certClient, err := newCertManagerClient(o.credsMgrCAPath)
+	if err != nil {
+		return nil, errors.Wrap(err, "newCertManagerClient")
+	}
+
 	s := &SiteMgr{
-		Options: o,
-		certClient: &http.Client{
-			Timeout: vaultTimeout,
-			// wrap transport with otel
-			Transport: otelhttp.NewTransport(&http.Transport{
-				// disable cert verification as this is a local server
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			}, otelhttp.WithSpanNameFormatter(func(_ string, _ *http.Request) string {
-				return certMgrClientName
-			})),
-		},
-		log: core.GetLogger(ctx),
+		Options:    o,
+		certClient: certClient,
+		log:        core.GetLogger(ctx),
 	}
 
 	s.crdClient = c
 
-	err := s.tlsSetup(ctx)
+	err = s.tlsSetup(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "tlsSetup")
 	}
@@ -131,6 +132,39 @@ func (s *SiteMgr) Start(ctx context.Context) {
 		log.Fatalf("failed to start appService: %v", err)
 	}
 	s.l = l
+}
+
+// newCertManagerClient builds the HTTP client used to reach
+// nico-rest-cert-manager. The CA bundle at caPath is the only trust anchor, so
+// an unreadable or malformed file is a startup failure rather than a silent
+// downgrade to an unverified connection.
+func newCertManagerClient(caPath string) (*http.Client, error) {
+	if caPath == "" {
+		return nil, fmt.Errorf("a CA bundle path is required to verify the cert manager endpoint")
+	}
+
+	caPEM, err := os.ReadFile(caPath)
+	if err != nil {
+		return nil, errors.Wrapf(err, "read cert manager CA bundle %q", caPath)
+	}
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("cert manager CA bundle %q contains no certificates", caPath)
+	}
+
+	return &http.Client{
+		Timeout: vaultTimeout,
+		// wrap transport with otel
+		Transport: otelhttp.NewTransport(&http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs:    pool,
+				MinVersion: tls.VersionTLS12,
+			},
+		}, otelhttp.WithSpanNameFormatter(func(_ string, _ *http.Request) string {
+			return certMgrClientName
+		})),
+	}, nil
 }
 
 func (s *SiteMgr) tlsSetup(ctx context.Context) error {

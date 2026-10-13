@@ -201,6 +201,7 @@ pub fn get() -> CarbideConfig {
         ssh_console_url: None,
         auth: None,
         pools: None,
+        resource_pool_backends: HashMap::new(),
         networks: None,
         vpcs: None,
         dpu_ipmi_tool_impl: None,
@@ -240,6 +241,8 @@ pub fn get() -> CarbideConfig {
             IbFabricDefinition {
                 // The actual IP is not used and thereby does not matter
                 endpoints: vec!["https://127.0.0.1:443".to_string()],
+                backend: None,
+                remote_pool: None,
                 pkeys: vec![resource_pool::Range {
                     start: "1".to_string(),
                     end: "100".to_string(),

@@ -51,6 +51,9 @@ spec:
             - --tls-port={{ .Values.config.tlsPort }}
             - --insecure-port={{ .Values.config.insecurePort }}
             - --ca-base-dns={{ .Values.config.caBaseDns }}
+            {{- range include "nico-rest-cert-manager.dnsNames" . | fromYamlArray }}
+            - --dns-name={{ . }}
+            {{- end }}
             {{- if .Values.config.debug }}
             - --debug
             {{- end }}

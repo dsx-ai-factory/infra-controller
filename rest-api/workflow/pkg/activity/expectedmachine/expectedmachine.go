@@ -40,7 +40,7 @@ type ManageExpectedMachine struct {
 // The reconciliation logic is as follows:
 // - UUID existing in NICo but not in DB: create record in DB
 // - UUID existing in both NICo and DB with differences: update record in DB
-// - UUID existing in DB but not in NICo: delete record in DB
+// - UUID existing in DB but not in NICo: delete the stale record if it has not changed since the initial read
 func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context, siteID uuid.UUID, expectedMachineInventory *corev1.ExpectedMachineInventory) error {
 	logger := log.With().Str("Activity", "UpdateExpectedMachinesInDB").Str("Site ID", siteID.String()).Logger()
 
@@ -286,9 +286,9 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 		}
 	}
 
-	// Delete any Expected Machine present in DB not present in NICo.
-	// We only act if this is the last page (or paging disabled) and outside race window.
-	// The source of truth for NICo is reportedIDs.
+	// Delete stale records missing from `reportedIDs` only after the final page
+	// (or when paging is disabled). Matching the saved `Updated` timestamp in
+	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
 	if util.ShouldReconcileDeletions(expectedMachineInventory.GetInventoryPage()) {
 		for _, em := range existingExpectedMachines {
 			if _, keep := reportedIDs[em.ID]; keep {
@@ -298,11 +298,14 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 			if site.IsTimeWithinStaleInventoryThreshold(em.Updated) {
 				continue
 			}
-			logger.Info().Str("ExpectedMachineID", em.ID.String()).Msg("deleting ExpectedMachine from DB since it was no longer reported in inventory from Site")
-			if derr := emDAO.Delete(ctx, nil, em.ID); derr != nil {
+			deleted, derr := emDAO.DeleteIfUnchanged(ctx, nil, em.ID, em.Updated)
+			if derr != nil {
 				logger.Error().Err(derr).Str("ExpectedMachineID", em.ID.String()).Msg("failed to delete ExpectedMachine from DB")
+				continue
 			}
-
+			if deleted {
+				logger.Info().Str("ExpectedMachineID", em.ID.String()).Msg("deleted ExpectedMachine no longer reported in inventory from Site")
+			}
 		}
 	}
 

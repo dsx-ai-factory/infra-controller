@@ -1,20 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# RBAC for carbide-rest-site-manager
+# RBAC for nico-rest-site-manager
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: carbide-rest-site-manager
+  name: nico-rest-site-manager
   labels:
-    app: carbide-rest-site-manager
+    app: nico-rest-site-manager
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: carbide-rest-site-manager
+  name: nico-rest-site-manager
   labels:
-    app: carbide-rest-site-manager
+    app: nico-rest-site-manager
 rules:
   # Access to Site CRDs
   - apiGroups: ["forge.nvidia.io"]
@@ -34,24 +34,24 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: carbide-rest-site-manager
+  name: nico-rest-site-manager
   labels:
-    app: carbide-rest-site-manager
+    app: nico-rest-site-manager
 subjects:
   - kind: ServiceAccount
-    name: carbide-rest-site-manager
+    name: nico-rest-site-manager
 roleRef:
   kind: Role
-  name: carbide-rest-site-manager
+  name: nico-rest-site-manager
   apiGroup: rbac.authorization.k8s.io
 ---
 # ClusterRole for CRD access across namespaces (if needed)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: carbide-rest-site-manager
+  name: nico-rest-site-manager
   labels:
-    app: carbide-rest-site-manager
+    app: nico-rest-site-manager
 rules:
   - apiGroups: ["forge.nvidia.io"]
     resources: ["sites"]
@@ -63,14 +63,16 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: carbide-rest-site-manager
+  name: nico-rest-site-manager
   labels:
-    app: carbide-rest-site-manager
+    app: nico-rest-site-manager
 subjects:
+  # A ServiceAccount subject needs an explicit namespace, which the overlay's
+  # namespace transformer rewrites alongside the ServiceAccount itself.
   - kind: ServiceAccount
-    name: carbide-rest-site-manager
-    namespace: carbide-rest
+    name: nico-rest-site-manager
+    namespace: nico-rest
 roleRef:
   kind: ClusterRole
-  name: carbide-rest-site-manager
+  name: nico-rest-site-manager
   apiGroup: rbac.authorization.k8s.io

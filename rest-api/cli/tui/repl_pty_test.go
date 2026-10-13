@@ -935,6 +935,279 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 	})
 }
 
+func TestCLIRegression_OSCreateRegisteredSites(t *testing.T) {
+	binaryPath := buildRegressionCLI(t)
+	for _, osType := range []string{operatingSystemTypeImage, operatingSystemTypeTemplatedIPXE} {
+		t.Run(osType, func(t *testing.T) {
+			const selectedSiteID = "497f6eca-6276-4993-bfeb-53cbbbba6f08"
+			recorder := &cliRegressionRecorder{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				body, err := io.ReadAll(request.Body)
+				require.NoError(t, err)
+				recorder.append(cliRegressionRequest{
+					Method: request.Method,
+					Path:   request.URL.Path,
+					Body:   string(body),
+				})
+				w.Header().Set("Content-Type", "application/json")
+				switch request.URL.Path {
+				case "/v2/org/acme/nico/tenant/current":
+					_, _ = io.WriteString(w, `{"id":"tenant-1"}`)
+				case "/v2/org/acme/nico/site":
+					_, _ = io.WriteString(w, `[
+						{"id":"pending-site","name":"pending-site","status":"Pending"},
+						{"id":"other-site","name":"registered-one","status":"Registered"},
+						{"id":"`+selectedSiteID+`","name":"registered-two","status":"Registered"}
+					]`)
+				case "/v2/org/acme/nico/ipxe-template":
+					assert.Equal(t, selectedSiteID, request.URL.Query().Get("siteId"))
+					_, _ = io.WriteString(w, `[{"id":"template-1","name":"Ubuntu Template"}]`)
+				case "/v2/org/acme/nico/operating-system":
+					assert.Equal(t, http.MethodPost, request.Method)
+					w.WriteHeader(http.StatusCreated)
+					_, _ = io.WriteString(w, `{"id":"os-1","name":"registered-site-os"}`)
+				default:
+					http.NotFound(w, request)
+				}
+			}))
+			defer server.Close()
+			command := exec.Command(binaryPath, "--config", writeRegressionConfig(t, server.URL), "tui")
+			command.Env = regressionEnvironment(map[string]string{
+				"NICO_TOKEN": ptyAuthToken,
+				"TERM":       "xterm-256color",
+			})
+			terminal := startRegressionPTY(t, command)
+			defer terminal.close()
+			terminal.waitFor(t, "Type a command or")
+			terminal.send(t, "operating-system create\r")
+			terminal.waitFor(t, "Operating system name")
+			terminal.send(t, "registered-site-os\r")
+			terminal.waitFor(t, "Description (optional)")
+			terminal.send(t, "\r")
+			terminal.waitFor(t, "Operating system type")
+			terminal.send(t, osType+"\r")
+			terminal.waitFor(t, "registered-two")
+			assert.Contains(t, terminal.transcript(), "registered-one")
+			assert.NotContains(t, terminal.transcript(), "pending-site")
+			terminal.send(t, "registered-two\r")
+			if osType == operatingSystemTypeImage {
+				terminal.waitFor(t, "Image URL")
+				terminal.send(t, "https://example.com/os.qcow2\r")
+				terminal.waitFor(t, "Image SHA")
+				terminal.send(t, strings.Repeat("a", 64)+"\r")
+				terminal.waitFor(t, "Specify root filesystem by")
+				terminal.send(t, rootFilesystemTypeLabel+"\r")
+				terminal.waitFor(t, "Root filesystem label")
+				terminal.send(t, "rootfs\r")
+				terminal.waitFor(t, "Image authentication type")
+				terminal.send(t, authTypeNone+"\r")
+				terminal.waitFor(t, "Image disk (optional)")
+				terminal.send(t, "\r")
+			}
+			terminal.waitFor(t, "User data (optional)")
+			terminal.send(t, "\r")
+			terminal.waitFor(t, "Allow override at instance creation?")
+			terminal.send(t, "n\r")
+			terminal.waitFor(t, "Enable phone home?")
+			terminal.send(t, "n\r")
+			terminal.waitFor(t, "Operating system created: registered-site-os (os-1)")
+			requests := recorder.matching(http.MethodPost, "/v2/org/acme/nico/operating-system")
+			require.Len(t, requests, 1)
+			var createdBody map[string]interface{}
+			require.NoError(t, json.Unmarshal([]byte(requests[0].Body), &createdBody))
+			assert.Equal(t, []interface{}{selectedSiteID}, createdBody["siteIds"])
+			terminal.send(t, "exit\r")
+			terminal.waitForExit(t)
+		})
+	}
+}
+
+func TestCLIRegression_RegisteredSiteSelection(t *testing.T) {
+	binaryPath := buildRegressionCLI(t)
+	for _, commandName := range []string{"vpc create", "ssh-key-group create", "expected-switch create"} {
+		t.Run(commandName, func(t *testing.T) {
+			recorder := &cliRegressionRecorder{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				body, err := io.ReadAll(request.Body)
+				require.NoError(t, err)
+				recorder.append(cliRegressionRequest{
+					Method: request.Method,
+					Path:   request.URL.Path,
+					Body:   string(body),
+				})
+				w.Header().Set("Content-Type", "application/json")
+				switch request.Method + " " + request.URL.Path {
+				case "GET /v2/org/acme/nico/site":
+					_, _ = io.WriteString(w, `[{"id":"pending","name":"pending","status":"Pending"},{"id":"registered-one","name":"registered-one","status":"Registered"},{"id":"registered-two","name":"registered-two","status":"Registered"}]`)
+				case "GET /v2/org/acme/nico/sshkey":
+					_, _ = io.WriteString(w, `[]`)
+				case "POST /v2/org/acme/nico/vpc", "POST /v2/org/acme/nico/sshkeygroup", "POST /v2/org/acme/nico/expected-switch":
+					w.WriteHeader(http.StatusCreated)
+					_, _ = io.WriteString(w, `{"id":"created","name":"registered-resource"}`)
+				default:
+					http.NotFound(w, request)
+				}
+			}))
+			defer server.Close()
+			command := exec.Command(binaryPath, "--config", writeRegressionConfig(t, server.URL), "tui")
+			command.Env = regressionEnvironment(map[string]string{
+				"NICO_TOKEN": ptyAuthToken,
+				"TERM":       "xterm-256color",
+			})
+			terminal := startRegressionPTY(t, command)
+			defer terminal.close()
+			terminal.waitFor(t, "Type a command or")
+			if commandName == "expected-switch create" {
+				terminal.send(t, `expected-switch create --data '{"siteId":"pending"}'`+"\r")
+				terminal.waitFor(t, `site "pending" is unavailable or not in Registered state`)
+				assert.Empty(t, recorder.matching(http.MethodPost, "/v2/org/acme/nico/expected-switch"))
+				terminal.send(t, `expected-switch create --data '{"siteId":"registered-two"}'`+"\r")
+				terminal.waitFor(t, "Run expected-switch create (POST)?")
+				terminal.send(t, "y\r")
+				terminal.waitFor(t, `"id": "created"`)
+			} else {
+				terminal.send(t, commandName+"\r")
+				if commandName == "ssh-key-group create" {
+					terminal.waitFor(t, "SSH key group name")
+					terminal.send(t, "registered-resource\r")
+					terminal.waitFor(t, "Description (optional)")
+					terminal.send(t, "\r")
+					terminal.waitFor(t, "Add site?")
+					terminal.send(t, "y\r")
+				}
+				terminal.waitFor(t, "registered-two")
+				assert.NotContains(t, terminal.transcript(), "pending")
+				terminal.send(t, "registered-two\r")
+				if commandName == "vpc create" {
+					terminal.waitFor(t, "VPC name")
+					terminal.send(t, "registered-resource\r")
+					terminal.waitFor(t, "Description (optional)")
+					terminal.send(t, "\r")
+					terminal.waitFor(t, "VPC created: registered-resource")
+				} else {
+					terminal.waitFor(t, "Add another site (have 1)?")
+					terminal.send(t, "n\r")
+					terminal.waitFor(t, "SSH key group created: registered-resource")
+				}
+			}
+			path := "/v2/org/acme/nico/expected-switch"
+			switch commandName {
+			case "vpc create":
+				path = "/v2/org/acme/nico/vpc"
+			case "ssh-key-group create":
+				path = "/v2/org/acme/nico/sshkeygroup"
+			}
+			requests := recorder.matching(http.MethodPost, path)
+			require.Len(t, requests, 1)
+			var body map[string]interface{}
+			require.NoError(t, json.Unmarshal([]byte(requests[0].Body), &body))
+			if commandName == "ssh-key-group create" {
+				assert.Equal(t, []interface{}{"registered-two"}, body["siteIds"])
+			} else {
+				assert.Equal(t, "registered-two", body["siteId"])
+			}
+			terminal.send(t, "exit\r")
+			terminal.waitForExit(t)
+		})
+	}
+}
+
+func TestCLIRegression_SSHKeyGroupUpdateSiteSelection(t *testing.T) {
+	binaryPath := buildRegressionCLI(t)
+	const existingSiteID = "497f6eca-6276-4993-bfeb-53cbbbba6f08"
+	const registeredSiteID = "3b78c28b-c734-48fd-84f4-2731ee6ce19e"
+	for _, test := range []struct {
+		name           string
+		retainExisting bool
+		wantIDs        []interface{}
+	}{
+		{
+			name:           "retain pending association and add registered site",
+			retainExisting: true,
+			wantIDs:        []interface{}{existingSiteID, registeredSiteID},
+		},
+		{
+			name:    "replace existing association",
+			wantIDs: []interface{}{registeredSiteID},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := &cliRegressionRecorder{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				body, err := io.ReadAll(request.Body)
+				require.NoError(t, err)
+				recorder.append(cliRegressionRequest{
+					Method: request.Method,
+					Path:   request.URL.Path,
+					Body:   string(body),
+				})
+				w.Header().Set("Content-Type", "application/json")
+				switch request.Method + " " + request.URL.Path {
+				case "GET /v2/org/acme/nico/site":
+					_, _ = io.WriteString(w, `[
+						{"id":"pending","name":"new-pending","status":"Pending"},
+						{"id":"registered-one","name":"registered-one","status":"Registered"},
+						{"id":"`+registeredSiteID+`","name":"registered-two","status":"Registered"}
+					]`)
+				case "GET /v2/org/acme/nico/sshkeygroup":
+					_, _ = io.WriteString(w, `[{"id":"group-1","name":"group-one","version":"version-1",
+						"siteAssociations":[{"site":{"id":"`+existingSiteID+`","name":"existing-pending","status":"Pending"}}]}]`)
+				case "PATCH /v2/org/acme/nico/sshkeygroup/group-1":
+					_, _ = io.WriteString(w, `{"id":"group-1","name":"group-one"}`)
+				default:
+					http.NotFound(w, request)
+				}
+			}))
+			defer server.Close()
+			command := exec.Command(binaryPath, "--config", writeRegressionConfig(t, server.URL), "tui")
+			command.Env = regressionEnvironment(map[string]string{
+				"NICO_TOKEN": ptyAuthToken,
+				"TERM":       "xterm-256color",
+			})
+			terminal := startRegressionPTY(t, command)
+			defer terminal.close()
+			terminal.waitFor(t, "Type a command or")
+			terminal.send(t, "ssh-key-group update\r")
+			terminal.waitFor(t, "SSH key group name (optional)")
+			terminal.send(t, "\r")
+			terminal.waitFor(t, "Description (optional)")
+			terminal.send(t, "\r")
+			terminal.waitFor(t, "Replace associated sites (select none to clear)?")
+			terminal.send(t, "y\r")
+			terminal.waitFor(t, "Add site?")
+			terminal.send(t, "y\r")
+			terminal.waitFor(t, "existing-pending")
+			assert.Contains(t, terminal.transcript(), "registered-two")
+			assert.NotContains(t, terminal.transcript(), "new-pending")
+			assert.NotContains(t, terminal.transcript(), "Replace site IDs")
+			if test.retainExisting {
+				terminal.send(t, "existing-pending\r")
+				terminal.waitFor(t, "Add another site (have 1)?")
+				terminal.send(t, "y\r")
+				terminal.waitFor(t, "site:")
+			}
+			terminal.send(t, "REGISTERED-TWO\r")
+			if test.retainExisting {
+				terminal.waitFor(t, "Add another site (have 2)?")
+			} else {
+				terminal.waitFor(t, "Add another site (have 1)?")
+			}
+			terminal.send(t, "n\r")
+			terminal.waitFor(t, "Replace SSH key IDs")
+			terminal.send(t, "\r")
+			terminal.waitFor(t, "SSH key group updated: group-one")
+			requests := recorder.matching(http.MethodPatch, "/v2/org/acme/nico/sshkeygroup/group-1")
+			require.Len(t, requests, 1)
+			var body map[string]interface{}
+			require.NoError(t, json.Unmarshal([]byte(requests[0].Body), &body))
+			assert.Equal(t, test.wantIDs, body["siteIds"])
+			assert.Equal(t, "version-1", body["version"])
+			terminal.send(t, "exit\r")
+			terminal.waitForExit(t)
+		})
+	}
+}
+
 func buildRegressionCLI(t *testing.T) string {
 	t.Helper()
 	binaryPath := filepath.Join(t.TempDir(), "nicocli")
@@ -996,8 +1269,8 @@ func newInteractiveRegressionHandler(recorder *cliRegressionRecorder) http.Handl
 		case request.Method == http.MethodGet &&
 			request.URL.Path == "/v2/org/acme/nico/site":
 			_, _ = io.WriteString(w, `[
-				{"id":"site-1","name":"site-one","status":"Ready"},
-				{"id":"site-2","name":"site-two","status":"Ready"}
+				{"id":"site-1","name":"site-one","status":"Registered"},
+				{"id":"site-2","name":"site-two","status":"Registered"}
 			]`)
 		case request.Method == http.MethodGet &&
 			request.URL.Path == "/v2/org/acme/nico/site/site-1":

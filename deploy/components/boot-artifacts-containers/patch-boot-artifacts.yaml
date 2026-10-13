@@ -15,24 +15,13 @@
 # limitations under the License.
 #
 - op: add
-  path: /spec/template/spec/volumes/0
-  value:
-    name: boot-artifacts
-    emptyDir: {}
-- op: add
-  path: /spec/template/spec/containers/0/volumeMounts/0
-  value:
-    name: boot-artifacts
-    mountPath: /forge-boot-artifacts/blobs/internal
-
-- op: add
   path: /spec/template/spec/containers/0
   value:
     name: boot-artifacts-x86-64
     image: yourdockerregistry.com/path/to/boot-artifacts-x86_64:latest
     imagePullPolicy: IfNotPresent
     command: ["/bin/sh"]
-    args: ["-c", "cp -r /x86_64 /forge-boot-artifacts/blobs/internal; trap : TERM INT; sleep 9999999999d & wait"]
+    args: ["-c", "set -e; cp -r /x86_64 /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal/x86_64; chmod -R g+rX /forge-boot-artifacts/blobs/internal/x86_64; trap : TERM INT; sleep 9999999999d & wait"]
     volumeMounts:
       - name: boot-artifacts
         mountPath: /forge-boot-artifacts/blobs/internal
@@ -43,7 +32,7 @@
     image: yourdockerregistry.com/path/to/boot-artifacts-aarch64:latest
     imagePullPolicy: IfNotPresent
     command: ["/bin/sh"]
-    args: ["-c", "cp -r /aarch64 /forge-boot-artifacts/blobs/internal; cp -r /apt /forge-boot-artifacts/blobs/internal; cp -r /firmware /forge-boot-artifacts/blobs/internal; trap : TERM INT; sleep 9999999999d & wait"]
+    args: ["-c", "set -e; cp -r /aarch64 /forge-boot-artifacts/blobs/internal; cp -r /apt /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal/aarch64 /forge-boot-artifacts/blobs/internal/apt; chmod -R g+rX /forge-boot-artifacts/blobs/internal/aarch64 /forge-boot-artifacts/blobs/internal/apt; trap : TERM INT; sleep 9999999999d & wait"]
     volumeMounts:
       - name: boot-artifacts
         mountPath: /forge-boot-artifacts/blobs/internal
@@ -58,7 +47,7 @@
     image: yourdockerregistry.com/path/to/boot-artifacts-x86_64:v2023.11-rc1-16-gf7aebdcc
     imagePullPolicy: IfNotPresent
     command: ["/bin/sh"]
-    args: ["-c", "mkdir -vp /forge-boot-artifacts/blobs/internal/x86_64 && cp -fr /x86_64/qcow-imaging* /forge-boot-artifacts/blobs/internal/x86_64; trap : TERM INT; sleep 9999999999d & wait"]
+    args: ["-c", "set -e; mkdir -vp /forge-boot-artifacts/blobs/internal/x86_64 && cp -fr /x86_64/qcow-imaging* /forge-boot-artifacts/blobs/internal/x86_64; chgrp -R 10001 /forge-boot-artifacts/blobs/internal/x86_64; chmod -R g+rX /forge-boot-artifacts/blobs/internal/x86_64; trap : TERM INT; sleep 9999999999d & wait"]
     volumeMounts:
       - name: boot-artifacts
         mountPath: /forge-boot-artifacts/blobs/internal
@@ -69,7 +58,7 @@
     image: yourdockerregistry.com/path/to/nvmetal-scout-burn-in:1.3.0
     imagePullPolicy: IfNotPresent
     command: ["/bin/sh"]
-    args: ["-c", "cp -r /machine-validation /forge-boot-artifacts/blobs/internal; trap : TERM INT; sleep 9999999999d & wait"]
+    args: ["-c", "set -e; cp -r /machine-validation /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal/machine-validation; chmod -R g+rX /forge-boot-artifacts/blobs/internal/machine-validation; trap : TERM INT; sleep 9999999999d & wait"]
     volumeMounts:
       - name: boot-artifacts
         mountPath: /forge-boot-artifacts/blobs/internal

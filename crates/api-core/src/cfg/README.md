@@ -61,14 +61,15 @@ behavior.
 | `tls` | `Option<TlsConfig>` | — | `server` | TLS certificate/key paths (see [TlsConfig](#tlsconfig)). |
 | `listen_mode` | `ListenMode` | `Tls` | `server` | Transport mode: `plaintext_http1`, `plaintext_http2`, or `tls`. |
 | `auth` | `Option<AuthConfig>` | — | `server` | Authentication/authorization settings (see [AuthConfig](#authconfig)). |
-| `pools` | `Option<HashMap<String, ResourcePoolDef>>` | — | `networking` | Resource pools that allocate IPs, VNIs, etc. Required but `Option` for partial-config merging. |
+| `pools` | `Option<HashMap<String, ResourcePoolConfig>>` | — | `networking` | Resource pools that allocate IPs, VNIs, etc. Legacy seed source; prefer `pools` in `initial_objects_file`. Each pool accepts optional `backend` and `remote_pool` selectors (see [ResourcePoolConfig](#resourcepoolconfig)). |
+| `resource_pool_backends` | `HashMap<String, ResourcePoolBackendConfig>` | `{}` | `networking` | Named allocator definitions (see [ResourcePoolBackendConfig](#resourcepoolbackendconfig)). Defining a backend selects no pool. Omission and an empty map both leave pools on Integrated allocation unless a pool explicitly selects a name; unknown names and, in v2.4, selected gRPC backends fail startup. |
 | `networks` | `Option<HashMap<String, NetworkDefinition>>` | — | `networking` | Networks to create at startup. Alternative: `CreateNetworkSegment` gRPC. `NetworkDefinition` supports IPv4-only, IPv6-only, and dual-stack segments with optional `prefix_v6` and `dhcpv6_link_address`. NICo saves the complete initial definition when it creates a segment. Later configuration edits do not update the existing segment or its saved definition. Refer to [Initial Network Configuration](../../../../docs/provisioning/ip-and-network-configuration.md#initial-network-configuration) for all prefix combinations, gateway requirements, examples, and compatibility. |
 | `dpu_ipmi_tool_impl` | `Option<String>` | — | `machines` | IPMI tool implementation for DPU power control (`"prod"` or `"fake"`). |
 | `dpu_ipmi_reboot_attempts` | `Option<u32>` | — | `machines` | Retry count when IPMI errors during DPU reboot. |
 | `bmc_session_lockout_threshold` | `u32` | `3` | `security` | Consecutive BMC HTTP 401/403 responses before session-token login attempts stop for that BMC. |
 | `bmc_max_sessions_per_caller` | `usize` | `4` | `security` | Cap on outstanding Redfish sessions per calling service identity per BMC; a `GetBmcCredentials` mint past the cap revokes that caller's oldest sessions. Values below 1 are treated as 1. |
 | `bmc_proxy` | `Option<BmcProxyConfig>` | — | `security` | Routes this instance's ordinary BMC Redfish traffic — including established-endpoint credentialed exploration — through nico-bmc-proxy. Credential setup and rotation, session minting, exploration's anonymous vendor probes, and component-manager compute-tray power control (explicit per-endpoint credentials) always stay direct. |
-| `ib_fabrics` | `HashMap<String, IbFabricDefinition>` | `{}` | `hardware` | InfiniBand fabrics managed by the site. Currently only one fabric is supported. |
+| `ib_fabrics` | `HashMap<String, IbFabricDefinition>` | `{}` | `hardware` | InfiniBand fabrics managed by the site. When `ib_config.enabled = true`, v2.4 accepts at most one fabric, named `default`. Each fabric accepts optional `backend` and `remote_pool` selectors with the [ResourcePoolConfig](#resourcepoolconfig) rules, using `ib_fabrics.<fabric>.pkey` as its logical pool name. When InfiniBand management is disabled, selectors are still validated, but fabric configuration alone creates no PKey binding; existing pool inventory can still receive a missing binding. |
 | `initial_domain_name` | `Option<String>` | — | `machines` | Domain to create if none exist. Most sites use a single domain. |
 | `initial_dpu_agent_upgrade_policy` | `Option<AgentUpgradePolicyChoice>` | — | `machines` | Policy for nico-dpu-agent upgrades. Also settable via `nico-admin-cli`. |
 | `max_concurrent_machine_updates` | `Option<i32>` | — | `machines` | **Deprecated.** Use `machine_updater` instead. |
@@ -498,6 +499,102 @@ shipped configuration selects a plaintext mode.
 | `casbin_policy_file` | `Option<PathBuf>` | — | Path to Casbin CSV policy file. |
 | `cli_certs` | `Option<AllowedCertCriteria>` | — | Additional allowed cert criteria for nico-admin-cli. |
 | `trust` | `Option<TrustConfig>` | — | SPIFFE trust domain and allowed paths for client certs. |
+
+### `ResourcePoolConfig`
+
+Each `[pools.<name>]` table accepts the allocator selectors below alongside its
+pool definition. See [IP resource pools](../../../../docs/manuals/networking/ip_resource_pools.md)
+and [VNI resource pools](../../../../docs/manuals/vpc/vni_resource_pools.md) for
+the definition fields. The logical pool name must contain a non-whitespace
+character. These settings are read at startup.
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `backend` | `Option<String>` | Integrated | Exact name of a `resource_pool_backends` entry. Omission selects the local Integrated allocator without requiring a named entry. Unknown names fail startup. Named Integrated aliases use the same local database. v2.4 rejects any pool selecting a gRPC backend before provider I/O or pool writes. |
+| `remote_pool` | `Option<String>` | Logical pool name | Provider lookup name. Integrated requires an explicitly supplied value to equal the logical pool name exactly; a different value is rejected at startup. Named Integrated backends are allowed. |
+
+The same pool schema is accepted in `initial_objects_file`. Unless
+`listen_only = true`, at least one source must contain a `pools` table; an empty
+table satisfies this presence check. If both sources define the same name,
+their pool definitions must match. Both sources' selectors are validated before
+merging; different Integrated backend names do not make matching definitions
+conflict. For matching definitions, the backend selection from
+`initial_objects_file` is used. If an ordinary pool named
+`ib_fabrics.default.pkey` has type `integer`, its backend selection is used
+instead of the default fabric's selection. Both selections are validated.
+Entries in the legacy Core `pools` table produce deprecation warnings.
+
+NICo saves each pool's accepted backend selection as a binding in the database.
+On upgrade, existing pools receive Integrated bindings automatically. Later
+starts verify those bindings; removing a pool from configuration or freeing all
+its allocations does not remove its binding. Switching between Integrated aliases
+is allowed, but changing the allocator or remote pool name is rejected. The
+original binding ID and alias remain recorded. Editing a seed definition still
+leaves an existing pool's values unchanged. Administrative growth must keep the
+pool's stored value family; a pool with only a binding also rejects changes to
+that family.
+
+Administrative growth accepts a bare map of pool names to `ResourcePoolDef`
+tables, without the `pools` wrapper or the `backend` and `remote_pool` selectors.
+A new pool created through growth receives the default Integrated binding.
+
+Startup and administrative growth check every existing pool for incompatible
+values, such as integers and IP addresses under one pool name. Mixed inventory
+in any pool blocks both operations, including growth of an unrelated pool.
+IPv4 and IPv6 addresses may share an address pool. These checks fail before pool
+writes; they do not repair inconsistent inventory automatically.
+
+Listen-only startup also saves missing bindings for existing pools and validates
+pool configuration. It does not create pools or add values from configuration,
+and a pool that exists only in configuration remains unbound until authoritative
+startup or an administrative growth request creates its binding.
+
+For example, define a named Integrated backend in the nico-api configuration:
+
+```toml
+[resource_pool_backends.local]
+type = "integrated"
+```
+
+Then select it for the VPC VNI pool in the file configured by
+`initial_objects_file`:
+
+```toml
+[pools.vpc-vni]
+type = "integer"
+backend = "local"
+ranges = [{ start = "10000", end = "19999" }]
+```
+
+Omitting `backend` uses the same Integrated allocator, so existing deployments
+need no configuration changes. `remote_pool` is also optional and defaults to
+`vpc-vni` in this example.
+
+### `ResourcePoolBackendConfig`
+
+TOML section: `[resource_pool_backends.<name>]`. Names must be nonempty and are
+matched exactly. Unused definitions are allowed and validated at startup;
+defining a backend does not contact it or read its certificate files. In v2.4,
+pools can select only Integrated backends; selecting a gRPC backend fails startup.
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `type` | `String` | **required** | `integrated` for the local database or `grpc` for a remote provider definition. Defining either type selects no pool. |
+| `endpoint` | `Url` | Required for `grpc` | HTTP or HTTPS URL with a host. Credentials, query strings, fragments, and paths other than empty or `/` are rejected. Not accepted for `integrated`. |
+| `tls` | `Option<ResourcePoolTlsConfig>` | — | Optional certificate paths for `grpc` (see [ResourcePoolTlsConfig](#resourcepooltlsconfig)). Not accepted for `integrated`. |
+
+### `ResourcePoolTlsConfig`
+
+TOML section: `[resource_pool_backends.<name>.tls]`. All paths are optional;
+omission and an empty table both configure no certificate files. Any configured
+certificate or key requires an HTTPS endpoint. v2.4 validates field combinations
+without opening files or checking their contents.
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `ca_cert_file` | `Option<PathBuf>` | — | Path to a PEM CA certificate file for validating the provider. |
+| `client_cert_file` | `Option<PathBuf>` | — | Path to a PEM client certificate file. Must be configured together with `client_key_file`. |
+| `client_key_file` | `Option<PathBuf>` | — | Path to a PEM client private key file. Must be configured together with `client_cert_file`. |
 
 ### `IBFabricConfig`
 
@@ -1129,6 +1226,11 @@ and [Instance admission](https://github.com/dsx-ai-factory/infra-controller/issu
 
 ### VPC Peering Deletion
 
+For operator procedures, refer to the
+[peering deletion guide](../../../../docs/manuals/vpc/vpc_peering_management.md#deleting-vpc-peering-connections)
+and the
+[upgrade stop-and-drain procedure](../../../../docs/manuals/upgrade.md#upgrades-that-introduce-asynchronous-peering-deletion).
+
 `DeleteVpcPeering` starts permission removal. `FindVpcPeeringsByIds` reports
 `VPC_PEERING_STATE_DELETING` until every affected DPU acknowledges the new
 managed-host network configuration. During that wait, FNN and ETV responses
@@ -1153,7 +1255,7 @@ the host and expected network version and stores the wait reason in
 `vpc_peerings.controller_state_outcome`. Restore the DPU and let it acknowledge
 the configuration; `DeleteVpcPeering` never treats a missing receipt as success.
 
-Before starting an API with this deletion controller, stop every API process
+Before starting an API with this deletion behavior, stop every API process
 without the peering deletion behavior added in
 [#6917](https://github.com/dsx-ai-factory/infra-controller/pull/6917) and drain its
 requests. Scale the API deployment to zero and wait for the old pods to exit
@@ -1167,7 +1269,7 @@ Those old binaries also hard-delete peerings, so they are not a safe application
 rollback. No intermediate release is required. The additive migration can run
 while the outgoing API is live, with the existing possibility of cached
 wildcard-query errors until its connections or process are replaced. The
-stop-and-drain requirement applies before the new controller starts; stopping
+stop-and-drain requirement applies before any new API process starts; stopping
 the old API before migrations also avoids that additional error window.
 
 ### Stored Prefix Scope

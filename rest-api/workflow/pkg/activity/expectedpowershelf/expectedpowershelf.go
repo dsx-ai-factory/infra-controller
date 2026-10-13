@@ -38,7 +38,7 @@ type ManageExpectedPowerShelf struct {
 // The reconciliation logic is as follows:
 // - UUID existing in NICo but not in DB: create record in DB
 // - UUID existing in both NICo and DB with differences: update record in DB
-// - UUID existing in DB but not in NICo: delete record in DB
+// - UUID existing in DB but not in NICo: delete the stale record if it has not changed since the initial read
 func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.Context, siteID uuid.UUID, expectedPowerShelfInventory *corev1.ExpectedPowerShelfInventory) error {
 	logger := log.With().Str("Activity", "UpdateExpectedPowerShelvesInDB").Str("Site ID", siteID.String()).Logger()
 
@@ -200,9 +200,9 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 		}
 	}
 
-	// Delete any Expected Power Shelf present in DB not present in NICo.
-	// We only act if this is the last page (or paging disabled) and outside race window.
-	// The source of truth for NICo is reportedIDs.
+	// Delete stale records missing from `reportedIDs` only after the final page
+	// (or when paging is disabled). Matching the saved `Updated` timestamp in
+	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
 	if util.ShouldReconcileDeletions(expectedPowerShelfInventory.GetInventoryPage()) {
 		for _, eps := range existingExpectedPowerShelves {
 			if _, keep := reportedIDs[eps.ID]; keep {
@@ -212,11 +212,14 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 			if site.IsTimeWithinStaleInventoryThreshold(eps.Updated) {
 				continue
 			}
-			logger.Info().Str("ExpectedPowerShelfID", eps.ID.String()).Msg("deleting ExpectedPowerShelf from DB since it was no longer reported in inventory from Site")
-			if derr := epsDAO.Delete(ctx, nil, eps.ID); derr != nil {
+			deleted, derr := epsDAO.DeleteIfUnchanged(ctx, nil, eps.ID, eps.Updated)
+			if derr != nil {
 				logger.Error().Err(derr).Str("ExpectedPowerShelfID", eps.ID.String()).Msg("failed to delete ExpectedPowerShelf from DB")
+				continue
 			}
-
+			if deleted {
+				logger.Info().Str("ExpectedPowerShelfID", eps.ID.String()).Msg("deleted ExpectedPowerShelf no longer reported in inventory from Site")
+			}
 		}
 	}
 

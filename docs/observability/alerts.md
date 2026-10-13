@@ -98,11 +98,18 @@ availability as one minus the error rate from the `_count` series split by gRPC 
 
 ```text
 1 - (
-  sum(rate(carbide_api_grpc_server_duration_milliseconds_count{grpc_status_code!="Ok"}[5m]))
+  (sum(rate(carbide_api_grpc_server_duration_milliseconds_count{grpc_status_code!="Ok"}[5m])) or vector(0))
   /
   sum(rate(carbide_api_grpc_server_duration_milliseconds_count[5m]))
 )
 ```
+
+When every request succeeds, there is no error series to match, so the query returns nothing.
+`or vector(0)` fills in a zero error rate, so you get `1`, meaning 100% availability.
+
+Two other results are easy to mix up. An empty result means the metric is missing, or the window
+is too short to compute a rate. A `NaN` result means the counters exist but have not moved, so
+no requests arrived.
 
 **API latency** uses the same histogram. Extract p95 or p99 percentiles and convert to
 seconds (metric is in milliseconds, SLO target is 1 second = 1000ms):

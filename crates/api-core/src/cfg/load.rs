@@ -323,6 +323,8 @@ pub fn parse_carbide_config(
     // Validate that admin-UI tool entries have unique names.
     config.validate_web_ui_sidebar_tools()?;
     config.validate_service_vpc_slots()?;
+    // Reject endpoints with embedded secrets before tracing the configuration.
+    config.validate_resource_pool_backends()?;
     config.api_admission_control.validate()?;
 
     if let Some(config) = &config.dsx_exchange_event_bus {
@@ -413,7 +415,7 @@ pub fn log_vpc_peering_policy_deprecations(config: &CarbideConfig) {
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::Outcome::{Fails, Yields};
     use carbide_test_support::scenarios;
     use tracing_subscriber::prelude::*;
 
@@ -610,6 +612,127 @@ mod tests {
             let message = error.to_string();
             assert!(message.contains("unknown_root_field (base.toml)"));
             assert!(message.contains("site_explorer.unknown_nested_field (base.toml)"));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn resource_pool_unknown_fields_preserve_paths_and_configured_selectors() {
+        let config_dir = tempfile::tempdir().expect("create configuration directory");
+        let base_path = config_dir.path().join("base.toml");
+        let site_path = config_dir.path().join("site.toml");
+        std::fs::write(&base_path, include_str!("test_data/min_config.toml"))
+            .expect("write base configuration");
+        std::fs::write(
+            &site_path,
+            r#"
+            [pools.test]
+            type = "integer"
+            backend = "shared"
+            remote_pool = "provider-vnis"
+            ranges = [{ start = "1", end = "10", unknown_range_field = true }]
+            unknown_pool_field = true
+
+            [resource_pool_backends.shared]
+            type = "grpc"
+            endpoint = "https://allocator.example"
+
+            [resource_pool_backends.shared.tls]
+            ca_cert_file = "absent-ca.pem"
+            unknown_tls_field = true
+            "#,
+        )
+        .expect("write site configuration");
+
+        let figment = Figment::from(Toml::file(&base_path)).merge(Toml::file(&site_path));
+        let (config, unknown_fields) = extract_with_unknown_fields::<CarbideConfig>(&figment)
+            .expect("load configuration with unknown fields removed");
+        let pool = &config.pools.as_ref().expect("configured pools")["test"];
+        assert_eq!(pool.backend.as_deref(), Some("shared"));
+        assert_eq!(pool.remote_pool.as_deref(), Some("provider-vnis"));
+        config
+            .validate_resource_pool_backends()
+            .expect("validation does not read certificate files or activate gRPC");
+        assert_eq!(
+            unknown_fields,
+            vec![
+                UnknownConfigurationField {
+                    path: "pools.test.ranges.0.unknown_range_field".to_string(),
+                    // Figment's metadata lookup does not traverse array indexes.
+                    source: "configuration".to_string(),
+                },
+                UnknownConfigurationField {
+                    path: "pools.test.unknown_pool_field".to_string(),
+                    source: "site.toml".to_string(),
+                },
+                UnknownConfigurationField {
+                    path: "resource_pool_backends.shared.tls.unknown_tls_field".to_string(),
+                    source: "site.toml".to_string(),
+                },
+            ]
+        );
+        apply_unknown_field_policy(&unknown_fields, false)
+            .expect("warning policy accepts unknown fields");
+        let error = apply_unknown_field_policy(&unknown_fields, true)
+            .expect_err("strict policy rejects unknown fields");
+        let message = error.to_string();
+        assert!(message.contains("pools.test.ranges.0.unknown_range_field"));
+        assert!(message.contains("pools.test.unknown_pool_field"));
+        assert!(message.contains("resource_pool_backends.shared.tls.unknown_tls_field"));
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn invalid_unused_resource_pool_endpoints_do_not_expose_secrets() {
+        const FAKE_SECRET: &str = "FAKE_RESOURCE_POOL_ENDPOINT_SECRET";
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |(endpoint, expected_error): (&str, &str)| {
+                    // No pool selects this definition; loading still validates it.
+                    let config_text = format!(
+                        "{}\n[resource_pool_backends.unused]\ntype = \"grpc\"\nendpoint = \"{endpoint}\"\n",
+                        include_str!("test_data/min_config.toml")
+                    );
+                    jail.create_file("config.toml", &config_text).expect("write test configuration");
+
+                    let stream = LogStream::new(16, usize::MAX);
+                    let subscriber = tracing_subscriber::registry()
+                        .with(tracing_subscriber::filter::LevelFilter::TRACE)
+                        .with(LogStreamLayer::new(stream.clone()));
+                    let result = tracing::subscriber::with_default(subscriber, || {
+                        // Prove the capture includes the level used by the config dump.
+                        tracing::trace!("Capturing resource-pool configuration logs");
+                        parse_carbide_config(Path::new("config.toml"), None)
+                    });
+                    let logs = stream.latest(usize::MAX);
+                    assert!(logs.iter().any(|line| {
+                        line.level == "TRACE"
+                            && line.message == "Capturing resource-pool configuration logs"
+                    }));
+                    assert!(logs.iter().all(|line| {
+                        std::iter::once(&line.message)
+                            .chain(line.fields.values())
+                            .all(|value| !value.contains(FAKE_SECRET))
+                    }));
+
+                    result.map(drop).map_err(|error| {
+                        let diagnostic = format!("{error:#}");
+                        assert!(diagnostic.contains(expected_error), "{diagnostic}");
+                        assert!(diagnostic.contains("unused"), "{diagnostic}");
+                        assert!(!diagnostic.contains(FAKE_SECRET), "{diagnostic}");
+                    })
+                };
+                "invalid unused endpoints keep secrets out of errors and logs" {
+                    (
+                        "https://user:FAKE_RESOURCE_POOL_ENDPOINT_SECRET@allocator.example:invalid-port",
+                        "invalid endpoint URL: invalid port number",
+                    ) => Fails,
+                    (
+                        "https://user:FAKE_RESOURCE_POOL_ENDPOINT_SECRET@allocator.example",
+                        "endpoint must not contain credentials, a query, or a fragment",
+                    ) => Fails,
+                }
+            );
             Ok(())
         })
     }

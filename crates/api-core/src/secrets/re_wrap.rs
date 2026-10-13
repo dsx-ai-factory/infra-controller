@@ -34,7 +34,8 @@ pub(crate) struct ReWrapStaleResult {
     /// Rows already wrapped by the routed KEK.
     pub(crate) already_current: u64,
     /// Rows still wrapped by a KEK outside the routing config after the
-    /// walk. Zero means every unrouted KEK can be retired; nonzero right
+    /// walk. Zero means no live journal row needs an unrouted KEK; it does
+    /// not account for retained backups or rollback windows. Nonzero right
     /// after a run means concurrent writers landed rows mid-walk -- run
     /// re-wrap again once the fleet's config has converged.
     pub(crate) stale_remaining: u64,
@@ -57,8 +58,8 @@ struct PendingReWrap {
 /// are network calls that must not run while a transaction is held), and
 /// batches commit independently, so an interrupted run keeps its progress.
 /// Historical journal entries are re-wrapped too: they must stay
-/// decryptable, and re-wrapping them is what lets an old KEK be retired
-/// completely.
+/// decryptable, and re-wrapping them removes an old KEK from live rows.
+/// Backup retention and rollback determine when the key can be retired.
 pub(crate) async fn re_wrap_stale(
     pool: &PgPool,
     work_lock_manager: &WorkLockManagerHandle,
@@ -146,8 +147,8 @@ pub(crate) async fn re_wrap_stale(
         result.re_wrapped += pending.len() as u64;
     }
 
-    // Report what is still wrapped by KEKs outside the routing config --
-    // the operator's retire-the-old-key signal.
+    // Report live rows still wrapped by KEKs outside the routing config.
+    // Retained backups and rollback windows are outside this count.
     let routed: Vec<String> = routing
         .routes()
         .map(|(_, kek_id)| kek_id.to_string())

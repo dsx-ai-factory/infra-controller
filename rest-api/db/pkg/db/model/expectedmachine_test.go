@@ -1488,6 +1488,73 @@ func TestExpectedMachineSQLDAO_Delete(t *testing.T) {
 	}
 }
 
+func TestExpectedMachineSQLDAO_DeleteIfUnchanged(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+
+	existing := testExpectedMachineSQLDAOCreateExpectedMachines(ctx, t, dbSession)
+	dao := NewExpectedMachineDAO(dbSession)
+	unchanged, err := dao.Get(ctx, nil, existing[0].ID, nil, false)
+	require.NoError(t, err)
+	beforeUpdate, err := dao.Get(ctx, nil, existing[1].ID, nil, false)
+	require.NoError(t, err)
+	afterUpdate, err := dao.Update(ctx, nil, ExpectedMachineUpdateInput{
+		ExpectedMachineID: beforeUpdate.ID,
+		Name:              cutil.GetPtr("API-name"),
+	})
+	require.NoError(t, err)
+	require.True(t, afterUpdate.Updated.After(beforeUpdate.Updated))
+	other, err := dao.Get(ctx, nil, existing[2].ID, nil, false)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		id          uuid.UUID
+		updated     time.Time
+		wantDeleted bool
+		want        *ExpectedMachine
+	}{
+		{
+			name:        "matching version deletes the row",
+			id:          unchanged.ID,
+			updated:     unchanged.Updated,
+			wantDeleted: true,
+		},
+		{
+			name:    "changed version preserves the row",
+			id:      beforeUpdate.ID,
+			updated: beforeUpdate.Updated,
+			want:    afterUpdate,
+		},
+		{
+			name:    "absent row preserves another row with the same timestamp",
+			id:      uuid.New(),
+			updated: other.Updated,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			deleted, err := dao.DeleteIfUnchanged(ctx, nil, tc.id, tc.updated)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantDeleted, deleted)
+
+			stored, err := dao.Get(ctx, nil, tc.id, nil, false)
+			if tc.want == nil {
+				assert.ErrorIs(t, err, db.ErrDoesNotExist)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, stored)
+		})
+	}
+
+	stored, err := dao.Get(ctx, nil, other.ID, nil, false)
+	require.NoError(t, err)
+	assert.Equal(t, other, stored)
+}
+
 func TestExpectedMachineSQLDAO_CreateMultiple(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInitDB(t)

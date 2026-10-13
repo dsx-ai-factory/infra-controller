@@ -872,17 +872,15 @@ In TUI mode, `instance delete` prompts for confirmation before proceeding. Delet
 
 ### Machine-Level Emergency Operations (gRPC Only)
 
-For stuck or unresponsive machines that cannot be managed through the instance API, nico-admin-cli provides direct BMC operations:
+If a machine is stuck or unresponsive, operators can use `nico-admin-cli` for
+recovery. Choose the operation that matches the problem:
 
-```bash
-# Force-reboot via BMC
-nico-admin-cli -a <core-api-url> machine reboot --machine-id="<machine-id>"
-
-# Force-delete a stuck machine (destructive -- wipes machine state)
-nico-admin-cli -a <core-api-url> machine force-delete --machine="<machine-id>"
-```
-
-See the [Machine Reboot](../playbooks/machine_reboot.md) and [Force Delete](../playbooks/force_delete.md) playbooks in the core documentation for detailed procedures.
+- To restart the machine, refer to the
+  [`machine reboot` reference](../manuals/nico-admin-cli/commands/machine/machine-reboot.md).
+- To remove its NICo records and restart discovery, follow
+  [Force Deleting and Rebuilding NICo Hosts](../playbooks/force_delete.md).
+  Force deletion does not wipe the tenant operating system or its data. The
+  playbook explains deletion consent and the optional wait for DPU confirmation.
 
 ## Tenant Lifecycle Operations
 
@@ -928,15 +926,21 @@ NICo has no first-class "disable" operation. Options:
 
 ### Tenant Teardown Sequence
 
-There is no `DELETE /tenant` endpoint -- tenant records are permanent. To fully decommission:
+There is no `DELETE /tenant` endpoint -- tenant records are permanent. For peerings
+with another tenant, arrange deletion with the Site's Provider Admin.
+
+To fully decommission:
 
 1. **Terminate all instances** -- delete every instance; each must reach `Terminated` status.
 2. **Delete all tenant network resources** -- remove VPC Prefixes or Subnets
    from every VPC, according to its `networkVirtualizationType`.
-3. **Delete all VPCs** -- remove the tenant's VPCs.
-4. **Delete all allocations** -- provider admin removes compute and network allocations.
-5. **Delete the tenant account** -- provider admin severs the link.
-6. **Revoke identity provider access** -- remove roles and optionally org membership.
+3. **Delete all VPC peerings** -- follow the
+   [peering deletion guide](../manuals/vpc/vpc_peering_management.md#deleting-vpc-peering-connections)
+   and wait for each connection to disappear.
+4. **Delete all VPCs** -- remove the tenant's VPCs.
+5. **Delete all allocations** -- provider admin removes compute and network allocations.
+6. **Delete the tenant account** -- provider admin severs the link.
+7. **Revoke identity provider access** -- remove roles and optionally org membership.
 
 After this sequence, the tenant record still exists but is inert.
 
@@ -1127,7 +1131,7 @@ Flag-first ordering -- always put flags before positional args.
 - [Quick Start Guide](../getting-started/quick-start.md), NICo deployment and Day Zero walkthrough
 - [VPC Routing Profiles](../manuals/vpc/vpc_routing_profiles.md), profile configuration and behavior
 - [VPC Network Virtualization](../manuals/vpc/vpc_network_virtualization.md), full networking architecture
-- [VPC Peering](../manuals/vpc/vpc_peering_management.md), connecting VPCs (gRPC only)
+- [VPC Peering](../manuals/vpc/vpc_peering_management.md), connecting VPCs and waiting for peering deletion
 - [NVLink Partitioning](../manuals/nvlink_partitioning.md), NVLink logical partition management
 - [Machine Reboot Playbook](../playbooks/machine_reboot.md), emergency BMC reboot procedures
 - [Force Delete Playbook](../playbooks/force_delete.md), removing stuck machines

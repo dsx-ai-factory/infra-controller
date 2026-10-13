@@ -447,7 +447,8 @@ impl RedfishClient {
             .inspect_err(
                 |error| tracing::warn!(%error, "Failed to fetch forge secure boot status."),
             )
-            .ok();
+            .ok()
+            .flatten();
 
         let lockdown_status = fetch_lockdown_status(client.as_ref())
             .await
@@ -1760,8 +1761,21 @@ async fn fetch_machine_setup_status(
     })
 }
 
-async fn fetch_secure_boot_status(client: &dyn Redfish) -> Result<SecureBootStatus, RedfishError> {
-    let status = client.get_secure_boot().await?;
+async fn fetch_secure_boot_status(
+    client: &dyn Redfish,
+) -> Result<Option<SecureBootStatus>, RedfishError> {
+    let status = match client.get_secure_boot().await {
+        Ok(status) => status,
+        Err(RedfishError::NotSupported(_)) => return Ok(None),
+        // The standard client probes the optional resource directly, without a link check.
+        Err(RedfishError::HTTPErrorCode {
+            status_code, url, ..
+        }) if status_code == http::StatusCode::NOT_FOUND => {
+            tracing::debug!(%url, "SecureBoot resource returned 404; treating as absent");
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
 
     let secure_boot_enable =
         status
@@ -1779,7 +1793,7 @@ async fn fetch_secure_boot_status(client: &dyn Redfish) -> Result<SecureBootStat
 
     let is_enabled = secure_boot_enable && secure_boot_current_boot.is_enabled();
 
-    Ok(SecureBootStatus { is_enabled })
+    Ok(Some(SecureBootStatus { is_enabled }))
 }
 
 /// What an exploration learned about the BMC's `ComponentIntegrity`
@@ -2100,6 +2114,128 @@ mod tests {
         nv_bmc_explore_config, record_evaluated_boot_interface, should_fetch_network_adapter_ports,
         system_resource_to_model,
     };
+
+    #[tokio::test]
+    async fn secure_boot_absence_preserves_other_errors() {
+        use std::sync::Mutex;
+
+        use carbide_instrument::testing::capture_logs_async;
+        use libredfish::model::secure_boot::SecureBoot;
+        use libredfish::{EnabledDisabled, Redfish, RedfishError, RedfishFuture};
+
+        struct SecureBootClient(Mutex<Option<Result<SecureBoot, RedfishError>>>);
+
+        impl Redfish for SecureBootClient {
+            fn std_redfish(&self) -> &libredfish::standard::RedfishStandard {
+                panic!("this test only reads SecureBoot")
+            }
+
+            fn get_secure_boot(&self) -> RedfishFuture<'_, Result<SecureBoot, RedfishError>> {
+                Box::pin(async { self.0.lock().unwrap().take().unwrap() })
+            }
+        }
+
+        let status = |enabled, current_boot| {
+            Ok(SecureBoot {
+                secure_boot_enable: enabled,
+                secure_boot_current_boot: current_boot,
+                ..Default::default()
+            })
+        };
+        let http_error = |status_code| {
+            Err(RedfishError::HTTPErrorCode {
+                url: "https://bmc.example/redfish/v1/Systems/1/SecureBoot".into(),
+                status_code,
+                response_body: String::new(),
+            })
+        };
+        let cases = [
+            (
+                "absent",
+                http_error(http::StatusCode::NOT_FOUND),
+                Yields(None),
+            ),
+            (
+                "unsupported",
+                Err(RedfishError::NotSupported("SecureBoot".into())),
+                Yields(None),
+            ),
+            (
+                "enabled",
+                status(Some(true), Some(EnabledDisabled::Enabled)),
+                Yields(Some(true)),
+            ),
+            (
+                "disabled",
+                status(Some(false), Some(EnabledDisabled::Enabled)),
+                Yields(Some(false)),
+            ),
+            (
+                "current boot disabled",
+                status(Some(true), Some(EnabledDisabled::Disabled)),
+                Yields(Some(false)),
+            ),
+            (
+                "missing enable",
+                status(None, Some(EnabledDisabled::Enabled)),
+                Fails,
+            ),
+            ("missing current boot", status(Some(true), None), Fails),
+            (
+                "unauthorized",
+                http_error(http::StatusCode::UNAUTHORIZED),
+                Fails,
+            ),
+            ("forbidden", http_error(http::StatusCode::FORBIDDEN), Fails),
+            (
+                "server failure",
+                http_error(http::StatusCode::INTERNAL_SERVER_ERROR),
+                Fails,
+            ),
+            (
+                "invalid JSON",
+                Err(RedfishError::JsonDeserializeError {
+                    url: "https://bmc.example/redfish/v1/Systems/1/SecureBoot".into(),
+                    body: "{".into(),
+                    source: serde_json::from_str::<SecureBoot>("{").unwrap_err(),
+                }),
+                Fails,
+            ),
+        ];
+        check_cases_async(
+            cases.into_iter().map(|(scenario, input, expect)| Case {
+                scenario,
+                input,
+                expect,
+            }),
+            |response| async {
+                let client = SecureBootClient(Mutex::new(Some(response)));
+                super::fetch_secure_boot_status(&client)
+                    .await
+                    .map(|s| s.map(|s| s.is_enabled))
+                    .map_err(drop)
+            },
+        )
+        .await;
+
+        let client = SecureBootClient(Mutex::new(Some(http_error(http::StatusCode::NOT_FOUND))));
+        let (result, logs) = capture_logs_async(super::fetch_secure_boot_status(&client)).await;
+        assert!(result.unwrap().is_none());
+        assert_eq!(
+            logs.len(),
+            1,
+            "404 should emit only a debug diagnostic: {logs:?}"
+        );
+        assert_eq!(logs[0].level, tracing::Level::DEBUG);
+        assert_eq!(
+            logs[0].message,
+            "SecureBoot resource returned 404; treating as absent"
+        );
+        assert_eq!(
+            logs[0].field("url"),
+            Some("https://bmc.example/redfish/v1/Systems/1/SecureBoot"),
+        );
+    }
 
     #[test]
     fn resource_fields_are_normalized_without_linked_inventory() {

@@ -424,6 +424,9 @@ type ExpectedMachineDAO interface {
 	UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedMachineUpdateInput) ([]ExpectedMachine, error)
 	// Delete used to delete row
 	Delete(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID) error
+	// DeleteIfUnchanged deletes only the version observed by inventory reconciliation.
+	// It returns false if the row changed or no longer exists.
+	DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID, updated time.Time) (bool, error)
 	// DeleteAll deletes all rows matching a required filter
 	DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) error
 	// ReplaceAll replaces all rows matching a required filter
@@ -1124,6 +1127,22 @@ func (emsd ExpectedMachineSQLDAO) Delete(ctx context.Context, tx *db.Tx, expecte
 	}
 
 	return nil
+}
+
+// DeleteIfUnchanged deletes a row only if its Updated timestamp matches updated.
+// It returns false if the row changed or no longer exists.
+func (emsd ExpectedMachineSQLDAO) DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID, updated time.Time) (_ bool, retErr error) {
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.DeleteIfUnchanged")
+	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedMachineDAOSpan, attribute.String("id", expectedMachineID.String()))
+
+	result, err := db.GetIDB(tx, emsd.dbSession).NewDelete().Model((*ExpectedMachine)(nil)).
+		Where("id = ?", expectedMachineID).Where("updated = ?", updated).Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
 }
 
 // DeleteAll deletes all ExpectedMachines matching the supplied filter. An

@@ -7,12 +7,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"time"
 
@@ -39,9 +42,26 @@ type Suite struct {
 	srv      *httptest.Server
 	forceErr bool
 	tc       *http.Client
+	caPath   string
 	MgrURL   string
 	cancel   context.CancelFunc
 	UUID1OTP string
+}
+
+// writeCAFile PEM-encodes cert into a temporary file usable as a CA bundle.
+func writeCAFile(cert *x509.Certificate) (string, error) {
+	f, err := os.CreateTemp("", "sitemgr-test-ca-*.pem")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	err = pem.Encode(f, &pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+	if err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
 }
 
 var (
@@ -158,6 +178,14 @@ func (s *Suite) setup() error {
 	s.srv = httptest.NewUnstartedServer(rtr)
 	s.srv.Listener = l
 	s.srv.StartTLS()
+
+	// The site manager verifies the cert manager endpoint, so hand it the
+	// test server's own certificate as the trust anchor.
+	s.caPath, err = writeCAFile(s.srv.Certificate())
+	if err != nil {
+		return err
+	}
+
 	s.tc = &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
@@ -171,6 +199,9 @@ func (s *Suite) setup() error {
 // Teardown closes the connection
 func (s *Suite) Teardown() {
 	s.srv.Close()
+	if s.caPath != "" {
+		os.Remove(s.caPath)
+	}
 	s.cancel()
 }
 
@@ -274,10 +305,11 @@ func TestManagerCreateSite() (*Suite, error) {
 
 	fcrd := fakecrdclient.NewSimpleClientset()
 	o := Options{
-		credsMgrURL: fmt.Sprintf("https://%s", ts.l.Addr().String()),
-		ingressHost: "test-host",
-		listenPort:  "0",
-		namespace:   "csm",
+		credsMgrURL:    fmt.Sprintf("https://%s", ts.l.Addr().String()),
+		credsMgrCAPath: ts.caPath,
+		ingressHost:    "test-host",
+		listenPort:     "0",
+		namespace:      "csm",
 	}
 
 	ctx := core.NewDefaultContext(context.Background())

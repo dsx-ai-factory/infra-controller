@@ -374,5 +374,5 @@ A few terms used on this page that are not always obvious:
 [cvss-vulnerability-metrics]: https://nvd.nist.gov/vuln-metrics/cvss
 [downgrade-support-issue]: https://github.com/dsx-ai-factory/infra-controller/issues/2019
 [not-guaranteed]: #what-is-explicitly-not-guaranteed
-[roadmap]: https://github.com/dsx-ai-factory/infra-controller/issues
+[roadmap]: https://github.com/dsx-ai-factory/infra-controller/issues/3603
 [release-notes]: fern/changelog/overview.mdx

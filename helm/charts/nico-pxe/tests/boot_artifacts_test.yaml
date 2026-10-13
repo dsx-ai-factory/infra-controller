@@ -2,22 +2,25 @@ suite: boot artifact init containers
 templates:
   - deployment.yaml
 tests:
-  - it: should not render init containers or boot-artifacts volume when bootArtifactContainers is empty
+  - it: should preserve image-bundled boot artifacts without init containers
     asserts:
       - isKind:
           of: Deployment
       - notExists:
           path: spec.template.spec.initContainers
+      - equal:
+          path: spec.template.spec.securityContext.fsGroup
+          value: 10001
       - notContains:
           path: spec.template.spec.volumes
           content:
             name: boot-artifacts
-            emptyDir: {}
+          any: true
       - notContains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: boot-artifacts
-            mountPath: /forge-boot-artifacts/blobs/internal
+          any: true
 
   - it: should render boot artifact init containers with auto-injected volume mount
     set:
@@ -27,13 +30,13 @@ tests:
           command: ["sh", "-c", "cp -r /x86_64 /forge-boot-artifacts/blobs/internal"]
         - name: boot-artifacts-aarch64
           image: registry.example.com/boot-artifacts-aarch64:latest
-          command: ["sh", "-c", "cp -r /aarch64 /apt /firmware /forge-boot-artifacts/blobs/internal"]
+          command: ["sh", "-c", "set -e; cp -r /aarch64 /apt /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal/aarch64 /forge-boot-artifacts/blobs/internal/apt; chmod -R g+rX /forge-boot-artifacts/blobs/internal/aarch64 /forge-boot-artifacts/blobs/internal/apt"]
     asserts:
       - exists:
           path: spec.template.spec.initContainers
       - lengthEqual:
           path: spec.template.spec.initContainers
-          count: 2
+          count: 3
       - equal:
           path: spec.template.spec.initContainers[0].name
           value: boot-artifacts-x86-64
@@ -47,6 +50,35 @@ tests:
           content:
             name: boot-artifacts
             mountPath: /forge-boot-artifacts/blobs/internal
+      - notExists:
+          path: spec.template.spec.initContainers[0].securityContext.runAsUser
+      - notExists:
+          path: spec.template.spec.initContainers[0].securityContext.runAsNonRoot
+      - notExists:
+          path: spec.template.spec.initContainers[1].securityContext.runAsUser
+      - notExists:
+          path: spec.template.spec.initContainers[1].securityContext.runAsNonRoot
+      - equal:
+          path: spec.template.spec.initContainers[2].name
+          value: boot-artifacts-permissions
+      - equal:
+          path: spec.template.spec.initContainers[2].securityContext.runAsUser
+          value: 0
+      - equal:
+          path: spec.template.spec.initContainers[2].securityContext.runAsNonRoot
+          value: false
+      - equal:
+          path: spec.template.spec.initContainers[2].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.initContainers[2].securityContext.capabilities.drop
+          value: ["ALL"]
+      - equal:
+          path: spec.template.spec.initContainers[2].securityContext.capabilities.add
+          value: ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+      - matchRegex:
+          path: spec.template.spec.initContainers[2].command[2]
+          pattern: 'chmod -R g\+rX /forge-boot-artifacts/blobs/internal'
 
   - it: should build image from repository + tag when provided (new fields win)
     set:
@@ -93,6 +125,9 @@ tests:
 
   - it: should use configurable serve path
     set:
+      bootArtifactContainers:
+        - name: boot-artifacts
+          image: registry.example.com/boot-artifacts:latest
       bootArtifacts:
         servePath: /custom-boot-path
     asserts:
@@ -101,6 +136,11 @@ tests:
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
           pattern: '-s /custom-boot-path'
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: boot-artifacts
+            mountPath: /custom-boot-path/blobs/internal
 
   - it: should default serve path to /forge-boot-artifacts
     asserts:
@@ -121,13 +161,16 @@ tests:
     asserts:
       - lengthEqual:
           path: spec.template.spec.initContainers
-          count: 2
+          count: 3
       - equal:
           path: spec.template.spec.initContainers[0].name
           value: boot-artifacts-x86-64
       - equal:
           path: spec.template.spec.initContainers[1].name
           value: custom-init
+      - equal:
+          path: spec.template.spec.initContainers[2].name
+          value: boot-artifacts-permissions
 
   - it: should reject empty split and fallback images
     set:

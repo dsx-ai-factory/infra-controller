@@ -99,6 +99,7 @@ pub async fn run(
         None
     };
 
+    carbide_api_core::validate_resource_pool_config(&carbide_config, initial_objects.as_ref())?;
     validate_network_prefixes(&carbide_config)?;
 
     let log_history_max_bytes = carbide_config

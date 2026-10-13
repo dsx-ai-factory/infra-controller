@@ -274,6 +274,9 @@ type ExpectedPowerShelfDAO interface {
 	Update(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfUpdateInput) (*ExpectedPowerShelf, error)
 	// Delete used to delete row
 	Delete(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID) error
+	// DeleteIfUnchanged deletes only the version observed by inventory reconciliation.
+	// It returns false if the row changed or no longer exists.
+	DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID, updated time.Time) (bool, error)
 	// DeleteAll deletes all rows matching a required filter
 	DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput) error
 	// ReplaceAll replaces all rows matching a required filter
@@ -684,6 +687,22 @@ func (epsd ExpectedPowerShelfSQLDAO) Delete(ctx context.Context, tx *db.Tx, expe
 	}
 
 	return nil
+}
+
+// DeleteIfUnchanged deletes a row only if its Updated timestamp matches updated.
+// It returns false if the row changed or no longer exists.
+func (epsd ExpectedPowerShelfSQLDAO) DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID, updated time.Time) (_ bool, retErr error) {
+	ctx, expectedPowerShelfDAOSpan := cotel.StartSpan(ctx, "ExpectedPowerShelfDAO.DeleteIfUnchanged")
+	defer func() { cotel.EndSpan(expectedPowerShelfDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedPowerShelfDAOSpan, attribute.String("id", expectedPowerShelfID.String()))
+
+	result, err := db.GetIDB(tx, epsd.dbSession).NewDelete().Model((*ExpectedPowerShelf)(nil)).
+		Where("id = ?", expectedPowerShelfID).Where("updated = ?", updated).Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
 }
 
 // DeleteAll deletes all ExpectedPowerShelves matching the supplied filter. An
