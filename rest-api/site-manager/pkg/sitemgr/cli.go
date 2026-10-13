@@ -28,9 +28,14 @@ func NewCommand() *cli.Command {
 		Usage: "Forge Site Manager Service",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:  "creds-manager-token-file",
-				Value: "/var/run/secrets/nico-rest-cert-manager/token",
-				Usage: "Projected service account token file for audience nico-rest-cert-manager; reloaded by the client",
+				Name:    "creds-manager-client-cert-path",
+				EnvVars: []string{"CREDS_MANAGER_CLIENT_CERT_PATH"},
+				Usage:   "Client certificate for Certificate Manager; optional, requires matching key path",
+			},
+			&cli.StringFlag{
+				Name:    "creds-manager-client-key-path",
+				EnvVars: []string{"CREDS_MANAGER_CLIENT_KEY_PATH"},
+				Usage:   "Client private key for Certificate Manager; optional, requires matching certificate path",
 			},
 			&cli.BoolFlag{
 				Name:  "debug",
@@ -97,15 +102,16 @@ func NewCommand() *cli.Command {
 			log := core.GetLogger(ctx)
 
 			o := Options{
-				credsMgrTokenFile: c.String("creds-manager-token-file"),
-				credsMgrURL:       c.String("creds-manager-url"),
-				credsMgrCAPath:    c.String("creds-manager-ca-path"),
-				ingressHost:       c.String("ingress-host"),
-				listenPort:        c.String("listen-port"),
-				tlsKeyPath:        c.String("tls-key-path"),
-				tlsCertPath:       c.String("tls-cert-path"),
-				namespace:         c.String("namespace"),
-				sentryDSN:         c.String("sentry-dsn"),
+				credsMgrClientCertPath: c.String("creds-manager-client-cert-path"),
+				credsMgrClientKeyPath:  c.String("creds-manager-client-key-path"),
+				credsMgrURL:            c.String("creds-manager-url"),
+				credsMgrCAPath:         c.String("creds-manager-ca-path"),
+				ingressHost:            c.String("ingress-host"),
+				listenPort:             c.String("listen-port"),
+				tlsKeyPath:             c.String("tls-key-path"),
+				tlsCertPath:            c.String("tls-cert-path"),
+				namespace:              c.String("namespace"),
+				sentryDSN:              c.String("sentry-dsn"),
 			}
 
 			otpHrs := c.Int("otp-duration")

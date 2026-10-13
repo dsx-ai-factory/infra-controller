@@ -6,9 +6,13 @@ package types
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// ErrInvalidTTL indicates a lifetime outside the supported issuance bounds.
+var ErrInvalidTTL = errors.New("invalid certificate TTL")
 
 // CertificateIssuer defines a certificate issuer interface
 type CertificateIssuer interface {

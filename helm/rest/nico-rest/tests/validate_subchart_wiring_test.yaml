@@ -117,3 +117,33 @@ tests:
     asserts:
       - hasDocuments:
           count: 0
+
+  - it: rejects a Site Manager URI missing from the allowlist
+    set:
+      nico-rest-site-manager.clientCertificate.spiffeID: spiffe://custom.test/site-manager
+    asserts:
+      - failedTemplate:
+          errorPattern: 'Site Manager client SPIFFE ID.*missing from.*allowedIdentities'
+
+  - it: accepts a deliberately configured identity on both sides
+    set:
+      nico-rest-site-manager.clientCertificate.spiffeID: spiffe://custom.test/site-manager
+      nico-rest-cert-manager.authorization.allowedIdentities:
+        - spiffe://custom.test/site-manager
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: derives both identities from the shared trust domain
+    set:
+      global.spiffeTrustDomain: example.test
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: rejects relocating Site Manager without adjusting its allowed identity
+    set:
+      nico-rest-site-manager.namespaceOverride: registration
+    asserts:
+      - failedTemplate:
+          errorPattern: 'spiffe://nico.local/registration/sa/nico-rest-site-manager.*missing'
