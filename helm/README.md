@@ -140,11 +140,18 @@ Kubernetes Secret does not install or bind the server identity on a switch.
 
 ### Grafana Dashboards
 
-The chart packages three dashboards built from NICo's exported Prometheus
-metrics: a site overview, object lifecycle diagnostics, and API performance.
+The chart packages six dashboards built from NICo's exported Prometheus
+metrics: a site overview, a deep per-site detail view, a multi-site fleet
+rollup, object lifecycle diagnostics, API performance, and BMC performance.
 They are disabled by default because this chart does not install Grafana.
 The source JSON files live in [`observability/dashboards/`](./observability/dashboards/) and can also be
 imported into Grafana directly.
+
+The fleet dashboard groups every panel by a site label, which defaults to
+`forge_site`, the external label the NICo observability bundle sets per site.
+A Prometheus that serves only its own site leaves that label empty, because
+Prometheus attaches external labels only when data leaves the server; set the
+dashboard's `site_label` variable to `job` there.
 
 To expose the dashboards to a Grafana dashboard sidecar in the release
 namespace:
