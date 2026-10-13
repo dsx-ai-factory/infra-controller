@@ -35,6 +35,9 @@ func TestHTTPServiceRoutes(t *testing.T) {
 	s.Use(NewHTTPMiddleware(ctx, WithRequestMetrics("testroutes"),
 		WithHandlerTimeout(500*time.Millisecond),
 		WithRequestBodyLimit(int64(10)))...)
+	s.Path("/v1/site/{uuid}").HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}).Methods(http.MethodGet)
 
 	run := func(method, path, payload string) (string, int) {
 		req := httptest.NewRequest(method, path, strings.NewReader(payload))
@@ -58,8 +61,21 @@ func TestHTTPServiceRoutes(t *testing.T) {
 	assert.Equal(t, "0.1.0\n", body)
 	assert.Equal(t, http.StatusOK, code)
 
+	siteIDs := []string{
+		"d2f4b0c6-6f1e-4a0e-9f5a-0b6a6f4c1e77",
+		"5b0e7c1a-2d3f-4e8a-9c6b-7a1d2e3f4a5b",
+	}
+	for _, siteID := range siteIDs {
+		_, code = run(http.MethodGet, "/v1/site/"+siteID, "")
+		assert.Equal(t, http.StatusOK, code)
+	}
+
 	body, code = run("GET", "/metrics", "")
 	assert.Contains(t, body, "testroutes_http_duration_seconds")
+	assert.Contains(t, body, `testroutes_http_request_counts{method="GET",path="/v1/site/{uuid}",status_code="200"} 2`)
+	for _, siteID := range siteIDs {
+		assert.NotContains(t, body, siteID)
+	}
 	assert.Equal(t, http.StatusOK, code)
 
 	assert.Equal(t, logrus.InfoLevel, GetLogger(ctx).Logger.GetLevel())
