@@ -804,41 +804,37 @@ _db_location() {
 # Resolves temporal.useHaPostgres or keycloak.useHaPostgres into
 # _USE_HA_POSTGRES as true or false. `auto` keeps the database where
 # _db_location finds it, so it never moves an existing database, and a new Site
-# gets nico-pg-cluster. With postgresql.enabled false, the chart creates no
-# nico-pg-cluster, so `auto` means false. Records a blocking error and leaves
+# gets nico-pg-cluster. With postgresql.enabled false, nico-pg-cluster is the
+# Site's own PostgreSQL, which only exists once the Site provisions it, so a
+# new Site's `auto` means false. Records a blocking error and leaves
 # _USE_HA_POSTGRES empty when it can't decide, since phase 7 can't run then.
 _resolve_use_ha_postgres() {
     local _component="$1" _value
     _USE_HA_POSTGRES=""
     _value="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" "${_component}" useHaPostgres)"
     case "${_value}" in
-        true)
-            if [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" postgresql enabled)" == "false" ]]; then
-                BLOCKING_ERRORS+=("${_component}.useHaPostgres: true needs postgresql.enabled: true, because the chart only creates nico-pg-cluster and its credentials then")
-                return 0
-            fi
-            _USE_HA_POSTGRES=true
-            return 0
-            ;;
-        false)
-            _USE_HA_POSTGRES=false
+        true | false)
+            _USE_HA_POSTGRES="${_value}"
             return 0
             ;;
         auto) ;;
         *)
-            BLOCKING_ERRORS+=("values.yaml: ${_component}.useHaPostgres must be true, false, or auto (got '${_value}')")
+            # _check_use_ha_postgres_value already recorded the error.
             return 0
             ;;
     esac
 
-    if [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" postgresql enabled)" == "false" ]]; then
-        _USE_HA_POSTGRES=false
-        return 0
-    fi
     _db_location "${_component}"
     case "${_DB_LOCATION}" in
-        nico-pg-cluster|new)
+        nico-pg-cluster)
             _USE_HA_POSTGRES=true
+            ;;
+        new)
+            if [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" postgresql enabled)" == "false" ]]; then
+                _USE_HA_POSTGRES=false
+            else
+                _USE_HA_POSTGRES=true
+            fi
             ;;
         standalone)
             _USE_HA_POSTGRES=false
@@ -906,7 +902,11 @@ _check_db_cutover() {
         return 0
     fi
     if [[ -z "${_receipt}" ]]; then
-        BLOCKING_ERRORS+=("${_component}.useHaPostgres: true moves ${_component} off the standalone postgres.postgres StatefulSet, but its data hasn't been migrated. Run '${_hint}' first")
+        if [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" postgresql enabled)" == "false" ]]; then
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: true moves ${_component} off the standalone postgres.postgres StatefulSet, but its data hasn't been migrated, and the migration script can't copy it into the Site's own PostgreSQL yet. Set it to auto until it can")
+        else
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: true moves ${_component} off the standalone postgres.postgres StatefulSet, but its data hasn't been migrated. Run '${_hint}' first")
+        fi
         return 0
     fi
     read -r -a _entries <<< "${_receipt}"
@@ -930,12 +930,10 @@ _check_db_cutover() {
     return 0
 }
 
-# Succeeds when the resolved value can move the component's database: an
-# explicit true or false, or auto forced to false by postgresql.enabled false.
-# Otherwise auto follows wherever the database already is.
+# Succeeds when the value can move the component's database, which only an
+# explicit true or false can. auto follows wherever the database already is.
 _can_move_db() {
-    [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" "$1" useHaPostgres)" != "auto" \
-        || "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" postgresql enabled)" == "false" ]]
+    [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" "$1" useHaPostgres)" != "auto" ]]
 }
 
 # Records a blocking error when KEYCLOAK_NS differs from keycloak.namespace.
@@ -950,6 +948,21 @@ _check_keycloak_ns() {
     fi
     return 0
 }
+
+# Records a blocking error for a useHaPostgres value other than true, false, or
+# auto. The nico-prereqs chart fails to render one in phases 2 and 5, which run
+# on --skip-rest too, so this check stays outside section 8.
+_check_use_ha_postgres_value() {
+    local _value
+    _value="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" "$1" useHaPostgres)"
+    case "${_value}" in
+        true | false | auto) ;;
+        *) BLOCKING_ERRORS+=("values.yaml: $1.useHaPostgres must be true, false, or auto (got '${_value}')") ;;
+    esac
+    return 0
+}
+_check_use_ha_postgres_value temporal
+_check_use_ha_postgres_value keycloak
 
 if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
     # nico-api.hostname must be a real external hostname
@@ -1324,14 +1337,17 @@ EOF
         [[ "${_TEMPORAL_USE_HA_POSTGRES}" == "false" ]] && _STANDALONE_PG_WORKLOADS="Temporal"
         [[ "${_KEYCLOAK_USE_HA_POSTGRES}" == "false" ]] && \
             _STANDALONE_PG_WORKLOADS="${_STANDALONE_PG_WORKLOADS:+${_STANDALONE_PG_WORKLOADS} and }Keycloak"
+        _STANDALONE_PG_HINT="Migrate to nico-pg-cluster with the guide in helm-prereqs/README.md, \"Consolidating Temporal/Keycloak onto nico-pg-cluster\""
+        if [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" postgresql enabled)" == "false" ]]; then
+            _STANDALONE_PG_HINT="Move them onto the Site's own PostgreSQL as helm-prereqs/README.md, \"Using your own PostgreSQL\", describes"
+        fi
         if [[ -n "${_STANDALONE_PG_WORKLOADS}" ]]; then
-            WARNINGS+=("Deprecated: the standalone postgres.postgres StatefulSet still serves ${_STANDALONE_PG_WORKLOADS}. Support for it will be removed in 2.5. Migrate to nico-pg-cluster with the guide in helm-prereqs/README.md, \"Consolidating Temporal/Keycloak onto nico-pg-cluster\"")
+            WARNINGS+=("Deprecated: the standalone postgres.postgres StatefulSet still serves ${_STANDALONE_PG_WORKLOADS}. Support for it will be removed in 2.5. ${_STANDALONE_PG_HINT}")
         fi
 
-        # auto never moves a deployed database, so only an explicit value can,
-        # or auto forced to false because postgresql.enabled is false. These
-        # errors stop setup even under -y. Phase 7d doesn't deploy a Keycloak
-        # that nico-rest.yaml disables.
+        # auto never moves a deployed database, so only an explicit value can.
+        # These errors stop setup even under -y. Phase 7d doesn't deploy a
+        # Keycloak that nico-rest.yaml disables.
         if [[ -n "${_TEMPORAL_USE_HA_POSTGRES}" ]] && _can_move_db temporal; then
             _check_db_cutover temporal "${_TEMPORAL_USE_HA_POSTGRES}"
         fi

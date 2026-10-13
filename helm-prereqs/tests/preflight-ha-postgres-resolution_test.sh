@@ -10,7 +10,8 @@ TEST_TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TEST_TMP_DIR}"' EXIT
 
 for fn in _yaml_toplevel_value _keycloak_ns _deployed_db_host _db_location \
-    _resolve_use_ha_postgres _check_db_cutover _can_move_db _check_keycloak_ns; do
+    _resolve_use_ha_postgres _check_db_cutover _can_move_db _check_keycloak_ns \
+    _check_use_ha_postgres_value; do
     definition="$(sed -n "/^${fn}()/,/^}/p" "${PREFLIGHT_SH}")"
     if [[ -z "${definition}" ]]; then
         echo "could not extract ${fn} from preflight.sh" >&2
@@ -150,7 +151,6 @@ resolver_cases=(
     "Keycloak on nico-pg-cluster|keycloak|auto||jdbc:postgresql://nico-pg-cluster.postgres.svc.cluster.local:5432/keycloak?sslmode=require|statefulset||false|true|"
     "Keycloak with KC_DB_URL from valueFrom|keycloak|auto||valueFrom|||false||auto could not tell which PostgreSQL the deployed keycloak uses"
     "unreadable cluster state|temporal|auto|||||true||auto could not tell which PostgreSQL the deployed temporal uses"
-    "invalid value|keycloak|maybe|||||false||keycloak.useHaPostgres must be true, false, or auto (got 'maybe')"
 )
 
 for row in "${resolver_cases[@]}"; do
@@ -171,36 +171,49 @@ for row in "${resolver_cases[@]}"; do
     check_errors "${name}" "${BLOCKING_ERRORS[*]:-}" "${expected_error}"
 done
 
-# On external Postgres the chart creates no nico-pg-cluster, so a new Site's
-# auto can't pick it.
-write_values temporal auto false
+# The chart fails to render any other value, so preflight stops on it without
+# cluster access.
+write_values keycloak maybe
 BLOCKING_ERRORS=()
-FAKE_TEMPORAL_HOST="" FAKE_KEYCLOAK_URL="" FAKE_STANDALONE="" FAKE_RECORD="" \
-    FAKE_DEPLOYMENT_STATE="" FAKE_READS_FAIL=false PATH="${TEST_TMP_DIR}/bin:${PATH}" \
-    _resolve_use_ha_postgres temporal
-if [[ "${_USE_HA_POSTGRES}" != "false" ]]; then
-    echo "FAIL external Postgres: resolved '${_USE_HA_POSTGRES}', want 'false' (errors: ${BLOCKING_ERRORS[*]:-none})" >&2
-    failures=$((failures + 1))
-fi
-check_errors "external Postgres" "${BLOCKING_ERRORS[*]:-}" ""
+_check_use_ha_postgres_value keycloak
+check_errors "invalid value" "${BLOCKING_ERRORS[*]:-}" \
+    "keycloak.useHaPostgres must be true, false, or auto (got 'maybe')"
 
-# Without nico-pg-cluster an explicit true can't be honored, so preflight
-# stops before setup changes anything.
+# With postgresql.enabled false, nico-pg-cluster is the Site's own PostgreSQL.
+# A new Site's auto can't assume it's provisioned, but a Site already on it
+# stays there. Columns: name|value|deployed Temporal DB host|expected.
+external_cases=(
+    "new Site keeps the StatefulSet|auto||false"
+    "Site already on its own PostgreSQL|auto|nico-pg-cluster.postgres.svc.cluster.local|true"
+    "explicit true selects its own PostgreSQL|true||true"
+)
+for row in "${external_cases[@]}"; do
+    IFS='|' read -r name value temporal_host expected <<< "${row}"
+    write_values temporal "${value}" false
+    BLOCKING_ERRORS=()
+    FAKE_TEMPORAL_HOST="${temporal_host}" FAKE_KEYCLOAK_URL="" FAKE_STANDALONE="" FAKE_RECORD="" \
+        FAKE_DEPLOYMENT_STATE="" FAKE_READS_FAIL=false PATH="${TEST_TMP_DIR}/bin:${PATH}" \
+        _resolve_use_ha_postgres temporal
+    if [[ "${_USE_HA_POSTGRES}" != "${expected}" ]]; then
+        echo "FAIL external Postgres, ${name}: resolved '${_USE_HA_POSTGRES}', want '${expected}' (errors: ${BLOCKING_ERRORS[*]:-none})" >&2
+        failures=$((failures + 1))
+    fi
+    check_errors "external Postgres, ${name}" "${BLOCKING_ERRORS[*]:-}" ""
+done
+
+# The migration script can't copy into the Site's own PostgreSQL yet, so the
+# missing receipt points there instead of at the script.
 write_values temporal true false
 BLOCKING_ERRORS=()
-FAKE_TEMPORAL_HOST="" FAKE_KEYCLOAK_URL="" FAKE_STANDALONE="" FAKE_RECORD="" \
-    FAKE_DEPLOYMENT_STATE="" FAKE_READS_FAIL=false PATH="${TEST_TMP_DIR}/bin:${PATH}" \
-    _resolve_use_ha_postgres temporal
-if [[ -n "${_USE_HA_POSTGRES}" ]]; then
-    echo "FAIL explicit true on external Postgres: resolved '${_USE_HA_POSTGRES}', want ''" >&2
-    failures=$((failures + 1))
-fi
-check_errors "explicit true on external Postgres" "${BLOCKING_ERRORS[*]:-}" \
-    "temporal.useHaPostgres: true needs postgresql.enabled: true"
+FAKE_TEMPORAL_HOST="postgres.postgres.svc.cluster.local." FAKE_KEYCLOAK_URL="" \
+    FAKE_STANDALONE=statefulset FAKE_RECORD="" FAKE_DEPLOYMENT_STATE="" FAKE_READS_FAIL=false \
+    PATH="${TEST_TMP_DIR}/bin:${PATH}" _check_db_cutover temporal true
+check_errors "external Postgres cutover without a migration" "${BLOCKING_ERRORS[*]:-}" \
+    "the migration script can't copy it into the Site's own PostgreSQL yet"
 
-# The move check runs for an explicit value, or auto forced to false. Same
-# columns as above without expected, plus the current uid/generation every
-# Deployment of the workload reports.
+# The move check runs for an explicit value. Same columns as above without
+# expected, plus the current uid/generation every Deployment of the workload
+# reports.
 temporal_receipt="temporal-migrated=temporal-frontend=uid-t/4 temporal-history=uid-t/4 temporal-matching=uid-t/4 temporal-worker=uid-t/4"
 cutover_cases=(
     "migrated Site already on nico-pg-cluster|temporal|true|nico-pg-cluster.postgres.svc.cluster.local||statefulset||uid-t/9|false|"
@@ -228,21 +241,20 @@ for row in "${cutover_cases[@]}"; do
 done
 
 # Preflight runs the move check above for every value that can move a
-# database. Columns: value|postgresql.enabled|whether the check runs.
+# database. Columns: value|whether the check runs.
 can_move_cases=(
-    "false|true|yes"
-    "auto|true|no"
-    "auto|false|yes"
+    "false|yes"
+    "auto|no"
 )
 for row in "${can_move_cases[@]}"; do
-    IFS='|' read -r value postgresql_enabled expected <<< "${row}"
-    write_values temporal "${value}" "${postgresql_enabled}"
+    IFS='|' read -r value expected <<< "${row}"
+    write_values temporal "${value}"
     actual=no
     if _can_move_db temporal; then
         actual=yes
     fi
     if [[ "${actual}" != "${expected}" ]]; then
-        echo "FAIL move check for ${value} with postgresql.enabled ${postgresql_enabled}: runs ${actual}, want ${expected}" >&2
+        echo "FAIL move check for ${value}: runs ${actual}, want ${expected}" >&2
         failures=$((failures + 1))
     fi
 done
