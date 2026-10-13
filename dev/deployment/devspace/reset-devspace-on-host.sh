@@ -15,7 +15,7 @@ set -euo pipefail
 DEV_USER=""
 REPO_DIR=""
 CLUSTER_NAME="nico-dev"
-DOCKER_ROOT="/var/lib/docker"
+DOCKER_ROOT=""
 DOCKER_ROOT_EXPLICIT=0
 CONFIRM_HOST=""
 APPLY=0
@@ -71,7 +71,7 @@ Options:
                        the legacy ~/ncx-infra-controller-core path.
   --cluster-name NAME  kind cluster to delete. Default: nico-dev.
   --docker-root PATH   Docker data path. Defaults to Docker's active root,
-                       or /var/lib/docker when the daemon is unavailable.
+                       and is required explicitly if discovery fails.
   --confirm-host NAME  Required with --apply; must match hostname or hostname -f.
   --apply              Perform the reset. Without this flag, print the plan.
   --force-dirty-checkout
@@ -219,11 +219,11 @@ resolve_docker_root() {
   fi
 
   local active_root
-  active_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
-  if [[ -n "${active_root}" ]]; then
+  if active_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)" &&
+    [[ -n "${active_root}" ]]; then
     DOCKER_ROOT="${active_root}"
   else
-    DOCKER_ROOT="/var/lib/docker"
+    die "cannot determine Docker data root; pass --docker-root explicitly"
   fi
   log "Using Docker data path ${DOCKER_ROOT}"
 }
