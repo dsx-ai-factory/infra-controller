@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -19,6 +20,7 @@ import (
 	tmocks "go.temporal.io/sdk/mocks"
 	tsdkWorker "go.temporal.io/sdk/worker"
 
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
 	cwfn "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/namespace"
 )
 
@@ -40,17 +42,20 @@ func (s stubWorker) Run(<-chan interface{}) error {
 
 func TestRunWorker(t *testing.T) {
 	tests := []struct {
-		name      string
-		namespace string
-		failCron  string
-		wantCrons []string
-		wantErr   error
+		name                         string
+		namespace                    string
+		successfulInventoryRetention time.Duration
+		failCron                     string
+		wantCrons                    []string
+		wantErr                      error
 	}{
 		{
-			name:      "Cloud worker triggers every cron before it runs",
-			namespace: cwfn.CloudNamespace,
-			wantCrons: []string{"site-monitor-health-all", "rotate-certs-and-otps", "monitor-site-temporal-namespaces"},
-			wantErr:   errWorkerStopped,
+			// Both workers read the same config, so the Cloud worker also sees the cleanup enabled
+			name:                         "Cloud worker triggers every cron before it runs",
+			namespace:                    cwfn.CloudNamespace,
+			successfulInventoryRetention: config.DefaultSiteNamespaceSuccessfulInventoryRetention,
+			wantCrons:                    []string{"site-monitor-health-all", "rotate-certs-and-otps", "monitor-site-temporal-namespaces"},
+			wantErr:                      errWorkerStopped,
 		},
 		{
 			name:      "Cloud worker does not run when a cron fails to trigger",
@@ -59,7 +64,21 @@ func TestRunWorker(t *testing.T) {
 			wantErr:   errTriggerFailed,
 		},
 		{
-			name:      "Site worker triggers no cron",
+			name:                         "Site worker triggers the successful inventory cleanup before it runs",
+			namespace:                    cwfn.SiteNamespace,
+			successfulInventoryRetention: config.DefaultSiteNamespaceSuccessfulInventoryRetention,
+			wantCrons:                    []string{"delete-successful-inventory-workflows"},
+			wantErr:                      errWorkerStopped,
+		},
+		{
+			name:                         "Site worker does not run when the cleanup fails to trigger",
+			namespace:                    cwfn.SiteNamespace,
+			successfulInventoryRetention: config.DefaultSiteNamespaceSuccessfulInventoryRetention,
+			failCron:                     "delete-successful-inventory-workflows",
+			wantErr:                      errTriggerFailed,
+		},
+		{
+			name:      "Site worker triggers no cron when successful inventory retention is disabled",
 			namespace: cwfn.SiteNamespace,
 			wantErr:   errWorkerStopped,
 		},
@@ -84,7 +103,7 @@ func TestRunWorker(t *testing.T) {
 
 			w := stubWorker{onRun: func() { triggeredBeforeRun = slices.Clone(triggered) }}
 
-			err := runWorker(context.Background(), tc, w, tt.namespace, nil)
+			err := runWorker(context.Background(), tc, w, tt.namespace, tt.successfulInventoryRetention, nil)
 			require.ErrorIs(t, err, tt.wantErr)
 			assert.ElementsMatch(t, tt.wantCrons, triggeredBeforeRun)
 		})
