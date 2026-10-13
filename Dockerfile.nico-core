@@ -15,22 +15,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Build from the repo root:
+# Multi-service Kind dev image build. A single builder stage cross-compiles
+# all NICo Rust services; separate runtime stages produce one image per service.
 #
-#   docker buildx build --platform linux/amd64 \
-#     -f Dockerfile.nico-core -t localhost:5000/nico-rest-core:latest .
+# Build targets (from repo root, set --target to pick one):
 #
-# NOTE: Cross-compilation architecture
-# The BUILDER stage always runs NATIVE on the build host ($BUILDPLATFORM) and
-# cross-compiles to x86_64-unknown-linux-gnu. This avoids QEMU emulation when
-# building on Apple Silicon hosts, which would otherwise SEGFAULT while
-# assembling aws-lc-sys's hand-written x86-64 assembly code.
+#   docker buildx build --platform linux/amd64 --target nico-rest-core  \
+#     -t localhost:5000/nico-rest-core:latest  -f Dockerfile.nico-core .
+#   docker buildx build --platform linux/amd64 --target nico-rest-dns   \
+#     -t localhost:5000/nico-rest-dns:latest   -f Dockerfile.nico-core .
+#   docker buildx build --platform linux/amd64 --target nico-rest-pxe   \
+#     -t localhost:5000/nico-rest-pxe:latest   -f Dockerfile.nico-core .
+#   docker buildx build --platform linux/amd64 --target nico-rest-dhcp  \
+#     -t localhost:5000/nico-rest-dhcp:latest  -f Dockerfile.nico-core .
+#
+# NOTE: Cross-compilation
+# The builder stage runs NATIVE on $BUILDPLATFORM and cross-compiles to
+# x86_64-unknown-linux-gnu, avoiding QEMU SEGFAULT on arm hosts when
+# aws-lc-sys assembles its hand-written x86-64 assembly.
 #
 # NOTE: pxe/ is required because carbide-ipxe-renderer embeds
 # pxe/ipxe/local/embed.ipxe and pxe/ipxe/local/branding.h at compile time.
 #
 ARG RUST_VERSION=1.97.1
+ARG KEA_VERSION=2.2.0-6
 
+# =============================================================================
+# Builder — all Rust services
+# =============================================================================
 FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-slim-bookworm AS builder
 
 ARG VERSION
@@ -49,6 +61,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libudev-dev \
     libtss2-dev \
     libssh-dev \
+    kea-dev \
+    libboost-dev \
     && if [ "$(uname -m)" != "x86_64" ]; then \
          apt-get install -y --no-install-recommends \
            gcc-x86-64-linux-gnu libc6-dev-amd64-cross; \
@@ -74,16 +88,26 @@ RUN --mount=type=cache,id=nico-core-cross-cargo-home,target=/cargo-home,sharing=
              CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc; \
     fi && \
     cargo build \
-        -p carbide-api --bin carbide-api \
-        -p nico-admin-cli --bin nico-admin-cli \
+        -p carbide-api         --bin carbide-api \
+        -p nico-admin-cli      --bin nico-admin-cli \
+        -p carbide-dns         --bin carbide-dns \
+        -p carbide-pxe         --bin carbide \
+        -p carbide-dhcp-server --bin forge-dhcp-server \
+        -p carbide-dhcp        --lib \
         --locked --release \
         --target x86_64-unknown-linux-gnu && \
     mkdir -p /artifacts && \
-    cp /cargo-target/x86_64-unknown-linux-gnu/release/carbide-api /artifacts/carbide-api && \
-    cp /cargo-target/x86_64-unknown-linux-gnu/release/nico-admin-cli /artifacts/nico-admin-cli
+    cp /cargo-target/x86_64-unknown-linux-gnu/release/carbide-api       /artifacts/ && \
+    cp /cargo-target/x86_64-unknown-linux-gnu/release/nico-admin-cli    /artifacts/ && \
+    cp /cargo-target/x86_64-unknown-linux-gnu/release/carbide-dns       /artifacts/ && \
+    cp /cargo-target/x86_64-unknown-linux-gnu/release/carbide            /artifacts/carbide && \
+    cp /cargo-target/x86_64-unknown-linux-gnu/release/forge-dhcp-server /artifacts/ && \
+    cp /cargo-target/x86_64-unknown-linux-gnu/release/libdhcp.so        /artifacts/
 
-# Runtime image
-FROM --platform=linux/amd64 debian:bookworm-slim
+# =============================================================================
+# nico-rest-core — carbide-api + nico-admin-cli
+# =============================================================================
+FROM --platform=linux/amd64 debian:bookworm-slim AS nico-rest-core
 
 ARG VERSION
 ARG CI_COMMIT_SHORT_SHA
@@ -105,7 +129,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN mkdir -p /opt/carbide /mnt/persistence /var/run/kea
 
-COPY --from=builder /artifacts/carbide-api /opt/carbide/carbide-api
+COPY --from=builder /artifacts/carbide-api    /opt/carbide/carbide-api
 COPY --from=builder /artifacts/nico-admin-cli /opt/carbide/nico-admin-cli
 COPY crates/api/casbin-policy.csv /opt/carbide/casbin-policy.csv
 
@@ -116,3 +140,91 @@ EXPOSE 1079 1080
 ENTRYPOINT ["/opt/carbide/carbide-api"]
 CMD ["run", "--config-path", "/etc/forge/carbide-api/carbide-api-config.toml", \
   "--site-config-path", "/etc/forge/carbide-api/site/carbide-api-site-config.toml"]
+
+# =============================================================================
+# nico-rest-dns — carbide-dns
+# =============================================================================
+FROM --platform=linux/amd64 debian:bookworm-slim AS nico-rest-dns
+
+ARG VERSION
+ARG CI_COMMIT_SHORT_SHA
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${CI_COMMIT_SHORT_SHA}"
+LABEL org.opencontainers.image.title="nico-dns"
+LABEL org.opencontainers.image.description="NICo DNS Server"
+LABEL org.opencontainers.image.vendor="NVIDIA"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/carbide
+
+COPY --from=builder /artifacts/carbide-dns /opt/carbide/carbide-dns
+
+EXPOSE 53/udp 53/tcp
+
+ENTRYPOINT ["/opt/carbide/carbide-dns"]
+CMD ["run"]
+
+# =============================================================================
+# nico-rest-pxe — carbide-pxe
+# =============================================================================
+FROM --platform=linux/amd64 debian:bookworm-slim AS nico-rest-pxe
+
+ARG VERSION
+ARG CI_COMMIT_SHORT_SHA
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${CI_COMMIT_SHORT_SHA}"
+LABEL org.opencontainers.image.title="nico-pxe"
+LABEL org.opencontainers.image.description="NICo PXE Server"
+LABEL org.opencontainers.image.vendor="NVIDIA"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/carbide /opt/carbide/pxe
+
+COPY --from=builder /artifacts/carbide /opt/carbide/carbide
+# PXE templates are embedded at compile time; no extra runtime files needed.
+# The chart runs /opt/carbide/carbide; also expose as carbide-pxe for clarity.
+RUN ln -s /opt/carbide/carbide /opt/carbide/carbide-pxe
+
+EXPOSE 69/udp 8080
+
+# No CMD: the binary takes no positional arguments (only --version/--static-dir);
+# a default "run" argument would be rejected at startup.
+ENTRYPOINT ["/opt/carbide/carbide-pxe"]
+
+# =============================================================================
+# nico-rest-dhcp — kea-dhcp4 + libdhcp.so hook + forge-dhcp-server helper
+# =============================================================================
+FROM --platform=linux/amd64 debian:bookworm-slim AS nico-rest-dhcp
+
+ARG VERSION
+ARG CI_COMMIT_SHORT_SHA
+ARG KEA_VERSION=2.2.0-6
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${CI_COMMIT_SHORT_SHA}"
+LABEL org.opencontainers.image.title="nico-dhcp"
+LABEL org.opencontainers.image.description="NICo DHCP Server (Kea + carbide hook)"
+LABEL org.opencontainers.image.vendor="NVIDIA"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    kea-dhcp4-server \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/carbide /var/run/kea /var/lib/kea
+
+COPY --from=builder /artifacts/libdhcp.so \
+    /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so
+COPY --from=builder /artifacts/forge-dhcp-server \
+    /opt/carbide/forge-dhcp-server
+
+EXPOSE 67/udp 8080
+
+ENTRYPOINT ["/bin/sh", "-c"]
+CMD ["mkdir -p /var/run/kea /var/lib/kea && exec /sbin/kea-dhcp4 -c /tmp/kea_config.json"]
+>>>>>>> 59ebd85 (feat(kind): add KIND_DNS, KIND_PXE, KIND_DHCP — deploy and verify mTLS)

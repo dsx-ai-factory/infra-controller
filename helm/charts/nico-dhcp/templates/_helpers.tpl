@@ -42,7 +42,11 @@ app.kubernetes.io/component: dhcp
 Global image reference
 */}}
 {{- define "nico-dhcp.image" -}}
+{{- if .Values.image.repository -}}
+{{ .Values.image.repository }}:{{ .Values.image.tag | default .Values.global.image.tag }}
+{{- else -}}
 {{ .Values.global.image.repository }}:{{ .Values.global.image.tag }}
+{{- end -}}
 {{- end }}
 
 {{/*
