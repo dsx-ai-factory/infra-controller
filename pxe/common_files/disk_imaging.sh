@@ -43,7 +43,12 @@ update_grub_cfg="yes"
 function curl_url() {
 	url=$1
 	auth=$2
-	curl --retry 5 --retry-all-errors -k -L -O $auth $url 2>&1 | tee $log_output
+	# Keep a distro-selected checksum filename; otherwise use only the
+	# explicit URL path so query parameters cannot change the local name.
+	if [ -z "$file" ]; then
+		file=$(basename "${url%%\?*}")
+	fi
+	curl --retry 5 --retry-all-errors -k -L $auth --output "$file" "$url" 2>&1 | tee $log_output
 }
 
 function verify_sha() {
@@ -1054,10 +1059,6 @@ function main() {
 		return 1;
 	fi
 
-	if [ -z $file ]; then
-		file=$(basename $image_url)
-	fi
-
 	if [ ! -z "$image_auth_token" ]; then
 		if [ -z "$image_auth_type" ]; then
 		       image_auth_type=Bearer
@@ -1066,7 +1067,7 @@ function main() {
 	fi
 
 	echo "Downloading image from $image_url" | tee $log_output
-	curl_url $image_url $image_auth
+	curl_url "$image_url" "$image_auth"
 	if [ ! -z "$image_sha" ]; then
 		echo "Verifying image with digest $image_sha" | tee $log_output
 		verify_sha $image_sha
@@ -1092,7 +1093,7 @@ function main() {
 	precheck_image_identifiers || return 1
 
 	echo "Imaging $file to $image_disk" | tee $log_output
-	qemu-img convert -p -O raw -S 0 $file $image_disk 2>&1 | tee $log_output
+	qemu-img convert -p -O raw -S 0 "$file" "$image_disk" 2>&1 | tee $log_output
 	ret=$?
 	if [ $ret -ne 0 ]; then
 		echo "Imaging failed $ret" | tee $log_output
