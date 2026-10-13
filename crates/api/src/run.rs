@@ -86,8 +86,6 @@ pub async fn run(
     // See the docs on `carbide::AdminUiRoutesBuilder` for the full story.
     let admin_ui_routes_builder = Box::new(carbide_api_web::routes);
 
-    validate_network_prefixes(&carbide_config)?;
-
     let log_history_max_bytes = carbide_config
         .log_history
         .max_megabytes
@@ -108,6 +106,7 @@ pub async fn run(
 
     config_diagnostics.emit();
     carbide_api_core::cfg::load::log_vpc_peering_policy_deprecations(&carbide_config);
+    validate_network_prefixes(&carbide_config)?;
 
     // Load initial objects after logging setup so warn-mode unknown-field
     // diagnostics from this second configuration file are observable too.
