@@ -18,8 +18,15 @@ tests:
   - it: covers every in-cluster name of the Service by default
     asserts:
       - contains:
-          path: spec.template.spec.containers[0].args
-          content: --allowed-service-account=system:serviceaccount:nico-rest:nico-rest-site-manager
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CERT_AUTH_ALLOWED_IDENTITIES
+            value: spiffe://nico.local/nico-rest/sa/nico-rest-site-manager
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CERT_AUTH_MODE
+            value: AUDIT
       - contains:
           path: spec.template.spec.containers[0].args
           content: --dns-name=nico-rest-cert-manager
@@ -61,12 +68,34 @@ tests:
           path: spec.template.spec.containers[0].args
           content: --dns-name=nico-rest-cert-manager
 
-  - it: authorizes a separately configured Site Manager identity
+  - it: authorizes separately configured identities in enforce mode
     set:
-      config:
-        siteManagerNamespace: registration
-        siteManagerServiceAccount: issuer-client
+      authorization:
+        mode: ENFORCE
+        allowedIdentities:
+          - spiffe://custom.test/registration/sa/issuer-client
     asserts:
       - contains:
-          path: spec.template.spec.containers[0].args
-          content: --allowed-service-account=system:serviceaccount:registration:issuer-client
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CERT_AUTH_ALLOWED_IDENTITIES
+            value: spiffe://custom.test/registration/sa/issuer-client
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CERT_AUTH_MODE
+            value: ENFORCE
+
+  - it: rejects invalid authorization mode
+    set:
+      authorization.mode: enforce
+    asserts:
+      - failedTemplate:
+          errorMessage: authorization.mode must be AUDIT or ENFORCE
+
+  - it: prevents extraEnv from bypassing identity validation
+    set:
+      extraEnv.CERT_AUTH_ALLOWED_IDENTITIES: spiffe://other.test/caller
+    asserts:
+      - failedTemplate:
+          errorPattern: configure CERT_AUTH_ALLOWED_IDENTITIES through chart values

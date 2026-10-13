@@ -5,20 +5,18 @@ package certs
 
 import (
 	"context"
-	"fmt"
+	"crypto/tls"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	authenticationclient "k8s.io/client-go/kubernetes/typed/authentication/v1"
 )
 
 const (
 	svcKeyFile  = "/tmp/svc.key"
 	svcCertFile = "/tmp/svc.cert"
-	svcTTL      = 10 * 365 * 24
+	svcTTL      = 365 * 24
 )
 
 // Options defines options for the server
@@ -28,16 +26,18 @@ type Options struct {
 	// DNSNames are the hostnames the TLS listener's certificate must match.
 	// Every name clients dial has to appear here, because hostname
 	// verification only consults the certificate's SANs.
-	DNSNames              []string
-	CABaseDNS             string
-	AllowedServiceAccount string
-	TokenReviewer         authenticationclient.TokenReviewInterface
+	DNSNames          []string
+	CABaseDNS         string
+	AuthorizationMode string
+	AllowedIdentities []string
+	ClientCAFile      string
 }
 
 // Server defines a server
 type Server struct {
 	Options
 	certificateIssuer CertificateIssuer
+	authorizer        *certificateAuthorizer
 	appService        *core.HTTPService
 	insecService      *core.HTTPService
 }
@@ -48,23 +48,19 @@ func NewServerWithIssuer(ctx context.Context, o Options, certIssuer CertificateI
 		panic("certIssuer is required")
 	}
 
-	subject := strings.Split(o.AllowedServiceAccount, ":")
-	if len(subject) != 4 || subject[0] != "system" || subject[1] != "serviceaccount" || subject[2] == "" || subject[3] == "" {
-		return nil, fmt.Errorf("allowed service account must have the form system:serviceaccount:namespace:name")
+	authorizer, err := newCertificateAuthorizer(ctx, o, certIssuer)
+	if err != nil {
+		return nil, err
 	}
-	if o.TokenReviewer == nil {
-		return nil, fmt.Errorf("token reviewer is required")
-	}
+	s := &Server{Options: o, certificateIssuer: certIssuer, authorizer: authorizer}
 
-	s := &Server{Options: o}
-	s.certificateIssuer = certIssuer
-
-	err := s.tlsSetup(ctx)
+	err = s.tlsSetup(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	appService := core.NewTLSService(s.Addr, svcCertFile, svcKeyFile)
+	appService.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.RequestClientCert}
 	appService.AddHealthRoute(ctx)
 	appService.AddVersionRoute(ctx)
 	appService.AddMetricsRoute(ctx)

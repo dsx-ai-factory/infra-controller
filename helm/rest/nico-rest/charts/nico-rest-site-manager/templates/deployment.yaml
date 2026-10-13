@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+{{- if hasKey .Values.extraEnv "CREDS_MANAGER_CLIENT_CERT_PATH" }}
+{{- fail "configure CREDS_MANAGER_CLIENT_CERT_PATH through chart values, not extraEnv" }}
+{{- end }}
+{{- if hasKey .Values.extraEnv "CREDS_MANAGER_CLIENT_KEY_PATH" }}
+{{- fail "configure CREDS_MANAGER_CLIENT_KEY_PATH through chart values, not extraEnv" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -57,16 +63,20 @@ spec:
           ports:
             - containerPort: {{ .Values.service.port }}
               name: https
-          {{- with .Values.extraEnv }}
           env:
+            - name: CREDS_MANAGER_CLIENT_CERT_PATH
+              value: /etc/credsmgr-client/tls.crt
+            - name: CREDS_MANAGER_CLIENT_KEY_PATH
+              value: /etc/credsmgr-client/tls.key
+          {{- with .Values.extraEnv }}
             {{- range $k, $v := . }}
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}
           {{- end }}
           volumeMounts:
-            - name: creds-manager-token
-              mountPath: /var/run/secrets/nico-rest-cert-manager
+            - name: credsmgr-client
+              mountPath: /etc/credsmgr-client
               readOnly: true
             - name: tls-certs
               mountPath: /etc/tls
@@ -93,13 +103,9 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 15
       volumes:
-        - name: creds-manager-token
-          projected:
-            sources:
-              - serviceAccountToken:
-                  path: token
-                  audience: nico-rest-cert-manager
-                  expirationSeconds: 3600
+        - name: credsmgr-client
+          secret:
+            secretName: {{ .Values.clientCertificate.secretName }}
         - name: tls-certs
           secret:
             secretName: {{ .Values.certificate.secretName }}
