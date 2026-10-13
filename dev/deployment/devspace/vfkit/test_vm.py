@@ -83,6 +83,16 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.machine.config["disk_gib"], 200)
         self.assertIsNone(self.machine.config["data_dir"])
 
+    def test_devspace_command_enables_nested_virtualization(self):
+        self.machine.create(self.args())
+        for network in ("nat", "bridged"):
+            with self.subTest(network=network), \
+                    patch.object(vm.lab_manager, "vmnet_run", return_value="/helper"):
+                self.machine.config.update(network=network, interface="en0")
+                command = self.machine.command()
+                self.assertEqual(command.count("--nested"), 1)
+                self.assertGreater(command.index("--nested"), command.index("vfkit"))
+
     def test_lab_configuration_survives_restart_and_rejects_drift(self):
         self.machine.create(self.args("--network", "lab", "--lab-id", "12",
                                      "--lab-uplink", "bridged", "--lab-interface", "en0",
