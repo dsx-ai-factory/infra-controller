@@ -1386,7 +1386,9 @@ impl ForgeHttpConnector {
                     preferred.restart();
                     alternate.restart();
                     alternate_started = false;
-                    alternate_delay.as_mut().reset(TokioInstant::now() + delay);
+                    // Match the first attempt: `tokio::time::sleep` handles
+                    // overflow, while adding the delay directly can panic.
+                    alternate_delay.set(tokio::time::sleep(delay));
                 }
             }
         }
@@ -2720,27 +2722,50 @@ mod tests {
 
     /// A refused SOCKS attempt recovers on its IPv4 retry schedule. An empty or
     /// failed AAAA response during backoff must not restart that interval.
+    /// An overflowing delay must not become a short delay on retry, and IPv4
+    /// exhaustion must still admit IPv6 immediately.
     #[tokio::test(start_paused = true)]
     async fn ipv4_retries_keep_their_schedule_during_dns() {
-        for (scenario, racing, mixed_primary, dns_result) in [
-            ("sequential with pending AAAA", false, false, None),
-            ("Happy Eyeballs with pending AAAA", true, false, None),
+        enum RetryConnection {
+            Ipv4,
+            DelayedIpv6,
+            Ipv6AfterIpv4Failure,
+        }
+        for (scenario, delay, retry_connection, dns_result) in [
+            (
+                "sequential with pending AAAA",
+                None,
+                RetryConnection::Ipv4,
+                None,
+            ),
+            (
+                "Happy Eyeballs with pending AAAA",
+                Some(Duration::from_secs(1)),
+                RetryConnection::Ipv4,
+                None,
+            ),
             (
                 "Happy Eyeballs resets the mixed-answer retry delay",
-                true,
-                true,
+                Some(Duration::from_secs(1)),
+                RetryConnection::DelayedIpv6,
+                None,
+            ),
+            (
+                "overflow delay retry admits IPv6 after IPv4 exhaustion",
+                Some(Duration::MAX),
+                RetryConnection::Ipv6AfterIpv4Failure,
                 None,
             ),
             (
                 "sequential with empty AAAA during backoff",
-                false,
-                false,
+                None,
+                RetryConnection::Ipv4,
                 Some(Ok(Vec::new().into())),
             ),
             (
                 "Happy Eyeballs with failed AAAA during backoff",
-                true,
-                false,
+                Some(Duration::from_secs(1)),
+                RetryConnection::Ipv4,
                 Some(Err(hickory_resolver::net::NetError::from(
                     "AAAA lookup failed",
                 ))),
@@ -2752,6 +2777,7 @@ mod tests {
             let proxy_addr = proxy.local_addr().expect("SOCKS fixture address");
             let ipv4 = "192.0.2.1:443".parse().expect("IPv4 fixture");
             let ipv6 = "[2001:db8::1]:443".parse().expect("IPv6 fixture");
+            let mixed_primary = !matches!(retry_connection, RetryConnection::Ipv4);
             let primary = if mixed_primary {
                 vec![ipv4, ipv6]
             } else {
@@ -2771,14 +2797,9 @@ mod tests {
                 Box::pin(PendingLookup(Arc::clone(&lookup)))
             };
             let mut connection = Box::pin(async {
-                if racing {
+                if let Some(delay) = delay {
                     connector
-                        .connect_resolving_racing(
-                            primary.clone().into(),
-                            fallback,
-                            443,
-                            Duration::from_secs(1),
-                        )
+                        .connect_resolving_racing(primary.clone().into(), fallback, 443, delay)
                         .await
                 } else {
                     connector
@@ -2830,15 +2851,38 @@ mod tests {
                     "{scenario}: AAAA still pending"
                 );
             }
-            let completed_at = failed_at + Duration::from_secs(if mixed_primary { 4 } else { 3 });
+            let retry_ipv4_fails =
+                matches!(retry_connection, RetryConnection::Ipv6AfterIpv4Failure);
+            let completed_at = failed_at
+                + Duration::from_secs(3)
+                + match retry_connection {
+                    RetryConnection::Ipv4 => Duration::ZERO,
+                    RetryConnection::DelayedIpv6 => Duration::from_secs(1),
+                    RetryConnection::Ipv6AfterIpv4Failure => Duration::from_secs(60),
+                };
             if mixed_primary {
-                advance_to(completed_at - Duration::from_millis(1)).await;
-                assert!(
-                    futures_util::poll!(&mut connection).is_pending(),
-                    "{scenario}"
-                );
-                assert_no_queued_connection(&proxy).await;
-                advance_to(completed_at).await;
+                if retry_ipv4_fails {
+                    // Wait past the finite delay and retry interval so a short
+                    // overflow fallback cannot pass by admitting IPv6 early.
+                    advance_to(completed_at).await;
+                    assert!(
+                        futures_util::poll!(&mut connection).is_pending(),
+                        "{scenario}"
+                    );
+                    assert_no_queued_connection(&proxy).await;
+                    // IPv4 exhaustion must bypass the remaining delay.
+                    await_io(second.write_all(&[5, 5, 0, 1, 127, 0, 0, 1, 0, 1]))
+                        .await
+                        .expect("refuse retried IPv4");
+                } else {
+                    advance_to(completed_at - Duration::from_millis(1)).await;
+                    assert!(
+                        futures_util::poll!(&mut connection).is_pending(),
+                        "{scenario}"
+                    );
+                    assert_no_queued_connection(&proxy).await;
+                    advance_to(completed_at).await;
+                }
                 let mut alternate =
                     while_connecting(connection.as_mut(), accept_socks_target(&proxy, ipv6)).await;
                 accept_socks_connection(&mut alternate).await;
@@ -2857,14 +2901,17 @@ mod tests {
             assert_eq!(completed.retries_used, 1, "{scenario}");
             assert_eq!(TokioInstant::now(), completed_at, "{scenario}");
             assert_eq!(completed.addrs.collect::<Vec<_>>(), primary, "{scenario}");
+            let expected_errors = initial_errors + u32::from(retry_ipv4_fails);
             assert_eq!(
                 metrics.get_total_attempts(),
-                initial_errors + 1,
+                expected_errors + 1,
                 "{scenario}"
             );
-            assert_eq!(metrics.get_total_errors(), initial_errors, "{scenario}");
+            assert_eq!(metrics.get_total_errors(), expected_errors, "{scenario}");
             assert_eq!(metrics.get_total_successes(), 1, "{scenario}");
-            if mixed_primary {
+            // A refused retry is counted above; only the still-live losing
+            // attempt needs this cancellation check.
+            if matches!(retry_connection, RetryConnection::DelayedIpv6) {
                 assert_eq!(
                     await_io(second.read(&mut [0]))
                         .await
