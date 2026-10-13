@@ -341,7 +341,7 @@ class VM:
 
     def command(self):
         config = self.config
-        command = ["vfkit", "--cpus", str(config["cpus"]),
+        command = ["vfkit", "--nested", "--cpus", str(config["cpus"]),
                    "--memory", str(config["memory_gib"] * 1024),
                    "--bootloader", f"efi,variable-store={self.directory}/efi-store,create",
                    "--device", f"virtio-blk,path={self.directory}/root.raw",
