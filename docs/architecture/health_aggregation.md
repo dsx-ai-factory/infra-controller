@@ -365,7 +365,7 @@ When `health_report.alerts` is present, every JSON object carries the same
 | Field | JSON type | Presence | Value |
 | --------- | --------- | -------- | ----- |
 | `message` | string | Always | Human-readable description of the alert. |
-| `classifications` | array of string | Always | Zero or more of `SensorOk`, `SensorWarning`, `SensorCritical`, `SensorFatal`, `SensorFailure`, `PreventAllocations`, `Leak`, and `LeakDetector`. Refer to [Health alert classifications](health/health_alert_classifications.md) for the classifications NICo interprets. Unlike reports for the NICo API, this array carries only the classifications the collector raised, without the `Hardware` marker. |
+| `classifications` | array of string | Always | Zero or more of `SensorOk`, `SensorWarning`, `SensorCritical`, `SensorFatal`, `SensorFailure`, `PreventAllocations`, `Leak`, `LeakDetector`, `TrayLeak`, and `RackLeak`. Refer to [Health alert classifications](health/health_alert_classifications.md) for the classifications NICo interprets. Unlike reports for the NICo API, this array carries only the classifications the collector raised, without the `Hardware` marker. |
 
 The two record timestamps are set by different clocks. `time_unix_nano` is never zero: it is the report's own observation time if it is representable as Unix nanoseconds, and otherwise the export time. `observed_time_unix_nano` is always the export time. These keep export order recoverable for reports whose observation time is older or absent.
 

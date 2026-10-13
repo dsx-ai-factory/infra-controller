@@ -79,7 +79,11 @@ impl RackLeakProcessor {
                         "Rack leak detected: {} leaking trays reached threshold {}",
                         leaking_count, self.leaking_tray_threshold,
                     ),
-                    classifications: vec![Classification::Leak],
+                    classifications: vec![
+                        Classification::RackLeak,
+                        Classification::SensorCritical,
+                        Classification::PreventAllocations,
+                    ],
                 }],
             }
         } else {
@@ -216,7 +220,11 @@ mod tests {
                     probe_id: Probe::LeakDetection,
                     target: None,
                     message: "tray leaking".to_string(),
-                    classifications: vec![Classification::Leak],
+                    classifications: vec![
+                        Classification::TrayLeak,
+                        Classification::SensorCritical,
+                        Classification::PreventAllocations,
+                    ],
                 }],
             }
         } else {
@@ -291,7 +299,11 @@ mod tests {
                 probe_id: Probe::LeakDetection,
                 target: None,
                 message: "switch leaking".to_string(),
-                classifications: vec![Classification::Leak],
+                classifications: vec![
+                    Classification::TrayLeak,
+                    Classification::SensorCritical,
+                    Classification::PreventAllocations,
+                ],
             }],
         }));
 
@@ -323,6 +335,14 @@ mod tests {
         assert_eq!(report.target, Some(HealthReportTarget::Rack));
         assert_eq!(report.alerts.len(), 1);
         assert!(report.alerts[0].message.contains("2 leaking trays"));
+        assert_eq!(
+            report.alerts[0].classifications,
+            vec![
+                Classification::RackLeak,
+                Classification::SensorCritical,
+                Classification::PreventAllocations,
+            ]
+        );
     }
 
     #[test]

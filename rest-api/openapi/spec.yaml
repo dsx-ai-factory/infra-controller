@@ -17304,8 +17304,6 @@ paths:
             enum:
               - NAME_ASC
               - NAME_DESC
-              - STATUS_ASC
-              - STATUS_DESC
               - CREATED_ASC
               - CREATED_DESC
               - UPDATED_ASC

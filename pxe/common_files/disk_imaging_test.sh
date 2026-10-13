@@ -44,6 +44,8 @@ assert_eq() {
 	fi
 }
 
+# Verifies authentication config files are owner-only so credentials are not
+# exposed to other local users.
 assert_file_mode_600() {
 	local description=$1
 	local file=$2
@@ -224,6 +226,138 @@ fi
 assert_eq "unknown argument leaves image_url unchanged" "unchanged-url" "$image_url"
 assert_eq "unknown argument leaves image_disk unchanged" "unchanged-disk" "$image_disk"
 
+# Validates the explicit-destination curl contract and creates synthetic output
+# only for a valid invocation so pipeline status masking cannot hide a failure.
+curl() {
+	local destination=
+	local destination_count=0
+	local request=
+	local request_count=0
+
+	# Accept the production command's fixed transport options while rejecting
+	# remote naming, malformed operands, and unrelated arguments.
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--retry)
+				if [ "$#" -lt 2 ]; then
+					return 2
+				fi
+				shift 2
+				continue
+				;;
+			--retry-all-errors|-k|-L)
+				shift
+				continue
+				;;
+			-O|--remote-name)
+				return 2
+				;;
+			--output)
+				if [ "$#" -lt 2 ]; then
+					return 2
+				fi
+				shift
+				destination=$1
+				destination_count=$((destination_count + 1))
+				;;
+			http://*|https://*)
+				request=$1
+				request_count=$((request_count + 1))
+				;;
+			*)
+				return 2
+				;;
+		esac
+		shift
+	done
+
+	if [ "$destination_count" -ne 1 ] || [ "$request_count" -ne 1 ]; then
+		return 2
+	fi
+
+	# Publish captures and output only after the complete invocation validates.
+	printf '%s' "$request" >"$temp_dir/curl-request"
+	printf '%s' "$destination" >"$temp_dir/curl-destination"
+	printf '%s\n' "synthetic image content" >"$destination"
+}
+
+# Exercises production filename selection and download wiring in an isolated
+# directory so the test cannot create image files in the repository.
+run_download_tests() (
+	local -a descriptions=()
+	local -a urls=()
+	local -a initial_files=()
+	local -a expected_files=()
+	local actual_request
+	local actual_destination
+	local index
+	local download_dir="$temp_dir/downloads"
+
+	mkdir "$download_dir"
+	cd "$download_dir" || fail "could not enter temporary download directory"
+
+	# A query-free URL retains the path basename used by existing callers.
+	descriptions+=("query-free URL")
+	urls+=("https://images.example/os/image.qcow2")
+	initial_files+=("")
+	expected_files+=("image.qcow2")
+
+	# A simple query remains part of the request but not the local filename.
+	descriptions+=("simple query")
+	urls+=("https://images.example/os/image.qcow2?token=synthetic")
+	initial_files+=("")
+	expected_files+=("image.qcow2")
+
+	# A slash in the query cannot be interpreted as part of the local path.
+	descriptions+=("slash in query")
+	urls+=("https://images.example/os/image.qcow2?token=segment/part")
+	initial_files+=("")
+	expected_files+=("image.qcow2")
+
+	# A distro-selected name remains authoritative for checksum lookup.
+	descriptions+=("preselected distro filename")
+	urls+=("https://images.example/releases/source.img")
+	initial_files+=("checksum-selected.img")
+	expected_files+=("checksum-selected.img")
+
+	for index in "${!urls[@]}"; do
+		echo "download: ${descriptions[$index]}"
+		file=${initial_files[$index]}
+		rm -f "$temp_dir/curl-request" \
+			"$temp_dir/curl-destination"
+
+		# Invoke the production path that selects the filename and calls curl.
+		curl_url "${urls[$index]}"
+		actual_request=$(<"$temp_dir/curl-request")
+		actual_destination=$(<"$temp_dir/curl-destination")
+
+		# The full request and selected destination must agree with the file
+		# subsequently consumed by checksum verification and conversion.
+		assert_eq \
+			"${descriptions[$index]} selected filename" \
+			"${expected_files[$index]}" \
+			"$file"
+		assert_eq \
+			"${descriptions[$index]} request URL" \
+			"${urls[$index]}" \
+			"$actual_request"
+		assert_eq \
+			"${descriptions[$index]} curl destination" \
+			"$file" \
+			"$actual_destination"
+		if [ ! -f "$file" ]; then
+			fail "${descriptions[$index]} did not create [$file]"
+		fi
+		assert_eq \
+			"${descriptions[$index]} downloaded content" \
+			"synthetic image content" \
+			"$(<"$file")"
+		rm -f "$file"
+	done
+)
+
+run_download_tests || exit $?
+
 echo "image auth header construction"
 image_url="https://images.example/image.qcow2"
 
@@ -315,10 +449,12 @@ echo "curl_url forwards the url and the auth config as separate arguments, never
 # arguments via a file rather than a variable, which would not survive
 # back to this shell.
 mock_curl_args_file="$temp_dir/curl_args"
+# Records curl's argument vector outside the pipeline subshell for assertions.
 curl() {
 	printf '%s\n' "$@" >"$mock_curl_args_file"
 	return 0
 }
+# Reloads the recorded argument vector without changing argument boundaries.
 read_mock_curl_args() {
 	mock_curl_args=()
 	while IFS= read -r line; do
@@ -326,22 +462,45 @@ read_mock_curl_args() {
 	done <"$mock_curl_args_file"
 }
 
+file=
+image_url="https://images.example/image.qcow2"
 image_auth=()
 curl_url "$image_url"
 read_mock_curl_args
-assert_eq "unauthenticated curl arg count" "7" "${#mock_curl_args[@]}"
-assert_eq "unauthenticated curl url is the last argument" "$image_url" "${mock_curl_args[6]}"
+assert_eq "unauthenticated curl arg count" "8" "${#mock_curl_args[@]}"
+assert_eq "unauthenticated curl output flag" "--output" "${mock_curl_args[5]}"
+assert_eq "unauthenticated curl output filename" "$file" "${mock_curl_args[6]}"
+assert_eq "unauthenticated curl url is the last argument" "$image_url" "${mock_curl_args[7]}"
 
+file=
+query_marker="synthetic-query-marker"
+image_url="https://images.example/image.qcow2?token=$query_marker"
 image_auth_token="my-token"
 image_auth_type="Bearer"
 build_image_auth_args
+
+# Exercise the production announcement independently of main so no hardware
+# discovery or imaging can run.
+: >"$log_output"
+announcement_stdout=$(announce_image_download)
+assert_eq "download announcement stdout" "Downloading image" "$announcement_stdout"
+case "$announcement_stdout" in
+	*"$query_marker"*) fail "download announcement exposed the URL query on stdout" ;;
+esac
+if grep -Fq -- "$query_marker" "$log_output"; then
+	fail "download announcement exposed the URL query in the imaging log"
+fi
+
 curl_url "$image_url" "${image_auth[@]}"
 read_mock_curl_args
-assert_eq "authenticated curl arg count" "9" "${#mock_curl_args[@]}"
-assert_eq "authenticated curl auth flag" "-K" "${mock_curl_args[6]}"
+assert_eq "authenticated query selects the path filename" "image.qcow2" "$file"
+assert_eq "authenticated curl arg count" "10" "${#mock_curl_args[@]}"
+assert_eq "authenticated curl auth flag" "-K" "${mock_curl_args[5]}"
 assert_eq "authenticated curl auth value is the header file, not the token" \
-	"$image_auth_header_file" "${mock_curl_args[7]}"
-assert_eq "authenticated curl url is the last argument" "$image_url" "${mock_curl_args[8]}"
+	"$image_auth_header_file" "${mock_curl_args[6]}"
+assert_eq "authenticated curl output flag" "--output" "${mock_curl_args[7]}"
+assert_eq "authenticated curl output filename" "$file" "${mock_curl_args[8]}"
+assert_eq "authenticated curl url preserves the query" "$image_url" "${mock_curl_args[9]}"
 for arg in "${mock_curl_args[@]}"; do
 	case "$arg" in
 		*my-token*) fail "token leaked into curl's argument list: $arg" ;;

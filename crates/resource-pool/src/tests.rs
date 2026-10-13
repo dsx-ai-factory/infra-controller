@@ -18,7 +18,7 @@
 use std::net::Ipv4Addr;
 
 use db::ConditionalWrite;
-use db::resource_pool::{allocate_exact, populate};
+use db::resource_pool::{ResourcePoolAllocationNotOwned, allocate_exact, populate};
 use model::resource_pool::{OwnerType, ResourcePool, ResourcePoolEntryState, ValueType};
 use sqlx::types::Json;
 
@@ -40,7 +40,7 @@ async fn integrated_forwards_pool_values_and_owners_in_the_borrowed_transaction(
     let requested = Ipv4Addr::new(192, 0, 2, 3);
 
     // Both pools have the same existing SQL allocation. Releasing through the
-    // adapter must use the selected pool and leave the other allocation alone.
+    // backend must use the selected pool and leave the other allocation alone.
     let mut txn = database.begin().await?;
     populate(&descriptor, &mut txn, vec![automatic, existing], true).await?;
     populate(&descriptor, &mut txn, vec![requested], false).await?;
@@ -59,8 +59,20 @@ async fn integrated_forwards_pool_values_and_owners_in_the_borrowed_transaction(
 
     let selected_backend = ResourcePoolBackend::Integrated(IntegratedResourcePoolBackend);
     let pool = ResourcePoolWithBackend::new(&descriptor, &selected_backend);
-    let ResourcePoolBackend::Integrated(backend) = pool.backend();
+    let backend = pool.backend();
     let mut txn = database.begin().await?;
+    assert_eq!(
+        backend
+            .release(
+                pool.pool(),
+                &mut txn,
+                existing,
+                OwnerType::Vpc,
+                "existing-owner"
+            )
+            .await?,
+        ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned)
+    );
     assert_eq!(
         backend
             .release(
@@ -150,8 +162,8 @@ async fn integrated_forwards_pool_values_and_owners_in_the_borrowed_transaction(
         ],
     );
 
-    // The caller's rollback must undo every adapter mutation, including the
-    // release of the allocation created through SQL before the adapter existed.
+    // The caller's rollback must undo every backend mutation, including the
+    // release of the allocation created directly through SQL.
     txn.rollback().await?;
     let rows: Vec<Entry> = sqlx::query_as(entries)
         .bind(descriptor.name())
