@@ -4,7 +4,9 @@
 package expectedmachine
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -17,6 +19,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
@@ -64,19 +68,23 @@ func testExpectedMachineInitDB(t *testing.T) *cdb.Session {
 func testExpectedMachineSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create Infrastructure Provider table
 	err := dbSession.DB.ResetModel(context.Background(), (*cdbm.InfrastructureProvider)(nil))
-	assert.Nil(t, err)
+	require.NoError(t, err)
 	// create Site table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Site)(nil))
-	assert.Nil(t, err)
+	require.NoError(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.InstanceType)(nil))
+	require.NoError(t, err)
 	// create SKU table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.SKU)(nil))
-	assert.Nil(t, err)
+	require.NoError(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Machine)(nil))
+	require.NoError(t, err)
 	// create ExpectedMachine table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.ExpectedMachine)(nil))
-	assert.Nil(t, err)
+	require.NoError(t, err)
 	// create User table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.User)(nil))
-	assert.Nil(t, err)
+	require.NoError(t, err)
 }
 
 type testExpectedMachineReconcileContextKey struct{}
@@ -274,6 +282,8 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 		expectedMachineInventory *corev1.ExpectedMachineInventory
 	}
 
+	unsupportedNewID := uuid.New()
+
 	tests := []struct {
 		name                     string
 		fields                   fields
@@ -281,6 +291,9 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 		expectedMachinesToUpdate []*cdbm.ExpectedMachine
 		expectedMachinesToDelete []*cdbm.ExpectedMachine
 		unchangedID              uuid.UUID
+		notCreatedID             uuid.UUID
+		wantWarning              string
+		wantInventoryStatus      string
 		wantErr                  bool
 	}{
 		{
@@ -308,6 +321,7 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 				ctx:    ctx,
 				siteID: uuid.New(),
 				expectedMachineInventory: &corev1.ExpectedMachineInventory{
+					InventoryStatus:  corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
 					ExpectedMachines: []*corev1.ExpectedMachine{},
 				},
 			},
@@ -329,7 +343,57 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 					InventoryStatus:  corev1.InventoryStatus_INVENTORY_STATUS_FAILED,
 				},
 			},
-			wantErr: false,
+			unchangedID: pagedExpectedMachines[7].ID,
+			wantErr:     false,
+			wantWarning: "received failed inventory status from Site Agent, skipping inventory processing",
+		},
+		{
+			name: "test ExpectedMachine inventory processing, unspecified inventory status",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:                      ctx,
+				siteID:                   st.ID,
+				expectedMachineInventory: &corev1.ExpectedMachineInventory{},
+			},
+			unchangedID:         pagedExpectedMachines[7].ID,
+			wantWarning:         "received unsupported inventory status, skipping inventory processing",
+			wantInventoryStatus: "INVENTORY_STATUS_UNSPECIFIED",
+		},
+		{
+			name: "test ExpectedMachine inventory processing, unknown inventory status",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st.ID,
+				expectedMachineInventory: &corev1.ExpectedMachineInventory{
+					InventoryStatus: corev1.InventoryStatus(99),
+					ExpectedMachines: []*corev1.ExpectedMachine{
+						{
+							Id:                       &corev1.UUID{Value: pagedExpectedMachines[7].ID.String()},
+							BmcMacAddress:            "00:11:22:33:66:07",
+							ChassisSerialNumber:      pagedExpectedMachines[7].ChassisSerialNumber,
+							FallbackDpuSerialNumbers: pagedExpectedMachines[7].FallbackDpuSerialNumbers,
+						},
+						{
+							Id:                  &corev1.UUID{Value: unsupportedNewID.String()},
+							BmcMacAddress:       "00:11:22:33:66:FF",
+							ChassisSerialNumber: "SN-UNSUPPORTED",
+						},
+					},
+				},
+			},
+			unchangedID:         pagedExpectedMachines[7].ID,
+			wantWarning:         "received unsupported inventory status, skipping inventory processing",
+			wantInventoryStatus: "99",
+			notCreatedID:        unsupportedNewID,
 		},
 		{
 			name: "test paged ExpectedMachine inventory processing, empty inventory",
@@ -460,8 +524,27 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 				require.False(t, st.IsTimeWithinStaleInventoryThreshold(beforeUnchanged.Updated))
 			}
 
+			var logOutput bytes.Buffer
+			if tt.wantWarning != "" {
+				originalLogger := log.Logger
+				log.Logger = zerolog.New(&logOutput).Level(zerolog.WarnLevel)
+				t.Cleanup(func() { log.Logger = originalLogger })
+			}
+
 			err := mei.UpdateExpectedMachinesInDB(tt.args.ctx, tt.args.siteID, tt.args.expectedMachineInventory)
 			assert.Equal(t, tt.wantErr, err != nil)
+
+			if tt.wantWarning != "" {
+				var warning map[string]any
+				require.NoError(t, json.Unmarshal(logOutput.Bytes(), &warning))
+				assert.Equal(t, "warn", warning["level"])
+				assert.Equal(t, tt.wantWarning, warning["message"])
+				assert.Equal(t, "UpdateExpectedMachinesInDB", warning["Activity"])
+				assert.Equal(t, tt.args.siteID.String(), warning["Site ID"])
+				if tt.wantInventoryStatus != "" {
+					assert.Equal(t, tt.wantInventoryStatus, warning["inventory_status"])
+				}
+			}
 
 			if tt.wantErr {
 				return
@@ -479,10 +562,14 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 				machinesByID[allMachines[i].ID] = &allMachines[i]
 			}
 
+			if tt.notCreatedID != uuid.Nil {
+				assert.NotContains(t, machinesByID, tt.notCreatedID)
+			}
+
 			if beforeUnchanged != nil {
 				unchanged := machinesByID[beforeUnchanged.ID]
 				require.NotNil(t, unchanged)
-				assert.Equal(t, beforeUnchanged.Updated, unchanged.Updated, "absent labels must not refresh Updated on the first reconciliation")
+				assert.Equal(t, beforeUnchanged, unchanged, "stored row must keep every field, including Updated")
 			}
 
 			for _, em := range tt.expectedMachinesToUpdate {
