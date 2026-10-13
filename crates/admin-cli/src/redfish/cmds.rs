@@ -110,9 +110,7 @@ pub(crate) async fn action(action: RedfishAction) -> color_eyre::Result<()> {
                     &bios_profiles,
                     selected_profile,
                     &HashMap::default(),
-                    // The manual CLI does not resolve host DPU policy; leave the
-                    // onboard NIC untouched here.
-                    false,
+                    machine_setup_args.disable_onboard_nic,
                 )
                 .await?;
         }
@@ -126,9 +124,12 @@ pub(crate) async fn action(action: RedfishAction) -> color_eyre::Result<()> {
                 .map(libredfish::BootInterfaceRef::Mac);
             println!(
                 "{}",
-                // The manual CLI does not resolve host DPU policy, so it does
-                // not report onboard-NIC drift here.
-                redfish.machine_setup_status(boot_interface, false).await?
+                redfish
+                    .machine_setup_status(
+                        boot_interface,
+                        machine_setup_status_args.disable_onboard_nic
+                    )
+                    .await?
             );
         }
         SetForgePasswordPolicy => {

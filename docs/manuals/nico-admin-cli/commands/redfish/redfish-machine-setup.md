@@ -10,8 +10,8 @@ nico-admin-cli-redfish-machine-setup - Setup host for use
 
 ```text
 nico-admin-cli redfish machine-setup [--boot-interface-mac]
-[--bios-profiles] [--selected-profile] [--extended]
-[--sort-by] [-h|--help]
+[--bios-profiles] [--selected-profile] [--disable-onboard-nic]
+[--extended] [--sort-by] [-h|--help]
 ```
 
 ## DESCRIPTION
@@ -37,6 +37,13 @@ BIOS profile to use
 > - performance
 >
 > - power-efficiency
+
+`--disable-onboard-nic`
+
+Disable the hosts onboard management NIC (e.g. VR72). Use for
+managed-DPU hosts, where the onboard NIC conflicts with the DPU NIC and
+bypasses tenant isolation; leave off for zero-DPU hosts that use the
+onboard NIC as their data path
 
 `--extended`
 
@@ -64,6 +71,10 @@ Print help (see a summary with -h)
 
 ```sh
 nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypassword machine-setup --boot-interface-mac 00:11:22:33:44:55
+```
+
+```sh
+nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypassword machine-setup --boot-interface-mac 00:11:22:33:44:55 --disable-onboard-nic
 ```
 
 ---
