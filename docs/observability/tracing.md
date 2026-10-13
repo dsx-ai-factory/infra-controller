@@ -231,7 +231,7 @@ routes. It uses the shared setup in `carbide_instrument::otlp_tracing`, enabled 
 
 ### nico-dhcp tracing
 
-DHCP is served by two separate programs, and both use the shared setup in
+Two separate programs serve DHCP, and both use the shared setup in
 `carbide_instrument::otlp_tracing` with the same variables as nico-pxe.
 
 - **The Kea hook** (`crates/dhcp`, built as `libdhcp.so`) runs inside the `kea-dhcp4` and
