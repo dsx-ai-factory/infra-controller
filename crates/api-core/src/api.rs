@@ -36,6 +36,7 @@ use carbide_machine_controller::io::MachineStateControllerIO;
 use carbide_rack::bms_client::BmsDsxExchangeHandle;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
+use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::SecretsError;
 use carbide_secrets::certificates::CertificateProvider;
 use carbide_secrets::credentials::{
@@ -86,6 +87,8 @@ pub struct Api {
     pub(crate) bmc_session_manager: Arc<crate::credentials::BmcSessionManager>,
     pub(crate) eth_data: EthVirtData,
     pub(crate) common_pools: Arc<CommonPools>,
+    /// Pool backends resolved at startup; runtime lookups also see later growth.
+    pub(crate) resource_pool_registry: ResourcePoolRegistry,
     pub(crate) ib_fabric_manager: Arc<dyn IBFabricManager>,
     // `pub` (not `pub(crate)`): read by the `carbide-api-web` admin UI for config-derived display.
     pub runtime_config: Arc<CarbideConfig>,

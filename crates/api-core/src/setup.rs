@@ -716,6 +716,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     let api_service = Arc::new(Api {
         certificate_provider,
         common_pools,
+        resource_pool_registry: registry,
         credential_manager,
         node_jwt_validator,
         database_connection: db_pool.clone(),
@@ -1745,6 +1746,7 @@ async fn initialize_and_start_controllers<'a>(
                 db_pool,
                 &seed_data.initial_vpcs,
                 common_pools.ethernet.pool_vpc_vni.as_ref(),
+                &api_service.resource_pool_registry,
             )
             .await?;
         }
