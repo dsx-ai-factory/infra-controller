@@ -5,10 +5,14 @@ package matclient
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
-	"net/http/httptest"
 	"strings"
+	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -190,6 +194,71 @@ func TestClient_GetMachinesStatus_InvalidBodies(t *testing.T) {
 func ptr[T any](v T) *T {
 	return &v
 }
+
+func TestNewClient_WithRootCA(t *testing.T) {
+	// Start a TLS test server with a self-signed certificate.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	// Extract the server's self-signed CA cert.
+	certPEM := server.TLS.Certificates[0].Certificate[0]
+	cert, err := x509.ParseCertificate(certPEM)
+	require.NoError(t, err)
+
+	// Write the CA cert to a temp file using encoding/pem.
+	caFile, err := os.CreateTemp(t.TempDir(), "ca-*.crt")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(caFile.Name(),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certPEM}), 0o600))
+
+	t.Run("rejects server cert without CA", func(t *testing.T) {
+		// Default client uses the system pool, which won't trust the test cert.
+		client, err := NewClient(server.URL)
+		require.NoError(t, err)
+		defer client.Close()
+		_, err = client.GetMachinesStatus(context.Background())
+		require.Error(t, err, "should reject self-signed cert without custom CA")
+	})
+
+	t.Run("accepts server cert with matching CA", func(t *testing.T) {
+		client, err := NewClient(server.URL, WithRootCA(caFile.Name()))
+		require.NoError(t, err)
+		defer client.Close()
+
+		// Verify the CA pool is set on the transport.
+		transport, ok := client.httpClient.Transport.(*http.Transport)
+		require.True(t, ok)
+		require.NotNil(t, transport.TLSClientConfig)
+		require.NotNil(t, transport.TLSClientConfig.RootCAs)
+		assert.True(t, transport.TLSClientConfig.RootCAs.Equal(func() *x509.CertPool {
+			p := x509.NewCertPool()
+			p.AddCert(cert)
+			return p
+		}()))
+	})
+
+	t.Run("rejects missing CA file", func(t *testing.T) {
+		_, err := NewClient(server.URL, WithRootCA("/nonexistent/ca.crt"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "loading root CA")
+	})
+
+	t.Run("rejects non-PEM CA file", func(t *testing.T) {
+		bad, err := os.CreateTemp(t.TempDir(), "bad-*.crt")
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(bad.Name(), []byte("not a cert"), 0o600))
+		_, err = NewClient(server.URL, WithRootCA(bad.Name()))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no valid PEM certificates")
+	})
+
+	_ = cert // used above via AddCert
+}
+
+// Ensure tls is used (for the TLS server setup in TestNewClient_WithRootCA).
+var _ = tls.Certificate{}
 
 func TestClient_Close(t *testing.T) {
 	client, err := NewClient("https://example.com")
