@@ -89,18 +89,27 @@ async fn host_init_reboots_while_waiting_for_measurements(pool: PgPool) {
         .build()
         .await;
     let host = setup_waiting_host(&env, Duration::minutes(10)).await;
-    let updated = sqlx::query(
-        "UPDATE ek_cert_verification_status SET signing_ca_found = TRUE WHERE machine_id = $1",
+    let mut txn = env
+        .test_harness
+        .api()
+        .database_connection
+        .begin()
+        .await
+        .unwrap();
+    db::attestation::ek_cert_verification_status::insert(
+        txn.as_mut(),
+        b"test-ek-sha256",
+        "test-serial",
+        true,
+        None,
+        b"test-issuer",
+        "test-issuer-access-info",
+        host.host.id,
     )
-    .bind(host.host.id)
-    .execute(&env.test_harness.api().database_connection)
     .await
-    .unwrap();
-    assert_eq!(
-        updated.rows_affected(),
-        1,
-        "fixture should create EK status"
-    );
+    .unwrap()
+    .expect("verified EK status should be inserted");
+    txn.commit().await.unwrap();
     let timepoint = env.redfish_sim.timepoint();
 
     env.run_single_iteration().await;
@@ -132,11 +141,6 @@ async fn missing_ek_status_cannot_bypass_measurement_timeout(pool: PgPool) {
         .build()
         .await;
     let host = setup_waiting_host(&env, Duration::minutes(10)).await;
-    sqlx::query("DELETE FROM ek_cert_verification_status WHERE machine_id = $1")
-        .bind(host.host.id)
-        .execute(&env.test_harness.api().database_connection)
-        .await
-        .unwrap();
     let timepoint = env.redfish_sim.timepoint();
 
     env.run_single_iteration().await;
