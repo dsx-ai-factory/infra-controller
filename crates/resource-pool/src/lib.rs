@@ -20,8 +20,8 @@
 //! [`ResourcePoolRegistry`] saves and checks each pool's backend selection.
 //! [`ResourcePoolWithBackend`] borrows a descriptor and its selected backend.
 //! This association does not resolve configuration or persist which backend is
-//! authoritative for allocations. Callers match the backend before supplying
-//! the execution context its adapter requires.
+//! authoritative for allocations. Callers allocate and release values through
+//! [`ResourcePoolBackend`].
 
 #![cfg_attr(test, allow(txn_held_across_await, txn_without_commit))]
 
@@ -44,8 +44,10 @@ use sqlx::PgConnection;
 
 /// `ResourcePoolBackend` selects how a pool performs allocation and release.
 ///
-/// Matching the execution variant keeps Integrated's borrowed transaction
-/// explicit at the caller.
+/// Integrated uses a connection from the caller's transaction; the caller owns
+/// commit or rollback. It forwards to the SQL allocator without acquiring
+/// connections or committing independently. Existing allocations need no
+/// conversion to be used or released through the Integrated backend.
 #[derive(Clone)]
 pub enum ResourcePoolBackend {
     /// Use the existing SQL allocator in the caller's entity transaction.
@@ -56,12 +58,10 @@ pub enum ResourcePoolBackend {
 ///
 /// Both values remain owned by the caller. The association lasts for the borrow;
 /// constructing it performs no I/O and does not establish a durable backend
-/// binding. Allocation and release methods belong to the selected adapter, so
-/// Integrated's SQL connection requirement stays specific to that backend.
+/// binding. Allocation and release methods belong to [`ResourcePoolBackend`].
 ///
 /// Each pool can select a separate backend instance. The pools must already be
-/// populated in SQL; the caller supplies a transaction after matching the
-/// selected variant:
+/// populated in SQL; the caller supplies a transaction to the selected backend:
 ///
 /// ```rust,no_run
 /// use std::net::Ipv4Addr;
@@ -82,26 +82,20 @@ pub enum ResourcePoolBackend {
 ///     let loopback = ResourcePoolWithBackend::new(&loopback, &machine_backend);
 ///     let vni = ResourcePoolWithBackend::new(&vni, &network_backend);
 ///
-///     let address = match loopback.backend() {
-///         ResourcePoolBackend::Integrated(backend) => {
-///             backend
-///                 .allocate(loopback.pool(), txn, OwnerType::Machine, "machine-1", None)
-///                 .await?
-///         }
-///     };
-///     let vni = match vni.backend() {
-///         ResourcePoolBackend::Integrated(backend) => {
-///             backend
-///                 .allocate(
-///                     vni.pool(),
-///                     txn,
-///                     OwnerType::NetworkSegment,
-///                     "segment-1",
-///                     Some(42),
-///                 )
-///                 .await?
-///         }
-///     };
+///     let address = loopback
+///         .backend()
+///         .allocate(loopback.pool(), txn, OwnerType::Machine, "machine-1", None)
+///         .await?;
+///     let vni = vni
+///         .backend()
+///         .allocate(
+///             vni.pool(),
+///             txn,
+///             OwnerType::NetworkSegment,
+///             "segment-1",
+///             Some(42),
+///         )
+///         .await?;
 ///     Ok((address, vni))
 /// }
 /// ```
@@ -129,28 +123,27 @@ where
         self.pool
     }
 
-    /// `backend` returns the selected backend for matching before execution.
+    /// `backend` returns the selected backend for allocation and release.
     pub fn backend(&self) -> &'a ResourcePoolBackend {
         self.backend
     }
 }
 
-/// `IntegratedResourcePoolBackend` forwards mutations to the existing SQL allocator.
+/// `IntegratedResourcePoolBackend` represents the SQL allocator in
+/// [`ResourcePoolBackend::Integrated`].
 ///
-/// The caller supplies a connection from its transaction and owns commit or
-/// rollback. The adapter does not acquire connections or commit independently;
-/// existing allocations need no conversion to be used or released through it.
-/// The adapter is stateless; the supplied connection determines the database.
+/// It is stateless; the connection supplied to [`ResourcePoolBackend`] methods
+/// determines the database.
 #[derive(Clone)]
 pub struct IntegratedResourcePoolBackend;
 
-impl IntegratedResourcePoolBackend {
+impl ResourcePoolBackend {
     /// `allocate` reserves a value and returns it as the pool's Rust type.
     ///
     /// `None` selects from free automatic entries. `Some(value)` requests that
     /// value from the manual partition. Exhaustion, unavailable requested values,
     /// database failures, and value-conversion errors retain the SQL allocator's
-    /// error types and precedence. Success performs the same single SQL query.
+    /// error types and precedence. Integrated performs one SQL query on success.
     pub async fn allocate<T>(
         &self,
         pool: &ResourcePool<T>,
@@ -163,7 +156,11 @@ impl IntegratedResourcePoolBackend {
         T: ToString + FromStr + Send + Sync + 'static,
         <T as FromStr>::Err: std::error::Error,
     {
-        db::resource_pool::allocate(pool, txn, owner_type, owner_id, requested_value).await
+        match self {
+            Self::Integrated(_) => {
+                db::resource_pool::allocate(pool, txn, owner_type, owner_id, requested_value).await
+            }
+        }
     }
 
     /// `allocate_exact` reserves the requested value from either assignment partition.
@@ -183,7 +180,12 @@ impl IntegratedResourcePoolBackend {
         T: ToString + FromStr + Send + Sync + 'static,
         <T as FromStr>::Err: std::error::Error,
     {
-        db::resource_pool::allocate_exact(pool, txn, owner_type, owner_id, requested_value).await
+        match self {
+            Self::Integrated(_) => {
+                db::resource_pool::allocate_exact(pool, txn, owner_type, owner_id, requested_value)
+                    .await
+            }
+        }
     }
 
     /// `release` frees a value only when its owner type and ID match.
@@ -204,6 +206,10 @@ impl IntegratedResourcePoolBackend {
         T: ToString + FromStr + Send + Sync + 'static,
         <T as FromStr>::Err: std::error::Error,
     {
-        db::resource_pool::release(pool, txn, value, owner_type, owner_id).await
+        match self {
+            Self::Integrated(_) => {
+                db::resource_pool::release(pool, txn, value, owner_type, owner_id).await
+            }
+        }
     }
 }

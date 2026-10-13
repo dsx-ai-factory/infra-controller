@@ -19,7 +19,7 @@ use ::rpc::forge as rpc;
 use ::rpc::network::vpc_virtualization_type_try_from_rpc;
 use carbide_network::virtualization::{DEFAULT_NETWORK_VIRTUALIZATION_TYPE, VpcVirtualizationType};
 use carbide_resource_pool::{
-    ResourcePoolBackend, ResourcePoolRegistry, ResourcePoolRegistryError, ResourcePoolWithBackend,
+    ResourcePoolRegistry, ResourcePoolRegistryError, ResourcePoolWithBackend,
 };
 use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use carbide_uuid::vpc::VpcId;
@@ -751,19 +751,16 @@ async fn release_inactive_vpc_vni(
     let selected_pool = ResourcePoolWithBackend::new(inactive_pool, backend.as_ref());
     // The ownership lookup holds this allocation's row lock through commit,
     // so this release must apply. Treat a rejection as an invariant failure.
-    let released = match selected_pool.backend() {
-        ResourcePoolBackend::Integrated(integrated) => {
-            integrated
-                .release(
-                    selected_pool.pool(),
-                    txn,
-                    inactive_vni,
-                    resource_pool::OwnerType::Vpc,
-                    &vpc.id.to_string(),
-                )
-                .await?
-        }
-    };
+    let released = selected_pool
+        .backend()
+        .release(
+            selected_pool.pool(),
+            txn,
+            inactive_vni,
+            resource_pool::OwnerType::Vpc,
+            &vpc.id.to_string(),
+        )
+        .await?;
     match released {
         ConditionalWrite::Applied(()) => {}
         ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
@@ -1069,19 +1066,16 @@ pub(crate) async fn delete(
             })?;
         let selected_pool = ResourcePoolWithBackend::new(pool, backend.as_ref());
         // The ownership lookup above keeps the allocation locked until commit.
-        let released = match selected_pool.backend() {
-            ResourcePoolBackend::Integrated(integrated) => {
-                integrated
-                    .release(
-                        selected_pool.pool(),
-                        &mut txn,
-                        vni,
-                        resource_pool::OwnerType::Vpc,
-                        &owner_id,
-                    )
-                    .await?
-            }
-        };
+        let released = selected_pool
+            .backend()
+            .release(
+                selected_pool.pool(),
+                &mut txn,
+                vni,
+                resource_pool::OwnerType::Vpc,
+                &owner_id,
+            )
+            .await?;
         match released {
             ConditionalWrite::Applied(()) => {}
             ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
@@ -1263,19 +1257,16 @@ async fn allocate_vpc_vni(
     {
         Ok(Some(backend)) => {
             let selected_pool = ResourcePoolWithBackend::new(source_pool, backend.as_ref());
-            match selected_pool.backend() {
-                ResourcePoolBackend::Integrated(integrated) => {
-                    integrated
-                        .allocate(
-                            selected_pool.pool(),
-                            txn,
-                            resource_pool::OwnerType::Vpc,
-                            owner_id,
-                            requested_vni,
-                        )
-                        .await
-                }
-            }
+            selected_pool
+                .backend()
+                .allocate(
+                    selected_pool.pool(),
+                    txn,
+                    resource_pool::OwnerType::Vpc,
+                    owner_id,
+                    requested_vni,
+                )
+                .await
         }
         // The optional external pool may have neither a binding nor SQL values.
         // Keep its existing exhaustion error and allocation-failure metric.
@@ -1356,19 +1347,16 @@ async fn allocate_exact_vpc_vni(
     let allocation = match registry.get_or_load_backend(txn, pool.name()).await {
         Ok(Some(backend)) => {
             let selected_pool = ResourcePoolWithBackend::new(pool, backend.as_ref());
-            match selected_pool.backend() {
-                ResourcePoolBackend::Integrated(integrated) => {
-                    integrated
-                        .allocate_exact(
-                            selected_pool.pool(),
-                            txn,
-                            resource_pool::OwnerType::Vpc,
-                            owner_id,
-                            vni,
-                        )
-                        .await
-                }
-            }
+            selected_pool
+                .backend()
+                .allocate_exact(
+                    selected_pool.pool(),
+                    txn,
+                    resource_pool::OwnerType::Vpc,
+                    owner_id,
+                    vni,
+                )
+                .await
         }
         Ok(None) => {
             return Err(CarbideError::FailedPrecondition(format!(
