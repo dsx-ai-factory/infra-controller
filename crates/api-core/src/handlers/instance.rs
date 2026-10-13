@@ -1415,6 +1415,7 @@ pub(crate) async fn update_instance_config(
     };
     let vf_inventory_source = instance_vf_inventory_source(
         &mh_snapshot,
+        &api.runtime_config,
         expected_machine_declares_cx9(expected_machine.as_ref()),
     );
     // This first snapshot establishes the request's comparison baseline.

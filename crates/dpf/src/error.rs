@@ -37,6 +37,16 @@ pub enum DpfError {
     #[error("invalid state: {0}")]
     InvalidState(String),
 
+    /// A DPUServiceInterface migration failed with retry context while retaining its repository cause.
+    #[error("{context}: {source}")]
+    MigrationFailed {
+        /// Description of the failed migration and its safe retry action.
+        context: String,
+        /// Repository failure that interrupted the migration.
+        #[source]
+        source: Box<DpfError>,
+    },
+
     /// The current site-wide BMC credential is absent from its authoritative
     /// source. DPF leaves any derived Secret unchanged until the source
     /// supplies a value or coordinated per-device fencing can remove it.
