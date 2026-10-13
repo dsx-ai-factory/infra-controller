@@ -26513,7 +26513,8 @@ components:
             When true, request that the selected component backend override
             firmware version-based checks when deciding whether to apply the
             update. This permits same-version reapplication and downgrade when
-            supported. It does not bypass readiness checks or state-controller
+            supported. The opt-in `nicolegacy` compute manager rejects this
+            option. It does not bypass readiness checks or state-controller
             routing.
         overrideReadinessCheck:
           type: boolean
@@ -26572,7 +26573,8 @@ components:
             When true, request that the selected component backend override
             firmware version-based checks when deciding whether to apply the
             update. This permits same-version reapplication and downgrade when
-            supported. It does not bypass readiness checks or state-controller
+            supported. The opt-in `nicolegacy` compute manager rejects this
+            option. It does not bypass readiness checks or state-controller
             routing.
         overrideReadinessCheck:
           type: boolean
@@ -26758,7 +26760,8 @@ components:
             When true, request that the selected component backend override
             firmware version-based checks when deciding whether to apply the
             update. This permits same-version reapplication and downgrade when
-            supported. It does not bypass readiness checks or state-controller
+            supported. The opt-in `nicolegacy` compute manager rejects this
+            option. It does not bypass readiness checks or state-controller
             routing.
         overrideReadinessCheck:
           type: boolean
@@ -27784,7 +27787,8 @@ components:
             When true, request that the selected component backend override
             firmware version-based checks when deciding whether to apply the
             update. This permits same-version reapplication and downgrade when
-            supported. It does not bypass readiness checks or state-controller
+            supported. The opt-in `nicolegacy` compute manager rejects this
+            option. It does not bypass readiness checks or state-controller
             routing.
         overrideReadinessCheck:
           type: boolean
@@ -28011,8 +28015,8 @@ components:
 
             The default `nico` compute component manager forwards BMC and BIOS
             selections through `UpdateComponentFirmware`. The opt-in
-            `nicolegacy` manager schedules the whole configured host firmware
-            bundle; it does not honor BMC or BIOS sub-target selection.
+            `nicolegacy` manager rejects compute-tray sub-target selection
+            because its firmware API can only schedule the whole bundle.
             Omitted or empty means "update everything in the bundle"
             (the historical default) for compute-tray-internal targets.
             Unknown names are rejected.
@@ -28044,7 +28048,8 @@ components:
             When true, request that the selected component backend override
             firmware version-based checks when deciding whether to apply the
             update. This permits same-version reapplication and downgrade when
-            supported. It does not bypass readiness checks or state-controller
+            supported. The opt-in `nicolegacy` compute manager rejects this
+            option. It does not bypass readiness checks or state-controller
             routing.
         overrideReadinessCheck:
           type: boolean
@@ -28257,8 +28262,8 @@ components:
 
             The default `nico` compute component manager forwards BMC and BIOS
             selections through `UpdateComponentFirmware`. The opt-in
-            `nicolegacy` manager schedules the whole configured host firmware
-            bundle; it does not honor BMC or BIOS sub-target selection.
+            `nicolegacy` manager rejects compute-tray sub-target selection
+            because its firmware API can only schedule the whole bundle.
             Omitted or empty means "update everything in the bundle"
             (the historical default) for compute-tray-internal targets.
             Unknown names are rejected.
@@ -28289,7 +28294,8 @@ components:
             When true, request that the selected component backend override
             firmware version-based checks when deciding whether to apply the
             update. This permits same-version reapplication and downgrade when
-            supported. It does not bypass readiness checks or state-controller
+            supported. The opt-in `nicolegacy` compute manager rejects this
+            option. It does not bypass readiness checks or state-controller
             routing.
         overrideReadinessCheck:
           type: boolean
