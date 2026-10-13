@@ -100,7 +100,7 @@ Common causes:
 | NMX-C connect error | TLS, endpoint, or network issue. |
 | partition cleanup pending | stale binding or delayed fabric observation. |
 | placement failure | topology, domain health, or requested instance shape mismatch. |
-| host not allocatable with an `NvlinkUnhealthy` alert | A GPU was reported unhealthy and its alert has not cleared. Check current GPU health, inventory, and monitor errors; see [NVLink GPU health recovery](../../architecture/health/health_probe_ids.md#nvlinkunhealthy). |
+| host not allocatable with an `NvlinkUnhealthy` alert | A GPU was reported unhealthy and its alert has not cleared. Check current GPU health, inventory, and monitor errors; refer to [NVLink GPU health recovery](../../architecture/health/health_probe_ids.md#nvlinkunhealthy) for more details. |
 
 Compare each alert's `target` GPU UID with the host's `nvlink-info` and current
 NMX-C health. An alert persists while that GPU reports `Unknown`, is absent
