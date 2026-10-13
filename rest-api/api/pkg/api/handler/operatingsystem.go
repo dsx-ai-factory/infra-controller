@@ -889,7 +889,6 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 			sitesByID[site.ID] = site
 		}
 
-		tenantSiteIDs := make(map[uuid.UUID]struct{})
 		if tenant != nil {
 			var terr error
 			tenantSites, _, terr = tsDAO.GetAll(
@@ -907,9 +906,6 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine if Tenant has access to Sites specified in query, DB error", nil)
 			}
 			tenantSitesLoaded = true
-			for _, ts := range tenantSites {
-				tenantSiteIDs[ts.SiteID] = struct{}{}
-			}
 		}
 
 		for _, siteID := range requestedSiteIDs {
@@ -917,8 +913,15 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 			if !ok {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to retrieve Site specified in query", nil)
 			}
-			_, tenantHasAccess := tenantSiteIDs[siteID]
-			tenantHasAccess = tenantHasAccess || slices.Contains(tenantVisibleProviderSiteIDs, siteID)
+			tenantHasAccess := slices.Contains(tenantVisibleProviderSiteIDs, siteID)
+			if !tenantHasAccess && tenant != nil {
+				var aerr error
+				tenantHasAccess, aerr = common.TenantHasSiteAccess(ctx, nil, gash.dbSession, tenant, siteID)
+				if aerr != nil {
+					logger.Error().Err(aerr).Msg("error checking Tenant access to Site specified in query")
+					return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine if Tenant has access to Sites specified in query, DB error", nil)
+				}
+			}
 			providerHasAccess := ip != nil && site.InfrastructureProviderID == ip.ID
 			if !tenantHasAccess && !providerHasAccess {
 				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Caller is not associated with Site specified in query", nil)

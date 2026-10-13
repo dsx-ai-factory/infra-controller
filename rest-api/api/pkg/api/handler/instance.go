@@ -5206,29 +5206,16 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 		}
 	}
 
-	// Check TenantSite entry
-	if len(siteIDs) > 0 {
-		tsDAO := cdbm.NewTenantSiteDAO(gaih.dbSession)
-		_, count, err := tsDAO.GetAll(
-			ctx,
-			nil,
-			cdbm.TenantSiteFilterInput{
-				TenantIDs: []uuid.UUID{tenant.ID},
-				SiteIDs:   siteIDs,
-			},
-			cdbp.PageInput{},
-			nil,
-		)
-		if err != nil {
-			logger.Error().Err(err).Msg("error retrieving TenantSite entry")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant's association with Site", nil)
-		}
-
-		// We've ensured that the set of siteIDs is unique earlier,
-		// so if the counts don't match, then something wasn't found.
-		if count != len(siteIDs) {
+	// Check Tenant access to each Site
+	for _, siteID := range siteIDs {
+		err := common.ValidateTenantSiteAccess(ctx, nil, gaih.dbSession, &tenant, siteID)
+		if errors.Is(err, cdb.ErrDoesNotExist) {
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden,
 				"Tenant is not associated with one or more of the Sites specified in query", nil)
+		}
+		if err != nil {
+			logger.Error().Err(err).Msg("error checking Tenant access to Site")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant's association with Site", nil)
 		}
 	}
 

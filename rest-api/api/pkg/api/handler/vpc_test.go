@@ -2593,6 +2593,18 @@ func TestUpdateVirtualizationVPCHandler_Handle(t *testing.T) {
 	vpcNoNativeNet := testVPCBuildVPC(t, dbSession, "test-vpc-no-native-net", ip, tn, stNoNativeNet, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, map[string]string{"zone": "west-nonative"}, cdbm.VpcStatusReady, tnu)
 	assert.NotNil(t, vpcNoNativeNet)
 
+	// Site where the Tenant is denied without Allocations
+	stDenied := testVPCBuildSite(t, dbSession, ip, "test-site-denied", true, true, cdbm.SiteStatusRegistered, ipu)
+	cdbm.TestBuildTenantSite(t, dbSession, tn, stDenied, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, tnu)
+	vpcDeniedSite := testVPCBuildVPC(t, dbSession, "test-vpc-denied-site", ip, tn, stDenied, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, map[string]string{"zone": "west-denied"}, cdbm.VpcStatusReady, tnu)
+
+	// Privileged Tenant without a Tenant/Site association or Allocations
+	tnOrgPriv := "test-privileged-tenant-org"
+	tnuPriv := testVPCBuildUser(t, dbSession, "test-starfleet-id-3", tnOrgPriv, tnOrgRoles)
+	tnPriv := testVPCBuildTenant(t, dbSession, "test-privileged-tenant", tnOrgPriv, tnuPriv)
+	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tnPriv.ID, tnOrgPriv, cdbm.TenantAccountStatusReady, tnuPriv)
+	vpcPrivileged := testVPCBuildVPC(t, dbSession, "test-vpc-privileged", ip, tnPriv, st, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, map[string]string{"zone": "west-privileged"}, cdbm.VpcStatusReady, tnuPriv)
+
 	e := echo.New()
 	cfg := common.GetTestConfig()
 	tc := &tmocks.Client{}
@@ -2825,6 +2837,44 @@ func TestUpdateVirtualizationVPCHandler_Handle(t *testing.T) {
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
+		},
+		{
+			name: "test VPC virtualization update error, Site denied for Tenant without Allocations",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcVirtualizationUpdateRequest{
+					NetworkVirtualizationType: "FNN",
+				},
+				reqOrg:   tnOrg,
+				reqVPCID: vpcDeniedSite.ID.String(),
+				reqVPC:   vpcDeniedSite,
+				reqUser:  tnu,
+				respCode: http.StatusForbidden,
+			},
+			wantErr: false,
+		},
+		{
+			name: "test VPC virtualization update success, privileged Tenant without Tenant/Site association",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcVirtualizationUpdateRequest{
+					NetworkVirtualizationType: "FNN",
+				},
+				reqOrg:   tnOrgPriv,
+				reqVPCID: vpcPrivileged.ID.String(),
+				reqVPC:   vpcPrivileged,
+				reqUser:  tnuPriv,
+				respCode: http.StatusOK,
+			},
+			wantErr: false,
 		},
 	}
 	for _, tt := range tests {

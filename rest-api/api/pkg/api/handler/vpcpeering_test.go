@@ -527,17 +527,23 @@ func TestGetAllVpcPeeringHandler_Handle(t *testing.T) {
 	tn1 := common.TestBuildTenant(t, dbSession, "tenant-1", tnOrg1, tnu1)
 	common.TestBuildTenantSite(t, dbSession, tn1, st1, tnu1)
 	common.TestBuildTenantSite(t, dbSession, tn1, st2, tnu1)
+	common.TestBuildAllocation(t, dbSession, st1, tn1, "allocation-t1s1", ipu)
+	common.TestBuildAllocation(t, dbSession, st2, tn1, "allocation-t1s2", ipu2)
 
 	tnu2 := common.TestBuildUser(t, dbSession, uuid.New().String(), tnOrg2, tnOrgRoles)
 	tn2 := common.TestBuildTenant(t, dbSession, "tenant-2", tnOrg2, tnu2)
 	common.TestBuildTenantSite(t, dbSession, tn2, st1, tnu2)
 	common.TestBuildTenantSite(t, dbSession, tn2, st2, tnu2)
 	common.TestBuildTenantSite(t, dbSession, tn2, st3, tnu2)
+	common.TestBuildAllocation(t, dbSession, st1, tn2, "allocation-t2s1", ipu)
+	common.TestBuildAllocation(t, dbSession, st2, tn2, "allocation-t2s2", ipu2)
+	common.TestBuildAllocation(t, dbSession, st3, tn2, "allocation-t2s3", ipu2)
 
 	// Tenant for provider+tenant admin user in provider org.
 	// ipu2 is both the provider admin of site 2 and 3, and tenant admin of site 1
 	tnProvider := common.TestBuildTenant(t, dbSession, "tenant-provider", ipOrg2, ipu2)
 	common.TestBuildTenantSite(t, dbSession, tnProvider, st1, ipu2)
+	common.TestBuildAllocation(t, dbSession, st1, tnProvider, "allocation-provider-s1", ipu)
 
 	// VPCs
 	vpc1 := common.TestBuildVPC(t, dbSession, "vpc-1", ip, tn1, st1, nil, nil, nil, cdbm.VpcStatusReady, tnu1)

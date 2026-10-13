@@ -27,7 +27,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
@@ -475,22 +474,11 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 		}
 
 		if !providerSiteAuthorized && tenant != nil {
-			tsDAO := cdbm.NewTenantSiteDAO(gavph.dbSession)
-			tenantSites, _, err := tsDAO.GetAll(
-				ctx,
-				nil,
-				cdbm.TenantSiteFilterInput{
-					TenantIDs: []uuid.UUID{tenant.ID},
-					SiteIDs:   []uuid.UUID{site.ID},
-				},
-				paginator.PageInput{Limit: cutil.GetPtr(1)},
-				nil,
-			)
+			tenantSiteAuthorized, err = common.TenantHasSiteAccess(ctx, nil, gavph.dbSession, tenant, site.ID)
 			if err != nil {
-				logger.Error().Err(err).Msg("error retrieving TenantSite from DB")
+				logger.Error().Err(err).Msg("error checking Tenant access to Site")
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Site access for Tenant, DB error", nil)
 			}
-			tenantSiteAuthorized = len(tenantSites) > 0
 		}
 
 		if !providerSiteAuthorized && !tenantSiteAuthorized {

@@ -1192,8 +1192,7 @@ func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
 	}
 
 	// Ensure that Tenant has access to Site
-	tsDAO := cdbm.NewTenantSiteDAO(uvvh.dbSession)
-	_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, vpc.SiteID, nil)
+	err = common.ValidateTenantSiteAccess(ctx, nil, uvvh.dbSession, tenant, vpc.SiteID)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have access to Site, VPC cannot be updated", nil)
