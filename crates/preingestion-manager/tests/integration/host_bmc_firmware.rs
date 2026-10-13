@@ -36,6 +36,252 @@ use rpc::forge::DhcpDiscovery;
 
 use crate::common;
 
+/// An incomplete report (no version for a component with a minimum, or no host
+/// model) gets exactly one refreshed report before the check decides (#7061).
+#[sqlx_test]
+async fn test_preingestion_defers_once_on_an_incomplete_report(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        Arc::new(RedfishSim::default()),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a7", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let addr = response.address.as_str();
+    let address = IpAddr::from_str(addr)?;
+
+    struct Case {
+        scenario: &'static str,
+        model: Option<&'static str>,
+        /// Keep the report's explicit `model` field while the systems and
+        /// chassis carry none: the lookup resolves the explicit field first,
+        /// so the check must not ask for a refresh that cannot help.
+        explicit_model_only: bool,
+        bmc_version: Option<&'static str>,
+        /// What the refreshed report says (BMC version); None keeps it absent.
+        refreshed_bmc_version: Option<&'static str>,
+        expect_deferral: bool,
+        expect_upgrade: bool,
+    }
+    let cases = [
+        Case {
+            scenario: "explicit model with no firmware definition completes without a refresh",
+            model: None,
+            explicit_model_only: true,
+            bmc_version: Some("4.9"),
+            refreshed_bmc_version: Some("4.9"),
+            expect_deferral: false,
+            expect_upgrade: false,
+        },
+        Case {
+            scenario: "version arrives with the refreshed report and is below the minimum",
+            explicit_model_only: false,
+            expect_deferral: true,
+            model: Some("PowerEdge R750"),
+            bmc_version: None,
+            refreshed_bmc_version: Some("4.9"),
+            expect_upgrade: true,
+        },
+        Case {
+            scenario: "version is a placeholder that cannot be compared, then arrives with the refresh",
+            explicit_model_only: false,
+            expect_deferral: true,
+            model: Some("PowerEdge R750"),
+            bmc_version: Some("N/A"),
+            refreshed_bmc_version: Some("4.9"),
+            expect_upgrade: true,
+        },
+        Case {
+            scenario: "version is still missing after the refresh",
+            explicit_model_only: false,
+            expect_deferral: true,
+            model: Some("PowerEdge R750"),
+            bmc_version: None,
+            refreshed_bmc_version: None,
+            expect_upgrade: false,
+        },
+        Case {
+            scenario: "no host model, before and after the refresh",
+            explicit_model_only: false,
+            expect_deferral: true,
+            model: None,
+            bmc_version: Some("4.9"),
+            refreshed_bmc_version: Some("4.9"),
+            expect_upgrade: false,
+        },
+    ];
+
+    for case in cases {
+        // The helper only builds complete reports: store the incomplete one via try_update.
+        let mut txn = pool.begin().await?;
+        db::explored_endpoints::delete(&mut txn, address).await?;
+        common::insert_endpoint_version(
+            &mut txn,
+            addr,
+            case.bmc_version.unwrap_or("4.9"),
+            "1.13.2",
+            false,
+        )
+        .await?;
+        let inserted = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+            .await?
+            .remove(0);
+        let mut report = inserted.report.clone();
+        if case.model.is_none() {
+            report.systems[0].model = None;
+            report.chassis[0].model = None;
+            report.model = case
+                .explicit_model_only
+                .then(|| "Unlisted Model".to_string());
+        }
+        if case.bmc_version.is_none() {
+            report.service[0].inventories[0].version = None;
+        }
+        assert_eq!(
+            db::explored_endpoints::try_update(
+                address,
+                inserted.report_version,
+                &report,
+                false,
+                &mut txn
+            )
+            .await?,
+            db::ConditionalWrite::Applied(()),
+            "{}",
+            case.scenario
+        );
+        txn.commit().await?;
+
+        // Iteration 1 reaches SetNtpServers; iteration 2 runs the check and must defer.
+        mgr.run_single_iteration().await?;
+        mgr.run_single_iteration().await?;
+
+        let mut txn = pool.begin().await?;
+        let deferred = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+            .await?
+            .remove(0);
+        if !case.expect_deferral {
+            assert_eq!(
+                deferred.preingestion_state,
+                PreingestionState::Complete,
+                "{}: must decide on the first report",
+                case.scenario
+            );
+            assert!(
+                !deferred.waiting_for_explorer_refresh,
+                "{}: must not ask for a refresh",
+                case.scenario
+            );
+            txn.commit().await?;
+            continue;
+        }
+        assert_eq!(
+            deferred.preingestion_state,
+            PreingestionState::FirmwareCheckRefreshWait,
+            "{}: state after deferral",
+            case.scenario
+        );
+        assert!(
+            deferred.waiting_for_explorer_refresh,
+            "{}: must wait for the explorer",
+            case.scenario
+        );
+        assert!(
+            deferred.exploration_requested,
+            "{}: must ask the explorer to probe it next",
+            case.scenario
+        );
+        assert!(
+            db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut())
+                .await?
+                .is_empty(),
+            "{}: a waiting endpoint leaves the work list",
+            case.scenario
+        );
+
+        // The explorer's refreshed report lands, with or without the version.
+        let mut report = deferred.report.clone();
+        report.service[0].inventories[0].version = case.refreshed_bmc_version.map(str::to_string);
+        assert_eq!(
+            db::explored_endpoints::try_update(
+                address,
+                deferred.report_version,
+                &report,
+                false,
+                &mut txn
+            )
+            .await?,
+            db::ConditionalWrite::Applied(()),
+            "{}",
+            case.scenario
+        );
+        txn.commit().await?;
+
+        // Iteration 3 re-runs the check on the refreshed report, from a fresh
+        // manager: the wait lives in the row, not in the process, so a restart
+        // in between must not defer a second time.
+        let restarted = PreingestionManager::new(
+            pool.clone(),
+            config.preingestion_manager(),
+            Arc::new(RedfishSim::default()),
+            env.test_meter.meter(),
+            None,
+            None,
+            None,
+            env.api().work_lock_manager_handle(),
+            config.ntp_servers.clone(),
+        );
+        restarted.run_single_iteration().await?;
+
+        let mut txn = pool.begin().await?;
+        let after = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+            .await?
+            .remove(0);
+        if case.expect_upgrade {
+            assert!(
+                matches!(
+                    after.preingestion_state,
+                    PreingestionState::UpgradeFirmwareWait { .. }
+                ),
+                "{}: expected an upgrade, got {:?}",
+                case.scenario,
+                after.preingestion_state
+            );
+        } else {
+            assert_eq!(
+                after.preingestion_state,
+                PreingestionState::Complete,
+                "{}: a second incomplete report completes as before",
+                case.scenario
+            );
+        }
+        txn.commit().await?;
+    }
+    Ok(())
+}
+
 #[sqlx_test]
 async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let env = TestHarness::builder(pool.clone()).build().await;
