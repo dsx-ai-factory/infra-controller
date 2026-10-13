@@ -48,3 +48,11 @@ not.
 {{- define "nico-rest-cert-manager.image" -}}
 {{ .Values.global.image.repository }}/{{ .Values.image.name }}:{{ .Values.global.image.tag }}
 {{- end }}
+
+{{- define "nico-rest-cert-manager.allowedIdentities" -}}
+{{- if .Values.authorization.allowedIdentities -}}
+{{- toYaml .Values.authorization.allowedIdentities -}}
+{{- else -}}
+{{- toYaml (list (printf "spiffe://%s/%s/sa/nico-rest-site-manager" (default "nico.local" .Values.global.spiffeTrustDomain) .Release.Namespace)) -}}
+{{- end -}}
+{{- end -}}

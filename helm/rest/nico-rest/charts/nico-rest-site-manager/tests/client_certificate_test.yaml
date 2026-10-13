@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Site Manager client identity
+templates:
+  - client-certificate.yaml
+release:
+  namespace: registration
+set:
+  global.certificate.issuerRef:
+    name: nico-rest-ca-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+tests:
+  - it: issues a separate client-only SPIFFE certificate
+    asserts:
+      - equal:
+          path: spec.secretName
+          value: site-manager-client-tls
+      - equal:
+          path: spec.usages
+          value: [client auth]
+      - equal:
+          path: spec.uris
+          value: [spiffe://nico.local/registration/sa/nico-rest-site-manager]
+      - isNull:
+          path: spec.dnsNames
+  - it: uses an existing externally provisioned client secret when disabled
+    set:
+      clientCertificate.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0

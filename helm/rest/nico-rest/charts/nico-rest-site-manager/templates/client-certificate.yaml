@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if .Values.clientCertificate.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.clientCertificate.secretName }}
+  namespace: {{ include "nico-rest-site-manager.namespace" . }}
+spec:
+  secretName: {{ .Values.clientCertificate.secretName }}
+  duration: {{ .Values.clientCertificate.duration }}
+  renewBefore: {{ .Values.clientCertificate.renewBefore }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  usages:
+    - client auth
+  uris:
+    - {{ include "nico-rest-site-manager.clientIdentity" . | quote }}
+  issuerRef:
+    {{- toYaml .Values.global.certificate.issuerRef | nindent 4 }}
+{{- end }}

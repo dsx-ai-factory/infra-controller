@@ -23,7 +23,8 @@ const (
 	// RSAKeySize is the default key size for RSA keys
 	RSAKeySize = 2048
 	// DefaultCATTL is the default TTL for CA certificates (10 years)
-	DefaultCATTL = 10 * 365 * 24 * time.Hour
+	DefaultCATTL      = 10 * 365 * 24 * time.Hour
+	maxCertificateTTL = 365 * 24
 )
 
 // CA represents a Certificate Authority
@@ -61,6 +62,9 @@ func (ca *CA) GetCRL() string {
 // common name, so a server certificate has to list every name its clients
 // dial in extraDNSNames.
 func (ca *CA) IssueCertificate(commonName string, extraDNSNames []string, ttlHours int) (certPEM, keyPEM string, err error) {
+	if ttlHours < 1 || ttlHours > maxCertificateTTL {
+		return "", "", fmt.Errorf("certificate TTL must be between 1 and %d hours", maxCertificateTTL)
+	}
 	ca.mu.RLock()
 	defer ca.mu.RUnlock()
 
