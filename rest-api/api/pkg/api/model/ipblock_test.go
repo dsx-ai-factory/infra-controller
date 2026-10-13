@@ -4,6 +4,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	ipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAPIIPBlockCreateRequest_Validate(t *testing.T) {
@@ -288,6 +290,23 @@ func TestAPIIPBlockNew(t *testing.T) {
 		t.Run(tc.desc, func(t *testing.T) {
 			got := NewAPIIPBlock(tc.dbObj, tc.sdObj, tc.dbUsageObj)
 			assert.Equal(t, tc.apiObj, got)
+		})
+	}
+}
+
+func TestAPIIPBlock_MarshalJSON(t *testing.T) {
+	for _, managed := range []bool{true, false} {
+		t.Run(fmt.Sprintf("managed=%t", managed), func(t *testing.T) {
+			block := &cdbm.IPBlock{Managed: managed}
+			for _, response := range []interface{}{NewAPIIPBlock(block, nil, nil), NewAPIIPBlockSummary(block)} {
+				data, err := json.Marshal(response)
+				require.NoError(t, err)
+				var fields map[string]interface{}
+				require.NoError(t, json.Unmarshal(data, &fields))
+				value, present := fields["managed"]
+				require.True(t, present, "false is a supported value, not an omitted field")
+				require.Equal(t, managed, value)
+			}
 		})
 	}
 }

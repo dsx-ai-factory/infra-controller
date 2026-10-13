@@ -706,7 +706,7 @@ func TestManageSite_MonitorInventoryReceiptForAllSites(t *testing.T) {
 
 			for siteID, wantStatus := range tt.wantStatus {
 				siteDAO := cdbm.NewSiteDAO(dbSession)
-				site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false)
+				site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false, false)
 				assert.NoError(t, err)
 				assert.Equal(t, wantStatus, site.Status)
 			}
@@ -865,7 +865,7 @@ func TestManageSite_CheckOTPExpirationAndRenewForAllSites(t *testing.T) {
 			mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", tt.wantWorkflowStarts)
 
 			for _, id := range siteIDs {
-				site, err := cdbm.NewSiteDAO(dbSession).GetByID(ctx, nil, id, nil, false)
+				site, err := cdbm.NewSiteDAO(dbSession).GetByID(ctx, nil, id, nil, false, false)
 				require.NoError(t, err)
 				assert.Equal(t, cdbm.SiteStatusRegistered, site.Status)
 			}
@@ -970,7 +970,7 @@ func TestManageSite_UpdateAgentCertExpiry_Activity(t *testing.T) {
 
 	// Check initial condition: AgentCertExpiry is nil
 	siteDAO := cdbm.NewSiteDAO(dbSession)
-	existingSite, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false)
+	existingSite, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false, false)
 	assert.NoError(t, err)
 	assert.Nil(t, existingSite.AgentCertExpiry)
 
@@ -980,7 +980,7 @@ func TestManageSite_UpdateAgentCertExpiry_Activity(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Verify AgentCertExpiry is updated
-	updatedSite, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false)
+	updatedSite, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false, false)
 	assert.NoError(t, err)
 	assert.NotNil(t, updatedSite.AgentCertExpiry)
 	assert.True(t, updatedSite.AgentCertExpiry.Equal(newCertExpiry))
@@ -1697,7 +1697,7 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 
 			require.NoError(t, err)
 
-			got, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false)
+			got, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false, false)
 			require.NoError(t, err)
 			if tt.wantVersion == nil {
 				assert.Nil(t, got.SiteControllerVersion)

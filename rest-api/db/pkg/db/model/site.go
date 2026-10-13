@@ -6,7 +6,6 @@ package model
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 
@@ -228,10 +227,8 @@ func (s *Site) BeforeCreateTable(ctx context.Context, query *bun.CreateTableQuer
 
 // SiteDAO is the data access interface for Site
 type SiteDAO interface {
-	// GetByIDForUpdate locks and reloads an active Site in the caller's transaction.
-	GetByIDForUpdate(ctx context.Context, tx *db.Tx, id uuid.UUID) (*Site, error)
 	//
-	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool) (*Site, error)
+	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool, forUpdate bool) (*Site, error)
 	//
 	GetAll(ctx context.Context, tx *db.Tx, filter SiteFilterInput, page paginator.PageInput, includeRelations []string) (sites []Site, total int, err error)
 	// GetCount returns total count of rows for specified filter
@@ -244,24 +241,6 @@ type SiteDAO interface {
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 }
 
-// GetByIDForUpdate prevents inventory from recreating records after Site deletion.
-func (ssd SiteSQLDAO) GetByIDForUpdate(ctx context.Context, tx *db.Tx, id uuid.UUID) (_ *Site, retErr error) {
-	if tx == nil {
-		return nil, fmt.Errorf("%w: locking a Site requires a transaction", db.ErrInvalidValue)
-	}
-	ctx, siteDAOSpan := cotel.StartSpan(ctx, "SiteDAO.GetByIDForUpdate")
-	defer func() { cotel.EndSpan(siteDAOSpan, retErr) }()
-	cotel.SetAttribute(siteDAOSpan, attribute.String("id", id.String()))
-
-	st := &Site{}
-	// Exclude Site deletion while allowing child inserts to check their Site foreign key.
-	err := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(st).Where("st.id = ?", id).For("NO KEY UPDATE").Scan(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, db.ErrDoesNotExist
-	}
-	return st, err
-}
-
 // SiteSQLDAO is the SQL data access object for Site
 type SiteSQLDAO struct {
 	dbSession *db.Session
@@ -269,7 +248,10 @@ type SiteSQLDAO struct {
 }
 
 // GetByID returns a Site by its ID
-func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool) (_ *Site, retErr error) {
+func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool, forUpdate bool) (_ *Site, retErr error) {
+	if forUpdate && tx == nil {
+		return nil, fmt.Errorf("%w: locking a Site requires a transaction", db.ErrInvalidValue)
+	}
 	// Create a child span and set the attributes for current request
 	ctx, stDAOSpan := cotel.StartSpan(ctx, "SiteDAO.GetByID")
 	defer func() { cotel.EndSpan(stDAOSpan, retErr) }()
@@ -278,6 +260,10 @@ func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, incl
 	st := &Site{}
 
 	query := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(st).Where("st.id = ?", id)
+	if forUpdate {
+		// Exclude Site deletion while allowing child inserts to check their Site foreign key.
+		query = query.For("NO KEY UPDATE")
+	}
 	for _, relation := range includeRelations {
 		query = query.Relation(relation)
 	}
@@ -449,7 +435,7 @@ func (ssd SiteSQLDAO) Create(ctx context.Context, tx *db.Tx, input SiteCreateInp
 		return nil, err
 	}
 
-	nst, err := ssd.GetByID(ctx, tx, st.ID, nil, false)
+	nst, err := ssd.GetByID(ctx, tx, st.ID, nil, false, false)
 	if err != nil {
 		return nil, err
 	}
@@ -622,7 +608,7 @@ func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInp
 		}
 	}
 
-	ust, err := ssd.GetByID(ctx, tx, st.ID, nil, false)
+	ust, err := ssd.GetByID(ctx, tx, st.ID, nil, false, false)
 	if err != nil {
 		return nil, err
 	}

@@ -15,8 +15,7 @@ func ipBlockManagedUpMigration(ctx context.Context, db *bun.DB) error {
 	_, err := db.ExecContext(ctx, `
 		ALTER TABLE ip_block ADD COLUMN IF NOT EXISTS managed BOOLEAN NOT NULL DEFAULT TRUE;
 		ALTER TABLE ip_block ALTER COLUMN managed SET DEFAULT TRUE;
-		UPDATE ip_block SET managed = FALSE
-		WHERE tenant_id IS NOT NULL AND site_prefix_id IS NOT NULL;
+		UPDATE ip_block SET managed = FALSE WHERE tenant_id IS NOT NULL AND site_prefix_id IS NOT NULL;
 	`)
 	return err
 }

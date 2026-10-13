@@ -123,7 +123,7 @@ type IPBlock struct {
 	TenantID                 *uuid.UUID              `bun:"tenant_id,type:uuid"`
 	Tenant                   *Tenant                 `bun:"rel:belongs-to,join:tenant_id=id"`
 	SitePrefixID             *uuid.UUID              `bun:"site_prefix_id,type:uuid"`
-	// Managed is true for provider roots and allocated blocks, false for tenant-created blocks.
+	// Managed is true for Site fabric/root/overlay blocks and blocks allocated to Tenants by the Provider, false for blocks created by Tenants.
 	Managed         bool       `bun:"managed,notnull"`
 	RoutingType     string     `bun:"routing_type,notnull"`
 	Prefix          string     `bun:"prefix,notnull"`
@@ -215,6 +215,7 @@ type IPBlockClearInput struct {
 // IPBlockFilterInput input parameters for Filter method
 type IPBlockFilterInput struct {
 	IPBlockIDs                []uuid.UUID
+	SitePrefixIDs             []uuid.UUID
 	Names                     []string
 	SiteIDs                   []uuid.UUID
 	InfrastructureProviderIDs []uuid.UUID
@@ -278,8 +279,6 @@ func (it *IPBlock) BeforeCreateTable(ctx context.Context, query *bun.CreateTable
 
 // IPBlockDAO is an interface for interacting with the IPBlock model
 type IPBlockDAO interface {
-	// GetBySitePrefixID includes soft-deleted identities for lifecycle reconciliation.
-	GetBySitePrefixID(ctx context.Context, tx *db.Tx, sitePrefixID uuid.UUID) (*IPBlock, error)
 	//
 	Create(ctx context.Context, tx *db.Tx, input IPBlockCreateInput) (*IPBlock, error)
 	//
@@ -301,22 +300,6 @@ type IPBlockDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input IPBlockClearInput) (*IPBlock, error)
 	//
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
-}
-
-// GetBySitePrefixID finds the globally unique Core identity, including deleted rows.
-// The receiver must verify ownership and lifecycle before restoring a deleted identity.
-func (ipbsd IPBlockSQLDAO) GetBySitePrefixID(ctx context.Context, tx *db.Tx, sitePrefixID uuid.UUID) (_ *IPBlock, retErr error) {
-	ctx, ipblockDAOSpan := cotel.StartSpan(ctx, "IPBlockDAO.GetBySitePrefixID")
-	defer func() { cotel.EndSpan(ipblockDAOSpan, retErr) }()
-	cotel.SetAttribute(ipblockDAOSpan, attribute.String("site_prefix_id", sitePrefixID.String()))
-
-	ipb := &IPBlock{}
-	err := db.GetIDB(tx, ipbsd.dbSession).NewSelect().Model(ipb).
-		WhereAllWithDeleted().Where("ipb.site_prefix_id = ?", sitePrefixID).Scan(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, db.ErrDoesNotExist
-	}
-	return ipb, err
 }
 
 // IPBlockSQLDAO is an implementation of the IPBlockDAO interface
@@ -553,6 +536,9 @@ func (ipbsd IPBlockSQLDAO) setQueryWithFilter(query *bun.SelectQuery, filter IPB
 	}
 	if filter.IPBlockIDs != nil {
 		query = query.Where("ipb.id IN (?)", bun.In(filter.IPBlockIDs))
+	}
+	if filter.SitePrefixIDs != nil {
+		query = query.Where("ipb.site_prefix_id IN (?)", bun.In(filter.SitePrefixIDs))
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)

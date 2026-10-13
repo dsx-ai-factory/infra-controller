@@ -56,7 +56,7 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 
 	stDAO := cdbm.NewSiteDAO(mv.dbSession)
 
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Warn().Err(err).Msg("received VPC inventory for unknown or deleted Site")
