@@ -371,7 +371,8 @@ func WithTelemetry(serverName string) HTTPMiddlewareOption {
 //     request.Context
 //
 //   - Collects <latencyMetricsName>_http_duration_seconds metrics with
-//     {path,method} dimensions, if latencyMetricsName is specified
+//     bounded {path,method} dimensions, if latencyMetricsName is specified.
+//     The path label is the matched route template rather than the request URL.
 //
 // - Wraps handler with http.TimeoutHandler with `handlerTimeout`.
 //
@@ -541,10 +542,18 @@ func metricsMiddleware(latencyMetricsName string) mux.MiddlewareFunc {
 		return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 			log := GetLogger(r.Context())
 			w := getRRW(rw)
+			pathLabel := "unmatched"
+			if route := mux.CurrentRoute(r); route != nil {
+				if routeTemplate, err := route.GetPathTemplate(); err == nil && routeTemplate != "" {
+					pathLabel = routeTemplate
+				} else if routeRegexp, err := route.GetPathRegexp(); err == nil && routeRegexp != "" {
+					pathLabel = routeRegexp
+				}
+			}
 			defer func() {
 				log.WithField("status_code", w.statusCode).Debugf("Handler finished")
 				if count != nil {
-					count.WithLabelValues(r.URL.Path, r.Method, fmt.Sprintf("%d", w.statusCode)).Inc()
+					count.WithLabelValues(pathLabel, r.Method, fmt.Sprintf("%d", w.statusCode)).Inc()
 				}
 				// Return the writer back to the pool
 				putRRW(w)
@@ -552,7 +561,7 @@ func metricsMiddleware(latencyMetricsName string) mux.MiddlewareFunc {
 			log.Debugf("Handler started")
 
 			if latency != nil {
-				timer := prometheus.NewTimer(latency.WithLabelValues(r.URL.Path, r.Method))
+				timer := prometheus.NewTimer(latency.WithLabelValues(pathLabel, r.Method))
 				next.ServeHTTP(w.writer, r)
 				timer.ObserveDuration()
 			} else {
