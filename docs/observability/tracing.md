@@ -115,19 +115,38 @@ the API runtime tracing flag are both off, payload encoding and redaction are sk
 transport propagation remains installed. The transport runs without the caller's span, so
 connections it opens do not keep the `rms_rpc` span open after the call returns, and the
 client's own events are not recorded.
+
+To turn on the audit log in nico-api, add the target to the server's runtime filter:
+
+```bash
+nico-admin-cli set log-filter --filter info,rms_rpc_audit=debug --expiry 30min
+```
+
+The required `--filter` replaces the whole filter, so include the base level (`info` here).
+The optional `--expiry` accepts a duration such as `30min` or `1h`, defaults to `1h`, and
+cannot exceed `60h`. After expiry, the server restores its startup filter on the next
+15-minute reset check. A filter with span directives cannot be evaluated by target alone,
+so nico-api enables payload encoding and redaction
+even if the filter ultimately suppresses the audit record. For `nico-admin-cli rms`, set
+`RUST_LOG=rms_rpc_audit=debug`; the records go to stderr.
+
 Bodies are redacted before being attached to a span or log: credentials, passwords, tokens,
 URLs, arbitrary attributes, config values, error text, embedded JSON, and binary fields are
 withheld. Only reviewed identifier, address, domain, and version string fields are retained;
 new string fields are withheld until reviewed. Numeric, boolean, and enum values remain.
 Unknown or malformed messages and bodies exceeding 65,536 bytes before or after JSON
-serialization produce an omission marker, with no raw-payload fallback. Status messages,
-status details, and request/response metadata are not recorded. Transport failures have no
-response body; cancellation records gRPC `CANCELLED` (numeric code 1). This is diagnostic
+serialization produce a `[BODY OMITTED: <reason>]` marker, for example
+`[BODY OMITTED: exceeds 65536 bytes]`, `[BODY OMITTED: unknown message type]`, or
+`[BODY OMITTED: invalid protobuf]`, with no raw-payload fallback. Withheld field values appear
+as `[REDACTED]`. Status messages, status details, and request/response metadata are not
+recorded. Transport failures record `response_body` as the literal `null`;
+cancellation records gRPC `CANCELLED` (numeric code 1). This is diagnostic
 auditing in logs and sampled traces, not a durable audit database.
 
-The API's shared clients cover direct rack, discovery, and switch-monitor callers as well as
-component-manager callers. Existing RED metrics are unchanged. Readiness probes carry trace
-headers but do not produce their own body audit record. Raw tonic clients and streaming RPCs
+The API's shared clients cover every caller listed in the **RMS RPCs** row of
+[What operations are covered](#what-operations-are-covered). Existing RED (rate, errors, and
+duration) metrics are unchanged. Readiness probes carry trace headers but do not produce
+their own body audit record. Raw tonic clients and streaming RPCs
 are outside the decoded observer; RMS's V1/V2 service definitions contain only unary RPCs.
 
 `nico-admin-cli rms` installs the same policy and emits DEBUG audit logs through its own
@@ -282,8 +301,9 @@ through nico-api. The standard `TraceContextPropagator` is installed once at sta
   malformed `traceparent` leaves the request span a fresh root.
 - **Egress.** When nico-api makes an outbound call from within a traced request, it injects the
   current `traceparent` and `tracestate` so the downstream service can continue the trace. Covered:
-  - **gRPC** - Forge and NMX-C (`crates/rpc`), the NSM, power-shelf (PSM), and RMS backends
-    (`crates/component-manager`), and the NMX-C client pool (`crates/libnmxc`), through a shared tower
+  - **gRPC** - Forge and NMX-C (`crates/rpc`), the RMS clients (`crates/rms-observability`),
+    the NSM and power-shelf (PSM) backends (`crates/component-manager`), and the NMX-C client pool
+    (`crates/libnmxc`), through a shared tower
     layer applied to every request.
   - **HTTP** - the BMC/Redfish handler, machine-identity token exchange, admin-UI OAuth2, NRAS,
     the MQTT OAuth2 token provider, and firmware downloads.
