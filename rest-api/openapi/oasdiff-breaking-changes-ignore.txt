@@ -340,17 +340,17 @@ API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} added
 API POST /v2/org/{org}/nico/dpu-extension-service added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceID`
 API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceID`
 
-API GET /v2/org/{org}/nico/expected-machine the response property `items/interfaces/items/macAddress` became nullable
-API GET /v2/org/{org}/nico/expected-machine the response property `items/interfaces/items/macAddress` became optional
-API POST /v2/org/{org}/nico/expected-machine the response property `interfaces/items/macAddress` became nullable
-API POST /v2/org/{org}/nico/expected-machine the response property `interfaces/items/macAddress` became optional
-API PUT /v2/org/{org}/nico/expected-machine/all the response property `items/interfaces/items/macAddress` became nullable
-API PUT /v2/org/{org}/nico/expected-machine/all the response property `items/interfaces/items/macAddress` became optional
-API PATCH /v2/org/{org}/nico/expected-machine/batch the response property `items/interfaces/items/macAddress` became nullable
-API PATCH /v2/org/{org}/nico/expected-machine/batch the response property `items/interfaces/items/macAddress` became optional
-API POST /v2/org/{org}/nico/expected-machine/batch the response property `items/interfaces/items/macAddress` became nullable
-API POST /v2/org/{org}/nico/expected-machine/batch the response property `items/interfaces/items/macAddress` became optional
-API GET /v2/org/{org}/nico/expected-machine/{expectedMachineId} the response property `interfaces/items/macAddress` became nullable
-API GET /v2/org/{org}/nico/expected-machine/{expectedMachineId} the response property `interfaces/items/macAddress` became optional
-API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the response property `interfaces/items/macAddress` became nullable
-API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the response property `interfaces/items/macAddress` became optional
+API GET /v2/org/{org}/nico/expected-machine the response property `items/interfaces/items/macAddress` became nullable for the status `200`
+API GET /v2/org/{org}/nico/expected-machine the response property `items/interfaces/items/macAddress` became optional for the status `200`
+API POST /v2/org/{org}/nico/expected-machine the response property `interfaces/items/macAddress` became nullable for the status `201`
+API POST /v2/org/{org}/nico/expected-machine the response property `interfaces/items/macAddress` became optional for the status `201`
+API PUT /v2/org/{org}/nico/expected-machine/all the response property `items/interfaces/items/macAddress` became nullable for the status `200`
+API PUT /v2/org/{org}/nico/expected-machine/all the response property `items/interfaces/items/macAddress` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/batch the response property `items/interfaces/items/macAddress` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/batch the response property `items/interfaces/items/macAddress` became optional for the status `200`
+API POST /v2/org/{org}/nico/expected-machine/batch the response property `items/interfaces/items/macAddress` became nullable for the status `201`
+API POST /v2/org/{org}/nico/expected-machine/batch the response property `items/interfaces/items/macAddress` became optional for the status `201`
+API GET /v2/org/{org}/nico/expected-machine/{expectedMachineId} the response property `interfaces/items/macAddress` became nullable for the status `200`
+API GET /v2/org/{org}/nico/expected-machine/{expectedMachineId} the response property `interfaces/items/macAddress` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the response property `interfaces/items/macAddress` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the response property `interfaces/items/macAddress` became optional for the status `200`
