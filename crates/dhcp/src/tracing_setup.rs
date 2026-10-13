@@ -66,6 +66,13 @@ pub(crate) fn init() {
         ),
     }
 
+    if let Some((value, fallback)) = tracing.invalid_span_level() {
+        log::warn!(
+            "ignoring unparseable {} value {value:?}; using {fallback}",
+            carbide_instrument::otlp_tracing::SPAN_LEVEL_VAR
+        );
+    }
+
     *TRACING.lock().expect("tracing lock poisoned?") = Some(tracing);
 }
 

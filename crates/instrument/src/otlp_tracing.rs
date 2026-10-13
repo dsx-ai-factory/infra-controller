@@ -188,6 +188,14 @@ impl Tracing {
         }
     }
 
+    /// For callers that log outside `tracing`.
+    /// The rejected invalid SPAN_LEVEL_VAR value and the level.
+    pub fn invalid_span_level(&self) -> Option<(&str, LevelFilter)> {
+        self.invalid_span_level
+            .as_deref()
+            .map(|value| (value, self.span_level))
+    }
+
     /// Logs export settings and errors. Call after initializing the subscriber.
     pub fn report(&self) {
         match &self.state {
