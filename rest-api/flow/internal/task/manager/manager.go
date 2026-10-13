@@ -356,6 +356,24 @@ func (m *ManagerImpl) validateSubmissionRackTargets(
 		if err := validateRuleTargetApplicability(rule, rackMap[rackID]); err != nil {
 			return err
 		}
+		if m.executor != nil {
+			execReq := &taskdef.ExecutionRequest{
+				Info: taskdef.ExecutionInfo{
+					TaskID:         uuid.New(),
+					Components:     workflowComponentsFrom(rackMap[rackID]),
+					RuleDefinition: &rule.RuleDefinition,
+					OperationType:  op.Type,
+					OperationInfo:  op.Info,
+				},
+				Async: true,
+			}
+			if err := m.executor.Validate(execReq); err != nil {
+				return flowerrors.GRPCErrorPreconditionFailed(fmt.Sprintf(
+					"operation cannot be submitted: %v",
+					err,
+				))
+			}
+		}
 	}
 
 	return nil

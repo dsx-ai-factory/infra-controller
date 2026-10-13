@@ -32,7 +32,7 @@ type BatchNVLinkDomainFirmwareUpdateRequest struct {
 	Version NullableString `json:"version,omitempty"`
 	// Optional Operation Rule UUID. When set, pins every task spawned by this operation to the named rule and overrides Flow's default rule resolution.
 	RuleId *string `json:"ruleId,omitempty"`
-	// When true, request that the selected component backend override firmware version-based checks when deciding whether to apply the update. This permits same-version reapplication and downgrade when supported. The opt-in `nicolegacy` compute manager rejects this option. It does not bypass readiness checks or state-controller routing.
+	// When true, request that the selected component backend override firmware version-based checks when deciding whether to apply the update. This permits same-version reapplication and downgrade when supported. The opt-in `nicolegacy` compute manager rejects this option before creating a task. It does not bypass readiness checks or state-controller routing.
 	OverrideVersionCheck *bool `json:"overrideVersionCheck,omitempty"`
 	// When true, proceed even if one or more target components (or hosts on the owning rack for rack-scoped components) are reported as not ready by their persisted status. Intended for operator-supervised maintenance.
 	OverrideReadinessCheck *bool `json:"overrideReadinessCheck,omitempty"`

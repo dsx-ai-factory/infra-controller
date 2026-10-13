@@ -377,13 +377,10 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 		return fmt.Errorf("firmware authentication data is not supported by the nicolegacy compute manager")
 	}
 
-	computeTraySubs, hasDpu := firmwarecomponents.SplitNICoComputeTraySubTargets(info.SubTargets)
-	if len(computeTraySubs) > 0 {
-		return fmt.Errorf("compute firmware sub-target selection is not supported by the nicolegacy compute manager")
+	if err := m.ValidateFirmwareControl(info); err != nil {
+		return err
 	}
-	if info.OverrideVersionCheck {
-		return fmt.Errorf("firmware version-check override is not supported by the nicolegacy compute manager")
-	}
+	_, hasDpu := firmwarecomponents.SplitNICoComputeTraySubTargets(info.SubTargets)
 
 	log.Debug().
 		Str("components", target.String()).
@@ -422,6 +419,20 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 		); err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+// ValidateFirmwareControl rejects options that the legacy machine-centric
+// firmware APIs cannot enforce. It performs no readiness checks or RPCs.
+func (m *Manager) ValidateFirmwareControl(info operations.FirmwareControlTaskInfo) error {
+	computeTraySubs, _ := firmwarecomponents.SplitNICoComputeTraySubTargets(info.SubTargets)
+	if len(computeTraySubs) > 0 {
+		return fmt.Errorf("compute firmware sub-target selection is not supported by the nicolegacy compute manager")
+	}
+	if info.OverrideVersionCheck {
+		return fmt.Errorf("firmware version-check override is not supported by the nicolegacy compute manager")
 	}
 
 	return nil
