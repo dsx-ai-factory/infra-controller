@@ -62,6 +62,7 @@ use model::machine::{
 };
 use model::machine_interface_address::MachineInterfaceAssociation;
 use model::metadata::Metadata;
+use model::nic_firmware::NicFirmwareProfileId;
 use model::resource_pool;
 use model::resource_pool::ResourcePoolError;
 use model::resource_pool::common::{CommonPools, LOOPBACK_IP_V6};
@@ -231,6 +232,25 @@ where
     Ok(find(txn, ObjectFilter::One(*id), search_config)
         .await?
         .pop())
+}
+
+pub(crate) async fn find_by_nic_firmware_profile(
+    db: impl DbReader<'_>,
+    profile_id: &NicFirmwareProfileId,
+) -> DatabaseResult<Vec<HostMachine>> {
+    let query = format!(
+        "{} WHERE m.nic_firmware_profile_id = $1",
+        JSON_MACHINE_SNAPSHOT_QUERY.as_str()
+    );
+    let machines: Vec<AnyMachine> = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+        .bind(profile_id)
+        .fetch_all(db)
+        .await
+        .map_err(|error| DatabaseError::query(&query, error))?;
+    machines
+        .into_iter()
+        .map(|machine| machine.try_into_subtype().map_err(Into::into))
+        .collect()
 }
 
 pub async fn find_existing_machine(

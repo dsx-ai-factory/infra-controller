@@ -18,6 +18,7 @@
 use ::rpc::errors::RpcDataConversionError;
 use carbide_uuid::machine::HostMachineId;
 use config_version::ConfigVersion;
+use model::machine::status::managed_dpu_machine_ids;
 use model::nic_firmware::{
     NicFirmwareBaseline, NicFirmwareHardware, NicFirmwareProfileConfig, NicFirmwareProfileId,
     resolve_nic_firmware,
@@ -271,6 +272,40 @@ pub(crate) async fn find_site_defaults_by_ids(
     ))
 }
 
+pub(crate) async fn set_machine_override(
+    api: &Api,
+    request: Request<rpc::SetMachineNicFirmwareOverrideRequest>,
+) -> Result<Response<()>, Status> {
+    log_request_data_redacted(
+        format!("{:?}", request.get_ref())
+            .escape_default()
+            .to_string(),
+    );
+    let request = request.into_inner();
+    let machine_id: HostMachineId = convert_and_log_machine_id(request.machine_id.as_ref())?;
+    let expected_version = required_version(request.if_version_match)?;
+    let profile_id: Option<NicFirmwareProfileId> = match request
+        .action
+        .ok_or(CarbideError::MissingArgument("action"))?
+    {
+        rpc::set_machine_nic_firmware_override_request::Action::ProfileId(id) => {
+            Some(id.parse().map_err(CarbideError::from)?)
+        }
+        rpc::set_machine_nic_firmware_override_request::Action::Clear(()) => None,
+    };
+    let mut txn = api.txn_begin().await.map_err(CarbideError::from)?;
+    db::nic_firmware::set_machine_override(
+        &mut txn,
+        &machine_id,
+        profile_id.as_ref(),
+        expected_version,
+    )
+    .await
+    .map_err(CarbideError::from)?;
+    txn.commit().await.map_err(CarbideError::from)?;
+    Ok(Response::new(()))
+}
+
 /// `get_desired` selects desired firmware for stored device observations
 /// from a consistent catalog snapshot.
 /// Per-device errors are returned in the report without failing the request
@@ -292,7 +327,8 @@ pub(crate) async fn get_desired(
         .transpose()
         .map_err(CarbideError::from)?;
     let mut txn = api.txn_begin().await.map_err(CarbideError::from)?;
-    // Read assignments and profiles together so a concurrent edit cannot mix revisions.
+    // Read machine settings, observations, site defaults and profiles together
+    // so a concurrent edit cannot mix revisions.
     let query = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY";
     sqlx::query(query)
         .execute(&mut **txn)
@@ -312,6 +348,7 @@ pub(crate) async fn get_desired(
         .iter()
         .map(|binding| binding.profile_id.clone())
         .chain(allocation.iter().cloned())
+        .chain(machine.config.nic_firmware_profile_id.iter().cloned())
         .collect();
     let profiles = db::nic_firmware::find_by_ids(&mut txn, &profile_ids)
         .await
@@ -321,10 +358,7 @@ pub(crate) async fn get_desired(
     if let Some(observation) = machine.status.mlx_device_observation {
         response.observed_at = Some(observation.observed_at.into());
         for device in observation.devices {
-            let managed = super::mlx_device_identity::managed_dpu_machine_ids(
-                device.base_mac,
-                &machine.status.interfaces,
-            );
+            let managed = managed_dpu_machine_ids(device.base_mac, &machine.status.interfaces);
             let mut target = rpc::NicFirmwareDeviceTarget {
                 identity: Some(::rpc::protos::mlx_device::MlxDeviceIdentity {
                     device_info: Some(device.clone().into()),
@@ -353,6 +387,7 @@ pub(crate) async fn get_desired(
                     &hardware,
                     &profiles,
                     NicFirmwareBaseline {
+                        machine_override: machine.config.nic_firmware_profile_id.as_ref(),
                         site_default: binding.map(|binding| &binding.profile_id),
                         ..Default::default()
                     },

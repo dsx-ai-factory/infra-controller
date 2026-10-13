@@ -20,7 +20,8 @@ use sqlx::{FromRow, Row};
 
 ///
 /// A custom boot response is a representation of custom data for booting machines, either with pxe or user-data
-#[derive(Debug, sqlx::Encode)]
+#[derive(Debug, sqlx::Encode, carbide_macros::DbTable)]
+#[db_table(name = "machine_boot_override")]
 pub struct MachineBootOverride {
     pub machine_interface_id: MachineInterfaceId,
     pub custom_pxe: Option<String>,

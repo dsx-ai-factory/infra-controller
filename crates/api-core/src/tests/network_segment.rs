@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
 use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
 use carbide_test_support::Outcome::Yields;
 use carbide_test_support::{Case, check_cases_async};
 use carbide_uuid::network::NetworkSegmentId;
@@ -41,6 +42,10 @@ use model::network_segment;
 use model::network_segment::{
     NetworkDefinition, NetworkDefinitionSegmentType, NetworkSegment, NetworkSegmentControllerState,
     NetworkSegmentType, NewNetworkSegment,
+};
+use model::resource_pool::binding::{
+    INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolSelection,
+    ResourcePoolValueDomain,
 };
 use model::resource_pool::common::VLANID;
 use model::resource_pool::{
@@ -690,6 +695,7 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
         &env.pool,
         &vpcs,
         env.common_pools.ethernet.pool_vpc_vni.as_ref(),
+        &env.api.resource_pool_registry,
     )
     .await?;
     crate::db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
@@ -719,6 +725,7 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
         &env.pool,
         &vpcs,
         env.common_pools.ethernet.pool_vpc_vni.as_ref(),
+        &env.api.resource_pool_registry,
     )
     .await?;
     let seeded_vpcs = db::vpc::find_by_name(&env.pool, "zero-dpu-vpc").await?;
@@ -873,11 +880,33 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                         vni: failure.requested_vni(),
                     },
                 )]);
+                let mut txn = db_pool.begin().await.expect("begin binding transaction");
+                let registry = ResourcePoolRegistry::resolve(
+                    PoolDefinitionSource::SeedConfiguration,
+                    &mut txn,
+                    &HashMap::from([(
+                        failure.pool_name().to_string(),
+                        ResourcePoolSelection {
+                            pool_name: failure.pool_name().to_string(),
+                            value_domain: ResourcePoolValueDomain::Integer,
+                            backend_name: None,
+                            backend_kind: ResourcePoolBackendKind::Integrated,
+                            authority_id: INTEGRATED_AUTHORITY_ID.to_string(),
+                            remote_pool: failure.pool_name().to_string(),
+                        },
+                    )]),
+                )
+                .await
+                .expect("resolve configured VPC pool");
+                // Keep the empty pool bound so exhaustion comes from the allocator.
+                assert!(registry.get(failure.pool_name()).is_some());
+                txn.commit().await.expect("commit pool binding");
                 let metrics = MetricsCapture::start();
                 let (result, logs) = capture_logs_async(crate::db_init::create_initial_vpcs(
                     &db_pool,
                     &vpcs,
                     &source_pool,
+                    &registry,
                 ))
                 .await;
                 let returned_error = result.expect_err("initial VPC allocation must fail");

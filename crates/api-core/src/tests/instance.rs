@@ -7805,79 +7805,191 @@ async fn test_implicit_sparse_vf_noop_update_bypasses_overlap_lock(
     );
 }
 
-/// Verifies BF4 with a declared CX9 ignores a site intercept topology and uses Astra's static VFs.
-/// This protects deployments whose disabled Astra site flag leaves no persisted Astra DPA rows.
+/// Builds a BF4 DPF host whose persisted CX9 declaration selects Astra without DPA rows.
+/// This fixture matters because Astra classification follows provisioning data rather than
+/// site-gated DPA-interface creation.
+async fn create_bf4_astra_host(env: &TestEnv, cx9_mac_suffix: u8) -> TestManagedHost {
+    let host = create_managed_host(env).await;
+    let mut txn = env.db_txn().await;
+
+    // Mark the attached DPU as BF4, which combines with the CX9 declaration to select Astra.
+    let dpu = host.dpu().db_machine(&mut txn).await;
+    let mut hardware_info = dpu
+        .status
+        .hardware_info
+        .expect("the fixture DPU includes hardware information");
+    hardware_info
+        .dmi_data
+        .as_mut()
+        .expect("the fixture DPU includes DMI information")
+        .product_name = "BlueField-4 SmartNIC Main Card".to_string();
+    // Reopen topology ingestion so the persisted BF4 product mutation reaches host classification.
+    db::machine_topology::set_topology_update_needed(txn.as_mut(), &dpu.id, true)
+        .await
+        .unwrap();
+    db::machine_topology::create_or_update(txn.as_mut(), &dpu.id, &hardware_info)
+        .await
+        .unwrap();
+    // Persist completed DPF ingestion so classification uses the updated DPU topology.
+    db::machine::mark_machine_ingestion_done_with_dpf(txn.as_mut(), &host.id)
+        .await
+        .unwrap();
+
+    // Declare CX9 in expected-machine data without creating a site-gated Astra DPA row.
+    let host_machine = host.host().db_machine(&mut txn).await;
+    let bmc_mac = host_machine
+        .status
+        .bmc_info
+        .mac
+        .expect("the fixture host includes a BMC MAC");
+    let mut expected_machine = db::expected_machine::find_by_bmc_mac_address(txn.as_mut(), bmc_mac)
+        .await
+        .unwrap()
+        .expect("the fixture host includes an expected-machine declaration");
+    // Keep parallel hosts distinct while adding the expected-machine signal used with the
+    // persisted BF4 product.
+    expected_machine.data.interfaces.push(ExpectedInterface {
+        mac_address: mac_address::MacAddress::from([0x02, 0, 0, 0, 0, cx9_mac_suffix]),
+        nic_type: Some("CX9".to_string()), // Drives profile classification with the DPU product.
+        ..ExpectedInterface::default()
+    });
+    db::expected_machine::update(txn.as_mut(), &expected_machine)
+        .await
+        .unwrap();
+
+    // Expected-machine CX9 remains the sole Astra signal while the site-gated row is absent.
+    let astra_interfaces = db::dpa_interface::find_by_machine_id(
+        txn.as_mut(),
+        *host.id,
+        model::dpa_interface::DpaSearchConfig {
+            only_svpc: false,
+            only_astra: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(astra_interfaces.is_empty());
+    txn.commit().await.unwrap();
+
+    host
+}
+
+/// Verifies topology-free BF4+CX9 hosts reject VF14 through public create and update APIs.
+/// Generic DPF accepts this structurally valid VF without topology, so this is an Astra-specific
+/// discriminator that protects both handlers' independent inventory lookups.
 #[crate::sqlx_test]
-async fn test_bf4_astra_implicit_instance_vfs_use_static_inventory_on_create_and_update(
+async fn test_bf4_cx9_topology_free_public_instance_paths_use_astra_static_inventory(
     _: PgPoolOptions,
     options: PgConnectOptions,
 ) {
-    /// Builds a BF4 DPF host whose persisted CX9 declaration selects Astra even without DPA rows.
-    /// This proves admission follows provisioning rather than site-gated Astra enablement state.
-    async fn create_bf4_astra_host(env: &TestEnv, cx9_mac_suffix: u8) -> TestManagedHost {
-        let host = create_managed_host(env).await;
-        let mut txn = env.db_txn().await;
+    // Enable managed-host admission and keep VF14 structurally valid, but remove configured
+    // topology so Astra's fixed static inventory is authoritative.
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let mut config = crate::test_support::default_config::get();
+    config.dpf.enabled = true;
+    config.dpu_config.num_of_vfs = 16;
+    config.vmaas_config = None;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let create_host = create_bf4_astra_host(&env, 3).await;
+    let update_host = create_bf4_astra_host(&env, 4).await;
+    let segment_ids = env.create_vpc_and_tenant_segments(2).await;
 
-        // Mark the attached DPU as BF4, which combines with the CX9 declaration to select Astra.
-        let dpu = host.dpu().db_machine(&mut txn).await;
-        let mut hardware_info = dpu
-            .status
-            .hardware_info
-            .expect("the fixture DPU includes hardware information");
-        hardware_info
-            .dmi_data
-            .as_mut()
-            .expect("the fixture DPU includes DMI information")
-            .product_name = "BlueField-4 SmartNIC Main Card".to_string();
-        db::machine_topology::set_topology_update_needed(txn.as_mut(), &dpu.id, true)
-            .await
-            .unwrap();
-        db::machine_topology::create_or_update(txn.as_mut(), &dpu.id, &hardware_info)
-            .await
-            .unwrap();
-        db::machine::mark_machine_ingestion_done_with_dpf(txn.as_mut(), &host.id)
-            .await
-            .unwrap();
+    // Override only the VF ID: VF14 is valid for generic DPF but absent from Astra's static inventory.
+    let vf14_network = || {
+        let mut network = single_interface_network_config_with_vfs(segment_ids.clone());
+        network.interfaces[1].virtual_function_id = Some(14);
+        network
+    };
 
-        // Declare CX9 in expected-machine data without creating a site-gated Astra DPA row.
-        let host_machine = host.host().db_machine(&mut txn).await;
-        let bmc_mac = host_machine
-            .status
-            .bmc_info
-            .mac
-            .expect("the fixture host includes a BMC MAC");
-        let mut expected_machine =
-            db::expected_machine::find_by_bmc_mac_address(txn.as_mut(), bmc_mac)
-                .await
-                .unwrap()
-                .expect("the fixture host includes an expected-machine declaration");
-        expected_machine.data.interfaces.push(ExpectedInterface {
-            mac_address: mac_address::MacAddress::from([0x02, 0, 0, 0, 0, cx9_mac_suffix]),
-            nic_type: Some("CX9".to_string()),
-            ..ExpectedInterface::default()
-        });
-        db::expected_machine::update(txn.as_mut(), &expected_machine)
-            .await
-            .unwrap();
-
-        // Keep the fixture on the failing boundary: the Astra site flag is disabled, so the
-        // expected-machine CX9 declaration remains the only Astra classification signal.
-        let astra_interfaces = db::dpa_interface::find_by_machine_id(
-            txn.as_mut(),
-            *host.id,
-            model::dpa_interface::DpaSearchConfig {
-                only_svpc: false,
-                only_astra: true,
-            },
+    // The create path must select Astra and reject VF14 from its static VF0 through VF13 inventory.
+    let create_error = env
+        .api
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(create_host.id)
+                .config(InstanceConfig::default_tenant_and_os().network(vf14_network()))
+                .tonic_request(),
         )
         .await
-        .unwrap();
-        assert!(astra_interfaces.is_empty());
-        txn.commit().await.unwrap();
+        .expect_err("topology-free BF4 Astra creation must reject VF14");
 
-        host
+    // Establish an assigned Ready instance so update exercises its independent host lookup.
+    let update_instance = env
+        .api
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(update_host.id)
+                .config(
+                    InstanceConfig::default_tenant_and_os()
+                        .network(single_interface_network_config(segment_ids[0])),
+                )
+                .tonic_request(),
+        )
+        .await
+        .expect("the update fixture instance must be allocated")
+        .into_inner();
+    let update_instance_id = update_instance
+        .id
+        .expect("the allocated update fixture includes its ID");
+    // Network updates require an assigned Ready host; DPF convergence is outside this contract.
+    let mut txn = env.db_txn().await;
+    db::machine::update_state(
+        txn.as_mut(),
+        &update_host.id,
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    // The update path must make the same Astra classification and reject the same VF.
+    let update_error = env
+        .api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(update_instance_id),
+            if_version_match: None,
+            config: Some(rpc::InstanceConfig {
+                tenant: Some(default_tenant_config()),
+                os: Some(default_os_config()),
+                network: Some(vf14_network()),
+                infiniband: None,
+                network_security_group_id: None,
+                dpu_extension_services: None,
+                nvlink: None,
+                spxconfig: None,
+                power_profile: None,
+            }),
+            metadata: Some(rpc::forge::Metadata {
+                name: "bf4-astra-static-vf-update".to_string(),
+                description: String::new(),
+                labels: vec![],
+            }),
+        }))
+        .await
+        .expect_err("topology-free BF4 Astra update must reject VF14");
+
+    // The Astra-specific diagnostic proves neither handler silently took generic DPF behavior.
+    for error in [create_error, update_error] {
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(
+            error
+                .message()
+                .contains("not available in the BF4 Astra static VF inventory")
+        );
     }
+}
 
+/// Verifies BF4 Astra carries one sparse intercept-topology VF through public create and update.
+/// This protects topology wiring; the topology-free sibling above supplies the class discriminator.
+#[crate::sqlx_test]
+async fn test_bf4_astra_implicit_instance_vfs_use_intercept_topology_on_create_and_update(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    // Configure only VF14 so sequential allocation would expose admission/provisioning drift;
+    // the remaining host and segment fixtures provide independent create and update baselines.
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
     let mut config = crate::test_support::default_config::with_dpf_intercept_topology(&[14]);
     config.dpu_config.num_of_vfs = 16;
@@ -7886,12 +7998,15 @@ async fn test_bf4_astra_implicit_instance_vfs_use_static_inventory_on_create_and
     let update_host = create_bf4_astra_host(&env, 2).await;
     let segment_ids = env.create_vpc_and_tenant_segments(2).await;
 
+    // Clear the otherwise-complete fixture's VF identity so create and update must allocate from
+    // the configured sparse topology while retaining the remaining network setup.
     let implicit_network = || {
         let mut network = single_interface_network_config_with_vfs(segment_ids.clone());
         network.interfaces[1].virtual_function_id = None;
         network
     };
 
+    // Create an instance through the public API with an implicit VF identity.
     let created_instance = env
         .api
         .allocate_instance(
@@ -7901,15 +8016,24 @@ async fn test_bf4_astra_implicit_instance_vfs_use_static_inventory_on_create_and
                 .tonic_request(),
         )
         .await
-        .expect("BF4 Astra must allocate an implicit VF from its static inventory")
+        .expect("BF4 Astra must allocate an implicit VF from its intercept topology")
         .into_inner();
-    let created_vfs = created_instance
+
+    // The response must expose the sole VF selected by the replacement inventory.
+    let created_instance_id = created_instance
+        .id
+        .expect("the allocated instance includes its ID");
+    let created_network = created_instance
         .config
+        .as_ref()
         .expect("the allocated instance includes its config")
         .network
+        .as_ref()
         .expect("the allocated instance includes its network config")
+        .clone();
+    let created_vfs = created_network
         .interfaces
-        .into_iter()
+        .iter()
         .filter(|interface| interface.function_type() == rpc::InterfaceFunctionType::Virtual)
         .map(|interface| {
             interface
@@ -7917,7 +8041,25 @@ async fn test_bf4_astra_implicit_instance_vfs_use_static_inventory_on_create_and
                 .expect("NICo resolves every implicit VF ID")
         })
         .collect_vec();
-    assert_eq!(created_vfs, vec![0]);
+    assert_eq!(created_vfs, vec![14]);
+
+    // Re-read through the public API to prove the resolved topology identity was persisted.
+    let persisted_instances = env
+        .api
+        .find_instances_by_ids(Request::new(rpc::forge::InstancesByIdsRequest {
+            instance_ids: vec![created_instance_id],
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(persisted_instances.instances.len(), 1);
+    assert_eq!(
+        persisted_instances.instances[0]
+            .config
+            .as_ref()
+            .and_then(|config| config.network.as_ref()),
+        Some(&created_network)
+    );
 
     // Allocate directly because this test needs only an existing instance as the update baseline.
     let update_instance = env
@@ -7949,6 +8091,8 @@ async fn test_bf4_astra_implicit_instance_vfs_use_static_inventory_on_create_and
     .await
     .unwrap();
     txn.commit().await.unwrap();
+
+    // Update through the public API with another implicit VF identity.
     env.api
         .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
             instance_id: Some(update_instance_id),
@@ -7971,8 +8115,9 @@ async fn test_bf4_astra_implicit_instance_vfs_use_static_inventory_on_create_and
             }),
         }))
         .await
-        .expect("a BF4 Astra update must use the static VF inventory");
+        .expect("a BF4 Astra update must use the intercept topology");
 
+    // Reload the staged replacement and verify persistence uses the same sparse VF identity.
     let mut txn = env.db_txn().await;
     let staged_update = db::instance::find_by_id(txn.as_mut(), update_instance_id)
         .await
@@ -7989,7 +8134,7 @@ async fn test_bf4_astra_implicit_instance_vfs_use_static_inventory_on_create_and
             InterfaceFunctionId::Virtual { id } => Some(*id),
         })
         .collect_vec();
-    assert_eq!(staged_vfs, vec![0]);
+    assert_eq!(staged_vfs, vec![14]);
     txn.rollback().await.unwrap();
 }
 

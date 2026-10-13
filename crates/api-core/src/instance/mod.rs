@@ -170,13 +170,19 @@ pub(crate) fn expected_machine_declares_cx9(expected_machine: Option<&ExpectedMa
     })
 }
 
-/// Selects the VF inventory source using the same BF4-and-CX9 distinction as DPF provisioning.
+/// Selects configured DPF topology before using BF4-and-CX9 classification for the topology-free fallback.
 pub(crate) fn instance_vf_inventory_source(
     mh_snapshot: &ManagedHostStateSnapshot,
+    config: &CarbideConfig,
     expected_machine_has_cx9: bool,
 ) -> InstanceVfInventorySource {
     if !mh_snapshot.host_snapshot.config.dpf.used_for_ingestion {
         return InstanceVfInventorySource::HbnRepresentors;
+    }
+
+    // Configured topology is authoritative for every DPF profile, regardless of hardware classification.
+    if dpf_topology_vf_ids(config).is_some() {
+        return InstanceVfInventorySource::DpfInterceptTopology;
     }
 
     let all_dpus_are_bf4 = !mh_snapshot.dpu_snapshots.is_empty()
@@ -188,6 +194,7 @@ pub(crate) fn instance_vf_inventory_source(
                 .is_some_and(|dmi_data| is_bf4_dmi_product(&dmi_data.product_name))
         });
 
+    // Only topology-free Astra needs a distinct static fallback.
     if expected_machine_has_cx9 && all_dpus_are_bf4 {
         InstanceVfInventorySource::Bf4AstraStatic
     } else {
@@ -197,8 +204,8 @@ pub(crate) fn instance_vf_inventory_source(
 
 /// Rejects instance VFs that are absent from the effective DPU interface inventory.
 ///
-/// A BF4 Astra host uses its static provisioned inventory. Other DPF-managed hosts use the
-/// configured intercept topology, while topology-free DPF retains its historical behavior.
+/// Every DPF profile uses configured intercept topology when present. Topology-free Astra uses its
+/// static provisioned inventory, while other topology-free DPF profiles retain historical behavior.
 /// A non-DPF host follows `hbn_reps`, capped by the configured hardware VF population.
 pub(crate) fn validate_instance_vfs_against_effective_dpu_inventory(
     network: &InstanceNetworkConfig,
@@ -2385,6 +2392,7 @@ pub(crate) async fn batch_allocate_instances(
             .and_then(|bmc_mac| expected_machines_by_bmc.get(&bmc_mac));
         let vf_inventory_source = instance_vf_inventory_source(
             &mh_snapshot,
+            &api.runtime_config,
             expected_machine_declares_cx9(expected_machine),
         );
 
@@ -3193,14 +3201,15 @@ mod tests {
         );
     }
 
-    /// Verifies exact DPF topology membership without changing topology-free DPF admission.
+    /// Verifies exact DPF topology membership without changing topology-free admission because
+    /// accepted instance VFs must match the ServiceInterfaces provisioned for each DPF profile.
     #[test]
     fn instance_vf_admission_follows_effective_dpu_inventory() {
         #[derive(Clone, Copy)]
         enum InventoryMode {
             DpfTopology(&'static [u8]),
             DpfWithoutTopology,
-            Bf4Astra(&'static [u8]),
+            Bf4AstraWithoutTopology,
             NonDpf(&'static [u8]),
         }
 
@@ -3217,13 +3226,18 @@ mod tests {
                     }
                     InventoryMode::DpfWithoutTopology => {
                         let mut config = crate::test_support::default_config::get();
+                        // Remove the configured intercept inventory so this exercises non-Astra DPF's
+                        // topology-free compatibility branch.
                         config.vmaas_config = None;
                         (config, InstanceVfInventorySource::DpfInterceptTopology)
                     }
-                    InventoryMode::Bf4Astra(vf_ids) => (
-                        crate::test_support::default_config::with_dpf_intercept_topology(vf_ids),
-                        InstanceVfInventorySource::Bf4AstraStatic,
-                    ),
+                    InventoryMode::Bf4AstraWithoutTopology => {
+                        let mut config = crate::test_support::default_config::get();
+                        // Remove the configured intercept inventory so Astra must synthesize its topology-free
+                        // static VF inventory.
+                        config.vmaas_config = None;
+                        (config, InstanceVfInventorySource::Bf4AstraStatic)
+                    }
                     InventoryMode::NonDpf(vf_ids) => (
                         crate::test_support::default_config::with_dpf_intercept_topology(vf_ids),
                         InstanceVfInventorySource::HbnRepresentors,
@@ -3262,30 +3276,37 @@ mod tests {
             }
 
             "DPF without topology retains compatibility behavior" {
+                // Non-Astra DPF keeps boolean-only admission when no replacement inventory exists.
                 (InventoryMode::DpfWithoutTopology, vec![14]) => true,
             }
 
-            "BF4 Astra ignores a conflicting intercept topology" {
-                (InventoryMode::Bf4Astra(&[14]), vec![0]) => true,
+            "topology-free BF4 Astra retains its static inventory" {
+                // Static VF13 remains available when no replacement inventory is configured.
+                (InventoryMode::Bf4AstraWithoutTopology, vec![13]) => true,
             }
 
-            "BF4 Astra rejects a topology-only VF" {
-                (InventoryMode::Bf4Astra(&[14]), vec![14]) => false,
+            "topology-free BF4 Astra rejects VF14" {
+                // Astra's compatibility inventory ends at VF13 rather than allowing every typed VF.
+                (InventoryMode::Bf4AstraWithoutTopology, vec![14]) => false,
             }
 
             "non-DPF host ignores the configured DPF topology" {
+                // Legacy provisioning follows HBN defaults rather than DPF-only selections.
                 (InventoryMode::NonDpf(&[7]), vec![0]) => true,
             }
 
             "non-DPF host admits the final default HBN VF" {
+                // VF13 remains the upper edge of the topology-free HBN fallback.
                 (InventoryMode::NonDpf(&[7]), vec![13]) => true,
             }
 
             "non-DPF host rejects the first absent default HBN VF" {
+                // VF14 distinguishes the fallback boundary from unrestricted boolean admission.
                 (InventoryMode::NonDpf(&[7]), vec![14]) => false,
             }
         );
 
+        // Keep the operator-facing failure tied to the same effective inventory boundary.
         let error = validate_vf_ids_against_effective_dpu_inventory(
             [14],
             &crate::test_support::default_config::get(),
@@ -3348,27 +3369,66 @@ mod tests {
         );
     }
 
+    /// Verifies implicit VF exhaustion names the authoritative inventory because operators must
+    /// distinguish configured topology capacity from the static fallback.
     #[test]
-    fn implicit_instance_vf_allocation_rejects_inventory_exhaustion() {
-        let mut config = crate::test_support::default_config::get();
-        config.dpu_config.num_of_vfs = 16;
-        config
+    fn implicit_instance_vf_allocation_reports_effective_inventory_exhaustion() {
+        // Each case pairs a complete site configuration with its persisted inventory
+        // classification.
+        struct ExhaustionInput {
+            config: CarbideConfig,
+            inventory_source: InstanceVfInventorySource,
+        }
+
+        // One selected HBN VF drives exhaustion; the remaining defaults keep the site config valid.
+        let mut hbn_config = crate::test_support::default_config::get();
+        hbn_config.dpu_config.num_of_vfs = 16;
+        hbn_config
             .vmaas_config
             .as_mut()
-            .expect("the default test configuration includes VMaaS")
+            .expect("the default test configuration includes interface selection")
             .hbn_reps = Some("pf0hpf,pf0vf2,pf1hpf".to_string());
-        let mut network = implicit_vf_network(&[0, 0]);
 
-        let error = assign_implicit_instance_vfs_from_effective_dpu_inventory(
-            &mut network,
-            &config,
-            InstanceVfInventorySource::HbnRepresentors,
-        )
-        .expect_err("one selected VF cannot satisfy two implicit VF requests");
+        // One selected topology VF drives the configured DPF boundary; the helper supplies valid defaults.
+        let topology_config =
+            crate::test_support::default_config::with_dpf_intercept_topology(&[14]);
 
-        assert_eq!(
-            error.to_string(),
-            "invalid configuration: invalid value: cannot implicitly allocate 2 virtual functions for pf0/0; the configured instance VF inventory exposes only 1"
+        check_values(
+            [
+                // The HBN path keeps its established diagnostic while sharing the exhaustion
+                // operation.
+                Check {
+                    scenario: "configured HBN inventory",
+                    input: ExhaustionInput {
+                        config: hbn_config,
+                        inventory_source: InstanceVfInventorySource::HbnRepresentors,
+                    },
+                    expect: "invalid configuration: invalid value: cannot implicitly allocate 2 virtual functions for pf0/0; the configured instance VF inventory exposes only 1".to_string(),
+                },
+                // The DPF path must name its configured topology instead of a fallback inventory.
+                Check {
+                    scenario: "configured DPF intercept topology",
+                    input: ExhaustionInput {
+                        config: topology_config,
+                        inventory_source: InstanceVfInventorySource::DpfInterceptTopology,
+                    },
+                    expect: "invalid configuration: invalid value: cannot implicitly allocate 2 virtual functions for pf0/0; the configured DPF intercept-bridging topology exposes only 1".to_string(),
+                },
+            ],
+            |ExhaustionInput {
+                 config,
+                 inventory_source,
+             }| {
+                // Two requests for one device exhaust either one-entry inventory.
+                let mut network = implicit_vf_network(&[0, 0]);
+                assign_implicit_instance_vfs_from_effective_dpu_inventory(
+                    &mut network,
+                    &config,
+                    inventory_source,
+                )
+                .expect_err("one selected VF cannot satisfy two implicit VF requests")
+                .to_string()
+            },
         );
     }
 
@@ -3398,18 +3458,22 @@ mod tests {
         );
     }
 
+    /// Verifies implicit allocation selects the sparse configured DPF inventory because the public API must not allocate a VF absent from its DPF ServiceInterfaces.
     #[test]
-    fn bf4_astra_implicit_vfs_ignore_intercept_topology() {
+    fn implicit_vfs_follow_dpf_intercept_topology() {
+        // Configure VF14 as the only tenant VF and start from the converter's placeholder ID.
         let config = crate::test_support::default_config::with_dpf_intercept_topology(&[14]);
         let mut network = implicit_vf_network(&[0]);
 
+        // Resolve the implicit identity through the topology shared by every DPF profile.
         assign_implicit_instance_vfs_from_effective_dpu_inventory(
             &mut network,
             &config,
-            InstanceVfInventorySource::Bf4AstraStatic,
+            InstanceVfInventorySource::DpfInterceptTopology,
         )
         .unwrap();
 
+        // The sparse topology identity must replace the sequential placeholder.
         assert_eq!(
             network
                 .interfaces
@@ -3419,7 +3483,7 @@ mod tests {
                     InterfaceFunctionId::Virtual { id } => Some(*id),
                 })
                 .collect_vec(),
-            vec![0],
+            vec![14],
         );
     }
 

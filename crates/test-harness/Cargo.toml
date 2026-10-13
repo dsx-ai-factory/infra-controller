@@ -35,6 +35,7 @@ carbide-site-explorer = { path = "../site-explorer", features = [
 carbide-macros = { path = "../macros", default-features = false }
 carbide-network = { path = "../network" }
 carbide-network-segment-controller = { path = "../network-segment-controller", default-features = false }
+carbide-resource-pool = { path = "../resource-pool" }
 carbide-sqlx-testing = { path = "../sqlx-testing", default-features = false }
 carbide-utils = { path = "../utils", features = ["test-support"] }
 carbide-uuid = { path = "../uuid", default-features = false }
