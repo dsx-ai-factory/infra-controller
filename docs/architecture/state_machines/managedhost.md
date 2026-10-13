@@ -467,10 +467,12 @@ stateDiagram-v2
     SuppressingOobDhcp --> PowerCyclingHost : OOB DHCP suppressions recorded
     PowerCyclingHost --> PoweringOnHost : AC power cycle accepted
     PoweringOnHost --> WaitingForOobDhcpAcknowledgement : Host power state is On after power cycle
-    WaitingForOobDhcpAcknowledgement --> SuppressingBmcDhcp : DHCP acknowledges OOB suppressions
+    WaitingForOobDhcpAcknowledgement --> WaitingForOobDhcpAcknowledgement : OOB DHCP acknowledgement pending
+    WaitingForOobDhcpAcknowledgement --> SuppressingBmcDhcp : No OOB DHCP acknowledgements pending
     SuppressingBmcDhcp --> FactoryResettingBmcs : BMC DHCP suppressions recorded
     FactoryResettingBmcs --> WaitingForBmcDhcpAcknowledgement : BMC resets accepted
-    WaitingForBmcDhcpAcknowledgement --> DeletingManagedCredentials : DHCP acknowledges BMC suppressions
+    WaitingForBmcDhcpAcknowledgement --> WaitingForBmcDhcpAcknowledgement : BMC DHCP acknowledgement pending
+    WaitingForBmcDhcpAcknowledgement --> DeletingManagedCredentials : No BMC DHCP acknowledgements pending
     DeletingManagedCredentials --> Decommissioned : Per-device credentials deleted
 ```
 
@@ -478,6 +480,13 @@ stateDiagram-v2
 settings, and clears the host UEFI password. `DeconfiguringDpus` removes DPF
 resources when applicable and installs the vanilla `preingestion.bfb` on every
 DPU.
+
+The OOB DHCP wait checks the host and DPU OOB interface MACs, and the BMC DHCP
+wait checks the host and DPU BMC MACs. Each DHCP wait advances after every MAC
+it checks has a recorded suppression acknowledgement or qualifies to advance
+without one. Refer to
+[DHCP Suppression Acknowledgement](../../decommissioning/index.md#dhcp-suppression-acknowledgement)
+for the shared rule.
 
 Refer to [Decommission Managed Hosts and DPUs](../../decommissioning/hosts.md) for the
 operator procedure, platform limitations, and intended post-reset state.

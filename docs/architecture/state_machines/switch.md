@@ -115,10 +115,12 @@ stateDiagram-v2
 | Decommissioning (`NvosFactoryResetOutcomeUnknown { error }`) | Same sub-state | Handler reports `ManualInterventionRequired`; no automatic reset resubmission |
 | Decommissioning (`SuppressingNvosDhcp`) | Decommissioning (`RebootingSwitch`) | NVOS DHCP suppression is recorded |
 | Decommissioning (`RebootingSwitch`) | Decommissioning (`WaitingForNvosDhcpAcknowledgement`) | Redfish accepts `ForceRestart` |
-| Decommissioning (`WaitingForNvosDhcpAcknowledgement`) | Decommissioning (`SuppressingBmcDhcp`) | DHCP acknowledges the NVOS suppression |
+| Decommissioning (`WaitingForNvosDhcpAcknowledgement`) | Same sub-state | NVOS DHCP acknowledgement is required and not yet recorded |
+| Decommissioning (`WaitingForNvosDhcpAcknowledgement`) | Decommissioning (`SuppressingBmcDhcp`) | No NVOS DHCP acknowledgement pending |
 | Decommissioning (`SuppressingBmcDhcp`) | Decommissioning (`FactoryResetBmc`) | BMC DHCP suppression is recorded |
 | Decommissioning (`FactoryResetBmc`) | Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Redfish accepts the BMC factory-reset request |
-| Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Decommissioning (`DeletingManagedCredentials`) | DHCP acknowledges the BMC suppression |
+| Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Same sub-state | BMC DHCP acknowledgement is required and not yet recorded |
+| Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Decommissioning (`DeletingManagedCredentials`) | No BMC DHCP acknowledgement pending |
 | Decommissioning (`DeletingManagedCredentials`) | Decommissioning (`Decommissioned`) | Managed BMC and NVOS credentials and convergence records are deleted |
 | Deleting | *(end)* | Final delete committed |
 
@@ -147,8 +149,12 @@ Managed-switch decommissioning requires the RMS switch backend and starts only
 from `Ready`. After Site Explorer acknowledges suppression, the controller
 submits the NVOS factory reset, persists the returned job ID, and polls that
 job until RMS reports `Completed`. It then suppresses NVOS DHCP, requests a
-switch reboot through Redfish, and waits for DHCP suppression acknowledgement
-before resetting the BMC and deleting managed credentials.
+switch reboot through Redfish, and completes the NVOS DHCP wait before
+suppressing BMC DHCP and resetting the BMC. It then completes the BMC DHCP wait
+before deleting managed credentials. Either endpoint can complete its wait
+without acknowledgement. Refer to
+[DHCP Suppression Acknowledgement](../../decommissioning/index.md#dhcp-suppression-acknowledgement)
+for the shared rule.
 
 Transient handler errors leave the switch in its current sub-state for a
 later retry. A failed RMS reset job reports `ManualInterventionRequired`
