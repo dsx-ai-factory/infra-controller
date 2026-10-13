@@ -187,6 +187,11 @@ and release parts are truncated to 16 characters each, and the full name to 63.
 Long namespaces or release names therefore shorten the rendered name. Read the
 name back with `helm get manifest` before you reference it from a `configMapRef`.
 
+Upgrading from a chart version that rendered a single
+`<release-namespace>-<release-name>-grafana-dashboards` ConfigMap removes that
+ConfigMap. Update any `configMapRef` that points to it to use the per-dashboard
+names.
+
 The target namespace must exist before Helm runs, and the Helm identity must be
 allowed to create ConfigMaps there. The Grafana sidecar must also watch that
 namespace; for `kube-prometheus-stack`, configure
