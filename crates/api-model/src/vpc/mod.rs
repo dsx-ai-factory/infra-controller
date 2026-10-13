@@ -219,7 +219,8 @@ impl<'r> sqlx::FromRow<'r, PgRow> for Vpc {
     }
 }
 
-#[derive(Clone, Debug, FromRow)]
+#[derive(Clone, Debug, FromRow, carbide_macros::DbTable)]
+#[db_table(name = "vpc_dpu_loopbacks")]
 pub struct VpcDpuLoopback {
     pub dpu_id: DpuMachineId,
     pub vpc_id: VpcId,
