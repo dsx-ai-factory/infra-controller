@@ -63,6 +63,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 	tn1 := common.TestBuildTenant(t, dbSession, "test-tenant", tnOrg, tnu1)
 	ts1 := common.TestBuildTenantSite(t, dbSession, tn1, st1, tnu1)
 	assert.NotNil(t, ts1)
+	common.TestBuildAllocation(t, dbSession, st1, tn1, "test-allocation-1", ipu)
 
 	// Create existing DPU Extension Service to test name collision
 	existingDES := common.TestBuildDpuExtensionService(t, dbSession, "existing-service", model.DpuExtensionServiceTypeKubernetesPod, tn1, st1, "V1-T1761856992374052", cdbm.DpuExtensionServiceStatusReady, tnu1)

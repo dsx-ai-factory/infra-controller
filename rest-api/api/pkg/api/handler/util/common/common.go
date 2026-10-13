@@ -1721,6 +1721,15 @@ func TenantHasSiteAccess(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session
 	return TenantHasTargetedInstanceCreation(ctx, tx, dbSession, tenant, &TenantPrivilegeScope{SiteID: &siteID})
 }
 
+// ValidateTenantSiteAccess returns cdb.ErrDoesNotExist when TenantHasSiteAccess reports no access.
+func ValidateTenantSiteAccess(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID) error {
+	ok, err := TenantHasSiteAccess(ctx, tx, dbSession, tenant, siteID)
+	if err == nil && !ok {
+		err = cdb.ErrDoesNotExist
+	}
+	return err
+}
+
 // GetPrivilegedAccessSiteIDsForTenant returns Site IDs where the Tenant has
 // effective TargetedInstanceCreation via a Ready TenantAccount and optional
 // TenantSite.config overrides. It is nil-safe and returns an empty slice when

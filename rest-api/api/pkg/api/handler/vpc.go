@@ -144,18 +144,16 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant", nil)
 	}
 
-	// Ensure that Tenant has an Allocation with specified Site
-	aDAO := cdbm.NewAllocationDAO(cvh.dbSession)
-	allocationFilter := cdbm.AllocationFilterInput{TenantIDs: []uuid.UUID{tenant.ID}, SiteIDs: []uuid.UUID{site.ID}}
-	aCount, err := aDAO.GetCount(ctx, nil, allocationFilter)
+	// Ensure that Tenant has access to specified Site
+	hasSiteAccess, err := common.TenantHasSiteAccess(ctx, nil, cvh.dbSession, tenant, site.ID)
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving Allocations count from DB for Tenant and Site")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site Allocations count for Tenant", nil)
+		logger.Error().Err(err).Msg("error checking Tenant access to Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant access to Site, DB error", nil)
 	}
 
-	if aCount == 0 {
+	if !hasSiteAccess {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden,
-			"Tenant does not have any Allocations with Site specified in request data", nil)
+			"Tenant does not have access to Site specified in request data", nil)
 	}
 
 	vpcDAO := cdbm.NewVpcDAO(cvh.dbSession)
@@ -705,18 +703,16 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have sufficient privileges to set `routingProfileOverrides`", nil)
 	}
 
-	// Ensure that Tenant has an Allocation with specified Site
-	aDAO := cdbm.NewAllocationDAO(uvh.dbSession)
-	allocationFilter := cdbm.AllocationFilterInput{TenantIDs: []uuid.UUID{tenant.ID}, SiteIDs: []uuid.UUID{vpc.SiteID}}
-	aCount, err := aDAO.GetCount(ctx, nil, allocationFilter)
+	// Ensure that Tenant has access to specified Site
+	hasSiteAccess, err := common.TenantHasSiteAccess(ctx, nil, uvh.dbSession, tenant, vpc.SiteID)
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving Allocations count from DB for Tenant and Site")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site Allocations count for Tenant", nil)
+		logger.Error().Err(err).Msg("error checking Tenant access to Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant access to Site, DB error", nil)
 	}
 
-	if aCount == 0 {
+	if !hasSiteAccess {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden,
-			"Tenant does not have any Allocations with Site specified in request data", nil)
+			"Tenant does not have access to Site specified in request data", nil)
 	}
 
 	vpcDAO := cdbm.NewVpcDAO(uvh.dbSession)

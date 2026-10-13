@@ -237,13 +237,12 @@ func validateIpxeTemplateAvailableAtSites(ctx context.Context, dbSession *cdb.Se
 	return nil
 }
 
-// getTenantSiteIDs combines explicit membership with effective privileged site
-// access, matching the Site API. An empty result must remain non-nil so queries
+// getTenantSiteIDs combines Allocation sites with effective privileged site
+// access, matching common.TenantHasSiteAccess. An empty result must remain non-nil so queries
 // match no sites rather than removing the site restriction.
 func getTenantSiteIDs(ctx context.Context, dbSession *cdb.Session, tenant *cdbm.Tenant) ([]uuid.UUID, error) {
-	tsDAO := cdbm.NewTenantSiteDAO(dbSession)
-	tss, _, err := tsDAO.GetAll(ctx, nil,
-		cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{tenant.ID}},
+	as, _, err := cdbm.NewAllocationDAO(dbSession).GetAll(ctx, nil,
+		cdbm.AllocationFilterInput{TenantIDs: []uuid.UUID{tenant.ID}},
 		cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
 		nil,
 	)
@@ -255,8 +254,8 @@ func getTenantSiteIDs(ctx context.Context, dbSession *cdb.Session, tenant *cdbm.
 		return nil, err
 	}
 	siteIDs := mapset.NewSet[uuid.UUID]()
-	for _, ts := range tss {
-		siteIDs.Add(ts.SiteID)
+	for _, a := range as {
+		siteIDs.Add(a.SiteID)
 	}
 	for _, id := range privilegedIDs {
 		siteIDs.Add(id)
@@ -457,8 +456,13 @@ func (csh CreateOperatingSystemHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Unable to associate Operating System with Site: %s, Site does not belong to provider", siteID.String()), nil)
 			}
 		} else {
-			// Validate the TenantSite exists for current tenant and this site
-			if _, ok := sttsmap[siteID]; !ok {
+			// Validate the current tenant has access to this site
+			ok, serr := common.TenantHasSiteAccess(ctx, nil, csh.dbSession, tenant, siteID)
+			if serr != nil {
+				logger.Error().Err(serr).Msg("error checking Tenant access to Site")
+				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create Operating System, DB error checking Site access", nil)
+			}
+			if !ok {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Unable to associate Operating System with Site: %s, Tenant does not have access to Site", siteID.String()), nil)
 			}
 
@@ -1518,8 +1522,12 @@ func (ush UpdateOperatingSystemHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to update Operating System, Associated Site: %s is not in Registered state", dbosa.Site.Name), nil)
 			}
 
-			// Validate the TenantSite exists for current tenant and this site
-			_, ok := sttsmap[dbosa.SiteID]
+			// Validate the current tenant has access to this site
+			ok, serr := common.TenantHasSiteAccess(ctx, nil, ush.dbSession, tenant, dbosa.SiteID)
+			if serr != nil {
+				logger.Error().Err(serr).Msg("error checking Tenant access to Site")
+				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to update Operating System, DB error checking Site access", nil)
+			}
 			if !ok {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Unable to update associate Operating System with Site: %s, Tenant does not have access to Site", dbosa.Site.Name), nil)
 			}

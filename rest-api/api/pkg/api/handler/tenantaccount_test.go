@@ -833,6 +833,15 @@ func TestTenantAccountHandler_UpdateSiteCapabilities(t *testing.T) {
 	updatedTenantSite, err = tenantSiteDAO.GetByID(ctx, nil, overrideTenantSite.ID, nil)
 	require.NoError(t, err)
 	assert.Equal(t, cutil.GetPtr(false), updatedTenantSite.Config.TargetedInstanceCreation, "explicit site override is retained without allocations")
+
+	blockedSite := testTenantAccountBuildSite(t, dbSession, ip, "blocked-site", ipUser)
+	sendUpdate(model.APITenantAccountSiteCapabilitiesUpdateRequest{
+		{TargetedInstanceCreation: cutil.GetPtr(true)},
+		{SiteIDs: []string{blockedSite.ID.String()}, TargetedInstanceCreation: cutil.GetPtr(false)},
+	})
+	blockedTenantSite, err := tenantSiteDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, blockedSite.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, cutil.GetPtr(false), blockedTenantSite.Config.TargetedInstanceCreation, "a listed Site without a Tenant/Site association can be blocked")
 }
 
 func TestTenantAccountHandler_GetByID(t *testing.T) {

@@ -116,9 +116,8 @@ func (gafh GetAllFabricHandler) Handle(c echo.Context) error {
 	if provider != nil {
 		isAssociated = provider.ID == st.InfrastructureProviderID
 	}
-	tsDAO := cdbm.NewTenantSiteDAO(gafh.dbSession)
 	if !isAssociated && tenant != nil {
-		_, serr := tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, stID, nil)
+		serr := common.ValidateTenantSiteAccess(ctx, nil, gafh.dbSession, tenant, stID)
 		if serr != nil {
 			if serr != cdb.ErrDoesNotExist {
 				logger.Error().Err(serr).Msg("error retrieving TenantSite from DB")
@@ -285,9 +284,8 @@ func (gfh GetFabricHandler) Handle(c echo.Context) error {
 	if provider != nil {
 		isAssociated = provider.ID == st.InfrastructureProviderID
 	}
-	tsDAO := cdbm.NewTenantSiteDAO(gfh.dbSession)
 	if !isAssociated && tenant != nil {
-		_, serr := tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, stID, nil)
+		serr := common.ValidateTenantSiteAccess(ctx, nil, gfh.dbSession, tenant, stID)
 		if serr != nil {
 			if serr != cdb.ErrDoesNotExist {
 				logger.Error().Err(serr).Msg("error retrieving TenantSite from DB")

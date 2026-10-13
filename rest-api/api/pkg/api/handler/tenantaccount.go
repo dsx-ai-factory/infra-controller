@@ -944,7 +944,21 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 			ts, gerr := tsDAO.GetByTenantIDAndSiteID(ctx, tx, *ta.TenantID, siteID, []string{"Site"})
 			if gerr != nil {
 				if errors.Is(gerr, cdb.ErrDoesNotExist) {
-					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Site %s is not associated with Tenant", siteID.String()), nil)
+					site, serr := cdbm.NewSiteDAO(utah.dbSession).GetByID(ctx, tx, siteID, nil, false)
+					if serr != nil && !errors.Is(serr, cdb.ErrDoesNotExist) {
+						return serr
+					}
+					if serr != nil || site.InfrastructureProviderID != ta.InfrastructureProviderID {
+						return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Site %s is not owned by the Tenant Account Infrastructure Provider", siteID.String()), nil)
+					}
+					_, derr = tsDAO.Create(ctx, tx, cdbm.TenantSiteCreateInput{
+						TenantID: *ta.TenantID, TenantOrg: ta.TenantOrg, SiteID: siteID, CreatedBy: dbUser.ID,
+						Config: &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(siteUpdates[siteID])},
+					})
+					if derr != nil {
+						return derr
+					}
+					continue
 				}
 				logger.Error().Err(gerr).Msg("error retrieving TenantSite for siteCapabilities update")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)

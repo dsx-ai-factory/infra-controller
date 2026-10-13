@@ -370,17 +370,13 @@ func (gctrph GetCurrentTenantRoutingProfileHandler) Handle(c echo.Context) error
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant", nil)
 	}
 
-	allocationDAO := cdbm.NewAllocationDAO(gctrph.dbSession)
-	allocationCount, err := allocationDAO.GetCount(ctx, nil, cdbm.AllocationFilterInput{
-		TenantIDs: []uuid.UUID{tenant.ID},
-		SiteIDs:   []uuid.UUID{site.ID},
-	})
+	hasSiteAccess, err := common.TenantHasSiteAccess(ctx, nil, gctrph.dbSession, tenant, site.ID)
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving Allocations count from DB for Tenant and Site")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site Allocations count for Tenant", nil)
+		logger.Error().Err(err).Msg("error checking Tenant access to Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant access to Site, DB error", nil)
 	}
-	if allocationCount == 0 {
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have any Allocations with Site specified in query", nil)
+	if !hasSiteAccess {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have access to Site specified in query", nil)
 	}
 
 	stc, err := gctrph.scp.GetClientByID(site.ID)

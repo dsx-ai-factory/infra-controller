@@ -119,19 +119,12 @@ func (h GetAllIpxeTemplateHandler) Handle(c echo.Context) error {
 	}
 
 	if tenant != nil {
-		tsDAO := cdbm.NewTenantSiteDAO(h.dbSession)
-		tss, _, terr := tsDAO.GetAll(ctx, nil,
-			cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{tenant.ID}},
-			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
-			nil,
-		)
+		tenantSiteIDs, terr := getTenantSiteIDs(ctx, h.dbSession, tenant)
 		if terr != nil {
 			logger.Error().Err(terr).Msg("error retrieving Tenant Site associations from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant Site associations, DB error", nil)
 		}
-		for i := range tss {
-			tenantSites.Add(tss[i].SiteID)
-		}
+		tenantSites.Append(tenantSiteIDs...)
 	}
 
 	isAuthorized := func(id uuid.UUID) bool {
@@ -355,19 +348,17 @@ func callerHasAccessToAnyAssociatedSite(
 		}
 	}
 
-	// Tenant path: any site reachable via a TenantSite association.
+	// Tenant path: any site the Tenant has access to.
 	if tenant != nil {
-		tsDAO := cdbm.NewTenantSiteDAO(dbSession)
-		tss, _, terr := tsDAO.GetAll(ctx, nil, cdbm.TenantSiteFilterInput{
-			TenantIDs: []uuid.UUID{tenant.ID},
-			SiteIDs:   siteIDs,
-		}, cdbp.PageInput{Limit: cutil.GetPtr(1)}, nil)
-		if terr != nil {
-			logger.Error().Err(terr).Msg("error retrieving Tenant Site associations for iPXE template authorization")
-			return false, terr
-		}
-		if len(tss) > 0 {
-			return true, nil
+		for _, siteID := range siteIDs {
+			ok, terr := common.TenantHasSiteAccess(ctx, nil, dbSession, tenant, siteID)
+			if terr != nil {
+				logger.Error().Err(terr).Msg("error checking Tenant Site access for iPXE template authorization")
+				return false, terr
+			}
+			if ok {
+				return true, nil
+			}
 		}
 	}
 

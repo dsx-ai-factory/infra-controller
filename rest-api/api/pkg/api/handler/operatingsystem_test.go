@@ -430,6 +430,7 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg1, tenant1.ID, site.ID, tnu.ID)
 	assert.NotNil(t, ts1)
+	common.TestBuildAllocation(t, dbSession, site, tenant1, "test-allocation-1", tnu)
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
@@ -503,6 +504,7 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 
 	ts4 := testBuildTenantSiteAssociation(t, dbSession, tnOrg4, tenant4.ID, site2.ID, tnu.ID)
 	assert.NotNil(t, ts4)
+	common.TestBuildAllocation(t, dbSession, site2, tenant4, "test-allocation-4", tnu)
 
 	imageoss := []cdbm.OperatingSystem{}
 	imageossa := []cdbm.OperatingSystemSiteAssociation{}
@@ -888,9 +890,11 @@ func TestOperatingSystemHandler_GetByID(t *testing.T) {
 
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg1, tenant1.ID, site.ID, user.ID)
 	assert.NotNil(t, ts1)
+	common.TestBuildAllocation(t, dbSession, site, tenant1, "test-allocation-1", user)
 
 	ts2 := testBuildTenantSiteAssociation(t, dbSession, tnOrg2, tenant2.ID, site.ID, user.ID)
 	assert.NotNil(t, ts2)
+	common.TestBuildAllocation(t, dbSession, site, tenant2, "test-allocation-2", user)
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
@@ -1170,9 +1174,11 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 
 	ts2 := testBuildTenantSiteAssociation(t, dbSession, tnOrg1, tenant1.ID, site.ID, user.ID)
 	assert.NotNil(t, ts2)
+	common.TestBuildAllocation(t, dbSession, site, tenant1, "test-allocation-1", user)
 
 	ts3 := testBuildTenantSiteAssociation(t, dbSession, tnOrg1, tenant2.ID, site1.ID, user.ID)
 	assert.NotNil(t, ts3)
+	common.TestBuildAllocation(t, dbSession, site1, tenant2, "test-allocation-2", user)
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
@@ -2647,6 +2653,7 @@ func TestOperatingSystemHandler_GetAll_Visibility(t *testing.T) {
 	tn := testMachineBuildTenant(t, dbSession, tenantOrg, "vis-tenant")
 	tsC := testBuildTenantSiteAssociation(t, dbSession, tenantOrg, tn.ID, siteC.ID, tnUser.ID)
 	assert.NotNil(t, tsC)
+	common.TestBuildAllocation(t, dbSession, siteC, tn, "vis-allocation-c", provUser)
 
 	buildTenantOS(t, ctx, osDAO, tenantOrg, tn.ID, "tenant-os-1", tnUser.ID)
 	buildTenantOS(t, ctx, osDAO, tenantOrg, tn.ID, "tenant-os-2", tnUser.ID)
@@ -2772,6 +2779,7 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 	siteD := testMachineBuildSite(t, dbSession, ip2, "vis-site-d", cdbm.SiteStatusRegistered)
 	tn := testMachineBuildTenant(t, dbSession, tenantOrg, "vis-tenant")
 	testBuildTenantSiteAssociation(t, dbSession, tenantOrg, tn.ID, siteC.ID, tnUser.ID)
+	common.TestBuildAllocation(t, dbSession, siteC, tn, "vis-allocation-c", servingProviderUser)
 
 	tnOS := buildTenantOS(t, ctx, osDAO, tenantOrg, tn.ID, "tenant-os-1", tnUser.ID)
 	provC := buildProviderOS(t, ctx, osDAO, servingProviderOrg, ip2.ID, "prov-os-c", tnUser.ID)
@@ -2799,6 +2807,7 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 	dualUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{servingProviderOrg}, []string{authz.ProviderAdminRole, authz.TenantAdminRole})
 	dualTenant := testMachineBuildTenant(t, dbSession, servingProviderOrg, "vis-dual-tenant")
 	testBuildTenantSiteAssociation(t, dbSession, servingProviderOrg, dualTenant.ID, siteC.ID, dualUser.ID)
+	common.TestBuildAllocation(t, dbSession, siteC, dualTenant, "vis-dual-allocation-c", servingProviderUser)
 	privOrg := "vis-privileged-org"
 	privUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{privOrg}, []string{authz.TenantAdminRole})
 	privTenant := testMachineBuildTenant(t, dbSession, privOrg, "vis-privileged-tenant")
@@ -2806,6 +2815,7 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 	// Disabling targeted creation at C does not revoke ordinary membership.
 	// D has no membership and is accessible only through the account default.
 	cdbm.TestBuildTenantSite(t, dbSession, privTenant, siteC, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, privUser)
+	common.TestBuildAllocation(t, dbSession, siteC, privTenant, "vis-privileged-allocation-c", servingProviderUser)
 
 	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 

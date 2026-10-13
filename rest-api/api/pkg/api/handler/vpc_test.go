@@ -1404,7 +1404,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "test VPC create API endpoint failure, Tenant has no Site Allocation",
+			name: "test VPC create API endpoint failure, Tenant has no Site Allocation or privilege",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -1416,9 +1416,36 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 					Description: cutil.GetPtr("Test VPC Description"),
 					SiteID:      st2.ID.String(),
 				},
-				reqOrg:   tnOrg,
-				reqUser:  tnu,
+				reqOrg:   tnOrg3,
+				reqUser:  tnu3,
 				respCode: http.StatusForbidden,
+			},
+			wantErr: false,
+		},
+		{
+			name: "test VPC create API endpoint success, privileged Tenant has no Site Allocation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:        "Test VPC",
+					Description: cutil.GetPtr("Test VPC Description"),
+					SiteID:      st2.ID.String(),
+				},
+				reqOrg:                     tnOrg,
+				reqUser:                    tnu,
+				respCode:                   http.StatusCreated,
+				expectedStatus:             cdbm.VpcStatusProvisioning,
+				expectedVirtualizationType: cdbm.VpcFNN,
+				expectedStatusDetails: []expectedStatusDetail{
+					{
+						status:  cdbm.VpcStatusProvisioning,
+						message: "VPC provisioning has been initiated on Site",
+					},
+				},
 			},
 			wantErr: false,
 		},
@@ -1802,6 +1829,8 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 
 	vpc4 := testVPCBuildVPC(t, dbSession, "test-vpc-3", ip, tn, st3, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, map[string]string{"zone": "west6"}, cdbm.VpcStatusReady, tnu)
 	assert.NotNil(t, vpc4)
+	// Deny the privileged Tenant at the Site without Allocations
+	cdbm.TestBuildTenantSite(t, dbSession, tn, st3, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, tnu)
 
 	// Associate tenant 1 with site 1
 	ts1t1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st.ID, tnu.ID)
