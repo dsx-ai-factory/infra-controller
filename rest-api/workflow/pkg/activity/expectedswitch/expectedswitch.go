@@ -39,7 +39,7 @@ type ManageExpectedSwitch struct {
 // The reconciliation logic is as follows:
 // - UUID existing in NICo but not in DB: create record in DB
 // - UUID existing in both NICo and DB with differences: update record in DB
-// - UUID existing in DB but not in NICo: delete record in DB
+// - UUID existing in DB but not in NICo: delete the stale record if it has not changed since the initial read
 func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, siteID uuid.UUID, expectedSwitchInventory *corev1.ExpectedSwitchInventory) error {
 	logger := log.With().Str("Activity", "UpdateExpectedSwitchesInDB").Str("Site ID", siteID.String()).Logger()
 
@@ -207,9 +207,9 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 		}
 	}
 
-	// Delete any Expected Switch present in DB not present in NICo.
-	// We only act if this is the last page (or paging disabled) and outside race window.
-	// The source of truth for NICo is reportedIDs.
+	// Delete stale records missing from `reportedIDs` only after the final page
+	// (or when paging is disabled). Matching the saved `Updated` timestamp in
+	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
 	if util.ShouldReconcileDeletions(expectedSwitchInventory.GetInventoryPage()) {
 		for _, es := range existingExpectedSwitches {
 			if _, keep := reportedIDs[es.ID]; keep {
@@ -219,11 +219,14 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 			if site.IsTimeWithinStaleInventoryThreshold(es.Updated) {
 				continue
 			}
-			logger.Info().Str("ExpectedSwitchID", es.ID.String()).Msg("deleting ExpectedSwitch from DB since it was no longer reported in inventory from Site")
-			if derr := esDAO.Delete(ctx, nil, es.ID); derr != nil {
+			deleted, derr := esDAO.DeleteIfUnchanged(ctx, nil, es.ID, es.Updated)
+			if derr != nil {
 				logger.Error().Err(derr).Str("ExpectedSwitchID", es.ID.String()).Msg("failed to delete ExpectedSwitch from DB")
+				continue
 			}
-
+			if deleted {
+				logger.Info().Str("ExpectedSwitchID", es.ID.String()).Msg("deleted ExpectedSwitch no longer reported in inventory from Site")
+			}
 		}
 	}
 
