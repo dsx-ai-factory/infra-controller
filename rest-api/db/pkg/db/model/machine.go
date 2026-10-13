@@ -160,10 +160,13 @@ type Machine struct {
 	IsAssigned           bool                   `bun:"is_assigned,notnull"` // true when machine is assigned to an Instance
 	Labels               map[string]string      `bun:"labels,type:jsonb"`   // Labels are used to store additional metadata about the machine
 	Status               string                 `bun:"status,notnull"`
-	IsMissingOnSite      bool                   `bun:"is_missing_on_site,notnull"`
-	Created              time.Time              `bun:"created,nullzero,notnull,default:current_timestamp"`
-	Updated              time.Time              `bun:"updated,nullzero,notnull,default:current_timestamp"`
-	Deleted              *time.Time             `bun:"deleted,soft_delete"`
+	// IsForceDeletionRequested records accepted Site deletion, including incomplete cleanup.
+	// Retained records no longer contribute Allocation capacity or return to tenant use.
+	IsForceDeletionRequested bool       `bun:"is_force_deletion_requested,notnull,default:false"`
+	IsMissingOnSite          bool       `bun:"is_missing_on_site,notnull"`
+	Created                  time.Time  `bun:"created,nullzero,notnull,default:current_timestamp"`
+	Updated                  time.Time  `bun:"updated,nullzero,notnull,default:current_timestamp"`
+	Deleted                  *time.Time `bun:"deleted,soft_delete"`
 }
 
 // GetControllerState returns the normalized controller state from Machine metadata, or empty when
@@ -270,6 +273,7 @@ type MachineUpdateInput struct {
 	Metadata                 *SiteControllerMachine
 	IsInMaintenance          *bool
 	IsUsableByTenant         *bool
+	IsForceDeletionRequested *bool
 	MaintenanceMessage       *string
 	IsNetworkDegraded        *bool
 	NetworkHealthMessage     *string
@@ -1005,6 +1009,7 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 	machines := make([]*Machine, 0, len(inputs))
 	ids := make([]string, 0, len(inputs))
 	columnsSet := make(map[string]bool)
+	forceDeletionUpdates := []*Machine{}
 
 	// Limit per-item tracing to avoid overly-large spans; see db.MaxBatchItemsToTrace for details
 	traceItems := len(inputs)
@@ -1094,6 +1099,13 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 			columns = append(columns, "metadata")
 			if addTrace {
 				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"metadata", "set"))
+			}
+		}
+		if input.IsForceDeletionRequested != nil {
+			m.IsForceDeletionRequested = *input.IsForceDeletionRequested
+			forceDeletionUpdates = append(forceDeletionUpdates, m)
+			if addTrace {
+				cotel.SetAttribute(machineDAOSpan, attribute.Bool(prefix+"is_force_deletion_requested", *input.IsForceDeletionRequested))
 			}
 		}
 		if input.IsUsableByTenant != nil {
@@ -1200,6 +1212,15 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 		Exec(ctx)
 	if err != nil {
 		return nil, err
+	}
+
+	// Preserve omitted deletion markers in mixed batches, including inventory updates.
+	if len(forceDeletionUpdates) > 0 {
+		_, err = db.GetIDB(tx, msd.dbSession).NewUpdate().Model(&forceDeletionUpdates).
+			Column("is_force_deletion_requested").Bulk().Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Fetch the updated machines

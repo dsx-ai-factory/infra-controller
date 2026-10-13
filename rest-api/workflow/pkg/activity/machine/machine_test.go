@@ -1784,6 +1784,48 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 			})
 		}
 	})
+	t.Run("present inventory preserves retained force-deletion records", func(t *testing.T) {
+		ctx := context.Background()
+		retainedSite := testMachineBuildSite(t, dbSession, ip2, "retained-force-deletion-site", cdbm.SiteStatusRegistered)
+		machine := testMachineBuildMachine(t, dbSession, ip2.ID, retainedSite.ID, &instanceTypeOriginal.ID, nil, false, nil, false, nil, cutil.GetPtr(cdbm.MachineStatusReady))
+		association := testMachineBuildMachineInstanceType(t, dbSession, machine.ID, instanceTypeOriginal.ID)
+		machineDAO := cdbm.NewMachineDAO(dbSession)
+		aged := time.Now().Add(-2 * time.Duration(cutil.DefaultInventoryReceiptInterval))
+		_, err := machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{
+			MachineID: machine.ID, IsForceDeletionRequested: cutil.GetPtr(true),
+			IsUsableByTenant: cutil.GetPtr(false), Updated: &aged,
+		})
+		require.NoError(t, err)
+		inventory := &corev1.MachineInventory{
+			Machines: []*corev1.MachineInfo{{Machine: &corev1.Machine{
+				Id: &corev1.MachineId{Id: machine.ID}, State: cdbm.ControllerMachineStateReady,
+				Status: &corev1.MachineStatus{},
+			}}},
+			Timestamp: timestamppb.Now(), InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		}
+		manager := NewManageMachine(dbSession, nil)
+		require.NoError(t, manager.UpdateMachinesInDB(ctx, retainedSite.ID.String(), inventory))
+		retained, err := machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
+		require.NoError(t, err)
+		assert.True(t, retained.IsForceDeletionRequested)
+		assert.False(t, retained.IsUsableByTenant)
+		assert.Equal(t, machine.InstanceTypeID, retained.InstanceTypeID)
+		_, err = cdbm.NewMachineInstanceTypeDAO(dbSession).GetByID(ctx, nil, association.ID, nil)
+		require.NoError(t, err)
+		// Deliberate owner cleanup permits a later authoritative reappearance.
+		require.NoError(t, cdbm.NewMachineInstanceTypeDAO(dbSession).Delete(ctx, nil, association.ID, false))
+		require.NoError(t, machineDAO.Delete(ctx, nil, machine.ID, false))
+		_, err = dbSession.DB.NewUpdate().Model((*cdbm.Machine)(nil)).Set("deleted = ?", aged).
+			Where("id = ?", machine.ID).WhereAllWithDeleted().Exec(ctx)
+		require.NoError(t, err)
+		require.NoError(t, manager.UpdateMachinesInDB(ctx, retainedSite.ID.String(), inventory))
+		restored, err := machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
+		require.NoError(t, err)
+		assert.False(t, restored.IsForceDeletionRequested)
+		assert.True(t, restored.IsUsableByTenant)
+
+	})
+
 }
 
 func TestManageMachine_UpdateMachinesInDB_AddresslessInterface(t *testing.T) {
