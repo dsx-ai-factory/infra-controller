@@ -2857,6 +2857,19 @@ pub struct UpgradeDecision {
     pub last_updated: DateTime<Utc>,
 }
 
+/// `DpuAgentUpgradeStatus` contains the persisted inputs to an agent upgrade decision.
+#[derive(Debug, sqlx::FromRow)]
+pub struct DpuAgentUpgradeStatus {
+    /// The DPU whose observation and upgrade decision were read.
+    pub id: DpuMachineId,
+    /// The version in the latest network observation, or `None` if unreported.
+    pub agent_version: Option<String>,
+    /// Whether an agent upgrade is requested; an absent decision means `false`.
+    pub upgrade_requested: bool,
+    /// Whether the attached host was ingested with DPF, which manages its upgrades.
+    pub host_dpf_used_for_ingestion: bool,
+}
+
 impl Display for DpuDiscoveringState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(self, f)

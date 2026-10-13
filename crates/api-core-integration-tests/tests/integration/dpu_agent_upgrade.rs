@@ -25,7 +25,8 @@ use carbide_test_harness::test_support::fixture_config::{
 };
 use carbide_uuid::machine::DpuMachineId;
 use chrono::{Duration, Utc};
-use health_report::{HealthAlertClassification, HealthProbeAlert, HealthProbeId};
+use health_report::{HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthReport};
+use model::machine::network::MachineNetworkStatusObservation;
 use model::test_support::ManagedHostConfig;
 
 async fn create_ready_managed_host(env: &TestHarness) -> TestManagedHost {
@@ -54,20 +55,28 @@ async fn init(pool: PgPool) -> (TestHarness, TestManagedHost) {
     (env, managed_host)
 }
 
-/// Helper: call record_dpu_network_status with an old agent version.
-async fn report_old_agent_version(env: &TestHarness, dpu_machine_id: DpuMachineId) {
+async fn report_agent_version(
+    env: &TestHarness,
+    dpu_machine_id: DpuMachineId,
+    agent_version: Option<&str>,
+    health: Option<HealthReport>,
+) -> Result<(), tonic::Status> {
     env.api()
         .record_dpu_network_status(tonic::Request::new(rpc::DpuNetworkStatus {
             dpu_machine_id: Some(dpu_machine_id),
-            dpu_agent_version: Some("v2023.06-rc2-1-gc5c05de3".to_string()),
+            dpu_agent_version: agent_version.map(str::to_string),
             observed_at: None,
-            dpu_health: Some(::rpc::health::HealthReport {
-                source: "forge-dpu-agent".to_string(),
-                triggered_by: None,
-                observed_at: None,
-                successes: vec![],
-                alerts: vec![],
-            }),
+            dpu_health: Some(
+                health
+                    .map(Into::into)
+                    .unwrap_or(::rpc::health::HealthReport {
+                        source: "forge-dpu-agent".to_string(),
+                        triggered_by: None,
+                        observed_at: None,
+                        successes: vec![],
+                        alerts: vec![],
+                    }),
+            ),
             network_config_version: None,
             instance_id: None,
             instance_config_version: None,
@@ -83,7 +92,7 @@ async fn report_old_agent_version(env: &TestHarness, dpu_machine_id: DpuMachineI
             lldp: None,
         }))
         .await
-        .unwrap();
+        .map(|_| ())
 }
 
 async fn upgrade_needed(env: &TestHarness, dpu_machine_id: DpuMachineId) -> bool {
@@ -100,13 +109,26 @@ async fn upgrade_needed(env: &TestHarness, dpu_machine_id: DpuMachineId) -> bool
         .should_upgrade
 }
 
-async fn set_upgrade_policy(env: &TestHarness) {
-    env.api()
+async fn set_upgrade_policy(env: &TestHarness, policy: rpc::AgentUpgradePolicy) {
+    let response = env
+        .api()
         .dpu_agent_upgrade_policy_action(tonic::Request::new(rpc::DpuAgentUpgradePolicyRequest {
-            new_policy: Some(rpc::AgentUpgradePolicy::UpOnly as i32),
+            new_policy: Some(policy as i32),
         }))
         .await
-        .unwrap();
+        .unwrap()
+        .into_inner();
+    assert_eq!(response.active_policy, policy as i32);
+}
+
+async fn stored_upgrade_decision(
+    env: &TestHarness,
+    dpu_machine_id: DpuMachineId,
+) -> Result<serde_json::Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT dpu_agent_upgrade_requested FROM machines WHERE id = $1")
+        .bind(dpu_machine_id)
+        .fetch_one(&env.api().database_connection)
+        .await
 }
 
 #[sqlx_test]
@@ -114,7 +136,7 @@ async fn test_dpf_host_does_not_set_upgrade_flag(db_pool: PgPool) -> Result<(), 
     let (env, mh) = init(db_pool).await;
     let dpu_id = mh.first_dpu().id;
 
-    set_upgrade_policy(&env).await;
+    set_upgrade_policy(&env, rpc::AgentUpgradePolicy::UpOnly).await;
 
     // Mark the host as DPF-managed (used_for_ingestion = true).
     let mut txn = env.db_txn().await;
@@ -122,7 +144,7 @@ async fn test_dpf_host_does_not_set_upgrade_flag(db_pool: PgPool) -> Result<(), 
     txn.commit().await?;
 
     // Even with an old agent version reported, the upgrade flag must NOT be set.
-    report_old_agent_version(&env, dpu_id).await;
+    report_agent_version(&env, dpu_id, Some("v2023.06-rc2-1-gc5c05de3"), None).await?;
 
     assert!(
         !upgrade_needed(&env, dpu_id).await,
@@ -138,33 +160,43 @@ async fn test_dpf_transition_clears_stale_upgrade_flag(
     let (env, mh) = init(db_pool).await;
     let dpu_id = mh.first_dpu().id;
 
-    set_upgrade_policy(&env).await;
-
-    // While NOT yet DPF-managed, report an old version to set the upgrade flag.
-    report_old_agent_version(&env, dpu_id).await;
-    assert!(
-        upgrade_needed(&env, dpu_id).await,
-        "upgrade flag should be set before DPF transition"
-    );
-
-    // Transition the host to DPF.
     let mut txn = env.db_txn().await;
     db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &mh.host.id).await?;
     txn.commit().await?;
 
-    // The next status report should clear the stale flag.
-    report_old_agent_version(&env, dpu_id).await;
-    assert!(
-        !upgrade_needed(&env, dpu_id).await,
-        "upgrade flag should be cleared after DPF transition"
-    );
+    for policy in [
+        rpc::AgentUpgradePolicy::UpOnly,
+        rpc::AgentUpgradePolicy::Off,
+    ] {
+        set_upgrade_policy(&env, policy).await;
+        let mut txn = env.db_txn().await;
+        db::machine::set_dpu_agent_upgrade_requested(&mut txn, &dpu_id, true, "stale-target")
+            .await?;
+        txn.commit().await?;
+        let stale_decision = stored_upgrade_decision(&env, dpu_id).await?;
 
-    // A second status report must NOT re-set the flag (no redundant DB writes).
-    report_old_agent_version(&env, dpu_id).await;
-    assert!(
-        !upgrade_needed(&env, dpu_id).await,
-        "upgrade flag must stay cleared on subsequent status reports"
-    );
+        report_agent_version(&env, dpu_id, Some("v2023.06-rc2-1-gc5c05de3"), None).await?;
+        assert!(
+            !upgrade_needed(&env, dpu_id).await,
+            "DPF must clear a stale upgrade request under {policy:?}"
+        );
+        let cleared_decision = stored_upgrade_decision(&env, dpu_id).await?;
+        assert_eq!(cleared_decision["should_upgrade"], false);
+        assert_eq!(
+            cleared_decision["to_version"],
+            carbide_version::v!(build_version)
+        );
+        assert_ne!(
+            cleared_decision["last_updated"],
+            stale_decision["last_updated"]
+        );
+
+        report_agent_version(&env, dpu_id, Some("v2023.06-rc2-1-gc5c05de3"), None).await?;
+        assert_eq!(
+            stored_upgrade_decision(&env, dpu_id).await?,
+            cleared_decision
+        );
+    }
     Ok(())
 }
 
@@ -266,6 +298,183 @@ async fn test_upgrade_check(db_pool: PgPool) -> Result<(), eyre::Report> {
         "Debian package version is our version minus initial 'v'"
     );
 
+    let requested_decision = stored_upgrade_decision(&env, dpu_machine_id).await?;
+    assert_eq!(requested_decision["should_upgrade"], true);
+    assert_eq!(requested_decision["to_version"], current_version);
+    assert!(requested_decision["last_updated"].as_str().is_some());
+
+    for agent_version in [Some("v2023.06-rc2-1-gc5c05de3"), None] {
+        report_agent_version(&env, dpu_machine_id, agent_version, None).await?;
+        assert_eq!(
+            stored_upgrade_decision(&env, dpu_machine_id).await?,
+            requested_decision,
+            "{agent_version:?} must preserve the stored upgrade request"
+        );
+    }
+
+    set_upgrade_policy(&env, rpc::AgentUpgradePolicy::Off).await;
+    report_agent_version(&env, dpu_machine_id, Some(current_version), None).await?;
+    assert_eq!(
+        stored_upgrade_decision(&env, dpu_machine_id).await?,
+        requested_decision,
+        "Off must preserve the request even when the reported version is current"
+    );
+
+    set_upgrade_policy(&env, rpc::AgentUpgradePolicy::UpOnly).await;
+    report_agent_version(&env, dpu_machine_id, Some(current_version), None).await?;
+    assert!(
+        !upgrade_needed(&env, dpu_machine_id).await,
+        "the current version must clear the upgrade request in the same report"
+    );
+    let cleared_decision = stored_upgrade_decision(&env, dpu_machine_id).await?;
+    assert_eq!(cleared_decision["should_upgrade"], false);
+    assert_eq!(cleared_decision["to_version"], current_version);
+    assert_ne!(
+        cleared_decision["last_updated"],
+        requested_decision["last_updated"]
+    );
+    for agent_version in [Some(current_version), None] {
+        report_agent_version(&env, dpu_machine_id, agent_version, None).await?;
+        assert_eq!(
+            stored_upgrade_decision(&env, dpu_machine_id).await?,
+            cleared_decision,
+            "{agent_version:?} must preserve the cleared upgrade decision"
+        );
+    }
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_upgrade_missing_host_preserves_committed_status(
+    db_pool: PgPool,
+) -> Result<(), eyre::Report> {
+    let (env, managed_host) = init(db_pool).await;
+    let dpu_id = managed_host.first_dpu().id;
+    let detached = sqlx::query(
+        "UPDATE machine_interfaces SET attached_dpu_machine_id = NULL
+         WHERE machine_id = $1 AND attached_dpu_machine_id = $2",
+    )
+    .bind(managed_host.host.id)
+    .bind(dpu_id)
+    .execute(&env.api().database_connection)
+    .await?;
+    assert!(detached.rows_affected() > 0);
+    let mut txn = env.db_txn().await;
+    db::machine::set_dpu_agent_upgrade_requested(&mut txn, &dpu_id, true, "preserved-target")
+        .await?;
+    txn.commit().await?;
+    let prior_decision = stored_upgrade_decision(&env, dpu_id).await?;
+
+    // Without a configured policy, the handler does not need a host attachment.
+    report_agent_version(&env, dpu_id, Some("v2023.06-rc2-1-gc5c05de3"), None).await?;
+    assert_eq!(stored_upgrade_decision(&env, dpu_id).await?, prior_decision);
+
+    set_upgrade_policy(&env, rpc::AgentUpgradePolicy::UpOnly).await;
+    let current_version = carbide_version::v!(build_version);
+    let mut health = HealthReport::empty(HealthReport::DPU_AGENT_SOURCE.to_string());
+    health.alerts.push(HealthProbeAlert {
+        id: "UpgradeStatusCommit".parse()?,
+        target: None,
+        in_alert_since: None,
+        message: "health submitted with the detached DPU status".to_string(),
+        tenant_message: None,
+        classifications: vec![],
+    });
+    let error = report_agent_version(&env, dpu_id, Some(current_version), Some(health.clone()))
+        .await
+        .expect_err("an upgrade decision requires the attached host");
+    assert_eq!(error.code(), tonic::Code::NotFound);
+    assert_eq!(error.message(), format!("machine not found: {dpu_id}"));
+
+    let (persisted_version, persisted_health): (Option<String>, sqlx::types::Json<HealthReport>) =
+        sqlx::query_as(
+            "SELECT network_status_observation->>'agent_version',
+                health_reports->'merges'->'forge-dpu-agent'
+         FROM machines WHERE id = $1",
+        )
+        .bind(dpu_id)
+        .fetch_one(&env.api().database_connection)
+        .await?;
+    assert_eq!(persisted_version.as_deref(), Some(current_version));
+    assert_eq!(persisted_health.alerts.len(), 1);
+    assert_eq!(persisted_health.alerts[0].id, health.alerts[0].id);
+    assert_eq!(persisted_health.alerts[0].message, health.alerts[0].message);
+    assert_eq!(stored_upgrade_decision(&env, dpu_id).await?, prior_decision);
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_upgrade_uses_observation_committed_after_report(
+    db_pool: PgPool,
+) -> Result<(), eyre::Report> {
+    let (env, managed_host) = init(db_pool).await;
+    let dpu_id = managed_host.first_dpu().id;
+    let current_version = carbide_version::v!(build_version);
+    set_upgrade_policy(&env, rpc::AgentUpgradePolicy::UpOnly).await;
+    assert!(!upgrade_needed(&env, dpu_id).await);
+    sqlx::query("UPDATE machines SET network_status_observation = NULL WHERE id = $1")
+        .bind(dpu_id)
+        .execute(&env.api().database_connection)
+        .await?;
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut policy_gate = env.db_txn().await;
+        // The handler reads policy only after committing its status transaction.
+        sqlx::query("LOCK TABLE dpu_agent_upgrade_policy IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *policy_gate)
+            .await?;
+        let env = &env;
+        tokio::try_join!(
+            async {
+                report_agent_version(env, dpu_id, Some(current_version), None).await?;
+                Ok::<_, eyre::Report>(())
+            },
+            async move {
+                let mut poll = tokio::time::interval(std::time::Duration::from_millis(10));
+                let mut observation = loop {
+                    poll.tick().await;
+                    let observed: Option<sqlx::types::Json<MachineNetworkStatusObservation>> =
+                        sqlx::query_scalar(
+                            "SELECT network_status_observation FROM machines WHERE id = $1",
+                        )
+                        .bind(dpu_id)
+                        .fetch_one(&env.api().database_connection)
+                        .await?;
+                    if let Some(observed) = observed
+                        && observed.agent_version.as_deref() == Some(current_version)
+                    {
+                        break observed.0;
+                    }
+                };
+
+                // Seeing the reported version here proves the first transaction committed.
+                // Commit a later observation before allowing the upgrade decision.
+                observation.agent_version = Some("v2023.06-rc2-1-gc5c05de3".to_string());
+                observation.observed_at += Duration::milliseconds(1);
+                let mut writer = env.db_txn().await;
+                assert!(matches!(
+                    db::machine::update_network_status_observation(
+                        &mut writer,
+                        &dpu_id,
+                        &observation,
+                    )
+                    .await?,
+                    db::ConditionalWrite::Applied(())
+                ));
+                writer.commit().await?;
+                policy_gate.commit().await?;
+                Ok::<_, eyre::Report>(())
+            }
+        )?;
+        Ok::<_, eyre::Report>(())
+    })
+    .await??;
+
+    assert!(upgrade_needed(&env, dpu_id).await);
+    let decision = stored_upgrade_decision(&env, dpu_id).await?;
+    assert_eq!(decision["should_upgrade"], true);
+    assert_eq!(decision["to_version"], current_version);
     Ok(())
 }
 
