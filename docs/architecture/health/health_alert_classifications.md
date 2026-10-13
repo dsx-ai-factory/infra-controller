@@ -70,7 +70,7 @@ the probe is treated as success and no alert classification is emitted.
 
 ## `TrayLeak`
 
-Indicates an active leak in a compute or NVSwitch tray. Derived tray leak
+Indicates an active leak in a tray. Derived tray leak
 alerts also include `Hardware`, `SensorCritical`, and `PreventAllocations`.
 
 ## `RackLeak`
