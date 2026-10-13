@@ -1,3 +1,14 @@
+## Per-chart image override. When repository is set, takes precedence over global.image.
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: ""
+
+## Name of the Secret containing the SSH server host key (id_ed25519 and
+## id_ed25519.pub keys). Defaults to "ssh-host-key". Override to use a
+## pre-existing secret or a chart-generated one.
+sshHostKeySecretName: "ssh-host-key"
+
 ## nico-ssh-console-rs — SSH console proxy for remote BMC/console access
 ## Global settings (overridden by umbrella chart)
 global:
