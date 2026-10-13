@@ -5267,7 +5267,9 @@ impl DpuMachineStateHandler {
                     }
                 };
 
-                match dpu_redfish_client.is_bios_setup(None).await {
+                // DPU BMC: the onboard host-NIC toggle does not apply, so never
+                // request its removal here.
+                match dpu_redfish_client.is_bios_setup(None, false).await {
                     Ok(true) => {
                         tracing::info!(
                             dpu_machine_id = %dpu_snapshot.id,
@@ -13517,6 +13519,12 @@ pub async fn call_machine_setup_and_handle_no_dpu_error(
     expected_dpu_count: usize,
     site_config: &MachineStateHandlerSiteConfig,
 ) -> Result<Option<String>, RedfishError> {
+    // Disable the host's onboard management NIC only for managed-DPU hosts. The
+    // site-explorer DPU policy gate guarantees `expected_dpu_count > 0` iff the
+    // host is `Manage`; `Nic`/`Ignore` hosts (count 0) keep the onboard NIC as
+    // their data path. This must match the value `is_bios_setup` /
+    // `machine_setup_status` receive, so detection and remediation agree.
+    let disable_onboard_nic = expected_dpu_count > 0;
     let setup_result = match boot_interface {
         Some(target) => {
             target
@@ -13526,6 +13534,7 @@ pub async fn call_machine_setup_and_handle_no_dpu_error(
                         &site_config.bios_profiles,
                         site_config.selected_profile,
                         &site_config.oem_manager_profiles,
+                        disable_onboard_nic,
                     )
                 })
                 .await
@@ -13537,6 +13546,7 @@ pub async fn call_machine_setup_and_handle_no_dpu_error(
                     &site_config.bios_profiles,
                     site_config.selected_profile,
                     &site_config.oem_manager_profiles,
+                    disable_onboard_nic,
                 )
                 .await
         }
@@ -14163,7 +14173,7 @@ async fn set_host_boot_order(
             // inspection, return to the shared BIOS/job stages before attempting
             // the order write.
             let is_bios_setup = boot_interface
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
+                .run(|bi| redfish_client.is_bios_setup(Some(bi), mh_snapshot.has_managed_dpus()))
                 .await
                 .map_err(|e| redfish_error("is_bios_setup", e))?;
 
@@ -14297,7 +14307,7 @@ async fn set_host_boot_order(
             };
 
             let is_bios_setup = boot_interface
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
+                .run(|bi| redfish_client.is_bios_setup(Some(bi), mh_snapshot.has_managed_dpus()))
                 .await
                 .map_err(|e| redfish_error("is_bios_setup", e))?;
 
@@ -14611,7 +14621,7 @@ async fn set_host_boot_order(
             // every platform and return to the shared job-aware repair before
             // declaring the overall boot configuration complete.
             let is_bios_setup = boot_interface
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
+                .run(|bi| redfish_client.is_bios_setup(Some(bi), mh_snapshot.has_managed_dpus()))
                 .await
                 .map_err(|e| redfish_error("is_bios_setup", e))?;
 

@@ -7003,7 +7003,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.11#9da4784d22f3719005c8d81491e9ad63f10fc504"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.12#568a490d599c0b5d039e377e05796fb4ba706e7a"
 dependencies = [
  "chrono",
  "clap",

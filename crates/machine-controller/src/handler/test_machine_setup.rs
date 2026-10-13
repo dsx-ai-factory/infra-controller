@@ -74,6 +74,57 @@ async fn test_oem_manager_profiles_passed_to_machine_setup() {
         RedfishSimAction::MachineSetup {
             oem_manager_profiles: config.oem_manager_profiles,
             boot_interface_mac: None,
+            // One managed DPU, so the host's onboard management NIC is disabled.
+            disable_onboard_nic: true,
         }
     );
+}
+
+/// `call_machine_setup_and_handle_no_dpu_error` must derive `disable_onboard_nic`
+/// from the expected DPU count: managed-DPU hosts (count > 0) disable the onboard
+/// NIC, while zero-DPU hosts (`Nic`/`Ignore`, count 0) keep it as their data path.
+#[tokio::test]
+async fn test_disable_onboard_nic_derived_from_expected_dpu_count() {
+    let config = MachineStateHandlerSiteConfig::test_default();
+
+    for (expected_dpu_count, expected_disable) in [(0usize, false), (1usize, true)] {
+        let sim = RedfishSim::default();
+        let timepoint = sim.timepoint();
+        let client = sim
+            .create_client(
+                "test-host",
+                None,
+                RedfishAuth::Key(CredentialKey::HostRedfish {
+                    credential_type: CredentialType::SiteDefault,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+
+        call_machine_setup_and_handle_no_dpu_error(
+            client.as_ref(),
+            None,
+            expected_dpu_count,
+            &config,
+        )
+        .await
+        .expect("machine_setup succeeds");
+
+        let actions = sim.actions_since(&timepoint).all_hosts();
+        let disable_onboard_nic = actions
+            .iter()
+            .find_map(|action| match action {
+                RedfishSimAction::MachineSetup {
+                    disable_onboard_nic,
+                    ..
+                } => Some(*disable_onboard_nic),
+                _ => None,
+            })
+            .expect("machine_setup should have been called");
+        assert_eq!(
+            disable_onboard_nic, expected_disable,
+            "expected_dpu_count={expected_dpu_count}"
+        );
+    }
 }

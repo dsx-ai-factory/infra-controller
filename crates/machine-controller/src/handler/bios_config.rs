@@ -401,10 +401,14 @@ pub(super) async fn advance_polling_bios_setup(
     let is_bios_setup_result = match boot_interface {
         Some(target) => {
             target
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
+                .run(|bi| redfish_client.is_bios_setup(Some(bi), mh_snapshot.has_managed_dpus()))
                 .await
         }
-        None => redfish_client.is_bios_setup(None).await,
+        None => {
+            redfish_client
+                .is_bios_setup(None, mh_snapshot.has_managed_dpus())
+                .await
+        }
     };
     match is_bios_setup_result {
         Ok(true) => {
@@ -483,10 +487,14 @@ pub(super) async fn handle_bios_setup_failed_recovery(
     let is_bios_setup_result = match &boot_interface {
         Some(target) => {
             target
-                .run(|bi| redfish_client.is_bios_setup(Some(bi)))
+                .run(|bi| redfish_client.is_bios_setup(Some(bi), mh_snapshot.has_managed_dpus()))
                 .await
         }
-        None => redfish_client.is_bios_setup(None).await,
+        None => {
+            redfish_client
+                .is_bios_setup(None, mh_snapshot.has_managed_dpus())
+                .await
+        }
     };
     match is_bios_setup_result {
         Ok(true) => {

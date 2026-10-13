@@ -729,6 +729,10 @@ impl RedfishClient {
                             &empty_profiles,
                             libredfish::BiosProfileType::Performance,
                             &empty_profiles,
+                            // Exploration-time setup does not know the host DPU
+                            // policy; the controller owns the onboard-NIC
+                            // decision when it re-runs machine_setup.
+                            false,
                         )
                     })
                     .await
@@ -740,6 +744,10 @@ impl RedfishClient {
                         &empty_profiles,
                         libredfish::BiosProfileType::Performance,
                         &empty_profiles,
+                        // Exploration-time setup does not know the host DPU
+                        // policy; the controller owns the onboard-NIC decision
+                        // when it re-runs machine_setup.
+                        false,
                     )
                     .await
             }
@@ -1736,13 +1744,16 @@ async fn fetch_machine_setup_status(
     client: &dyn Redfish,
     boot_interface: Option<&BootInterfaceTarget>,
 ) -> Result<MachineSetupStatus, RedfishError> {
+    // Exploration reports the status generically and does not carry the host
+    // DPU policy, so it does not flag onboard-NIC drift here; the controller is
+    // the authority that passes the policy-derived value.
     let status = match boot_interface {
         Some(target) => {
             target
-                .run(|boot_interface| client.machine_setup_status(Some(boot_interface)))
+                .run(|boot_interface| client.machine_setup_status(Some(boot_interface), false))
                 .await?
         }
-        None => client.machine_setup_status(None).await?,
+        None => client.machine_setup_status(None, false).await?,
     };
     let mut diffs: Vec<MachineSetupDiff> = Vec::new();
 
