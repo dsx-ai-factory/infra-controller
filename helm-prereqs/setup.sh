@@ -2128,6 +2128,7 @@ if [[ "${_KC_ENABLED}" == "true" ]]; then
                 echo "ERROR: nico-keycloak-pg-creds not synced after 120s." >&2
                 echo "  Check: kubectl describe clusterexternalsecret nico-keycloak-db-eso" >&2
                 echo "  Ensure phase 5 synced nico-prereqs with keycloak.useHaPostgres set to auto or true." >&2
+                echo "  With postgresql.enabled: false, create it yourself, as \"Using your own PostgreSQL\" in helm-prereqs/README.md describes." >&2
                 exit 1
             fi
             echo "  nico-keycloak-pg-creds not yet synced (${_kc_i}/24) — retrying in 5s..."
@@ -2202,6 +2203,7 @@ if [[ "${_TEMPORAL_USE_HA_POSTGRES}" == "true" ]]; then
             echo "ERROR: nico-temporal-pg-creds not synced after 120s." >&2
             echo "  Check: kubectl describe clusterexternalsecret nico-temporal-db-eso" >&2
             echo "  Ensure phase 5 synced nico-prereqs with temporal.useHaPostgres set to auto or true." >&2
+            echo "  With postgresql.enabled: false, create it yourself, as \"Using your own PostgreSQL\" in helm-prereqs/README.md describes." >&2
             exit 1
         fi
         echo "  nico-temporal-pg-creds not yet synced (${_tp_i}/24) — retrying in 5s..."
@@ -2819,8 +2821,7 @@ if [[ -n "${_STANDALONE_PG_WORKLOADS:-}" ]]; then
     echo ""
     echo "  WARNING: the standalone postgres.postgres StatefulSet still serves ${_STANDALONE_PG_WORKLOADS}."
     echo "  It is deprecated and support for it will be removed in 2.5."
-    echo "  Migrate to nico-pg-cluster with the guide in helm-prereqs/README.md,"
-    echo "  \"Consolidating Temporal/Keycloak onto nico-pg-cluster\"."
+    echo "  ${_STANDALONE_PG_HINT}."
 fi
 echo "========================================================================="
 
