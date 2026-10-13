@@ -18,9 +18,7 @@
 use std::collections::HashMap;
 
 use ::rpc::forge as rpc;
-use carbide_resource_pool::{
-    PoolDefinitionSource, ResourcePoolRegistry, ResourcePoolRegistryError,
-};
+use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
 use model::resource_pool::binding::{
     INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolSelection,
 };
@@ -75,13 +73,7 @@ pub(crate) async fn grow(
     let mut txn = api.txn_begin().await?;
     ResourcePoolRegistry::resolve(PoolDefinitionSource::GrowthRequest, &mut txn, &selections)
         .await
-        .map_err(|error| match error {
-            ResourcePoolRegistryError::Database(error)
-            | ResourcePoolRegistryError::Binding(
-                db::resource_pool::binding::BindingError::Database(error),
-            ) => Status::from(CarbideError::from(error)),
-            error => CarbideError::FailedPrecondition(error.to_string()).into(),
-        })?;
+        .map_err(CarbideError::from)?;
     let reconcile_dpu_loopbacks = pools.contains_key(model::resource_pool::common::LOOPBACK_IP_V6);
     use db::resource_pool::DefineResourcePoolError as DE;
     match db::resource_pool::define_all_from(&mut txn, &pools).await {

@@ -79,9 +79,14 @@ that contains `PowerState` for power, boot override, BIOS, and VirtualMedia
 requests.
 
 The default libvirt device targets are `sdb` for `Cd` and `sdc` for `ConfigCd`.
-Confirm those targets are unused with `virsh domblklist DOMAIN --details` before
-inserting media. HTTP or HTTPS ISO URLs must be reachable from the host running
-the QEMU process. File paths must exist in that host's filesystem.
+At startup, the backend creates an empty SATA CD-ROM at each configured target,
+marked with a `ua-bmc-mock-vmedia-<device-id>` alias. An existing target must be
+an owned SATA CD-ROM; a foreign device causes startup or media updates to fail.
+Insert, replace, and eject use `update-device` to change media without removing
+the CD-ROM. Updates affect saved configuration and, while the VM is active,
+live configuration as well. Eject leaves an empty drive.
+
+HTTP or HTTPS ISO URLs must be reachable from the host running the QEMU process. File paths must exist in that host's filesystem.
 
 ## Apply boot-order changes with libvirt
 
@@ -120,7 +125,9 @@ MAC addresses will then agree. `--state-backend libvirt --libvirt-domain NAME`
 can be used for a DPU endpoint when a separate DPU VM exists.
 
 The internal backend maintains power state entirely within the process. It does
-not affect the host VM and intentionally does not expose libvirt virtual media.
+not affect the host VM. A DPU using libvirt exposes only `ConfigCd` for
+configuration media; a host using libvirt exposes `Cd` and `ConfigCd`. Internal
+simulation keeps the profile defaults.
 
 ## SSE events
 

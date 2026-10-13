@@ -103,6 +103,10 @@ impl VirtualMediaState {
         }
     }
 
+    pub(crate) fn device_ids(&self) -> impl Iterator<Item = &str> {
+        self.devices.iter().map(|device| device.config.id.as_ref())
+    }
+
     fn find_device(&self, device_id: &str) -> Option<&Arc<DeviceState>> {
         self.devices
             .iter()

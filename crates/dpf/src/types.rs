@@ -76,7 +76,10 @@ pub const DOCA_WEAVE_FLOW_CONTROLLER_SERVICE_NAME: &str = "doca-weave-flow-contr
 pub const DOCA_XPLANE_SERVICE_NAME: &str = "doca-xplane";
 /// Hash-stable legacy VF population used by default DPF flavors and SDK initialization.
 pub const DEFAULT_DPU_NUM_OF_VFS: u32 = 16;
-/// Default SF capacity reserved beyond configured NICo-managed service endpoints.
+/// Default SF capacity reserve for regular BF3 and generic BF4.
+///
+/// BF3 GB200 uses this pool for validation but emits fixed `PF_TOTAL_SF=128`; Astra derives its
+/// capacity from managed endpoints and fixed allocations instead.
 pub const DEFAULT_PF_TOTAL_SF_RESERVED: u32 = 30;
 /// Default operator-declared SF ceiling per parent PF for BF3 and generic BF4.
 pub const DEFAULT_MAX_SF_PER_PF: u32 = 126;
@@ -124,9 +127,16 @@ pub struct InitDpfResourcesConfig {
     pub(crate) services: Vec<ServiceDefinition>,
 
     /// Number of hardware VFs provisioned per DPU PF for BF3 and generic BF4.
+    /// BF4 Astra always emits `NUM_OF_VFS=46`; this value does not shrink its topology-free static
+    /// inventory, but it still bounds VF identities in the shared intercept-bridging topology.
     pub(crate) num_of_vfs: u32,
-    /// SF capacity reserved beyond configured NICo-managed service endpoints.
-    /// Without intercept bridging, this remains the complete legacy `PF_TOTAL_SF` value.
+    /// SF capacity reserve for regular BF3 and generic BF4.
+    ///
+    /// With intercept bridging, it is added to NICo-managed service endpoints and
+    /// `additional_managed_sf`. Without intercept bridging, it is the complete legacy
+    /// `PF_TOTAL_SF` pool, and those endpoints plus `additional_managed_sf` must fit inside it. BF3
+    /// GB200 applies the same validation but emits fixed `PF_TOTAL_SF=128`. BF4 Astra ignores this
+    /// value and derives capacity from managed endpoints plus fixed allocations.
     pub(crate) pf_total_sf_reserved: u32,
     /// Managed SF capacity not represented in [`interfaces`](Self::interfaces).
     /// Added to calculated BF3/generic-BF4 capacity when intercept bridging is configured;
@@ -154,7 +164,7 @@ pub struct InitDpfResourcesConfig {
     /// API-core rejects a disabled value during DPF initialization while scoped
     /// ServiceInterfaces exist.
     pub(crate) deployment_scoped_service_interfaces: bool,
-    /// Optional intercept-bridging topology for BF3 and generic BF4. `Some` replaces the
+    /// Optional intercept-bridging topology for BF3 and both BF4 profiles. `Some` replaces the
     /// ordinary static PF/VF inventory and contains exactly one configured PF.
     #[builder(setter(strip_option))]
     pub(crate) intercept_bridging: Option<DpfInterceptBridging>,
@@ -410,7 +420,7 @@ impl DpfInterceptBridge {
     }
 }
 
-/// Deterministic, validated intercept-bridging topology shared by BF3 and generic BF4.
+/// Deterministic, validated intercept-bridging topology shared by BF3 and both BF4 profiles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DpfInterceptBridging {
     interfaces: Vec<DpfInterceptBridge>,

@@ -351,6 +351,11 @@ impl<ID: MachineIdSubtypeTrait> From<model::machine::Machine<ID>> for rpc::forge
                 .map(|i| i.to_string()),
             dpf,
             hw_sku: machine.config.hw_sku.clone(),
+            nic_firmware_profile_id: machine
+                .config
+                .nic_firmware_profile_id
+                .as_ref()
+                .map(ToString::to_string),
         };
 
         // -- Build the new structured status sub-message --

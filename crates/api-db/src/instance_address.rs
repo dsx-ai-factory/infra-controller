@@ -20,6 +20,7 @@ use std::net::IpAddr;
 use std::ops::DerefMut;
 
 use carbide_network::virtualization::{VpcVirtualizationType, get_host_ip};
+use carbide_uuid::DbTable;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::MachineIdSubtypeTrait;
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
@@ -71,15 +72,17 @@ pub async fn find_all_by_address(
     txn: impl DbReader<'_>,
     address: IpAddr,
 ) -> Result<Vec<InstanceAddress>, DatabaseError> {
-    let query =
-        "SELECT instance_id, segment_id, vpc_id, address, prefix, hostname FROM instance_addresses
+    let query = format!(
+        "SELECT {} FROM instance_addresses
         WHERE address = $1::inet
-        ORDER BY vpc_id, segment_id, instance_id";
-    sqlx::query_as(query)
+        ORDER BY vpc_id, segment_id, instance_id",
+        InstanceAddress::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(address)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Returns every address an instance holds on one segment, ordered by address.
@@ -90,30 +93,34 @@ pub async fn find_all_by_instance_id_and_segment_id(
     instance_id: &InstanceId,
     segment_id: &NetworkSegmentId,
 ) -> Result<Vec<InstanceAddress>, DatabaseError> {
-    let query =
-        "SELECT instance_id, segment_id, vpc_id, address, prefix, hostname FROM instance_addresses
+    let query = format!(
+        "SELECT {} FROM instance_addresses
         WHERE instance_id=$1 AND segment_id=$2
-        ORDER BY address";
+        ORDER BY address",
+        InstanceAddress::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(instance_id)
         .bind(segment_id)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 pub async fn find_by_segment_id(
     txn: impl DbReader<'_>,
     segment_id: &NetworkSegmentId,
 ) -> Result<Vec<InstanceAddress>, DatabaseError> {
-    let query = "SELECT instance_id, segment_id, vpc_id, address, prefix, hostname
-        FROM instance_addresses WHERE segment_id = $1::uuid ORDER BY address";
-    sqlx::query_as(query)
+    let query = format!(
+        "SELECT {} FROM instance_addresses WHERE segment_id = $1::uuid ORDER BY address",
+        InstanceAddress::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(segment_id)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Locks every address row for an instance in stable ID order.

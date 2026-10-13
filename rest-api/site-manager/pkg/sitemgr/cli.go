@@ -65,7 +65,7 @@ func NewCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "namespace",
-				Value:   "carbide-rest",
+				Value:   "nico-rest",
 				EnvVars: []string{"SITE_MANAGER_NS"},
 				Usage:   "Namespace where service is deployed",
 			},

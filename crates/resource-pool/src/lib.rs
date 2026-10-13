@@ -46,6 +46,7 @@ use sqlx::PgConnection;
 ///
 /// Matching the execution variant keeps Integrated's borrowed transaction
 /// explicit at the caller.
+#[derive(Clone)]
 pub enum ResourcePoolBackend {
     /// Use the existing SQL allocator in the caller's entity transaction.
     Integrated(IntegratedResourcePoolBackend),
@@ -140,6 +141,7 @@ where
 /// rollback. The adapter does not acquire connections or commit independently;
 /// existing allocations need no conversion to be used or released through it.
 /// The adapter is stateless; the supplied connection determines the database.
+#[derive(Clone)]
 pub struct IntegratedResourcePoolBackend;
 
 impl IntegratedResourcePoolBackend {

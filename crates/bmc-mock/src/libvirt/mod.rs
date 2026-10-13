@@ -21,7 +21,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
-use eyre::WrapErr;
 use nv_redfish::schema::resource::PowerState;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
@@ -32,17 +31,19 @@ use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
 use crate::persistence::PersistenceError;
 use crate::redfish::computer_system::{SingleSystemState, SystemState};
 use crate::{
-    ActionError, BmcState, BootOptionKind, Callbacks, ResourceResetType, VirtualMediaContents,
-    VirtualMediaUpdate, validate_power_reset,
+    ActionError, BmcState, BootOptionKind, Callbacks, ResourceResetType, VirtualMediaUpdate,
+    validate_power_reset,
 };
 
 mod commands;
 mod device_xml;
 mod domain_xml;
+mod media_lifecycle;
 mod persistence;
 mod virsh;
 mod xml;
-use commands::VirshCommand;
+use commands::{DomainConfiguration, VirshCommand};
+use media_lifecycle::MediaLifecycle;
 use persistence::StateFile;
 use virsh::Virsh;
 
@@ -234,6 +235,12 @@ impl LibvirtBackend {
         let applied = AppliedState::from(controlled_system);
         self.apply_persistent_boot_selection(applied.persistent_boot_selection)
             .await?;
+        if let Some(media) = controlled_system.virtual_media() {
+            let lifecycle = MediaLifecycle::new(self.virsh(), &self.config.virtual_media_targets);
+            for device_id in media.device_ids() {
+                lifecycle.ensure_device(device_id).await?;
+            }
+        }
         self.system_state = Some(Arc::downgrade(&state));
         self.applied_state = applied;
         self.publish_power_state(PowerState::Off);
@@ -306,22 +313,12 @@ impl LibvirtBackend {
     }
 
     async fn apply_boot_devices(&self, devices: &[&str]) -> eyre::Result<()> {
-        let domain = self.virsh().dumpxml().await?;
+        let domain = self
+            .virsh()
+            .dumpxml(DomainConfiguration::Persistent)
+            .await?;
         let command = VirshCommand::boot_order(domain, devices)?;
         self.virsh().execute(command).await.map(drop)
-    }
-
-    fn target_for_device(&self, device_id: &str) -> Result<&str, ActionError> {
-        self.config
-            .virtual_media_targets
-            .get(device_id)
-            .map(String::as_str)
-            .ok_or_else(|| {
-                ActionError::BadRequest(eyre::eyre!(
-                    "virtual media device {} has no libvirt target",
-                    device_id
-                ))
-            })
     }
 
     async fn apply_boot_source_override(
@@ -350,42 +347,6 @@ impl LibvirtBackend {
             .await
             .map_err(ActionError::Internal)?;
         self.restore_boot_after_power_on = enabled == Some("Once");
-        Ok(())
-    }
-
-    async fn apply_virtual_media(
-        &self,
-        device_id: &str,
-        contents: &VirtualMediaContents,
-    ) -> Result<(), ActionError> {
-        let target = self.target_for_device(device_id)?;
-        let output = self
-            .virsh()
-            .execute(VirshCommand::BlockList)
-            .await
-            .map_err(ActionError::Internal)?;
-        let listing = String::from_utf8(output.stdout)
-            .context("virsh domblklist returned invalid UTF-8")
-            .map_err(ActionError::Internal)?;
-        if let Some(command) = VirshCommand::detach_media(target, &listing) {
-            self.virsh()
-                .execute(command)
-                .await
-                .map_err(ActionError::Internal)?;
-        }
-        // Preserve the old order: detach precedes validation and attachment of new media.
-        if let VirtualMediaContents::Inserted {
-            image,
-            write_protected,
-        } = contents
-        {
-            let command = VirshCommand::insert_media(device_id, target, image, *write_protected)
-                .map_err(ActionError::Internal)?;
-            self.virsh()
-                .execute(command)
-                .await
-                .map_err(ActionError::Internal)?;
-        }
         Ok(())
     }
 
@@ -532,9 +493,8 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
     ) -> ActorResult {
         match message {
             LibvirtMessage::SetVirtualMedia { update, reply } => {
-                let result = self
-                    .apply_virtual_media(&update.device_id, &update.contents)
-                    .await;
+                let media = MediaLifecycle::new(self.virsh(), &self.config.virtual_media_targets);
+                let result = media.apply(&update.device_id, &update.contents).await;
                 if result.is_ok() {
                     update.commit();
                 }
@@ -669,7 +629,7 @@ case "$3" in
         printf '%s\n' "$state"
         ;;
     dumpxml) printf '%s\n' '<domain><os><type>hvm</type></os><devices/></domain>' ;;
-    define) exit 0 ;;
+    define | attach-device) while IFS= read -r line; do :; done ;;
     *) exit 2 ;;
 esac
 "#,
@@ -686,7 +646,11 @@ esac
                 virsh_path: virsh,
                 uri: "test:///default".to_string(),
                 domain: "test-domain".to_string(),
-                virtual_media_targets: BTreeMap::new(),
+                virtual_media_targets: [
+                    ("Cd".to_owned(), "sdb".to_owned()),
+                    ("ConfigCd".to_owned(), "sdc".to_owned()),
+                ]
+                .into(),
             },
             stop.clone().drop_guard(),
         );

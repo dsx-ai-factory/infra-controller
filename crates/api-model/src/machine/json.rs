@@ -48,6 +48,7 @@ use crate::machine_boot_interface::{
     MachineBootInterfaceTarget, canonical_redfish_boot_interface_id,
 };
 use crate::metadata::Metadata;
+use crate::nic_firmware::NicFirmwareProfileId;
 use crate::power_manager::PowerOptions;
 use crate::rack::RackFirmwareUpgradeStatus;
 use crate::sku::SkuStatus;
@@ -104,6 +105,8 @@ pub struct MachineSnapshotPgJson {
     pub cleanup_machine_validation_id: Option<MachineValidationId>,
     pub dpu_agent_upgrade_requested: Option<UpgradeDecision>,
     pub firmware_autoupdate: Option<bool>,
+    /// Optional machine-wide NIC firmware profile reference.
+    pub nic_firmware_profile_id: Option<NicFirmwareProfileId>,
     pub health_reports: Option<HealthReportSources>,
     pub on_demand_machine_validation_id: Option<MachineValidationId>,
     pub on_demand_machine_validation_request: Option<bool>,
@@ -346,6 +349,7 @@ impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
             rack_id: value.rack_id,
             config: MachineConfig {
                 firmware_autoupdate: value.firmware_autoupdate,
+                nic_firmware_profile_id: value.nic_firmware_profile_id,
                 instance_type_id: value.instance_type_id,
                 dpf: value.dpf,
                 hw_sku: value.hw_sku,

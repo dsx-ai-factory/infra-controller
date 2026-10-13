@@ -18,6 +18,9 @@ use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
 use ::rpc::network::vpc_virtualization_type_try_from_rpc;
 use carbide_network::virtualization::{DEFAULT_NETWORK_VIRTUALIZATION_TYPE, VpcVirtualizationType};
+use carbide_resource_pool::{
+    ResourcePoolBackend, ResourcePoolRegistry, ResourcePoolRegistryError, ResourcePoolWithBackend,
+};
 use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
@@ -531,7 +534,14 @@ pub(crate) async fn change_routing_profile(
         }
         (Some((_, vni)), _) => vni,
         (None, Some(vni)) => {
-            allocate_exact_vpc_vni(destination_pool, &mut txn, &vpc.id.to_string(), vni).await?
+            allocate_exact_vpc_vni(
+                &api.resource_pool_registry,
+                destination_pool,
+                &mut txn,
+                &vpc.id.to_string(),
+                vni,
+            )
+            .await?
         }
         (None, None) => {
             allocate_vpc_vni(
@@ -728,17 +738,33 @@ async fn release_inactive_vpc_vni(
         )));
     }
 
+    let backend = api
+        .resource_pool_registry
+        .get_or_load_backend(txn, inactive_pool.name())
+        .await?
+        .ok_or_else(|| {
+            CarbideError::FailedPrecondition(format!(
+                "resource pool `{}` has neither a backend binding nor stored values",
+                inactive_pool.name(),
+            ))
+        })?;
+    let selected_pool = ResourcePoolWithBackend::new(inactive_pool, backend.as_ref());
     // The ownership lookup holds this allocation's row lock through commit,
     // so this release must apply. Treat a rejection as an invariant failure.
-    match db::resource_pool::release(
-        inactive_pool,
-        txn,
-        inactive_vni,
-        resource_pool::OwnerType::Vpc,
-        &vpc.id.to_string(),
-    )
-    .await?
-    {
+    let released = match selected_pool.backend() {
+        ResourcePoolBackend::Integrated(integrated) => {
+            integrated
+                .release(
+                    selected_pool.pool(),
+                    txn,
+                    inactive_vni,
+                    resource_pool::OwnerType::Vpc,
+                    &vpc.id.to_string(),
+                )
+                .await?
+        }
+    };
+    match released {
         ConditionalWrite::Applied(()) => {}
         ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
             return Err(CarbideError::FailedPrecondition(format!(
@@ -1030,16 +1056,33 @@ pub(crate) async fn delete(
     }
 
     if let Some((pool, vni)) = owned_allocation {
+        let backend = api
+            .resource_pool_registry
+            .get_or_load_backend(&mut txn, pool.name())
+            .await
+            .map_err(CarbideError::from)?
+            .ok_or_else(|| {
+                CarbideError::FailedPrecondition(format!(
+                    "resource pool `{}` has neither a backend binding nor stored values",
+                    pool.name(),
+                ))
+            })?;
+        let selected_pool = ResourcePoolWithBackend::new(pool, backend.as_ref());
         // The ownership lookup above keeps the allocation locked until commit.
-        match db::resource_pool::release(
-            pool,
-            &mut txn,
-            vni,
-            resource_pool::OwnerType::Vpc,
-            &owner_id,
-        )
-        .await?
-        {
+        let released = match selected_pool.backend() {
+            ResourcePoolBackend::Integrated(integrated) => {
+                integrated
+                    .release(
+                        selected_pool.pool(),
+                        &mut txn,
+                        vni,
+                        resource_pool::OwnerType::Vpc,
+                        &owner_id,
+                    )
+                    .await?
+            }
+        };
+        match released {
             ConditionalWrite::Applied(()) => {}
             ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
                 return Err(CarbideError::FailedPrecondition(format!(
@@ -1194,9 +1237,8 @@ fn vpc_to_rpc(vpc: model::vpc::Vpc, fnn_config: Option<&FnnConfig>) -> rpc::Vpc 
     rpc_vpc
 }
 
-/// Allocate a value from the vpc vni resource pool.
-///
-/// If the pool exists but is empty or has en error, return that.
+/// `allocate_vpc_vni` allocates from the selected internal or external VNI pool.
+/// A missing pool reports the same exhaustion error as a pool with no free values.
 async fn allocate_vpc_vni(
     api: &Api,
     txn: &mut PgConnection,
@@ -1214,17 +1256,36 @@ async fn allocate_vpc_vni(
         &api.common_pools.ethernet.pool_external_vpc_vni
     };
 
-    match (
-        db::resource_pool::allocate(
-            source_pool,
-            txn,
-            resource_pool::OwnerType::Vpc,
-            owner_id,
-            requested_vni,
-        )
-        .await,
-        requested_vni,
-    ) {
+    let allocation = match api
+        .resource_pool_registry
+        .get_or_load_backend(txn, source_pool.name())
+        .await
+    {
+        Ok(Some(backend)) => {
+            let selected_pool = ResourcePoolWithBackend::new(source_pool, backend.as_ref());
+            match selected_pool.backend() {
+                ResourcePoolBackend::Integrated(integrated) => {
+                    integrated
+                        .allocate(
+                            selected_pool.pool(),
+                            txn,
+                            resource_pool::OwnerType::Vpc,
+                            owner_id,
+                            requested_vni,
+                        )
+                        .await
+                }
+            }
+        }
+        // The optional external pool may have neither a binding nor SQL values.
+        // Keep its existing exhaustion error and allocation-failure metric.
+        Ok(None) => Err(resource_pool::ResourcePoolError::Empty.into()),
+        // Database lookup failures belong to the allocation attempt; unsupported
+        // backend selections are configuration errors, before allocation starts.
+        Err(ResourcePoolRegistryError::Database(error)) => Err(error.into()),
+        Err(error) => return Err(error.into()),
+    };
+    match (allocation, requested_vni) {
         (Ok(val), _) => Ok(val),
         (
             Err(
@@ -1286,32 +1347,57 @@ async fn allocate_vpc_vni(
 /// `allocate_exact_vpc_vni` claims a requested VNI from the already validated pool.
 /// Unlike VPC creation, routing changes accept either assignment partition.
 async fn allocate_exact_vpc_vni(
+    registry: &ResourcePoolRegistry,
     pool: &resource_pool::ResourcePool<i32>,
     txn: &mut PgConnection,
     owner_id: &str,
     vni: i32,
 ) -> Result<i32, CarbideError> {
-    db::resource_pool::allocate_exact(pool, txn, resource_pool::OwnerType::Vpc, owner_id, vni)
-        .await
-        .map_err(|error| {
-            if matches!(error, db::DatabaseError::FailedPrecondition(_)) {
-                db::resource_pool::emit_requested_vni_unavailable(
-                    pool.value_type,
-                    owner_id,
-                    vni,
-                    pool.name(),
-                );
-            } else {
-                db::resource_pool::emit_database_allocation_failure(
-                    pool.value_type,
-                    owner_id,
-                    true,
-                    pool.name(),
-                    &error,
-                );
+    let allocation = match registry.get_or_load_backend(txn, pool.name()).await {
+        Ok(Some(backend)) => {
+            let selected_pool = ResourcePoolWithBackend::new(pool, backend.as_ref());
+            match selected_pool.backend() {
+                ResourcePoolBackend::Integrated(integrated) => {
+                    integrated
+                        .allocate_exact(
+                            selected_pool.pool(),
+                            txn,
+                            resource_pool::OwnerType::Vpc,
+                            owner_id,
+                            vni,
+                        )
+                        .await
+                }
             }
-            CarbideError::from(error)
-        })
+        }
+        Ok(None) => {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "resource pool `{}` has neither a backend binding nor stored values",
+                pool.name(),
+            )));
+        }
+        Err(ResourcePoolRegistryError::Database(error)) => Err(error),
+        Err(error) => return Err(error.into()),
+    };
+    allocation.map_err(|error| {
+        if matches!(error, db::DatabaseError::FailedPrecondition(_)) {
+            db::resource_pool::emit_requested_vni_unavailable(
+                pool.value_type,
+                owner_id,
+                vni,
+                pool.name(),
+            );
+        } else {
+            db::resource_pool::emit_database_allocation_failure(
+                pool.value_type,
+                owner_id,
+                true,
+                pool.name(),
+                &error,
+            );
+        }
+        CarbideError::from(error)
+    })
 }
 
 /// Resolution of routing-related state for a VPC at create time. The

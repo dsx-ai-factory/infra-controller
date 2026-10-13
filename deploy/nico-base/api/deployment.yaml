@@ -33,6 +33,9 @@ spec:
       annotations:
         kubectl.kubernetes.io/default-container: nico-api
     spec:
+      # Prevent Kubernetes-generated CARBIDE_API_* service variables from
+      # being interpreted as API configuration.
+      enableServiceLinks: false
       # Allow state-controller handlers already in flight to finish. Keep this
       # greater than controller.max_object_handling_time (3 minutes by default).
       terminationGracePeriodSeconds: 240

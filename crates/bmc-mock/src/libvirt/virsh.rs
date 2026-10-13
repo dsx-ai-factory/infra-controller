@@ -22,7 +22,7 @@ use eyre::WrapErr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
-use super::commands::VirshCommand;
+use super::commands::{DomainConfiguration, VirshCommand};
 use super::domain_xml::DomainXml;
 use super::{VIRSH_CLEANUP_TIMEOUT, VIRSH_COMMAND_TIMEOUT};
 
@@ -34,19 +34,38 @@ pub(super) struct Virsh<'a> {
 }
 
 impl Virsh<'_> {
-    /// Reads the saved domain configuration and returns its XML model.
-    pub(super) async fn dumpxml(&self) -> eyre::Result<DomainXml> {
-        let output = self.execute(VirshCommand::DumpXml).await?;
+    /// Reads a domain configuration and returns its XML model.
+    pub(super) async fn dumpxml(
+        &self,
+        configuration: DomainConfiguration,
+    ) -> eyre::Result<DomainXml> {
+        let output = self
+            .execute(VirshCommand::DumpXml { configuration })
+            .await?;
         let xml =
             String::from_utf8(output.stdout).context("virsh dumpxml returned invalid UTF-8")?;
         xml.parse()
+    }
+
+    /// Whether the domain currently has a live configuration.
+    pub(super) async fn domain_active(&self) -> eyre::Result<bool> {
+        let output = self.execute(VirshCommand::DomainState).await?;
+        let state =
+            String::from_utf8(output.stdout).context("virsh domstate returned invalid UTF-8")?;
+        match state.trim() {
+            "running" | "idle" | "blocked" | "paused" | "in shutdown" | "pmsuspended" => Ok(true),
+            "shut off" | "crashed" => Ok(false),
+            state => eyre::bail!("virsh domstate returned an unknown domain state: {state}"),
+        }
     }
 
     pub(super) async fn execute(&self, command: VirshCommand) -> eyre::Result<Output> {
         let arguments = command.arguments(self.domain);
         let input = match command {
             VirshCommand::Define { xml } => Some(xml.into_xml()),
-            VirshCommand::AttachDevice { xml } => Some(xml.into_xml()?),
+            VirshCommand::AttachDevice { xml, .. } | VirshCommand::UpdateDevice { xml, .. } => {
+                Some(xml.into_xml()?)
+            }
             _ => None,
         };
         let output = self.virsh_output(&arguments, input.as_deref()).await?;

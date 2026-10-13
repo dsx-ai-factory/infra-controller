@@ -18,6 +18,9 @@
 use std::collections::HashMap;
 
 use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_resource_pool::{
+    ResourcePoolBackend, ResourcePoolRegistry, ResourcePoolRegistryError, ResourcePoolWithBackend,
+};
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::vpc::VpcId;
 use db::dns::domain;
@@ -246,6 +249,7 @@ pub(crate) async fn create_initial_vpcs(
     db_pool: &Pool<Postgres>,
     vpcs: &HashMap<String, VpcDefinition>,
     vni_pool: &ResourcePool<i32>,
+    resource_pool_registry: &ResourcePoolRegistry,
 ) -> Result<(), CarbideError> {
     // Retain validation at the mutation boundary as defense in depth. Startup
     // also validates during SeedData resolution, before any reconciliation.
@@ -271,15 +275,32 @@ pub(crate) async fn create_initial_vpcs(
             .unwrap_or(uuid::Uuid::new_v4().into());
         let owner_id = vpc_id.to_string();
 
-        let vni = db::resource_pool::allocate(
-            vni_pool,
-            &mut txn,
-            resource_pool::OwnerType::Vpc,
-            &owner_id,
-            def.vni,
-        )
-        .await
-        .inspect_err(|error| {
+        let allocation = match resource_pool_registry
+            .get_or_load_backend(&mut txn, vni_pool.name())
+            .await
+        {
+            Ok(Some(backend)) => {
+                let selected_pool = ResourcePoolWithBackend::new(vni_pool, backend.as_ref());
+                match selected_pool.backend() {
+                    ResourcePoolBackend::Integrated(integrated) => {
+                        integrated
+                            .allocate(
+                                selected_pool.pool(),
+                                &mut txn,
+                                resource_pool::OwnerType::Vpc,
+                                &owner_id,
+                                def.vni,
+                            )
+                            .await
+                    }
+                }
+            }
+            // A pool with neither a binding nor values has nothing to allocate.
+            Ok(None) => Err(resource_pool::ResourcePoolError::Empty.into()),
+            Err(ResourcePoolRegistryError::Database(error)) => Err(error.into()),
+            Err(error) => return Err(error.into()),
+        };
+        let vni = allocation.inspect_err(|error| {
             db::resource_pool::emit_allocation_failure(
                 vni_pool.value_type,
                 &owner_id,

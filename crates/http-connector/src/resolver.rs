@@ -38,7 +38,8 @@ use tracing::trace;
 #[cfg(target_os = "linux")]
 const MGMT_VRF_NAME: &[u8] = "mgmt".as_bytes();
 
-type HickoryResolverFuture = Pin<Box<dyn Future<Output = Result<SocketAddrs, NetError>> + Send>>;
+pub(super) type HickoryResolverFuture =
+    Pin<Box<dyn Future<Output = Result<SocketAddrs, NetError>> + Send>>;
 
 /// `ForgeRuntimeProvider` creates Hickory sockets with optional management-VRF binding.
 /// Each TCP connection attempt uses the supplied timeout, or five seconds for `None`.
@@ -199,6 +200,15 @@ impl RuntimeProvider for ForgeRuntimeProvider {
 /// A hyper resolver using `hickory`'s [`TokioAsyncResolver`].
 pub type ForgeResolver = HickoryResolver<ForgeRuntimeProvider>;
 
+/// DNS resolver options for NICo clients.
+///
+/// `Default` selects `Ipv4AndIpv6`, querying both families with IPv4 first.
+/// IPv4 remains preferred because IPv6 routes may be unusable.
+/// Batch lookups wait for both families, including configured timeouts and retries
+/// for a family that does not respond. With these options and
+/// [`ForgeResolver::with_config_and_options`], `ForgeHttpConnector` can start TCP
+/// with ready IPv4 addresses while retaining pending AAAA for IPv6 fallback.
+/// [`Self::new`] instead retains Hickory's `Ipv6AndIpv4` batch strategy.
 #[derive(Clone, Debug)]
 pub struct ForgeResolverOpts {
     inner: ResolverOpts,
@@ -208,9 +218,7 @@ pub struct ForgeResolverOpts {
 impl Default for ForgeResolverOpts {
     fn default() -> Self {
         let mut inner = ResolverOpts::default();
-        // This was default in earlier hickory versions, maintain it here to avoid regressions in
-        // improperly-setup dual-stack environments.
-        inner.ip_strategy = LookupIpStrategy::Ipv4thenIpv6;
+        inner.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
 
         Self {
             inner,
@@ -264,6 +272,8 @@ impl Iterator for SocketAddrs {
 }
 
 impl ForgeResolverOpts {
+    /// Retains Hickory's defaults, including the `Ipv6AndIpv4` batch strategy.
+    /// Use [`Self::default`] for IPv4 preference and incremental connections.
     pub fn new() -> Self {
         Self {
             inner: ResolverOpts::default(),
@@ -617,6 +627,7 @@ mod tests {
     use tokio::task::JoinHandle;
 
     use super::*;
+    use crate::connector::{ConnectorMetrics, ForgeHttpConnector};
 
     /// A never-ready dial must report `TimedOut` without relying on OS routing
     /// to simulate a blackholed DNS server.
@@ -716,23 +727,15 @@ mod tests {
         .expect("DNS TCP exchange failed");
     }
 
-    /// Opts tests into incremental lookups without changing constructor defaults.
-    fn ipv4_and_ipv6_options() -> ForgeResolverOpts {
-        let mut options = ForgeResolverOpts::default();
-        options.inner.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
-        options
-    }
-
-    /// Constructor defaults are caller-visible policy; the incremental lookup
-    /// capability must not change existing connection behavior by itself.
+    /// Default enables incremental connections; `new()` retains Hickory's batch policy.
     #[tokio::test]
     async fn resolver_option_constructors_keep_their_lookup_strategies() {
         check_values(
             [
                 Check {
-                    scenario: "default retains the legacy IPv4-then-IPv6 strategy",
+                    scenario: "default enables both families with IPv4 preference",
                     input: ForgeResolverOpts::default(),
-                    expect: LookupIpStrategy::Ipv4thenIpv6,
+                    expect: LookupIpStrategy::Ipv4AndIpv6,
                 },
                 Check {
                     scenario: "new retains Hickory's IPv6-first batch strategy",
@@ -742,7 +745,7 @@ mod tests {
             ],
             |options| options.inner.ip_strategy,
         );
-        assert!(ForgeResolver::default().connection_lookup.is_none());
+        assert!(ForgeResolver::default().connection_lookup.is_some());
     }
 
     /// Local DNS fixture with recorded questions and an owned, joined responder task.
@@ -926,6 +929,23 @@ mod tests {
         .await
     }
 
+    /// Keeps paused-time tests runnable while real loopback I/O is pending, so
+    /// Tokio cannot advance a retry timer before the fixture releases DNS.
+    async fn fixture_io<T>(operation: impl Future<Output = T>) -> T {
+        tokio::pin!(operation);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Poll::Ready(result) = futures_util::poll!(&mut operation) {
+                return result;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture I/O exceeded five seconds"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
     /// Pending AAAA work must stay on the selected search candidate, then populate
     /// the shared cache so clones and public batch calls need no further DNS traffic.
     #[tokio::test]
@@ -950,7 +970,7 @@ mod tests {
                 ],
                 vec![],
             ),
-            ipv4_and_ipv6_options(),
+            ForgeResolverOpts::default(),
             Some(gate.clone()),
             vec![],
             None,
@@ -998,7 +1018,7 @@ mod tests {
     #[tokio::test]
     async fn dropping_connecting_addresses_releases_the_pending_lookup_owner() {
         let (server, gate) =
-            DnsServer::start_gated(RecordType::AAAA, ipv4_and_ipv6_options()).await;
+            DnsServer::start_gated(RecordType::AAAA, ForgeResolverOpts::default()).await;
         let result = tokio::time::timeout(Duration::from_secs(10), async {
             let owners_before = Arc::strong_count(&server.resolver.resolver);
             let mut resolved = server
@@ -1024,67 +1044,95 @@ mod tests {
         result.expect("pending lookup owner test timed out");
     }
 
-    /// Held AAAA replies must keep TCP idle even with A cached. Releasing an empty
-    /// reply must not discard that usable A address or lose the caller's URI port.
+    /// Keep AAAA unanswered through the TCP exchange. A usable A result must
+    /// satisfy the caller before the five-second DNS timeout in either mode.
+    /// A cached empty AAAA result must also preserve an IPv4-only service.
     #[tokio::test]
-    async fn connector_waits_for_empty_aaaa_and_preserves_a_at_the_uri_port() {
-        let gate = Arc::new(ReplyGate {
-            record_type: RecordType::AAAA,
-            queried: Notify::new(),
-            other_replied: Notify::new(),
-            release: Notify::new(),
-        });
-        let server = DnsServer::start_with_config(
-            vec![address_record("service.test.", Ipv4Addr::LOCALHOST)],
-            ResolverConfig::default(),
-            ipv4_and_ipv6_options(),
-            Some(gate.clone()),
-            vec![],
-            None,
-        )
-        .await;
-        let result = tokio::time::timeout(Duration::from_secs(10), async {
-            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-            let listen_address = listener.local_addr().unwrap();
-            let primary = server
-                .resolver
-                .lookup_family("service.test.".parse().unwrap(), RecordType::A)
-                .await
-                .unwrap();
-            assert_eq!(
-                primary.addrs.collect::<Vec<_>>(),
-                vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 0))]
-            );
-            let mut connector =
-                crate::connector::ForgeHttpConnector::new_with_resolver(server.resolver.clone());
-            let uri = format!("http://service.test.:{}/", listen_address.port())
-                .parse()
-                .unwrap();
-            let mut connection = tower_service::Service::call(&mut connector, uri);
-            pending_until(connection.as_mut(), gate.queried.notified()).await;
+    async fn working_ipv4_does_not_wait_for_silent_aaaa() {
+        for (scenario, happy_eyeballs_timeout, empty_aaaa) in [
+            ("sequential", None, false),
+            ("Happy Eyeballs", Some(Duration::from_millis(50)), false),
+            ("cached empty AAAA", None, true),
+        ] {
+            let gate = Arc::new(ReplyGate {
+                record_type: RecordType::AAAA,
+                queried: Notify::new(),
+                other_replied: Notify::new(),
+                release: Notify::new(),
+            });
+            let mut options = ForgeResolverOpts::default().timeout(Duration::from_secs(5));
+            options.inner.negative_min_ttl = Some(Duration::from_secs(60));
+            let mut answers = vec![address_record("service.test.", Ipv4Addr::LOCALHOST)];
+            if !empty_aaaa {
+                answers.push(address_record("service.test.", Ipv6Addr::LOCALHOST));
+            }
+            let server = DnsServer::start_with_config(
+                answers,
+                ResolverConfig::default(),
+                options,
+                Some(gate.clone()),
+                vec![],
+                None,
+            )
+            .await;
+            let mut metrics = ConnectorMetrics::default();
+            let result = tokio::time::timeout(Duration::from_secs(2), async {
+                if empty_aaaa {
+                    let lookup = server.resolver.lookup_family(
+                        "service.test.".parse().expect("service name"),
+                        RecordType::AAAA,
+                    );
+                    tokio::pin!(lookup);
+                    pending_until(lookup.as_mut(), gate.queried.notified()).await;
+                    gate.release.notify_one();
+                    assert!(matches!(lookup.await, Err(error) if error.is_no_records_found()));
+                }
+                let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+                let address = listener.local_addr()?;
+                let mut connector = ForgeHttpConnector::new_with_resolver(server.resolver.clone());
+                connector.set_connect_timeout(Some(Duration::from_secs(5)));
+                connector.set_happy_eyeballs_timeout(happy_eyeballs_timeout);
+                connector.set_metrics(metrics.clone());
+                let uri = format!("http://service.test.:{}", address.port())
+                    .parse()
+                    .expect("service URI");
 
-            // A is cached and AAAA is held: TCP must stay idle throughout
-            // this window. The post-release accept below checks the same path.
-            assert!(
-                pending_until(
-                    connection.as_mut(),
-                    tokio::time::timeout(Duration::from_millis(50), listener.accept()),
-                )
-                .await
-                .is_err(),
-                "TCP connected before the AAAA reply"
-            );
-            gate.release.notify_one();
-            let stream = connection.await.expect("empty AAAA retains the A address");
-            assert_eq!(stream.inner().peer_addr().unwrap(), listen_address);
-            listener
-                .accept()
-                .await
-                .expect("accept connection after AAAA completes");
-        })
-        .await;
-        server.stop().await;
-        result.expect("gated connector test timed out");
+                // Observe AAAA even when TCP succeeds first. Silent rows keep
+                // the reply gate closed; the empty row observed its query above.
+                let (connection, ()) =
+                    tokio::join!(tower_service::Service::call(&mut connector, uri), async {
+                        if !empty_aaaa {
+                            gate.queried.notified().await;
+                        }
+                    },);
+                let mut client = connection?.into_inner();
+                assert_eq!(client.peer_addr()?, address, "{scenario}");
+                let (mut peer, _) = listener.accept().await?;
+                client.write_all(b"query").await?;
+                let mut received = [0; 5];
+                peer.read_exact(&mut received).await?;
+                assert_eq!(&received, b"query", "{scenario}");
+                assert_eq!(
+                    metrics.get_successes_for_addr(&address),
+                    Some(1),
+                    "{scenario}"
+                );
+                assert_eq!(metrics.get_total_attempts(), 1, "{scenario}");
+                assert_eq!(metrics.get_total_errors(), 0, "{scenario}");
+                Ok::<(), Box<dyn std::error::Error>>(())
+            })
+            .await;
+            let queries = server.stop().await;
+            result
+                .unwrap_or_else(|_| {
+                    panic!("{scenario}: AAAA query observation and IPv4 exchange timed out")
+                })
+                .expect("IPv4 connector exchange failed");
+            assert!(queries.contains(&Query::query(
+                "service.test.".parse().expect("service name"),
+                RecordType::AAAA,
+            )));
+        }
     }
 
     /// Hickory accepts both address types in one ANSWER; filtering by query type
@@ -1100,7 +1148,7 @@ mod tests {
             let server = DnsServer::start_with_config(
                 vec![],
                 ResolverConfig::default(),
-                ipv4_and_ipv6_options(),
+                ForgeResolverOpts::default(),
                 None,
                 vec![],
                 Some((
@@ -1141,7 +1189,8 @@ mod tests {
     /// DNS reply timing must not promote IPv6 ahead of the preferred IPv4 family.
     #[tokio::test]
     async fn cached_aaaa_waits_for_a_and_keeps_ipv4_first() {
-        let (server, gate) = DnsServer::start_gated(RecordType::A, ipv4_and_ipv6_options()).await;
+        let (server, gate) =
+            DnsServer::start_gated(RecordType::A, ForgeResolverOpts::default()).await;
         let result = tokio::time::timeout(Duration::from_secs(10), async {
             let ipv6 = server
                 .resolver
@@ -1191,6 +1240,7 @@ mod tests {
             additionals: Vec<Record>,
             hosts: &'static str,
             expected: Result<Vec<SocketAddr>, Query>,
+            expected_connector_error: Option<std::io::ErrorKind>,
             queried_names: &'static [&'static str],
         }
 
@@ -1212,6 +1262,7 @@ mod tests {
                 additionals: vec![],
                 hosts: "",
                 expected: Ok(vec![(ipv4, 0).into(), (ipv6, 0).into()]),
+                expected_connector_error: None,
                 queried_names: &["service.domain.test."],
             },
             Case {
@@ -1226,6 +1277,7 @@ mod tests {
                 additionals: vec![],
                 hosts: "",
                 expected: Ok(vec![(ipv4, 0).into()]),
+                expected_connector_error: None,
                 queried_names: &["service.first.test."],
             },
             Case {
@@ -1240,6 +1292,7 @@ mod tests {
                 additionals: vec![],
                 hosts: "127.0.0.1 service.hosts.test\n::1 service.hosts.test\n",
                 expected: Ok(vec![(ipv4, 0).into(), (ipv6, 0).into()]),
+                expected_connector_error: None,
                 queried_names: &["service.missing.test."],
             },
             Case {
@@ -1254,6 +1307,7 @@ mod tests {
                 additionals: vec![],
                 hosts: "",
                 expected: Ok(vec![(ipv4, 0).into()]),
+                expected_connector_error: None,
                 queried_names: &["service."],
             },
             Case {
@@ -1268,6 +1322,7 @@ mod tests {
                 additionals: vec![],
                 hosts: "",
                 expected: Ok(vec![(ipv6, 0).into()]),
+                expected_connector_error: None,
                 queried_names: &["service.first.test."],
             },
             Case {
@@ -1279,6 +1334,7 @@ mod tests {
                 additionals: vec![],
                 hosts: "",
                 expected: Err(Query::query("service.".parse().unwrap(), RecordType::A)),
+                expected_connector_error: None,
                 queried_names: &["service.missing.test.", "service."],
             },
             Case {
@@ -1299,6 +1355,7 @@ mod tests {
                 additionals: vec![],
                 hosts: "",
                 expected: Ok(vec![(ipv4, 0).into(), (ipv6, 0).into()]),
+                expected_connector_error: None,
                 queried_names: &["service.alias.test.", "target.test."],
             },
             Case {
@@ -1320,6 +1377,7 @@ mod tests {
                 ],
                 hosts: "",
                 expected: Ok(vec![]),
+                expected_connector_error: Some(std::io::ErrorKind::NotConnected),
                 queried_names: &["service.alias.test."],
             },
             Case {
@@ -1331,6 +1389,7 @@ mod tests {
                 additionals: vec![address_record("service.empty.test.", ipv4)],
                 hosts: "",
                 expected: Ok(vec![(other_ipv4, 0).into()]),
+                expected_connector_error: None,
                 queried_names: &["service.empty.test.", "service.selected.test."],
             },
         ];
@@ -1347,7 +1406,7 @@ mod tests {
             let mut server = DnsServer::start_with_config(
                 case.answers,
                 config,
-                ipv4_and_ipv6_options(),
+                ForgeResolverOpts::default(),
                 None,
                 case.additionals,
                 None,
@@ -1370,6 +1429,28 @@ mod tests {
                         Ok(fallback) => addresses.extend(fallback),
                         Err(error) => assert!(error.is_no_records_found(), "{error}"),
                     }
+                }
+                if let Some(expected_error) = case.expected_connector_error {
+                    // A selected CNAME with no usable IP must fail gracefully,
+                    // not connect through the later search suffix's decoy.
+                    let mut connector =
+                        ForgeHttpConnector::new_with_resolver(server.resolver.clone());
+                    connector.set_connect_timeout(Some(Duration::from_secs(1)));
+                    let error = tower_service::Service::call(
+                        &mut connector,
+                        "http://service:80".parse().unwrap(),
+                    )
+                    .await
+                    .expect_err("empty DNS result must not connect");
+                    let source =
+                        std::error::Error::source(&error).expect("connection error source");
+                    assert_eq!(
+                        source
+                            .downcast_ref::<std::io::Error>()
+                            .expect("I/O error")
+                            .kind(),
+                        expected_error
+                    );
                 }
                 Ok::<_, NetError>(addresses)
             })
@@ -1507,7 +1588,7 @@ mod tests {
         let cases = [
             Case {
                 scenario: "opaque resolver keeps its configured IPv4-first batch",
-                options: ipv4_and_ipv6_options(),
+                options: ForgeResolverOpts::default(),
                 opaque: true,
                 public_batch: false,
                 expected: vec![ipv4, ipv6],
@@ -1521,7 +1602,7 @@ mod tests {
             },
             Case {
                 scenario: "public Service lookup remains a batch on an incremental resolver",
-                options: ipv4_and_ipv6_options(),
+                options: ForgeResolverOpts::default(),
                 opaque: false,
                 public_batch: true,
                 expected: vec![ipv4, ipv6],
@@ -1574,6 +1655,496 @@ mod tests {
                 case.expected,
                 "{}",
                 case.scenario
+            );
+        }
+    }
+
+    /// Reserves one loopback port in both families without listening, keeping
+    /// connection-refusal tests independent of concurrent listener allocation.
+    fn bind_loopback_pair() -> std::io::Result<(TcpSocket, TcpSocket)> {
+        for _ in 0..16 {
+            let ipv6 = TcpSocket::new_v6()?;
+            ipv6.bind(SocketAddr::from((Ipv6Addr::LOCALHOST, 0)))?;
+            let ipv4 = SocketAddr::from((Ipv4Addr::LOCALHOST, ipv6.local_addr()?.port()));
+            let refused_ipv4 = TcpSocket::new_v4()?;
+            match refused_ipv4.bind(ipv4) {
+                Ok(()) => return Ok((ipv6, refused_ipv4)),
+                // The IPv6 ephemeral port may already be in use on IPv4.
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            "could not reserve a shared loopback port after 16 attempts",
+        ))
+    }
+
+    /// Release AAAA only after observing IPv4 refusal, so a complete batch of
+    /// addresses cannot bypass the pending-DNS fallback path this test protects.
+    #[tokio::test]
+    async fn connector_reaches_ipv6_after_dns_ipv4_connection_fails() {
+        // Both dispatch paths must resume with the delayed IPv6 answer after
+        // IPv4 has already failed; neither may return that first error early.
+        for happy_eyeballs_timeout in [None, Some(Duration::from_millis(50))] {
+            let (server, gate) =
+                DnsServer::start_gated(RecordType::AAAA, ForgeResolverOpts::default()).await;
+            let mut metrics = ConnectorMetrics::default();
+            let result = tokio::time::timeout(Duration::from_secs(10), async {
+                // Keep the IPv4 port reserved without listening, so that attempt
+                // fails even if another test is binding loopback ports.
+                let (ipv6_socket, refused_ipv4) = bind_loopback_pair()?;
+                let listener = ipv6_socket.listen(128)?;
+                let ipv6 = listener.local_addr()?;
+                let ipv4 = refused_ipv4.local_addr()?;
+
+                let mut connector = ForgeHttpConnector::new_with_resolver(server.resolver.clone());
+                connector.set_connect_timeout(Some(Duration::from_secs(2)));
+                connector.set_happy_eyeballs_timeout(happy_eyeballs_timeout);
+                connector.set_metrics(metrics.clone());
+                let uri = format!("http://service.test.:{}", ipv6.port())
+                    .parse()
+                    .unwrap();
+                let connection = tower_service::Service::call(&mut connector, uri);
+                tokio::pin!(connection);
+                pending_until(connection.as_mut(), async {
+                    gate.queried.notified().await;
+                    poll_fn(|_| {
+                        if metrics.get_errors_for_addr(&ipv4) == Some(1) {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                })
+                .await;
+                // AAAA is still unanswered when the first IPv4 attempt fails.
+                gate.release.notify_one();
+                let mut client = connection.await?.into_inner();
+                assert_eq!(client.peer_addr()?, ipv6);
+                let (mut peer, peer_address) = listener.accept().await?;
+                assert_eq!(peer_address, client.local_addr()?);
+
+                client.write_all(b"query").await?;
+                let mut received = [0; 5];
+                peer.read_exact(&mut received).await?;
+                assert_eq!(&received, b"query");
+                peer.write_all(b"reply").await?;
+                client.read_exact(&mut received).await?;
+                assert_eq!(&received, b"reply");
+
+                assert_eq!(metrics.get_errors_for_addr(&ipv4), Some(1));
+                assert_eq!(metrics.get_successes_for_addr(&ipv6), Some(1));
+                assert_eq!(metrics.get_total_attempts(), 2);
+                Ok::<(), Box<dyn std::error::Error>>(())
+            })
+            .await;
+            server.stop().await;
+            result
+                .expect("connector exchange timed out")
+                .expect("connector exchange failed");
+        }
+    }
+
+    /// Public retry handling must include late IPv6 addresses without restoring
+    /// retries already used by IPv4 while DNS was pending.
+    #[tokio::test(start_paused = true)]
+    async fn connector_retry_attempts_each_resolved_family_once_per_round() {
+        // Exercise ordinary handoff, each scheduler's shared allowance, and a
+        // useful answer arriving inside the sequential retry backoff.
+        for (scenario, retries_before_aaaa, happy_eyeballs_timeout, dns_delay) in [
+            ("sequential handoff", 0, None, Duration::ZERO),
+            ("sequential consumed retry", 1, None, Duration::ZERO),
+            (
+                "Happy Eyeballs consumed retry",
+                1,
+                Some(Duration::from_millis(50)),
+                Duration::ZERO,
+            ),
+            (
+                "useful AAAA during backoff",
+                0,
+                None,
+                Duration::from_secs(1),
+            ),
+        ] {
+            let (server, gate) =
+                DnsServer::start_gated(RecordType::AAAA, ForgeResolverOpts::default()).await;
+            let mut metrics = ConnectorMetrics::default();
+            let result = fixture_io(async {
+                let (ipv6, ipv4) = bind_loopback_pair()?;
+                let ipv4_address = ipv4.local_addr()?;
+                let ipv6_address = ipv6.local_addr()?;
+                let mut connector = ForgeHttpConnector::new_with_resolver(server.resolver.clone());
+                connector.set_connect_retries_max(Some(2));
+                connector.set_connect_retries_interval(Some(Duration::from_secs(3)));
+                connector.set_connect_timeout(Some(Duration::from_secs(1)));
+                connector.set_happy_eyeballs_timeout(happy_eyeballs_timeout);
+                connector.set_metrics(metrics.clone());
+                let uri = format!("http://service.test.:{}", ipv4_address.port())
+                    .parse()
+                    .unwrap();
+
+                // Both sockets stay bound without listening for the entire retry.
+                let connection = tower_service::Service::call(&mut connector, uri);
+                tokio::pin!(connection);
+                pending_until(connection.as_mut(), async {
+                    gate.queried.notified().await;
+                    poll_fn(|_| {
+                        if metrics.get_errors_for_addr(&ipv4_address) == Some(1) {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                })
+                .await;
+                for _ in 0..retries_before_aaaa {
+                    tokio::time::advance(Duration::from_secs(3)).await;
+                    pending_until(
+                        connection.as_mut(),
+                        poll_fn(|_| {
+                            if metrics.get_errors_for_addr(&ipv4_address) == Some(2) {
+                                Poll::Ready(())
+                            } else {
+                                Poll::Pending
+                            }
+                        }),
+                    )
+                    .await;
+                }
+                tokio::time::advance(dns_delay).await;
+                let released_at = tokio::time::Instant::now();
+                gate.release.notify_one();
+                pending_until(
+                    connection.as_mut(),
+                    poll_fn(|_| {
+                        if metrics.get_errors_for_addr(&ipv6_address) == Some(1) {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    }),
+                )
+                .await;
+                assert_eq!(
+                    tokio::time::Instant::now(),
+                    released_at,
+                    "{scenario}: a new IPv6 address waited for retry backoff"
+                );
+                for round in (retries_before_aaaa + 1)..=2 {
+                    if !dns_delay.is_zero() && round == 1 {
+                        // The old IPv4 backoff expires a second earlier. Drive
+                        // real socket I/O at that deadline so a
+                        // retry on that obsolete timer changes the error count.
+                        tokio::time::advance(Duration::from_secs(3) - dns_delay).await;
+                        let observation_ends =
+                            std::time::Instant::now() + Duration::from_millis(50);
+                        pending_until(
+                            connection.as_mut(),
+                            poll_fn(|cx| {
+                                assert_eq!(
+                                    metrics.get_errors_for_addr(&ipv4_address),
+                                    Some(1),
+                                    "{scenario}: retried on the old IPv4 backoff"
+                                );
+                                if std::time::Instant::now() >= observation_ends {
+                                    Poll::Ready(())
+                                } else {
+                                    cx.waker().wake_by_ref();
+                                    Poll::Pending
+                                }
+                            }),
+                        )
+                        .await;
+                        tokio::time::advance(dns_delay).await;
+                    } else {
+                        tokio::time::advance(Duration::from_secs(3)).await;
+                    }
+                    if round < 2 {
+                        pending_until(
+                            connection.as_mut(),
+                            poll_fn(|_| {
+                                if metrics.get_errors_for_addr(&ipv6_address) == Some(round + 1) {
+                                    Poll::Ready(())
+                                } else {
+                                    Poll::Pending
+                                }
+                            }),
+                        )
+                        .await;
+                    }
+                }
+                assert!(connection.await.is_err());
+                assert_eq!(
+                    metrics.get_total_attempts(),
+                    6 - retries_before_aaaa,
+                    "{scenario}"
+                );
+                assert_eq!(metrics.get_total_successes(), 0, "{scenario}");
+                assert_eq!(
+                    metrics.get_errors_for_addr(&ipv4_address),
+                    Some(3),
+                    "{scenario}"
+                );
+                assert_eq!(
+                    metrics.get_errors_for_addr(&ipv6_address),
+                    Some(3 - retries_before_aaaa),
+                    "{scenario}"
+                );
+                Ok::<(), std::io::Error>(())
+            })
+            .await;
+            server.stop().await;
+            result.expect("retry fixture failed");
+        }
+    }
+
+    /// The public connector must dispatch configured Happy Eyeballs, start IPv6
+    /// while IPv4 is still pending, and retain IPv4 if the IPv6 attempt fails.
+    /// Cached DNS uses batch racing; pending AAAA uses the incremental scheduler.
+    #[tokio::test(start_paused = true)]
+    async fn public_happy_eyeballs_keeps_ipv4_after_ipv6_fails() {
+        /// Reading each target proves which family is being attempted. Holding
+        /// the SOCKS reply makes this independent of host routing and TCP timing.
+        async fn accept_target(proxy: &TcpListener, ipv6: bool) -> TokioTcpStream {
+            let (mut socket, _) = proxy.accept().await.expect("accept proxy connection");
+            let mut greeting = [0; 3];
+            socket
+                .read_exact(&mut greeting)
+                .await
+                .expect("read greeting");
+            assert_eq!(greeting, [5, 1, 0]);
+            socket
+                .write_all(&[5, 0])
+                .await
+                .expect("accept authentication");
+            let mut expected = vec![5, 1, 0, if ipv6 { 4 } else { 1 }];
+            if ipv6 {
+                expected.extend_from_slice(&Ipv6Addr::LOCALHOST.octets());
+            } else {
+                expected.extend_from_slice(&Ipv4Addr::LOCALHOST.octets());
+            }
+            expected.extend_from_slice(&12345_u16.to_be_bytes());
+            let mut request = vec![0; expected.len()];
+            socket
+                .read_exact(&mut request)
+                .await
+                .expect("read connect request");
+            assert_eq!(request, expected);
+            socket
+        }
+
+        for (scenario, cached_dns) in [("pending AAAA", false), ("cached DNS", true)] {
+            let (server, gate) =
+                DnsServer::start_gated(RecordType::AAAA, ForgeResolverOpts::default()).await;
+            fixture_io(async {
+                if cached_dns {
+                    gate.release.notify_one();
+                    let batch = server.resolver.clone();
+                    assert_eq!(
+                        batch
+                            .call("service.test.".parse().expect("service name"))
+                            .await
+                            .expect("prime both DNS families")
+                            .collect::<Vec<_>>(),
+                        vec![
+                            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+                            SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
+                        ]
+                    );
+                    let resolved = server
+                        .resolver
+                        .resolve_for_connect("service.test.".parse().expect("service name"))
+                        .await
+                        .expect("cached lookup");
+                    assert!(
+                        resolved.fallback.is_none(),
+                        "{scenario}: DNS is already complete"
+                    );
+                }
+                let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                    .await
+                    .expect("bind proxy");
+                let proxy_address = proxy.local_addr().expect("proxy address");
+                let mut metrics = ConnectorMetrics::default();
+                let mut connector = ForgeHttpConnector::new_with_resolver(server.resolver.clone());
+                connector.set_socks5_proxy(Some(proxy_address.to_string()));
+                connector.set_happy_eyeballs_timeout(Some(Duration::from_millis(50)));
+                connector.set_connect_timeout(Some(Duration::from_secs(5)));
+                connector.set_metrics(metrics.clone());
+                let connection = tower_service::Service::call(
+                    &mut connector,
+                    "http://service.test.:12345".parse().expect("service URI"),
+                );
+                tokio::pin!(connection);
+                let mut ipv4 =
+                    pending_until(connection.as_mut(), accept_target(&proxy, false)).await;
+                if !cached_dns {
+                    pending_until(connection.as_mut(), gate.queried.notified()).await;
+                    gate.release.notify_one();
+                    pending_until(
+                        connection.as_mut(),
+                        server.resolver.lookup_family(
+                            "service.test.".parse().expect("service name"),
+                            RecordType::AAAA,
+                        ),
+                    )
+                    .await
+                    .expect("released AAAA response");
+                }
+                tokio::time::advance(Duration::from_millis(50)).await;
+                let mut ipv6 =
+                    pending_until(connection.as_mut(), accept_target(&proxy, true)).await;
+
+                // IPv6 completes first, but with refusal. The original IPv4 socket
+                // must remain usable instead of returning the first completed error.
+                ipv6.write_all(&[5, 5, 0, 1, 127, 0, 0, 1, 0, 1])
+                    .await
+                    .expect("refuse IPv6");
+                pending_until(
+                    connection.as_mut(),
+                    poll_fn(|_| {
+                        if metrics.get_total_errors() == 1 {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    }),
+                )
+                .await;
+                ipv4.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 1])
+                    .await
+                    .expect("accept IPv4");
+                let mut client = connection
+                    .await
+                    .expect("remaining IPv4 connection")
+                    .into_inner();
+                client.write_all(b"ok").await.expect("write through IPv4");
+                let mut received = [0; 2];
+                ipv4.read_exact(&mut received)
+                    .await
+                    .expect("read from IPv4");
+                assert_eq!(&received, b"ok");
+                assert_eq!(metrics.get_total_attempts(), 2, "{scenario}");
+                assert_eq!(metrics.get_total_errors(), 1, "{scenario}");
+                assert_eq!(metrics.get_total_successes(), 1, "{scenario}");
+            })
+            .await;
+            server.stop().await;
+        }
+    }
+
+    /// An IPv6-only local binding cannot retry an IPv4 result after AAAA fails.
+    /// Pending and cached DNS delivery must both return without empty retry rounds.
+    #[tokio::test(start_paused = true)]
+    async fn ipv6_local_binding_returns_aaaa_failure_without_retries() {
+        for (scenario, cached_aaaa) in [("pending AAAA", false), ("cached AAAA failure", true)] {
+            let gate = Arc::new(ReplyGate {
+                record_type: RecordType::AAAA,
+                queried: Notify::new(),
+                other_replied: Notify::new(),
+                release: Notify::new(),
+            });
+            let mut options = ForgeResolverOpts::default();
+            // The fixture's empty response has no SOA; make its negative result
+            // cacheable so the completed-delivery row does not depend on I/O order.
+            options.inner.negative_min_ttl = Some(Duration::from_secs(60));
+            let server = DnsServer::start_with_config(
+                vec![address_record("service.test.", Ipv4Addr::LOCALHOST)],
+                ResolverConfig::default(),
+                options,
+                Some(gate.clone()),
+                vec![],
+                None,
+            )
+            .await;
+            fixture_io(async {
+                if cached_aaaa {
+                    gate.release.notify_one();
+                    assert!(matches!(
+                        server.resolver.lookup_family(
+                            "service.test.".parse().expect("service name"),
+                            RecordType::AAAA,
+                        ).await,
+                        Err(error) if error.is_no_records_found()
+                    ));
+                    let resolved = server
+                        .resolver
+                        .resolve_for_connect("service.test.".parse().expect("service name"))
+                        .await
+                        .expect("A result with cached AAAA failure");
+                    assert!(resolved.fallback.is_none(), "AAAA must already be complete");
+                    assert_eq!(
+                        resolved.primary.collect::<Vec<_>>(),
+                        vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 0))]
+                    );
+                }
+                let start = tokio::time::Instant::now();
+                let mut metrics = ConnectorMetrics::default();
+                let mut connector = ForgeHttpConnector::new_with_resolver(server.resolver.clone());
+                connector.set_local_address(Some(Ipv6Addr::LOCALHOST.into()));
+                connector.set_happy_eyeballs_timeout(Some(Duration::from_millis(50)));
+                connector.set_connect_retries_max(Some(2));
+                connector.set_connect_retries_interval(Some(Duration::from_secs(3)));
+                connector.set_metrics(metrics.clone());
+                let connection = tower_service::Service::call(
+                    &mut connector,
+                    "http://service.test.:12345".parse().expect("service URI"),
+                );
+                tokio::pin!(connection);
+                if !cached_aaaa {
+                    pending_until(connection.as_mut(), async {
+                        gate.queried.notified().await;
+                        gate.other_replied.notified().await;
+                        let ipv4 = server
+                            .resolver
+                            .lookup_family(
+                                "service.test.".parse().expect("service name"),
+                                RecordType::A,
+                            )
+                            .await
+                            .expect("IPv4 response before releasing AAAA");
+                        assert_eq!(
+                            ipv4.addrs.collect::<Vec<_>>(),
+                            vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 0))]
+                        );
+                    })
+                    .await;
+                    gate.release.notify_one();
+                }
+                let error = connection.await.expect_err(scenario);
+                let source = std::error::Error::source(&error).expect("connection error cause");
+                if cached_aaaa {
+                    assert_eq!(
+                        source
+                            .downcast_ref::<std::io::Error>()
+                            .expect("no eligible address")
+                            .kind(),
+                        std::io::ErrorKind::NotConnected,
+                        "{scenario}"
+                    );
+                } else {
+                    assert!(
+                        source.is::<NetError>(),
+                        "{scenario}: preserve the pending DNS error"
+                    );
+                }
+                assert_eq!(
+                    tokio::time::Instant::now(),
+                    start,
+                    "{scenario}: empty retries delayed the error"
+                );
+                assert_eq!(metrics.get_total_attempts(), 0, "{scenario}");
+            })
+            .await;
+            let queries = server.stop().await;
+            assert_eq!(
+                queries.len(),
+                2,
+                "{scenario}: cached results issued more queries"
             );
         }
     }

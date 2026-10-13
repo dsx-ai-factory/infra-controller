@@ -719,6 +719,7 @@ impl InternalRBACRules {
         x.perm("SetNicFirmwareSiteDefault", vec![ForgeAdminCLI]);
         x.perm("FindNicFirmwareSiteDefaultIds", vec![ForgeAdminCLI]);
         x.perm("FindNicFirmwareSiteDefaultsByIds", vec![ForgeAdminCLI]);
+        x.perm("SetMachineNicFirmwareOverride", vec![ForgeAdminCLI]);
         x.perm("GetDesiredNicFirmware", vec![ForgeAdminCLI]);
         x.perm("CreateSku", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GenerateSkuFromMachine", vec![ForgeAdminCLI]);
@@ -1337,6 +1338,7 @@ mod rbac_rule_tests {
                 "SetNicFirmwareSiteDefault",
                 "FindNicFirmwareSiteDefaultIds",
                 "FindNicFirmwareSiteDefaultsByIds",
+                "SetMachineNicFirmwareOverride",
                 "GetDesiredNicFirmware",
             ] {
                 assert_eq!(

@@ -23,6 +23,7 @@ use ::rpc::errors::RpcDataConversionError;
 use carbide_ib_fabric::errors::IbError;
 use carbide_redfish::libredfish::RedfishClientCreationError;
 use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
+use carbide_resource_pool::ResourcePoolRegistryError;
 use carbide_site_explorer::EndpointExplorationServiceError;
 use carbide_uuid::machine::{InvalidMachineType, MachineId};
 use config_version::ConfigVersionParseError;
@@ -30,6 +31,7 @@ use db::credential_rotation::CredentialRotationType;
 use db::ip_allocator::DhcpError;
 use db::machine_interface_address::AddressAlreadyInUseError;
 use db::resource_pool::ResourcePoolDatabaseError;
+use db::resource_pool::binding::BindingError;
 use db::{AnnotatedSqlxError, DatabaseError};
 use librms::RackManagerError;
 use mac_address::MacAddress;
@@ -315,6 +317,16 @@ impl From<ModelError> for CarbideError {
             ModelError::HardwareInfo(e) => Self::HardwareInfoError(e),
             ModelError::InvalidArgument(e) => Self::InvalidArgument(e),
             ModelError::InvalidMachindId(e) => Self::InvalidArgument(e),
+        }
+    }
+}
+
+impl From<ResourcePoolRegistryError> for CarbideError {
+    fn from(error: ResourcePoolRegistryError) -> Self {
+        match error {
+            ResourcePoolRegistryError::Database(error)
+            | ResourcePoolRegistryError::Binding(BindingError::Database(error)) => error.into(),
+            error => Self::FailedPrecondition(error.to_string()),
         }
     }
 }

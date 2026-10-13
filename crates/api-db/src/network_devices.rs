@@ -16,6 +16,7 @@
  */
 use std::ops::DerefMut;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::MachineId;
 use itertools::Itertools;
 use model::hardware_info::LldpSwitchData;
@@ -200,23 +201,26 @@ pub mod dpu_to_network_device_map {
         network_device_id: &str,
     ) -> Result<DpuToNetworkDeviceMap, DatabaseError> {
         // Update the association if already exists, else just insert into table.
-        let query = r#"INSERT INTO port_to_network_device_map(dpu_id, local_port, remote_port, network_device_id)
+        let query = format!(
+            r#"INSERT INTO port_to_network_device_map(dpu_id, local_port, remote_port, network_device_id)
                          VALUES($1, $2::dpu_local_ports, $3, $4)
                          ON CONFLICT ON CONSTRAINT network_device_dpu_associations_primary
                          DO UPDATE SET
                             network_device_id=EXCLUDED.network_device_id,
                             local_port=EXCLUDED.local_port,
                             remote_port=EXCLUDED.remote_port
-                       RETURNING dpu_id, local_port, remote_port, network_device_id"#;
+                       RETURNING {}"#,
+            DpuToNetworkDeviceMap::db_table_columns(),
+        );
 
-        sqlx::query_as(query)
+        sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
             .bind(dpu_id)
             .bind(local_port)
             .bind(remote_port)
             .bind(network_device_id)
             .fetch_one(txn)
             .await
-            .map_err(|e| DatabaseError::query(query, e))
+            .map_err(|e| DatabaseError::query(&query, e))
     }
 
     pub async fn delete(
@@ -275,10 +279,12 @@ pub mod dpu_to_network_device_map {
         txn: impl DbReader<'_>,
         device_id: &str,
     ) -> Result<Vec<DpuToNetworkDeviceMap>, DatabaseError> {
-        let base_query = "SELECT l.dpu_id, l.local_port, l.remote_port, l.network_device_id
-                          FROM port_to_network_device_map l WHERE network_device_id=$1";
+        let base_query = format!(
+            "SELECT {} FROM port_to_network_device_map WHERE network_device_id=$1",
+            DpuToNetworkDeviceMap::db_table_columns(),
+        );
 
-        sqlx::query_as(base_query)
+        sqlx::query_as(sqlx::AssertSqlSafe(base_query.as_str()))
             .bind(device_id)
             .fetch_all(txn)
             .await
@@ -289,10 +295,12 @@ pub mod dpu_to_network_device_map {
         txn: impl DbReader<'_>,
         dpu_ids: &[MachineId],
     ) -> Result<Vec<DpuToNetworkDeviceMap>, DatabaseError> {
-        let base_query = "SELECT l.dpu_id, l.local_port, l.remote_port, l.network_device_id
-                          FROM port_to_network_device_map l WHERE dpu_id=ANY($1)";
+        let base_query = format!(
+            "SELECT {} FROM port_to_network_device_map WHERE dpu_id=ANY($1)",
+            DpuToNetworkDeviceMap::db_table_columns(),
+        );
 
-        sqlx::query_as(base_query)
+        sqlx::query_as(sqlx::AssertSqlSafe(base_query.as_str()))
             .bind(dpu_ids)
             .fetch_all(txn)
             .await
