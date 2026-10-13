@@ -22,12 +22,12 @@ var _ MappedNullable = &ExpectedMachineInterface{}
 
 // ExpectedMachineInterface Expected interface declaration. Each supplied list entry replaces the corresponding declaration, so preserve all returned attributes when editing it. Core validates role, primary selection, and allocation against the Site configuration.
 type ExpectedMachineInterface struct {
-	// Optional MAC address of the expected interface. Required unless `physicalIfname` is supplied; at least one of the two identifies the interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
+	// Optional MAC address of the expected interface. Required unless `physicalName` is supplied; at least one of the two identifies the interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
 	MacAddress NullableString `json:"macAddress,omitempty" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
 	// Optional physical interface identifier, for example `C1-1-L1`, as named in the Cerebro database. Required unless `macAddress` is supplied; both identifiers may be present. Omission or null clears it when replacing the declaration.
-	PhysicalIfname NullableString `json:"physicalIfname,omitempty"`
+	PhysicalName NullableString `json:"physicalName,omitempty"`
 	// Optional logical interface name stored for inventory consumers. Omission or null clears it when replacing the declaration.
-	LogicalIfname NullableString `json:"logicalIfname,omitempty"`
+	LogicalName NullableString `json:"logicalName,omitempty"`
 	// Optional NIC type. Use `CX9` for ConnectX-9 interfaces on Astra hosts.
 	NicType NullableString `json:"nicType,omitempty"`
 	// Optional fixed IPv4 or IPv6 address for the interface. REST preserves repeated MAC declarations without enforcing uniqueness by MAC and address family; Core applies allocation validation.
@@ -106,90 +106,90 @@ func (o *ExpectedMachineInterface) UnsetMacAddress() {
 	o.MacAddress.Unset()
 }
 
-// GetPhysicalIfname returns the PhysicalIfname field value if set, zero value otherwise (both if not set or set to explicit null).
-func (o *ExpectedMachineInterface) GetPhysicalIfname() string {
-	if o == nil || IsNil(o.PhysicalIfname.Get()) {
+// GetPhysicalName returns the PhysicalName field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *ExpectedMachineInterface) GetPhysicalName() string {
+	if o == nil || IsNil(o.PhysicalName.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.PhysicalIfname.Get()
+	return *o.PhysicalName.Get()
 }
 
-// GetPhysicalIfnameOk returns a tuple with the PhysicalIfname field value if set, nil otherwise
+// GetPhysicalNameOk returns a tuple with the PhysicalName field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
-func (o *ExpectedMachineInterface) GetPhysicalIfnameOk() (*string, bool) {
+func (o *ExpectedMachineInterface) GetPhysicalNameOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
-	return o.PhysicalIfname.Get(), o.PhysicalIfname.IsSet()
+	return o.PhysicalName.Get(), o.PhysicalName.IsSet()
 }
 
-// HasPhysicalIfname returns a boolean if a field has been set.
-func (o *ExpectedMachineInterface) HasPhysicalIfname() bool {
-	if o != nil && o.PhysicalIfname.IsSet() {
+// HasPhysicalName returns a boolean if a field has been set.
+func (o *ExpectedMachineInterface) HasPhysicalName() bool {
+	if o != nil && o.PhysicalName.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetPhysicalIfname gets a reference to the given NullableString and assigns it to the PhysicalIfname field.
-func (o *ExpectedMachineInterface) SetPhysicalIfname(v string) {
-	o.PhysicalIfname.Set(&v)
+// SetPhysicalName gets a reference to the given NullableString and assigns it to the PhysicalName field.
+func (o *ExpectedMachineInterface) SetPhysicalName(v string) {
+	o.PhysicalName.Set(&v)
 }
 
-// SetPhysicalIfnameNil sets the value for PhysicalIfname to be an explicit nil
-func (o *ExpectedMachineInterface) SetPhysicalIfnameNil() {
-	o.PhysicalIfname.Set(nil)
+// SetPhysicalNameNil sets the value for PhysicalName to be an explicit nil
+func (o *ExpectedMachineInterface) SetPhysicalNameNil() {
+	o.PhysicalName.Set(nil)
 }
 
-// UnsetPhysicalIfname ensures that no value is present for PhysicalIfname, not even an explicit nil
-func (o *ExpectedMachineInterface) UnsetPhysicalIfname() {
-	o.PhysicalIfname.Unset()
+// UnsetPhysicalName ensures that no value is present for PhysicalName, not even an explicit nil
+func (o *ExpectedMachineInterface) UnsetPhysicalName() {
+	o.PhysicalName.Unset()
 }
 
-// GetLogicalIfname returns the LogicalIfname field value if set, zero value otherwise (both if not set or set to explicit null).
-func (o *ExpectedMachineInterface) GetLogicalIfname() string {
-	if o == nil || IsNil(o.LogicalIfname.Get()) {
+// GetLogicalName returns the LogicalName field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *ExpectedMachineInterface) GetLogicalName() string {
+	if o == nil || IsNil(o.LogicalName.Get()) {
 		var ret string
 		return ret
 	}
-	return *o.LogicalIfname.Get()
+	return *o.LogicalName.Get()
 }
 
-// GetLogicalIfnameOk returns a tuple with the LogicalIfname field value if set, nil otherwise
+// GetLogicalNameOk returns a tuple with the LogicalName field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
-func (o *ExpectedMachineInterface) GetLogicalIfnameOk() (*string, bool) {
+func (o *ExpectedMachineInterface) GetLogicalNameOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
-	return o.LogicalIfname.Get(), o.LogicalIfname.IsSet()
+	return o.LogicalName.Get(), o.LogicalName.IsSet()
 }
 
-// HasLogicalIfname returns a boolean if a field has been set.
-func (o *ExpectedMachineInterface) HasLogicalIfname() bool {
-	if o != nil && o.LogicalIfname.IsSet() {
+// HasLogicalName returns a boolean if a field has been set.
+func (o *ExpectedMachineInterface) HasLogicalName() bool {
+	if o != nil && o.LogicalName.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetLogicalIfname gets a reference to the given NullableString and assigns it to the LogicalIfname field.
-func (o *ExpectedMachineInterface) SetLogicalIfname(v string) {
-	o.LogicalIfname.Set(&v)
+// SetLogicalName gets a reference to the given NullableString and assigns it to the LogicalName field.
+func (o *ExpectedMachineInterface) SetLogicalName(v string) {
+	o.LogicalName.Set(&v)
 }
 
-// SetLogicalIfnameNil sets the value for LogicalIfname to be an explicit nil
-func (o *ExpectedMachineInterface) SetLogicalIfnameNil() {
-	o.LogicalIfname.Set(nil)
+// SetLogicalNameNil sets the value for LogicalName to be an explicit nil
+func (o *ExpectedMachineInterface) SetLogicalNameNil() {
+	o.LogicalName.Set(nil)
 }
 
-// UnsetLogicalIfname ensures that no value is present for LogicalIfname, not even an explicit nil
-func (o *ExpectedMachineInterface) UnsetLogicalIfname() {
-	o.LogicalIfname.Unset()
+// UnsetLogicalName ensures that no value is present for LogicalName, not even an explicit nil
+func (o *ExpectedMachineInterface) UnsetLogicalName() {
+	o.LogicalName.Unset()
 }
 
 // GetNicType returns the NicType field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -549,11 +549,11 @@ func (o ExpectedMachineInterface) ToMap() (map[string]interface{}, error) {
 	if o.MacAddress.IsSet() {
 		toSerialize["macAddress"] = o.MacAddress.Get()
 	}
-	if o.PhysicalIfname.IsSet() {
-		toSerialize["physicalIfname"] = o.PhysicalIfname.Get()
+	if o.PhysicalName.IsSet() {
+		toSerialize["physicalName"] = o.PhysicalName.Get()
 	}
-	if o.LogicalIfname.IsSet() {
-		toSerialize["logicalIfname"] = o.LogicalIfname.Get()
+	if o.LogicalName.IsSet() {
+		toSerialize["logicalName"] = o.LogicalName.Get()
 	}
 	if o.NicType.IsSet() {
 		toSerialize["nicType"] = o.NicType.Get()

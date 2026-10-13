@@ -249,9 +249,9 @@ pub fn astra_get_cage_index(nic_index: u8) -> u8 {
 
 /// Return the MPO index for a NIC index in Astra.
 ///
-/// MPO index is `(nic_index / 2) + 1`.
+/// MPO index is `(nic_index % 2) + 1`.
 pub fn astra_get_mpo_index(nic_index: u8) -> u8 {
-    (nic_index / 2) + 1
+    (nic_index % 2) + 1
 }
 
 /// Return the Cage/MPO-encoded string (e.g. `C1_2`) for a NIC index in Astra.

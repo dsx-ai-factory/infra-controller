@@ -26,8 +26,8 @@ var expectedMachineInterfaceMACRegexp = regexp.MustCompile(`^([0-9A-Fa-f]{2}[:-]
 // Expected Machine. Core consumes this shape through ExpectedMachine.host_nics.
 type APIExpectedMachineInterface struct {
 	MacAddress         *string                                   `json:"macAddress"`
-	PhysicalIfname     *string                                   `json:"physicalIfname"`
-	LogicalIfname      *string                                   `json:"logicalIfname"`
+	PhysicalName       *string                                   `json:"physicalName"`
+	LogicalName        *string                                   `json:"logicalName"`
 	NicType            *string                                   `json:"nicType"`
 	FixedIP            *string                                   `json:"fixedIp"`
 	FixedMask          *string                                   `json:"fixedMask"`
@@ -45,14 +45,14 @@ func (i APIExpectedMachineInterface) Validate() error {
 			validation.NilOrNotEmpty.Error("MacAddress cannot be empty"),
 			validation.When(i.MacAddress != nil,
 				validation.Match(expectedMachineInterfaceMACRegexp).Error("must be a MAC address of six colon- or hyphen-separated octets"))),
-		validation.Field(&i.PhysicalIfname,
-			validation.NilOrNotEmpty.Error("PhysicalIfname cannot be empty"),
-			validation.When(i.PhysicalIfname != nil,
-				validation.Match(util.NotAllWhitespaceRegexp).Error("PhysicalIfname consists only of whitespace"))),
-		validation.Field(&i.LogicalIfname,
-			validation.NilOrNotEmpty.Error("LogicalIfname cannot be empty"),
-			validation.When(i.LogicalIfname != nil,
-				validation.Match(util.NotAllWhitespaceRegexp).Error("LogicalIfname consists only of whitespace"))),
+		validation.Field(&i.PhysicalName,
+			validation.NilOrNotEmpty.Error("PhysicalName cannot be empty"),
+			validation.When(i.PhysicalName != nil,
+				validation.Match(util.NotAllWhitespaceRegexp).Error("PhysicalName consists only of whitespace"))),
+		validation.Field(&i.LogicalName,
+			validation.NilOrNotEmpty.Error("LogicalName cannot be empty"),
+			validation.When(i.LogicalName != nil,
+				validation.Match(util.NotAllWhitespaceRegexp).Error("LogicalName consists only of whitespace"))),
 		validation.Field(&i.NicType,
 			validation.NilOrNotEmpty.Error("NicType cannot be empty"),
 			validation.When(i.NicType != nil,
@@ -83,8 +83,8 @@ func (i APIExpectedMachineInterface) Validate() error {
 	// An interface must be identifiable. A MAC address or a physical interface
 	// name (or both) is required; a logical name alone is insufficient. Core
 	// enforces the same contract on ExpectedInterface.
-	if i.MacAddress == nil && i.PhysicalIfname == nil {
-		return validation.Errors{"macAddress": errors.New("either macAddress or physicalIfname is required")}
+	if i.MacAddress == nil && i.PhysicalName == nil {
+		return validation.Errors{"macAddress": errors.New("either macAddress or physicalName is required")}
 	}
 	if i.IPAllocation != nil {
 		switch *i.IPAllocation {
@@ -120,8 +120,8 @@ func (i APIExpectedMachineInterface) ToDBModel() cdbm.ExpectedMachineInterface {
 	}
 	return cdbm.ExpectedMachineInterface{
 		MacAddress:         macAddress,
-		PhysicalIfname:     i.PhysicalIfname,
-		LogicalIfname:      i.LogicalIfname,
+		PhysicalName:       i.PhysicalName,
+		LogicalName:        i.LogicalName,
 		NicType:            i.NicType,
 		FixedIP:            i.FixedIP,
 		FixedMask:          i.FixedMask,
@@ -138,8 +138,8 @@ func (i APIExpectedMachineInterface) ToDBModel() cdbm.ExpectedMachineInterface {
 func NewAPIExpectedMachineInterface(i cdbm.ExpectedMachineInterface) APIExpectedMachineInterface {
 	return APIExpectedMachineInterface{
 		MacAddress:         i.MacAddress,
-		PhysicalIfname:     i.PhysicalIfname,
-		LogicalIfname:      i.LogicalIfname,
+		PhysicalName:       i.PhysicalName,
+		LogicalName:        i.LogicalName,
 		NicType:            i.NicType,
 		FixedIP:            i.FixedIP,
 		FixedMask:          i.FixedMask,

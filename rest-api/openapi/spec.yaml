@@ -29490,14 +29490,14 @@ components:
             - string
             - 'null'
           pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
-          description: Optional MAC address of the expected interface. Required unless `physicalIfname` is supplied; at least one of the two identifies the interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
-        physicalIfname:
+          description: Optional MAC address of the expected interface. Required unless `physicalName` is supplied; at least one of the two identifies the interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
+        physicalName:
           type:
             - string
             - 'null'
           minLength: 1
           description: Optional physical interface identifier, for example `C1-1-L1`, as named in the Cerebro database. Required unless `macAddress` is supplied; both identifiers may be present. Omission or null clears it when replacing the declaration.
-        logicalIfname:
+        logicalName:
           type:
             - string
             - 'null'

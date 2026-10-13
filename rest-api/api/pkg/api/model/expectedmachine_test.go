@@ -372,8 +372,8 @@ func TestAPIExpectedMachineInterface_Validate(t *testing.T) {
 		{name: "DPU forbids primary", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuOs), Primary: cutil.GetPtr(false)}, wantErr: "primary"},
 		{name: "HostBmc forbids primary true", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc), Primary: cutil.GetPtr(true)}, wantErr: "primary"},
 		{name: "HostBmc accepts primary false", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc), Primary: cutil.GetPtr(false)}},
-		{name: "physical name without MAC", value: APIExpectedMachineInterface{PhysicalIfname: cutil.GetPtr("C1-1-L1")}},
-		{name: "neither MAC nor physical name", value: APIExpectedMachineInterface{NicType: cutil.GetPtr("CX9")}, wantErr: "either macAddress or physicalIfname is required"},
+		{name: "physical name without MAC", value: APIExpectedMachineInterface{PhysicalName: cutil.GetPtr("C1-1-L1")}},
+		{name: "neither MAC nor physical name", value: APIExpectedMachineInterface{NicType: cutil.GetPtr("CX9")}, wantErr: "either macAddress or physicalName is required"},
 	}
 
 	for _, test := range tests {
@@ -565,7 +565,7 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 			wantLabelsJSON:     `{"env":"test","zone":"us-west-1"}`,
 			wantSerialsJSON:    `["DPU002","DPU001"]`,
 			interfaces:         []cdbm.ExpectedMachineInterface{{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.9")}},
-			wantInterfacesJSON: `[{"macAddress":"02:00:00:00:00:09","physicalIfname":null,"logicalIfname":null,"nicType":"CX9","fixedIp":"192.0.2.9","fixedMask":null,"fixedGateway":null,"primary":null,"networkSegmentType":null,"role":null,"ipAllocation":null}]`,
+			wantInterfacesJSON: `[{"macAddress":"02:00:00:00:00:09","physicalName":null,"logicalName":null,"nicType":"CX9","fixedIp":"192.0.2.9","fixedMask":null,"fixedGateway":null,"primary":null,"networkSegmentType":null,"role":null,"ipAllocation":null}]`,
 		},
 		{
 			desc:         "stored DPF false is returned",

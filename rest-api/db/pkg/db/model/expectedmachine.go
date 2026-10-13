@@ -84,8 +84,8 @@ type ExpectedMachine struct {
 // to Core's ExpectedMachine.host_nics field.
 type ExpectedMachineInterface struct {
 	MacAddress         *string                              `json:"mac_address,omitempty"`
-	PhysicalIfname     *string                              `json:"physical_ifname,omitempty"`
-	LogicalIfname      *string                              `json:"logical_ifname,omitempty"`
+	PhysicalName       *string                              `json:"physical_name,omitempty"`
+	LogicalName        *string                              `json:"logical_name,omitempty"`
 	NicType            *string                              `json:"nic_type,omitempty"`
 	FixedIP            *string                              `json:"fixed_ip,omitempty"`
 	FixedMask          *string                              `json:"fixed_mask,omitempty"`
@@ -100,8 +100,8 @@ type ExpectedMachineInterface struct {
 func (i ExpectedMachineInterface) ToProto() *corev1.ExpectedHostNic {
 	result := &corev1.ExpectedHostNic{
 		MacAddress:     i.MacAddress,
-		PhysicalIfname: i.PhysicalIfname,
-		LogicalIfname:  i.LogicalIfname,
+		PhysicalIfname: i.PhysicalName,
+		LogicalIfname:  i.LogicalName,
 		NicType:        i.NicType,
 		FixedIp:        i.FixedIP,
 		FixedMask:      i.FixedMask,
@@ -127,8 +127,8 @@ func (i *ExpectedMachineInterface) FromProto(proto *corev1.ExpectedHostNic) {
 		return
 	}
 	i.MacAddress = proto.MacAddress
-	i.PhysicalIfname = proto.PhysicalIfname
-	i.LogicalIfname = proto.LogicalIfname
+	i.PhysicalName = proto.PhysicalIfname
+	i.LogicalName = proto.LogicalIfname
 	i.NicType = proto.NicType
 	i.FixedIP = proto.FixedIp
 	i.FixedMask = proto.FixedMask
