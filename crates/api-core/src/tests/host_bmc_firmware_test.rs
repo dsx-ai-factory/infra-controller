@@ -1878,6 +1878,70 @@ async fn test_report_scout_firmware_upgrade_status(pool: sqlx::PgPool) -> Carbid
 }
 
 #[crate::sqlx_test]
+async fn test_report_scout_firmware_upgrade_status_for_assigned_host(
+    pool: sqlx::PgPool,
+) -> CarbideResult<()> {
+    const UPGRADE_TASK_ID: &str = "assigned-scout-upgrade-task-id";
+
+    let env = create_test_env(pool).await;
+    let mh = common::api_fixtures::create_managed_host(&env).await;
+
+    let mut txn = env.pool.begin().await.unwrap();
+    let host = mh.host().db_machine(&mut txn).await;
+    let waiting_state = ManagedHostState::Assigned {
+        instance_state: InstanceState::HostReprovision {
+            reprovision_state: HostReprovisionState::WaitingForScoutUpgrade {
+                upgrade_task_id: UPGRADE_TASK_ID.to_string(),
+                firmware_type: FirmwareComponentType::Bmc,
+                final_version: "1.2.3".to_string(),
+                power_drains_needed: None,
+                started_at: chrono::Utc::now(),
+                deadline: chrono::Utc::now() + chrono::TimeDelta::minutes(60),
+                task_json: String::new(),
+                result: None,
+            },
+        },
+    };
+    db::machine::advance(&host, &mut txn, &waiting_state, None)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    env.api
+        .report_scout_firmware_upgrade_status(Request::new(
+            rpc::forge::ScoutFirmwareUpgradeStatusRequest {
+                machine_id: Some(mh.host().id),
+                success: true,
+                exit_code: 0,
+                stdout: "assigned upgrade complete".to_string(),
+                stderr: String::new(),
+                error: String::new(),
+                upgrade_task_id: UPGRADE_TASK_ID.to_string(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let mut txn = env.pool.begin().await.unwrap();
+    let host = mh.host().db_machine(&mut txn).await;
+    let ManagedHostState::Assigned {
+        instance_state: InstanceState::HostReprovision { reprovision_state },
+    } = host.current_state()
+    else {
+        panic!("assigned host reprovision wrapper was not preserved");
+    };
+    let HostReprovisionState::WaitingForScoutUpgrade { result, .. } = reprovision_state else {
+        panic!("Not in WaitingForScoutUpgrade");
+    };
+    let result = result.as_ref().expect("result should be set");
+    assert!(result.success);
+    assert_eq!(result.stdout, "assigned upgrade complete");
+    txn.commit().await.unwrap();
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn test_report_scout_firmware_upgrade_status_failure(
     pool: sqlx::PgPool,
 ) -> CarbideResult<()> {

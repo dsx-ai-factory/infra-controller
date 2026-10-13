@@ -220,6 +220,54 @@ async fn waiting_for_scout_upgrade_returns_task_without_cleanup_timestamp(pool: 
 }
 
 #[sqlx_test]
+async fn assigned_waiting_for_scout_upgrade_returns_task(pool: PgPool) {
+    let TestContext { mh, .. } = init(pool).await;
+    let upgrade_task_id = uuid::Uuid::new_v4().to_string();
+    let task_json = serde_json::json!({
+        "upgrade_task_id": &upgrade_task_id,
+        "component_type": "cx7",
+        "target_version": "28.47.2682",
+        "script": {
+            "url": "http://pxe/scripts/cx7_upgrade.sh",
+            "sha256": "script-sha",
+        },
+        "execution_timeout_seconds": 7200,
+        "artifact_download_timeout_seconds": 600,
+        "file_artifacts": [{
+            "url": "http://pxe/cx7.bin",
+            "sha256": "firmware-sha",
+        }],
+    })
+    .to_string();
+    mh.advance_state(ManagedHostState::Assigned {
+        instance_state: InstanceState::HostReprovision {
+            reprovision_state: HostReprovisionState::WaitingForScoutUpgrade {
+                upgrade_task_id: upgrade_task_id.clone(),
+                firmware_type: FirmwareComponentType::Cx7,
+                final_version: "28.47.2682".to_string(),
+                power_drains_needed: Some(1),
+                started_at: chrono::Utc::now(),
+                deadline: chrono::Utc::now() + chrono::TimeDelta::hours(3),
+                task_json,
+                result: None,
+            },
+        },
+    })
+    .await;
+
+    let response = mh.host.forge_agent_control().await;
+    let Some(Action::FirmwareUpgrade(firmware_upgrade)) = response.action else {
+        panic!("expected typed firmware upgrade action");
+    };
+    let task = firmware_upgrade.task.expect("typed task");
+
+    assert_eq!(response.legacy_action, LegacyAction::FirmwareUpgrade as i32);
+    assert_eq!(task.component_type, "cx7");
+    assert_eq!(task.target_version, "28.47.2682");
+    assert_eq!(task.upgrade_task_id, upgrade_task_id);
+}
+
+#[sqlx_test]
 async fn invalid_json_falls_back_to_noop(pool: PgPool) {
     let TestContext { env, mh, .. } = init(pool).await;
     let mut txn = env.db_txn().await;
