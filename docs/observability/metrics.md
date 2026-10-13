@@ -534,7 +534,7 @@ and exit rates, mean time in state, and reboot attempts during discovery boot.
 
 **Host health** - Healthy percentage with maintenance and suppressed-alerting hosts
 discounted, probe and classification breakdowns, operator overrides, hosts missing a
-BIOS password, and rack, switch and power shelf health.
+BIOS password, and rack, switch, and power shelf health.
 
 **Network segments and VPC prefixes** - State distribution, above-SLA objects,
 transitions, time in state and handler errors for both object types.
