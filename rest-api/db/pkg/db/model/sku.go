@@ -6,7 +6,6 @@ package model
 import (
 	"context"
 	"database/sql"
-	"reflect"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	otrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
@@ -49,12 +49,8 @@ type SkuComponents struct {
 	*corev1.SkuComponents
 }
 
-// Equal reports whether two `*SkuComponents` wrappers carry the same
-// underlying proto, treating a nil wrapper as carrying a nil proto.
-// Avoids dereferencing a nil wrapper to read `.SkuComponents`. Declared
-// as a method (per the Go convention used by `time.Time.Equal`,
-// `cmp.Equal`, etc.) so callers can write `s.Equal(other)` instead of
-// reaching for a free helper.
+// Equal compares protobuf field values, ignoring runtime bookkeeping such as
+// cached message state. A nil wrapper is treated as a nil underlying proto.
 func (s *SkuComponents) Equal(other *SkuComponents) bool {
 	var sp, op *corev1.SkuComponents
 	if s != nil {
@@ -63,7 +59,7 @@ func (s *SkuComponents) Equal(other *SkuComponents) bool {
 	if other != nil {
 		op = other.SkuComponents
 	}
-	return reflect.DeepEqual(sp, op)
+	return proto.Equal(sp, op)
 }
 
 func (s *SkuComponents) UnmarshalJSON(b []byte) error {
@@ -232,10 +228,14 @@ func (s *SKU) BeforeCreateTable(ctx context.Context, query *bun.CreateTableQuery
 type SkuDAO interface {
 	// Create used to create new row
 	Create(ctx context.Context, tx *db.Tx, input SkuCreateInput) (*SKU, error)
-	// Update used to update row
+	// Update writes supplied fields and stamps `Updated`. With no fields it returns
+	// the stored row without writing.
 	Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput) (*SKU, error)
 	// Delete used to delete row
 	Delete(ctx context.Context, tx *db.Tx, skuID string) error
+	// DeleteIfUnchanged deletes only the version observed by inventory reconciliation.
+	// It returns false if the row changed or no longer exists.
+	DeleteIfUnchanged(ctx context.Context, tx *db.Tx, skuID string, updated time.Time) (bool, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter SkuFilterInput, page paginator.PageInput) ([]SKU, int, error)
 	// Get returns row for specified ID
@@ -353,7 +353,8 @@ func (ssd SkuSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SkuFilterInpu
 	return skus, pager.Total, nil
 }
 
-// Update updates specified fields of an existing SKU
+// Update writes supplied fields and stamps `Updated`. With no fields it returns
+// the stored row without writing.
 func (ssd SkuSQLDAO) Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput) (_ *SKU, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.Update")
@@ -398,6 +399,7 @@ func (ssd SkuSQLDAO) Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput
 	}
 
 	if len(updatedFields) > 0 {
+		updatedFields = append(updatedFields, "updated")
 		_, err := db.GetIDB(tx, ssd.dbSession).NewUpdate().Model(sk).Column(updatedFields...).Where("sk.id = ?", input.SkuID).Exec(ctx)
 		if err != nil {
 			return nil, err
@@ -422,6 +424,22 @@ func (ssd SkuSQLDAO) Delete(ctx context.Context, tx *db.Tx, id string) (retErr e
 	}
 
 	return nil
+}
+
+// DeleteIfUnchanged deletes a row only if its `Updated` timestamp matches `updated`.
+// It returns false if the row changed or no longer exists.
+func (ssd SkuSQLDAO) DeleteIfUnchanged(ctx context.Context, tx *db.Tx, skuID string, updated time.Time) (_ bool, retErr error) {
+	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.DeleteIfUnchanged")
+	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
+	cotel.SetAttribute(skuDAOSpan, attribute.String("id", skuID))
+
+	result, err := db.GetIDB(tx, ssd.dbSession).NewDelete().Model((*SKU)(nil)).
+		Where("id = ?", skuID).Where("updated = ?", updated).Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
 }
 
 // NewSkuDAO returns a new SkuDAO
