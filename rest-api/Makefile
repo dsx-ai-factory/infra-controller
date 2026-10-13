@@ -52,9 +52,12 @@ CORE_CHART := ../helm/charts/nico-api
 KIND_FLOW ?= false
 KIND_MAT  ?= false
 KIND_CORE ?= false
-KIND_DNS  ?= false
-KIND_PXE  ?= false
-KIND_DHCP ?= false
+KIND_DNS       ?= false
+KIND_PXE       ?= false
+KIND_DHCP      ?= false
+KIND_BMC_PROXY ?= false
+KIND_SSH       ?= false
+KIND_HW_HEALTH ?= false
 
 # Docker network name and subnet used when KIND_MAT=true.
 # BMC IPs are carved from 192.168.102.0/24 (within the /22, outside pod/service CIDRs).
@@ -465,6 +468,9 @@ flow-protogen: .tools-stamp
 .PHONY: docker-build-dns kind-load-dns helm-deploy-dns kind-verify-dns
 .PHONY: docker-build-pxe kind-load-pxe helm-deploy-pxe kind-verify-pxe
 .PHONY: docker-build-dhcp kind-load-dhcp helm-deploy-dhcp kind-verify-dhcp
+.PHONY: docker-build-bmc-proxy kind-load-bmc-proxy helm-deploy-bmc-proxy kind-verify-bmc-proxy
+.PHONY: docker-build-ssh-console kind-load-ssh-console helm-deploy-ssh-console kind-verify-ssh-console
+.PHONY: docker-build-hw-health kind-load-hw-health helm-deploy-hw-health kind-verify-hw-health
 .PHONY: docker-build-nico-services kind-load-nico-services
 
 # Kind cluster configuration
@@ -517,6 +523,15 @@ docker-build-local:
 	fi
 	@if [ "$(KIND_DHCP)" = "true" ]; then \
 		$(MAKE) docker-build-dhcp ; \
+	fi
+	@if [ "$(KIND_BMC_PROXY)" = "true" ]; then \
+		$(MAKE) docker-build-bmc-proxy ; \
+	fi
+	@if [ "$(KIND_SSH)" = "true" ]; then \
+		$(MAKE) docker-build-ssh-console ; \
+	fi
+	@if [ "$(KIND_HW_HEALTH)" = "true" ]; then \
+		$(MAKE) docker-build-hw-health ; \
 	fi
 
 # Build machine-a-tron and mat-k8s-controller images (used when KIND_MAT=true).
@@ -584,6 +599,15 @@ kind-load:
 	fi
 	@if [ "$(KIND_DHCP)" = "true" ]; then \
 		$(MAKE) kind-load-dhcp ; \
+	fi
+	@if [ "$(KIND_BMC_PROXY)" = "true" ]; then \
+		$(MAKE) kind-load-bmc-proxy ; \
+	fi
+	@if [ "$(KIND_SSH)" = "true" ]; then \
+		$(MAKE) kind-load-ssh-console ; \
+	fi
+	@if [ "$(KIND_HW_HEALTH)" = "true" ]; then \
+		$(MAKE) kind-load-hw-health ; \
 	fi
 
 # Load machine-a-tron and controller images into the Kind cluster.
@@ -877,6 +901,15 @@ kind-reset-helm: kind-reset-infra
 	@if [ "$(KIND_DHCP)" = "true" ]; then \
 		$(MAKE) helm-deploy-dhcp ; \
 	fi
+	@if [ "$(KIND_BMC_PROXY)" = "true" ]; then \
+		$(MAKE) helm-deploy-bmc-proxy ; \
+	fi
+	@if [ "$(KIND_SSH)" = "true" ]; then \
+		$(MAKE) helm-deploy-ssh-console ; \
+	fi
+	@if [ "$(KIND_HW_HEALTH)" = "true" ]; then \
+		$(MAKE) helm-deploy-hw-health ; \
+	fi
 	@echo ""
 	@echo "================================================================================"
 	@echo "Deployment complete! (Helm)"
@@ -894,9 +927,12 @@ kind-reset-helm: kind-reset-infra
 	@[ "$(KIND_FLOW)" = "true" ] && echo "Flow: nico-flow.nico-rest:50051" || true
 	@[ "$(KIND_MAT)" = "true" ] && echo "machine-a-tron: nico-system (BMC externalIPs from 192.168.102.0/24)" || true
 	@[ "$(KIND_CORE)" = "true" ] && echo "Core: core-grpc.nico-system:1079 (Vault production mode, K8s SA auth)" || true
-	@[ "$(KIND_DNS)" = "true" ] && echo "DNS: nico-dns.nico-system (connected to real Core)" || true
-	@[ "$(KIND_PXE)" = "true" ] && echo "PXE: nico-pxe.nico-system (connected to real Core; no EFI artifacts in Kind)" || true
-	@[ "$(KIND_DHCP)" = "true" ] && echo "DHCP: nico-dhcp.nico-system (Kea + libdhcp.so hook, connected to real Core)" || true
+	@[ "$(KIND_DNS)" = "true" ] && echo "DNS: nico-dns.nico-system VIP=$(KIND_DNS_VIP)" || true
+	@[ "$(KIND_PXE)" = "true" ] && echo "PXE: nico-pxe.nico-system VIP=$(KIND_PXE_VIP)" || true
+	@[ "$(KIND_DHCP)" = "true" ] && echo "DHCP: nico-dhcp.nico-system (Kea + libdhcp.so, DNS=$(KIND_DNS_VIP) PXE=$(KIND_PXE_VIP))" || true
+	@[ "$(KIND_BMC_PROXY)" = "true" ] && echo "BMC Proxy: nico-bmc-proxy.nico-system" || true
+	@[ "$(KIND_SSH)" = "true" ] && echo "SSH Console: nico-ssh-console-rs.nico-system" || true
+	@[ "$(KIND_HW_HEALTH)" = "true" ] && echo "HW Health: nico-hardware-health.nico-system" || true
 	@echo "================================================================================"
 
 # Default: full reset using Helm deployment
@@ -1214,9 +1250,140 @@ kind-verify-dhcp:
 	kubectl -n nico-system rollout status deployment/nico-dhcp --timeout=60s
 	@echo "nico-dhcp verify: OK"
 
+
+# =============================================================================
+# Kind: nico-bmc-proxy (KIND_BMC_PROXY=true)
+# Proxies Redfish/IPMI to BMC endpoints. In Kind, machine-a-tron's BMC mock
+# is reachable via the mat-bmc-* externalIP Services on 192.168.102.0/24.
+# =============================================================================
+BMC_PROXY_CHART := ../helm/charts/nico-bmc-proxy
+HELM_SET_BMC_PROXY := \
+	--set image.repository=$(IMAGE_REGISTRY)/nico-rest-bmc-proxy \
+	--set image.tag=$(IMAGE_TAG) \
+	--set image.pullPolicy=Never \
+	--set namespaceOverride=nico-system \
+	--set createNamespace=false \
+	--set "global.certificate.issuerRef.name=nico-rest-ca-issuer" \
+	--set "global.certificate.issuerRef.kind=ClusterIssuer" \
+	--set "global.certificate.privateKey.algorithm=ECDSA" \
+	--set "global.certificate.privateKey.size=256" \
+	--set "imagePullSecret.create=false"
+
+docker-build-bmc-proxy:
+	docker buildx build --platform linux/amd64 --target nico-rest-bmc-proxy \
+		-t $(IMAGE_REGISTRY)/nico-rest-bmc-proxy:$(IMAGE_TAG) \
+		-f ../Dockerfile.nico-core --load ..
+
+kind-load-bmc-proxy:
+	kind load docker-image $(IMAGE_REGISTRY)/nico-rest-bmc-proxy:$(IMAGE_TAG) --name $(KIND_CLUSTER_NAME)
+
+helm-deploy-bmc-proxy:
+	@echo "Installing nico-bmc-proxy chart..."
+	helm upgrade --install nico-bmc-proxy $(BMC_PROXY_CHART)/ \
+		--namespace nico-system --create-namespace \
+		$(HELM_SET_BMC_PROXY) --timeout 5m
+	kubectl -n nico-system rollout status deployment/nico-bmc-proxy --timeout=120s || true
+
+kind-verify-bmc-proxy:
+	@echo "Checking nico-bmc-proxy pod is running..."
+	kubectl -n nico-system rollout status deployment/nico-bmc-proxy --timeout=60s
+	@echo "nico-bmc-proxy verify: OK"
+
+# =============================================================================
+# Kind: nico-ssh-console-rs (KIND_SSH=true)
+# Proxies SSH console to machines. machine-a-tron mocks SSH on port 2222.
+# =============================================================================
+SSH_CHART := ../helm/charts/nico-ssh-console-rs
+HELM_SET_SSH := \
+	--set image.repository=$(IMAGE_REGISTRY)/nico-rest-ssh-console \
+	--set image.tag=$(IMAGE_TAG) \
+	--set image.pullPolicy=Never \
+	--set namespaceOverride=nico-system \
+	--set createNamespace=false \
+	--set apiServiceName=core-grpc \
+	--set "global.certificate.issuerRef.name=nico-rest-ca-issuer" \
+	--set "global.certificate.issuerRef.kind=ClusterIssuer" \
+	--set "global.certificate.privateKey.algorithm=ECDSA" \
+	--set "global.certificate.privateKey.size=256" \
+	--set "imagePullSecret.create=false"
+
+docker-build-ssh-console:
+	docker buildx build --platform linux/amd64 --target nico-rest-ssh-console \
+		-t $(IMAGE_REGISTRY)/nico-rest-ssh-console:$(IMAGE_TAG) \
+		-f ../Dockerfile.nico-core --load ..
+
+kind-load-ssh-console:
+	kind load docker-image $(IMAGE_REGISTRY)/nico-rest-ssh-console:$(IMAGE_TAG) --name $(KIND_CLUSTER_NAME)
+
+helm-deploy-ssh-console:
+	@echo "Generating SSH host key secret for Kind..."
+	@# Ensure the namespace exists before the Secret check. The recipe uses
+	@# POSIX redirection (Makefile recipes run under /bin/sh, not bash) and a
+	@# mktemp -d directory (mode 0700) removed on any exit via the trap.
+	kubectl create namespace nico-system --dry-run=client -o yaml | kubectl apply -f -
+	@if ! kubectl -n nico-system get secret kind-ssh-host-key >/dev/null 2>&1; then \
+		key_dir=$$(mktemp -d) && trap 'rm -rf "$$key_dir"' EXIT && \
+		ssh-keygen -t ed25519 -f "$$key_dir/ssh_host_ed25519_key" -N "" -q && \
+		kubectl -n nico-system create secret generic kind-ssh-host-key \
+			--from-file=ssh_host_ed25519_key="$$key_dir/ssh_host_ed25519_key" \
+			--from-file=ssh_host_ed25519_key_pub="$$key_dir/ssh_host_ed25519_key.pub" ; \
+	fi
+	@echo "Installing nico-ssh-console-rs chart..."
+	helm upgrade --install nico-ssh-console-rs $(SSH_CHART)/ \
+		--namespace nico-system --create-namespace \
+		$(HELM_SET_SSH) --set sshHostKeySecretName=kind-ssh-host-key --timeout 5m
+	kubectl -n nico-system rollout status deployment/nico-ssh-console-rs --timeout=120s || true
+
+kind-verify-ssh-console:
+	@echo "Checking nico-ssh-console-rs pod is running..."
+	kubectl -n nico-system rollout status deployment/nico-ssh-console-rs --timeout=60s
+	@echo "nico-ssh-console verify: OK"
+
+# =============================================================================
+# Kind: nico-hardware-health (KIND_HW_HEALTH=true)
+# Hardware health reporter. Connects to Core gRPC with nico-hardware-health
+# SPIFFE identity (Health internal-RBAC principal).
+# =============================================================================
+HW_HEALTH_CHART := ../helm/charts/nico-hardware-health
+HELM_SET_HW_HEALTH := \
+	--set image.repository=$(IMAGE_REGISTRY)/nico-rest-hw-health \
+	--set image.tag=$(IMAGE_TAG) \
+	--set image.pullPolicy=Never \
+	--set namespaceOverride=nico-system \
+	--set createNamespace=false \
+	$(if $(filter true,$(KIND_CORE)),--set "env.CARBIDE_HEALTH__COLLECTORS__CARBIDE_API__API_URL=https://core-grpc.nico-system.svc.cluster.local:1079") \
+	$(if $(filter true,$(KIND_CORE)),--set "env.NICO_HEALTH__COLLECTORS__CARBIDE_API__API_URL=https://core-grpc.nico-system.svc.cluster.local:1079") \
+	--set "global.certificate.issuerRef.name=nico-rest-ca-issuer" \
+	--set "global.certificate.issuerRef.kind=ClusterIssuer" \
+	--set "global.certificate.privateKey.algorithm=ECDSA" \
+	--set "global.certificate.privateKey.size=256" \
+	--set "imagePullSecret.create=false"
+
+docker-build-hw-health:
+	docker buildx build --platform linux/amd64 --target nico-rest-hw-health \
+		-t $(IMAGE_REGISTRY)/nico-rest-hw-health:$(IMAGE_TAG) \
+		-f ../Dockerfile.nico-core --load ..
+
+kind-load-hw-health:
+	kind load docker-image $(IMAGE_REGISTRY)/nico-rest-hw-health:$(IMAGE_TAG) --name $(KIND_CLUSTER_NAME)
+
+helm-deploy-hw-health:
+	@echo "Installing nico-hardware-health chart..."
+	helm upgrade --install nico-hardware-health $(HW_HEALTH_CHART)/ \
+		--namespace nico-system --create-namespace \
+		$(HELM_SET_HW_HEALTH) --timeout 5m
+	kubectl -n nico-system rollout status deployment/nico-hardware-health --timeout=120s || true
+
+kind-verify-hw-health:
+	@echo "Checking nico-hardware-health pod is running..."
+	kubectl -n nico-system rollout status deployment/nico-hardware-health --timeout=60s
+	@echo "nico-hardware-health verify: OK"
+
 # Convenience: build all Rust NICo service images from one Dockerfile.
-docker-build-nico-services: docker-build-core docker-build-dns docker-build-pxe docker-build-dhcp
-kind-load-nico-services: kind-load-core kind-load-dns kind-load-pxe kind-load-dhcp
+docker-build-nico-services: docker-build-core docker-build-dns docker-build-pxe docker-build-dhcp \
+	docker-build-bmc-proxy docker-build-ssh-console docker-build-hw-health
+kind-load-nico-services: kind-load-core kind-load-dns kind-load-pxe kind-load-dhcp \
+	kind-load-bmc-proxy kind-load-ssh-console kind-load-hw-health
 
 # Deploy everything (umbrella + site-agent + mcp)
 helm-deploy-all: helm-deploy helm-deploy-site-agent helm-deploy-mcp

@@ -55,7 +55,7 @@ spec:
               else
                 exec /opt/carbide/ssh-console run -c /etc/forge/ssh-console/config.toml
               fi
-          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | default ((.Values.global.image).pullPolicy | default "IfNotPresent") }}
           securityContext:
             capabilities:
               add:
@@ -95,7 +95,7 @@ spec:
         {{ if .Values.lokiLogCollector.enabled }}
         - name: loki-log-collector
           image: "{{ required "lokiLogCollector.image.repository is required when lokiLogCollector.enabled is true" .Values.lokiLogCollector.image.repository }}:{{ required "lokiLogCollector.image.tag is required when lokiLogCollector.enabled is true" .Values.lokiLogCollector.image.tag }}"
-          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          imagePullPolicy: {{ ((.Values.global.image).pullPolicy | default "IfNotPresent") }}
           args: ["--config=/etc/otelcol-contrib/config.yaml"]
           volumeMounts:
             - name: otelcol-config
@@ -115,11 +115,11 @@ spec:
             secretName: {{ include "nico-ssh-console-rs.name" . }}-certificate
         - name: ssh-host-key
           secret:
-            secretName: ssh-host-key
+            secretName: {{ .Values.sshHostKeySecretName }}
             defaultMode: 0400
         - name: ssh-host-key-pub
           secret:
-            secretName: ssh-host-key
+            secretName: {{ .Values.sshHostKeySecretName }}
             defaultMode: 0444
         - name: console-logs
           emptyDir: {}
