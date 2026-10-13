@@ -674,8 +674,8 @@ or failing and you need to know whether the BMCs or NICo are responsible.
 
 **Option A: Helm provisioning (recommended)**
 
-Enable dashboard provisioning in your Helm values. The chart creates a ConfigMap that
-Grafana's sidecar picks up automatically:
+Enable dashboard provisioning in your Helm values. The chart creates one ConfigMap
+per dashboard, which Grafana's sidecar picks up automatically:
 
 ```yaml
 grafanaDashboards:

@@ -178,8 +178,10 @@ grafanaDashboards:
   annotations: {}
 ```
 
-The target namespace must exist before Helm runs, and the Helm identity must be
-allowed to create ConfigMaps there. The Grafana sidecar must also watch that
+The chart creates one ConfigMap per dashboard, named
+`<namespace>-<release>-<dashboard>`, so a single large dashboard cannot push the
+set past the 1 MiB object limit. The target namespace must exist before Helm
+runs, and the Helm identity must be allowed to create ConfigMaps there. The Grafana sidecar must also watch that
 namespace; for `kube-prometheus-stack`, configure
 `grafana.sidecar.dashboards.searchNamespace` accordingly.
 
