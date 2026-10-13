@@ -118,6 +118,8 @@ struct PreingestionManagerStatic {
     bfb_copy_limiter: Arc<Semaphore>,
     ntp_servers: Vec<Ipv4Addr>,
     rack_firmware: Option<RackFirmwareDependencies>,
+    /// Endpoints deferred by the firmware check
+    deferred_firmware_checks: Arc<std::sync::Mutex<HashMap<IpAddr, String>>>,
 }
 
 #[derive(Clone)]
@@ -166,6 +168,7 @@ impl PreingestionManager {
                 bfb_copy_limiter: Arc::new(Semaphore::new(config.max_concurrent_bfb_copies)),
                 ntp_servers,
                 rack_firmware: None,
+                deferred_firmware_checks: Default::default(),
                 config,
             }),
             metric_holder,
@@ -581,15 +584,45 @@ impl PreingestionManagerStatic {
             return Ok(false);
         }
 
+        // Consume the deferral once the report version changed;
+        let already_deferred = {
+            let mut deferred = self
+                .deferred_firmware_checks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match deferred.get(&endpoint.address) {
+                Some(version) if *version != endpoint.report_version.to_string() => {
+                    deferred.remove(&endpoint.address);
+                    true
+                }
+                _ => false,
+            }
+        };
+
         // First, we need to check if it's appropriate to upgrade at this point or wait until later.
+        // Every decision is logged at info; an incomplete report is deferred once.
         let fw_info = match self.find_fw_info_for_host(db, endpoint).await? {
             None => {
-                tracing::debug!(
-                    bmc_ip_address = %endpoint.address,
-                    "No matching firmware info found during preingestion check"
-                );
                 // No desired firmware description found for this host, nothing to do.
                 // This is the expected path for DPUs.
+                // A known vendor with no model may be a BMC still recovering from the
+                // reset this check follows: give it one refreshed report first.
+                if endpoint.report.vendor.is_some()
+                    && endpoint.report.model().is_none()
+                    && !endpoint.report.is_dpu()
+                    && !already_deferred
+                {
+                    self.defer_firmware_check_once(db, endpoint, "the report has no host model")
+                        .await?;
+                    return Ok(false);
+                }
+                tracing::info!(
+                    bmc_ip_address = %endpoint.address,
+                    vendor = ?endpoint.report.vendor,
+                    model = ?endpoint.report.model(),
+                    waited_for_refresh = already_deferred,
+                    "No host firmware definition matches this endpoint; firmware preingestion complete"
+                );
                 db.with_txn(|txn| {
                     db::explored_endpoints::set_preingestion_complete(endpoint.address, txn).boxed()
                 })
@@ -598,44 +631,80 @@ impl PreingestionManagerStatic {
             }
             Some(fw_info) => fw_info,
         };
+        let mut satisfied: Vec<String> = Vec::new();
+        let mut not_checked: Vec<String> = Vec::new();
         for (fwtype, desc) in &fw_info.components {
-            if let Some(min_preingestion) = &desc.preingest_upgrade_when_below
-                && let Some(current) = endpoint.find_version(&fw_info, *fwtype)
+            let Some(min_preingestion) = &desc.preingest_upgrade_when_below else {
+                continue;
+            };
+            let Some(inventory) = endpoint.find_inventory(&fw_info, *fwtype) else {
+                tracing::info!(
+                    bmc_ip_address = %endpoint.address,
+                    firmware_type = ?fwtype,
+                    current_version_reported_as = desc
+                        .current_version_reported_as
+                        .as_ref()
+                        .map(|regex| regex.as_str())
+                        .unwrap_or("<none>"),
+                    "No inventory entry in the exploration report matches this component; its preingestion minimum cannot be checked"
+                );
+                not_checked.push(format!("{fwtype:?}: no matching inventory entry"));
+                continue;
+            };
+            let Some(current) = inventory.version.as_ref() else {
+                tracing::info!(
+                    bmc_ip_address = %endpoint.address,
+                    firmware_type = ?fwtype,
+                    inventory_id = %inventory.id,
+                    "The matching inventory entry reports no version; this component's preingestion minimum cannot be checked"
+                );
+                not_checked.push(format!("{fwtype:?}: {} reports no version", inventory.id));
+                continue;
+            };
+            tracing::info!(
+                bmc_ip_address = %endpoint.address,
+                firmware_type = ?fwtype,
+                inventory_id = %inventory.id,
+                ?min_preingestion,
+                ?current,
+                "Checking firmware version against preingestion minimum"
+            );
+
+            if version_compare::compare(current, min_preingestion)
+                .is_ok_and(|c| c == version_compare::Cmp::Lt)
             {
                 tracing::info!(
                     bmc_ip_address = %endpoint.address,
                     firmware_type = ?fwtype,
-                    ?min_preingestion,
-                    ?current,
-                    "Checking firmware version against preingestion minimum"
+                    "Starting firmware upload during preingestion check"
                 );
-
-                if version_compare::compare(current, min_preingestion)
-                    .is_ok_and(|c| c == version_compare::Cmp::Lt)
-                {
-                    tracing::info!(
-                        bmc_ip_address = %endpoint.address,
-                        firmware_type = ?fwtype,
-                        "Starting firmware upload during preingestion check"
-                    );
-                    // One or both of the versions are low enough to absolutely need upgrades first - do them both while we're at it.
-                    let delayed_upgrade = self
-                        .start_firmware_uploads_or_continue(db, endpoint, false)
-                        .await?;
-                    return Ok(delayed_upgrade);
-                } else {
-                    tracing::info!(
-                        bmc_ip_address = %endpoint.address,
-                        firmware_type = ?fwtype,
-                        "Firmware version satisfies preingestion minimum"
-                    );
-                }
+                // One or both of the versions are low enough to absolutely need upgrades first - do them both while we're at it.
+                let delayed_upgrade = self
+                    .start_firmware_uploads_or_continue(db, endpoint, false)
+                    .await?;
+                return Ok(delayed_upgrade);
+            } else {
+                tracing::info!(
+                    bmc_ip_address = %endpoint.address,
+                    firmware_type = ?fwtype,
+                    "Firmware version satisfies preingestion minimum"
+                );
+                satisfied.push(format!("{fwtype:?} {current}"));
             }
         }
 
-        tracing::debug!(
+        // A component that could not be checked gets one refreshed report first.
+        if !not_checked.is_empty() && !already_deferred {
+            self.defer_firmware_check_once(db, endpoint, &not_checked.join("; "))
+                .await?;
+            return Ok(false);
+        }
+        tracing::info!(
             bmc_ip_address = %endpoint.address,
-            "Firmware versions satisfy preingestion requirements; marking complete"
+            ?satisfied,
+            ?not_checked,
+            waited_for_refresh = already_deferred,
+            "No listed component is below its preingestion minimum; firmware preingestion complete"
         );
         // Good enough for now at least, proceed with ingestion.
         db.with_txn(|txn| {
@@ -643,6 +712,45 @@ impl PreingestionManagerStatic {
         })
         .await??;
         Ok(false)
+    }
+
+    /// Parks the endpoint until the explorer writes one refreshed report.
+    async fn defer_firmware_check_once(
+        &self,
+        db: &PgPool,
+        endpoint: &ExploredEndpoint,
+        reason: &str,
+    ) -> PreingestionManagerResult<()> {
+        // Already parked: the work-list query should not have returned this
+        // endpoint, so do not raise the flags again; the pending refresh stands.
+        if endpoint.waiting_for_explorer_refresh {
+            tracing::debug!(
+                bmc_ip_address = %endpoint.address,
+                reason,
+                "Endpoint is already waiting for an explorer refresh; not deferring again"
+            );
+            return Ok(());
+        }
+        self.deferred_firmware_checks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(endpoint.address, endpoint.report_version.to_string());
+        db.with_txn(|txn| {
+            async move {
+                db::explored_endpoints::set_waiting_for_explorer_refresh(endpoint.address, txn)
+                    .await?;
+                db::explored_endpoints::request_exploration_for_addresses(&[endpoint.address], txn)
+                    .await
+            }
+            .boxed()
+        })
+        .await??;
+        tracing::info!(
+            bmc_ip_address = %endpoint.address,
+            reason,
+            "Exploration report is incomplete for the firmware check; waiting for one refreshed report"
+        );
+        Ok(())
     }
 
     /// start_firmware_uploads_or_continue will start a firmware upgrade if any of the endpoint's versions
