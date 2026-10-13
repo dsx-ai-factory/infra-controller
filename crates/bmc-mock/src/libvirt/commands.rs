@@ -48,30 +48,6 @@ impl VirshCommand {
         })
     }
 
-    pub(super) fn insert_media(
-        device_id: &str,
-        target: &str,
-        image: &str,
-        write_protected: bool,
-    ) -> eyre::Result<Self> {
-        Ok(Self::AttachDevice {
-            xml: DeviceXml::virtual_media(device_id, target, image, write_protected)?,
-        })
-    }
-
-    pub(super) fn detach_media(target: &str, listing: &str) -> Option<Self> {
-        listing
-            .lines()
-            .any(|line| {
-                line.split_whitespace()
-                    .nth(2)
-                    .is_some_and(|value| value == target)
-            })
-            .then(|| Self::DetachDisk {
-                target: target.to_owned(),
-            })
-    }
-
     pub(super) fn power(reset_type: ResourceResetType) -> Result<Vec<Self>, ActionError> {
         use ResourceResetType::*;
         Ok(match reset_type {
@@ -209,18 +185,5 @@ mod tests {
         for (name, reset_type, expected) in cases {
             assert_eq!(VirshCommand::power(reset_type).unwrap(), expected, "{name}");
         }
-    }
-
-    #[test]
-    fn detach_only_plans_a_command_when_the_requested_target_is_present() {
-        let listing =
-            "Type Device Target Source\nfile cdrom sdb media.iso\nfile disk vda root.img\n";
-        assert_eq!(
-            VirshCommand::detach_media("sdb", listing),
-            Some(VirshCommand::DetachDisk {
-                target: "sdb".to_owned()
-            })
-        );
-        assert_eq!(VirshCommand::detach_media("sdc", listing), None);
     }
 }

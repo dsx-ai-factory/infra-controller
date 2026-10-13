@@ -22,6 +22,7 @@ use eyre::WrapErr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
+use super::block_list::BlockList;
 use super::commands::VirshCommand;
 use super::domain_xml::DomainXml;
 use super::{VIRSH_CLEANUP_TIMEOUT, VIRSH_COMMAND_TIMEOUT};
@@ -40,6 +41,14 @@ impl Virsh<'_> {
         let xml =
             String::from_utf8(output.stdout).context("virsh dumpxml returned invalid UTF-8")?;
         xml.parse()
+    }
+
+    /// Reads block-device targets from the detailed domain listing.
+    pub(super) async fn block_list(&self) -> eyre::Result<BlockList> {
+        let output = self.execute(VirshCommand::BlockList).await?;
+        let listing =
+            String::from_utf8(output.stdout).context("virsh domblklist returned invalid UTF-8")?;
+        Ok(BlockList::from(listing.as_str()))
     }
 
     pub(super) async fn execute(&self, command: VirshCommand) -> eyre::Result<Output> {
