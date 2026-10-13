@@ -583,8 +583,9 @@ panels need kube-state-metrics and cAdvisor.
 
 ### Fleet dashboard
 
-The fleet board (`nico-fleet.json`) compares sites on one Prometheus. Every panel groups
-by the `$site_label` variable.
+The fleet board (`nico-fleet.json`) compares sites on one Prometheus. Most panels group
+by the `$site_label` variable; fleet-wide totals, such as Distinct API versions and the
+Fleet BMC connection panels, aggregate across all sites.
 
 On a central Prometheus fed by remote-write or federation, set `$site_label` to
 `forge_site`: the NICo observability bundle sets that as each site's external label, and
