@@ -307,7 +307,8 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ inputs.image_tag }}
-          tags: ${{ steps.tag_list.outputs.tags }}
+          # Stage PXE candidates without moving release tags until runtime tests pass.
+          tags: ${{ inputs.test_pxe_boot_artifacts && steps.loadgate.outputs.load != 'true' && format('{0}:pxe-test-{1}-{2}', inputs.image_name, github.run_id, github.run_attempt) || steps.tag_list.outputs.tags }}
           build-args: ${{ steps.parse-args.outputs.build_args }}
           # Every ref reads the cache; only main writes it. The Rust images
           # `COPY . ./` before the compile, so any new commit invalidates the
@@ -328,12 +329,12 @@ jobs:
             actions_runtime_token=${{ env.BUILD_ACTIONS_RUNTIME_TOKEN }}
             sccache_gha_rw_mode=${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
 
-      # Published canonical images retain provenance; pull them for testing
-      # instead of also exporting through Docker's attestation-less store.
-      - name: Pull the published PXE test image
+      # Pull the staged image by digest, keeping its provenance in the registry.
+      - name: Pull the staged PXE test image
+        id: pxe-pull
         if: ${{ inputs.test_pxe_boot_artifacts && steps.loadgate.outputs.load != 'true' }}
         env:
-          PXE_TEST_IMAGE: ${{ steps.tag_list.outputs.primary }}
+          PXE_TEST_IMAGE: ${{ inputs.image_name }}@${{ steps.build.outputs.digest }}
         run: docker pull "$PXE_TEST_IMAGE"
 
       - name: Test PXE boot artifact serving
@@ -341,8 +342,24 @@ jobs:
         if: ${{ inputs.test_pxe_boot_artifacts }}
         timeout-minutes: 15
         env:
-          PXE_TEST_IMAGE: ${{ steps.tag_list.outputs.primary }}
+          PXE_TEST_IMAGE: ${{ steps.loadgate.outputs.load == 'true' && steps.tag_list.outputs.primary || format('{0}@{1}', inputs.image_name, steps.build.outputs.digest) }}
         run: bash .github/ci/test_pxe_runtime.sh
+
+      - name: Publish verified PXE image tags
+        id: pxe-promote
+        if: ${{ inputs.test_pxe_boot_artifacts && steps.loadgate.outputs.load != 'true' && steps.pxe-runtime.outcome == 'success' }}
+        env:
+          SOURCE: ${{ inputs.image_name }}@${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.tag_list.outputs.tags }}
+        run: |
+          set -euo pipefail
+          tag_args=()
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            tag_args+=(--tag "$tag")
+          done <<< "$TAGS"
+          # Copy the tested manifest, including provenance, without rebuilding it.
+          docker buildx imagetools create --prefer-index=false "${tag_args[@]}" "$SOURCE"
 
       - name: Login to target registry
         if: ${{ inputs.push && !contains(inputs.platforms, ',') && github.repository != 'dsx-ai-factory/infra-controller' }}

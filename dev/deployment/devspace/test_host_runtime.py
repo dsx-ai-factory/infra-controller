@@ -121,22 +121,52 @@ start_core_postgres() {''' + function + '\n}\nstart_core_postgres\n'
 
 
 class PurgeTests(unittest.TestCase):
+    def test_reset_stops_before_any_action_when_docker_root_is_unknown(self):
+        script = (SCRIPT_DIR / "reset-devspace-on-host.sh").read_text()
+        resolve = script[script.index("resolve_docker_root() {"):
+                         script.index("\ndetect_checkout() {")]
+        main = script[script.index("main() {"):]
+        # Only discovery and main are real; no destructive function is available.
+        command = '''set -eu
+log() { :; }
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+docker() { return 1; }
+detect_checkout() { printf 'unexpected action\\n'; }
+''' + resolve + main
+        result = subprocess.run(
+            ["bash", "-c", command],
+            env={**os.environ, "DOCKER_ROOT_EXPLICIT": "0", "APPLY": "1"},
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("pass --docker-root explicitly", result.stderr)
+        self.assertEqual(result.stdout, "")
+
     def test_reset_uses_active_docker_root_or_explicit_override(self):
         script = (SCRIPT_DIR / "reset-devspace-on-host.sh").read_text()
         function = script.split("resolve_docker_root() {", 1)[1].split("\n}\n", 1)[0]
-        for explicit, active, expected in (
-                ("0", "/custom/docker", "/custom/docker"),
-                ("0", "", "/var/lib/docker"),
-                ("1", "/custom/docker", "/explicit/docker")):
-            with self.subTest(explicit=explicit, active=active):
-                command = ('set -eu\nlog() { :; }\ndocker() { printf "%s" "$ACTIVE_ROOT"; }\n'
+        for explicit, active, status, expected in (
+                ("0", "/custom/docker", "0", "/custom/docker"),
+                ("0", "", "0", None),
+                ("0", "/partial/output", "1", None),
+                ("1", "", "1", "/explicit/docker")):
+            with self.subTest(explicit=explicit, active=active, status=status):
+                command = ('set -eu\nlog() { :; }\n'
+                           'die() { printf "%s" "$*" >&2; exit 1; }\n'
+                           'docker() { printf "%s" "$ACTIVE_ROOT"; return "$DOCKER_STATUS"; }\n'
                            'resolve_docker_root() {' + function + '\n}\n'
                            'resolve_docker_root\nprintf "%s" "$DOCKER_ROOT"')
-                result = subprocess.run(["bash", "-c", command], check=True, text=True,
+                result = subprocess.run(["bash", "-c", command], text=True,
                                         capture_output=True, env=dict(os.environ,
                                         DOCKER_ROOT_EXPLICIT=explicit, ACTIVE_ROOT=active,
-                                        DOCKER_ROOT="/explicit/docker"))
-                self.assertEqual(result.stdout, expected)
+                                        DOCKER_STATUS=status, DOCKER_ROOT="/explicit/docker"))
+                if expected is None:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("pass --docker-root explicitly", result.stderr)
+                    self.assertEqual(result.stdout, "")
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, expected)
 
     def test_purge_preserves_family_and_fails_before_delete_without_node_config(self):
         with tempfile.TemporaryDirectory(prefix="nico-kind-test-") as temporary:
