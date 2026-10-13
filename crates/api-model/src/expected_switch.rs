@@ -150,10 +150,16 @@ impl<'r> FromRow<'r, PgRow> for ExpectedSwitch {
         // `expected_switch_nvos_interfaces` table as a JSON aggregate aliased
         // `nvos_interfaces`. Queries that do not include that column (and legacy
         // callers) default to no ports.
-        let nvos_interfaces: Vec<ExpectedNvosInterface> = row
+        let nvos_interfaces: Vec<ExpectedNvosInterface> = match row
             .try_get::<sqlx::types::Json<Vec<ExpectedNvosInterface>>, _>("nvos_interfaces")
-            .map(|json| json.0)
-            .unwrap_or_default();
+        {
+            Ok(json) => json.0,
+            // Only a missing column is a legitimate "no ports" default;
+            // a malformed JSON value must surface rather than masquerade
+            // as a switch with no NVOS ports.
+            Err(sqlx::Error::ColumnNotFound(_)) => Vec::new(),
+            Err(e) => return Err(e),
+        };
 
         Ok(ExpectedSwitch {
             expected_switch_id: row.try_get("expected_switch_id")?,

@@ -29,8 +29,10 @@ type APINvosInterface struct {
 	// MacAddress is the MAC of this NVOS ethernet port.
 	MacAddress string `json:"macAddress"`
 	// IsPrimary marks this port as the primary (eth0) port. At most one entry
-	// per switch may be primary; when no entry is marked, Core defaults the
-	// first port on a multi-port switch (a single-port switch is always primary).
+	// per switch may be primary; when no entry is marked, the REST layer defaults
+	// the first port on a multi-port switch (a single-port switch is always
+	// primary) when it builds the Core request, so Core does not apply this
+	// default on the REST path.
 	IsPrimary bool `json:"isPrimary"`
 }
 
@@ -195,8 +197,9 @@ type APIExpectedSwitchUpdateRequest struct {
 	// NvOsPassword is the NVOS password of the expected switch
 	NvOsPassword *string `json:"nvOsPassword"`
 	// NvosInterfaces replaces the switch's NVOS ethernet port set. Omission
-	// leaves the stored set unchanged; an empty array clears it. Mark one entry
-	// primary to choose eth0.
+	// leaves the stored set unchanged; an empty array is rejected because a
+	// switch must keep at least one NVOS port. Mark one entry primary to choose
+	// eth0.
 	NvosInterfaces APINvosInterfaces `json:"nvosInterfaces"`
 	// RackID is the optional rack identifier
 	RackID *string `json:"rackId"`
@@ -232,6 +235,16 @@ func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
 			return validation.Errors{
 				"id": errors.New("ID must be a valid UUID"),
 			}
+		}
+	}
+
+	// A switch must keep at least one NVOS port, so an explicit empty list is
+	// rejected rather than treated as a clear: Core rejects an empty set and
+	// would roll back the already-committed cloud change. Omission leaves the
+	// stored ports unchanged.
+	if esur.NvosInterfaces != nil && len(esur.NvosInterfaces) == 0 {
+		return validation.Errors{
+			"nvosInterfaces": errors.New("nvosInterfaces must not be an empty list; omit the field to leave the NVOS ports unchanged"),
 		}
 	}
 

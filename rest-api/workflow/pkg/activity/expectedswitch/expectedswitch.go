@@ -184,6 +184,7 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 			(reported.Name != nil && !util.PtrsEqual(cur.Name, reported.Name)) ||
 			(reported.Description != nil && !util.PtrsEqual(cur.Description, reported.Description)) ||
 			!slices.Equal(cur.NvosMacAddresses, reported.NvosMacAddresses) ||
+			!util.PtrsEqual(cur.NvosPrimaryMacAddress, reported.NvosPrimaryMacAddress) ||
 			!maps.Equal(cur.Labels, reported.Labels) {
 			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
 				// Lock and re-read before writing so an API change after the
@@ -196,7 +197,7 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 					return nil
 				}
 
-				_, uerr := esDAO.Update(ctx, tx, cdbm.ExpectedSwitchUpdateInput{
+				if _, uerr := esDAO.Update(ctx, tx, cdbm.ExpectedSwitchUpdateInput{
 					ExpectedSwitchID:      cur.ID,
 					BmcMacAddress:         &reported.BmcMacAddress,
 					SwitchSerialNumber:    &reported.SwitchSerialNumber,
@@ -207,8 +208,23 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 					NvosMacAddresses:      reported.NvosMacAddresses,
 					NvosPrimaryMacAddress: reported.NvosPrimaryMacAddress,
 					Labels:                reported.Labels,
-				})
-				return uerr
+				}); uerr != nil {
+					return uerr
+				}
+
+				// Update preserves the stored primary when the selector is nil,
+				// so a reconcile that reports no primary (a switch with no
+				// ports) must clear it explicitly instead of leaving the stale
+				// selector behind.
+				if reported.NvosPrimaryMacAddress == nil {
+					if _, cerr := esDAO.Clear(ctx, tx, cdbm.ExpectedSwitchClearInput{
+						ExpectedSwitchID:      cur.ID,
+						NvosPrimaryMacAddress: true,
+					}); cerr != nil {
+						return cerr
+					}
+				}
+				return nil
 			})
 			if uerr != nil {
 				logger.Error().Err(uerr).Str("ExpectedSwitchID", cur.ID.String()).Msg("failed to update ExpectedSwitch in DB")

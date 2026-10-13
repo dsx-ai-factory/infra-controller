@@ -3178,10 +3178,12 @@ message ExpectedSwitch {
   optional string nvos_password = 8;
   // Unique identifier for the expected switch. When omitted, server generates one.
   optional common.UUID expected_switch_id = 9;
-  // The switch's NVOS ethernet ports. Exactly one entry must be flagged
-  // `is_primary` when more than one is present; a single port is primary
-  // implicitly. On reads the flags report the current primary.
-  repeated ExpectedNvosInterface nvos_interfaces = 10;
+  // Field 10 was `repeated string nvos_mac_addresses`; replaced by the
+  // structured `nvos_interfaces` at field 14 to carry the per-port primary
+  // flag. The number is retired rather than reused because the wire type
+  // changed from string to message.
+  reserved 10;
+  reserved "nvos_mac_addresses";
   string bmc_ip_address = 11;
   // When true, site-explorer skips BMC password rotation and stores the
   // factory-default credentials in Vault as-is.
@@ -3189,6 +3191,10 @@ message ExpectedSwitch {
   // Static IP reservation for the single wired NVOS port. Only meaningful
   // when `nvos_interfaces` has exactly one entry.
   optional string nvos_ip_address = 13;
+  // The switch's NVOS ethernet ports. Exactly one entry must be flagged
+  // `is_primary` when more than one is present; a single port is primary
+  // implicitly. On reads the flags report the current primary.
+  repeated ExpectedNvosInterface nvos_interfaces = 14;
 }
 
 message ExpectedSwitchRequest {

@@ -17801,18 +17801,18 @@ type ExpectedSwitch struct {
 	NvosUsername *string   `protobuf:"bytes,7,opt,name=nvos_username,json=nvosUsername,proto3,oneof" json:"nvos_username,omitempty"`
 	NvosPassword *string   `protobuf:"bytes,8,opt,name=nvos_password,json=nvosPassword,proto3,oneof" json:"nvos_password,omitempty"`
 	// Unique identifier for the expected switch. When omitted, server generates one.
-	ExpectedSwitchId *UUID `protobuf:"bytes,9,opt,name=expected_switch_id,json=expectedSwitchId,proto3,oneof" json:"expected_switch_id,omitempty"`
-	// The switch's NVOS ethernet ports. Exactly one entry must be flagged
-	// `is_primary` when more than one is present; a single port is primary
-	// implicitly. On reads the flags report the current primary.
-	NvosInterfaces []*ExpectedNvosInterface `protobuf:"bytes,10,rep,name=nvos_interfaces,json=nvosInterfaces,proto3" json:"nvos_interfaces,omitempty"`
-	BmcIpAddress   string                   `protobuf:"bytes,11,opt,name=bmc_ip_address,json=bmcIpAddress,proto3" json:"bmc_ip_address,omitempty"`
+	ExpectedSwitchId *UUID  `protobuf:"bytes,9,opt,name=expected_switch_id,json=expectedSwitchId,proto3,oneof" json:"expected_switch_id,omitempty"`
+	BmcIpAddress     string `protobuf:"bytes,11,opt,name=bmc_ip_address,json=bmcIpAddress,proto3" json:"bmc_ip_address,omitempty"`
 	// When true, site-explorer skips BMC password rotation and stores the
 	// factory-default credentials in Vault as-is.
 	BmcRetainCredentials *bool `protobuf:"varint,12,opt,name=bmc_retain_credentials,json=bmcRetainCredentials,proto3,oneof" json:"bmc_retain_credentials,omitempty"`
 	// Static IP reservation for the single wired NVOS port. Only meaningful
 	// when `nvos_interfaces` has exactly one entry.
 	NvosIpAddress *string `protobuf:"bytes,13,opt,name=nvos_ip_address,json=nvosIpAddress,proto3,oneof" json:"nvos_ip_address,omitempty"`
+	// The switch's NVOS ethernet ports. Exactly one entry must be flagged
+	// `is_primary` when more than one is present; a single port is primary
+	// implicitly. On reads the flags report the current primary.
+	NvosInterfaces []*ExpectedNvosInterface `protobuf:"bytes,14,rep,name=nvos_interfaces,json=nvosInterfaces,proto3" json:"nvos_interfaces,omitempty"`
 	// WARNING: Following fields are not present in Core, but added directly in REST snapshot
 	Name            *string `protobuf:"bytes,21,opt,name=name,proto3,oneof" json:"name,omitempty"`
 	Manufacturer    *string `protobuf:"bytes,22,opt,name=manufacturer,proto3,oneof" json:"manufacturer,omitempty"`
@@ -17919,13 +17919,6 @@ func (x *ExpectedSwitch) GetExpectedSwitchId() *UUID {
 	return nil
 }
 
-func (x *ExpectedSwitch) GetNvosInterfaces() []*ExpectedNvosInterface {
-	if x != nil {
-		return x.NvosInterfaces
-	}
-	return nil
-}
-
 func (x *ExpectedSwitch) GetBmcIpAddress() string {
 	if x != nil {
 		return x.BmcIpAddress
@@ -17945,6 +17938,13 @@ func (x *ExpectedSwitch) GetNvosIpAddress() string {
 		return *x.NvosIpAddress
 	}
 	return ""
+}
+
+func (x *ExpectedSwitch) GetNvosInterfaces() []*ExpectedNvosInterface {
+	if x != nil {
+		return x.NvosInterfaces
+	}
+	return nil
 }
 
 func (x *ExpectedSwitch) GetName() string {
@@ -74195,7 +74195,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\vmac_address\x18\x01 \x01(\tR\n" +
 	"macAddress\x12\x1d\n" +
 	"\n" +
-	"is_primary\x18\x02 \x01(\bR\tisPrimary\"\xe9\b\n" +
+	"is_primary\x18\x02 \x01(\bR\tisPrimary\"\x83\t\n" +
 	"\x0eExpectedSwitch\x12&\n" +
 	"\x0fbmc_mac_address\x18\x01 \x01(\tR\rbmcMacAddress\x12!\n" +
 	"\fbmc_username\x18\x02 \x01(\tR\vbmcUsername\x12!\n" +
@@ -74205,12 +74205,11 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\arack_id\x18\x06 \x01(\v2\x0e.common.RackIdH\x00R\x06rackId\x88\x01\x01\x12(\n" +
 	"\rnvos_username\x18\a \x01(\tH\x01R\fnvosUsername\x88\x01\x01\x12(\n" +
 	"\rnvos_password\x18\b \x01(\tH\x02R\fnvosPassword\x88\x01\x01\x12?\n" +
-	"\x12expected_switch_id\x18\t \x01(\v2\f.common.UUIDH\x03R\x10expectedSwitchId\x88\x01\x01\x12E\n" +
-	"\x0fnvos_interfaces\x18\n" +
-	" \x03(\v2\x1c.forge.ExpectedNvosInterfaceR\x0envosInterfaces\x12$\n" +
+	"\x12expected_switch_id\x18\t \x01(\v2\f.common.UUIDH\x03R\x10expectedSwitchId\x88\x01\x01\x12$\n" +
 	"\x0ebmc_ip_address\x18\v \x01(\tR\fbmcIpAddress\x129\n" +
 	"\x16bmc_retain_credentials\x18\f \x01(\bH\x04R\x14bmcRetainCredentials\x88\x01\x01\x12+\n" +
-	"\x0fnvos_ip_address\x18\r \x01(\tH\x05R\rnvosIpAddress\x88\x01\x01\x12\x17\n" +
+	"\x0fnvos_ip_address\x18\r \x01(\tH\x05R\rnvosIpAddress\x88\x01\x01\x12E\n" +
+	"\x0fnvos_interfaces\x18\x0e \x03(\v2\x1c.forge.ExpectedNvosInterfaceR\x0envosInterfaces\x12\x17\n" +
 	"\x04name\x18\x15 \x01(\tH\x06R\x04name\x88\x01\x01\x12'\n" +
 	"\fmanufacturer\x18\x16 \x01(\tH\aR\fmanufacturer\x88\x01\x01\x12\x19\n" +
 	"\x05model\x18\x17 \x01(\tH\bR\x05model\x88\x01\x01\x12%\n" +
@@ -74236,7 +74235,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\b_slot_idB\v\n" +
 	"\t_tray_idxB\n" +
 	"\n" +
-	"\b_host_id\"\x97\x01\n" +
+	"\b_host_idJ\x04\b\n" +
+	"\x10\vR\x12nvos_mac_addresses\"\x97\x01\n" +
 	"\x15ExpectedSwitchRequest\x12&\n" +
 	"\x0fbmc_mac_address\x18\x01 \x01(\tR\rbmcMacAddress\x12?\n" +
 	"\x12expected_switch_id\x18\x02 \x01(\v2\f.common.UUIDH\x00R\x10expectedSwitchId\x88\x01\x01B\x15\n" +

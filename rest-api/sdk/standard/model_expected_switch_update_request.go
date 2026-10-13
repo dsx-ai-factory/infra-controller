@@ -37,7 +37,7 @@ type ExpectedSwitchUpdateRequest struct {
 	NvOsUsername NullableString `json:"nvOsUsername,omitempty"`
 	// NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
 	NvOsPassword NullableString `json:"nvOsPassword,omitempty"`
-	// Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array clears them. Mark one entry primary to choose eth0.
+	// Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array is rejected because a switch must keep at least one NVOS port. Mark one entry primary to choose eth0.
 	NvosInterfaces []NvosInterface `json:"nvosInterfaces,omitempty"`
 	// Optional rack identifier for this component
 	RackId NullableString `json:"rackId,omitempty"`
