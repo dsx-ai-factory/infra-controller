@@ -56,12 +56,13 @@ func TestToStandardExpectedMachineUpdateRequest(t *testing.T) {
 	})
 
 	t.Run("populated interfaces preserve optional CX9 data", func(t *testing.T) {
+		mac := "02:00:00:00:00:09"
 		nicType := "CX9"
 		fixedIP := "192.0.2.9"
 		mask, gateway, segment, role, allocation := "255.255.255.0", "192.0.2.1", "HostInband", "Host", "Fixed"
 		primary := true
 		req := ExpectedMachineUpdateRequest{Interfaces: []ExpectedMachineInterface{{
-			MacAddress: "02:00:00:00:00:09",
+			MacAddress: &mac,
 			NicType:    &nicType,
 			FixedIP:    &fixedIP,
 			FixedMask:  &mask, FixedGateway: &gateway, Primary: &primary,
@@ -71,7 +72,7 @@ func TestToStandardExpectedMachineUpdateRequest(t *testing.T) {
 		apiReq := toStandardExpectedMachineUpdateRequest(req)
 
 		require.Len(t, apiReq.Interfaces, 1)
-		assert.Equal(t, "02:00:00:00:00:09", apiReq.Interfaces[0].MacAddress)
+		assert.Equal(t, &mac, apiReq.Interfaces[0].MacAddress.Get())
 		assert.Equal(t, &nicType, apiReq.Interfaces[0].NicType.Get())
 		assert.Equal(t, &fixedIP, apiReq.Interfaces[0].FixedIp.Get())
 		body, err := json.Marshal(apiReq)

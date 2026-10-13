@@ -30,7 +30,7 @@ type ExpectedMachine struct {
 
 // ExpectedMachineInterface is expected host NIC information forwarded to NICo Core.
 type ExpectedMachineInterface struct {
-	MacAddress         string  `json:"macAddress"`
+	MacAddress         *string `json:"macAddress"`
 	NicType            *string `json:"nicType"`
 	FixedIP            *string `json:"fixedIp"`
 	FixedMask          *string `json:"fixedMask"`
@@ -71,7 +71,7 @@ func expectedMachineInterfacesFromStandard(interfaces []standard.ExpectedMachine
 	result := make([]ExpectedMachineInterface, 0, len(interfaces))
 	for _, expectedInterface := range interfaces {
 		result = append(result, ExpectedMachineInterface{
-			MacAddress:         expectedInterface.MacAddress,
+			MacAddress:         expectedInterface.MacAddress.Get(),
 			NicType:            expectedInterface.NicType.Get(),
 			FixedIP:            expectedInterface.FixedIp.Get(),
 			FixedMask:          expectedInterface.FixedMask.Get(),
@@ -91,7 +91,10 @@ func expectedMachineInterfacesToStandard(interfaces []ExpectedMachineInterface) 
 	}
 	result := make([]standard.ExpectedMachineInterface, 0, len(interfaces))
 	for _, expectedInterface := range interfaces {
-		converted := standard.ExpectedMachineInterface{MacAddress: expectedInterface.MacAddress}
+		converted := standard.ExpectedMachineInterface{}
+		if expectedInterface.MacAddress != nil {
+			converted.MacAddress.Set(expectedInterface.MacAddress)
+		}
 		if expectedInterface.NicType != nil {
 			converted.NicType.Set(expectedInterface.NicType)
 		}
