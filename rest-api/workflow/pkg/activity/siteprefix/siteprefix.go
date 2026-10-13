@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -84,9 +86,16 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		}
 		// Keep one prefix's REST identity, IPAM changes, and status detail atomic.
 		// A failed prefix must not roll back earlier prefixes in the page.
+		isLockContention := false
 		err = cdb.WithTx(ctx, manager.dbSession, func(tx *cdb.Tx) error {
-			err := tx.AcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, siteID), false)
+			err := tx.TryAcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, siteID), nil)
 			if err != nil {
+				// The retry aggregate includes earlier failures; classify its last attempt.
+				lastErr := errors.Unwrap(err)
+				if lastErr == nil {
+					lastErr = err
+				}
+				isLockContention = errors.Is(lastErr, cdb.ErrXactAdvisoryLockFailed)
 				return err
 			}
 			lockedSite, err := siteDAO.GetByIDForUpdate(ctx, tx, siteID)
@@ -121,7 +130,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 				tenantID = &tenants[0].ID
 			}
 			if block == nil || block.Deleted != nil {
-				block, err = manager.createOrUpdateSitePrefixFromSite(ctx, tx, lockedSite, prefix, tenantID)
+				block, err = manager.createOrUpdateSitePrefixFromSite(ctx, tx, lockedSite, prefix, tenantID, block)
 				if err != nil {
 					return err
 				}
@@ -158,6 +167,11 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			return nil
 		})
 		if err != nil {
+			if isLockContention {
+				logger.Warn().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
+					Msg("skipping SitePrefix after bounded Site fabric lock contention retries")
+				continue
+			}
 			logger.Error().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
 				Msg("failed to reconcile SitePrefix in DB")
 		}
@@ -168,14 +182,15 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 
 // createOrUpdateSitePrefixFromSite creates, adopts, or restores an IP Block for a
 // validated prefix with no active REST identity. The caller holds the Site fabric
-// and active Site row locks and keeps this helper and subsequent updates in one tx.
+// and active Site row locks, passes its identity lookup result, and keeps this
+// helper and subsequent updates in one tx.
 // Adoption preserves the REST ID, IPAM tree, and allocations. Only newly created
 // blocks receive an initial status detail here; ordinary updates belong to the caller.
 // Retired operator roots are skipped for Deleting reports and restored with their
 // IPAM entry for Ready reports. Tenant identities are never restored.
 // A nil block without an error skips a retired root.
 // This helper never removes roots or infers absence.
-func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Context, tx *cdb.Tx, site *cdbm.Site, prefix *corev1.SitePrefix, tenantID *uuid.UUID) (*cdbm.IPBlock, error) {
+func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Context, tx *cdb.Tx, site *cdbm.Site, prefix *corev1.SitePrefix, tenantID *uuid.UUID, existingBlock *cdbm.IPBlock) (*cdbm.IPBlock, error) {
 	id := uuid.MustParse(prefix.GetId().GetValue()) // validated before the transaction
 	cidr := netip.MustParsePrefix(prefix.Config.Prefix)
 	routingType := cdbm.GetSiteFabricIPBlockRoutingType(cidr)
@@ -186,22 +201,10 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 	dao := cdbm.NewIPBlockDAO(manager.dbSession)
 	logger := log.With().Str("Activity", "UpdateSitePrefixesInDB").Str("Site ID", site.ID.String()).
 		Str("Site Prefix ID", id.String()).Logger()
-	// Recheck the global identity, including tombstones, before creating or
-	// restoring a root. The Site lock serializes same-Site reconciliation.
-	existingBlock, err := dao.GetBySitePrefixID(ctx, tx, id)
-	if err != nil && !errors.Is(err, cdb.ErrDoesNotExist) {
-		return nil, err
-	}
-	if errors.Is(err, cdb.ErrDoesNotExist) {
-		existingBlock = nil
-	}
 	if existingBlock != nil {
-		err = validateSitePrefixIdentity(existingBlock, site, prefix, tenantID)
+		err := validateSitePrefixIdentity(existingBlock, site, prefix, tenantID)
 		if err != nil {
 			return nil, err
-		}
-		if existingBlock.Deleted == nil {
-			return existingBlock, nil
 		}
 		if tenantID != nil {
 			return nil, invalid("Core SitePrefix %s conflicts with its immutable REST identity", id)
@@ -251,7 +254,7 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 		}
 	}
 	var description *string
-	if tenantID != nil || prefix.Metadata.Description != "" {
+	if prefix.Metadata.Description != "" {
 		description = &prefix.Metadata.Description
 	}
 	// Only operator roots need a cloud-IPAM entry here; tenant prefixes are
@@ -360,7 +363,8 @@ func validatePrefix(prefix *corev1.SitePrefix) error {
 		return invalid("unsupported SitePrefix authority")
 	}
 	if len(metadata.Name) < minName || len(metadata.Name) > 256 || !ascii(metadata.Name) ||
-		len(metadata.Description) > 1024 || !utf8.ValidString(metadata.Description) || len(metadata.Labels) > 16 {
+		strings.ContainsFunc(metadata.Name, unicode.IsControl) || len(metadata.Description) > 1024 ||
+		!utf8.ValidString(metadata.Description) || strings.ContainsRune(metadata.Description, '\x00') || len(metadata.Labels) > 16 {
 		return invalid("invalid SitePrefix metadata")
 	}
 	keys := make(map[string]bool)

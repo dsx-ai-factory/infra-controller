@@ -31,9 +31,9 @@ func TestUpdateSitePrefixInventory(t *testing.T) {
 		metricsErr    error
 	}{
 		{"success tolerates metrics failure", corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, nil, false, nil, errors.New("metrics unavailable")},
-		{"transient failure recovers", corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, errors.New("lock contention"), true, nil, nil},
+		{"transient Site lookup failure recovers", corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, errors.New("Site lookup unavailable"), true, nil, nil},
 		{"retries are bounded", corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, errors.New("database unavailable"), true, errors.New("database unavailable"), nil},
-		{"invalid prefix does not retry", corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, temporal.NewNonRetryableApplicationError("invalid prefix", "InvalidSitePrefixInventory", nil), false, errors.New("invalid prefix"), nil},
+		{"invalid inventory does not retry", corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, temporal.NewNonRetryableApplicationError("invalid inventory", "InvalidSitePrefixInventory", nil), false, errors.New("invalid inventory"), nil},
 		{"diagnostic uses shared retries", corev1.InventoryStatus_INVENTORY_STATUS_FAILED, errors.New("diagnostic failure"), true, nil, nil},
 	}
 	for _, tt := range tests {

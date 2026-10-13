@@ -193,8 +193,11 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.Equal(t, []string{first.Config.Prefix}, prefixes)
 		}},
 		{"operator creates root and IPAM", func(t *testing.T, f fixture) {
+			hook := &sitePrefixLookupHook{}
+			f.session.DB.AddQueryHook(hook)
 			inventory := testInventory(testPrefix())
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+			require.Equal(t, 1, hook.reads)
 			blocks := f.blocks(t)
 			require.Len(t, blocks, 1)
 			require.Equal(t, inventory.SitePrefixes[0].Id.Value, blocks[0].SitePrefixID.String())
@@ -203,6 +206,16 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.Equal(t, &inventory.SitePrefixes[0].Metadata.Description, blocks[0].Description)
 			_, err := ipam.NewIpamStorage(f.session.DB, nil).ReadPrefix(ctx, "10.0.0.0/24", f.namespace())
 			require.NoError(t, err)
+		}},
+		{"tenant empty description is absent", func(t *testing.T, f fixture) {
+			prefix := testPrefix()
+			prefix.Status.Authority = corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED
+			prefix.Config.TenantOrganizationId = &f.tenant.Org
+			prefix.Metadata.Description = ""
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			blocks := f.blocks(t)
+			require.Len(t, blocks, 1)
+			require.Nil(t, blocks[0].Description)
 		}},
 		{"unreconcilable entries do not hold back later prefixes", func(t *testing.T, f fixture) {
 			var output bytes.Buffer
@@ -662,6 +675,10 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			}
 		}},
 		{"contention returns and a later attempt succeeds", func(t *testing.T, f fixture) {
+			var output bytes.Buffer
+			previousLogger := log.Logger
+			log.Logger = zerolog.New(&output)
+			t.Cleanup(func() { log.Logger = previousLogger })
 			tx, err := cdb.BeginTx(ctx, f.session, nil)
 			require.NoError(t, err)
 			defer func() { _ = tx.Rollback() }()
@@ -669,9 +686,40 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			inventory := testInventory(testPrefix())
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
 			require.Empty(t, f.blocks(t))
+			require.Contains(t, output.String(), `"level":"warn"`)
+			require.NotContains(t, output.String(), `"level":"error"`)
 			require.NoError(t, tx.Commit())
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
 			require.Len(t, f.blocks(t), 1)
+		}},
+		{"temporary lock contention recovers within the same inventory call", func(t *testing.T, f fixture) {
+			tx, err := cdb.BeginTx(ctx, f.session, nil)
+			require.NoError(t, err)
+			defer func() { _ = tx.Rollback() }()
+			require.NoError(t, tx.AcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(f.site.InfrastructureProviderID, f.site.ID), false))
+			hook := &lockReleaseHook{tx: tx}
+			f.session.DB.AddQueryHook(hook)
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(testPrefix())))
+			require.NoError(t, hook.err)
+			require.Equal(t, 2, hook.attempts)
+			require.Len(t, f.blocks(t), 1)
+		}},
+		{"database failure after contention retains error logging", func(t *testing.T, f fixture) {
+			var output bytes.Buffer
+			previousLogger := log.Logger
+			log.Logger = zerolog.New(&output)
+			t.Cleanup(func() { log.Logger = previousLogger })
+			tx, err := cdb.BeginTx(ctx, f.session, nil)
+			require.NoError(t, err)
+			defer func() { _ = tx.Rollback() }()
+			require.NoError(t, tx.AcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(f.site.InfrastructureProviderID, f.site.ID), false))
+			hook := &lockFailureHook{}
+			f.session.DB.AddQueryHook(hook)
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(testPrefix())))
+			require.Equal(t, 3, hook.attempts)
+			require.Empty(t, f.blocks(t))
+			require.Contains(t, output.String(), `"level":"error"`)
+			require.NotContains(t, output.String(), `"level":"warn"`)
 		}},
 	}
 	for _, tt := range tests {
@@ -821,6 +869,57 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 		})
 	}
 }
+
+type sitePrefixLookupHook struct {
+	reads int
+}
+
+func (hook *sitePrefixLookupHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if strings.Contains(event.Query, "site_prefix_id =") && strings.HasPrefix(event.Query, "SELECT") {
+		hook.reads++
+	}
+	return ctx
+}
+
+func (*sitePrefixLookupHook) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+// Release a competing transaction before the receiver's second lock attempt.
+type lockReleaseHook struct {
+	tx       *cdb.Tx
+	attempts int
+	err      error
+}
+
+func (hook *lockReleaseHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if strings.Contains(event.Query, "pg_try_advisory_xact_lock") {
+		hook.attempts++
+		if hook.attempts == 2 {
+			hook.err = hook.tx.Commit()
+		}
+	}
+	return ctx
+}
+
+func (*lockReleaseHook) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+// Fail database lock queries after the first successful query reports contention.
+type lockFailureHook struct {
+	attempts int
+}
+
+func (hook *lockFailureHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if strings.Contains(event.Query, "pg_try_advisory_xact_lock") {
+		hook.attempts++
+		if hook.attempts > 1 {
+			cancelled, cancel := context.WithCancel(ctx)
+			cancel()
+			return cancelled
+		}
+	}
+	return ctx
+}
+
+func (*lockFailureHook) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 // Delete after the first prefix commits, before the second locks the Site.
 type siteDeletionHook struct {
@@ -1044,6 +1143,10 @@ func TestValidatePrefix(t *testing.T) {
 		{"operator v6", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Config.Prefix = "fd00::/64"; return p }, true},
 		{"metadata absent", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Metadata = nil; return p }, false},
 		{"metadata bounds", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Metadata.Name = strings.Repeat("x", 257); return p }, false},
+		{"name NUL", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Metadata.Name = "prefix\x00name"; return p }, false},
+		{"name newline", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Metadata.Name = "prefix\nname"; return p }, false},
+		{"name DEL", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Metadata.Name = "prefix\x7fname"; return p }, false},
+		{"description NUL", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Metadata.Description = "description\x00"; return p }, false},
 		{"duplicate label", func(p *corev1.SitePrefix) *corev1.SitePrefix {
 			p.Metadata.Labels = []*corev1.Label{{Key: "x"}, {Key: "x"}}
 			return p
