@@ -178,10 +178,17 @@ grafanaDashboards:
   annotations: {}
 ```
 
-The chart creates one ConfigMap per dashboard, named
-`<namespace>-<release>-<dashboard>`, so a single large dashboard cannot push the
-set past the 1 MiB object limit. The target namespace must exist before Helm
-runs, and the Helm identity must be allowed to create ConfigMaps there. The Grafana sidecar must also watch that
+The chart creates one ConfigMap per dashboard, so a single large dashboard
+cannot push the set past the 1 MiB object limit. Each name is
+`<release-namespace>-<release-name>-<dashboard>`, where the dashboard part is
+the JSON filename without its extension. The prefix is the Helm release
+namespace and release name, not `grafanaDashboards.namespace`. The namespace
+and release parts are truncated to 16 characters each and the full name to 63,
+so long namespaces or release names shorten the rendered name; read it back
+with `helm get manifest` before referencing it from a `configMapRef`.
+
+The target namespace must exist before Helm runs, and the Helm identity must be
+allowed to create ConfigMaps there. The Grafana sidecar must also watch that
 namespace; for `kube-prometheus-stack`, configure
 `grafana.sidecar.dashboards.searchNamespace` accordingly.
 

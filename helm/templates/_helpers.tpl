@@ -8,12 +8,15 @@ Create the chart name and version as used by the chart label.
 {{/*
 Create a namespace- and release-scoped name for one packaged Grafana dashboard
 ConfigMap. The ConfigMaps may be installed into a shared monitoring namespace,
-where release name alone is not necessarily unique. Takes a dict with "root"
-(the chart context) and "dashboard" (the JSON filename without its extension).
+where release name alone is not necessarily unique. Namespace and release are
+truncated separately so that a long namespace cannot push the release name out
+of the name. Takes a dict with "root" (the chart context) and "dashboard" (the
+JSON filename without its extension).
 */}}
 {{- define "nico.grafanaDashboardName" -}}
-{{- $prefix := printf "%s-%s" .root.Release.Namespace .root.Release.Name | trunc 32 | trimSuffix "-" -}}
-{{- printf "%s-%s" $prefix .dashboard | trunc 63 | trimSuffix "-" -}}
+{{- $namespace := .root.Release.Namespace | trunc 16 | trimSuffix "-" -}}
+{{- $release := .root.Release.Name | trunc 16 | trimSuffix "-" -}}
+{{- printf "%s-%s-%s" $namespace $release .dashboard | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*
