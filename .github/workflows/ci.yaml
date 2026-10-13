@@ -172,7 +172,9 @@ jobs:
       proto_files_changed: ${{ steps.base-container-gate.outputs.proto_files_changed }}
       core_rpc_proto_files_changed: ${{ steps.base-container-gate.outputs.core_rpc_proto_files_changed }}
       source_files_changed: ${{ steps.base-container-gate.outputs.source_files_changed }}
+      pxe_kustomize_changed: ${{ steps.base-container-gate.outputs.pxe_kustomize_changed }}
       machine_lifecycle_changed: ${{ steps.base-container-gate.outputs.machine_lifecycle_changed }}
+      control_plane_dpu_changed: ${{ steps.base-container-gate.outputs.control_plane_dpu_changed }}
       kea_version: ${{ steps.kea-version.outputs.version }}
       release_build_args: ${{ steps.release-metadata.outputs.build_args }}
       release_build_args_aarch64: ${{ steps.release-metadata.outputs.build_args_aarch64 }}
@@ -230,9 +232,21 @@ jobs:
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yaml'
               - 'dev/k8s/machine-a-tron-controller/**'
+            pxe_kustomize:
+              - '.github/workflows/ci.yaml'
+              - 'deploy/components/boot-artifacts-containers/**'
+              - 'deploy/nico-base/api/**'
+              - 'deploy/nico-base/pxe/**'
+              - 'deploy/tests/pxe-with-boot-artifacts/**'
+              - 'deploy/tests/test-pxe-non-root.sh'
             machine_lifecycle:
               - 'tests/machine-lifecycle/**'
               - '.github/workflows/ci.yaml'
+            control_plane_dpu:
+              - 'scripts/control-plane-dpu/**'
+              - '.github/workflows/ci.yaml'
+              - '.github/ci/check_ci_gate.py'
+              - '.github/ci/test_check_ci_gate.py'
       - name: Calculate version
         id: version
         run: |
@@ -424,7 +438,9 @@ jobs:
           PROTO_FILES_CHANGED: ${{ steps.build-container-changes.outputs.proto_files }}
           CORE_RPC_PROTO_FILES_CHANGED: ${{ steps.build-container-changes.outputs.core_rpc_proto_files }}
           SOURCE_FILES_CHANGED: ${{ steps.build-container-changes.outputs.source_files }}
+          PXE_KUSTOMIZE_CHANGED: ${{ steps.build-container-changes.outputs.pxe_kustomize }}
           MACHINE_LIFECYCLE_CHANGED: ${{ steps.build-container-changes.outputs.machine_lifecycle }}
+          CONTROL_PLANE_DPU_CHANGED: ${{ steps.build-container-changes.outputs.control_plane_dpu }}
         run: |
           build_container_x86_64_run=false
           runtime_container_x86_64_run=false
@@ -435,7 +451,9 @@ jobs:
           proto_files_changed=false
           core_rpc_proto_files_changed=false
           source_files_changed=false
+          pxe_kustomize_changed=false
           machine_lifecycle_changed=false
+          control_plane_dpu_changed=false
 
           if [[ "${COMMIT_MESSAGE}" =~ ci-rebuild-base-containers ]]; then
             build_container_x86_64_run=true
@@ -460,8 +478,15 @@ jobs:
              source_files_changed=true
           fi
 
+          if [[ "${PXE_KUSTOMIZE_CHANGED}" == "true" ]]; then
+             pxe_kustomize_changed=true
+          fi
           if [[ "${MACHINE_LIFECYCLE_CHANGED}" == "true" ]]; then
              machine_lifecycle_changed=true
+          fi
+
+          if [[ "${CONTROL_PLANE_DPU_CHANGED}" == "true" ]]; then
+             control_plane_dpu_changed=true
           fi
 
           if [[ "${RUNTIME_CONTAINER_X86_64_DOCKERFILE_CHANGED}" == "true" ]]; then
@@ -493,7 +518,9 @@ jobs:
           echo "proto_files_changed=${proto_files_changed}" >> "$GITHUB_OUTPUT"
           echo "core_rpc_proto_files_changed=${core_rpc_proto_files_changed}" >> "$GITHUB_OUTPUT"
           echo "source_files_changed=${source_files_changed}" >> "$GITHUB_OUTPUT"
+          echo "pxe_kustomize_changed=${pxe_kustomize_changed}" >> "$GITHUB_OUTPUT"
           echo "machine_lifecycle_changed=${machine_lifecycle_changed}" >> "$GITHUB_OUTPUT"
+          echo "control_plane_dpu_changed=${control_plane_dpu_changed}" >> "$GITHUB_OUTPUT"
 
           MAJOR_MINOR=$(echo "${VERSION}" | cut -d. -f1,2)
           echo "major_minor_version=${MAJOR_MINOR}" >> "$GITHUB_OUTPUT"
@@ -636,6 +663,60 @@ jobs:
             '{VERSION: $VERSION, CI_COMMIT_SHORT_SHA: $SHORT_SHA, CI_COMMIT_TIMESTAMP: $COMMIT_TIMESTAMP, CONTAINER_BUILD_AARCH64: $BUILD, CONTAINER_RUNTIME_AARCH64: $RUNTIME, CARBIDE_BUILD_HELM_VERSION: $HELM_VERSION}')
 
           echo "build_args_aarch64=${BUILD_ARGS_AARCH64}" >> "$GITHUB_OUTPUT"
+
+  test-control-plane-dpu:
+    name: Control-plane DPU shell tests
+    needs:
+      - prepare
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.control_plane_dpu_changed == 'true'
+      }}
+    runs-on: linux-amd64-cpu4
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Provide main for template regression comparisons
+        run: git update-ref refs/remotes/upstream/main refs/remotes/origin/main
+
+      - name: Install test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools_dir="$RUNNER_TEMP/control-plane-dpu-tools"
+          mkdir -p "$tools_dir"
+          cd "$tools_dir"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/mikefarah/yq/releases/download/v4.52.5/yq_linux_amd64 -o yq
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/hairyhenderson/gomplate/releases/download/v4.3.3/gomplate_linux-amd64 -o gomplate
+          echo '75d893a0d5940d1019cb7cdc60001d9e876623852c31cfc6267047bc31149fa9  yq' | sha256sum --check
+          echo 'ca281666e86f2f09218c1653e1908f572c0e349e9de64cb4ea93ade9333f0596  gomplate' | sha256sum --check
+          chmod +x yq gomplate
+          echo "$tools_dir" >> "$GITHUB_PATH"
+
+      - name: Check test prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          (( BASH_VERSINFO[0] >= 4 ))
+          for tool in yq gomplate python3 setsid openssl shasum ps; do
+            command -v "$tool"
+          done
+          yq --version
+          gomplate --version
+          ps -o tty= -p $$ >/dev/null
+
+      - name: Run DPU shell tests
+        run: bash scripts/control-plane-dpu/unit-tests/run_all.sh
 
   # ============================================================================
   # BUILD STAGE - Base Containers
@@ -1807,6 +1888,25 @@ jobs:
           bash scripts/check-repo-clean.sh "REST Core protobuf sync"
           "make sync-protobuf (from the repository root)"
 
+  pxe-kustomize-render:
+    needs: prepare
+    if: ${{ !failure() && !cancelled() && needs.prepare.outputs.pxe_kustomize_changed == 'true' }}
+    runs-on: linux-amd64-cpu32
+    container:
+      image: ${{ needs.prepare.outputs.lint_container_ref }}
+      credentials:
+        username: ${{ secrets.NICO_SOURCE_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+        password: ${{ secrets.NICO_SOURCE_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Trust the workspace in this container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Test PXE Kustomize renders
+        run: deploy/tests/test-pxe-non-root.sh
+
   lint-police:
     needs:
       - prepare
@@ -2572,6 +2672,7 @@ jobs:
       - build-validate-bluefield-helm-charts
       - build-push-bluefield-helm-charts
       - lint-police
+      - pxe-kustomize-render
     steps:
       - name: Generate summary
         run: |
@@ -2774,9 +2875,13 @@ jobs:
       - build-machine-lifecycle-test-aarch64
       - merge-manifests-machine-lifecycle-test
 
+      # DPU shell tests
+      - test-control-plane-dpu
+
       # Source and repository policy checks
       - proto-police
       - lint-police
+      - pxe-kustomize-render
       - migration-police
       - proto-breaking-changes
       - check-rest-core-proto-sync

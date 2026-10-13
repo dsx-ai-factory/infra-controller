@@ -23,6 +23,8 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+# bmc-mock should be usable independently of NICo.
+# Do not add new carbide-* dependencies, including dev-dependencies.
 [dependencies]
 bmc-vendor = { path = "../bmc-vendor" }
 axum = { workspace = true }
@@ -51,7 +53,7 @@ nv-redfish = { workspace = true, features = [
 nix = { features = ["fs"], workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
-quick-xml = { workspace = true }
+quick-xml = { features = ["serialize"], workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 serde = { features = ["derive"], workspace = true }

@@ -12,6 +12,7 @@
 | 0.4 | 05/11/2026 | Binu Ramakrishnan | Signing key rotation (two slots), overlap policy on rotate only |
 | 0.5 | 06/02/2026 | Binu Ramakrishnan | Site master encryption key re-wrap (`ReencryptTenantIdentitySecrets` gRPC); envelope `key_id` in ciphertext (drop DB `encryption_key_id` column) |
 | 0.6 | 08/07/2026 | Parham Armani | Expose re-wrap via NICo REST (`POST .../tenant-identity/re-encrypt`, provider-admin), keeping `dryRun`; previously gRPC/Forge-Admin-CLI only |
+| 0.7 | 09/02/2026 | Bill Minckler | Read the signing-key master key through the credential chain rather than only from Vault |
 |  |  |  |  |
 
 ## 1. Introduction
@@ -153,7 +154,7 @@ Per-org signing private keys and token-delegation credentials are encrypted at r
 | Concept | Where it lives |
 | :------ | :------------- |
 | Site **current** master key id | `[machine_identity].current_encryption_key_id` in site config |
-| Master key material | Site secrets `machine_identity.encryption_keys` (e.g. Vault `.../machine_identity/encryption_keys/kv1`) |
+| Master key material | Credential chain path `machine_identity/encryption_keys/{key_id}` (environment, watched file, Postgres, or Vault) |
 | Key id used to encrypt a given blob | **`key_id` inside the ciphertext envelope JSON** (standard base64 in DB), not a table column |
 
 **New encrypts** (first org provisioning, signing-key rotation, token-delegation writes) use the site **`current_encryption_key_id`**. **Decrypt** loads the AES key named by the envelope’s embedded **`key_id`**, so older keys must remain in secrets until all blobs are re-wrapped.
@@ -364,7 +365,7 @@ NICo Tenant issue JWT-SVID to tenant workload, routed back through NICo
 
 #### 3.4.1 Database Design
 
-A new table will be created to store tenant signing key pairs and optional token delegation config. The private key will be encrypted with a master key stored in Vault. Token delegation columns are nullable when an org does not use delegation.
+A new table will be created to store tenant signing key pairs and optional token delegation config. The private key is encrypted with a site master key read through the credential chain (`machine_identity/encryption_keys/{key_id}`), which may be served by Postgres, Vault, or a local environment or file source. Token delegation columns are nullable when an org does not use delegation.
 
 | tenant_identity_config |  |  |
 | :---- | :---- | :---- |
@@ -393,7 +394,7 @@ A new table will be created to store tenant signing key pairs and optional token
 
 #### 3.4.2 Configuration
 
-The JWT spec and vault related configs are passed to the NICo Core server during startup through `site_config.toml` config file.
+The JWT and machine-identity configurations are passed to the NICo Core server during startup through the `site_config.toml` config file.
 
 ```toml
 # In site config file (e.g., site_config.toml)

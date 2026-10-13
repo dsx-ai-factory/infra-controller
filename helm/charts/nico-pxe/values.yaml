@@ -50,6 +50,15 @@ replicas: 1
 ## a positive integer (validated at render).
 fileDescriptorLimit: 65536
 
+## Optional component image. When repository is empty, the chart uses the
+## global image and its pull policy. When repository is set and tag is empty,
+## the component tag defaults to latest; an empty pull policy uses the global
+## pull policy.
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: ""
+
 ## Optional general-purpose init containers, run in list order after bootArtifactContainers.
 ## Omitted or empty lists add no general-purpose init containers.
 ## Quote tags (for example, tag: "1.10") to preserve their exact text.
@@ -72,13 +81,20 @@ initContainers: []
 ## volume automatically mounted at /forge-boot-artifacts/blobs/internal, then served by
 ## nico-pxe at /public/blobs/internal.
 ##
-## REQUIRED for DPU and host HTTP boot: if empty, the DPU/host requests its bootloader
+## Required when boot artifacts are not bundled in the PXE image: if empty and
+## the image has no artifacts, the DPU/host requests its bootloader
 ## (e.g. /public/blobs/internal/aarch64/ipxe.efi) and gets HTTP 404, then falls back to
 ## its local disk and never (re)provisions. Populate per site (extensible list).
 ##
 ## NOTE: copy ONLY directories that exist in the image. The boot-artifacts-aarch64 image
 ## ships /aarch64 and /apt (NOT /firmware); copying a missing dir makes `cp` exit non-zero
 ## and the init container crash-loops.
+## When populated, the chart mounts an emptyDir and appends a root init container
+## after all other init containers to set group 10001 and grant group read/traverse
+## on the copied trees, including source files with mode 0600. Existing copy
+## commands work without migration. No world permissions are added.
+## The final init uses /bin/sh, chgrp, and chmod from the selected PXE image.
+## When empty, no boot-artifacts volume is mounted, preserving image-bundled files.
 ## Quote tags (for example, tag: "1.10") to preserve their exact text.
 ## YAML parses unquoted 1.10 as 1.1; unquoted 0 is treated as empty and falls
 ## back to image. Use "0" to select the literal tag 0.
@@ -90,17 +106,19 @@ bootArtifactContainers: []
 #   - name: boot-artifacts-x86-64
 #     repository: <your-registry>/boot-artifacts-x86_64
 #     tag: "<tag>"
-#     command: ["sh", "-c", "cp -r /x86_64 /forge-boot-artifacts/blobs/internal"]
+#     command: ["sh", "-c", "set -e; cp -r /x86_64 /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal/x86_64; chmod -R g+rX /forge-boot-artifacts/blobs/internal/x86_64"]
 #   - name: boot-artifacts-aarch64
 #     repository: <your-registry>/boot-artifacts-aarch64
 #     tag: "<tag>"
-#     command: ["sh", "-c", "cp -r /aarch64 /apt /forge-boot-artifacts/blobs/internal"]
+#     command: ["sh", "-c", "set -e; cp -r /aarch64 /apt /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal/aarch64 /forge-boot-artifacts/blobs/internal/apt; chmod -R g+rX /forge-boot-artifacts/blobs/internal/aarch64 /forge-boot-artifacts/blobs/internal/apt"]
 #   - name: machine-validation-config
 #     repository: <your-registry>/machine-validation-config
 #     tag: "<tag>"
-#     command: ["sh", "-c", "cp -r /machine-validation /forge-boot-artifacts/blobs/internal"]
+#     command: ["sh", "-c", "set -e; cp -r /machine-validation /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal/machine-validation; chmod -R g+rX /forge-boot-artifacts/blobs/internal/machine-validation"]
 
 ## Boot artifact serving configuration
+## When bootArtifactContainers is populated, the chart mounts writable storage
+## at <servePath>/blobs/internal. Otherwise it serves the image's existing files.
 bootArtifacts:
   servePath: /forge-boot-artifacts
 

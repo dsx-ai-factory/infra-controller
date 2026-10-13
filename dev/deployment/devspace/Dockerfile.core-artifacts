@@ -21,7 +21,8 @@ RUN --mount=type=cache,id=nico-devspace-cargo-home,target=/cargo-home,sharing=lo
     -p carbide-bmc-proxy --bin carbide-bmc-proxy \
     -p carbide-dhcp --lib \
     -p carbide-ssh-console --bin ssh-console \
-    -p carbide-machine-a-tron --bin machine-a-tron && \
+    -p carbide-machine-a-tron --bin machine-a-tron \
+    -p carbide-pxe --bin carbide && \
   mkdir -p /artifacts && \
   cp \
     /cargo-target/debug/carbide-api \
@@ -30,6 +31,7 @@ RUN --mount=type=cache,id=nico-devspace-cargo-home,target=/cargo-home,sharing=lo
     /cargo-target/debug/libdhcp.so \
     /cargo-target/debug/ssh-console \
     /cargo-target/debug/machine-a-tron \
+    /cargo-target/debug/carbide \
     /artifacts/
 
 FROM scratch

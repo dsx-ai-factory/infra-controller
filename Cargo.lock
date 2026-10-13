@@ -1186,6 +1186,7 @@ dependencies = [
  "carbide-rack",
  "carbide-rack-controller",
  "carbide-redfish",
+ "carbide-resource-pool",
  "carbide-rpc",
  "carbide-secrets",
  "carbide-site-explorer",
@@ -2275,6 +2276,7 @@ dependencies = [
 name = "carbide-http-connector"
 version = "0.0.0"
 dependencies = [
+ "carbide-test-support",
  "futures-util",
  "hickory-resolver",
  "hyper",

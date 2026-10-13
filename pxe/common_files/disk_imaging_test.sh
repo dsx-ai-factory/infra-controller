@@ -44,6 +44,15 @@ assert_eq() {
 	fi
 }
 
+assert_file_mode_600() {
+	local description=$1
+	local file=$2
+
+	if [ -z "$(find "$file" -maxdepth 0 -perm 600 2>/dev/null)" ]; then
+		fail "$description: $file is not mode 600"
+	fi
+}
+
 assert_log_contains() {
 	local expected=$1
 
@@ -214,5 +223,130 @@ if parse_kernel_cmdline_argument \
 fi
 assert_eq "unknown argument leaves image_url unchanged" "unchanged-url" "$image_url"
 assert_eq "unknown argument leaves image_disk unchanged" "unchanged-disk" "$image_disk"
+
+echo "image auth header construction"
+image_url="https://images.example/image.qcow2"
+
+image_auth_token=""
+image_auth_type=""
+build_image_auth_args
+assert_eq "no-token auth arg count" "0" "${#image_auth[@]}"
+assert_eq "no-token header file" "" "$image_auth_header_file"
+
+image_auth_token="my-token"
+image_auth_type=""
+build_image_auth_args
+assert_eq "default auth type" "Bearer" "$image_auth_type"
+assert_eq "auth arg count" "2" "${#image_auth[@]}"
+assert_eq "auth flag" "-K" "${image_auth[0]}"
+assert_eq "auth config file argument matches the header file" \
+	"$image_auth_header_file" "${image_auth[1]}"
+assert_file_mode_600 "auth header file" "$image_auth_header_file"
+assert_eq "auth header file content" \
+	'header = "Authorization: Bearer my-token"' "$(<"$image_auth_header_file")"
+rm -f "$image_auth_header_file"
+
+image_auth_token="my-token"
+image_auth_type="Basic"
+build_image_auth_args
+assert_eq "explicit auth type is not overridden" "Basic" "$image_auth_type"
+assert_eq "basic auth header file content" \
+	'header = "Authorization: Basic my-token"' "$(<"$image_auth_header_file")"
+rm -f "$image_auth_header_file"
+
+image_auth_type="Token"
+build_image_auth_args
+assert_eq "token auth header file content" \
+	'header = "Authorization: Token my-token"' "$(<"$image_auth_header_file")"
+rm -f "$image_auth_header_file"
+
+echo "image auth header escaping"
+# A token containing curl config-file special characters: a double quote and
+# a backslash. If these are not escaped, the config file either breaks curl's
+# quoted-value parsing or changes the header curl actually sends.
+image_auth_token='weird"token\with-specials'
+image_auth_type="Bearer"
+build_image_auth_args
+assert_eq "escaped header file content" \
+	'header = "Authorization: Bearer weird\"token\\with-specials"' \
+	"$(<"$image_auth_header_file")"
+rm -f "$image_auth_header_file"
+
+echo "image auth header file creation failure"
+# mktemp failing (e.g. a full or read-only /tmp) must stop the download
+# rather than silently falling back to an unauthenticated fetch.
+mktemp() {
+	return 1
+}
+image_auth_token="my-token"
+image_auth_type="Bearer"
+if build_image_auth_args; then
+	fail "build_image_auth_args accepted a failed mktemp"
+fi
+assert_eq "failed mktemp leaves auth empty" "0" "${#image_auth[@]}"
+unset -f mktemp
+
+echo "image auth header file cleanup when a later step fails"
+# mktemp can succeed while chmod or the write still fails (e.g. a quota or a
+# filesystem that rejects the mode change). The partially-created file must
+# not be left behind.
+known_auth_file="$temp_dir/chmod-fail-header"
+mktemp() {
+	: >"$known_auth_file"
+	printf '%s\n' "$known_auth_file"
+}
+chmod() {
+	return 1
+}
+image_auth_token="my-token"
+image_auth_type="Bearer"
+if build_image_auth_args; then
+	fail "build_image_auth_args accepted a failed chmod"
+fi
+assert_eq "chmod failure clears the header file variable" "" "$image_auth_header_file"
+if [ -e "$known_auth_file" ]; then
+	fail "build_image_auth_args left the temp file behind after chmod failed"
+fi
+unset -f chmod
+unset -f mktemp
+
+echo "curl_url forwards the url and the auth config as separate arguments, never the raw token"
+# curl_url pipes through tee, so curl runs in a subshell: capture its
+# arguments via a file rather than a variable, which would not survive
+# back to this shell.
+mock_curl_args_file="$temp_dir/curl_args"
+curl() {
+	printf '%s\n' "$@" >"$mock_curl_args_file"
+	return 0
+}
+read_mock_curl_args() {
+	mock_curl_args=()
+	while IFS= read -r line; do
+		mock_curl_args+=("$line")
+	done <"$mock_curl_args_file"
+}
+
+image_auth=()
+curl_url "$image_url"
+read_mock_curl_args
+assert_eq "unauthenticated curl arg count" "7" "${#mock_curl_args[@]}"
+assert_eq "unauthenticated curl url is the last argument" "$image_url" "${mock_curl_args[6]}"
+
+image_auth_token="my-token"
+image_auth_type="Bearer"
+build_image_auth_args
+curl_url "$image_url" "${image_auth[@]}"
+read_mock_curl_args
+assert_eq "authenticated curl arg count" "9" "${#mock_curl_args[@]}"
+assert_eq "authenticated curl auth flag" "-K" "${mock_curl_args[6]}"
+assert_eq "authenticated curl auth value is the header file, not the token" \
+	"$image_auth_header_file" "${mock_curl_args[7]}"
+assert_eq "authenticated curl url is the last argument" "$image_url" "${mock_curl_args[8]}"
+for arg in "${mock_curl_args[@]}"; do
+	case "$arg" in
+		*my-token*) fail "token leaked into curl's argument list: $arg" ;;
+	esac
+done
+rm -f "$image_auth_header_file"
 
 echo "disk imaging identifier tests passed"
