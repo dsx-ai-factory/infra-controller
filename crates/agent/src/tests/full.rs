@@ -21,7 +21,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::extract::State as AxumState;
@@ -58,6 +58,8 @@ struct State {
     virtualization_type: VpcVirtualizationType,
     loopback_ip_override: Option<&'static str>,
     last_network_status: Option<rpc::forge::DpuNetworkStatus>,
+    reject_next_network_status: bool,
+    network_status_reports: Vec<(Instant, bool)>,
     reject_dhcp_update: bool,
     dhcp_updates: Vec<(bool, Bytes)>,
 }
@@ -139,6 +141,7 @@ async fn dhcp_unavailability_retries_the_same_ipv6_network_configuration() -> ey
     let state = Arc::new(Mutex::new(State {
         virtualization_type: VpcVirtualizationType::EthernetVirtualizer,
         loopback_ip_override: Some("2001:db8::1"),
+        reject_next_network_status: true,
         reject_dhcp_update: true,
         ..Default::default()
     }));
@@ -196,6 +199,20 @@ async fn dhcp_unavailability_retries_the_same_ipv6_network_configuration() -> ey
                 fs::read_to_string(&startup_path)? == PREVIOUS_NETWORK,
                 "DHCP rejection overwrote the existing network configuration"
             );
+            {
+                let state = state.lock().await;
+                let [(rejected_at, true), (retried_at, false), ..] =
+                    state.network_status_reports.as_slice()
+                else {
+                    eyre::bail!(
+                        "expected a successful status report after one rejected RPC: {:?}",
+                        state.network_status_reports
+                    );
+                };
+                // The shared fixture configures a one-second active period.
+                // A failed status RPC must still wait before the next report.
+                assert!(retried_at.duration_since(*rejected_at) >= Duration::from_secs(1));
+            }
 
             // Clear the transient failure without changing the desired network
             // or its versions. The next tick must retry the same DHCP request.
@@ -1195,14 +1212,29 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
 async fn handle_record_netstat(
     AxumState(state): AxumState<Arc<Mutex<State>>>,
     body: Bytes,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<axum::response::Response, StatusCode> {
     let payload = body.get(5..).ok_or(StatusCode::BAD_REQUEST)?;
     let status =
         rpc::forge::DpuNetworkStatus::decode(payload).map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut state = state.lock().await;
     state.num_health_reports.fetch_add(1, Ordering::SeqCst);
+    let rejected = std::mem::take(&mut state.reject_next_network_status);
+    state
+        .network_status_reports
+        .push((Instant::now(), rejected));
+    if rejected {
+        return Ok((
+            [
+                ("content-type", "application/grpc"),
+                ("grpc-status", "14"),
+                ("grpc-message", "injected%20status%20rejection"),
+            ],
+            "",
+        )
+            .into_response());
+    }
     state.last_network_status = Some(status);
-    Ok(common::respond(()))
+    Ok(common::respond(()).into_response())
 }
 
 async fn handle_dpu_agent_upgrade_check(
