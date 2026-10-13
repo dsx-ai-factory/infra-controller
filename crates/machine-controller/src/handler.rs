@@ -2363,6 +2363,18 @@ impl MachineStateHandler {
             StateHandlerError::GenericError(eyre!("invalid SPX NIC MAC address {mac_address}: {e}"))
         })?;
 
+        // An all-zero MAC (00:00:00:00:00:00) is syntactically valid and parses successfully, but it
+        // never identifies a real NIC. Reject it so we do not register a bogus Astra interface.
+        if mac_address.bytes().iter().all(|&octet| octet == 0) {
+            tracing::error!(
+                machine_id = %mh_snapshot.host_snapshot.id,
+                "SPX NIC MAC address is all zeros"
+            );
+            return Err(StateHandlerError::GenericError(eyre!(
+                "SPX NIC MAC address is all zeros"
+            )));
+        }
+
         let cage_mpo_encoded_string =
             model::machine::astra::astra_get_cage_mpo_encoded_string(nic_index);
 
