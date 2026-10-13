@@ -30,7 +30,6 @@ use futures_util::future::Either;
 use hickory_resolver::proto::rr::Name;
 use hyper::http::Uri;
 use hyper::http::uri::Scheme;
-use hyper::service::Service;
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::time::Sleep;
@@ -1002,11 +1001,24 @@ impl ForgeHttpConnector {
             addrs
         } else {
             let dns_name: Name = host.parse().map_err(ConnectError::dns)?;
-            let addrs = self
+            let resolved = self
                 .resolver
-                .call(dns_name)
+                .resolve_for_connect(dns_name)
                 .await
                 .map_err(ConnectError::dns)?;
+            // Keep TCP behind both DNS replies until connection scheduling can
+            // consume the pending lookup: https://github.com/dsx-ai-factory/infra-controller/issues/7495
+            let mut addrs = resolved.primary;
+            if let Some(fallback) = resolved.fallback {
+                match fallback.await {
+                    Ok(fallback) => {
+                        addrs = resolver::SocketAddrs::new(addrs.chain(fallback).collect());
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "AAAA lookup failed; retaining A lookup addresses");
+                    }
+                }
+            }
 
             let addrs: Vec<SocketAddr> = addrs
                 .map(|mut addr| {
