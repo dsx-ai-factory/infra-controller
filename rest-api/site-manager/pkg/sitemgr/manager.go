@@ -6,6 +6,8 @@ package sitemgr
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/certs"
 	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
+	commontls "github.com/NVIDIA/infra-controller/rest-api/common/pkg/tls"
 	crdclient "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned"
 	"github.com/getsentry/sentry-go"
 	"github.com/pkg/errors"
@@ -37,8 +40,9 @@ const (
 
 // Options are args passed to the site manager at boot
 type Options struct {
-	credsMgrURL       string
-	credsMgrTokenFile string
+	credsMgrURL            string
+	credsMgrClientCertPath string
+	credsMgrClientKeyPath  string
 	// credsMgrCAPath is the CA bundle used to verify credsMgrURL. It is the
 	// ca.crt of the same CA that signs the cert-manager's listener, so the
 	// certificate chain and the hostname both have to check out.
@@ -95,7 +99,7 @@ func NewSiteManager(ctx context.Context, o Options) (*SiteMgr, error) {
 }
 
 func newSiteManager(ctx context.Context, o Options, c crdclient.Interface) (*SiteMgr, error) {
-	certClient, err := newCertManagerClient(o)
+	certClient, err := newCertManagerClient(ctx, o)
 	if err != nil {
 		return nil, errors.Wrap(err, "newCertManagerClient")
 	}
@@ -128,7 +132,7 @@ func newSiteManager(ctx context.Context, o Options, c crdclient.Interface) (*Sit
 	return s, nil
 }
 
-func newCertManagerClient(o Options) (*http.Client, error) {
+func newCertManagerClient(ctx context.Context, o Options) (*http.Client, error) {
 	endpoint, err := url.Parse(o.credsMgrURL)
 	if err != nil {
 		return nil, errors.Wrap(err, "parse certificate manager URL")
@@ -136,29 +140,33 @@ func newCertManagerClient(o Options) (*http.Client, error) {
 	if endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil {
 		return nil, fmt.Errorf("certificate manager URL must use HTTPS without user information")
 	}
-	if o.credsMgrTokenFile == "" || o.credsMgrCAPath == "" {
-		return nil, fmt.Errorf("certificate manager token and CA files are required")
+	if o.credsMgrCAPath == "" {
+		return nil, fmt.Errorf("certificate manager CA file is required")
 	}
 	caPEM, err := os.ReadFile(o.credsMgrCAPath)
 	if err != nil {
 		return nil, errors.Wrapf(err, "read cert manager CA bundle %q", o.credsMgrCAPath)
 	}
-	// client-go treats an empty CA bundle as a request to use system roots.
-	if len(caPEM) == 0 {
-		return nil, fmt.Errorf("cert manager CA bundle %q contains no certificates", o.credsMgrCAPath)
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("cert manager CA bundle contains no usable certificates")
 	}
-	client, err := rest.HTTPClientFor(&rest.Config{
-		Host:            o.credsMgrURL,
-		BearerTokenFile: o.credsMgrTokenFile,
-		TLSClientConfig: rest.TLSClientConfig{CAData: caPEM},
-		Timeout:         vaultTimeout,
-		WrapTransport: func(rt http.RoundTripper) http.RoundTripper {
-			return otelhttp.NewTransport(rt, otelhttp.WithSpanNameFormatter(func(_ string, _ *http.Request) string { return certMgrClientName }))
-		},
-	})
-	if err != nil {
-		return nil, errors.Wrap(err, "configure certificate manager client")
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
+	if o.credsMgrClientCertPath != "" || o.credsMgrClientKeyPath != "" {
+		if o.credsMgrClientCertPath == "" || o.credsMgrClientKeyPath == "" {
+			return nil, fmt.Errorf("both client certificate and key paths are required")
+		}
+		dynamic, err := commontls.NewDynTLSCfg(o.credsMgrClientKeyPath, o.credsMgrClientCertPath, o.credsMgrCAPath)
+		if err != nil {
+			return nil, errors.Wrap(err, "configure certificate manager client identity")
+		}
+		context.AfterFunc(ctx, dynamic.Close)
+		tlsConfig = dynamic.ClientCfg()
 	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsConfig
+	client := &http.Client{Timeout: vaultTimeout, Transport: otelhttp.NewTransport(transport, otelhttp.WithSpanNameFormatter(func(_ string, _ *http.Request) string { return certMgrClientName }))}
+	context.AfterFunc(ctx, client.CloseIdleConnections)
 	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	return client, nil
 }
