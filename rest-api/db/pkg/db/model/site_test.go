@@ -110,6 +110,7 @@ func TestSiteSQLDAO_GetByID(t *testing.T) {
 		id               uuid.UUID
 		includeRelations bool
 		includeDeleted   bool
+		forUpdate        bool
 	}
 
 	// Define tests
@@ -122,6 +123,14 @@ func TestSiteSQLDAO_GetByID(t *testing.T) {
 		wantErrVal         error
 		verifyChildSpanner bool
 	}{
+		{
+			name:       "locking a Site requires a transaction",
+			fields:     fields{dbSession: dbSession},
+			args:       args{ctx: ctx, id: st1.ID, forUpdate: true},
+			want:       st1,
+			wantErr:    true,
+			wantErrVal: db.ErrInvalidValue,
+		},
 		{
 			name: "get a Site by ID",
 			fields: fields{
@@ -190,13 +199,13 @@ func TestSiteSQLDAO_GetByID(t *testing.T) {
 				tt.want.InfrastructureProvider = nil
 			}
 
-			got, err := ssd.GetByID(tt.args.ctx, nil, tt.args.id, relations, tt.args.includeDeleted)
+			got, err := ssd.GetByID(tt.args.ctx, nil, tt.args.id, relations, tt.args.includeDeleted, tt.args.forUpdate)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("SiteSQLDAO.GetByID()\nerror = %v,\nwantErr = %v", err, tt.wantErr)
 				return
 			}
 			if tt.wantErr {
-				assert.Equal(t, tt.wantErrVal, err)
+				assert.ErrorIs(t, err, tt.wantErrVal)
 				return
 			}
 			if got.ID != tt.want.ID {

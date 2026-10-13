@@ -239,7 +239,7 @@ func (csh CreateSiteHandler) Handle(c echo.Context) error {
 			}
 
 			// Refresh Site object
-			refreshedSite, serr := stDAO.GetByID(ctx, tx, st.ID, nil, false)
+			refreshedSite, serr := stDAO.GetByID(ctx, tx, st.ID, nil, false, false)
 			if serr != nil {
 				logger.Error().Err(serr).Msg("error retrieving Site from DB")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to refresh Site data with registration token, error communicating with data store", nil)
@@ -356,7 +356,7 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 	}
 
 	// Check that Site exists
-	es, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	es, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error retrieving Site DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve Site to update", nil)
@@ -616,7 +616,7 @@ func (gsh GetSiteHandler) Handle(c echo.Context) error {
 	// Get Site
 	stDAO := cdbm.NewSiteDAO(gsh.dbSession)
 
-	st, err := stDAO.GetByID(ctx, nil, stID, qIncludeRelations, false)
+	st, err := stDAO.GetByID(ctx, nil, stID, qIncludeRelations, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Site with specified ID", nil)
@@ -1034,7 +1034,7 @@ func (dsh DeleteSiteHandler) Handle(c echo.Context) error {
 
 	// Get Site
 	stDAO := cdbm.NewSiteDAO(dsh.dbSession)
-	st, err := stDAO.GetByID(ctx, nil, stID, nil, false)
+	st, err := stDAO.GetByID(ctx, nil, stID, nil, false, false)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error retrieving Site from DB by ID")
 		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve Site with ID in URL", nil)
@@ -1158,7 +1158,7 @@ func (gssdh GetSiteStatusDetailsHandler) Handle(c echo.Context) error {
 
 	// Get Site
 	stDAO := cdbm.NewSiteDAO(gssdh.dbSession)
-	st, err := stDAO.GetByID(ctx, nil, stID, nil, false)
+	st, err := stDAO.GetByID(ctx, nil, stID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Site with specified ID", nil)

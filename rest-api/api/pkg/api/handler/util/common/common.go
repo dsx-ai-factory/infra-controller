@@ -191,7 +191,7 @@ func GetSiteFromIDString(ctx context.Context, tx *cdb.Tx, siteID string, dbSessi
 	if err != nil {
 		return nil, ErrInvalidID
 	}
-	return cdbm.NewSiteDAO(dbSession).GetByID(ctx, tx, siteid, nil, false)
+	return cdbm.NewSiteDAO(dbSession).GetByID(ctx, tx, siteid, nil, false, false)
 }
 
 // GetInstanceFromIDString gets the site DB model from the id string

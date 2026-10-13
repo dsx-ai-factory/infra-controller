@@ -57,7 +57,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		return invalid("unsupported SitePrefix inventory status")
 	}
 	siteDAO := cdbm.NewSiteDAO(manager.dbSession)
-	site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("received SitePrefix inventory for unknown or deleted Site")
@@ -70,6 +70,26 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 	if page != nil {
 		logger.Info().Msgf("Received SitePrefix inventory page: %d of %d, page size: %d, total count: %d",
 			page.CurrentPage, page.TotalPages, page.PageSize, page.TotalItems)
+	}
+	// Load the page's active identities once, as other inventory receivers do.
+	// Core identities are global; validate ownership before changing a matched row.
+	prefixIDs := []uuid.UUID{}
+	for _, prefix := range inventory.SitePrefixes {
+		id, err := uuid.Parse(prefix.GetId().GetValue())
+		if err == nil {
+			prefixIDs = append(prefixIDs, id)
+		}
+	}
+	dao := cdbm.NewIPBlockDAO(manager.dbSession)
+	blocks, _, err := dao.GetAll(ctx, nil, cdbm.IPBlockFilterInput{SitePrefixIDs: prefixIDs},
+		paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve IP Blocks for SitePrefix inventory")
+		return err
+	}
+	existingBlockMap := make(map[uuid.UUID]*cdbm.IPBlock, len(blocks))
+	for i := range blocks {
+		existingBlockMap[*blocks[i].SitePrefixID] = &blocks[i]
 	}
 
 	for _, prefix := range inventory.SitePrefixes {
@@ -87,6 +107,8 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		// Keep one prefix's REST identity, IPAM changes, and status detail atomic.
 		// A failed prefix must not roll back earlier prefixes in the page.
 		isLockContention := false
+		id := uuid.MustParse(prefix.GetId().GetValue()) // validated before the transaction
+		var reconciledBlock *cdbm.IPBlock
 		err = cdb.WithTx(ctx, manager.dbSession, func(tx *cdb.Tx) error {
 			err := tx.TryAcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, siteID), nil)
 			if err != nil {
@@ -98,23 +120,23 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 				isLockContention = errors.Is(lastErr, cdb.ErrXactAdvisoryLockFailed)
 				return err
 			}
-			lockedSite, err := siteDAO.GetByIDForUpdate(ctx, tx, siteID)
+			lockedSite, err := siteDAO.GetByID(ctx, tx, siteID, nil, false, true)
 			if err != nil {
 				return err
 			}
 			if lockedSite.InfrastructureProviderID != site.InfrastructureProviderID {
 				return invalid("Site provider changed while acquiring inventory lock")
 			}
-			id := uuid.MustParse(prefix.GetId().GetValue()) // validated before the transaction
-			dao := cdbm.NewIPBlockDAO(manager.dbSession)
-			// Look up the active link under the Site locks. The creation helper
-			// handles retired identities when no active IP Block exists.
-			block, err := dao.GetBySitePrefixID(ctx, tx, id)
-			if err != nil && !errors.Is(err, cdb.ErrDoesNotExist) {
-				return err
-			}
-			if errors.Is(err, cdb.ErrDoesNotExist) {
-				block = nil
+			block := existingBlockMap[id]
+			if block != nil {
+				// Reload the page snapshot under the row lock before applying lifecycle.
+				block, err = dao.GetByIDForUpdate(ctx, tx, block.ID)
+				if err != nil && !errors.Is(err, cdb.ErrDoesNotExist) {
+					return err
+				}
+				if errors.Is(err, cdb.ErrDoesNotExist) {
+					block = nil
+				}
 			}
 			var tenantID *uuid.UUID
 			if prefix.Status.Authority == corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED {
@@ -129,8 +151,8 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 				}
 				tenantID = &tenants[0].ID
 			}
-			if block == nil || block.Deleted != nil {
-				block, err = manager.createOrUpdateSitePrefixFromSite(ctx, tx, lockedSite, prefix, tenantID, block)
+			if block == nil {
+				block, err = manager.createOrUpdateSitePrefixFromSite(ctx, tx, lockedSite, prefix, tenantID)
 				if err != nil {
 					return err
 				}
@@ -139,10 +161,6 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 				}
 			} else {
 				// Existing links may change lifecycle, but not ownership or CIDR.
-				block, err = dao.GetByIDForUpdate(ctx, tx, block.ID)
-				if err != nil {
-					return err
-				}
 				err = validateSitePrefixIdentity(block, lockedSite, prefix, tenantID)
 				if err != nil {
 					return err
@@ -153,7 +171,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			// roots. Only lifecycle changes produce writes and status details.
 			status := getSitePrefixStatus(prefix.Status.LifecycleState)
 			if status != block.Status {
-				_, err = dao.Update(ctx, tx, cdbm.IPBlockUpdateInput{IPBlockID: block.ID, Status: &status})
+				block, err = dao.Update(ctx, tx, cdbm.IPBlockUpdateInput{IPBlockID: block.ID, Status: &status})
 				if err != nil {
 					return err
 				}
@@ -164,6 +182,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 					return err
 				}
 			}
+			reconciledBlock = block
 			return nil
 		})
 		if err != nil {
@@ -174,6 +193,11 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			}
 			logger.Error().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
 				Msg("failed to reconcile SitePrefix in DB")
+			continue
+		}
+		if reconciledBlock != nil {
+			// Publish the new snapshot only after the per-entry transaction commits.
+			existingBlockMap[id] = reconciledBlock
 		}
 	}
 	logger.Info().Msg("completing activity")
@@ -182,15 +206,14 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 
 // createOrUpdateSitePrefixFromSite creates, adopts, or restores an IP Block for a
 // validated prefix with no active REST identity. The caller holds the Site fabric
-// and active Site row locks, passes its identity lookup result, and keeps this
-// helper and subsequent updates in one tx.
+// and active Site row locks and keeps this helper and subsequent updates in one tx.
 // Adoption preserves the REST ID, IPAM tree, and allocations. Only newly created
 // blocks receive an initial status detail here; ordinary updates belong to the caller.
 // Retired operator roots are skipped for Deleting reports and restored with their
 // IPAM entry for Ready reports. Tenant identities are never restored.
 // A nil block without an error skips a retired root.
 // This helper never removes roots or infers absence.
-func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Context, tx *cdb.Tx, site *cdbm.Site, prefix *corev1.SitePrefix, tenantID *uuid.UUID, existingBlock *cdbm.IPBlock) (*cdbm.IPBlock, error) {
+func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Context, tx *cdb.Tx, site *cdbm.Site, prefix *corev1.SitePrefix, tenantID *uuid.UUID) (*cdbm.IPBlock, error) {
 	id := uuid.MustParse(prefix.GetId().GetValue()) // validated before the transaction
 	cidr := netip.MustParsePrefix(prefix.Config.Prefix)
 	routingType := cdbm.GetSiteFabricIPBlockRoutingType(cidr)
@@ -199,12 +222,27 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 		family = cdbm.IPBlockProtocolVersionV4
 	}
 	dao := cdbm.NewIPBlockDAO(manager.dbSession)
+	// The page had no active match. Recheck under the Site locks for a concurrent
+	// creation or retired identity, following the inventory create/undelete pattern.
+	matches, _, err := dao.GetAll(ctx, tx, cdbm.IPBlockFilterInput{
+		SitePrefixIDs: []uuid.UUID{id}, IncludeDeleted: true,
+	}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+	if err != nil {
+		return nil, err
+	}
+	var existingBlock *cdbm.IPBlock
+	if len(matches) > 0 {
+		existingBlock = &matches[0]
+	}
 	logger := log.With().Str("Activity", "UpdateSitePrefixesInDB").Str("Site ID", site.ID.String()).
 		Str("Site Prefix ID", id.String()).Logger()
 	if existingBlock != nil {
 		err := validateSitePrefixIdentity(existingBlock, site, prefix, tenantID)
 		if err != nil {
 			return nil, err
+		}
+		if existingBlock.Deleted == nil {
+			return dao.GetByIDForUpdate(ctx, tx, existingBlock.ID)
 		}
 		if tenantID != nil {
 			return nil, invalid("Core SitePrefix %s conflicts with its immutable REST identity", id)

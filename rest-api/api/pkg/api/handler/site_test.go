@@ -518,7 +518,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 				createdSiteID, perr := uuid.Parse(rst.ID)
 				require.NoError(t, perr)
 				createdSite, gerr := cdbm.NewSiteDAO(tt.fields.dbSession).GetByID(
-					context.Background(), nil, createdSiteID, nil, false,
+					context.Background(), nil, createdSiteID, nil, false, false,
 				)
 				require.NoError(t, gerr)
 				require.NotNil(t, createdSite.Config)
@@ -1036,13 +1036,13 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 				assert.Contains(t, rec.Body.String(), tt.respMessage)
 			}
 			if tt.verifyVpcSlaac {
-				storedSite, getErr := cdbm.NewSiteDAO(tt.fields.dbSession).GetByID(ctx, nil, tt.args.site.ID, nil, false)
+				storedSite, getErr := cdbm.NewSiteDAO(tt.fields.dbSession).GetByID(ctx, nil, tt.args.site.ID, nil, false, false)
 				require.NoError(t, getErr)
 				require.NotNil(t, storedSite.Config)
 				assert.True(t, storedSite.Config.VpcSlaac)
 			}
 			if tt.verifyFlow {
-				storedSite, getErr := cdbm.NewSiteDAO(tt.fields.dbSession).GetByID(ctx, nil, tt.args.site.ID, nil, false)
+				storedSite, getErr := cdbm.NewSiteDAO(tt.fields.dbSession).GetByID(ctx, nil, tt.args.site.ID, nil, false, false)
 				require.NoError(t, getErr)
 				require.NotNil(t, storedSite.Config)
 				assert.True(t, storedSite.Config.Flow)

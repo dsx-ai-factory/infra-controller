@@ -51,7 +51,7 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 	stDAO := cdbm.NewSiteDAO(mde.dbSession)
 	sdDAO := cdbm.NewStatusDetailDAO(mde.dbSession)
 
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Warn().Err(err).Msg("received DPU Extension Service inventory for unknown or deleted Site")
