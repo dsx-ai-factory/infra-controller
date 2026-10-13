@@ -42,6 +42,8 @@ func TestParseOptions_DefaultsAndEnvironment(t *testing.T) {
 	assert.Equal(t, defaultHealthAddr, opts.healthAddr)
 	assert.Equal(t, defaultHealthStaleAfter, opts.healthStaleAfter)
 	assert.Equal(t, controller.ServiceGranularityDevice, opts.serviceGranularity)
+	assert.Empty(t, opts.caCertFile)
+	assert.False(t, opts.insecureSkipVerify)
 
 	env := map[string]string{
 		"NAMESPACE":            "other",
@@ -68,6 +70,16 @@ func TestParseOptions_DefaultsAndEnvironment(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, opts.sourceListAddr)
 	assert.Empty(t, opts.healthAddr)
+
+	// CA cert: flag takes precedence over environment variable.
+	opts, err = parseOptions([]string{"--ca-cert=/flag/ca.crt"}, envFrom(map[string]string{"CA_CERT_FILE": "/env/ca.crt"}))
+	require.NoError(t, err)
+	assert.Equal(t, "/flag/ca.crt", opts.caCertFile)
+
+	// CA cert: environment variable is used when the flag is absent.
+	opts, err = parseOptions(nil, envFrom(map[string]string{"CA_CERT_FILE": "/env/ca.crt"}))
+	require.NoError(t, err)
+	assert.Equal(t, "/env/ca.crt", opts.caCertFile)
 }
 
 func TestParseOptions_RejectsInvalidValues(t *testing.T) {
