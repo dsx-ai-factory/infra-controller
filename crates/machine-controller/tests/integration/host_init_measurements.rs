@@ -17,7 +17,7 @@
 
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_test_harness::prelude::*;
-use carbide_test_harness::test_support::fixture_config::ManagedHostConfigExt as _;
+use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use chrono::{Duration, Utc};
 use config_version::ConfigVersion;
 use model::machine::{
@@ -43,7 +43,7 @@ async fn setup_waiting_host(env: &Env, age: Duration) -> TestManagedHost {
     let host = env
         .test_harness
         .managed_host_builder(&site_explorer, underlay_segment)
-        .with_config(ManagedHostConfig::zero_dpu())
+        .with_config(ManagedHostConfig::default())
         .build()
         .await
         .0;
