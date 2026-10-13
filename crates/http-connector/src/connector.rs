@@ -293,7 +293,10 @@ impl ConnectingTcpRemote {
         connect_timeout: Option<Duration>,
         metrics: ConnectorMetrics,
     ) -> Self {
-        let connect_timeout = connect_timeout.map(|t| t / addrs.len() as u32);
+        // Family filtering can remove every address. Let
+        // `ConnectingTcpRemote::connect` return its normal connection error
+        // instead of dividing by zero here.
+        let connect_timeout = connect_timeout.map(|t| t / addrs.len().max(1) as u32);
 
         Self {
             addrs,
@@ -305,40 +308,19 @@ impl ConnectingTcpRemote {
 
 impl ConnectingTcpRemote {
     async fn connect(&mut self, config: &Config) -> Result<TcpStream, ConnectError> {
+        let proxy_addr = proxy_address(config)?;
         let mut err = None;
         for addr in &mut self.addrs {
-            if let Some(proxy) = config.socks5_proxy.as_deref() {
-                let proxy_addr = SocketAddr::from_str(proxy)
-                    .map_err(|e| ConnectError::new("Invalid proxy setting", e))?;
-                let connect_start = Instant::now();
-                match connect_with_socks_proxy(
-                    proxy_addr,
-                    addr,
-                    config.clone(),
-                    self.connect_timeout,
-                )?
-                .await
-                {
-                    Ok(tcp) => {
-                        self.metrics.connect_success(proxy_addr, connect_start);
-                        return Ok(tcp);
-                    }
-                    Err(e) => {
-                        self.metrics.connect_error(proxy_addr, connect_start, &e);
-                        err = Some(e);
-                    }
+            let connect_start = Instant::now();
+            let metric_addr = proxy_addr.unwrap_or(addr);
+            match connect_address(addr, proxy_addr, config, self.connect_timeout).await {
+                Ok(tcp) => {
+                    self.metrics.connect_success(metric_addr, connect_start);
+                    return Ok(tcp);
                 }
-            } else {
-                let connect_start = Instant::now();
-                match connect(&addr, config, self.connect_timeout)?.await {
-                    Ok(tcp) => {
-                        self.metrics.connect_success(addr, connect_start);
-                        return Ok(tcp);
-                    }
-                    Err(e) => {
-                        self.metrics.connect_error(addr, connect_start, &e);
-                        err = Some(e);
-                    }
+                Err(e) => {
+                    self.metrics.connect_error(metric_addr, connect_start, &e);
+                    err = Some(e);
                 }
             }
         }
@@ -350,6 +332,30 @@ impl ConnectingTcpRemote {
                 std::io::Error::new(std::io::ErrorKind::NotConnected, "Network unreachable"),
             )),
         }
+    }
+}
+
+/// Reject malformed proxy configuration before attempting individual addresses.
+fn proxy_address(config: &Config) -> Result<Option<SocketAddr>, ConnectError> {
+    config
+        .socks5_proxy
+        .as_deref()
+        .map(SocketAddr::from_str)
+        .transpose()
+        .map_err(|error| ConnectError::new("invalid proxy setting", error))
+}
+
+/// `connect_address` keeps setup and connection failures in the same attempt,
+/// so either failure lets the caller try the next eligible address.
+async fn connect_address(
+    addr: SocketAddr,
+    proxy_addr: Option<SocketAddr>,
+    config: &Config,
+    timeout: Option<Duration>,
+) -> Result<TcpStream, ConnectError> {
+    match proxy_addr {
+        Some(proxy) => connect_with_socks_proxy(proxy, addr, config.clone(), timeout)?.await,
+        None => connect(&addr, config, timeout)?.await,
     }
 }
 
@@ -553,6 +559,20 @@ impl<'a> ConnectingTcp<'a> {
                 config,
             }
         } else {
+            // A single source family must also restrict sequential direct
+            // connections. Otherwise fallback could connect without that bind.
+            // With both families or neither configured, keep the original order.
+            let remote_addrs = if config.socks5_proxy.is_none()
+                && matches!(
+                    (config.local_address_ipv4, config.local_address_ipv6),
+                    (Some(_), None) | (None, Some(_))
+                ) {
+                remote_addrs
+                    .split_by_preference(config.local_address_ipv4, config.local_address_ipv6)
+                    .0
+            } else {
+                remote_addrs
+            };
             ConnectingTcp {
                 preferred: ConnectingTcpRemote::new(remote_addrs, config.connect_timeout, metrics),
                 fallback: None,
@@ -1011,5 +1031,329 @@ impl ForgeHttpConnector {
         })
         .with_config(retry_config)
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    /// Setup failure counts as an attempt in both modes; sequential mode must
+    /// also continue through the same address list to reach IPv6.
+    #[tokio::test]
+    async fn ipv4_bind_failure_still_tries_ipv6() {
+        for (scenario, happy_eyeballs_timeout) in [
+            ("sequential", None),
+            ("Happy Eyeballs", Some(Duration::from_millis(50))),
+        ] {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
+                    .await
+                    .expect("bind IPv6 fixture");
+                let ipv6 = listener.local_addr().expect("IPv6 fixture address");
+                let ipv4 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), ipv6.port());
+                let mut connector = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
+                connector.set_local_addresses(Ipv4Addr::new(192, 0, 2, 254), Ipv6Addr::LOCALHOST);
+                connector.set_connect_timeout(Some(Duration::from_secs(2)));
+                connector.set_happy_eyeballs_timeout(happy_eyeballs_timeout);
+                let mut metrics = connector.metrics.clone();
+
+                // Prove setup itself fails before accepting IPv6 recovery as
+                // evidence; a later connection refusal would exercise another path.
+                let setup_error = match connect(&ipv4, &connector.config, None) {
+                    Err(error) => error,
+                    Ok(_) => panic!("{scenario}: fixture must fail during socket setup"),
+                };
+                assert_eq!(
+                    setup_error.msg.as_ref(),
+                    "tcp bind local error",
+                    "{scenario}"
+                );
+
+                let client = ConnectingTcp::new(
+                    vec![ipv4, ipv6].into(),
+                    &connector.config,
+                    connector.metrics.clone(),
+                )
+                .connect()
+                .await
+                .expect(scenario);
+                assert_eq!(
+                    client.peer_addr().expect("connected address"),
+                    ipv6,
+                    "{scenario}"
+                );
+                let (server, _) = listener.accept().await.expect("accept IPv6 connection");
+                assert_eq!(
+                    server.peer_addr().expect("accepted client address").ip(),
+                    IpAddr::V6(Ipv6Addr::LOCALHOST),
+                    "{scenario}"
+                );
+                assert_eq!(metrics.get_total_attempts(), 2, "{scenario}");
+                assert_eq!(metrics.get_total_errors(), 1, "{scenario}");
+                assert_eq!(metrics.get_total_successes(), 1, "{scenario}");
+                assert_eq!(metrics.get_errors_for_addr(&ipv4), Some(1), "{scenario}");
+                assert_eq!(metrics.get_successes_for_addr(&ipv6), Some(1), "{scenario}");
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{scenario}: connection timed out"));
+        }
+    }
+
+    /// A reachable IPv6 peer must not bypass the caller's IPv4-only source bind.
+    #[tokio::test]
+    async fn sequential_bind_failure_does_not_escape_the_source_family() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
+                .await
+                .expect("bind IPv6 fixture");
+            let ipv6 = listener.local_addr().expect("IPv6 fixture address");
+            let ipv4 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), ipv6.port());
+            let config = Config {
+                local_address_ipv4: Some(Ipv4Addr::new(192, 0, 2, 254)),
+                connect_timeout: Some(Duration::from_secs(2)),
+                ..Config::default()
+            };
+            let mut metrics = ConnectorMetrics::default();
+
+            // Prove IPv6 is reachable so filtering, not a network failure,
+            // accounts for rejecting the opposite-family address below.
+            let reachable = TcpStream::connect(ipv6).await.expect("reach IPv6 fixture");
+            let (accepted, _) = listener.accept().await.expect("accept IPv6 control");
+            drop((reachable, accepted));
+            let setup_error = match connect(&ipv4, &config, None) {
+                Err(error) => error,
+                Ok(_) => panic!("fixture must fail during IPv4 socket setup"),
+            };
+            assert_eq!(setup_error.msg.as_ref(), "tcp bind local error");
+
+            let error = ConnectingTcp::new(vec![ipv4, ipv6].into(), &config, metrics.clone())
+                .connect()
+                .await
+                .expect_err("IPv6 is ineligible with only an IPv4 source configured");
+            assert_eq!(error.msg.as_ref(), "tcp bind local error");
+            assert_eq!(metrics.get_total_attempts(), 1);
+            assert_eq!(metrics.get_errors_for_addr(&ipv4), Some(1));
+            assert_eq!(metrics.get_attempts_for_addr(&ipv6), None);
+        })
+        .await
+        .expect("source-family restriction test timed out");
+    }
+
+    /// Awaited TCP refusal must preserve its source when exhausted and allow
+    /// the next address in the same family when one remains.
+    #[tokio::test]
+    async fn tcp_refusal_preserves_the_error_and_tries_a_later_address() {
+        for (scenario, happy_eyeballs_timeout) in [
+            ("sequential", None),
+            ("Happy Eyeballs", Some(Duration::from_millis(50))),
+        ] {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                // Keep this port bound but not listening. Releasing a listener
+                // would let another process claim the port before we connect.
+                let refusing_socket = TcpSocket::new_v4().expect("create refusing socket");
+                refusing_socket
+                    .bind((Ipv4Addr::LOCALHOST, 0).into())
+                    .expect("bind refusing socket");
+                let refused = refusing_socket.local_addr().expect("refusing address");
+                let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                    .await
+                    .expect("bind accepting socket");
+                let accepting = listener.local_addr().expect("accepting address");
+                let config = Config {
+                    happy_eyeballs_timeout,
+                    connect_timeout: Some(Duration::from_secs(2)),
+                    ..Config::default()
+                };
+                let error =
+                    ConnectingTcp::new(vec![refused].into(), &config, ConnectorMetrics::default())
+                        .connect()
+                        .await
+                        .expect_err("the only address refuses TCP connections");
+                assert_eq!(error.msg.as_ref(), "tcp connect error", "{scenario}");
+                assert_eq!(
+                    error
+                        .source()
+                        .and_then(|source| source.downcast_ref::<io::Error>())
+                        .map(io::Error::kind),
+                    Some(io::ErrorKind::ConnectionRefused),
+                    "{scenario}"
+                );
+
+                let mut metrics = ConnectorMetrics::default();
+                let client =
+                    ConnectingTcp::new(vec![refused, accepting].into(), &config, metrics.clone())
+                        .connect()
+                        .await
+                        .expect(scenario);
+                assert_eq!(client.peer_addr().expect("connected address"), accepting);
+                let (_server, _) = listener.accept().await.expect("accept later connection");
+                assert_eq!(metrics.get_total_attempts(), 2, "{scenario}");
+                assert_eq!(metrics.get_total_errors(), 1, "{scenario}");
+                assert_eq!(metrics.get_total_successes(), 1, "{scenario}");
+                assert_eq!(metrics.get_errors_for_addr(&refused), Some(1), "{scenario}");
+                assert_eq!(
+                    metrics.get_successes_for_addr(&accepting),
+                    Some(1),
+                    "{scenario}"
+                );
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{scenario}: refusal recovery timed out"));
+        }
+    }
+
+    /// SOCKS target rejection advances in target order, while TCP metrics stay
+    /// attributed to the proxy address rather than either target.
+    #[tokio::test]
+    async fn socks_rejection_tries_the_next_target_with_proxy_metrics() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("bind SOCKS fixture");
+            let proxy = listener.local_addr().expect("SOCKS fixture address");
+            let targets = [
+                std::net::SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 443),
+                std::net::SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 2), 443),
+            ];
+            let config = Config {
+                socks5_proxy: Some(proxy.to_string()),
+                connect_timeout: Some(Duration::from_secs(2)),
+                ..Config::default()
+            };
+            let mut metrics = ConnectorMetrics::default();
+            let serve_proxy = async {
+                // The fixture implements only no-auth SOCKS5 IPv4 CONNECT.
+                // Reply 5 rejects the first target; reply 0 accepts the second.
+                for (target, reply) in targets.iter().zip([5, 0]) {
+                    let (mut stream, _) = listener.accept().await.expect("accept proxy connection");
+                    let mut greeting = [0; 3];
+                    stream
+                        .read_exact(&mut greeting)
+                        .await
+                        .expect("SOCKS greeting");
+                    assert_eq!(greeting, [5, 1, 0]);
+                    stream
+                        .write_all(&[5, 0])
+                        .await
+                        .expect("select no authentication");
+
+                    let mut request = [0; 10];
+                    stream
+                        .read_exact(&mut request)
+                        .await
+                        .expect("SOCKS CONNECT");
+                    assert_eq!(&request[..4], &[5, 1, 0, 1]);
+                    assert_eq!(&request[4..8], &target.ip().octets());
+                    assert_eq!(&request[8..], &target.port().to_be_bytes());
+                    stream
+                        .write_all(&[5, reply, 0, 1, 127, 0, 0, 1, 0, 0])
+                        .await
+                        .expect("reply to SOCKS CONNECT");
+                    if reply == 0 {
+                        stream
+                            .write_all(b"proxy")
+                            .await
+                            .expect("write proxy payload");
+                    }
+                }
+            };
+            let addresses = targets.into_iter().map(SocketAddr::V4).collect::<Vec<_>>();
+            let connect = ConnectingTcp::new(addresses.into(), &config, metrics.clone()).connect();
+            let ((), client) = tokio::join!(serve_proxy, connect);
+            let mut client = client.expect("second SOCKS target succeeds");
+            assert_eq!(client.peer_addr().expect("proxy peer address"), proxy);
+            let mut payload = [0; 5];
+            client
+                .read_exact(&mut payload)
+                .await
+                .expect("read proxy payload");
+            assert_eq!(&payload, b"proxy");
+            assert_eq!(metrics.get_total_attempts(), 2);
+            assert_eq!(metrics.get_total_errors(), 1);
+            assert_eq!(metrics.get_total_successes(), 1);
+            assert_eq!(metrics.get_attempts_for_addr(&proxy), Some(2));
+            assert_eq!(metrics.get_errors_for_addr(&proxy), Some(1));
+            assert_eq!(metrics.get_successes_for_addr(&proxy), Some(1));
+            for target in targets {
+                assert_eq!(metrics.get_attempts_for_addr(&SocketAddr::V4(target)), None);
+            }
+        })
+        .await
+        .expect("SOCKS target recovery timed out");
+    }
+
+    /// Family filtering can leave no destinations even with a finite timeout;
+    /// this must report absence without creating or recording a socket attempt.
+    #[tokio::test]
+    async fn empty_filtered_addresses_return_an_error_without_an_attempt() {
+        let mut connector = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
+        connector.set_local_address(Some(Ipv4Addr::LOCALHOST.into()));
+        connector.set_happy_eyeballs_timeout(Some(Duration::from_millis(50)));
+        connector.set_connect_timeout(Some(Duration::from_secs(2)));
+        let mut metrics = connector.metrics.clone();
+        let addresses = vec!["[::1]:443".parse().expect("IPv6 fixture")].into();
+        let error = ConnectingTcp::new(addresses, &connector.config, connector.metrics.clone())
+            .connect()
+            .await
+            .expect_err("no address matches the local IPv4 binding");
+        assert_eq!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<io::Error>())
+                .map(io::Error::kind),
+            Some(io::ErrorKind::NotConnected)
+        );
+        assert_eq!(metrics.get_total_attempts(), 0);
+    }
+
+    /// Proxy parsing precedes address exhaustion, including when no destination
+    /// survives filtering, so callers retain the configuration error.
+    #[tokio::test]
+    async fn invalid_proxy_fails_without_attempting_addresses() {
+        for (scenario, addresses, local_address_ipv4, happy_eyeballs_timeout) in [
+            (
+                "nonempty addresses",
+                vec![
+                    "127.0.0.1:443".parse().expect("IPv4 fixture"),
+                    "[::1]:443".parse().expect("IPv6 fixture"),
+                ],
+                None,
+                None,
+            ),
+            (
+                "empty filtered addresses",
+                vec!["[::1]:443".parse().expect("IPv6 fixture")],
+                Some(Ipv4Addr::LOCALHOST),
+                Some(Duration::from_millis(50)),
+            ),
+        ] {
+            let config = Config {
+                socks5_proxy: Some("invalid-proxy".to_string()),
+                local_address_ipv4,
+                happy_eyeballs_timeout,
+                ..Config::default()
+            };
+            let mut metrics = ConnectorMetrics::default();
+            let connection =
+                ConnectingTcp::new(addresses.into(), &config, metrics.clone()).connect();
+            tokio::pin!(connection);
+            let Poll::Ready(result) = futures_util::poll!(connection) else {
+                panic!("{scenario}: invalid proxy must fail before connecting");
+            };
+            let error = result.expect_err("malformed proxy must be rejected");
+            assert_eq!(error.msg.as_ref(), "invalid proxy setting", "{scenario}");
+            assert!(
+                error
+                    .source()
+                    .expect("proxy parse error")
+                    .is::<std::net::AddrParseError>(),
+                "{scenario}"
+            );
+            assert_eq!(metrics.get_total_attempts(), 0, "{scenario}");
+        }
     }
 }
