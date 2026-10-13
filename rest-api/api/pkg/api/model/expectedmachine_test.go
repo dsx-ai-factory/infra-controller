@@ -47,8 +47,8 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress: "00:11:22:33:44:55", ChassisSerialNumber: validChassisSerial,
 				Interfaces: APIExpectedMachineInterfaces{
-					{MacAddress: "00:11:22:33:44:55", Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc)},
-					{MacAddress: "00:11:22:33:44:55", Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc)},
+					{MacAddress: cutil.GetPtr("00:11:22:33:44:55"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc)},
+					{MacAddress: cutil.GetPtr("00:11:22:33:44:55"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc)},
 				},
 			},
 			expectErr: true,
@@ -354,24 +354,26 @@ func TestAPIExpectedMachineInterface_Validate(t *testing.T) {
 		{
 			name: "valid CX9 interface",
 			value: APIExpectedMachineInterface{
-				MacAddress: "02:00:00:00:00:09",
+				MacAddress: cutil.GetPtr("02:00:00:00:00:09"),
 				NicType:    cutil.GetPtr("CX9"),
 				FixedIP:    cutil.GetPtr("2001:db8::9"),
 			},
 		},
-		{name: "invalid MAC", value: APIExpectedMachineInterface{MacAddress: "invalid"}, wantErr: "macAddress"},
-		{name: "non-six-octet MAC", value: APIExpectedMachineInterface{MacAddress: "01:23:45:67:89:ab:cd:ef"}, wantErr: "six colon- or hyphen-separated octets"},
-		{name: "invalid fixed IP", value: APIExpectedMachineInterface{MacAddress: "02:00:00:00:00:09", FixedIP: cutil.GetPtr("invalid")}, wantErr: "FixedIP"},
-		{name: "whitespace NIC type", value: APIExpectedMachineInterface{MacAddress: "02:00:00:00:00:09", NicType: cutil.GetPtr(" ")}, wantErr: "NicType"},
-		{name: "invalid gateway", value: APIExpectedMachineInterface{MacAddress: "02:00:00:00:00:09", FixedGateway: cutil.GetPtr("invalid")}, wantErr: "fixedGateway"},
-		{name: "unknown role", value: APIExpectedMachineInterface{MacAddress: "02:00:00:00:00:09", Role: cutil.GetPtr(cdbm.ExpectedInterfaceRole("invalid"))}, wantErr: "role"},
-		{name: "empty segment", value: APIExpectedMachineInterface{MacAddress: "02:00:00:00:00:09", NetworkSegmentType: cutil.GetPtr(cdbm.ExpectedInterfaceNetworkSegmentType(""))}, wantErr: "networkSegmentType"},
-		{name: "unknown allocation", value: APIExpectedMachineInterface{MacAddress: "02:00:00:00:00:09", IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocation("invalid"))}, wantErr: "ipAllocation"},
-		{name: "Fixed requires address", value: APIExpectedMachineInterface{MacAddress: "02:00:00:00:00:09", IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed)}, wantErr: "fixedIp"},
-		{name: "Dynamic forbids address", value: APIExpectedMachineInterface{MacAddress: "02:00:00:00:00:09", IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationDynamic), FixedIP: cutil.GetPtr("192.0.2.9")}, wantErr: "fixedIp"},
-		{name: "DPU forbids primary", value: APIExpectedMachineInterface{MacAddress: "02:00:00:00:00:09", Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuOs), Primary: cutil.GetPtr(false)}, wantErr: "primary"},
-		{name: "HostBmc forbids primary true", value: APIExpectedMachineInterface{MacAddress: "02:00:00:00:00:09", Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc), Primary: cutil.GetPtr(true)}, wantErr: "primary"},
-		{name: "HostBmc accepts primary false", value: APIExpectedMachineInterface{MacAddress: "02:00:00:00:00:09", Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc), Primary: cutil.GetPtr(false)}},
+		{name: "invalid MAC", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("invalid")}, wantErr: "macAddress"},
+		{name: "non-six-octet MAC", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("01:23:45:67:89:ab:cd:ef")}, wantErr: "six colon- or hyphen-separated octets"},
+		{name: "invalid fixed IP", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), FixedIP: cutil.GetPtr("invalid")}, wantErr: "FixedIP"},
+		{name: "whitespace NIC type", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), NicType: cutil.GetPtr(" ")}, wantErr: "NicType"},
+		{name: "invalid gateway", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), FixedGateway: cutil.GetPtr("invalid")}, wantErr: "fixedGateway"},
+		{name: "unknown role", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRole("invalid"))}, wantErr: "role"},
+		{name: "empty segment", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), NetworkSegmentType: cutil.GetPtr(cdbm.ExpectedInterfaceNetworkSegmentType(""))}, wantErr: "networkSegmentType"},
+		{name: "unknown allocation", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocation("invalid"))}, wantErr: "ipAllocation"},
+		{name: "Fixed requires address", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed)}, wantErr: "fixedIp"},
+		{name: "Dynamic forbids address", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationDynamic), FixedIP: cutil.GetPtr("192.0.2.9")}, wantErr: "fixedIp"},
+		{name: "DPU forbids primary", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuOs), Primary: cutil.GetPtr(false)}, wantErr: "primary"},
+		{name: "HostBmc forbids primary true", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc), Primary: cutil.GetPtr(true)}, wantErr: "primary"},
+		{name: "HostBmc accepts primary false", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc), Primary: cutil.GetPtr(false)}},
+		{name: "physical name without MAC", value: APIExpectedMachineInterface{PhysicalIfname: cutil.GetPtr("C1-1-L1")}},
+		{name: "neither MAC nor physical name", value: APIExpectedMachineInterface{NicType: cutil.GetPtr("CX9")}, wantErr: "either macAddress or physicalIfname is required"},
 	}
 
 	for _, test := range tests {
@@ -393,43 +395,43 @@ func TestAPIExpectedMachineInterfaces_Validate(t *testing.T) {
 		wantErr    string
 	}{
 		{name: "one HostBmc and one primary", interfaces: APIExpectedMachineInterfaces{
-			{MacAddress: "02:00:00:00:00:01", Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc)},
-			{MacAddress: "02:00:00:00:00:02", Primary: cutil.GetPtr(true)},
-			{MacAddress: "02:00:00:00:00:03", Primary: cutil.GetPtr(false)},
+			{MacAddress: cutil.GetPtr("02:00:00:00:00:01"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc)},
+			{MacAddress: cutil.GetPtr("02:00:00:00:00:02"), Primary: cutil.GetPtr(true)},
+			{MacAddress: cutil.GetPtr("02:00:00:00:00:03"), Primary: cutil.GetPtr(false)},
 		}},
 		{name: "duplicate HostBmc", interfaces: APIExpectedMachineInterfaces{
-			{MacAddress: "02:00:00:00:00:01", Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc)},
-			{MacAddress: "02:00:00:00:00:01", Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc)},
+			{MacAddress: cutil.GetPtr("02:00:00:00:00:01"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc)},
+			{MacAddress: cutil.GetPtr("02:00:00:00:00:01"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc)},
 		}, wantErr: "at most one HostBmc"},
 		{name: "multiple primaries including omitted role", interfaces: APIExpectedMachineInterfaces{
-			{MacAddress: "02:00:00:00:00:01", Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHost), Primary: cutil.GetPtr(true)},
-			{MacAddress: "02:00:00:00:00:02", Primary: cutil.GetPtr(true)},
+			{MacAddress: cutil.GetPtr("02:00:00:00:00:01"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHost), Primary: cutil.GetPtr(true)},
+			{MacAddress: cutil.GetPtr("02:00:00:00:00:02"), Primary: cutil.GetPtr(true)},
 		}, wantErr: "at most one interface may set primary"},
 		{name: "dual stack same MAC with different spelling", interfaces: APIExpectedMachineInterfaces{
-			{MacAddress: "02:aa:bb:cc:dd:ee", FixedIP: cutil.GetPtr("192.0.2.9")},
-			{MacAddress: "02-AA-BB-CC-DD-EE", FixedIP: cutil.GetPtr("2001:db8::9")},
+			{MacAddress: cutil.GetPtr("02:aa:bb:cc:dd:ee"), FixedIP: cutil.GetPtr("192.0.2.9")},
+			{MacAddress: cutil.GetPtr("02-AA-BB-CC-DD-EE"), FixedIP: cutil.GetPtr("2001:db8::9")},
 		}},
-		{name: "invalid entry still rejected", interfaces: APIExpectedMachineInterfaces{{MacAddress: "invalid"}}, wantErr: "macAddress"},
+		{name: "invalid entry still rejected", interfaces: APIExpectedMachineInterfaces{{MacAddress: cutil.GetPtr("invalid")}}, wantErr: "macAddress"},
 		{name: "duplicate IPv4 with normalized MAC", interfaces: APIExpectedMachineInterfaces{
-			{MacAddress: "02:aa:bb:cc:dd:ee", FixedIP: cutil.GetPtr("192.0.2.9")},
-			{MacAddress: "02-AA-BB-CC-DD-EE", FixedIP: cutil.GetPtr("192.0.2.10")},
+			{MacAddress: cutil.GetPtr("02:aa:bb:cc:dd:ee"), FixedIP: cutil.GetPtr("192.0.2.9")},
+			{MacAddress: cutil.GetPtr("02-AA-BB-CC-DD-EE"), FixedIP: cutil.GetPtr("192.0.2.10")},
 		}},
 		{name: "duplicate IPv6", interfaces: APIExpectedMachineInterfaces{
-			{MacAddress: "02:aa:bb:cc:dd:ee", FixedIP: cutil.GetPtr("2001:db8::9")},
-			{MacAddress: "02:aa:bb:cc:dd:ee", FixedIP: cutil.GetPtr("2001:db8::10")},
+			{MacAddress: cutil.GetPtr("02:aa:bb:cc:dd:ee"), FixedIP: cutil.GetPtr("2001:db8::9")},
+			{MacAddress: cutil.GetPtr("02:aa:bb:cc:dd:ee"), FixedIP: cutil.GetPtr("2001:db8::10")},
 		}},
 		{name: "omitted fixed IP has no family", interfaces: APIExpectedMachineInterfaces{
-			{MacAddress: "02:aa:bb:cc:dd:ee"},
-			{MacAddress: "02:aa:bb:cc:dd:ee"},
-			{MacAddress: "02:aa:bb:cc:dd:ee", FixedIP: cutil.GetPtr("192.0.2.9")},
+			{MacAddress: cutil.GetPtr("02:aa:bb:cc:dd:ee")},
+			{MacAddress: cutil.GetPtr("02:aa:bb:cc:dd:ee")},
+			{MacAddress: cutil.GetPtr("02:aa:bb:cc:dd:ee"), FixedIP: cutil.GetPtr("192.0.2.9")},
 		}},
 		{name: "zero MAC CX9 declarations with distinct IPv4 addresses", interfaces: APIExpectedMachineInterfaces{
-			{MacAddress: "00:00:00:00:00:00", NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.9")},
-			{MacAddress: "00:00:00:00:00:00", NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.10")},
+			{MacAddress: cutil.GetPtr("00:00:00:00:00:00"), NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.9")},
+			{MacAddress: cutil.GetPtr("00:00:00:00:00:00"), NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.10")},
 		}},
 		{name: "different MACs may declare the same family", interfaces: APIExpectedMachineInterfaces{
-			{MacAddress: "02:aa:bb:cc:dd:ee", FixedIP: cutil.GetPtr("192.0.2.9")},
-			{MacAddress: "02:aa:bb:cc:dd:ef", FixedIP: cutil.GetPtr("192.0.2.10")},
+			{MacAddress: cutil.GetPtr("02:aa:bb:cc:dd:ee"), FixedIP: cutil.GetPtr("192.0.2.9")},
+			{MacAddress: cutil.GetPtr("02:aa:bb:cc:dd:ef"), FixedIP: cutil.GetPtr("192.0.2.10")},
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -447,13 +449,13 @@ func TestAPIExpectedMachineInterface_ToDBModel(t *testing.T) {
 	t.Run("canonical MAC spelling", func(t *testing.T) {
 		for _, mac := range []string{"02:aa:bb:cc:dd:ee", "02-AA-BB-CC-DD-EE", "02:aa-bb:cc-dd:ee", "02:AA:BB:CC:DD:EE"} {
 			t.Run(mac, func(t *testing.T) {
-				value := APIExpectedMachineInterface{MacAddress: mac}
+				value := APIExpectedMachineInterface{MacAddress: cutil.GetPtr(mac)}
 				require.NoError(t, value.Validate())
 				stored := value.ToDBModel()
 				require.NotNil(t, stored.MacAddress)
 				assert.Equal(t, "02:AA:BB:CC:DD:EE", *stored.MacAddress)
 				assert.Equal(t, stored.MacAddress, stored.ToProto().MacAddress)
-				assert.Equal(t, *stored.MacAddress, NewAPIExpectedMachineInterface(stored).MacAddress)
+				assert.Equal(t, stored.MacAddress, NewAPIExpectedMachineInterface(stored).MacAddress)
 			})
 		}
 	})
@@ -469,6 +471,9 @@ func TestAPIExpectedMachineInterface_ToDBModel(t *testing.T) {
 			IpAllocation:       corev1.ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_FIXED.Enum(),
 		}},
 		{name: "legacy declaration without new fields", input: &corev1.ExpectedHostNic{MacAddress: cutil.GetPtr("02:00:00:00:00:09")}},
+		{name: "physical and logical interface names survive", input: &corev1.ExpectedHostNic{
+			MacAddress: cutil.GetPtr("02:00:00:00:00:09"), PhysicalIfname: cutil.GetPtr("C1-1-L1"), LogicalIfname: cutil.GetPtr("rail0"),
+		}},
 		{name: "explicit zero values survive", input: &corev1.ExpectedHostNic{
 			MacAddress: cutil.GetPtr("02:00:00:00:00:09"), Primary: cutil.GetPtr(false),
 			NetworkSegmentType: corev1.NetworkSegmentType_TENANT.Enum(),
@@ -560,7 +565,7 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 			wantLabelsJSON:     `{"env":"test","zone":"us-west-1"}`,
 			wantSerialsJSON:    `["DPU002","DPU001"]`,
 			interfaces:         []cdbm.ExpectedMachineInterface{{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.9")}},
-			wantInterfacesJSON: `[{"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9","fixedMask":null,"fixedGateway":null,"primary":null,"networkSegmentType":null,"role":null,"ipAllocation":null}]`,
+			wantInterfacesJSON: `[{"macAddress":"02:00:00:00:00:09","physicalIfname":null,"logicalIfname":null,"nicType":"CX9","fixedIp":"192.0.2.9","fixedMask":null,"fixedGateway":null,"primary":null,"networkSegmentType":null,"role":null,"ipAllocation":null}]`,
 		},
 		{
 			desc:         "stored DPF false is returned",
@@ -764,8 +769,8 @@ func TestAPIExpectedMachineUpdateRequest_Validate(t *testing.T) {
 		{
 			desc: "reject multiple primary interfaces",
 			obj: APIExpectedMachineUpdateRequest{Interfaces: APIExpectedMachineInterfaces{
-				{MacAddress: "02:00:00:00:00:01", Primary: cutil.GetPtr(true)},
-				{MacAddress: "02:00:00:00:00:02", Primary: cutil.GetPtr(true)},
+				{MacAddress: cutil.GetPtr("02:00:00:00:00:01"), Primary: cutil.GetPtr(true)},
+				{MacAddress: cutil.GetPtr("02:00:00:00:00:02"), Primary: cutil.GetPtr(true)},
 			}},
 			expectErr: true,
 		},
@@ -1591,13 +1596,14 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 		{name: "empty lifecycle profile preserves policy", body: `{"hostLifecycleProfile":{}}`},
 		{name: "interfaces replace Core host NICs", body: `{"interfaces":[{"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9"}]}`, wantPaths: []string{"host_nics"}},
 		{name: "empty interfaces clear Core host NICs", body: `{"interfaces":[]}`, wantPaths: []string{"host_nics"}},
+		{name: "server name selects server_name path", body: `{"serverName":"server-1"}`, wantPaths: []string{"server_name"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var request APIExpectedMachineUpdateRequest
 			require.NoError(t, json.Unmarshal([]byte(test.body), &request))
 			require.NoError(t, request.Validate())
-			patch := request.ToProto(&cdbm.ExpectedMachine{SlotID: cutil.GetPtr(int32(0)), IsDpfEnabled: cutil.GetPtr(false), HostLifecycleProfile: cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)}})
+			patch := request.ToProto(&cdbm.ExpectedMachine{SlotID: cutil.GetPtr(int32(0)), IsDpfEnabled: cutil.GetPtr(false), ServerName: cutil.GetPtr("server-1"), HostLifecycleProfile: cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)}})
 			encoded, err := protojson.Marshal(patch)
 			require.NoError(t, err)
 			var decoded corev1.PatchExpectedMachineRequest
@@ -1619,6 +1625,9 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 			assert.Equal(t, request.BmcIpAddress, decoded.GetExpectedMachine().BmcIpAddress)
 			if request.BmcIpAddress != nil && *request.BmcIpAddress != "" {
 				assert.Equal(t, corev1.BmcIpAllocationType_BMC_IP_ALLOCATION_TYPE_AUTO, decoded.GetExpectedMachine().GetBmcIpAllocation())
+			}
+			if request.ServerName != nil {
+				assert.Equal(t, "server-1", decoded.GetExpectedMachine().GetServerName())
 			}
 			if request.Interfaces != nil {
 				require.Len(t, decoded.GetExpectedMachine().GetHostNics(), len(request.Interfaces))

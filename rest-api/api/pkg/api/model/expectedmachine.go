@@ -25,7 +25,9 @@ var expectedMachineInterfaceMACRegexp = regexp.MustCompile(`^([0-9A-Fa-f]{2}[:-]
 // APIExpectedMachineInterface describes REST-managed interface intent for an
 // Expected Machine. Core consumes this shape through ExpectedMachine.host_nics.
 type APIExpectedMachineInterface struct {
-	MacAddress         string                                    `json:"macAddress"`
+	MacAddress         *string                                   `json:"macAddress"`
+	PhysicalIfname     *string                                   `json:"physicalIfname"`
+	LogicalIfname      *string                                   `json:"logicalIfname"`
 	NicType            *string                                   `json:"nicType"`
 	FixedIP            *string                                   `json:"fixedIp"`
 	FixedMask          *string                                   `json:"fixedMask"`
@@ -40,8 +42,17 @@ type APIExpectedMachineInterface struct {
 func (i APIExpectedMachineInterface) Validate() error {
 	err := validation.ValidateStruct(&i,
 		validation.Field(&i.MacAddress,
-			validation.Required.Error(validationErrorValueRequired),
-			validation.Match(expectedMachineInterfaceMACRegexp).Error("must be a MAC address of six colon- or hyphen-separated octets")),
+			validation.NilOrNotEmpty.Error("MacAddress cannot be empty"),
+			validation.When(i.MacAddress != nil,
+				validation.Match(expectedMachineInterfaceMACRegexp).Error("must be a MAC address of six colon- or hyphen-separated octets"))),
+		validation.Field(&i.PhysicalIfname,
+			validation.NilOrNotEmpty.Error("PhysicalIfname cannot be empty"),
+			validation.When(i.PhysicalIfname != nil,
+				validation.Match(util.NotAllWhitespaceRegexp).Error("PhysicalIfname consists only of whitespace"))),
+		validation.Field(&i.LogicalIfname,
+			validation.NilOrNotEmpty.Error("LogicalIfname cannot be empty"),
+			validation.When(i.LogicalIfname != nil,
+				validation.Match(util.NotAllWhitespaceRegexp).Error("LogicalIfname consists only of whitespace"))),
 		validation.Field(&i.NicType,
 			validation.NilOrNotEmpty.Error("NicType cannot be empty"),
 			validation.When(i.NicType != nil,
@@ -68,6 +79,12 @@ func (i APIExpectedMachineInterface) Validate() error {
 	)
 	if err != nil {
 		return err
+	}
+	// An interface must be identifiable. A MAC address or a physical interface
+	// name (or both) is required; a logical name alone is insufficient. Core
+	// enforces the same contract on ExpectedInterface.
+	if i.MacAddress == nil && i.PhysicalIfname == nil {
+		return validation.Errors{"macAddress": errors.New("either macAddress or physicalIfname is required")}
 	}
 	if i.IPAllocation != nil {
 		switch *i.IPAllocation {
@@ -96,9 +113,15 @@ func (i APIExpectedMachineInterface) Validate() error {
 
 // ToDBModel converts the public interface shape to its persisted form.
 func (i APIExpectedMachineInterface) ToDBModel() cdbm.ExpectedMachineInterface {
-	macAddress := strings.ToUpper(strings.ReplaceAll(i.MacAddress, "-", ":"))
+	var macAddress *string
+	if i.MacAddress != nil {
+		normalized := strings.ToUpper(strings.ReplaceAll(*i.MacAddress, "-", ":"))
+		macAddress = &normalized
+	}
 	return cdbm.ExpectedMachineInterface{
-		MacAddress:         &macAddress,
+		MacAddress:         macAddress,
+		PhysicalIfname:     i.PhysicalIfname,
+		LogicalIfname:      i.LogicalIfname,
 		NicType:            i.NicType,
 		FixedIP:            i.FixedIP,
 		FixedMask:          i.FixedMask,
@@ -113,12 +136,10 @@ func (i APIExpectedMachineInterface) ToDBModel() cdbm.ExpectedMachineInterface {
 // NewAPIExpectedMachineInterface converts persisted interface intent to the
 // public REST shape.
 func NewAPIExpectedMachineInterface(i cdbm.ExpectedMachineInterface) APIExpectedMachineInterface {
-	macAddress := ""
-	if i.MacAddress != nil {
-		macAddress = *i.MacAddress
-	}
 	return APIExpectedMachineInterface{
-		MacAddress:         macAddress,
+		MacAddress:         i.MacAddress,
+		PhysicalIfname:     i.PhysicalIfname,
+		LogicalIfname:      i.LogicalIfname,
 		NicType:            i.NicType,
 		FixedIP:            i.FixedIP,
 		FixedMask:          i.FixedMask,
@@ -243,6 +264,8 @@ type APIExpectedMachineCreateRequest struct {
 	Model *string `json:"model"`
 	// Description is the optional description of the expected machine
 	Description *string `json:"description"`
+	// ServerName is the optional server name advertised to switches via LLDP
+	ServerName *string `json:"serverName"`
 	// SlotID is the optional slot identifier
 	SlotID *int32 `json:"slotId"`
 	// TrayIdx is the optional tray index
@@ -296,6 +319,8 @@ func (emcr *APIExpectedMachineCreateRequest) Validate() error {
 			validation.NilOrNotEmpty.Error("Model cannot be empty")),
 		validation.Field(&emcr.Description,
 			validation.NilOrNotEmpty.Error("Description cannot be empty")),
+		validation.Field(&emcr.ServerName,
+			validation.NilOrNotEmpty.Error("ServerName cannot be empty")),
 	)
 
 	if err != nil {
@@ -344,6 +369,8 @@ type APIExpectedMachineUpdateRequest struct {
 	Model *string `json:"model"`
 	// Description is the optional description of the expected machine
 	Description *string `json:"description"`
+	// ServerName is the optional server name advertised to switches via LLDP
+	ServerName *string `json:"serverName"`
 	// SlotID is the optional slot identifier
 	SlotID *int32 `json:"slotId"`
 	// TrayIdx is the optional tray index
@@ -415,6 +442,8 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 			validation.NilOrNotEmpty.Error("Model cannot be empty")),
 		validation.Field(&emur.Description,
 			validation.NilOrNotEmpty.Error("Description cannot be empty")),
+		validation.Field(&emur.ServerName,
+			validation.NilOrNotEmpty.Error("ServerName cannot be empty")),
 	)
 
 	if err != nil {
@@ -466,6 +495,7 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 			util.ExpectedComponentUpdateField{Path: "fallback_dpu_serial_numbers", Present: emur.FallbackDPUSerialNumbers != nil},
 			util.ExpectedComponentUpdateField{Path: "host_nics", Present: emur.Interfaces != nil},
 			util.ExpectedComponentUpdateField{Path: "sku_id", Present: emur.SkuID != nil},
+			util.ExpectedComponentUpdateField{Path: "server_name", Present: emur.ServerName != nil},
 			util.ExpectedComponentUpdateField{Path: "is_dpf_enabled", Present: emur.IsDpfEnabled != nil},
 			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.disable_lockdown", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.DisableLockdown != nil},
 		),
@@ -508,6 +538,8 @@ type APIExpectedMachine struct {
 	Model *string `json:"model"`
 	// Description is the optional description of the expected machine
 	Description *string `json:"description"`
+	// ServerName is the optional server name advertised to switches via LLDP
+	ServerName *string `json:"serverName"`
 	// SlotID is the optional slot identifier
 	SlotID *int32 `json:"slotId"`
 	// TrayIdx is the optional tray index
@@ -547,6 +579,7 @@ func NewAPIExpectedMachine(dibp *cdbm.ExpectedMachine) *APIExpectedMachine {
 		Manufacturer:             dibp.Manufacturer,
 		Model:                    dibp.Model,
 		Description:              dibp.Description,
+		ServerName:               dibp.ServerName,
 		SlotID:                   dibp.SlotID,
 		TrayIdx:                  dibp.TrayIdx,
 		HostID:                   dibp.HostID,

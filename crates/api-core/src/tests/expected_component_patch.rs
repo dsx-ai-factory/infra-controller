@@ -295,6 +295,67 @@ async fn patch_expected_machine_preserves_unselected_fields(pool: PgPool) {
 }
 
 #[crate::sqlx_test]
+async fn patch_expected_machine_sets_preserves_and_clears_server_name(pool: PgPool) {
+    let env = create_test_env(pool).await;
+    let id = Uuid::new_v4();
+    env.api
+        .add_expected_machine(Request::new(machine(id, 1)))
+        .await
+        .unwrap();
+    let mut expected = machine_row(&env.pool, id).await;
+    // The fixture does not supply a server name, so it starts absent.
+    assert_eq!(expected["server_name"], json!(null));
+
+    // Selecting server_name applies the supplied value.
+    env.api
+        .patch_expected_machine(Request::new(forge::PatchExpectedMachineRequest {
+            expected_machine: Some(forge::ExpectedMachine {
+                id: rpc_id(id),
+                server_name: Some("lldp-name".to_string()),
+                ..Default::default()
+            }),
+            update_mask: mask(&["server_name"]),
+        }))
+        .await
+        .unwrap();
+    expected["server_name"] = json!("lldp-name");
+    assert_eq!(machine_row(&env.pool, id).await, expected);
+
+    // An unrelated patch that omits server_name from the mask preserves it.
+    env.api
+        .patch_expected_machine(Request::new(forge::PatchExpectedMachineRequest {
+            expected_machine: Some(forge::ExpectedMachine {
+                id: rpc_id(id),
+                metadata: Some(forge::Metadata {
+                    name: "renamed".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            update_mask: mask(&["metadata.name"]),
+        }))
+        .await
+        .unwrap();
+    expected["metadata_name"] = json!("renamed");
+    assert_eq!(machine_row(&env.pool, id).await, expected);
+
+    // Selecting server_name with an absent value clears it.
+    env.api
+        .patch_expected_machine(Request::new(forge::PatchExpectedMachineRequest {
+            expected_machine: Some(forge::ExpectedMachine {
+                id: rpc_id(id),
+                server_name: None,
+                ..Default::default()
+            }),
+            update_mask: mask(&["server_name"]),
+        }))
+        .await
+        .unwrap();
+    expected["server_name"] = json!(null);
+    assert_eq!(machine_row(&env.pool, id).await, expected);
+}
+
+#[crate::sqlx_test]
 async fn patch_expected_machine_sets_and_clears_nested_host_bmc_address(pool: PgPool) {
     let env = create_test_env(pool).await;
     let id = Uuid::new_v4();

@@ -29486,9 +29486,23 @@ components:
           role: Host
       properties:
         macAddress:
-          type: string
+          type:
+            - string
+            - 'null'
           pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
-          description: MAC address of the expected interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
+          description: Optional MAC address of the expected interface. Required unless `physicalIfname` is supplied; at least one of the two identifies the interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
+        physicalIfname:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional physical interface identifier, for example `C1-1-L1`, as named in the Cerebro database. Required unless `macAddress` is supplied; both identifiers may be present. Omission or null clears it when replacing the declaration.
+        logicalIfname:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional logical interface name stored for inventory consumers. Omission or null clears it when replacing the declaration.
         nicType:
           type:
             - string
@@ -29522,8 +29536,6 @@ components:
           type: [string, 'null']
           enum: [Unspecified, Dynamic, Fixed, Retained, null]
           description: On create, omission, null, or Unspecified infers Fixed from fixedIp, otherwise Retained for HostBmc and Dynamic for other roles. On update, omission or null preserves a matching stored policy while fixedIp presence is unchanged; Unspecified resets inference. Fixed requires fixedIp; Dynamic and Retained forbid it. Explicit Fixed, inferred DPU Fixed, and inferred HostBmc Fixed with a segment constraint require a containing managed prefix; legacy Host or inferred HostBmc Fixed without a constraint may use static assignments. Retained keeps a DHCP-allocated address for the interface row lifetime.
-      required:
-        - macAddress
     ExpectedMachine:
       title: ExpectedMachine
       type: object
@@ -29628,6 +29640,11 @@ components:
             - string
             - 'null'
           description: Description of this component
+        serverName:
+          type:
+            - string
+            - 'null'
+          description: Optional server name advertised to connected switches in LLDP responses and used for cable validation.
         slotId:
           type:
             - integer
@@ -29771,6 +29788,12 @@ components:
             - string
             - 'null'
           description: Description of this component
+        serverName:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional server name advertised to connected switches in LLDP responses and used for cable validation.
         slotId:
           type:
             - integer
@@ -29953,6 +29976,12 @@ components:
             - string
             - 'null'
           description: Description of this component
+        serverName:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional server name advertised to connected switches in LLDP responses and used for cable validation. Omission or null preserves the current value.
         slotId:
           type:
             - integer

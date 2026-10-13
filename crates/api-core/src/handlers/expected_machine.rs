@@ -576,6 +576,9 @@ async fn apply_machine_patch(
     if fields.contains(UpdateField::IsDpfEnabled) {
         machine.data.dpf_enabled = patch.is_dpf_enabled;
     }
+    if fields.contains(UpdateField::ServerName) {
+        machine.data.server_name = patch.server_name;
+    }
     if fields.contains(UpdateField::DefaultPauseIngestionAndPoweron) {
         machine.data.default_pause_ingestion_and_poweron =
             patch.default_pause_ingestion_and_poweron;

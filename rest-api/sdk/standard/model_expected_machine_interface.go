@@ -14,9 +14,7 @@ API version: 2.0.0
 package standard
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
 )
 
 // checks if the ExpectedMachineInterface type satisfies the MappedNullable interface at compile time
@@ -24,8 +22,12 @@ var _ MappedNullable = &ExpectedMachineInterface{}
 
 // ExpectedMachineInterface Expected interface declaration. Each supplied list entry replaces the corresponding declaration, so preserve all returned attributes when editing it. Core validates role, primary selection, and allocation against the Site configuration.
 type ExpectedMachineInterface struct {
-	// MAC address of the expected interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
-	MacAddress string `json:"macAddress" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
+	// Optional MAC address of the expected interface. Required unless `physicalIfname` is supplied; at least one of the two identifies the interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
+	MacAddress NullableString `json:"macAddress,omitempty" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
+	// Optional physical interface identifier, for example `C1-1-L1`, as named in the Cerebro database. Required unless `macAddress` is supplied; both identifiers may be present. Omission or null clears it when replacing the declaration.
+	PhysicalIfname NullableString `json:"physicalIfname,omitempty"`
+	// Optional logical interface name stored for inventory consumers. Omission or null clears it when replacing the declaration.
+	LogicalIfname NullableString `json:"logicalIfname,omitempty"`
 	// Optional NIC type. Use `CX9` for ConnectX-9 interfaces on Astra hosts.
 	NicType NullableString `json:"nicType,omitempty"`
 	// Optional fixed IPv4 or IPv6 address for the interface. REST preserves repeated MAC declarations without enforcing uniqueness by MAC and address family; Core applies allocation validation.
@@ -44,15 +46,12 @@ type ExpectedMachineInterface struct {
 	IpAllocation NullableString `json:"ipAllocation,omitempty"`
 }
 
-type _ExpectedMachineInterface ExpectedMachineInterface
-
 // NewExpectedMachineInterface instantiates a new ExpectedMachineInterface object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewExpectedMachineInterface(macAddress string) *ExpectedMachineInterface {
+func NewExpectedMachineInterface() *ExpectedMachineInterface {
 	this := ExpectedMachineInterface{}
-	this.MacAddress = macAddress
 	return &this
 }
 
@@ -64,28 +63,133 @@ func NewExpectedMachineInterfaceWithDefaults() *ExpectedMachineInterface {
 	return &this
 }
 
-// GetMacAddress returns the MacAddress field value
+// GetMacAddress returns the MacAddress field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *ExpectedMachineInterface) GetMacAddress() string {
-	if o == nil {
+	if o == nil || IsNil(o.MacAddress.Get()) {
 		var ret string
 		return ret
 	}
-
-	return o.MacAddress
+	return *o.MacAddress.Get()
 }
 
-// GetMacAddressOk returns a tuple with the MacAddress field value
+// GetMacAddressOk returns a tuple with the MacAddress field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineInterface) GetMacAddressOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
-	return &o.MacAddress, true
+	return o.MacAddress.Get(), o.MacAddress.IsSet()
 }
 
-// SetMacAddress sets field value
+// HasMacAddress returns a boolean if a field has been set.
+func (o *ExpectedMachineInterface) HasMacAddress() bool {
+	if o != nil && o.MacAddress.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetMacAddress gets a reference to the given NullableString and assigns it to the MacAddress field.
 func (o *ExpectedMachineInterface) SetMacAddress(v string) {
-	o.MacAddress = v
+	o.MacAddress.Set(&v)
+}
+
+// SetMacAddressNil sets the value for MacAddress to be an explicit nil
+func (o *ExpectedMachineInterface) SetMacAddressNil() {
+	o.MacAddress.Set(nil)
+}
+
+// UnsetMacAddress ensures that no value is present for MacAddress, not even an explicit nil
+func (o *ExpectedMachineInterface) UnsetMacAddress() {
+	o.MacAddress.Unset()
+}
+
+// GetPhysicalIfname returns the PhysicalIfname field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *ExpectedMachineInterface) GetPhysicalIfname() string {
+	if o == nil || IsNil(o.PhysicalIfname.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.PhysicalIfname.Get()
+}
+
+// GetPhysicalIfnameOk returns a tuple with the PhysicalIfname field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *ExpectedMachineInterface) GetPhysicalIfnameOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.PhysicalIfname.Get(), o.PhysicalIfname.IsSet()
+}
+
+// HasPhysicalIfname returns a boolean if a field has been set.
+func (o *ExpectedMachineInterface) HasPhysicalIfname() bool {
+	if o != nil && o.PhysicalIfname.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetPhysicalIfname gets a reference to the given NullableString and assigns it to the PhysicalIfname field.
+func (o *ExpectedMachineInterface) SetPhysicalIfname(v string) {
+	o.PhysicalIfname.Set(&v)
+}
+
+// SetPhysicalIfnameNil sets the value for PhysicalIfname to be an explicit nil
+func (o *ExpectedMachineInterface) SetPhysicalIfnameNil() {
+	o.PhysicalIfname.Set(nil)
+}
+
+// UnsetPhysicalIfname ensures that no value is present for PhysicalIfname, not even an explicit nil
+func (o *ExpectedMachineInterface) UnsetPhysicalIfname() {
+	o.PhysicalIfname.Unset()
+}
+
+// GetLogicalIfname returns the LogicalIfname field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *ExpectedMachineInterface) GetLogicalIfname() string {
+	if o == nil || IsNil(o.LogicalIfname.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.LogicalIfname.Get()
+}
+
+// GetLogicalIfnameOk returns a tuple with the LogicalIfname field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *ExpectedMachineInterface) GetLogicalIfnameOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.LogicalIfname.Get(), o.LogicalIfname.IsSet()
+}
+
+// HasLogicalIfname returns a boolean if a field has been set.
+func (o *ExpectedMachineInterface) HasLogicalIfname() bool {
+	if o != nil && o.LogicalIfname.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetLogicalIfname gets a reference to the given NullableString and assigns it to the LogicalIfname field.
+func (o *ExpectedMachineInterface) SetLogicalIfname(v string) {
+	o.LogicalIfname.Set(&v)
+}
+
+// SetLogicalIfnameNil sets the value for LogicalIfname to be an explicit nil
+func (o *ExpectedMachineInterface) SetLogicalIfnameNil() {
+	o.LogicalIfname.Set(nil)
+}
+
+// UnsetLogicalIfname ensures that no value is present for LogicalIfname, not even an explicit nil
+func (o *ExpectedMachineInterface) UnsetLogicalIfname() {
+	o.LogicalIfname.Unset()
 }
 
 // GetNicType returns the NicType field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -442,7 +546,15 @@ func (o ExpectedMachineInterface) MarshalJSON() ([]byte, error) {
 
 func (o ExpectedMachineInterface) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	toSerialize["macAddress"] = o.MacAddress
+	if o.MacAddress.IsSet() {
+		toSerialize["macAddress"] = o.MacAddress.Get()
+	}
+	if o.PhysicalIfname.IsSet() {
+		toSerialize["physicalIfname"] = o.PhysicalIfname.Get()
+	}
+	if o.LogicalIfname.IsSet() {
+		toSerialize["logicalIfname"] = o.LogicalIfname.Get()
+	}
 	if o.NicType.IsSet() {
 		toSerialize["nicType"] = o.NicType.Get()
 	}
@@ -468,42 +580,6 @@ func (o ExpectedMachineInterface) ToMap() (map[string]interface{}, error) {
 		toSerialize["ipAllocation"] = o.IpAllocation.Get()
 	}
 	return toSerialize, nil
-}
-
-func (o *ExpectedMachineInterface) UnmarshalJSON(data []byte) (err error) {
-	// This validates that all required properties are included in the JSON object
-	// by unmarshalling the object into a generic map with string keys and checking
-	// that every required field exists as a key in the generic map.
-	requiredProperties := []string{
-		"macAddress",
-	}
-
-	allProperties := make(map[string]interface{})
-
-	err = json.Unmarshal(data, &allProperties)
-
-	if err != nil {
-		return err
-	}
-
-	for _, requiredProperty := range requiredProperties {
-		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
-			return fmt.Errorf("no value given for required property %v", requiredProperty)
-		}
-	}
-
-	varExpectedMachineInterface := _ExpectedMachineInterface{}
-
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	err = decoder.Decode(&varExpectedMachineInterface)
-
-	if err != nil {
-		return err
-	}
-
-	*o = ExpectedMachineInterface(varExpectedMachineInterface)
-
-	return err
 }
 
 type NullableExpectedMachineInterface struct {
