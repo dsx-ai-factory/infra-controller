@@ -248,8 +248,9 @@ DHCP is served by two separate programs, and both use the shared setup in
   `nico-dhcp` chart, where it reaches both the DHCPv4 and the DHCPv6 deployment, and in the
   BlueField chart.
 - **Span level.** `NICO_TRACES_SPAN_LEVEL` works as it does for nico-pxe, defaulting to `info`.
-- **Every span starts a new trace.** A DHCP client sends no `traceparent`, so there is no inbound
-  context to continue.
+- **Each packet starts a new trace.** A DHCP client sends no `traceparent`, so there is
+  no inbound context to continue. Spans opened inside that root span, including the outbound gRPC
+  call, join the same trace.
 - **Outbound gRPC to nico-api.** Calls use the shared `ForgeTlsClient`, which sends the trace
   context on every request, so a DHCP trace continues into nico-api.
 - **Hook logging is unchanged.** The hook logs through Kea's logger, and installing span export
