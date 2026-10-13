@@ -125,7 +125,9 @@ MAC addresses will then agree. `--state-backend libvirt --libvirt-domain NAME`
 can be used for a DPU endpoint when a separate DPU VM exists.
 
 The internal backend maintains power state entirely within the process. It does
-not affect the host VM and intentionally does not expose libvirt virtual media.
+not affect the host VM. A DPU using libvirt exposes only `ConfigCd` for
+configuration media; a host using libvirt exposes `Cd` and `ConfigCd`. Internal
+simulation keeps the profile defaults.
 
 ## SSE events
 
