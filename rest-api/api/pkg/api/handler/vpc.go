@@ -339,6 +339,13 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 		labels = apiRequest.Labels
 	}
 
+	// Core rejects an FNN VPC until the Tenant exists on the Site.
+	err = ensurePrivilegedTenantSites(ctx, cvh.dbSession, cvh.scp, logger, tenant, dbUser.ID, site.ID)
+	if err != nil {
+		logger.Error().Err(err).Msg("error provisioning Tenant on Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to provision Tenant on Site", nil)
+	}
+
 	dpsGroupCreated := false
 	if cvh.cfg.GetDPSEnabled() && apiRequest.PowerResourceGroup != nil {
 		if cvh.dps == nil {

@@ -7175,7 +7175,7 @@ paths:
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
-        The Tenant must be associated with the Site and hold an Allocation on it. Omit `vni` to let the Site allocate one; a requested `vni` that is already allocated or outside the Site's pool is rejected.
+        The Tenant must have an Allocation or TargetedInstanceCreation on the Site. Omit `vni` to let the Site allocate one; a requested `vni` that is already allocated or outside the Site's pool is rejected.
       requestBody:
         content:
           application/json:
@@ -20337,7 +20337,7 @@ components:
         - exactly one entry must omit siteIds or provide an empty siteIds array
         - each siteId may appear at most once across all entries
         - every provided siteId must be a valid Site UUID
-        - every provided siteId must identify a Site associated with the Tenant and owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
+        - every provided siteId must identify a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
 
         PATCH uses replace semantics: previously configured per-site overrides whose siteId is omitted from the new payload are cleared.
       required:
@@ -20345,7 +20345,7 @@ components:
       properties:
         siteIds:
           type: array
-          description: Sites to configure. An omitted or empty array identifies the Tenant Account default entry. Each value must be a valid Site UUID, may appear only once across all siteCapabilities entries in the same request, must be associated with the Tenant, and must be owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400.
+          description: Sites to configure. An omitted or empty array identifies the Tenant Account default entry. Each value must be a valid Site UUID, may appear only once across all siteCapabilities entries in the same request, and must be owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400.
           items:
             type: string
             format: uuid
@@ -20394,7 +20394,7 @@ components:
         Tenant Admins may accept an invite via `tenantContactId` only.
         Requests containing both fields are rejected with 400.
 
-        When `siteCapabilities` is included, the replace payload must contain at least one entry, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Every provided `siteId` must be a valid UUID for a Site associated with the Tenant and owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400. Previously configured per-site overrides whose `siteId` is omitted from the replacement payload are cleared.
+        When `siteCapabilities` is included, the replace payload must contain at least one entry, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Every provided `siteId` must be a valid UUID for a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400. Previously configured per-site overrides whose `siteId` is omitted from the replacement payload are cleared.
       examples:
         - tenantContactId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
         - siteCapabilities:
@@ -20421,7 +20421,7 @@ components:
             - must contain exactly one entry with omitted or empty siteIds
             - must not repeat any siteId across entries
             - every provided siteId must be a valid Site UUID
-            - every provided siteId must identify a Site associated with the Tenant and owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
+            - every provided siteId must identify a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
           items:
             $ref: '#/components/schemas/TenantAccountSiteCapability'
     Site:
@@ -34014,7 +34014,7 @@ components:
             and whitespace-containing strings are rejected, not treated as
             site-wide scope. The value is matched case-insensitively and is
             lowercased before the Tenant lookup and before it reaches Core. The
-            tenant must have an allocation and tenant identity configuration on
+            tenant must be associated with and have tenant identity configuration on
             the Site; only that organization's secrets are re-wrapped. The URL
             `{org}` separately identifies the provider authorizing the
             operation. If omitted or null, every row in the Site's tenant

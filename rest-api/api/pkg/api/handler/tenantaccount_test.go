@@ -743,7 +743,7 @@ func TestTenantAccountHandler_UpdateSiteCapabilities(t *testing.T) {
 	allocatedTenantSite := cdbm.TestBuildTenantSite(t, dbSession, tenant, allocatedSite, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(true)}, ipUser)
 	testTenantAccountBuildAllocation(t, dbSession, allocatedSite, tenant, "retained-allocation", ipUser)
 
-	handler := NewUpdateTenantAccountHandler(dbSession, &tmocks.Client{}, common.GetTestConfig())
+	handler := NewUpdateTenantAccountHandler(dbSession, nil, &tmocks.Client{}, common.GetTestConfig())
 	sendUpdate := func(caps model.APITenantAccountSiteCapabilitiesUpdateRequest) (*httptest.ResponseRecorder, *model.APITenantAccount) {
 		t.Helper()
 

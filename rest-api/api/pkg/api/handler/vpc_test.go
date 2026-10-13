@@ -577,6 +577,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 
 	tst3.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
 		"CreateVPCV2", mock.Anything).Return(wruntimeout, nil)
+	tst3.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateTenant", mock.Anything).Return(wrun, nil)
 
 	tst3.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 

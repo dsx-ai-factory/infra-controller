@@ -26,6 +26,7 @@ import (
 	common "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -619,14 +620,16 @@ func (gtah GetTenantAccountHandler) Handle(c echo.Context) error {
 // UpdateTenantAccountHandler is the API Handler for updating a TenantAccount
 type UpdateTenantAccountHandler struct {
 	dbSession *cdb.Session
+	scp       *sc.ClientPool
 	tc        temporalClient.Client
 	cfg       *config.Config
 }
 
 // NewUpdateTenantAccountHandler initializes and returns a new handler for updating Tenant
-func NewUpdateTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateTenantAccountHandler {
+func NewUpdateTenantAccountHandler(dbSession *cdb.Session, scp *sc.ClientPool, tc temporalClient.Client, cfg *config.Config) UpdateTenantAccountHandler {
 	return UpdateTenantAccountHandler{
 		dbSession: dbSession,
+		scp:       scp,
 		tc:        tc,
 		cfg:       cfg,
 	}
@@ -871,6 +874,7 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Tenant Account does not have an associated Tenant", nil)
 	}
 
+	var newSiteIDs []uuid.UUID
 	err = cdb.WithTx(ctx, utah.dbSession, func(tx *cdb.Tx) error {
 		lockKey := fmt.Sprintf("tenant-account-capabilities-%s-%s", ta.TenantID.String(), ta.InfrastructureProviderID.String())
 		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
@@ -883,7 +887,7 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 		// checks and subsequent writes operate on the same transactional
 		// snapshot rather than the pre-transaction read used to derive the
 		// lock key.
-		ta, derr = taDAO.GetByID(ctx, tx, taID, nil)
+		ta, derr = taDAO.GetByID(ctx, tx, taID, []string{cdbm.TenantRelationName})
 		if derr != nil {
 			logger.Warn().Err(derr).Msg("error retrieving TenantAccount DB entity within transaction")
 			return cutil.NewAPIError(http.StatusNotFound, "Could not retrieve TenantAccount to update", nil)
@@ -957,6 +961,9 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 					})
 					if derr != nil {
 						return derr
+					}
+					if siteUpdates[siteID] {
+						newSiteIDs = append(newSiteIDs, siteID)
 					}
 					continue
 				}
@@ -1032,6 +1039,9 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 	})
 	if err != nil {
 		return common.HandleTxError(c, logger, err, "Failed to update Tenant Account capabilities")
+	}
+	for _, siteID := range newSiteIDs {
+		startTenantCreate(ctx, utah.scp, logger, ta.Tenant, siteID)
 	}
 
 	ta, err = taDAO.GetByID(ctx, nil, taID, nil)

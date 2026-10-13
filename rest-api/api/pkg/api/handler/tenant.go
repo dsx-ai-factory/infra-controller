@@ -228,8 +228,12 @@ func (gcth GetCurrentTenantHandler) Handle(c echo.Context) error {
 }
 
 // ensurePrivilegedTenantSites creates missing site associations without changing existing site settings.
-func ensurePrivilegedTenantSites(ctx context.Context, dbSession *cdb.Session, scp *sc.ClientPool, logger zerolog.Logger, tenant *cdbm.Tenant, createdBy uuid.UUID) error {
+// When onlySiteIDs are given, only those Sites are provisioned and Tenant creation on them is awaited.
+func ensurePrivilegedTenantSites(ctx context.Context, dbSession *cdb.Session, scp *sc.ClientPool, logger zerolog.Logger, tenant *cdbm.Tenant, createdBy uuid.UUID, onlySiteIDs ...uuid.UUID) error {
 	siteIDs, err := common.GetPrivilegedAccessSiteIDsForTenant(ctx, nil, dbSession, tenant)
+	if err == nil && len(onlySiteIDs) > 0 {
+		siteIDs = mapset.NewSet(siteIDs...).Intersect(mapset.NewSet(onlySiteIDs...)).ToSlice()
+	}
 	if err != nil || len(siteIDs) == 0 {
 		return err
 	}
@@ -280,19 +284,33 @@ func ensurePrivilegedTenantSites(ctx context.Context, dbSession *cdb.Session, sc
 			errs = append(errs, fmt.Errorf("site %s: %w", site.ID, err))
 			continue
 		}
-		if created != nil {
-			stc, serr := scp.GetClientByID(site.ID)
-			if serr == nil {
-				_, serr = stc.ExecuteWorkflow(ctx, temporalClient.StartWorkflowOptions{
-					ID: "site-tenant-create-" + tenant.Org, TaskQueue: queue.SiteTaskQueue,
-				}, "CreateTenant", tenant.ToCreateRequestProto())
-			}
-			if serr != nil {
-				logger.Error().Err(serr).Str("Site ID", site.ID.String()).Str("Tenant ID", tenant.ID.String()).Msg("failed to trigger Tenant creation; inventory reconciliation will retry")
-			}
+		if created == nil {
+			continue
+		}
+		we := startTenantCreate(ctx, scp, logger, tenant, site.ID)
+		if we != nil && len(onlySiteIDs) > 0 {
+			wctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+			// Core reports a Tenant that is still missing; waiting only avoids racing its creation.
+			_ = we.Get(wctx, nil)
+			cancel()
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// startTenantCreate triggers Tenant creation on the Site; inventory reconciliation retries failures.
+func startTenantCreate(ctx context.Context, scp *sc.ClientPool, logger zerolog.Logger, tenant *cdbm.Tenant, siteID uuid.UUID) temporalClient.WorkflowRun {
+	var we temporalClient.WorkflowRun
+	stc, err := scp.GetClientByID(siteID)
+	if err == nil {
+		we, err = stc.ExecuteWorkflow(ctx, temporalClient.StartWorkflowOptions{
+			ID: "site-tenant-create-" + tenant.Org, TaskQueue: queue.SiteTaskQueue,
+		}, "CreateTenant", tenant.ToCreateRequestProto())
+	}
+	if err != nil {
+		logger.Error().Err(err).Str("Site ID", siteID.String()).Str("Tenant ID", tenant.ID.String()).Msg("failed to trigger Tenant creation; inventory reconciliation will retry")
+	}
+	return we
 }
 
 // ~~~~~ Get Current Routing Profile Handler ~~~~~ //

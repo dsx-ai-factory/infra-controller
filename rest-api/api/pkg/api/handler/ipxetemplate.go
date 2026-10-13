@@ -350,15 +350,13 @@ func callerHasAccessToAnyAssociatedSite(
 
 	// Tenant path: any site the Tenant has access to.
 	if tenant != nil {
-		for _, siteID := range siteIDs {
-			ok, terr := common.TenantHasSiteAccess(ctx, nil, dbSession, tenant, siteID)
-			if terr != nil {
-				logger.Error().Err(terr).Msg("error checking Tenant Site access for iPXE template authorization")
-				return false, terr
-			}
-			if ok {
-				return true, nil
-			}
+		tenantSiteIDs, terr := getTenantSiteIDs(ctx, dbSession, tenant)
+		if terr != nil {
+			logger.Error().Err(terr).Msg("error retrieving Tenant Site associations for iPXE template authorization")
+			return false, terr
+		}
+		if mapset.NewSet(tenantSiteIDs...).ContainsAny(siteIDs...) {
+			return true, nil
 		}
 	}
 
