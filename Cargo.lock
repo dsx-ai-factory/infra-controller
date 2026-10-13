@@ -2275,6 +2275,7 @@ dependencies = [
 name = "carbide-http-connector"
 version = "0.0.0"
 dependencies = [
+ "carbide-test-support",
  "futures-util",
  "hickory-resolver",
  "hyper",
