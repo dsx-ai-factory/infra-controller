@@ -675,12 +675,12 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			desc: "ok when NvosInterfaces is an empty list",
+			desc: "error when NvosInterfaces is an explicit empty list",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
 				NvosInterfaces:     APINvosInterfaces{},
 			},
-			expectErr: false,
+			expectErr: true,
 		},
 		{
 			desc: "error when NvosInterfaces has duplicate MACs",
@@ -858,7 +858,7 @@ func TestAPIExpectedSwitchUpdateRequest_ToProto(t *testing.T) {
 	}{
 		{name: "omitted fields preserve Core state", body: `{}`},
 		{name: "null fields preserve Core state", body: `{"defaultBmcUsername":null,"defaultBmcPassword":null,"nvOsUsername":null,"nvOsPassword":null,"labels":null}`},
-		{name: "explicit zero and empty values remain selected", body: `{"slotId":0,"labels":{},"nvosInterfaces":[]}`, wantPaths: []string{"metadata.labels", "nvos_interfaces"}},
+		{name: "explicit zero and empty values remain selected", body: `{"slotId":0,"labels":{}}`, wantPaths: []string{"metadata.labels"}},
 		{name: "slot ID alone selects derived labels", body: `{"slotId":0}`, wantPaths: []string{"metadata.labels"}},
 		{name: "BMC username leaves the password unselected", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":null}`, wantPaths: []string{"bmc_username"}},
 		{name: "BMC password leaves the username unselected", body: `{"defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_password"}},

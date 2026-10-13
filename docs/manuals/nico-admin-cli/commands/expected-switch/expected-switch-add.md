@@ -123,7 +123,7 @@ Print help (see a summary with -h)
 nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB
 nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB --rack_id 12345678-1234-5678-90ab-cdef01234567
 nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB --nvos-interface aa:bb:cc:dd:ee:ff --nvos-username admin --nvos-password mypassword --nvos-ip-address 192.0.2.10
-nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB --nvos-interface aa:bb:cc:dd:ee:ff,primary --nvos-interface aa:bb:cc:dd:ee:00
+nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB --nvos-interface aa:bb:cc:dd:ee:ff --nvos-interface aa:bb:cc:dd:ee:00,primary
 nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB --meta-name spine-01 --label DATACENTER:XYZ
 ```
 

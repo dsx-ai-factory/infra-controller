@@ -587,7 +587,13 @@ async fn backfill_marks_each_switchs_first_nvos_mac_primary(
                  ARRAY['aa:aa:aa:aa:aa:02','aa:aa:aa:aa:aa:01']::macaddr[]),
              ('BF-SINGLE', '02:00:00:00:0e:02', 'admin', 'pw',
                  ARRAY['bb:bb:bb:bb:bb:01']::macaddr[]),
-             ('BF-EMPTY',  '02:00:00:00:0e:03', 'admin', 'pw', '{}'::macaddr[]);",
+             ('BF-EMPTY',  '02:00:00:00:0e:03', 'admin', 'pw', '{}'::macaddr[]),
+             ('BF-DUP-A',  '02:00:00:00:0e:04', 'admin', 'pw',
+                 ARRAY['cc:cc:cc:cc:cc:01','cc:cc:cc:cc:cc:02']::macaddr[]),
+             ('BF-DUP-B',  '02:00:00:00:0e:05', 'admin', 'pw',
+                 ARRAY['cc:cc:cc:cc:cc:01','cc:cc:cc:cc:cc:03']::macaddr[]),
+             ('BF-INTRA',  '02:00:00:00:0e:06', 'admin', 'pw',
+                 ARRAY['dd:dd:dd:dd:dd:01','dd:dd:dd:dd:dd:01','dd:dd:dd:dd:dd:02']::macaddr[]);",
     )
     .execute(txn.as_mut())
     .await?;
@@ -632,6 +638,65 @@ async fn backfill_marks_each_switchs_first_nvos_mac_primary(
         .await?
         .expect("empty-array switch exists");
     assert!(empty.nvos_interfaces.is_empty());
+
+    // A MAC the unguarded legacy writes recorded on two switches lands on
+    // exactly one -- the lower BMC MAC wins -- instead of aborting the backfill
+    // on the primary-key collision.
+    let dup_a = find_by_bmc_mac_address(&mut txn, "02:00:00:00:0e:04".parse()?)
+        .await?
+        .expect("duplicate-owning switch exists");
+    assert_eq!(
+        dup_a.nvos_interfaces,
+        vec![
+            ExpectedNvosInterface {
+                mac_address: "cc:cc:cc:cc:cc:01".parse()?,
+                is_primary: true,
+            },
+            ExpectedNvosInterface {
+                mac_address: "cc:cc:cc:cc:cc:02".parse()?,
+                is_primary: false,
+            },
+        ]
+    );
+
+    // The losing switch keeps only its unique MAC. The backfill does not
+    // recompute the flag after ON CONFLICT drops its first port, so the lone
+    // survivor stays is_primary = false -- the accepted cross-switch tradeoff;
+    // the read path's lone-port fallback still treats it as the primary.
+    let dup_b = find_by_bmc_mac_address(&mut txn, "02:00:00:00:0e:05".parse()?)
+        .await?
+        .expect("duplicate-losing switch exists");
+    assert_eq!(
+        dup_b.nvos_interfaces,
+        vec![ExpectedNvosInterface {
+            mac_address: "cc:cc:cc:cc:cc:03".parse()?,
+            is_primary: false,
+        }]
+    );
+    assert_eq!(
+        dup_b.primary_nvos_mac_address(),
+        Some("cc:cc:cc:cc:cc:03".parse()?),
+        "the lone surviving port is still selected as primary at read time",
+    );
+
+    // A MAC repeated within one array collapses to a single port, keeping its
+    // first position as primary.
+    let intra = find_by_bmc_mac_address(&mut txn, "02:00:00:00:0e:06".parse()?)
+        .await?
+        .expect("intra-array duplicate switch exists");
+    assert_eq!(
+        intra.nvos_interfaces,
+        vec![
+            ExpectedNvosInterface {
+                mac_address: "dd:dd:dd:dd:dd:01".parse()?,
+                is_primary: true,
+            },
+            ExpectedNvosInterface {
+                mac_address: "dd:dd:dd:dd:dd:02".parse()?,
+                is_primary: false,
+            },
+        ]
+    );
 
     txn.rollback().await?;
     Ok(())

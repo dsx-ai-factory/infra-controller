@@ -1060,7 +1060,7 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusConflict,
 		},
 		{
-			name: "successful update clearing NvosInterfaces with an explicit empty list",
+			name: "update rejects clearing NvosInterfaces with an explicit empty list",
 			id:   testES.ID.String(),
 			requestBody: model.APIExpectedSwitchUpdateRequest{
 				NvosInterfaces: model.APINvosInterfaces{},
@@ -1070,8 +1070,8 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				c.SetParamNames("orgName", "id")
 				c.SetParamValues(org, testES.ID.String())
 			},
-			expectedStatus: http.StatusOK,
-			expectedPaths:  []string{"nvos_interfaces"},
+			expectedStatus:   http.StatusBadRequest,
+			expectNoWorkflow: true,
 		},
 		{
 			name: "body ID mismatch with URL should return 400",
@@ -1213,17 +1213,14 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				}
 			}
 
-			// Verify NvosInterfaces round-trips through the update response when
-			// set; an explicit empty list clears the value
+			// Verify a supplied non-empty NvosInterfaces round-trips through the
+			// update response. An explicit empty list is rejected (400), so it
+			// never reaches this success path.
 			if tt.expectedStatus == http.StatusOK && tt.requestBody.NvosInterfaces != nil {
 				var response model.APIExpectedSwitch
 				err := json.Unmarshal(rec.Body.Bytes(), &response)
 				assert.Nil(t, err)
-				if len(tt.requestBody.NvosInterfaces) == 0 {
-					assert.Empty(t, response.NvosInterfaces, "NvosInterfaces should be cleared in response")
-				} else {
-					assert.Equal(t, tt.requestBody.NvosInterfaces.MacAddresses(), response.NvosInterfaces.MacAddresses(), "NVOS MACs in response should match request")
-				}
+				assert.Equal(t, tt.requestBody.NvosInterfaces.MacAddresses(), response.NvosInterfaces.MacAddresses(), "NVOS MACs in response should match request")
 			}
 		})
 	}

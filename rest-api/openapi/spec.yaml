@@ -31146,6 +31146,7 @@ components:
     NvosInterface:
       title: NvosInterface
       type: object
+      additionalProperties: false
       description: One NVOS ethernet port of an Expected Switch.
       required:
         - macAddress
@@ -31498,7 +31499,7 @@ components:
           description: NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
         nvosInterfaces:
           type: array
-          description: Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array clears them. Mark one entry primary to choose eth0.
+          description: Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array is rejected because a switch must keep at least one NVOS port. Mark one entry primary to choose eth0.
           items:
             $ref: '#/components/schemas/NvosInterface'
         rackId:
