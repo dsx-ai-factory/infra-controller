@@ -41,7 +41,7 @@ func (snc *SiteNameCache) Get(ctx context.Context, dbSession *cdb.Session, siteI
 	}
 
 	siteDAO := cdbm.NewSiteDAO(dbSession)
-	site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		return "", err
 	}

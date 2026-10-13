@@ -54,7 +54,7 @@ func setup(t *testing.T) fixture {
 
 func (f fixture) inventorySite(t *testing.T) *cdbm.Site {
 	t.Helper()
-	site, err := cdbm.NewSiteDAO(f.session).GetByID(context.Background(), nil, f.site.ID, nil, false)
+	site, err := cdbm.NewSiteDAO(f.session).GetByID(context.Background(), nil, f.site.ID, nil, false, false)
 	require.NoError(t, err)
 	return site
 }
@@ -109,10 +109,19 @@ func (f fixture) retiredRoot(t *testing.T) *cdbm.IPBlock {
 			root.Prefix, root.PrefixLength, root.RoutingType, root.InfrastructureProviderID.String(), root.SiteID.String())
 	})
 	require.NoError(t, err)
-	retired, err := dao.GetBySitePrefixID(ctx, nil, *root.SitePrefixID)
-	require.NoError(t, err)
+	retired := f.linkedBlock(t, *root.SitePrefixID)
 	require.NotNil(t, retired.Deleted)
 	return retired
+}
+
+func (f fixture) linkedBlock(t *testing.T, id uuid.UUID) *cdbm.IPBlock {
+	t.Helper()
+	blocks, _, err := cdbm.NewIPBlockDAO(f.session).GetAll(context.Background(), nil,
+		cdbm.IPBlockFilterInput{SitePrefixIDs: []uuid.UUID{id}, IncludeDeleted: true},
+		paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	return &blocks[0]
 }
 
 func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
@@ -197,7 +206,8 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			f.session.DB.AddQueryHook(hook)
 			inventory := testInventory(testPrefix())
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
-			require.Equal(t, 1, hook.reads)
+			// One page lookup plus the missing identity's locked creation recheck.
+			require.Equal(t, 2, hook.reads)
 			blocks := f.blocks(t)
 			require.Len(t, blocks, 1)
 			require.Equal(t, inventory.SitePrefixes[0].Id.Value, blocks[0].SitePrefixID.String())
@@ -216,6 +226,24 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			blocks := f.blocks(t)
 			require.Len(t, blocks, 1)
 			require.Nil(t, blocks[0].Description)
+		}},
+		{"active page identities are fetched together", func(t *testing.T, f fixture) {
+			first, second := testPrefix(), testPrefix()
+			second.Config.Prefix = "10.1.0.0/24"
+			inventory := testInventory(first)
+			inventory.SitePrefixes = append(inventory.SitePrefixes, second)
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+			first.Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING
+			second.Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING
+			hook := &sitePrefixLookupHook{}
+			f.session.DB.AddQueryHook(hook)
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+			require.Equal(t, 1, hook.reads)
+			blocks := f.blocks(t)
+			require.Len(t, blocks, 2)
+			for _, block := range blocks {
+				require.Equal(t, cdbm.IPBlockStatusDeleting, block.Status)
+			}
 		}},
 		{"unreconcilable entries do not hold back later prefixes", func(t *testing.T, f fixture) {
 			var output bytes.Buffer
@@ -461,8 +489,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			final.SitePrefixes[0].Id.Value = ids[1]
 			final.SitePrefixes[0].Config.Prefix = "10.1.0.0/24"
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, final))
-			block, err := cdbm.NewIPBlockDAO(f.session).GetBySitePrefixID(ctx, nil, uuid.MustParse(ids[1]))
-			require.NoError(t, err)
+			block := f.linkedBlock(t, uuid.MustParse(ids[1]))
 			require.Equal(t, "10.1.0.0", block.Prefix)
 			require.Len(t, f.blocks(t), 2)
 		}},
@@ -559,8 +586,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			for range 2 {
 				require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
 			}
-			retained, err := cdbm.NewIPBlockDAO(f.session).GetBySitePrefixID(ctx, nil, *root.SitePrefixID)
-			require.NoError(t, err)
+			retained := f.linkedBlock(t, *root.SitePrefixID)
 			require.Equal(t, root, retained)
 			require.Len(t, f.blocks(t), 2)
 			prefixes, err := ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixCidrs(ctx, f.namespace())
@@ -740,8 +766,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			prefixes, err := ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixCidrs(ctx, f.namespace())
 			require.NoError(t, err)
 			require.Equal(t, []string{cidr}, prefixes)
-			replacementBlock, err := cdbm.NewIPBlockDAO(f.session).GetBySitePrefixID(ctx, nil, uuid.MustParse(replacement.Id.Value))
-			require.NoError(t, err)
+			replacementBlock := f.linkedBlock(t, uuid.MustParse(replacement.Id.Value))
 			err = cdb.WithTx(ctx, f.session, func(tx *cdb.Tx) error {
 				err := cdbm.NewIPBlockDAO(f.session).Delete(ctx, tx, replacementBlock.ID)
 				if err != nil {
@@ -875,7 +900,8 @@ type sitePrefixLookupHook struct {
 }
 
 func (hook *sitePrefixLookupHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
-	if strings.Contains(event.Query, "site_prefix_id =") && strings.HasPrefix(event.Query, "SELECT") {
+	if (strings.Contains(event.Query, "site_prefix_id =") || strings.Contains(event.Query, "site_prefix_id IN")) &&
+		strings.HasPrefix(event.Query, "SELECT") && !strings.Contains(strings.ToLower(event.Query), "count(") {
 		hook.reads++
 	}
 	return ctx
@@ -1087,7 +1113,7 @@ func checkSiteDeletion(t *testing.T, f fixture, reconcileFirst bool) {
 		require.Empty(t, f.blocks(t))
 	}
 	require.ErrorIs(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory), cdb.ErrDoesNotExist)
-	deletedSite, err := dao.GetByID(ctx, nil, f.site.ID, nil, true)
+	deletedSite, err := dao.GetByID(ctx, nil, f.site.ID, nil, true, false)
 	require.NoError(t, err)
 	require.NotNil(t, deletedSite.Deleted)
 }

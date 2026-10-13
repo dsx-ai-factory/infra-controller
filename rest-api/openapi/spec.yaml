@@ -461,7 +461,7 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-current-infrastructure-provider-stats
       description: |-
-        Retrieve statistics for the current Infrastructure Provider. IP Block totals exclude private IP Block records linked to a `TenantManaged` SitePrefix.
+        Retrieve statistics for the current Infrastructure Provider. IP Block totals exclude Tenant-created IP Blocks (`managed: false`).
 
         User must have authorization role with `PROVIDER_ADMIN` suffix.
       parameters: []
@@ -2439,7 +2439,7 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-ipblock
       description: |-
-        Retrieve the IP Blocks visible to the requesting organization. Private IP Block records linked to a `TenantManaged` SitePrefix are not exposed through this API.
+        Retrieve the IP Blocks visible to the requesting organization. Tenant-created IP Blocks (`managed: false`) are not exposed through this API. Blocks allocated to Tenants by the Infrastructure Provider remain managed and visible within the requesting organization's scope.
 
         User must have authorization role with `PROVIDER_ADMIN` or `TENANT_ADMIN` suffix. `infrastructureProviderId` or `tenantId` query parameter may be required for older API versions.
       parameters:
@@ -2651,7 +2651,7 @@ paths:
           $ref: '#/components/responses/NotFoundError'
       operationId: get-ipblock
       description: |-
-        Retrieve an IP Block by ID. Records outside the requesting organization's scope, including private IP Block records linked to a `TenantManaged` SitePrefix, return the same 404 response as an unknown ID.
+        Retrieve an IP Block by ID. Records outside the requesting organization's scope, including Tenant-created IP Blocks (`managed: false`), return the same 404 response as an unknown ID.
 
         User must have authorization role with `PROVIDER_ADMIN` or `TENANT_ADMIN` suffix.
       parameters:
@@ -2722,7 +2722,7 @@ paths:
 
         If the IP Block's prefix is still in the Site's `site_fabric_prefixes`, NICo creates a new IP Block for it the next time the Site reports its configuration.
 
-        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and private IP Block records linked to a `TenantManaged` SitePrefix return 404. A Site fabric root linked to an `OperatorManaged` SitePrefix cannot be deleted through this endpoint and returns 409.
+        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404. A Site fabric root linked to an `OperatorManaged` SitePrefix cannot be deleted through this endpoint and returns 409.
       tags:
         - IP Block
     patch:
@@ -2769,7 +2769,7 @@ paths:
 
         Renaming an IP Block that NICo created from a Site fabric prefix keeps NICo from removing it.
 
-        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and private IP Block records linked to a `TenantManaged` SitePrefix return 404.
+        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404.
       requestBody:
         content:
           application/json:
@@ -32252,6 +32252,7 @@ components:
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
           infrastructureProviderId: e94bcfda-f6cb-42e4-80ec-516811e5abbf
           tenantId: null
+          managed: true
           routingType: Public
           prefix: 202.168.16.0
           prefixLength: 20
@@ -32294,6 +32295,10 @@ components:
             - 'null'
           description: 'ID of the Tenant'
           format: uuid
+        managed:
+          type: boolean
+          readOnly: true
+          description: Always present. True for Site fabric/root/overlay blocks and blocks allocated to a Tenant by the Infrastructure Provider; false for blocks created by a Tenant. This classification is independent of the Tenant assignment and cannot be changed by clients.
         routingType:
           type: string
           description: 'RoutingType of the IP Block'
@@ -32341,6 +32346,7 @@ components:
       examples:
         - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
           name: Public Network Overlay for Site SJC4
+          managed: true
           routingType: Public
           prefix: 202.168.16.0
           prefixLength: 20
@@ -32356,6 +32362,10 @@ components:
           description: 'Name of the IP Block, only lowercase characters, digits, hyphens and cannot begin/end with hyphen'
           minLength: 2
           maxLength: 256
+        managed:
+          type: boolean
+          readOnly: true
+          description: Always present. True for Site fabric/root/overlay blocks and blocks allocated to a Tenant by the Infrastructure Provider; false for blocks created by a Tenant. This classification is independent of the Tenant assignment and cannot be changed by clients.
         routingType:
           type: string
           description: 'RoutingType of the IP Block'

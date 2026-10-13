@@ -147,7 +147,7 @@ func (csh CreateSubnetHandler) Handle(c echo.Context) error {
 
 	// Verify if site is ready
 	stDAO := cdbm.NewSiteDAO(csh.dbSession)
-	site, err := stDAO.GetByID(ctx, nil, vpc.SiteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, vpc.SiteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not find Site associated with Subnet", nil)
