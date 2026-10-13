@@ -39827,9 +39827,10 @@ type ExpectedHostNic struct {
 	// the legacy Host case leaves `network_segment_type` as a first-DHCP
 	// selection hint.
 	IpAllocation *ExpectedInterfaceIpAllocation `protobuf:"varint,9,opt,name=ip_allocation,json=ipAllocation,proto3,enum=forge.ExpectedInterfaceIpAllocation,oneof" json:"ip_allocation,omitempty"`
-	// Cerebro physical interface identifier (for example C1-1-L1).
-	// At least one of mac_address or cerebro_ifname must be supplied.
-	CerebroIfname *string `protobuf:"bytes,10,opt,name=cerebro_ifname,json=cerebroIfname,proto3,oneof" json:"cerebro_ifname,omitempty"`
+	// Physical interface identifier (for example C1-1-L1), as named in the
+	// Cerebro database.
+	// At least one of mac_address or physical_ifname must be supplied.
+	PhysicalIfname *string `protobuf:"bytes,10,opt,name=physical_ifname,json=physicalIfname,proto3,oneof" json:"physical_ifname,omitempty"`
 	// Optional logical interface name; stored for inventory consumers.
 	LogicalIfname *string `protobuf:"bytes,11,opt,name=logical_ifname,json=logicalIfname,proto3,oneof" json:"logical_ifname,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -39929,9 +39930,9 @@ func (x *ExpectedHostNic) GetIpAllocation() ExpectedInterfaceIpAllocation {
 	return ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_UNSPECIFIED
 }
 
-func (x *ExpectedHostNic) GetCerebroIfname() string {
-	if x != nil && x.CerebroIfname != nil {
-		return *x.CerebroIfname
+func (x *ExpectedHostNic) GetPhysicalIfname() string {
+	if x != nil && x.PhysicalIfname != nil {
+		return *x.PhysicalIfname
 	}
 	return ""
 }
@@ -74848,7 +74849,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\v2\x16.common.IpxeTemplateIdR\x02id\"\x1a\n" +
 	"\x18ListIpxeTemplatesRequest\"E\n" +
 	"\x10IpxeTemplateList\x121\n" +
-	"\ttemplates\x18\x01 \x03(\v2\x13.forge.IpxeTemplateR\ttemplates\"\xc6\x05\n" +
+	"\ttemplates\x18\x01 \x03(\v2\x13.forge.IpxeTemplateR\ttemplates\"\xc9\x05\n" +
 	"\x0fExpectedHostNic\x12$\n" +
 	"\vmac_address\x18\x01 \x01(\tH\x00R\n" +
 	"macAddress\x88\x01\x01\x12\x1e\n" +
@@ -74860,9 +74861,9 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\aprimary\x18\x06 \x01(\bH\x05R\aprimary\x88\x01\x01\x12P\n" +
 	"\x14network_segment_type\x18\a \x01(\x0e2\x19.forge.NetworkSegmentTypeH\x06R\x12networkSegmentType\x88\x01\x01\x125\n" +
 	"\x04role\x18\b \x01(\x0e2\x1c.forge.ExpectedInterfaceRoleH\aR\x04role\x88\x01\x01\x12N\n" +
-	"\rip_allocation\x18\t \x01(\x0e2$.forge.ExpectedInterfaceIpAllocationH\bR\fipAllocation\x88\x01\x01\x12*\n" +
-	"\x0ecerebro_ifname\x18\n" +
-	" \x01(\tH\tR\rcerebroIfname\x88\x01\x01\x12*\n" +
+	"\rip_allocation\x18\t \x01(\x0e2$.forge.ExpectedInterfaceIpAllocationH\bR\fipAllocation\x88\x01\x01\x12,\n" +
+	"\x0fphysical_ifname\x18\n" +
+	" \x01(\tH\tR\x0ephysicalIfname\x88\x01\x01\x12*\n" +
 	"\x0elogical_ifname\x18\v \x01(\tH\n" +
 	"R\rlogicalIfname\x88\x01\x01B\x0e\n" +
 	"\f_mac_addressB\v\n" +
@@ -74874,8 +74875,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\b_primaryB\x17\n" +
 	"\x15_network_segment_typeB\a\n" +
 	"\x05_roleB\x10\n" +
-	"\x0e_ip_allocationB\x11\n" +
-	"\x0f_cerebro_ifnameB\x11\n" +
+	"\x0e_ip_allocationB\x12\n" +
+	"\x10_physical_ifnameB\x11\n" +
 	"\x0f_logical_ifname\"[\n" +
 	"\x14HostLifecycleProfile\x12.\n" +
 	"\x10disable_lockdown\x18\x01 \x01(\bH\x00R\x0fdisableLockdown\x88\x01\x01B\x13\n" +

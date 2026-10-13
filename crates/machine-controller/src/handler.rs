@@ -2368,13 +2368,13 @@ impl MachineStateHandler {
 
         // We have to search through the cx9_nics array for all interfaces whose name starts with the cage_mpo_encoded_string.
         // The entry in the cx9_nics array has this format:
-        //   {"cerebro_ifname":"C1-2-L1","ip":"100.65.2.210","nic_type":"CX9","logical_ifname":"eth_r0_p0"}
-        // Look in cx9_nics for an entry whose cerebro_ifname starts with cage_mpo_encoded_string and return the
+        //   {"physical_ifname":"C1-2-L1","ip":"100.65.2.210","nic_type":"CX9","logical_ifname":"eth_r0_p0"}
+        // Look in cx9_nics for an entry whose physical_ifname starts with cage_mpo_encoded_string and return the
         // corresponding logical_ifname.
         let fixed_ip = cx9_nics
             .iter()
             .find(|nic| {
-                nic.cerebro_ifname
+                nic.physical_ifname
                     .as_deref()
                     .is_some_and(|name| name.starts_with(&cage_mpo_encoded_string))
             })
@@ -2395,8 +2395,8 @@ impl MachineStateHandler {
         // We need to retreive the DPU pci device name of this device using cage_mpo_encoded_string.
         // Append the string "_L1" to cage_mpo_encoded_string and lookup that name in ASTRA_NIC_MAPPINGS
         // and get the dpu_pci_address field.
-        let dpu_pci_address = model::machine::astra::astra_dpu_pci_address_for_cerebro_ifname(
-            &format!("{cage_mpo_encoded_string}_L1"),
+        let dpu_pci_address = model::machine::astra::astra_dpu_pci_address_for_physical_ifname(
+            &format!("{cage_mpo_encoded_string}-L1"),
         )
         .map(|addr| addr.to_string());
         // If dpu_pci_address is not found above, print an error and retrun error.

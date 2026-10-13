@@ -7250,9 +7250,10 @@ message ExpectedHostNic {
   // the legacy Host case leaves `network_segment_type` as a first-DHCP
   // selection hint.
   optional ExpectedInterfaceIpAllocation ip_allocation = 9;
-  // Cerebro physical interface identifier (for example C1-1-L1).
-  // At least one of mac_address or cerebro_ifname must be supplied.
-  optional string cerebro_ifname = 10;
+  // Physical interface identifier (for example C1-1-L1), as named in the
+  // Cerebro database.
+  // At least one of mac_address or physical_ifname must be supplied.
+  optional string physical_ifname = 10;
   // Optional logical interface name; stored for inventory consumers.
   optional string logical_ifname = 11;
 }

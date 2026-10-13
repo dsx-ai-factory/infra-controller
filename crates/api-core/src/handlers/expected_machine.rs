@@ -988,8 +988,8 @@ fn preserve_omitted_rpc_role_and_allocation(
                 candidate.mac_address == Some(mac)
             } else {
                 candidate.mac_address.is_none()
-                    && interface.cerebro_ifname.is_some()
-                    && candidate.cerebro_ifname == interface.cerebro_ifname
+                    && interface.physical_ifname.is_some()
+                    && candidate.physical_ifname == interface.physical_ifname
             }
         };
         let Some(existing_interface) = existing

@@ -59,7 +59,7 @@ async fn exercise_expected_machine_queries(
             interfaces: vec![
                 ExpectedInterface {
                     mac_address: Some(interface_mac),
-                    cerebro_ifname: Some("C1-1-L1".to_string()),
+                    physical_ifname: Some("C1-1-L1".to_string()),
                     logical_ifname: Some("rail0".to_string()),
                     ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
                     fixed_ip: Some("192.0.2.11".parse()?),
@@ -69,7 +69,7 @@ async fn exercise_expected_machine_queries(
                     ..Default::default()
                 },
                 ExpectedInterface {
-                    cerebro_ifname: Some("C1-1-L2".to_string()),
+                    physical_ifname: Some("C1-1-L2".to_string()),
                     logical_ifname: Some("rail1".to_string()),
                     ..Default::default()
                 },

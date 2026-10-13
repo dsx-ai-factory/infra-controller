@@ -121,7 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "#[serde(default)]",
         )
         .field_attribute(
-            "ExpectedHostNic.cerebro_ifname",
+            "ExpectedHostNic.physical_ifname",
             "#[serde(default, skip_serializing_if = \"Option::is_none\")]",
         )
         .field_attribute(

@@ -16,8 +16,8 @@ Each `interfaces` entry supports these fields:
 
 | Field | Required | Description |
 |---|---|---|
-| `mac_address` | Unless `cerebro_ifname` is supplied | MAC address that identifies the interface. |
-| `cerebro_ifname` | Unless `mac_address` is supplied | Cerebro physical interface identifier, such as `C1-1-L1`. Must be nonempty. Both identifiers may be supplied. |
+| `mac_address` | Unless `physical_ifname` is supplied | MAC address that identifies the interface. |
+| `physical_ifname` | Unless `mac_address` is supplied | Physical interface identifier, such as `C1-1-L1`, as named in the Cerebro database. Must be nonempty. Both identifiers may be supplied. |
 | `logical_ifname` | No | Logical interface name stored for inventory consumers. |
 | `role` | No | Interface role: `host`, `dpu_os`, `dpu_bmc`, or `host_bmc`. The default is `host`. |
 | `ip_allocation` | No | Address policy: `dynamic`, `fixed`, or `retained`. NICo can also infer the policy as described in [IP Allocation Policies](#ip-allocation-policies). |

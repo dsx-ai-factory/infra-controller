@@ -248,7 +248,7 @@ impl From<ExpectedInterface> for rpc::forge::ExpectedInterface {
     fn from(expected_interface: ExpectedInterface) -> Self {
         rpc::forge::ExpectedInterface {
             mac_address: expected_interface.mac_address.map(|mac| mac.to_string()),
-            cerebro_ifname: expected_interface.cerebro_ifname,
+            physical_ifname: expected_interface.physical_ifname,
             logical_ifname: expected_interface.logical_ifname,
             nic_type: expected_interface.nic_type,
             fixed_ip: expected_interface.fixed_ip.map(|ip| ip.to_string()),
@@ -280,7 +280,7 @@ impl TryFrom<rpc::forge::ExpectedInterface> for ExpectedInterface {
 
         let interface = ExpectedInterface {
             mac_address,
-            cerebro_ifname: expected_interface.cerebro_ifname,
+            physical_ifname: expected_interface.physical_ifname,
             logical_ifname: expected_interface.logical_ifname,
             nic_type: expected_interface.nic_type,
             fixed_ip: match expected_interface.fixed_ip.as_deref() {
@@ -810,13 +810,13 @@ mod tests {
     #[test]
     fn expected_interface_names_round_trip_through_rpc_without_a_mac() {
         let rpc: rpc::forge::ExpectedInterface = serde_json::from_value(serde_json::json!({
-            "cerebro_ifname": "C1-1-L1",
+            "physical_ifname": "C1-1-L1",
             "logical_ifname": "rail0"
         }))
         .unwrap();
         let model = ExpectedInterface::try_from(rpc).unwrap();
         assert_eq!(model.mac_address, None);
-        assert_eq!(model.cerebro_ifname.as_deref(), Some("C1-1-L1"));
+        assert_eq!(model.physical_ifname.as_deref(), Some("C1-1-L1"));
         assert_eq!(model.logical_ifname.as_deref(), Some("rail0"));
         let output = rpc::forge::ExpectedInterface::from(model.clone());
         assert!(output.mac_address.is_none());

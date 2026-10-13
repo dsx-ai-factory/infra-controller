@@ -336,7 +336,7 @@ pub struct ExpectedInterface {
     /// Physical interface identifier, for example `C1-1-L1` in Cerebro database.
     /// Required when `mac_address` is absent; both identifiers may be supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cerebro_ifname: Option<String>,
+    pub physical_ifname: Option<String>,
     /// Optional logical interface name for consumers of the expected inventory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_ifname: Option<String>,
@@ -390,7 +390,7 @@ impl<'de> Deserialize<'de> for ExpectedInterface {
         #[serde(remote = "ExpectedInterface")]
         struct UncheckedExpectedInterface {
             mac_address: Option<MacAddress>,
-            cerebro_ifname: Option<String>,
+            physical_ifname: Option<String>,
             logical_ifname: Option<String>,
             #[serde(default)]
             role: ExpectedInterfaceRole,
@@ -425,14 +425,14 @@ impl ExpectedInterface {
 
     pub fn validate_identity(&self) -> Result<(), &'static str> {
         if self
-            .cerebro_ifname
+            .physical_ifname
             .as_ref()
             .is_some_and(|name| name.trim().is_empty())
         {
-            return Err("cerebro_ifname must not be empty");
+            return Err("physical_ifname must not be empty");
         }
-        if self.mac_address.is_none() && self.cerebro_ifname.is_none() {
-            return Err("mac_address or cerebro_ifname is required");
+        if self.mac_address.is_none() && self.physical_ifname.is_none() {
+            return Err("mac_address or physical_ifname is required");
         }
         Ok(())
     }
@@ -441,7 +441,7 @@ impl ExpectedInterface {
     pub fn identity(&self) -> String {
         self.mac_address
             .map(|mac| mac.to_string())
-            .or_else(|| self.cerebro_ifname.clone())
+            .or_else(|| self.physical_ifname.clone())
             .unwrap_or_default()
     }
 
@@ -605,7 +605,7 @@ impl ExpectedMachine {
 
         ExpectedInterface {
             mac_address: Some(self.bmc_mac_address),
-            cerebro_ifname: None,
+            physical_ifname: None,
             logical_ifname: None,
             role: ExpectedInterfaceRole::HostBmc,
             ip_allocation,
@@ -1373,31 +1373,31 @@ mod tests {
                 },
                 Check {
                     scenario: "Cerebro and logical names without a MAC",
-                    input: serde_json::json!({"cerebro_ifname": "C1-1-L1", "logical_ifname": "rail0"}),
+                    input: serde_json::json!({"physical_ifname": "C1-1-L1", "logical_ifname": "rail0"}),
                     expect: Ok(ExpectedInterface {
-                        cerebro_ifname: Some("C1-1-L1".to_string()),
+                        physical_ifname: Some("C1-1-L1".to_string()),
                         logical_ifname: Some("rail0".to_string()),
                         ..Default::default()
                     }),
                 },
                 Check {
                     scenario: "both identifiers are allowed",
-                    input: serde_json::json!({"mac_address": "AA:BB:CC:DD:EE:FF", "cerebro_ifname": "C1-1-L1"}),
+                    input: serde_json::json!({"mac_address": "AA:BB:CC:DD:EE:FF", "physical_ifname": "C1-1-L1"}),
                     expect: Ok(ExpectedInterface {
                         mac_address: Some(mac),
-                        cerebro_ifname: Some("C1-1-L1".to_string()),
+                        physical_ifname: Some("C1-1-L1".to_string()),
                         ..Default::default()
                     }),
                 },
                 Check {
                     scenario: "logical name alone does not identify the interface",
                     input: serde_json::json!({"logical_ifname": "rail0"}),
-                    expect: Err("mac_address or cerebro_ifname is required".to_string()),
+                    expect: Err("mac_address or physical_ifname is required".to_string()),
                 },
                 Check {
                     scenario: "blank physical name is rejected",
-                    input: serde_json::json!({"cerebro_ifname": "   "}),
-                    expect: Err("cerebro_ifname must not be empty".to_string()),
+                    input: serde_json::json!({"physical_ifname": "   "}),
+                    expect: Err("physical_ifname must not be empty".to_string()),
                 },
             ],
             |input| {

@@ -3045,7 +3045,7 @@ fn astra_underlay_configuration(
 
         // The four Cerebro lanes in a group share their bridge's IP and routes.
         let cerebro_group = nic
-            .cerebro_ifname
+            .physical_ifname
             .as_deref()
             .and_then(|name| name.rsplit_once("-L"))
             .filter(|(group, lane)| !group.is_empty() && matches!(*lane, "1" | "2" | "3" | "4"))
@@ -3081,7 +3081,7 @@ fn astra_underlay_configuration(
             None => (String::new(), String::new(), String::new(), String::new()),
         };
         dpu_device_underlay_rows.push(json!({
-            "cerebro_ifname": nic.cerebro_ifname.as_deref().unwrap_or_default(),
+            "cerebro_ifname": nic.physical_ifname.as_deref().unwrap_or_default(),
             "mac_address": nic.mac_address.map(|mac| mac.to_string()).unwrap_or_default(),
             "ip": ip,
             "rail_route": rail_route,
@@ -6139,7 +6139,7 @@ mod tests {
                 // One addressed port per hardware-plane group; retain the other ports by name.
                 mac_address: (index % 4 == 0)
                     .then(|| format!("00:00:00:00:00:{index:02x}").parse().unwrap()),
-                cerebro_ifname: Some(format!(
+                physical_ifname: Some(format!(
                     "C{}-{}-L{}",
                     index / 8 + 1,
                     (index % 8) / 4 + 1,
