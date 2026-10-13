@@ -39,6 +39,7 @@ class LabTests(unittest.TestCase):
                                                            "wan_mac": "02:00:00:00:12:01",
                                                            "lan_mac": "02:00:00:00:12:02"}))
                 command = self.lab.command()
+                self.assertNotIn("--nested", command)
                 devices = [command[index + 1] for index, word in enumerate(command) if word == "--device"]
                 networks = [device for device in devices if device.startswith("virtio-net,")]
                 self.assertEqual(len(networks), 2)

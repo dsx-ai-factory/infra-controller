@@ -389,11 +389,20 @@ those shared scripts; it does not supply a separate DevSpace implementation.
 
 [`setup-devspace-mac-vfkit.sh`](setup-devspace-mac-vfkit.sh) manages one Ubuntu 24.04 ARM64 VM using [vfkit and Apple's Virtualization.framework](https://github.com/crc-org/vfkit/blob/main/doc/usage.md). Docker Engine runs inside Ubuntu; the entire DevSpace stack, including machine-a-tron, runs in kind inside that Docker Engine. Native Rust builds and tests run directly in Ubuntu. MAT retains its existing Helm configuration, service discovery, and certificates.
 
-The host requires Apple Silicon, macOS 13 or newer, Python 3, vfkit 0.6.2 or newer, Git, curl, OpenSSH, and macOS tar. [vfkit 0.6.2](https://github.com/crc-org/vfkit/releases/tag/v0.6.2) added the cloud-init `network-config` support used by this launcher. `up` and `start` reject older or unrecognized vfkit versions before accessing VM state. Install vfkit, Python, and the image conversion tool with Homebrew:
+The host requires Apple Silicon M3 or newer, macOS 15 or newer, Python 3, vfkit 0.6.2 or newer, Git, curl, OpenSSH, and macOS tar. [vfkit 0.6.2](https://github.com/crc-org/vfkit/releases/tag/v0.6.2) added the nested virtualization and cloud-init `network-config` support used by this launcher. `up` and `start` reject older or unrecognized vfkit versions before accessing VM state. Install vfkit, Python, and the image conversion tool with Homebrew:
 
 ```bash
 brew install vfkit python qemu
 ```
+
+The Ubuntu VM always starts with `vfkit --nested` so its Linux kernel can expose
+`/dev/kvm` for accelerated nested guests. This requires
+[Apple's nested virtualization support](https://developer.apple.com/documentation/virtualization/vzgenericplatformconfiguration/isnestedvirtualizationsupported);
+vfkit fails startup on unsupported hosts rather than falling back silently.
+The lab gateway does not enable nested virtualization. An already-running Ubuntu
+VM must be stopped and started through the updated launcher to pick up this
+setting; reusing it with `up` or running `deploy` does not change its hypervisor
+configuration. Guest kernel support and device permissions still govern KVM use.
 
 ### First run and native tests
 
