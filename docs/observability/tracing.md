@@ -256,7 +256,8 @@ DHCP is served by two separate programs, and both use the shared setup in
 - **Hook logging is unchanged.** The hook logs through Kea's logger, and installing span export
   does not add log lines or route them through `RUST_LOG`.
 - **Shutdown.** The hook sends its last batch when Kea unloads it. nico-dhcp-server sends its last
-  batch after the server stops.
+  batch only when its serve loop returns. It does not handle SIGTERM, so spans still buffered when
+  the pod is terminated are lost.
 
 ### W3C trace-context propagation
 
