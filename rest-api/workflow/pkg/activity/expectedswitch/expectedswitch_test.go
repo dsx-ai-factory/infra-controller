@@ -1026,6 +1026,11 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 		preserved.want.HostID = cutil.GetPtr(int32(5))
 		preserved.want.Labels = cdbm.Labels{"model": "updated-model-label"}
 		preserved.want.NvosMacAddresses = []string{}
+		// Core reporting no NVOS ports clears the primary selector too, rather
+		// than leaving it pointing at a MAC that is no longer present. The
+		// withoutLabels case below clones this want and inherits the cleared
+		// selector.
+		preserved.want.NvosPrimaryMacAddress = nil
 		preserved.prepare = func(t *testing.T) {
 			_, err := esDAO.Update(ctx, nil, cdbm.ExpectedSwitchUpdateInput{
 				ExpectedSwitchID: id,
