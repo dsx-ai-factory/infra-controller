@@ -104,7 +104,7 @@ async fn host_init_reboots_while_waiting_for_measurements(pool: PgPool) {
         None,
         b"test-issuer",
         "test-issuer-access-info",
-        host.host.id,
+        *host.host.id,
     )
     .await
     .unwrap()
