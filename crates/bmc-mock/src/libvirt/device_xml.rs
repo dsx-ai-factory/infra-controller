@@ -21,7 +21,7 @@ use eyre::WrapErr;
 use serde::Serialize;
 use url::Url;
 
-use crate::ActionError;
+use crate::{ActionError, VirtualMediaContents};
 
 /// A virtual-media CD-ROM device with a validated media source.
 /// Only this model's serializer constructs its libvirt device XML.
@@ -33,7 +33,8 @@ pub(super) struct DeviceXml {
     #[serde(rename = "@device")]
     device: &'static str,
     driver: Driver,
-    source: MediaSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<MediaSource>,
     target: Target,
     #[serde(skip_serializing_if = "Option::is_none")]
     readonly: Option<()>,
@@ -44,14 +45,19 @@ impl DeviceXml {
     pub(super) fn virtual_media(
         device_id: &str,
         target: &str,
-        image: &str,
-        write_protected: bool,
+        contents: &VirtualMediaContents,
     ) -> eyre::Result<Self> {
-        let source = MediaSource::parse(image)?;
+        let (source, write_protected) = match contents {
+            VirtualMediaContents::Empty => (None, false),
+            VirtualMediaContents::Inserted {
+                image,
+                write_protected,
+            } => (Some(MediaSource::parse(image)?), *write_protected),
+        };
         Ok(Self {
             kind: match &source {
-                MediaSource::File { .. } => "file",
-                MediaSource::Network { .. } => "network",
+                Some(MediaSource::Network { .. }) => "network",
+                _ => "file",
             },
             device: "cdrom",
             driver: Driver {
@@ -65,9 +71,13 @@ impl DeviceXml {
             },
             readonly: write_protected.then_some(()),
             alias: Alias {
-                name: format!("ua-bmc-mock-vmedia-{device_id}"),
+                name: Self::media_alias(device_id),
             },
         })
+    }
+
+    pub(super) fn media_alias(device_id: &str) -> String {
+        format!("ua-bmc-mock-vmedia-{device_id}")
     }
 
     pub(super) fn into_xml(self) -> eyre::Result<String> {
@@ -207,24 +217,49 @@ mod tests {
             ),
         ];
         for (name, image, expected) in cases {
-            let actual = DeviceXml::virtual_media("Cd", "sdb", image, true)
-                .unwrap()
-                .into_xml()
-                .unwrap();
+            let actual = DeviceXml::virtual_media(
+                "Cd",
+                "sdb",
+                &VirtualMediaContents::Inserted {
+                    image: image.to_owned(),
+                    write_protected: true,
+                },
+            )
+            .unwrap()
+            .into_xml()
+            .unwrap();
             assert_eq!(actual, expected, "{name}");
         }
     }
 
     #[test]
     fn builds_file_virtual_media_device() {
-        let actual = DeviceXml::virtual_media("ConfigCd", "sdc", "/tmp/config.iso", false)
-            .unwrap()
-            .into_xml()
-            .unwrap();
+        let actual = DeviceXml::virtual_media(
+            "ConfigCd",
+            "sdc",
+            &VirtualMediaContents::Inserted {
+                image: "/tmp/config.iso".to_owned(),
+                write_protected: false,
+            },
+        )
+        .unwrap()
+        .into_xml()
+        .unwrap();
 
         assert!(actual.contains("<disk type=\"file\" device=\"cdrom\">"));
         assert!(actual.contains("<source file=\"/tmp/config.iso\"/>"));
         assert!(actual.contains("<target dev=\"sdc\" bus=\"sata\"/>"));
         assert!(!actual.contains("<readonly/>"));
+    }
+    #[test]
+    fn empty_media_keeps_the_cdrom_without_a_source() {
+        let xml = DeviceXml::virtual_media("Cd", "sdb", &VirtualMediaContents::Empty)
+            .unwrap()
+            .into_xml()
+            .unwrap();
+        assert_eq!(
+            xml,
+            "<disk type=\"file\" device=\"cdrom\"><driver name=\"qemu\" type=\"raw\"/><target dev=\"sdb\" bus=\"sata\"/><alias name=\"ua-bmc-mock-vmedia-Cd\"/></disk>"
+        );
     }
 }

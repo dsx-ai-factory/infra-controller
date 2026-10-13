@@ -26,11 +26,20 @@ use crate::{ActionError, ResourceResetType};
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum VirshCommand {
     DomainState,
-    DumpXml,
-    BlockList,
-    Define { xml: DomainXml },
-    AttachDevice { xml: DeviceXml },
-    DetachDisk { target: String },
+    DumpXml {
+        configuration: DomainConfiguration,
+    },
+    Define {
+        xml: DomainXml,
+    },
+    AttachDevice {
+        xml: DeviceXml,
+        configuration: DeviceConfiguration,
+    },
+    UpdateDevice {
+        xml: DeviceXml,
+        configuration: DeviceConfiguration,
+    },
     Start,
     Shutdown,
     Destroy,
@@ -39,6 +48,29 @@ pub(super) enum VirshCommand {
     Suspend,
     Resume,
     InjectNmi,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DomainConfiguration {
+    Persistent,
+    Live,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DeviceConfiguration {
+    Persistent,
+    Live,
+    LiveAndPersistent,
+}
+
+impl DeviceConfiguration {
+    fn flags(self) -> &'static [&'static str] {
+        match self {
+            Self::Persistent => &["--config"],
+            Self::Live => &["--live"],
+            Self::LiveAndPersistent => &["--live", "--config"],
+        }
+    }
 }
 
 impl VirshCommand {
@@ -71,11 +103,10 @@ impl VirshCommand {
     pub(super) fn arguments(&self, domain: &str) -> Vec<OsString> {
         let command = match self {
             Self::DomainState => "domstate",
-            Self::DumpXml => "dumpxml",
-            Self::BlockList => "domblklist",
+            Self::DumpXml { .. } => "dumpxml",
             Self::Define { .. } => "define",
             Self::AttachDevice { .. } => "attach-device",
-            Self::DetachDisk { .. } => "detach-disk",
+            Self::UpdateDevice { .. } => "update-device",
             Self::Start => "start",
             Self::Shutdown => "shutdown",
             Self::Destroy => "destroy",
@@ -88,14 +119,16 @@ impl VirshCommand {
         let mut arguments = vec![OsString::from(command)];
         match self {
             Self::Define { .. } => arguments.push("/dev/stdin".into()),
-            Self::AttachDevice { .. } => {
-                arguments.extend([domain.into(), "/dev/stdin".into(), "--persistent".into()]);
+            Self::AttachDevice { configuration, .. } | Self::UpdateDevice { configuration, .. } => {
+                arguments.extend([domain.into(), "/dev/stdin".into()]);
+                arguments.extend(configuration.flags().iter().map(OsString::from));
             }
-            Self::DetachDisk { target } => {
-                arguments.extend([domain.into(), target.into(), "--persistent".into()]);
+            Self::DumpXml { configuration } => {
+                if *configuration == DomainConfiguration::Persistent {
+                    arguments.push("--inactive".into());
+                }
+                arguments.push(domain.into());
             }
-            Self::DumpXml => arguments.extend(["--inactive".into(), domain.into()]),
-            Self::BlockList => arguments.extend(["--details".into(), domain.into()]),
             Self::DomainState
             | Self::Start
             | Self::Shutdown
@@ -117,44 +150,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preserves_xml_and_media_command_arguments() {
-        let cases = [
+    fn selects_saved_and_live_configurations_for_xml_commands() {
+        let device =
+            || DeviceXml::virtual_media("Cd", "sdb", &crate::VirtualMediaContents::Empty).unwrap();
+        for (command, expected) in [
             (
-                "saved domain XML",
-                VirshCommand::DumpXml,
+                VirshCommand::DumpXml {
+                    configuration: DomainConfiguration::Persistent,
+                },
                 vec!["dumpxml", "--inactive", "test-domain"],
             ),
             (
-                "block device listing",
-                VirshCommand::BlockList,
-                vec!["domblklist", "--details", "test-domain"],
+                VirshCommand::DumpXml {
+                    configuration: DomainConfiguration::Live,
+                },
+                vec!["dumpxml", "test-domain"],
             ),
             (
-                "define consumes XML without a domain argument",
                 VirshCommand::Define {
                     xml: "<domain/>".parse().unwrap(),
                 },
                 vec!["define", "/dev/stdin"],
             ),
             (
-                "attach retains its persistence flag",
                 VirshCommand::AttachDevice {
-                    xml: DeviceXml::virtual_media("Cd", "sdb", "/tmp/test.iso", true).unwrap(),
+                    xml: device(),
+                    configuration: DeviceConfiguration::Live,
                 },
-                vec!["attach-device", "test-domain", "/dev/stdin", "--persistent"],
+                vec!["attach-device", "test-domain", "/dev/stdin", "--live"],
             ),
             (
-                "detach retains its target and persistence flag",
-                VirshCommand::DetachDisk {
-                    target: "sdb".to_owned(),
+                VirshCommand::UpdateDevice {
+                    xml: device(),
+                    configuration: DeviceConfiguration::Persistent,
                 },
-                vec!["detach-disk", "test-domain", "sdb", "--persistent"],
+                vec!["update-device", "test-domain", "/dev/stdin", "--config"],
             ),
-        ];
-        for (name, command, expected) in cases {
-            let actual = command.arguments("test-domain");
-            let expected: Vec<OsString> = expected.into_iter().map(OsString::from).collect();
-            assert_eq!(actual, expected, "{name}");
+            (
+                VirshCommand::UpdateDevice {
+                    xml: device(),
+                    configuration: DeviceConfiguration::LiveAndPersistent,
+                },
+                vec![
+                    "update-device",
+                    "test-domain",
+                    "/dev/stdin",
+                    "--live",
+                    "--config",
+                ],
+            ),
+        ] {
+            assert_eq!(
+                command.arguments("test-domain"),
+                expected.into_iter().map(OsString::from).collect::<Vec<_>>()
+            );
         }
     }
 

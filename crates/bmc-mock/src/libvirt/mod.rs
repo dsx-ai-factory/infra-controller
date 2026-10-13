@@ -35,7 +35,6 @@ use crate::{
     validate_power_reset,
 };
 
-mod block_list;
 mod commands;
 mod device_xml;
 mod domain_xml;
@@ -43,7 +42,7 @@ mod media_lifecycle;
 mod persistence;
 mod virsh;
 mod xml;
-use commands::VirshCommand;
+use commands::{DomainConfiguration, VirshCommand};
 use media_lifecycle::MediaLifecycle;
 use persistence::StateFile;
 use virsh::Virsh;
@@ -236,6 +235,12 @@ impl LibvirtBackend {
         let applied = AppliedState::from(controlled_system);
         self.apply_persistent_boot_selection(applied.persistent_boot_selection)
             .await?;
+        if let Some(media) = controlled_system.virtual_media() {
+            let lifecycle = MediaLifecycle::new(self.virsh(), &self.config.virtual_media_targets);
+            for device_id in media.device_ids() {
+                lifecycle.ensure_device(device_id).await?;
+            }
+        }
         self.system_state = Some(Arc::downgrade(&state));
         self.applied_state = applied;
         self.publish_power_state(PowerState::Off);
@@ -308,7 +313,10 @@ impl LibvirtBackend {
     }
 
     async fn apply_boot_devices(&self, devices: &[&str]) -> eyre::Result<()> {
-        let domain = self.virsh().dumpxml().await?;
+        let domain = self
+            .virsh()
+            .dumpxml(DomainConfiguration::Persistent)
+            .await?;
         let command = VirshCommand::boot_order(domain, devices)?;
         self.virsh().execute(command).await.map(drop)
     }
@@ -621,7 +629,7 @@ case "$3" in
         printf '%s\n' "$state"
         ;;
     dumpxml) printf '%s\n' '<domain><os><type>hvm</type></os><devices/></domain>' ;;
-    define) exit 0 ;;
+    define | attach-device) while IFS= read -r line; do :; done ;;
     *) exit 2 ;;
 esac
 "#,
@@ -638,7 +646,11 @@ esac
                 virsh_path: virsh,
                 uri: "test:///default".to_string(),
                 domain: "test-domain".to_string(),
-                virtual_media_targets: BTreeMap::new(),
+                virtual_media_targets: [
+                    ("Cd".to_owned(), "sdb".to_owned()),
+                    ("ConfigCd".to_owned(), "sdc".to_owned()),
+                ]
+                .into(),
             },
             stop.clone().drop_guard(),
         );
