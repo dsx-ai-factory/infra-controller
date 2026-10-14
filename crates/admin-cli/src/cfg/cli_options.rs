@@ -237,6 +237,11 @@ pub(crate) enum CliCommand {
     ExpectedRack(expected_rack::Cmd),
     #[clap(about = "Expected rack group handling", subcommand)]
     ExpectedRackGroup(expected_rack_group::Cmd),
+    #[clap(
+        about = "Administrator-owned expected NVLink domain declarations",
+        subcommand
+    )]
+    ExpectedNvlinkDomain(crate::expected_nvlink_domain::Cmd),
     #[clap(about = "Expected switch handling", subcommand, visible_alias = "ew")]
     ExpectedSwitch(expected_switch::Cmd),
     #[clap(

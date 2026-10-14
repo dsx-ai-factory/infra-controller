@@ -29,6 +29,7 @@ mod dpu_remediation;
 mod dpu_reprovisioning;
 mod expected_component_patch;
 mod expected_machine;
+mod expected_nvlink_domain;
 mod expected_rack;
 mod expected_rack_group;
 mod expected_switch;

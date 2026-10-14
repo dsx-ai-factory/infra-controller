@@ -39,6 +39,7 @@ pub mod dpu_agent_upgrade_policy;
 pub mod dpu_machine_update;
 pub mod dpu_remediation;
 pub mod expected_machine;
+pub mod expected_nvlink_domain;
 pub mod expected_power_shelf;
 pub mod expected_rack;
 pub mod expected_rack_group;

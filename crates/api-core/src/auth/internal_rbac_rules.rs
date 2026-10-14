@@ -957,6 +957,20 @@ impl InternalRBACRules {
             "DeleteAllExpectedRacks",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
+        x.perm("CreateExpectedNvLinkDomain", vec![ForgeAdminCLI]);
+        x.perm("DeleteExpectedNvLinkDomain", vec![ForgeAdminCLI]);
+        x.perm(
+            "GetExpectedNvLinkDomain",
+            vec![ForgeAdminCLI, SiteAgent, Flow],
+        );
+        x.perm(
+            "FindExpectedNvLinkDomainIds",
+            vec![ForgeAdminCLI, SiteAgent, Flow],
+        );
+        x.perm(
+            "FindExpectedNvLinkDomainsByIds",
+            vec![ForgeAdminCLI, SiteAgent, Flow],
+        );
         x.perm(
             "AddExpectedRackGroup",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
@@ -1511,6 +1525,35 @@ mod rbac_rule_tests {
                 None,
             ))],
         ));
+    }
+
+    #[test]
+    fn expected_nvlink_domain_inventory_is_admin_owned() {
+        let admin =
+            Principal::ExternalUser(ExternalUserInfo::new(None, "nico-admin-cli".into(), None));
+        let site_agent = Principal::SpiffeServiceIdentifier("elektra-site-agent".into());
+        let unrelated = Principal::SpiffeServiceIdentifier("unlisted".into());
+        for (method, readable) in [
+            ("CreateExpectedNvLinkDomain", false),
+            ("DeleteExpectedNvLinkDomain", false),
+            ("GetExpectedNvLinkDomain", true),
+            ("FindExpectedNvLinkDomainIds", true),
+            ("FindExpectedNvLinkDomainsByIds", true),
+        ] {
+            assert!(
+                InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&admin)),
+                "{method}"
+            );
+            assert_eq!(
+                InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&site_agent)),
+                readable,
+                "{method}"
+            );
+            assert!(
+                !InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&unrelated)),
+                "{method}"
+            );
+        }
     }
 
     #[test]
