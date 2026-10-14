@@ -197,7 +197,7 @@ tags:
 
       Deprecation history:
 
-      - `nvosMacAddresses` is deprecated in favor of `nvosInterfaces`. It remains accepted and returned for the rest of the v2 major release; removal requires a future major release and the notice defined by the release policy.
+      - `nvosMacAddresses` is deprecated in favor of `nvosInterfaces`. Its request value is accepted but ignored on create, replace-all, and PATCH, including empty arrays. PATCH preserves stored ports and primary selection unless `nvosInterfaces` is supplied. Responses continue returning the flat MAC list derived from stored interfaces.
   - name: SKU
     x-displayName: SKU
     description: |-
@@ -31345,14 +31345,14 @@ components:
           description: NvOS password for the Expected Switch
         nvosInterfaces:
           type: array
-          description: NVOS ethernet ports of the Expected Switch. Mark one entry primary to choose eth0; when none is marked, the first entry on a multi-port switch defaults to primary and a single-port switch is always its own primary. Do not provide this field together with `nvosMacAddresses`.
+          description: NVOS ethernet ports of the Expected Switch. Mark one entry primary to choose eth0; when none is marked, the first entry on a multi-port switch defaults to primary and a single-port switch is always its own primary. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
           items:
             $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
           type: array
           uniqueItems: true
           deprecated: true
-          description: Deprecated flat NVOS MAC list retained for v2 compatibility. Use `nvosInterfaces`. When supplied, REST marks the first MAC as primary. Do not provide both fields.
+          description: Deprecated and ignored. This field never configures NVOS ports or primary selection, regardless of its contents. Use `nvosInterfaces`, including in replace-all entries. Supplying both fields is allowed; only `nvosInterfaces` takes effect.
           items:
             type: string
             pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
@@ -31522,15 +31522,14 @@ components:
           description: NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
         nvosInterfaces:
           type: array
-          description: Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array is rejected because a switch must keep at least one NVOS port. Mark one entry primary to choose eth0. Do not provide this field together with `nvosMacAddresses`.
+          description: Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array is rejected because a switch must keep at least one NVOS port. Mark one entry primary to choose eth0. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
           items:
             $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
           type: array
-          minItems: 1
           uniqueItems: true
           deprecated: true
-          description: Deprecated flat NVOS MAC list retained for v2 compatibility. Use `nvosInterfaces`. When supplied, REST marks the first MAC as primary and replaces the complete stored port set. Omission or null preserves the stored ports; an empty array is rejected. Do not provide both fields.
+          description: Deprecated and ignored. Omitted, null, empty, and nonempty values all leave stored ports and primary selection unchanged. Use `nvosInterfaces` to replace ports. Supplying both fields is allowed; only `nvosInterfaces` takes effect.
           items:
             type: string
             pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'

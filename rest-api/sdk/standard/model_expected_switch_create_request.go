@@ -38,9 +38,9 @@ type ExpectedSwitchCreateRequest struct {
 	NvOsUsername NullableString `json:"nvOsUsername,omitempty"`
 	// NvOS password for the Expected Switch
 	NvOsPassword NullableString `json:"nvOsPassword,omitempty"`
-	// NVOS ethernet ports of the Expected Switch. Mark one entry primary to choose eth0; when none is marked, the first entry on a multi-port switch defaults to primary and a single-port switch is always its own primary. Do not provide this field together with `nvosMacAddresses`.
+	// NVOS ethernet ports of the Expected Switch. Mark one entry primary to choose eth0; when none is marked, the first entry on a multi-port switch defaults to primary and a single-port switch is always its own primary. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
 	NvosInterfaces []NvosInterface `json:"nvosInterfaces,omitempty"`
-	// Deprecated flat NVOS MAC list retained for v2 compatibility. Use `nvosInterfaces`. When supplied, REST marks the first MAC as primary. Do not provide both fields.
+	// Deprecated and ignored. This field never configures NVOS ports or primary selection, regardless of its contents. Use `nvosInterfaces`, including in replace-all entries. Supplying both fields is allowed; only `nvosInterfaces` takes effect.
 	// Deprecated
 	NvosMacAddresses []string `json:"nvosMacAddresses,omitempty"`
 	// Optional rack identifier for this component
