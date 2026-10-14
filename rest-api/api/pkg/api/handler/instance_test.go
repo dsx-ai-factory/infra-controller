@@ -11570,6 +11570,45 @@ func TestNewGetInstanceHandler(t *testing.T) {
 	}
 }
 
+func TestGetAllInstanceHandler_SerialConsoleURLWithoutTenantSite(t *testing.T) {
+	dbSession := testInstanceInitDB(t)
+	defer dbSession.Close()
+
+	testInstanceSetupSchema(t, dbSession)
+
+	ipOrg := "test-provider-org"
+	tnOrg := "test-tenant-org"
+
+	ipu := testInstanceBuildUser(t, dbSession, "test-starfleet-id-1", ipOrg, []string{authz.ProviderAdminRole})
+	ip := testInstanceSiteBuildInfrastructureProvider(t, dbSession, "test-infrastructure-provider", ipOrg, ipu)
+	st := testInstanceBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, true, ipu)
+	require.NotNil(t, st.SerialConsoleHostname)
+
+	tnu := testInstanceBuildUser(t, dbSession, "test-starfleet-id-2", tnOrg, []string{authz.TenantAdminRole})
+	tn := common.TestBuildTenantWithDisplayName(t, dbSession, "test-tenant", tnOrg, tnu, "Test Tenant")
+	ist := testInstanceBuildInstanceType(t, dbSession, ip, "test-instance-type", st, cdbm.InstanceStatusReady)
+	vpc := testInstanceBuildVPC(t, dbSession, "test-vpc", ip, tn, st, nil, nil, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, cdbm.VpcStatusReady, tnu)
+	inst := testInstanceBuildInstance(t, dbSession, "test-instance", tn.ID, ip.ID, st.ID, &ist.ID, vpc.ID, nil, nil, nil, cdbm.InstanceStatusReady)
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v2/org/%s/nico/instance", tnOrg), nil)
+	rec := httptest.NewRecorder()
+	ec := echo.New().NewContext(req, rec)
+	ec.SetParamNames("orgName")
+	ec.SetParamValues(tnOrg)
+	ec.Set("user", tnu)
+	ec.SetRequest(ec.Request().WithContext(common.TestCommonTraceProviderSetup(t, context.Background())))
+
+	handler := GetAllInstanceHandler{dbSession: dbSession, tc: &tmocks.Client{}, cfg: common.GetTestConfig()}
+	require.NoError(t, handler.Handle(ec))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rst := []model.APIInstance{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rst))
+	require.Len(t, rst, 1)
+	require.NotNil(t, rst[0].SerialConsoleURL)
+	assert.Equal(t, fmt.Sprintf("ssh://%s@%s", inst.ControllerInstanceID.String(), *st.SerialConsoleHostname), *rst[0].SerialConsoleURL)
+}
+
 func TestNewGetAllInstanceHandler(t *testing.T) {
 	type args struct {
 		dbSession *cdb.Session

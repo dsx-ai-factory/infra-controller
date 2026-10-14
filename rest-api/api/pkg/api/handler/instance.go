@@ -5191,19 +5191,6 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 		if len(sites) != len(siteIDs) {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find one or more Sites specified in query", nil)
 		}
-	} else {
-		tsDAO := cdbm.NewTenantSiteDAO(gaih.dbSession)
-		tss, _, err := tsDAO.GetAll(ctx, nil, cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{tenant.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, []string{cdbm.SiteRelationName})
-		if err != nil {
-			logger.Error().Err(err).Msg("error retrieving Sites for Tenant from DB")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Sites for Tenant, DB error", nil)
-		}
-		for _, ts := range tss {
-			// Check if Site relation was loaded successfully
-			if ts.Site != nil {
-				sitesByID[ts.Site.ID] = ts.Site
-			}
-		}
 	}
 
 	// Check Tenant access to each Site
@@ -5399,6 +5386,24 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 	if serr != nil {
 		logger.Error().Err(serr).Msg("error retrieving Instances for this Site")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Instances for Site", nil)
+	}
+
+	// Get Sites for Instances that weren't loaded from the siteId query
+	unloadedSiteIDs := goset.NewSet[uuid.UUID]()
+	for _, ins := range dbInstances {
+		if _, ok := sitesByID[ins.SiteID]; !ok {
+			unloadedSiteIDs.Add(ins.SiteID)
+		}
+	}
+	if unloadedSiteIDs.Cardinality() > 0 {
+		sites, _, err := stDAO.GetAll(ctx, nil, cdbm.SiteFilterInput{SiteIDs: unloadedSiteIDs.ToSlice()}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("error retrieving Sites for Instances from DB")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Sites for Instances, DB error", nil)
+		}
+		for _, site := range sites {
+			sitesByID[site.ID] = &site
+		}
 	}
 
 	// Make a map for instanceID -> ref Instance
