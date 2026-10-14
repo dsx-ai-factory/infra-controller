@@ -2313,9 +2313,48 @@ mod tests {
         Ok(())
     }
 
+    /// DHCP validation and reload failures must preserve configuration so a
+    /// compatible binary can retry the update, including after a restart.
     #[tokio::test]
     async fn ipv6_only_file_update_waits_for_compatible_binary() -> eyre::Result<()> {
         use std::os::unix::fs::PermissionsExt;
+
+        if std::env::var_os("DHCP_UPDATE_TEST_CHILD").is_none() {
+            // Create `crictl` only after entering a process running this test
+            // alone. Otherwise, an unrelated test can spawn while `crictl` is
+            // open for writing and retain that descriptor until exec, making
+            // our next execution fail with `ETXTBSY` after we close the file.
+            let child_log = tempfile::NamedTempFile::new()?;
+            let mut command = TokioCommand::new(std::env::current_exe()?);
+            command
+                .args([
+                    "--exact",
+                    "ethernet_virtualization::tests::ipv6_only_file_update_waits_for_compatible_binary",
+                    "--nocapture",
+                ])
+                .env("DHCP_UPDATE_TEST_CHILD", "true")
+                .stdout(child_log.as_file().try_clone()?)
+                .stderr(child_log.as_file().try_clone()?)
+                .kill_on_drop(true);
+
+            // The argument check and nine stages each allow 30 seconds. Leave
+            // another 30 seconds for setup and cleanup in the isolated child.
+            // Keep output outside the timed future so a timeout retains the
+            // child's diagnostics as well as reporting that it timed out.
+            let status = timeout(Duration::from_secs(330), command.status()).await;
+            let output = fs::read(child_log.path())
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_else(|error| format!("could not read child output: {error}"));
+            let status = status
+                .wrap_err_with(|| format!("isolated DHCP update test timed out:\n{output}"))?
+                .wrap_err_with(|| format!("isolated DHCP update test could not run:\n{output}"))?;
+
+            assert!(
+                status.success() && output.contains("1 passed; 0 failed"),
+                "isolated DHCP update test failed ({status}):\n{output}",
+            );
+            return Ok(());
+        }
 
         if let Some(root) = std::env::var_os("DHCP_UPDATE_TEST_ROOT") {
             let root = PathBuf::from(root);
