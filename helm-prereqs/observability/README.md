@@ -110,7 +110,7 @@ Running **standalone**, using `--skip-core`, or declining the Core install uses 
 an existing release with a chart tree that may differ from what is deployed could apply more
 than the monitors, so the installer prints the enable command instead. Apply it with the chart
 ref from the same repository revision as the deployed Core image, following the
-[image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration):
+[image compatibility policy](../../helm/README.md#image-configuration):
 
 ```bash
 helm upgrade nico <your-chart-ref> -n nico-system --reuse-values \
