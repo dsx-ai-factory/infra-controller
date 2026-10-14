@@ -44,6 +44,7 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/tenantaccess"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
@@ -1573,12 +1574,12 @@ func IsTenant(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session
 
 // TenantPrivilegeScope narrows where a Tenant's TargetedInstanceCreation
 // capability must be effective for a privilege check. See
-// cdbm.TenantPrivilegeScope for how its fields select the resolution.
+// tenantaccess.PrivilegeScope for how its fields select the resolution.
 //
 // The scope pointer's presence is itself the "require privileged" signal for
 // the auth gates (IsTenant / IsProviderOrTenant): a nil *TenantPrivilegeScope
 // means no privilege is required.
-type TenantPrivilegeScope = cdbm.TenantPrivilegeScope
+type TenantPrivilegeScope = tenantaccess.PrivilegeScope
 
 // TenantHasLegacyTargetedInstanceCreation reports whether the deprecated
 // Tenant.capabilities.targetedInstanceCreation compatibility field may be
@@ -1626,14 +1627,14 @@ func TenantHasLegacyTargetedInstanceCreation(ctx context.Context, tx *cdb.Tx, db
 
 // TenantHasTargetedInstanceCreation reports whether the Tenant has the
 // TargetedInstanceCreation capability enabled within the given scope. See
-// cdbm.TenantHasTargetedInstanceCreation.
+// tenantaccess.HasTargetedInstanceCreation.
 func TenantHasTargetedInstanceCreation(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, scope *TenantPrivilegeScope) (bool, error) {
-	return cdbm.TenantHasTargetedInstanceCreation(ctx, tx, dbSession, tenant, scope)
+	return tenantaccess.HasTargetedInstanceCreation(ctx, tx, dbSession, tenant, scope)
 }
 
 // TenantHasSiteAccess reports whether the Tenant has an Allocation or effective TargetedInstanceCreation on the Site.
 func TenantHasSiteAccess(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID) (bool, error) {
-	return cdbm.TenantHasSiteAccess(ctx, tx, dbSession, tenant, siteID)
+	return tenantaccess.HasSiteAccess(ctx, tx, dbSession, tenant, siteID)
 }
 
 // ValidateTenantSiteAccess returns cdb.ErrDoesNotExist when TenantHasSiteAccess reports no access.

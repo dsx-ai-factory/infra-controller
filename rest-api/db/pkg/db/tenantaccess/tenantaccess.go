@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package model
+// Package tenantaccess resolves a Tenant's access to Sites from Allocations,
+// TenantAccounts, and TenantSite overrides. It is shared by the API handlers
+// and the workflow activities.
+package tenantaccess
 
 import (
 	"context"
@@ -10,13 +13,14 @@ import (
 	"github.com/google/uuid"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 )
 
-// TenantPrivilegeScope narrows where a Tenant's TargetedInstanceCreation
+// PrivilegeScope narrows where a Tenant's TargetedInstanceCreation
 // capability must be effective for a privilege check. For
-// TenantHasTargetedInstanceCreation a non-nil scope is required and the fields
+// HasTargetedInstanceCreation a non-nil scope is required and the fields
 // select how the capability is resolved:
 //
 //   - SiteID set: resolve the effective capability for that exact Site.
@@ -24,19 +28,19 @@ import (
 //     that Provider has TargetedInstanceCreation enabled globally.
 //
 // SiteID and InfrastructureProviderID must not be set together.
-type TenantPrivilegeScope struct {
+type PrivilegeScope struct {
 	InfrastructureProviderID *uuid.UUID
 	SiteID                   *uuid.UUID
 }
 
-// TenantHasTargetedInstanceCreation reports whether the Tenant has the
+// HasTargetedInstanceCreation reports whether the Tenant has the
 // TargetedInstanceCreation capability enabled within the given scope. It is
 // nil-safe so callers don't have to repeat the tenant nil check, and it
 // deliberately does not read the deprecated tenant-level flag
 // (tenant.Config.TargetedInstanceCreation), which is superseded by
 // TenantAccount.config with per-site TenantSite.config overrides. See
-// TenantPrivilegeScope for how scope selects the resolution strategy.
-func TenantHasTargetedInstanceCreation(ctx context.Context, tx *db.Tx, dbSession *db.Session, tenant *Tenant, scope *TenantPrivilegeScope) (bool, error) {
+// PrivilegeScope for how scope selects the resolution strategy.
+func HasTargetedInstanceCreation(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, scope *PrivilegeScope) (bool, error) {
 	if tenant == nil {
 		return false, nil
 	}
@@ -55,11 +59,11 @@ func TenantHasTargetedInstanceCreation(ctx context.Context, tx *db.Tx, dbSession
 
 	// Site-scoped: resolve the effective capability for the exact Site.
 	if siteID != nil {
-		tsDAO := NewTenantSiteDAO(dbSession)
-		ts, err := tsDAO.GetByTenantIDAndSiteID(ctx, tx, tenant.ID, *siteID, []string{SiteRelationName})
+		tsDAO := cdbm.NewTenantSiteDAO(dbSession)
+		ts, err := tsDAO.GetByTenantIDAndSiteID(ctx, tx, tenant.ID, *siteID, []string{cdbm.SiteRelationName})
 		if err != nil {
-			if errors.Is(err, db.ErrDoesNotExist) {
-				siteDAO := NewSiteDAO(dbSession)
+			if errors.Is(err, cdb.ErrDoesNotExist) {
+				siteDAO := cdbm.NewSiteDAO(dbSession)
 				site, err := siteDAO.GetByID(ctx, tx, *siteID, nil, false)
 				if err != nil {
 					return false, err
@@ -82,12 +86,12 @@ func TenantHasTargetedInstanceCreation(ctx context.Context, tx *db.Tx, dbSession
 	}
 
 	if providerID != nil {
-		taDAO := NewTenantAccountDAO(dbSession)
-		tas, _, err := taDAO.GetAll(ctx, tx, TenantAccountFilterInput{
+		taDAO := cdbm.NewTenantAccountDAO(dbSession)
+		tas, _, err := taDAO.GetAll(ctx, tx, cdbm.TenantAccountFilterInput{
 			InfrastructureProviderID: providerID,
 			TenantIDs:                []uuid.UUID{tenant.ID},
-			Statuses:                 []string{TenantAccountStatusReady},
-		}, paginator.PageInput{Limit: cutil.GetPtr(1)}, nil)
+			Statuses:                 []string{cdbm.TenantAccountStatusReady},
+		}, cdbp.PageInput{Limit: cutil.GetPtr(1)}, nil)
 		if err != nil {
 			return false, err
 		}
@@ -107,11 +111,11 @@ func TenantHasTargetedInstanceCreation(ctx context.Context, tx *db.Tx, dbSession
 	return false, nil
 }
 
-// TenantHasSiteAccess reports whether the Tenant has an Allocation or effective TargetedInstanceCreation on the Site.
-func TenantHasSiteAccess(ctx context.Context, tx *db.Tx, dbSession *db.Session, tenant *Tenant, siteID uuid.UUID) (bool, error) {
-	count, err := NewAllocationDAO(dbSession).GetCount(ctx, tx, AllocationFilterInput{TenantIDs: []uuid.UUID{tenant.ID}, SiteIDs: []uuid.UUID{siteID}})
+// HasSiteAccess reports whether the Tenant has an Allocation or effective TargetedInstanceCreation on the Site.
+func HasSiteAccess(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID) (bool, error) {
+	count, err := cdbm.NewAllocationDAO(dbSession).GetCount(ctx, tx, cdbm.AllocationFilterInput{TenantIDs: []uuid.UUID{tenant.ID}, SiteIDs: []uuid.UUID{siteID}})
 	if err != nil || count > 0 {
 		return count > 0, err
 	}
-	return TenantHasTargetedInstanceCreation(ctx, tx, dbSession, tenant, &TenantPrivilegeScope{SiteID: &siteID})
+	return HasTargetedInstanceCreation(ctx, tx, dbSession, tenant, &PrivilegeScope{SiteID: &siteID})
 }
