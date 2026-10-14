@@ -145,7 +145,7 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 
 	// NVOS MACs identify the switch's management ports during discovery, so a
 	// MAC claimed by another Expected Switch on the Site is a conflict.
-	nvosInterfaces := apiRequest.ResolvedNvosInterfaces()
+	nvosInterfaces := apiRequest.NvosInterfaces
 	nvosMacAddresses := nvosInterfaces.MacAddresses()
 	if len(nvosMacAddresses) > 0 {
 		conflicts, _, derr := esDAO.GetAll(ctx, nil, cdbm.ExpectedSwitchFilterInput{
@@ -623,7 +623,7 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 	// NVOS MACs identify the switch's management ports during discovery, so a
 	// MAC claimed by another Expected Switch on the Site is a conflict. The
 	// switch being updated is excluded so re-asserting its own MACs stays valid.
-	nvosInterfaces := apiRequest.ResolvedNvosInterfaces()
+	nvosInterfaces := apiRequest.NvosInterfaces
 	nvosMacAddresses := nvosInterfaces.MacAddresses()
 	if len(nvosMacAddresses) > 0 {
 		conflicts, _, derr := esDAO.GetAll(ctx, nil, cdbm.ExpectedSwitchFilterInput{
@@ -654,12 +654,12 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 		bmcIPAddress = nil
 	}
 
-	// The structured field or its deprecated flat alias replaces the whole NVOS
+	// The structured field replaces the whole NVOS
 	// port set when present. An unflagged structured set clears the stored selector;
 	// the DB model then marks its first port primary on the Core wire. Omission
 	// preserves the stored ports and primary.
 	nvosPrimaryMacAddress := nvosInterfaces.PrimaryMacAddress()
-	nvosInterfacesPresent := apiRequest.NvosInterfaces != nil || apiRequest.NvosMacAddresses != nil
+	nvosInterfacesPresent := apiRequest.NvosInterfaces != nil
 	clearNvosPrimaryMacAddress := nvosInterfacesPresent && nvosPrimaryMacAddress == nil
 
 	updatedExpectedSwitch, err := cdb.WithTxResult(ctx, uesh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedSwitch, error) {
@@ -904,7 +904,7 @@ func (h ReplaceAllExpectedSwitchesHandler) Handle(c echo.Context) error {
 	credentials := make(map[uuid.UUID]cdbm.ExpectedSwitchCredentials, len(request.ExpectedSwitches))
 	for _, expectedSwitch := range request.ExpectedSwitches {
 		id := uuid.New()
-		nvosInterfaces := expectedSwitch.ResolvedNvosInterfaces()
+		nvosInterfaces := expectedSwitch.NvosInterfaces
 		credentials[id] = cdbm.ExpectedSwitchCredentials{BmcUsername: expectedSwitch.DefaultBmcUsername, BmcPassword: expectedSwitch.DefaultBmcPassword, NvosUsername: expectedSwitch.NvOsUsername, NvosPassword: expectedSwitch.NvOsPassword}
 		inputs = append(inputs, cdbm.ExpectedSwitchCreateInput{
 			ExpectedSwitchID: id, SiteID: site.ID, BmcMacAddress: expectedSwitch.BmcMacAddress,

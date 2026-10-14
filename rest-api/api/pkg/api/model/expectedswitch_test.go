@@ -334,12 +334,12 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
-				NvosMacAddresses:   APINvosMacAddresses{"00:11:22:33:44:66", "00:11:22:33:44:77"},
+				NvosMacAddresses:   json.RawMessage(`["invalid", "invalid"]`),
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when both NVOS fields are provided",
+			desc: "structured NVOS field is accepted alongside ignored legacy data",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
@@ -347,9 +347,9 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
 				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}},
-				NvosMacAddresses:   APINvosMacAddresses{"00:11:22:33:44:66"},
+				NvosMacAddresses:   json.RawMessage(`{"ignored":true}`),
 			},
-			expectErr: true,
+			expectErr: false,
 		},
 		{
 			desc: "error when NvosInterfaces has duplicate MACs",
@@ -720,18 +720,18 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 			desc: "ok when deprecated NvosMacAddresses is provided",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				NvosMacAddresses:   APINvosMacAddresses{"00:11:22:33:44:66", "00:11:22:33:44:77"},
+				NvosMacAddresses:   json.RawMessage(`["invalid", "invalid"]`),
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when both NVOS fields are provided",
+			desc: "structured NVOS field is accepted alongside ignored legacy data",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
 				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}},
-				NvosMacAddresses:   APINvosMacAddresses{"00:11:22:33:44:66"},
+				NvosMacAddresses:   json.RawMessage(`{"ignored":true}`),
 			},
-			expectErr: true,
+			expectErr: false,
 		},
 		{
 			desc: "error when NvosInterfaces has duplicate MACs",
@@ -918,6 +918,10 @@ func TestAPIExpectedSwitchUpdateRequest_ToProto(t *testing.T) {
 		{name: "NVOS password leaves the username unselected", body: `{"nvOsPassword":"secret"}`, wantPaths: []string{"nvos_password"}},
 		{name: "NVOS pair leaves BMC unchanged", body: `{"nvOsUsername":"admin","nvOsPassword":"secret"}`, wantPaths: []string{"nvos_username", "nvos_password"}},
 		{name: "nvos interfaces select a single path", body: `{"nvosInterfaces":[{"macAddress":"00:11:22:33:44:66","isPrimary":true}]}`, wantPaths: []string{"nvos_interfaces"}},
+		{name: "deprecated empty MAC list is ignored", body: `{"nvosMacAddresses":[]}`},
+		{name: "deprecated nonempty MAC list is ignored", body: `{"nvosMacAddresses":["00:11:22:33:44:66"]}`},
+		{name: "deprecated arbitrary JSON is ignored", body: `{"nvosMacAddresses":{"ignored":true}}`},
+		{name: "structured field wins over legacy content", body: `{"nvosMacAddresses":["invalid"],"nvosInterfaces":[{"macAddress":"00:11:22:33:44:66","isPrimary":true}]}`, wantPaths: []string{"nvos_interfaces"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
