@@ -6254,6 +6254,9 @@ enum BootstrapCaSource {
 
 message CloudInitDiscoveryInstructions {
   MachineInterface machine_interface = 1;
+  // Absent when a host-owned Data interface has no DNS domain, including
+  // predicted hosts. DPU discovery instructions still require a domain.
+  // A configured domain that cannot be loaded causes the request to fail.
   PxeDomain domain = 2;
   // Selects which representors from the configured VF population HBN is expected to use.
   optional string hbn_reps = 3;

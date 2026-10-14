@@ -33364,7 +33364,10 @@ func (x *PxeInstructions) GetStaticPxeUrlOverride() string {
 type CloudInitDiscoveryInstructions struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	MachineInterface *MachineInterface      `protobuf:"bytes,1,opt,name=machine_interface,json=machineInterface,proto3" json:"machine_interface,omitempty"`
-	Domain           *PxeDomain             `protobuf:"bytes,2,opt,name=domain,proto3" json:"domain,omitempty"`
+	// Absent when a host-owned Data interface has no DNS domain, including
+	// predicted hosts. DPU discovery instructions still require a domain.
+	// A configured domain that cannot be loaded causes the request to fail.
+	Domain *PxeDomain `protobuf:"bytes,2,opt,name=domain,proto3" json:"domain,omitempty"`
 	// Selects which representors from the configured VF population HBN is expected to use.
 	HbnReps *string `protobuf:"bytes,3,opt,name=hbn_reps,json=hbnReps,proto3,oneof" json:"hbn_reps,omitempty"`
 	// Number of VFs to configure per DPU PF during BlueField provisioning.
