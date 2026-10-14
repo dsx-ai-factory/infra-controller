@@ -47,7 +47,9 @@ port 9370. NICo resolves that address from a switch of the rack that is
 controller mode, `mat-k8s-controller` publishes every simulated switch's NVOS
 lease as the `externalIPs` of a `mat-nvos-*` Service that forwards port 9370
 to the bmc-mock listener, and the mock selects the rack from the address each
-request was sent to. The NVOS network therefore has the same
+request was sent to. The same Service forwards port 443 to the switch's own
+NVUE REST API mock, which bmc-mock serves at that address. The NVOS network
+therefore has the same
 [requirements](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/charts/nico-machine-a-tron/README.md#requirements)
 as the BMC network. Override mode has no per-switch routing, so NICo cannot
 reach the mock there.

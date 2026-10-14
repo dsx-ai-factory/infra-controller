@@ -310,6 +310,16 @@ impl RmsInventory for ControlState {
         self.device_by_bmc_mac(bmc_mac)?.set_system_power(control)?;
         Ok(())
     }
+
+    fn set_switch_password(
+        &self,
+        bmc_mac: MacAddress,
+        username: &str,
+        password: &str,
+    ) -> eyre::Result<()> {
+        self.device_by_bmc_mac(bmc_mac)?
+            .set_nvos_password(username, password)
+    }
 }
 
 /// The Redfish reset an RMS power operation stands for; RMS documents `RESET`

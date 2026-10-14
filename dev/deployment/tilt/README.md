@@ -133,7 +133,8 @@ for the full contract.
 The DPU OOB / switch NVOS underlay (`192.168.128.0/18`) has the same
 constraint: the controller publishes each simulated NVLink switch's NVOS lease
 as the externalIP of a `mat-nvos-*` Service, through which NICo reaches
-machine-a-tron's hosted NMX-C mock on port 9370.
+machine-a-tron's hosted NMX-C mock on port 9370 and the switch's NVUE REST API
+mock on port 443.
 
 ## Image builds
 

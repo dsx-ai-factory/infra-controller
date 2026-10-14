@@ -24,6 +24,8 @@
 //! credentials, and a factory reset clears the one thing the mock holds for
 //! a switch, its fabric primary role, when the switch's job completes.
 
+use std::sync::Arc;
+
 use crate::envelope::{matched_or_not, node_batch};
 use crate::jobs::Effect;
 use crate::{RmsMock, rms};
@@ -43,7 +45,27 @@ pub(crate) async fn update_switch_system_password(
 
     let inventory = mock.inventory.nodes();
     let refs = crate::resolve::resolve_nodes(&inventory, req.nodes.as_ref());
-    let batch = mock.jobs.start_batch(&refs, None);
+    // The new password reaches the simulated switch when its job completes,
+    // so the NVOS the host serves accepts what NICo stores.
+    let username: Arc<str> = req.username.as_str().into();
+    let password: Arc<str> = req.password.as_str().into();
+    let batch = mock.jobs.start_batch_with(&refs, |node| {
+        // An unmatched node's child fails on its own.
+        let Some(device) = node.node else {
+            return Ok(None);
+        };
+        let bmc_mac = device.bmc_mac.ok_or_else(|| {
+            format!(
+                "switch {} has no BMC MAC address to deliver its NVOS password to",
+                node.node_id
+            )
+        })?;
+        Ok(Some(Effect::SetSwitchPassword {
+            bmc_mac,
+            username: username.clone(),
+            password: password.clone(),
+        }))
+    });
 
     Ok(tonic::Response::new(
         rms::UpdateSwitchSystemPasswordResponse {
