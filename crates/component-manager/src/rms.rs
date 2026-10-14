@@ -9128,6 +9128,151 @@ mod tests {
     }
 
     #[carbide_macros::sqlx_test]
+    async fn sw_batch_disable_switch_mtls_maps_endpoints_and_services(pool: sqlx::PgPool) {
+        let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
+
+        mock.enqueue_batch_disable_switch_mtls(Ok(rms::BatchDisableSwitchMtlsResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "disable-mtls-job-1".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await;
+
+        let endpoint = make_sw_endpoint(SW_MAC_1);
+        let services = [rms::SwitchService::NvueApi as i32];
+
+        let job_id = NvSwitchManager::batch_disable_switch_mtls(
+            &backend,
+            std::slice::from_ref(&endpoint),
+            &services,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(job_id, "disable-mtls-job-1");
+
+        let calls = mock.batch_disable_switch_mtls_calls().await;
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].services, services);
+
+        let nodes = calls[0]
+            .nodes
+            .as_ref()
+            .expect("the RMS request should include target nodes");
+
+        assert_eq!(nodes.nodes.len(), 1);
+        assert_eq!(nodes.nodes[0].node_id, sw1.to_string());
+    }
+
+    #[tokio::test]
+    async fn sw_batch_disable_switch_mtls_submission_failures_report_dispatch_certainty() {
+        let no_job = |response| Ok(rms::BatchDisableSwitchMtlsResponse { response });
+
+        let cases = [
+            (
+                "older RMS without the RPC accepted no work",
+                Err(RackManagerError::ApiInvocationError(
+                    tonic::Status::unimplemented("unknown method"),
+                )),
+                true,
+            ),
+            (
+                "transport failure may follow dispatch",
+                Err(RackManagerError::ApiInvocationError(
+                    tonic::Status::unavailable("connection lost"),
+                )),
+                false,
+            ),
+            ("missing response", no_job(None), false),
+            (
+                "empty job ID",
+                no_job(Some(rms::NodeBatchResponse::default())),
+                false,
+            ),
+        ];
+
+        for (scenario, response, expect_unsupported) in cases {
+            let mock = MockRmsApi::new();
+            mock.enqueue_batch_disable_switch_mtls(response).await;
+
+            let error = rms_batch_disable_switch_mtls(
+                &mock,
+                vec![rms::NodeInfo::default()],
+                &[rms::SwitchService::NvueApi as i32],
+            )
+            .await
+            .expect_err(scenario);
+
+            assert_eq!(
+                matches!(error, ComponentManagerError::Unsupported(_)),
+                expect_unsupported,
+                "{scenario}"
+            );
+
+            assert_eq!(
+                matches!(error, ComponentManagerError::OperationOutcomeUnknown(_)),
+                !expect_unsupported,
+                "{scenario}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sw_mtls_disable_job_status_reports_failures_and_unobservable_jobs() {
+        let mock = MockRmsApi::new();
+
+        mock.enqueue_get_job_status(Ok(rms::GetJobStatusResponse {
+            job_states: vec![
+                rms::JobStatus {
+                    job_id: "disable-mtls-job-1".to_string(),
+                    child_job_ids: vec!["disable-child-1".to_string()],
+                    execution_state: rms::JobExecutionState::Running as i32,
+                    ..Default::default()
+                },
+                rms::JobStatus {
+                    job_id: "disable-child-1".to_string(),
+                    parent_job_id: Some("disable-mtls-job-1".to_string()),
+                    execution_state: rms::JobExecutionState::Failed as i32,
+                    error_message: "ssh login failed".to_string(),
+                    node_id: Some("switch-1".to_string()),
+                    ..Default::default()
+                },
+            ],
+        }))
+        .await;
+
+        mock.enqueue_get_job_status(Err(RackManagerError::ApiInvocationError(
+            tonic::Status::not_found("expired disable-mtls-job-1"),
+        )))
+        .await;
+
+        let status = rms_get_switch_mtls_disable_job_status(&mock, "disable-mtls-job-1")
+            .await
+            .expect("a failed child job is an observed terminal status");
+
+        assert_eq!(status.state, SwitchMtlsDisableState::Failed);
+
+        assert!(status.error.as_deref().is_some_and(|error| {
+            error.contains("mTLS-disable")
+                && error.contains("switch-1")
+                && error.contains("ssh login failed")
+        }));
+
+        let error = rms_get_switch_mtls_disable_job_status(&mock, "disable-mtls-job-1")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ComponentManagerError::OperationOutcomeUnknown(message)
+                if message.contains("disable outcome is unknown")
+        ));
+    }
+
+    #[carbide_macros::sqlx_test]
     async fn sw_batch_reset_switch_factory_default_maps_endpoints_and_returns_job_id(
         pool: sqlx::PgPool,
     ) {
