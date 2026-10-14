@@ -4047,9 +4047,18 @@ impl NvSwitchManager for RmsBackend {
             ));
         }
 
+        // Node resolution completes before RMS receives the mutation, so a
+        // preparation failure is safe for the caller to retry.
+        let reject = |error: ComponentManagerError| {
+            ComponentManagerError::RejectedBeforeDispatch(error.to_string())
+        };
         let macs: Vec<MacAddress> = endpoints.iter().map(|endpoint| endpoint.bmc_mac).collect();
-        let identities = resolve_switch_identities(&self.db, &macs).await?;
-        let hostnames = resolve_switch_machine_interface_hostnames(&self.db, endpoints).await?;
+        let identities = resolve_switch_identities(&self.db, &macs)
+            .await
+            .map_err(reject)?;
+        let hostnames = resolve_switch_machine_interface_hostnames(&self.db, endpoints)
+            .await
+            .map_err(reject)?;
         let mut nodes = Vec::with_capacity(endpoints.len());
 
         for endpoint in endpoints {
@@ -4059,7 +4068,7 @@ impl NvSwitchManager for RmsBackend {
                     endpoint.bmc_mac,
                     SwitchOrPowerShelfRole::Switch,
                 )
-                .map_err(ComponentManagerError::Internal)?;
+                .map_err(ComponentManagerError::RejectedBeforeDispatch)?;
 
             nodes.push(build_switch_node_info(
                 endpoint,
@@ -8956,6 +8965,30 @@ mod tests {
 
         assert_eq!(nodes.nodes.len(), 1);
         assert_eq!(nodes.nodes[0].node_id, sw1.to_string());
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn sw_batch_disable_switch_mtls_db_failure_is_rejected_before_dispatch(
+        pool: sqlx::PgPool,
+    ) {
+        let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
+        pool.close().await;
+        let endpoint = make_sw_endpoint(SW_MAC_1);
+
+        let error = NvSwitchManager::batch_disable_switch_mtls(
+            &backend,
+            std::slice::from_ref(&endpoint),
+            &[rms::SwitchService::NvueApi as i32],
+        )
+        .await
+        .expect_err("a closed database must prevent RMS dispatch");
+
+        assert!(matches!(
+            error,
+            ComponentManagerError::RejectedBeforeDispatch(_)
+        ));
+
+        assert!(mock.batch_disable_switch_mtls_calls().await.is_empty());
     }
 
     #[tokio::test]
