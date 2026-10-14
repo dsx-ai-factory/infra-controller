@@ -16,18 +16,82 @@ import (
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
-var expectedMachineInterfaceMACRegexp = regexp.MustCompile(`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`)
+var (
+	expectedMachineInterfaceMACRegexp          = regexp.MustCompile(`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`)
+	expectedMachineInterfacePhysicalNameRegexp = regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`)
+	expectedMachineInterfaceLogicalNameRegexp  = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+)
+
+const validationErrorExpectedMachineInterfaceMAC = "must be a MAC address of six colon- or hyphen-separated octets"
+
+// APIExpectedMachineInterfaceMacAddressIdentifier is a MAC address that
+// identifies an Expected Machine interface.
+type APIExpectedMachineInterfaceMacAddressIdentifier string
+
+// ToDBModel returns the uppercase colon-separated spelling that REST stores.
+func (mac APIExpectedMachineInterfaceMacAddressIdentifier) ToDBModel() string {
+	return strings.ToUpper(strings.ReplaceAll(string(mac), "-", ":"))
+}
+
+// APIExpectedMachineInterfaceAstraIdentifier identifies an interface on an
+// Astra host by the names Cerebro assigns to it.
+type APIExpectedMachineInterfaceAstraIdentifier struct {
+	// PhysicalName is the physical interface name in Cerebro, for example C1-1-L1
+	PhysicalName string `json:"physicalName"`
+	// LogicalName is the optional logical interface name, for example eth_r0_p0
+	LogicalName *string `json:"logicalName"`
+}
+
+// Validate applies the name rules Core enforces in
+// ExpectedInterface::validate_ifnames. Keep the two in sync.
+func (a APIExpectedMachineInterfaceAstraIdentifier) Validate() error {
+	return validation.ValidateStruct(&a,
+		validation.Field(&a.PhysicalName,
+			validation.Required.Error(validationErrorValueRequired),
+			validation.Match(expectedMachineInterfacePhysicalNameRegexp).Error("may contain only ASCII letters, digits, '_', '.', ':' and '-'")),
+		validation.Field(&a.LogicalName,
+			validation.NilOrNotEmpty.Error("LogicalName cannot be empty"),
+			validation.Length(1, 127).Error("must be at most 127 characters"),
+			validation.Match(expectedMachineInterfaceLogicalNameRegexp).Error("may contain only ASCII letters, digits, '_', '.' and '-'")),
+	)
+}
+
+// APIExpectedMachineInterfaceIdentifier identifies an Expected Machine
+// interface. Exactly one of MacAddress or Astra is set.
+type APIExpectedMachineInterfaceIdentifier struct {
+	// MacAddress identifies the interface by its MAC address
+	MacAddress *APIExpectedMachineInterfaceMacAddressIdentifier `json:"macAddress"`
+	// Astra identifies an Astra host interface by its Cerebro names
+	Astra *APIExpectedMachineInterfaceAstraIdentifier `json:"astra"`
+}
+
+// Validate checks that exactly one identity is set and that it is well formed.
+func (id APIExpectedMachineInterfaceIdentifier) Validate() error {
+	if (id.MacAddress == nil) == (id.Astra == nil) {
+		return errors.New("exactly one of macAddress or astra is required")
+	}
+	return validation.ValidateStruct(&id,
+		validation.Field(&id.MacAddress,
+			validation.NilOrNotEmpty.Error("MacAddress cannot be empty"),
+			validation.Match(expectedMachineInterfaceMACRegexp).Error(validationErrorExpectedMachineInterfaceMAC)),
+		validation.Field(&id.Astra),
+	)
+}
 
 // APIExpectedMachineInterface describes REST-managed interface intent for an
 // Expected Machine. Core consumes this shape through ExpectedMachine.host_nics.
 type APIExpectedMachineInterface struct {
+	// Identifier is how NICo identifies the interface
+	Identifier *APIExpectedMachineInterfaceIdentifier `json:"identifier"`
+	// MacAddress is deprecated in favor of Identifier.MacAddress. Requests may
+	// still use it in place of Identifier, and responses return the interface's
+	// MAC address here when it has one.
 	MacAddress         *string                                   `json:"macAddress"`
-	PhysicalName       *string                                   `json:"physicalName"`
-	LogicalName        *string                                   `json:"logicalName"`
 	NicType            *string                                   `json:"nicType"`
 	FixedIP            *string                                   `json:"fixedIp"`
 	FixedMask          *string                                   `json:"fixedMask"`
@@ -41,18 +105,13 @@ type APIExpectedMachineInterface struct {
 // Validate checks the interface fields REST can forward to Core.
 func (i APIExpectedMachineInterface) Validate() error {
 	err := validation.ValidateStruct(&i,
+		validation.Field(&i.Identifier,
+			validation.When(i.MacAddress == nil, validation.Required.Error(validationErrorValueRequired))),
 		validation.Field(&i.MacAddress,
 			validation.NilOrNotEmpty.Error("MacAddress cannot be empty"),
 			validation.When(i.MacAddress != nil,
-				validation.Match(expectedMachineInterfaceMACRegexp).Error("must be a MAC address of six colon- or hyphen-separated octets"))),
-		validation.Field(&i.PhysicalName,
-			validation.NilOrNotEmpty.Error("PhysicalName cannot be empty"),
-			validation.When(i.PhysicalName != nil,
-				validation.Match(util.NotAllWhitespaceRegexp).Error("PhysicalName consists only of whitespace"))),
-		validation.Field(&i.LogicalName,
-			validation.NilOrNotEmpty.Error("LogicalName cannot be empty"),
-			validation.When(i.LogicalName != nil,
-				validation.Match(util.NotAllWhitespaceRegexp).Error("LogicalName consists only of whitespace"))),
+				validation.Match(expectedMachineInterfaceMACRegexp).Error(validationErrorExpectedMachineInterfaceMAC),
+				validation.By(i.validateMacAddress))),
 		validation.Field(&i.NicType,
 			validation.NilOrNotEmpty.Error("NicType cannot be empty"),
 			validation.When(i.NicType != nil,
@@ -80,12 +139,6 @@ func (i APIExpectedMachineInterface) Validate() error {
 	if err != nil {
 		return err
 	}
-	// An interface must be identifiable. A MAC address or a physical interface
-	// name (or both) is required; a logical name alone is insufficient. Core
-	// enforces the same contract on ExpectedInterface.
-	if i.MacAddress == nil && i.PhysicalName == nil {
-		return validation.Errors{"macAddress": errors.New("either macAddress or physicalName is required")}
-	}
 	if i.IPAllocation != nil {
 		switch *i.IPAllocation {
 		case cdbm.ExpectedInterfaceIPAllocationFixed:
@@ -111,17 +164,28 @@ func (i APIExpectedMachineInterface) Validate() error {
 	return nil
 }
 
-// ToDBModel converts the public interface shape to its persisted form.
-func (i APIExpectedMachineInterface) ToDBModel() cdbm.ExpectedMachineInterface {
-	var macAddress *string
-	if i.MacAddress != nil {
-		normalized := strings.ToUpper(strings.ReplaceAll(*i.MacAddress, "-", ":"))
-		macAddress = &normalized
+// validateMacAddress accepts the deprecated macAddress beside an identifier
+// only when it names the same MAC, so a returned interface can be sent back.
+func (i APIExpectedMachineInterface) validateMacAddress(value interface{}) error {
+	macAddress, ok := value.(*string)
+	if !ok || macAddress == nil || i.Identifier == nil {
+		return nil
 	}
-	return cdbm.ExpectedMachineInterface{
-		MacAddress:         macAddress,
-		PhysicalName:       i.PhysicalName,
-		LogicalName:        i.LogicalName,
+	if i.Identifier.Astra != nil {
+		return errors.New("cannot be combined with identifier.astra")
+	}
+	if i.Identifier.MacAddress != nil &&
+		APIExpectedMachineInterfaceMacAddressIdentifier(*macAddress).ToDBModel() != i.Identifier.MacAddress.ToDBModel() {
+		return errors.New("must match identifier.macAddress")
+	}
+	return nil
+}
+
+// ToDBModel converts the public interface shape to its persisted form. Call
+// Validate first, so a deprecated macAddress sent beside identifier.macAddress
+// names the same MAC.
+func (i APIExpectedMachineInterface) ToDBModel() cdbm.ExpectedMachineInterface {
+	result := cdbm.ExpectedMachineInterface{
 		NicType:            i.NicType,
 		FixedIP:            i.FixedIP,
 		FixedMask:          i.FixedMask,
@@ -131,15 +195,27 @@ func (i APIExpectedMachineInterface) ToDBModel() cdbm.ExpectedMachineInterface {
 		Role:               i.Role,
 		IPAllocation:       i.IPAllocation,
 	}
+	macAddress := (*APIExpectedMachineInterfaceMacAddressIdentifier)(i.MacAddress)
+	if i.Identifier != nil {
+		if i.Identifier.MacAddress != nil {
+			macAddress = i.Identifier.MacAddress
+		}
+		if i.Identifier.Astra != nil {
+			result.PhysicalName = cutil.GetPtr(i.Identifier.Astra.PhysicalName)
+			result.LogicalName = i.Identifier.Astra.LogicalName
+		}
+	}
+	if macAddress != nil {
+		result.MacAddress = cutil.GetPtr(macAddress.ToDBModel())
+	}
+	return result
 }
 
 // NewAPIExpectedMachineInterface converts persisted interface intent to the
 // public REST shape.
 func NewAPIExpectedMachineInterface(i cdbm.ExpectedMachineInterface) APIExpectedMachineInterface {
-	return APIExpectedMachineInterface{
+	result := APIExpectedMachineInterface{
 		MacAddress:         i.MacAddress,
-		PhysicalName:       i.PhysicalName,
-		LogicalName:        i.LogicalName,
 		NicType:            i.NicType,
 		FixedIP:            i.FixedIP,
 		FixedMask:          i.FixedMask,
@@ -149,6 +225,19 @@ func NewAPIExpectedMachineInterface(i cdbm.ExpectedMachineInterface) APIExpected
 		Role:               i.Role,
 		IPAllocation:       i.IPAllocation,
 	}
+	// When Core reports both a MAC and Astra names, the MAC stays only in the
+	// deprecated field.
+	if i.PhysicalName != nil {
+		result.Identifier = &APIExpectedMachineInterfaceIdentifier{Astra: &APIExpectedMachineInterfaceAstraIdentifier{
+			PhysicalName: *i.PhysicalName,
+			LogicalName:  i.LogicalName,
+		}}
+	} else if i.MacAddress != nil {
+		result.Identifier = &APIExpectedMachineInterfaceIdentifier{
+			MacAddress: cutil.GetPtr(APIExpectedMachineInterfaceMacAddressIdentifier(*i.MacAddress)),
+		}
+	}
+	return result
 }
 
 func expectedMachineInterfacesToDB(interfaces []APIExpectedMachineInterface) []cdbm.ExpectedMachineInterface {

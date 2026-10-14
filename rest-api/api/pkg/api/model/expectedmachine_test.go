@@ -372,8 +372,18 @@ func TestAPIExpectedMachineInterface_Validate(t *testing.T) {
 		{name: "DPU forbids primary", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuOs), Primary: cutil.GetPtr(false)}, wantErr: "primary"},
 		{name: "HostBmc forbids primary true", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc), Primary: cutil.GetPtr(true)}, wantErr: "primary"},
 		{name: "HostBmc accepts primary false", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc), Primary: cutil.GetPtr(false)}},
-		{name: "physical name without MAC", value: APIExpectedMachineInterface{PhysicalName: cutil.GetPtr("C1-1-L1")}},
-		{name: "neither MAC nor physical name", value: APIExpectedMachineInterface{NicType: cutil.GetPtr("CX9")}, wantErr: "either macAddress or physicalName is required"},
+		{name: "identifier without deprecated MAC", value: APIExpectedMachineInterface{Identifier: macIdentifier("02:00:00:00:00:09")}},
+		{name: "no identity", value: APIExpectedMachineInterface{NicType: cutil.GetPtr("CX9")}, wantErr: "identifier: a value is required"},
+		{name: "invalid identifier", value: APIExpectedMachineInterface{Identifier: &APIExpectedMachineInterfaceIdentifier{}}, wantErr: "exactly one of macAddress or astra"},
+		{name: "deprecated MAC matches identifier in another spelling", value: APIExpectedMachineInterface{
+			Identifier: macIdentifier("02:aa:bb:cc:dd:ee"), MacAddress: cutil.GetPtr("02-AA-BB-CC-DD-EE"),
+		}},
+		{name: "deprecated MAC differs from identifier", value: APIExpectedMachineInterface{
+			Identifier: macIdentifier("02:aa:bb:cc:dd:ee"), MacAddress: cutil.GetPtr("02:aa:bb:cc:dd:ef"),
+		}, wantErr: "must match identifier.macAddress"},
+		{name: "deprecated MAC beside Astra identifier", value: APIExpectedMachineInterface{
+			Identifier: astraIdentifier("C1-1-L1", nil), MacAddress: cutil.GetPtr("02:00:00:00:00:09"),
+		}, wantErr: "cannot be combined with identifier.astra"},
 	}
 
 	for _, test := range tests {
@@ -384,6 +394,66 @@ func TestAPIExpectedMachineInterface_Validate(t *testing.T) {
 				return
 			}
 			require.ErrorContains(t, err, test.wantErr)
+		})
+	}
+}
+
+func macIdentifier(mac string) *APIExpectedMachineInterfaceIdentifier {
+	return &APIExpectedMachineInterfaceIdentifier{MacAddress: cutil.GetPtr(APIExpectedMachineInterfaceMacAddressIdentifier(mac))}
+}
+
+func astraIdentifier(physicalName string, logicalName *string) *APIExpectedMachineInterfaceIdentifier {
+	return &APIExpectedMachineInterfaceIdentifier{Astra: &APIExpectedMachineInterfaceAstraIdentifier{PhysicalName: physicalName, LogicalName: logicalName}}
+}
+
+func TestAPIExpectedMachineInterfaceIdentifier_Validate(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		identifier *APIExpectedMachineInterfaceIdentifier
+		wantErr    string
+	}{
+		{name: "MAC address", identifier: macIdentifier("02:00:00:00:00:09")},
+		{name: "Astra names", identifier: astraIdentifier("C1-1-L1", cutil.GetPtr("eth_r0_p0"))},
+		{name: "no identity", identifier: &APIExpectedMachineInterfaceIdentifier{}, wantErr: "exactly one of macAddress or astra"},
+		{name: "both identities", identifier: &APIExpectedMachineInterfaceIdentifier{
+			MacAddress: macIdentifier("02:00:00:00:00:09").MacAddress, Astra: astraIdentifier("C1-1-L1", nil).Astra,
+		}, wantErr: "exactly one of macAddress or astra"},
+		{name: "empty MAC", identifier: macIdentifier(""), wantErr: "macAddress: MacAddress cannot be empty"},
+		{name: "malformed MAC", identifier: macIdentifier("02:00:00:00:00"), wantErr: "macAddress: must be a MAC address of six colon- or hyphen-separated octets"},
+		{name: "invalid Astra names", identifier: astraIdentifier("", nil), wantErr: "astra: (physicalName: a value is required.)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.identifier.Validate()
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestAPIExpectedMachineInterfaceAstraIdentifier_Validate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		astra   APIExpectedMachineInterfaceAstraIdentifier
+		wantErr string
+	}{
+		{name: "physical and logical names", astra: APIExpectedMachineInterfaceAstraIdentifier{PhysicalName: "C1-1-L1", LogicalName: cutil.GetPtr("eth_r0_p0")}},
+		{name: "logical name is optional", astra: APIExpectedMachineInterfaceAstraIdentifier{PhysicalName: "C1-1-L1"}},
+		{name: "empty physical name", astra: APIExpectedMachineInterfaceAstraIdentifier{}, wantErr: "physicalName: a value is required"},
+		{name: "physical name outside Core's characters", astra: APIExpectedMachineInterfaceAstraIdentifier{PhysicalName: "C1 1 L1"}, wantErr: "physicalName: may contain only"},
+		{name: "empty logical name", astra: APIExpectedMachineInterfaceAstraIdentifier{PhysicalName: "C1-1-L1", LogicalName: cutil.GetPtr("")}, wantErr: "logicalName: LogicalName cannot be empty"},
+		{name: "logical name rejects the colon physical names allow", astra: APIExpectedMachineInterfaceAstraIdentifier{PhysicalName: "C1-1-L1", LogicalName: cutil.GetPtr("eth:0")}, wantErr: "logicalName: may contain only"},
+		{name: "logical name over 127 characters", astra: APIExpectedMachineInterfaceAstraIdentifier{PhysicalName: "C1-1-L1", LogicalName: cutil.GetPtr(strings.Repeat("a", 128))}, wantErr: "logicalName: must be at most 127 characters"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.astra.Validate()
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
 		})
 	}
 }
@@ -449,13 +519,15 @@ func TestAPIExpectedMachineInterface_ToDBModel(t *testing.T) {
 	t.Run("canonical MAC spelling", func(t *testing.T) {
 		for _, mac := range []string{"02:aa:bb:cc:dd:ee", "02-AA-BB-CC-DD-EE", "02:aa-bb:cc-dd:ee", "02:AA:BB:CC:DD:EE"} {
 			t.Run(mac, func(t *testing.T) {
-				value := APIExpectedMachineInterface{MacAddress: cutil.GetPtr(mac)}
+				value := APIExpectedMachineInterface{Identifier: macIdentifier(mac)}
 				require.NoError(t, value.Validate())
 				stored := value.ToDBModel()
 				require.NotNil(t, stored.MacAddress)
 				assert.Equal(t, "02:AA:BB:CC:DD:EE", *stored.MacAddress)
 				assert.Equal(t, stored.MacAddress, stored.ToProto().MacAddress)
-				assert.Equal(t, stored.MacAddress, NewAPIExpectedMachineInterface(stored).MacAddress)
+				response := NewAPIExpectedMachineInterface(stored)
+				assert.Equal(t, macIdentifier("02:AA:BB:CC:DD:EE"), response.Identifier)
+				assert.Equal(t, stored.MacAddress, response.MacAddress)
 			})
 		}
 	})
@@ -471,8 +543,9 @@ func TestAPIExpectedMachineInterface_ToDBModel(t *testing.T) {
 			IpAllocation:       corev1.ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_FIXED.Enum(),
 		}},
 		{name: "legacy declaration without new fields", input: &corev1.ExpectedHostNic{MacAddress: cutil.GetPtr("02:00:00:00:00:09")}},
-		{name: "physical and logical interface names survive", input: &corev1.ExpectedHostNic{
-			MacAddress: cutil.GetPtr("02:00:00:00:00:09"), PhysicalIfname: cutil.GetPtr("C1-1-L1"), LogicalIfname: cutil.GetPtr("rail0"),
+		{name: "Astra names without a MAC", input: &corev1.ExpectedHostNic{
+			PhysicalIfname: cutil.GetPtr("C1-1-L1"), LogicalIfname: cutil.GetPtr("eth_r0_p0"),
+			NicType: cutil.GetPtr("CX9"), FixedIp: cutil.GetPtr("192.0.2.11"),
 		}},
 		{name: "explicit zero values survive", input: &corev1.ExpectedHostNic{
 			MacAddress: cutil.GetPtr("02:00:00:00:00:09"), Primary: cutil.GetPtr(false),
@@ -565,7 +638,19 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 			wantLabelsJSON:     `{"env":"test","zone":"us-west-1"}`,
 			wantSerialsJSON:    `["DPU002","DPU001"]`,
 			interfaces:         []cdbm.ExpectedMachineInterface{{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.9")}},
-			wantInterfacesJSON: `[{"macAddress":"02:00:00:00:00:09","physicalName":null,"logicalName":null,"nicType":"CX9","fixedIp":"192.0.2.9","fixedMask":null,"fixedGateway":null,"primary":null,"networkSegmentType":null,"role":null,"ipAllocation":null}]`,
+			wantInterfacesJSON: `[{"identifier":{"macAddress":"02:00:00:00:00:09","astra":null},"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9","fixedMask":null,"fixedGateway":null,"primary":null,"networkSegmentType":null,"role":null,"ipAllocation":null}]`,
+		},
+		{
+			desc:       "Astra interface returns its names as the identifier",
+			interfaces: []cdbm.ExpectedMachineInterface{{PhysicalName: cutil.GetPtr("C1-1-L1"), LogicalName: cutil.GetPtr("eth_r0_p0"), NicType: cutil.GetPtr("CX9")}},
+			wantInterfacesJSON: `[{"identifier":{"macAddress":null,"astra":{"physicalName":"C1-1-L1","logicalName":"eth_r0_p0"}},"macAddress":null,
+				"nicType":"CX9","fixedIp":null,"fixedMask":null,"fixedGateway":null,"primary":null,"networkSegmentType":null,"role":null,"ipAllocation":null}]`,
+		},
+		{
+			desc:       "MAC Core reports beside Astra names stays in the deprecated field",
+			interfaces: []cdbm.ExpectedMachineInterface{{MacAddress: cutil.GetPtr("02:00:00:00:00:0A"), PhysicalName: cutil.GetPtr("C1-1-L2")}},
+			wantInterfacesJSON: `[{"identifier":{"macAddress":null,"astra":{"physicalName":"C1-1-L2","logicalName":null}},"macAddress":"02:00:00:00:00:0A",
+				"nicType":null,"fixedIp":null,"fixedMask":null,"fixedGateway":null,"primary":null,"networkSegmentType":null,"role":null,"ipAllocation":null}]`,
 		},
 		{
 			desc:         "stored DPF false is returned",
