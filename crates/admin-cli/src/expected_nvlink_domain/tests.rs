@@ -38,6 +38,40 @@ fn parse(args: &[&str]) -> Result<Cmd, clap::Error> {
 }
 
 #[test]
+fn help_omits_unused_output_flags() {
+    use carbide_test_support::{Check, check_values};
+
+    check_values(
+        ["", "show", "create", "delete"].map(|subcommand| Check {
+            scenario: subcommand,
+            input: subcommand,
+            expect: (clap::error::ErrorKind::DisplayHelp, false, false),
+        }),
+        |subcommand| {
+            let mut args = vec!["nico-admin-cli", "expected-nvlink-domain"];
+            if !subcommand.is_empty() {
+                args.push(subcommand);
+            }
+            args.push("--help");
+            let error = CliOptions::try_parse_from(args).unwrap_err();
+            let help = error.to_string();
+            (
+                error.kind(),
+                help.contains("--extended"),
+                help.contains("--sort-by"),
+            )
+        },
+    );
+    // Hiding inherited options must not break parsing existing invocations.
+    assert!(parse(&["show", "--extended", "--sort-by", "state"]).is_ok());
+    let other_help = CliOptions::try_parse_from(["nico-admin-cli", "machine", "show", "--help"])
+        .unwrap_err()
+        .to_string();
+    assert!(other_help.contains("--extended"));
+    assert!(other_help.contains("--sort-by"));
+}
+
+#[test]
 fn invalid_invocations() {
     for args in [
         vec!["create", "group"],

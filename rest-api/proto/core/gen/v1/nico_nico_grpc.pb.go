@@ -1105,7 +1105,8 @@ type ForgeClient interface {
 	// Fails with FAILED_PRECONDITION if expected NVLink domains reference this group.
 	DeleteExpectedRackGroup(ctx context.Context, in *ExpectedRackGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Replace the full record, including both lists and metadata.
-	// With expected NVLink domains, only metadata changes or identical inventory are accepted.
+	// With expected NVLink domains, racks must remain unchanged.
+	// Topology, protocol, and metadata changes are accepted.
 	UpdateExpectedRackGroup(ctx context.Context, in *ExpectedRackGroup, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetExpectedRackGroup(ctx context.Context, in *ExpectedRackGroupRequest, opts ...grpc.CallOption) (*ExpectedRackGroup, error)
 	// Return all declarations ordered by rack group ID; an empty site returns an empty list.
@@ -7574,7 +7575,8 @@ type ForgeServer interface {
 	// Fails with FAILED_PRECONDITION if expected NVLink domains reference this group.
 	DeleteExpectedRackGroup(context.Context, *ExpectedRackGroupRequest) (*emptypb.Empty, error)
 	// Replace the full record, including both lists and metadata.
-	// With expected NVLink domains, only metadata changes or identical inventory are accepted.
+	// With expected NVLink domains, racks must remain unchanged.
+	// Topology, protocol, and metadata changes are accepted.
 	UpdateExpectedRackGroup(context.Context, *ExpectedRackGroup) (*emptypb.Empty, error)
 	GetExpectedRackGroup(context.Context, *ExpectedRackGroupRequest) (*ExpectedRackGroup, error)
 	// Return all declarations ordered by rack group ID; an empty site returns an empty list.

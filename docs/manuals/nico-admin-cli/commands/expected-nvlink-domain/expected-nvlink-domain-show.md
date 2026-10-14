@@ -11,7 +11,7 @@ list declarations in UUID order
 
 ```text
 nico-admin-cli expected-nvlink-domain show [--rack-group-id]
-[--extended] [--sort-by] [-h|--help] [ID]
+[-h|--help] [ID]
 ```
 
 ## DESCRIPTION
@@ -24,24 +24,6 @@ Show one declaration or list declarations in UUID order
 
 Filter by external rack group ID; cannot be combined with a declaration
 ID
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
-
-`--sort-by <SORT_BY> [default: primary-id]`
-
-Sort output by specified field
-
-*Possible values:*
-
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
 
 `-h, --help`
 

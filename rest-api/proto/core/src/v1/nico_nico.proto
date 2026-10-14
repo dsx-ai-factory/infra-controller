@@ -650,7 +650,8 @@ service Forge {
   // Fails with FAILED_PRECONDITION if expected NVLink domains reference this group.
   rpc DeleteExpectedRackGroup(ExpectedRackGroupRequest) returns (google.protobuf.Empty);
   // Replace the full record, including both lists and metadata.
-  // With expected NVLink domains, only metadata changes or identical inventory are accepted.
+  // With expected NVLink domains, racks must remain unchanged.
+  // Topology, protocol, and metadata changes are accepted.
   rpc UpdateExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
   rpc GetExpectedRackGroup(ExpectedRackGroupRequest) returns (ExpectedRackGroup);
   // Return all declarations ordered by rack group ID; an empty site returns an empty list.

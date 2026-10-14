@@ -10,8 +10,8 @@ release its members without changing hardware
 ## SYNOPSIS
 
 ```text
-nico-admin-cli expected-nvlink-domain delete [--extended]
-[--sort-by] [-h|--help] <ID>
+nico-admin-cli expected-nvlink-domain delete [-h|--help]
+<ID>
 ```
 
 ## DESCRIPTION
@@ -19,24 +19,6 @@ nico-admin-cli expected-nvlink-domain delete [--extended]
 Delete a declaration and release its members without changing hardware
 
 ## OPTIONS
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
-
-`--sort-by <SORT_BY> [default: primary-id]`
-
-Sort output by specified field
-
-*Possible values:*
-
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
 
 `-h, --help`
 

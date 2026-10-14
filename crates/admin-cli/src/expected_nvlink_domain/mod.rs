@@ -19,6 +19,11 @@ use crate::errors::CarbideCliResult;
 use crate::{async_write, async_write_table_as_csv};
 
 #[derive(Parser, Debug, Dispatch)]
+// These inherited global flags are accepted for compatibility but do not affect this command.
+#[command(defer = |cmd| cmd.mut_args(|arg| match arg.get_id().as_str() {
+    "extended" | "sort_by" => arg.hide(true),
+    _ => arg,
+}))]
 pub(crate) enum Cmd {
     /// Create immutable expected membership without configuring hardware
     Create(Create),

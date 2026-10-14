@@ -70,9 +70,19 @@ async fn lifecycle_and_group_dependencies(pool: sqlx::PgPool) {
             .unwrap()
             .unwrap();
     group.metadata.name = "renamed".into();
+    group.topology = model::expected_rack_group::RackGroupTopology::new("updated-topology");
+    group.protocol = Some(model::expected_rack_group::RackGroupProtocol::new(
+        "updated-protocol",
+    ));
     crate::expected_rack_group::update(&mut txn, &group)
         .await
         .unwrap();
+    assert_eq!(
+        crate::expected_rack_group::find_by_rack_group_id(&mut txn, &domain.rack_group_id)
+            .await
+            .unwrap(),
+        Some(group.clone())
+    );
     group.racks.clear();
     assert!(matches!(
         crate::expected_rack_group::update(&mut txn, &group).await,
