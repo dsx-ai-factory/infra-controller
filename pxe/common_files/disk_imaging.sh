@@ -593,7 +593,7 @@ function modify_grub_cfg() {
 			else
 				mount "$boot_part" /mnt/boot 2>&1 | tee $log_output
 				if [ "${PIPESTATUS[0]}" -ne 0 ] && [ "$boot_part_source" != "default" ]; then
-					echo "Failed to mount $boot_part on /mnt/boot" | tee $log_output >&2
+					echo "Failed to mount $boot_part on /mnt/boot" | tee "$log_output" >&2
 					return 1
 				fi
 			fi
