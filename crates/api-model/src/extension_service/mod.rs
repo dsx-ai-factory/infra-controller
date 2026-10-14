@@ -246,7 +246,10 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ExtensionService {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A service version's definition and metadata, with fields named for `extension_service_versions` columns.
+/// The unmapped `dpf_service_id` column reserves a case-insensitive DPF identity during creation.
+#[derive(Debug, Clone, Serialize, Deserialize, carbide_macros::DbTable)]
+#[db_table(name = "extension_service_versions")]
 pub struct ExtensionServiceVersionInfo {
     pub service_id: ExtensionServiceId,
     pub version: ConfigVersion,

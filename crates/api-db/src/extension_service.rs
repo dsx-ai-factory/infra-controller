@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::extension_service::ExtensionServiceId;
 use config_version::{ConfigVersion, ConfigVersionChange};
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -281,21 +282,26 @@ pub async fn create(
     // Insert the initial version using the service id
     let service_id = service.id;
 
-    let version_query = "INSERT INTO extension_service_versions
+    let version_query = format!(
+        "INSERT INTO extension_service_versions
             (service_id, version, data, dpf_service_id, observability, has_credential)
             VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING service_id, version, data, observability, has_credential, created, deleted";
+            RETURNING {}",
+        ExtensionServiceVersionInfo::db_table_columns(),
+    );
 
-    let version = sqlx::query_as::<_, ExtensionServiceVersionInfo>(version_query)
-        .bind(service_id)
-        .bind(version.to_string())
-        .bind(data)
-        .bind(dpf_service_id)
-        .bind(observability.map(sqlx::types::Json))
-        .bind(has_credential)
-        .fetch_one(&mut *txn)
-        .await
-        .map_err(|e| DatabaseError::query(version_query, e))?;
+    let version = sqlx::query_as::<_, ExtensionServiceVersionInfo>(sqlx::AssertSqlSafe(
+        version_query.as_str(),
+    ))
+    .bind(service_id)
+    .bind(version.to_string())
+    .bind(data)
+    .bind(dpf_service_id)
+    .bind(observability.map(sqlx::types::Json))
+    .bind(has_credential)
+    .fetch_one(&mut *txn)
+    .await
+    .map_err(|e| DatabaseError::query(&version_query, e))?;
 
     // Kubernetes Pod services do not participate in this controller.  DPF
     // Helm services do, so record their initial Creating state in the same
@@ -415,20 +421,24 @@ pub async fn update(
     // Insert the new version with the next version number.
     // Since all updates will first take the extension service row for update, we do not need to worry
     // about concurrent update issue here.
-    let version_query =
+    let version_query = format!(
         "INSERT INTO extension_service_versions (service_id, version, data, observability, has_credential)
          VALUES ($1, $2, $3, $4, $5)
-         RETURNING service_id, version, data, observability, has_credential, created, deleted";
+         RETURNING {}",
+        ExtensionServiceVersionInfo::db_table_columns(),
+    );
 
-    let new_version = sqlx::query_as::<_, ExtensionServiceVersionInfo>(version_query)
-        .bind(service_id)
-        .bind(config_version_change.new)
-        .bind(data)
-        .bind(observability.map(sqlx::types::Json))
-        .bind(has_credential)
-        .fetch_one(&mut *txn)
-        .await
-        .map_err(|e| DatabaseError::query(version_query, e))?;
+    let new_version = sqlx::query_as::<_, ExtensionServiceVersionInfo>(sqlx::AssertSqlSafe(
+        version_query.as_str(),
+    ))
+    .bind(service_id)
+    .bind(config_version_change.new)
+    .bind(data)
+    .bind(observability.map(sqlx::types::Json))
+    .bind(has_credential)
+    .fetch_one(&mut *txn)
+    .await
+    .map_err(|e| DatabaseError::query(&version_query, e))?;
 
     Ok((updated_service, new_version))
 }
@@ -574,18 +584,23 @@ pub async fn update_dpf_helm_chart_in_place(
         Err(error) => return Err(DatabaseError::query(builder.sql(), error)),
     };
 
-    let version_query = "UPDATE extension_service_versions
-                         SET data = $1, dpf_service_id = $2
-                         WHERE service_id = $3 AND version = $4 AND deleted IS NULL
-                         RETURNING service_id, version, data, observability, has_credential, created, deleted";
-    let version = sqlx::query_as::<_, ExtensionServiceVersionInfo>(version_query)
-        .bind(normalized_data)
-        .bind(dpf_service_id)
-        .bind(service_id)
-        .bind(stable_version)
-        .fetch_one(&mut *txn)
-        .await
-        .map_err(|error| DatabaseError::query(version_query, error))?;
+    let version_query = format!(
+        "UPDATE extension_service_versions
+         SET data = $1, dpf_service_id = $2
+         WHERE service_id = $3 AND version = $4 AND deleted IS NULL
+         RETURNING {}",
+        ExtensionServiceVersionInfo::db_table_columns(),
+    );
+    let version = sqlx::query_as::<_, ExtensionServiceVersionInfo>(sqlx::AssertSqlSafe(
+        version_query.as_str(),
+    ))
+    .bind(normalized_data)
+    .bind(dpf_service_id)
+    .bind(service_id)
+    .bind(stable_version)
+    .fetch_one(&mut *txn)
+    .await
+    .map_err(|error| DatabaseError::query(&version_query, error))?;
 
     crate::state_history::persist(
         txn,
@@ -927,11 +942,12 @@ pub async fn find_version_info_of_known_service(
     version: Option<ConfigVersion>,
 ) -> DatabaseResult<ExtensionServiceVersionInfo> {
     // Build the version lookup query.
-    let mut builder = sqlx::QueryBuilder::new(
-        "SELECT service_id, version, data, observability, has_credential, created, deleted \
+    let mut builder = sqlx::QueryBuilder::new(format!(
+        "SELECT {} \
          FROM extension_service_versions \
          WHERE deleted IS NULL AND service_id = ",
-    );
+        ExtensionServiceVersionInfo::db_table_columns(),
+    ));
     builder.push_bind(service_id);
 
     if let Some(v) = version {
@@ -973,11 +989,12 @@ pub async fn find_versions_info(
     versions: Option<&[ConfigVersion]>,
 ) -> DatabaseResult<Vec<ExtensionServiceVersionInfo>> {
     // Build the version lookup query.
-    let mut builder = sqlx::QueryBuilder::new(
-        "SELECT service_id, version, data, observability, has_credential, created, deleted \
-     FROM extension_service_versions \
-     WHERE deleted IS NULL AND service_id = ",
-    );
+    let mut builder = sqlx::QueryBuilder::new(format!(
+        "SELECT {} \
+         FROM extension_service_versions \
+         WHERE deleted IS NULL AND service_id = ",
+        ExtensionServiceVersionInfo::db_table_columns(),
+    ));
     builder.push_bind(service_id);
 
     if let Some(versions) = versions {
@@ -1322,7 +1339,9 @@ mod test_batched_lookups {
     use model::controller_outcome::PersistentStateHandlerOutcome;
     use model::extension_service::{
         DpuTarget, ExtensionServiceInterfaceMac, ExtensionServiceLifecycleState,
-        ExtensionServiceType, ServiceVpcInterfaceRequirement,
+        ExtensionServiceObservabilityConfig, ExtensionServiceObservabilityConfigType,
+        ExtensionServiceObservabilityConfigTypeLogging, ExtensionServiceType,
+        ServiceVpcInterfaceRequirement,
     };
     use model::metadata::Metadata;
     use model::tenant::TenantOrganizationId;
@@ -2140,5 +2159,202 @@ mod test_batched_lookups {
             "extension_service version lookup: find_version_info={probed_count} \
              find_version_info_of_known_service={unprobed_count}"
         );
+    }
+
+    #[crate::sqlx_test]
+    async fn version_queries_decode_complete_records(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        crate::tenant::create_and_persist(
+            TENANT_ORG.to_string(),
+            Metadata {
+                name: "Test Org".to_string(),
+                description: String::new(),
+                labels: HashMap::new(),
+            },
+            None,
+            &mut txn,
+        )
+        .await?;
+        let tenant = TENANT_ORG.parse()?;
+        // `CURRENT_TIMESTAMP` is fixed for this transaction, including the `created` default.
+        let created_at = sqlx::query_scalar("SELECT CURRENT_TIMESTAMP")
+            .fetch_one(&mut *txn)
+            .await?;
+        let expected_initial = ExtensionServiceVersionInfo {
+            service_id: ExtensionServiceId::new(),
+            version: ConfigVersion::initial(),
+            created: created_at,
+            data: "initial pod definition".to_string(),
+            observability: Some(ExtensionServiceObservability {
+                configs: vec![ExtensionServiceObservabilityConfig {
+                    name: Some("service logs".to_string()),
+                    config: ExtensionServiceObservabilityConfigType::Logging(
+                        ExtensionServiceObservabilityConfigTypeLogging {
+                            path: "/var/log/service.log".to_string(),
+                        },
+                    ),
+                }],
+            }),
+            has_credential: true,
+            deleted: None,
+        };
+        let (_, created) = create(
+            &mut txn,
+            expected_initial.version,
+            &expected_initial.service_id,
+            &ExtensionServiceType::KubernetesPod,
+            None,
+            "pod-service",
+            &tenant,
+            None,
+            &[],
+            &expected_initial.data,
+            None,
+            expected_initial.observability.clone(),
+            expected_initial.has_credential,
+        )
+        .await?;
+        let version_change = expected_initial.version.incremental_change();
+        let expected_updated = ExtensionServiceVersionInfo {
+            version: version_change.new,
+            data: "updated pod definition".to_string(),
+            ..expected_initial.clone()
+        };
+        let (_, updated) = update(
+            &mut txn,
+            expected_updated.service_id,
+            None,
+            None,
+            &[],
+            &expected_updated.data,
+            expected_updated.observability.clone(),
+            expected_updated.has_credential,
+            version_change,
+        )
+        .await?;
+        let latest =
+            find_version_info_of_known_service(&mut txn, expected_updated.service_id, None).await?;
+        let versions = find_versions_info(&mut txn, &expected_updated.service_id, None).await?;
+
+        let expected_dpf = ExtensionServiceVersionInfo {
+            service_id: ExtensionServiceId::new(),
+            version: ConfigVersion::initial(),
+            created: created_at,
+            data: r#"{"chart":"updated"}"#.to_string(),
+            observability: None,
+            has_credential: false,
+            deleted: None,
+        };
+        let (dpf_service, _) = create(
+            &mut txn,
+            expected_dpf.version,
+            &expected_dpf.service_id,
+            &ExtensionServiceType::DpfHelmChart,
+            Some(DpuTarget::AllActive),
+            "helm-service",
+            &tenant,
+            None,
+            &[],
+            r#"{"chart":"initial"}"#,
+            Some("helm-service-v1"),
+            None,
+            false,
+        )
+        .await?;
+
+        // Put the service in `Ready` so the in-place update can retain `V1`.
+        let ready_version_change = dpf_service
+            .status
+            .controller_state
+            .version
+            .incremental_change();
+        assert_eq!(
+            try_update_controller_state(
+                &mut txn,
+                expected_dpf.service_id,
+                ready_version_change.current,
+                ready_version_change.new,
+                &ExtensionServiceLifecycleState::Ready,
+            )
+            .await?,
+            ConditionalWrite::Applied(())
+        );
+        let (_, dpf_updated) = update_dpf_helm_chart_in_place(
+            &mut txn,
+            expected_dpf.service_id,
+            None,
+            None,
+            &[],
+            &expected_dpf.data,
+            "helm-service-v1",
+            expected_dpf.version,
+            dpf_service.version_ctr,
+            ready_version_change.new.incremental_change(),
+        )
+        .await?;
+
+        for (operation, actual, expected) in [
+            ("create", &created, &expected_initial),
+            ("update", &updated, &expected_updated),
+            (
+                "find_version_info_of_known_service",
+                &latest,
+                &expected_updated,
+            ),
+            (
+                "update_dpf_helm_chart_in_place",
+                &dpf_updated,
+                &expected_dpf,
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(actual)?,
+                serde_json::to_value(expected)?,
+                "{operation}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(versions)?,
+            serde_json::to_value([&expected_updated, &expected_initial])?,
+            "find_versions_info returns complete versions in descending order"
+        );
+
+        soft_delete_versions(
+            &mut txn,
+            expected_updated.service_id,
+            &[expected_updated.version],
+        )
+        .await?;
+        let latest =
+            find_version_info_of_known_service(&mut txn, expected_updated.service_id, None).await?;
+        assert_eq!(
+            serde_json::to_value(latest)?,
+            serde_json::to_value(&expected_initial)?,
+            "latest lookup falls back to the previous active version"
+        );
+        let deleted = find_version_info_of_known_service(
+            &mut txn,
+            expected_updated.service_id,
+            Some(expected_updated.version),
+        )
+        .await
+        .expect_err("an exact lookup excludes a deleted version");
+        assert!(matches!(
+            deleted,
+            DatabaseError::NotFoundError {
+                kind: "extension_service_version",
+                ..
+            }
+        ));
+        let versions = find_versions_info(&mut txn, &expected_updated.service_id, None).await?;
+        assert_eq!(
+            serde_json::to_value(versions)?,
+            serde_json::to_value([expected_initial])?,
+            "find_versions_info excludes deleted versions"
+        );
+        txn.rollback().await?;
+        Ok(())
     }
 }
