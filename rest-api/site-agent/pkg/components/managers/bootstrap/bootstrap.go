@@ -55,8 +55,23 @@ const (
 	kubernetesSecretDataSymlink = "..data"
 )
 
+func resolveBootstrapRevision(dir string) (string, error) {
+	dataSymlink := filepath.Join(dir, kubernetesSecretDataSymlink)
+	if _, err := os.Lstat(dataSymlink); err == nil {
+		return filepath.EvalSymlinks(dataSymlink)
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	return dir, nil
+}
+
 func readBootstrapConfig(dir string) (bootstraptypes.SecretConfig, []string, error) {
 	log.Info().Msgf("Bootstrap: Reading from secret: %v", dir)
+
+	configDir, err := resolveBootstrapRevision(dir)
+	if err != nil {
+		return bootstraptypes.SecretConfig{}, nil, err
+	}
 
 	config := bootstraptypes.SecretConfig{}
 	fields := []struct {
@@ -83,7 +98,7 @@ func readBootstrapConfig(dir string) (bootstraptypes.SecretConfig, []string, err
 	files := make([]string, 0, len(fields))
 	for _, field := range fields {
 		file := filepath.Join(dir, field.tag)
-		readBytes, err := os.ReadFile(file)
+		readBytes, err := os.ReadFile(filepath.Join(configDir, field.tag))
 		if err != nil {
 			return bootstraptypes.SecretConfig{}, nil, err
 		}
@@ -219,28 +234,31 @@ func isBootstrapSecretUpdate(event fsnotify.Event, files map[string]bool, dir st
 }
 
 func (bs *BoostrapAPI) reloadBootstrapCredentials(dir string) error {
-	config, _, err := readBootstrapConfig(dir)
-	if err != nil {
-		return err
-	}
+	bootstrap := ManagerAccess.Data.EB.Managers.Bootstrap
+	return bootstrap.RunCredentialUpdate(func() error {
+		candidate, _, err := readBootstrapConfig(dir)
+		if err != nil {
+			return err
+		}
 
-	currentSiteID := ManagerAccess.Data.EB.Managers.Bootstrap.GetConfig().UUID
-	if currentSiteID != "" && config.UUID != currentSiteID {
-		return fmt.Errorf("bootstrap Secret Site ID changed from %s to %s", currentSiteID, config.UUID)
-	}
+		currentSiteID := bootstrap.GetConfig().UUID
+		if currentSiteID != "" && candidate.UUID != currentSiteID {
+			return fmt.Errorf("bootstrap Secret Site ID changed from %s to %s", currentSiteID, candidate.UUID)
+		}
 
-	ManagerAccess.Data.EB.Managers.Bootstrap.ReplaceConfig(config)
-	log.Info().
-		Str("site_id", config.UUID).
-		Str("credentials_url", config.CredsURL).
-		Str("ca_certificate", cutils.RedactSecret(config.CACert, cutils.CertLogPrefixLen)).
-		Msg("Bootstrap: configuration reloaded, OTP read")
-	err = bs.DownloadAndStoreCreds(nil)
-	if err != nil {
-		return err
-	}
-	ManagerAccess.Data.EB.Managers.Bootstrap.Registration.AddOTP(config.OTP)
-	return nil
+		if err := bs.downloadAndStoreCreds(candidate, true); err != nil {
+			return err
+		}
+
+		bootstrap.Registration.AddOTP(candidate.OTP)
+		bootstrap.ReplaceConfig(candidate)
+		log.Info().
+			Str("site_id", candidate.UUID).
+			Str("credentials_url", candidate.CredsURL).
+			Str("ca_certificate", cutils.RedactSecret(candidate.CACert, cutils.CertLogPrefixLen)).
+			Msg("Bootstrap: configuration reloaded, OTP read")
+		return nil
+	})
 }
 
 // watchSecretFiles watch on the secret file
@@ -310,11 +328,15 @@ func (bs *BoostrapAPI) Start() {
 // treated as a re-pair.
 func (bs *BoostrapAPI) CheckRegistration() error {
 	dir := ManagerAccess.Conf.EB.BootstrapSecret
-	siteID, err := os.ReadFile(dir + bootstraptypes.TagUUID)
+	configDir, err := resolveBootstrapRevision(dir)
 	if err != nil {
 		return nil
 	}
-	otp, err := os.ReadFile(dir + bootstraptypes.TagOTP)
+	siteID, err := os.ReadFile(filepath.Join(configDir, bootstraptypes.TagUUID))
+	if err != nil {
+		return nil
+	}
+	otp, err := os.ReadFile(filepath.Join(configDir, bootstraptypes.TagOTP))
 	if err != nil {
 		return nil
 	}
@@ -323,10 +345,27 @@ func (bs *BoostrapAPI) CheckRegistration() error {
 
 // DownloadAndStoreCreds - Download and Store Temporal credentials
 func (bs *BoostrapAPI) DownloadAndStoreCreds(otpOverride []byte) error {
-	// Check if certs for this OTP have already been downloaded
 	bootstrap := ManagerAccess.Data.EB.Managers.Bootstrap
-	bCfg := bootstrap.GetConfig()
+	return bootstrap.RunCredentialUpdate(func() error {
+		candidate := bootstrap.GetConfig()
+		if otpOverride != nil {
+			candidate.OTP = string(otpOverride)
+			log.Info().Msg("Bootstrap: Using OTP override")
+		}
 
+		if err := bs.downloadAndStoreCreds(candidate, otpOverride == nil); err != nil {
+			return err
+		}
+
+		if otpOverride != nil {
+			bootstrap.Registration.AddOTP(candidate.OTP)
+			bootstrap.ReplaceConfig(candidate)
+		}
+		return nil
+	})
+}
+
+func (bs *BoostrapAPI) downloadAndStoreCreds(config bootstraptypes.SecretConfig, skipIfStored bool) error {
 	otpFilePath := ManagerAccess.Conf.EB.Temporal.GetTemporalCertOTPFullPath()
 	otpBytes, err := os.ReadFile(otpFilePath)
 	if err != nil {
@@ -338,18 +377,9 @@ func (bs *BoostrapAPI) DownloadAndStoreCreds(otpOverride []byte) error {
 		otpBytes = []byte{}
 	}
 
-	// If an OTP override is provided and not nil, use it and update the config
-	if otpOverride != nil {
-		otpBytes = otpOverride
-		bCfg.OTP = string(otpBytes)
-		bootstrap.SetOTP(bCfg.OTP)
-		log.Info().Msgf("Bootstrap: Using OTP override")
-	}
-
-	// If no OTP override, check if credentials have already been downloaded for the OTP in the config
 	fileOTP := string(otpBytes)
-	configOTP := bCfg.OTP
-	if otpOverride == nil && len(fileOTP) > 0 && fileOTP == configOTP {
+	configOTP := config.OTP
+	if skipIfStored && len(fileOTP) > 0 && fileOTP == configOTP {
 		log.Info().Msgf("Bootstrap: Credentials already downloaded for OTP (file matches config)")
 		return nil
 	}
@@ -365,16 +395,16 @@ func (bs *BoostrapAPI) DownloadAndStoreCreds(otpOverride []byte) error {
 	defer span.End()
 
 	// Proceed to download credentials with the updated OTP
-	credsResponse, err := bs.downloadCredentials(ctx, bCfg)
+	credsResponse, err := bs.downloadCredentials(ctx, config)
 	if err != nil {
 		cotel.RecordError(span, err)
 		// A stale OTP is the usual cause, so the prefix identifies which one the
 		// Site sent.
 		log.Error().Err(err).Msgf("Bootstrap: Download Credentials failed for Site %v from %v with OTP %v",
-			bCfg.UUID, bCfg.CredsURL, cutils.RedactSecret(bCfg.OTP, cutils.SecretLogPrefixLen))
+			config.UUID, config.CredsURL, cutils.RedactSecret(config.OTP, cutils.SecretLogPrefixLen))
 		return err
 	}
-	err = bs.storeCredentials(ctx, credsResponse, bCfg.OTP)
+	err = bs.storeCredentials(ctx, credsResponse, config.OTP)
 	if err != nil {
 		cotel.RecordError(span, err)
 		log.Info().Msgf("Bootstrap: Store Credentials %v", err.Error())
