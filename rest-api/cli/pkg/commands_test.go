@@ -473,7 +473,7 @@ func TestGeneratedCommandInfos_ContainsConciseAliases(t *testing.T) {
 	}
 }
 
-func TestGeneratedCommandInfos_ExpectedInventoryBulkPaths(t *testing.T) {
+func TestGeneratedCommandInfos_ExpectedInventoryBatchPaths(t *testing.T) {
 	spec, err := ParseSpec(openapi.Spec)
 	require.NoError(t, err)
 
