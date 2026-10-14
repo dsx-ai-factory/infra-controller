@@ -204,7 +204,8 @@ pub async fn find_machine_ids_for_attestation(
     Ok(object_ids)
 }
 
-// list_all_attestation_statuses (selector)
+/// Lists jobs matching the aggregate device status selected by `selector`.
+/// Unfinished devices take precedence, followed by failure, cancellation, and all-passed.
 pub async fn list_all_attestation_statuses(
     txn: &mut PgConnection,
     selector: SpdmAttestationStatus,
@@ -220,7 +221,7 @@ pub async fn list_all_attestation_statuses(
                         THEN 'in_progress'
                     WHEN bool_or(state ? 'Failed')
                         THEN 'failed'
-                    WHEN bool_and(state = '"Cancelled"'::jsonb)
+                    WHEN bool_or(state = '"Cancelled"'::jsonb)
                         THEN 'cancelled'
                     WHEN bool_and(state = '"Passed"'::jsonb)
                         THEN 'passed'
@@ -245,7 +246,7 @@ pub async fn list_all_attestation_statuses(
                         THEN 'in_progress'
                     WHEN bool_or(state ? 'Failed')
                         THEN 'failed'
-                    WHEN bool_and(state = '"Cancelled"'::jsonb)
+                    WHEN bool_or(state = '"Cancelled"'::jsonb)
                         THEN 'cancelled'
                     WHEN bool_and(state = '"Passed"'::jsonb)
                         THEN 'passed'
@@ -270,7 +271,7 @@ pub async fn list_all_attestation_statuses(
                         THEN 'in_progress'
                     WHEN bool_or(state ? 'Failed')
                         THEN 'failed'
-                    WHEN bool_and(state = '"Cancelled"'::jsonb)
+                    WHEN bool_or(state = '"Cancelled"'::jsonb)
                         THEN 'cancelled'
                     WHEN bool_and(state = '"Passed"'::jsonb)
                         THEN 'passed'
@@ -295,7 +296,7 @@ pub async fn list_all_attestation_statuses(
                         THEN 'in_progress'
                     WHEN bool_or(state ? 'Failed')
                         THEN 'failed'
-                    WHEN bool_and(state = '"Cancelled"'::jsonb)
+                    WHEN bool_or(state = '"Cancelled"'::jsonb)
                         THEN 'cancelled'
                     WHEN bool_and(state = '"Passed"'::jsonb)
                         THEN 'passed'
@@ -338,6 +339,8 @@ pub async fn list_all_attestation_statuses(
     Ok(attestation_statuses)
 }
 
+/// Aggregates the latest attestation for each device on a machine.
+/// Unfinished devices take precedence, followed by failure, cancellation, and all-passed.
 pub async fn list_single_machine_attestation_status(
     txn: &mut PgConnection,
     machine_id: &MachineId,
@@ -358,7 +361,7 @@ pub async fn list_single_machine_attestation_status(
                     THEN 'in_progress'
                 WHEN bool_or(state ? 'Failed')
                     THEN 'failed'
-                WHEN bool_and(state = '"Cancelled"'::jsonb)
+                WHEN bool_or(state = '"Cancelled"'::jsonb)
                     THEN 'cancelled'
                 WHEN bool_and(state = '"Passed"'::jsonb)
                     THEN 'passed'
@@ -383,6 +386,8 @@ pub async fn list_single_machine_attestation_status(
     convert_status_str_to_model_status(status.as_str())
 }
 
+/// Aggregates the device states for a job, returning not found if it has no devices.
+/// Unfinished devices take precedence, followed by failure, cancellation, and all-passed.
 pub async fn get_attestation_job_status(
     txn: &mut PgConnection,
     job_id: &uuid::Uuid,
@@ -394,7 +399,7 @@ pub async fn get_attestation_job_status(
                     THEN 'in_progress'
                 WHEN bool_or(state ? 'Failed')
                     THEN 'failed'
-                WHEN bool_and(state = '"Cancelled"'::jsonb)
+                WHEN bool_or(state = '"Cancelled"'::jsonb)
                     THEN 'cancelled'
                 WHEN bool_and(state = '"Passed"'::jsonb)
                     THEN 'passed'
@@ -617,4 +622,143 @@ pub async fn update_history(
         .map_err(|e| DatabaseError::query(query, e))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases_async};
+    use carbide_uuid::machine::{MachineIdSource, MachineType};
+
+    use super::*;
+
+    #[crate::sqlx_test]
+    async fn mixed_cancelled_attestation_statuses(pool: sqlx::PgPool) {
+        struct Input {
+            machine_seed: u8,
+            gpu_0_state: SpdmAttestationState,
+            expected_status: SpdmAttestationStatus,
+        }
+
+        #[derive(Debug, PartialEq)]
+        struct Observation {
+            job_status_matches: bool,
+            machine_status_matches: bool,
+            list_selectors_match: [bool; 4],
+        }
+
+        let cases = [
+            Case {
+                scenario: "passed and cancelled devices make a cancelled job",
+                input: Input {
+                    machine_seed: 1,
+                    gpu_0_state: SpdmAttestationState::Passed,
+                    expected_status: SpdmAttestationStatus::Cancelled,
+                },
+                expect: Yields(Observation {
+                    job_status_matches: true,
+                    machine_status_matches: true,
+                    list_selectors_match: [true; 4],
+                }),
+            },
+            Case {
+                scenario: "failure takes precedence over cancellation",
+                input: Input {
+                    machine_seed: 2,
+                    gpu_0_state: SpdmAttestationState::Failed("verification failed".to_string()),
+                    expected_status: SpdmAttestationStatus::Failed,
+                },
+                expect: Yields(Observation {
+                    job_status_matches: true,
+                    machine_status_matches: true,
+                    list_selectors_match: [true; 4],
+                }),
+            },
+            Case {
+                scenario: "unfinished devices keep a cancelled job in progress",
+                input: Input {
+                    machine_seed: 3,
+                    gpu_0_state: SpdmAttestationState::FetchMetadata,
+                    expected_status: SpdmAttestationStatus::InProgress,
+                },
+                expect: Yields(Observation {
+                    job_status_matches: true,
+                    machine_status_matches: true,
+                    list_selectors_match: [true; 4],
+                }),
+            },
+        ];
+
+        check_cases_async(cases, |input| {
+            let pool = &pool;
+            async move {
+                let mut txn = pool.begin().await.map_err(|e| e.to_string())?;
+                let machine_id = MachineId::new(
+                    MachineIdSource::ProductBoardChassisSerial,
+                    [input.machine_seed; 32],
+                    MachineType::Host,
+                );
+                let job_id = uuid::Uuid::new_v4();
+                sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+                    .bind(machine_id)
+                    .execute(&mut *txn)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                for (device_id, state) in [
+                    ("GPU_0", input.gpu_0_state),
+                    ("GPU_1", SpdmAttestationState::Cancelled),
+                ] {
+                    sqlx::query(
+                        "INSERT INTO spdm_machine_devices_attestation \
+                         (machine_id, device_id, nonce, state, job_id, started_at) \
+                         VALUES ($1, $2, $3, $4, $5, now())",
+                    )
+                    .bind(machine_id)
+                    .bind(device_id)
+                    .bind(uuid::Uuid::new_v4())
+                    .bind(sqlx::types::Json(state))
+                    .bind(job_id)
+                    .execute(&mut *txn)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                }
+
+                let job_status = get_attestation_job_status(&mut txn, &job_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let machine_status = list_single_machine_attestation_status(&mut txn, &machine_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut list_selectors_match = [false; 4];
+                for (index, selector) in [
+                    SpdmAttestationStatus::InProgress,
+                    SpdmAttestationStatus::Failed,
+                    SpdmAttestationStatus::Cancelled,
+                    SpdmAttestationStatus::Passed,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let statuses = list_all_attestation_statuses(&mut txn, selector)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let expected = if selector == input.expected_status {
+                        vec![(job_id, input.expected_status)]
+                    } else {
+                        Vec::new()
+                    };
+                    list_selectors_match[index] = statuses == expected;
+                }
+
+                txn.rollback().await.map_err(|e| e.to_string())?;
+                Ok::<_, String>(Observation {
+                    job_status_matches: job_status == input.expected_status,
+                    machine_status_matches: machine_status == input.expected_status,
+                    list_selectors_match,
+                })
+            }
+        })
+        .await;
+    }
 }

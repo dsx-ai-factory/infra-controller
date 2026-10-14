@@ -126,7 +126,7 @@ pub mod spdm {
         }
     }
 
-    #[derive(Clone, Copy, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SpdmAttestationStatus {
         InProgress,
         Cancelled,
