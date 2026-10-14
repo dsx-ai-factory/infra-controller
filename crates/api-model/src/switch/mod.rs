@@ -1116,6 +1116,26 @@ mod tests {
     }
 
     #[test]
+    fn disable_mtls_state_persists_job_id() {
+        let state = SwitchControllerState::Configuring {
+            config_state: ConfiguringState::DisableMtls {
+                disable_mtls: DisableMtlsState::WaitForComplete {
+                    job_id: "job-1".to_string(),
+                },
+            },
+        };
+        let serialized = serde_json::to_string(&state).unwrap();
+        assert_eq!(
+            serialized,
+            r#"{"state":"configuring","config_state":{"DisableMtls":{"disable_mtls":{"WaitForComplete":{"job_id":"job-1"}}}}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<SwitchControllerState>(&serialized).unwrap(),
+            state
+        );
+    }
+
+    #[test]
     fn display_status_is_running_only_when_ok_and_configured() {
         value_scenarios!(
             run = |status| status.display_status();
