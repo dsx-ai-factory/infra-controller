@@ -1245,6 +1245,11 @@ async fn test_add_expected_switch_rejects_nvos_ip_without_mac(
         .await
         .expect_err("add must reject nvos_ip_address with no nvos_mac_addresses");
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(
+        err.message()
+            .contains("nvos_ip_address requires exactly one nvos_interfaces entry"),
+        "{err}"
+    );
 
     Ok(())
 }
@@ -1273,6 +1278,11 @@ async fn test_add_expected_switch_rejects_nvos_ip_with_multiple_macs(
         .await
         .expect_err("add must reject nvos_ip_address with multiple nvos_mac_addresses");
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(
+        err.message()
+            .contains("nvos_ip_address requires exactly one nvos_interfaces entry"),
+        "{err}"
+    );
 
     Ok(())
 }
@@ -1358,6 +1368,11 @@ async fn test_update_expected_switch_rejects_invalid_nvos_pairing(
         .await
         .expect_err("update must reject nvos_ip_address with no nvos_mac_addresses");
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(
+        err.message()
+            .contains("nvos_ip_address requires exactly one nvos_interfaces entry"),
+        "{err}"
+    );
 
     Ok(())
 }

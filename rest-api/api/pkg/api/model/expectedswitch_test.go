@@ -327,6 +327,31 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 			expectErr: false,
 		},
 		{
+			desc: "ok when deprecated NvosMacAddresses is provided",
+			obj: APIExpectedSwitchCreateRequest{
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				DefaultBmcUsername: &validUsername,
+				DefaultBmcPassword: &validPassword,
+				SwitchSerialNumber: validSwitchSerial,
+				NvosMacAddresses:   APINvosMacAddresses{"00:11:22:33:44:66", "00:11:22:33:44:77"},
+			},
+			expectErr: false,
+		},
+		{
+			desc: "error when both NVOS fields are provided",
+			obj: APIExpectedSwitchCreateRequest{
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				DefaultBmcUsername: &validUsername,
+				DefaultBmcPassword: &validPassword,
+				SwitchSerialNumber: validSwitchSerial,
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}},
+				NvosMacAddresses:   APINvosMacAddresses{"00:11:22:33:44:66"},
+			},
+			expectErr: true,
+		},
+		{
 			desc: "error when NvosInterfaces has duplicate MACs",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
@@ -434,6 +459,7 @@ func TestNewAPIExpectedSwitch(t *testing.T) {
 				{MacAddress: "00:11:22:33:44:66", IsPrimary: false},
 				{MacAddress: "00:11:22:33:44:77", IsPrimary: true},
 			}, got.NvosInterfaces)
+			assert.Equal(t, APINvosMacAddresses{"00:11:22:33:44:66", "00:11:22:33:44:77"}, got.NvosMacAddresses)
 			assert.Equal(t, APILabels(tc.dbObj.Labels), got.Labels)
 			assert.Equal(t, tc.dbObj.Created, got.Created)
 			assert.Equal(t, tc.dbObj.Updated, got.Updated)
@@ -456,6 +482,14 @@ func TestNewAPIExpectedSwitchWithNilFields(t *testing.T) {
 	assert.Equal(t, dbES.BmcMacAddress, got.BmcMacAddress)
 	assert.Equal(t, dbES.SwitchSerialNumber, got.SwitchSerialNumber)
 	assert.Nil(t, got.Labels)
+	assert.Empty(t, got.NvosInterfaces)
+	assert.NotNil(t, got.NvosInterfaces)
+	assert.Empty(t, got.NvosMacAddresses)
+	assert.NotNil(t, got.NvosMacAddresses)
+	encoded, err := json.Marshal(got)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"nvosInterfaces":[]`)
+	assert.Contains(t, string(encoded), `"nvosMacAddresses":[]`)
 }
 
 func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
@@ -679,6 +713,23 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
 				NvosInterfaces:     APINvosInterfaces{},
+			},
+			expectErr: true,
+		},
+		{
+			desc: "ok when deprecated NvosMacAddresses is provided",
+			obj: APIExpectedSwitchUpdateRequest{
+				SwitchSerialNumber: &validSwitchSerial,
+				NvosMacAddresses:   APINvosMacAddresses{"00:11:22:33:44:66", "00:11:22:33:44:77"},
+			},
+			expectErr: false,
+		},
+		{
+			desc: "error when both NVOS fields are provided",
+			obj: APIExpectedSwitchUpdateRequest{
+				SwitchSerialNumber: &validSwitchSerial,
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}},
+				NvosMacAddresses:   APINvosMacAddresses{"00:11:22:33:44:66"},
 			},
 			expectErr: true,
 		},

@@ -173,9 +173,26 @@ func TestCreateExpectedSwitchHandler_Handle(t *testing.T) {
 				SwitchSerialNumber: "SWITCH123",
 				NvOsUsername:       cutil.GetPtr("nvos-admin"),
 				NvOsPassword:       cutil.GetPtr("nvos-password"),
-				NvosInterfaces:     model.APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00:11:22:33:44:67"}},
+				NvosInterfaces:     model.APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00:11:22:33:44:67", IsPrimary: true}},
 				BmcIpAddress:       cutil.GetPtr("192.168.1.10"),
 				Labels:             map[string]string{"env": "test"},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusCreated,
+		},
+		{
+			name: "successful creation with deprecated NvosMacAddresses",
+			requestBody: model.APIExpectedSwitchCreateRequest{
+				SiteID:             site.ID.String(),
+				BmcMacAddress:      "00:11:22:33:44:56",
+				DefaultBmcUsername: cutil.GetPtr("admin"),
+				DefaultBmcPassword: cutil.GetPtr("password"),
+				SwitchSerialNumber: "SWITCH124",
+				NvosMacAddresses:   model.APINvosMacAddresses{"00:11:22:33:44:68", "00:11:22:33:44:69"},
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -318,8 +335,13 @@ func TestCreateExpectedSwitchHandler_Handle(t *testing.T) {
 						assert.Equal(t, *tt.requestBody.BmcIpAddress, *response.BmcIpAddress, "BmcIpAddress in response should match request")
 					}
 				}
-				if tt.requestBody.NvosInterfaces != nil {
-					assert.Equal(t, tt.requestBody.NvosInterfaces.MacAddresses(), response.NvosInterfaces.MacAddresses(), "NVOS MACs in response should match request")
+				if tt.requestBody.NvosInterfaces != nil || tt.requestBody.NvosMacAddresses != nil {
+					expected := tt.requestBody.ResolvedNvosInterfaces()
+					if expected.PrimaryMacAddress() == nil && len(expected) > 0 {
+						expected[0].IsPrimary = true
+					}
+					assert.Equal(t, expected, response.NvosInterfaces)
+					assert.Equal(t, model.APINvosMacAddresses(expected.MacAddresses()), response.NvosMacAddresses)
 				}
 			}
 		})
@@ -814,6 +836,7 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 		expectNoWorkflow     bool
 		expectedPaths        []string
 		rejectsCredentials   bool
+		assertPrimaryCleared bool
 		coreError            error
 	}{
 		{
@@ -1029,8 +1052,9 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				c.SetParamNames("orgName", "id")
 				c.SetParamValues(org, testES.ID.String())
 			},
-			expectedStatus: http.StatusOK,
-			expectedPaths:  []string{"nvos_interfaces"},
+			expectedStatus:       http.StatusOK,
+			expectedPaths:        []string{"nvos_interfaces"},
+			assertPrimaryCleared: true,
 		},
 		{
 			name: "update re-asserting its own NvosInterfaces is not a conflict",
@@ -1188,6 +1212,14 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 				}
 				assert.Equal(t, tt.requestBody.NvOsUsername, capturedPatch.ExpectedSwitch.NvosUsername)
 				assert.Equal(t, tt.requestBody.NvOsPassword, capturedPatch.ExpectedSwitch.NvosPassword)
+				if tt.assertPrimaryCleared {
+					stored, readErr := esDAO.Get(ctx, nil, testES.ID, nil, false)
+					require.NoError(t, readErr)
+					assert.Nil(t, stored.NvosPrimaryMacAddress)
+					require.Len(t, capturedPatch.ExpectedSwitch.NvosInterfaces, 2)
+					assert.True(t, capturedPatch.ExpectedSwitch.NvosInterfaces[0].IsPrimary)
+					assert.False(t, capturedPatch.ExpectedSwitch.NvosInterfaces[1].IsPrimary)
+				}
 				if tt.requestBody.NvOsUsername != nil {
 					testExpectedComponentPatchSecrets(t, capturedProxy, *tt.requestBody.NvOsUsername)
 					assert.NotContains(t, rec.Body.String(), *tt.requestBody.NvOsUsername)

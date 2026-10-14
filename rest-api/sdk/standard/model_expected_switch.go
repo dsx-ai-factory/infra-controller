@@ -33,6 +33,9 @@ type ExpectedSwitch struct {
 	SwitchSerialNumber *string `json:"switchSerialNumber,omitempty"`
 	// NVOS ethernet ports of the Expected Switch, with the primary (eth0) port flagged.
 	NvosInterfaces []NvosInterface `json:"nvosInterfaces,omitempty"`
+	// Deprecated flat NVOS MAC list retained for v2 compatibility. Use `nvosInterfaces`. Responses emit both fields, and this array contains the same MACs in the same order as `nvosInterfaces`.
+	// Deprecated
+	NvosMacAddresses []string `json:"nvosMacAddresses,omitempty"`
 	// Optional rack identifier for this component
 	RackId NullableString `json:"rackId,omitempty"`
 	// Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
@@ -234,6 +237,41 @@ func (o *ExpectedSwitch) HasNvosInterfaces() bool {
 // SetNvosInterfaces gets a reference to the given []NvosInterface and assigns it to the NvosInterfaces field.
 func (o *ExpectedSwitch) SetNvosInterfaces(v []NvosInterface) {
 	o.NvosInterfaces = v
+}
+
+// GetNvosMacAddresses returns the NvosMacAddresses field value if set, zero value otherwise.
+// Deprecated
+func (o *ExpectedSwitch) GetNvosMacAddresses() []string {
+	if o == nil || IsNil(o.NvosMacAddresses) {
+		var ret []string
+		return ret
+	}
+	return o.NvosMacAddresses
+}
+
+// GetNvosMacAddressesOk returns a tuple with the NvosMacAddresses field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// Deprecated
+func (o *ExpectedSwitch) GetNvosMacAddressesOk() ([]string, bool) {
+	if o == nil || IsNil(o.NvosMacAddresses) {
+		return nil, false
+	}
+	return o.NvosMacAddresses, true
+}
+
+// HasNvosMacAddresses returns a boolean if a field has been set.
+func (o *ExpectedSwitch) HasNvosMacAddresses() bool {
+	if o != nil && !IsNil(o.NvosMacAddresses) {
+		return true
+	}
+
+	return false
+}
+
+// SetNvosMacAddresses gets a reference to the given []string and assigns it to the NvosMacAddresses field.
+// Deprecated
+func (o *ExpectedSwitch) SetNvosMacAddresses(v []string) {
+	o.NvosMacAddresses = v
 }
 
 // GetRackId returns the RackId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -743,6 +781,9 @@ func (o ExpectedSwitch) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.NvosInterfaces) {
 		toSerialize["nvosInterfaces"] = o.NvosInterfaces
+	}
+	if !IsNil(o.NvosMacAddresses) {
+		toSerialize["nvosMacAddresses"] = o.NvosMacAddresses
 	}
 	if o.RackId.IsSet() {
 		toSerialize["rackId"] = o.RackId.Get()

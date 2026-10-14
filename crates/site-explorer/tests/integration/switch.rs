@@ -232,8 +232,8 @@ async fn test_site_explorer_switch_discovery(
     txn.commit().await?;
     assert_eq!(switches.len(), 1, "Expected one switch to be created");
 
-    // Steady state: skipping the existing switch must still replace the
-    // expected record's NVOS MAC addresses with the ones re-read from the switch.
+    // Steady state: hardware inventory must not replace the operator-declared
+    // NVOS interfaces when an existing switch is explored again.
     let nvos_mac: MacAddress = "B8:3F:D2:90:97:C1".parse().unwrap();
     explorer.insert_endpoint_result(
         switch_ip.parse().unwrap(),
@@ -276,9 +276,48 @@ async fn test_site_explorer_switch_discovery(
     assert_eq!(expected_switches.len(), 1);
     assert_eq!(
         expected_switches[0].nvos_mac_addresses(),
-        vec![nvos_mac],
-        "explored NVOS MAC addresses must replace the expected record"
+        vec![bmc_mac],
+        "exploration must preserve the expected-switch NVOS interfaces"
     );
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn switch_creation_preserves_operator_declared_nvos_interfaces(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let bmc_mac: MacAddress = "B8:3F:D2:90:97:E0".parse()?;
+    let declared_nvos_mac: MacAddress = "B8:3F:D2:90:97:E1".parse()?;
+    let observed_nvos_mac: MacAddress = "B8:3F:D2:90:97:E2".parse()?;
+    let expected_switch = expected_switch_fixture(bmc_mac, declared_nvos_mac, "SW-AUTHORITATIVE");
+
+    let mut txn = env.pool.begin().await?;
+    db::expected_switch::create(&mut txn, expected_switch.clone()).await?;
+    txn.commit().await?;
+
+    let switch_creator = SwitchCreator::new(env.pool.clone(), SiteExplorerConfig::default());
+    assert!(
+        switch_creator
+            .create_managed_switch(
+                &explored_managed_switch_fixture(
+                    "10.0.0.3".parse()?,
+                    observed_nvos_mac,
+                    Some("SW-AUTHORITATIVE"),
+                ),
+                &expected_switch,
+                &env.pool,
+            )
+            .await?
+    );
+
+    let mut txn = env.pool.begin().await?;
+    let reloaded = db::expected_switch::find_by_bmc_mac_address(&mut txn, bmc_mac)
+        .await?
+        .expect("expected switch");
+    txn.commit().await?;
+    assert_eq!(reloaded.nvos_interfaces, expected_switch.nvos_interfaces);
 
     Ok(())
 }

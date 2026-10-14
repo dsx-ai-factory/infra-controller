@@ -56,7 +56,8 @@ type ExpectedSwitch struct {
 	BmcIpAddress       *string   `bun:"bmc_ip_address"`
 	NvosMacAddresses   []string  `bun:"nvos_mac_addresses,array"`
 	// NvosPrimaryMacAddress is the NVOS MAC the operator designates as the primary
-	// (eth0) management port. Nil leaves the primary unset (Core defaults it).
+	// (eth0) management port. Nil makes the first stored port the REST/Core wire
+	// default.
 	NvosPrimaryMacAddress *string   `bun:"nvos_primary_mac_address"`
 	RackID                *string   `bun:"rack_id"`
 	Name                  *string   `bun:"name"`
@@ -91,7 +92,7 @@ type NvosInterface struct {
 
 // effectiveNvosPrimary returns the normalized MAC that should be treated as the
 // primary (eth0) port. An explicit selector wins; otherwise the first stored
-// port defaults to primary (mirroring the Core and admin-CLI wire rule). An
+// port defaults to primary for the REST/Core wire representation. An
 // empty MAC list has no primary.
 func effectiveNvosPrimary(macs []string, primary *string) string {
 	if primary != nil && *primary != "" {

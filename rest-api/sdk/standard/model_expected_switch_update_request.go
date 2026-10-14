@@ -37,8 +37,11 @@ type ExpectedSwitchUpdateRequest struct {
 	NvOsUsername NullableString `json:"nvOsUsername,omitempty"`
 	// NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
 	NvOsPassword NullableString `json:"nvOsPassword,omitempty"`
-	// Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array is rejected because a switch must keep at least one NVOS port. Mark one entry primary to choose eth0.
+	// Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array is rejected because a switch must keep at least one NVOS port. Mark one entry primary to choose eth0. Do not provide this field together with `nvosMacAddresses`.
 	NvosInterfaces []NvosInterface `json:"nvosInterfaces,omitempty"`
+	// Deprecated flat NVOS MAC list retained for v2 compatibility. Use `nvosInterfaces`. When supplied, REST marks the first MAC as primary and replaces the complete stored port set. Omission or null preserves the stored ports; an empty array is rejected. Do not provide both fields.
+	// Deprecated
+	NvosMacAddresses []string `json:"nvosMacAddresses,omitempty"`
 	// Optional rack identifier for this component
 	RackId NullableString `json:"rackId,omitempty"`
 	// Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value. It must not be unspecified, multicast, or IPv4 limited broadcast.
@@ -412,6 +415,41 @@ func (o *ExpectedSwitchUpdateRequest) HasNvosInterfaces() bool {
 // SetNvosInterfaces gets a reference to the given []NvosInterface and assigns it to the NvosInterfaces field.
 func (o *ExpectedSwitchUpdateRequest) SetNvosInterfaces(v []NvosInterface) {
 	o.NvosInterfaces = v
+}
+
+// GetNvosMacAddresses returns the NvosMacAddresses field value if set, zero value otherwise.
+// Deprecated
+func (o *ExpectedSwitchUpdateRequest) GetNvosMacAddresses() []string {
+	if o == nil || IsNil(o.NvosMacAddresses) {
+		var ret []string
+		return ret
+	}
+	return o.NvosMacAddresses
+}
+
+// GetNvosMacAddressesOk returns a tuple with the NvosMacAddresses field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// Deprecated
+func (o *ExpectedSwitchUpdateRequest) GetNvosMacAddressesOk() ([]string, bool) {
+	if o == nil || IsNil(o.NvosMacAddresses) {
+		return nil, false
+	}
+	return o.NvosMacAddresses, true
+}
+
+// HasNvosMacAddresses returns a boolean if a field has been set.
+func (o *ExpectedSwitchUpdateRequest) HasNvosMacAddresses() bool {
+	if o != nil && !IsNil(o.NvosMacAddresses) {
+		return true
+	}
+
+	return false
+}
+
+// SetNvosMacAddresses gets a reference to the given []string and assigns it to the NvosMacAddresses field.
+// Deprecated
+func (o *ExpectedSwitchUpdateRequest) SetNvosMacAddresses(v []string) {
+	o.NvosMacAddresses = v
 }
 
 // GetRackId returns the RackId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -866,6 +904,9 @@ func (o ExpectedSwitchUpdateRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.NvosInterfaces) {
 		toSerialize["nvosInterfaces"] = o.NvosInterfaces
+	}
+	if !IsNil(o.NvosMacAddresses) {
+		toSerialize["nvosMacAddresses"] = o.NvosMacAddresses
 	}
 	if o.RackId.IsSet() {
 		toSerialize["rackId"] = o.RackId.Get()

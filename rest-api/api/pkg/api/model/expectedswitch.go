@@ -23,6 +23,29 @@ import (
 // address format the OpenAPI contract publishes for NVOS interface MACs.
 var nvosMacAddressRegexp = regexp.MustCompile(`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`)
 
+// APINvosMacAddresses is the deprecated flat NVOS MAC list retained for REST
+// compatibility. New clients should use APINvosInterfaces.
+type APINvosMacAddresses []string
+
+// Validate checks that every legacy list entry is a unique, well-formed MAC.
+func (macs APINvosMacAddresses) Validate() error {
+	seen := make(map[string]bool, len(macs))
+	for _, mac := range macs {
+		err := validation.Validate(mac,
+			validation.Required.Error(validationErrorValueRequired),
+			validation.Match(nvosMacAddressRegexp).Error("must be a MAC address of six colon- or hyphen-separated octets"))
+		if err != nil {
+			return err
+		}
+		key := cdbm.NormalizeMacAddress(mac)
+		if seen[key] {
+			return fmt.Errorf("duplicate MAC address: %s", mac)
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
 // APINvosInterface is one NVOS ethernet port of an expected switch: its MAC
 // address and whether it is the primary (eth0) port NICo manages via RMS.
 type APINvosInterface struct {
@@ -81,15 +104,44 @@ func (interfaces APINvosInterfaces) MacAddresses() []string {
 	return macs
 }
 
-// PrimaryMacAddress returns the explicitly-flagged primary MAC, or nil when no
-// entry is flagged. Core applies the first-of-many default, so REST persists
-// only the operator's explicit selection.
+// PrimaryMacAddress returns the explicitly flagged primary MAC, or nil when no
+// entry is flagged. The REST persistence layer applies its first-port wire
+// default after storing an unflagged list.
 func (interfaces APINvosInterfaces) PrimaryMacAddress() *string {
 	for i := range interfaces {
 		if interfaces[i].IsPrimary {
 			mac := interfaces[i].MacAddress
 			return &mac
 		}
+	}
+	return nil
+}
+
+func resolveNvosInterfaces(interfaces APINvosInterfaces, legacy APINvosMacAddresses) APINvosInterfaces {
+	if interfaces != nil {
+		return interfaces
+	}
+	if legacy == nil {
+		return nil
+	}
+	resolved := make(APINvosInterfaces, 0, len(legacy))
+	for i, mac := range legacy {
+		resolved = append(resolved, APINvosInterface{
+			MacAddress: mac,
+			IsPrimary:  i == 0,
+		})
+	}
+	return resolved
+}
+
+func validateNvosInterfaceFields(interfaces APINvosInterfaces, legacy APINvosMacAddresses) error {
+	if interfaces != nil && legacy != nil {
+		return validation.Errors{
+			"nvosInterfaces": errors.New("nvosInterfaces and deprecated nvosMacAddresses cannot both be provided"),
+		}
+	}
+	if err := validation.Validate(resolveNvosInterfaces(interfaces, legacy)); err != nil {
+		return validation.Errors{"nvosInterfaces": err}
 	}
 	return nil
 }
@@ -114,6 +166,10 @@ type APIExpectedSwitchCreateRequest struct {
 	// primary to choose eth0; a single-port switch is primary implicitly and a
 	// multi-port switch with no primary marked defaults to the first entry.
 	NvosInterfaces APINvosInterfaces `json:"nvosInterfaces"`
+	// NvosMacAddresses is the deprecated flat NVOS MAC list. When supplied,
+	// REST maps its first entry to the primary port. Do not send it together
+	// with NvosInterfaces.
+	NvosMacAddresses APINvosMacAddresses `json:"nvosMacAddresses"`
 	// RackID is the optional rack identifier
 	RackID *string `json:"rackId"`
 	// BmcIpAddress is the optional BMC IP address of the expected switch
@@ -151,7 +207,6 @@ func (escr *APIExpectedSwitchCreateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validation.Match(util.NotAllWhitespaceRegexp).Error("Switch serial number consists only of whitespace"),
 			validation.Length(1, 32).Error("Switch serial number must be 32 characters or less")),
-		validation.Field(&escr.NvosInterfaces),
 		validation.Field(&escr.RackID,
 			validation.NilOrNotEmpty.Error("RackID cannot be empty")),
 		validation.Field(&escr.BmcIpAddress,
@@ -172,11 +227,21 @@ func (escr *APIExpectedSwitchCreateRequest) Validate() error {
 		return err
 	}
 
+	if err := validateNvosInterfaceFields(escr.NvosInterfaces, escr.NvosMacAddresses); err != nil {
+		return err
+	}
+
 	if err := util.ValidateLabels(escr.Labels); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// ResolvedNvosInterfaces returns the structured NVOS field, translating the
+// deprecated flat field when that is what the client supplied.
+func (escr *APIExpectedSwitchCreateRequest) ResolvedNvosInterfaces() APINvosInterfaces {
+	return resolveNvosInterfaces(escr.NvosInterfaces, escr.NvosMacAddresses)
 }
 
 // APIExpectedSwitchUpdateRequest is the data structure to capture user request to update an ExpectedSwitch
@@ -201,6 +266,10 @@ type APIExpectedSwitchUpdateRequest struct {
 	// switch must keep at least one NVOS port. Mark one entry primary to choose
 	// eth0.
 	NvosInterfaces APINvosInterfaces `json:"nvosInterfaces"`
+	// NvosMacAddresses is the deprecated flat NVOS MAC list. When supplied,
+	// REST maps its first entry to the primary port. Do not send it together
+	// with NvosInterfaces.
+	NvosMacAddresses APINvosMacAddresses `json:"nvosMacAddresses"`
 	// RackID is the optional rack identifier
 	RackID *string `json:"rackId"`
 	// BmcIpAddress is the optional BMC IP address of the expected switch
@@ -242,7 +311,8 @@ func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
 	// rejected rather than treated as a clear: Core rejects an empty set and
 	// would roll back the already-committed cloud change. Omission leaves the
 	// stored ports unchanged.
-	if esur.NvosInterfaces != nil && len(esur.NvosInterfaces) == 0 {
+	if (esur.NvosInterfaces != nil && len(esur.NvosInterfaces) == 0) ||
+		(esur.NvosMacAddresses != nil && len(esur.NvosMacAddresses) == 0) {
 		return validation.Errors{
 			"nvosInterfaces": errors.New("nvosInterfaces must not be an empty list; omit the field to leave the NVOS ports unchanged"),
 		}
@@ -267,7 +337,6 @@ func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
 			validation.When(esur.SwitchSerialNumber != nil && *esur.SwitchSerialNumber != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("Switch Serial Number consists only of whitespace")),
 			validation.Length(1, 32).Error("Switch Serial Number must be 1-32 characters")),
-		validation.Field(&esur.NvosInterfaces),
 		validation.Field(&esur.RackID,
 			validation.NilOrNotEmpty.Error("RackID cannot be empty")),
 		validation.Field(&esur.BmcIpAddress,
@@ -287,11 +356,21 @@ func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
 		return err
 	}
 
+	if err := validateNvosInterfaceFields(esur.NvosInterfaces, esur.NvosMacAddresses); err != nil {
+		return err
+	}
+
 	if err := util.ValidateLabels(esur.Labels); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// ResolvedNvosInterfaces returns the structured NVOS field, translating the
+// deprecated flat field when that is what the client supplied.
+func (esur *APIExpectedSwitchUpdateRequest) ResolvedNvosInterfaces() APINvosInterfaces {
+	return resolveNvosInterfaces(esur.NvosInterfaces, esur.NvosMacAddresses)
 }
 
 // ToProto builds the Core patch from the updated cloud row and the fields
@@ -316,7 +395,7 @@ func (esur *APIExpectedSwitchUpdateRequest) ToProto(entity *cdbm.ExpectedSwitch)
 			util.ExpectedComponentUpdateField{Path: "metadata.description", Present: esur.Description != nil},
 			util.ExpectedComponentUpdateField{Path: "metadata.labels", Present: esur.Labels != nil || esur.Manufacturer != nil || esur.Model != nil || esur.SlotID != nil || esur.TrayIdx != nil || esur.HostID != nil},
 			util.ExpectedComponentUpdateField{Path: "switch_serial_number", Present: esur.SwitchSerialNumber != nil},
-			util.ExpectedComponentUpdateField{Path: "nvos_interfaces", Present: esur.NvosInterfaces != nil},
+			util.ExpectedComponentUpdateField{Path: "nvos_interfaces", Present: esur.NvosInterfaces != nil || esur.NvosMacAddresses != nil},
 			util.ExpectedComponentUpdateField{Path: "nvos_username", Present: esur.NvOsUsername != nil},
 			util.ExpectedComponentUpdateField{Path: "nvos_password", Present: esur.NvOsPassword != nil},
 		),
@@ -338,6 +417,9 @@ type APIExpectedSwitch struct {
 	// NvosInterfaces lists the switch's NVOS ethernet ports with the primary
 	// (eth0) port flagged.
 	NvosInterfaces APINvosInterfaces `json:"nvosInterfaces"`
+	// NvosMacAddresses is the deprecated flat form retained for v2 clients.
+	// New clients should use NvosInterfaces.
+	NvosMacAddresses APINvosMacAddresses `json:"nvosMacAddresses"`
 	// RackID is the optional rack identifier
 	RackID *string `json:"rackId"`
 	// BmcIpAddress is the optional BMC IP address of the expected switch
@@ -366,11 +448,11 @@ type APIExpectedSwitch struct {
 
 // newAPINvosInterfaces converts the DB model's canonical NVOS port view into
 // the API representation so the response flags the same primary as the workflow
-// proto. A nil stored MAC list yields a nil slice.
+// proto. A nil stored MAC list yields an empty array on the REST surface.
 func newAPINvosInterfaces(dbModel *cdbm.ExpectedSwitch) APINvosInterfaces {
 	views := dbModel.NvosInterfaces()
 	if views == nil {
-		return nil
+		return make(APINvosInterfaces, 0)
 	}
 	interfaces := make(APINvosInterfaces, 0, len(views))
 	for _, view := range views {
@@ -384,12 +466,15 @@ func newAPINvosInterfaces(dbModel *cdbm.ExpectedSwitch) APINvosInterfaces {
 
 // NewAPIExpectedSwitch accepts a DB layer ExpectedSwitch object and returns an API object
 func NewAPIExpectedSwitch(dbModel *cdbm.ExpectedSwitch) *APIExpectedSwitch {
+	legacyNvosMacAddresses := make(APINvosMacAddresses, len(dbModel.NvosMacAddresses))
+	copy(legacyNvosMacAddresses, dbModel.NvosMacAddresses)
 	apies := &APIExpectedSwitch{
 		ID:                 dbModel.ID,
 		BmcMacAddress:      dbModel.BmcMacAddress,
 		SiteID:             dbModel.SiteID,
 		SwitchSerialNumber: dbModel.SwitchSerialNumber,
 		NvosInterfaces:     newAPINvosInterfaces(dbModel),
+		NvosMacAddresses:   legacyNvosMacAddresses,
 		RackID:             dbModel.RackID,
 		BmcIpAddress:       dbModel.BmcIpAddress,
 		Name:               dbModel.Name,

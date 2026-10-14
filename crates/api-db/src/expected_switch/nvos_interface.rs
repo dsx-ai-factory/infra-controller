@@ -26,10 +26,10 @@ use crate::{DatabaseError, DatabaseResult};
 
 /// Replace the NVOS port rows for one switch with `interfaces`.
 ///
-/// Callers must pass a set already validated by
+/// A non-empty set from an operator must already be validated by
 /// [`model::expected_switch::normalize_nvos_interfaces`] (at least one port,
-/// exactly one primary). Used by create/update where the operator declares the
-/// full port set and the primary.
+/// exactly one primary). An empty set is permitted for legacy zero-port records
+/// and replace-all compatibility.
 pub(super) async fn replace_for_switch(
     txn: &mut PgConnection,
     bmc_mac_address: MacAddress,
@@ -38,94 +38,6 @@ pub(super) async fn replace_for_switch(
     delete_by_switch_bmc(&mut *txn, bmc_mac_address).await?;
     for interface in interfaces {
         insert(&mut *txn, bmc_mac_address, interface).await?;
-    }
-    Ok(())
-}
-
-/// Reconcile the port set to the hardware-observed `mac_addresses`, preserving
-/// the existing primary selection.
-///
-/// New ports are added non-primary and ports no longer present are removed; the
-/// operator-owned primary flag is never moved here. If the reconcile leaves a
-/// single port it becomes the primary (a lone port is always primary). Empty
-/// `mac_addresses` clears the set (used by tests and teardown).
-pub(super) async fn reconcile_macs(
-    txn: &mut PgConnection,
-    bmc_mac_address: MacAddress,
-    mac_addresses: &[MacAddress],
-) -> DatabaseResult<()> {
-    let existing = find_by_switch_bmc(&mut *txn, bmc_mac_address).await?;
-
-    // Drop ports the hardware no longer reports.
-    for current in &existing {
-        if !mac_addresses.contains(&current.mac_address) {
-            delete_by_mac(&mut *txn, current.mac_address).await?;
-        }
-    }
-
-    // Add ports we have not seen before, non-primary.
-    for mac_address in mac_addresses {
-        if !existing.iter().any(|i| &i.mac_address == mac_address) {
-            insert(
-                &mut *txn,
-                bmc_mac_address,
-                &ExpectedNvosInterface {
-                    mac_address: *mac_address,
-                    is_primary: false,
-                },
-            )
-            .await?;
-        }
-    }
-
-    // A lone surviving port is always the primary, even if it was added here.
-    if let [only] = mac_addresses
-        && existing
-            .iter()
-            .filter(|i| mac_addresses.contains(&i.mac_address))
-            .all(|i| !i.is_primary)
-    {
-        set_primary(&mut *txn, bmc_mac_address, *only).await?;
-    }
-
-    Ok(())
-}
-
-/// Move the primary flag to `mac_address`, clearing it from the switch's other
-/// NVOS ports. Errors if the MAC is not one of the switch's NVOS ports.
-pub(super) async fn set_primary(
-    txn: &mut PgConnection,
-    bmc_mac_address: MacAddress,
-    mac_address: MacAddress,
-) -> DatabaseResult<()> {
-    let query = "UPDATE expected_switch_nvos_interfaces
-         SET is_primary = (mac_address = $2)
-         WHERE bmc_mac_address = $1";
-    let result = sqlx::query(query)
-        .bind(bmc_mac_address)
-        .bind(mac_address)
-        .execute(&mut *txn)
-        .await
-        .map_err(|err| DatabaseError::query(query, err))?;
-
-    if result.rows_affected() == 0 {
-        return Err(DatabaseError::NotFoundError {
-            kind: "expected_switch_nvos_interface",
-            id: mac_address.to_string(),
-        });
-    }
-
-    // The UPDATE above touches every port, so a nonzero row count does not prove
-    // the requested MAC exists. Confirm it landed as the primary.
-    let is_primary = find_by_switch_bmc(&mut *txn, bmc_mac_address)
-        .await?
-        .into_iter()
-        .any(|i| i.mac_address == mac_address && i.is_primary);
-    if !is_primary {
-        return Err(DatabaseError::NotFoundError {
-            kind: "expected_switch_nvos_interface",
-            id: mac_address.to_string(),
-        });
     }
     Ok(())
 }
@@ -209,16 +121,6 @@ async fn delete_by_switch_bmc(
     let query = "DELETE FROM expected_switch_nvos_interfaces WHERE bmc_mac_address = $1";
     sqlx::query(query)
         .bind(bmc_mac_address)
-        .execute(txn)
-        .await
-        .map(|_| ())
-        .map_err(|err| DatabaseError::query(query, err))
-}
-
-async fn delete_by_mac(txn: &mut PgConnection, mac_address: MacAddress) -> DatabaseResult<()> {
-    let query = "DELETE FROM expected_switch_nvos_interfaces WHERE mac_address = $1";
-    sqlx::query(query)
-        .bind(mac_address)
         .execute(txn)
         .await
         .map(|_| ())

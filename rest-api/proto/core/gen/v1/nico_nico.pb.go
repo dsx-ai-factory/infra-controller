@@ -17607,7 +17607,7 @@ type SwitchSearchFilter struct {
 	ControllerState *string `protobuf:"bytes,3,opt,name=controller_state,json=controllerState,proto3,oneof" json:"controller_state,omitempty"`
 	// Filter by BMC MAC address via machine_interfaces
 	BmcMac *string `protobuf:"bytes,4,opt,name=bmc_mac,json=bmcMac,proto3,oneof" json:"bmc_mac,omitempty"`
-	// Filter by NVOS MAC address via expected_switches.nvos_mac_addresses
+	// Filter by NVOS MAC address via expected_switch_nvos_interfaces.
 	NvosMac *string `protobuf:"bytes,5,opt,name=nvos_mac,json=nvosMac,proto3,oneof" json:"nvos_mac,omitempty"`
 	// For example, to search for leak alerts, set the below to "hardware-health.tray-leak-detection"
 	OnlyWithHealthAlert *string `protobuf:"bytes,6,opt,name=only_with_health_alert,json=onlyWithHealthAlert,proto3,oneof" json:"only_with_health_alert,omitempty"`
@@ -68916,12 +68916,15 @@ type PatchExpectedSwitchRequest struct {
 	ExpectedSwitch *ExpectedSwitch `protobuf:"bytes,1,opt,name=expected_switch,json=expectedSwitch,proto3" json:"expected_switch,omitempty"`
 	// Required; an empty mask checks existence without changing the row.
 	// Paths: bmc_username, bmc_password, switch_serial_number, bmc_ip_address,
-	// bmc_retain_credentials, rack_id, nvos_mac_addresses, nvos_primary_mac_address,
-	// nvos_ip_address, nvos_username, nvos_password, metadata.name,
+	// bmc_retain_credentials, rack_id, nvos_interfaces, nvos_ip_address,
+	// nvos_username, nvos_password, metadata.name,
 	// metadata.description, metadata.labels.
 	// Unselected values are ignored. Selected values replace the stored field,
-	// including empty collections, an absent `rack_id` (clear), and an empty BMC
-	// IP (clear). A selected `nvos_ip_address` clears with an absent or empty value.
+	// including empty labels, an absent `rack_id` (clear), and an empty BMC IP
+	// (clear). `nvos_interfaces` replaces the complete port set and must contain
+	// at least one port; a lone port is promoted to primary, while a multi-port
+	// set must flag exactly one primary. A selected `nvos_ip_address` clears with
+	// an absent or empty value.
 	// Nonempty IPs must parse as IPv4 or IPv6. A selected `bmc_retain_credentials`
 	// must be present; false is an update. BMC and NVOS usernames and passwords
 	// can each be selected independently; unselected values stay unchanged.

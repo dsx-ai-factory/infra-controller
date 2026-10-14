@@ -191,7 +191,12 @@ async fn exercise_expected_switch_queries(
             ..expected.clone()
         };
         assert_eq!(
-            find_nvos_mac_claimed_elsewhere(&mut txn, &[different_mac, nvos_mac], &other).await?,
+            find_nvos_mac_claimed_elsewhere(
+                &mut txn,
+                &[different_mac, nvos_mac],
+                other.bmc_mac_address,
+            )
+            .await?,
             Some(nvos_mac)
         );
     }
@@ -661,8 +666,8 @@ async fn backfill_marks_each_switchs_first_nvos_mac_primary(
 
     // The losing switch keeps only its unique MAC. The backfill does not
     // recompute the flag after ON CONFLICT drops its first port, so the lone
-    // survivor stays is_primary = false -- the accepted cross-switch tradeoff;
-    // the read path's lone-port fallback still treats it as the primary.
+    // survivor stays is_primary = false -- an accepted defensive fallback for
+    // unexpected malformed legacy data.
     let dup_b = find_by_bmc_mac_address(&mut txn, "02:00:00:00:0e:05".parse()?)
         .await?
         .expect("duplicate-losing switch exists");
@@ -702,54 +707,31 @@ async fn backfill_marks_each_switchs_first_nvos_mac_primary(
     Ok(())
 }
 
-/// The operator-owned primary survives a hardware reconcile that only adds and
-/// drops ports, a lone surviving port is auto-promoted, and an explicit
-/// move relocates the primary flag -- always leaving exactly one primary.
 #[crate::sqlx_test]
-async fn nvos_primary_reconcile_and_move_preserve_a_single_primary(
+async fn update_by_id_uses_the_stored_bmc_mac_for_nvos_ports(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = pool.begin().await?;
-    let switch = create_expected_switch(&mut txn, 0).await;
-    let bmc = switch.bmc_mac_address;
-    let primary = expected_switch_nvos_mac_address(0);
-    let added: mac_address::MacAddress = "55:55:55:55:55:01".parse()?;
-    let moved: mac_address::MacAddress = "55:55:55:55:55:02".parse()?;
+    let first = create_expected_switch(&mut txn, 30).await;
+    let second = create_expected_switch(&mut txn, 31).await;
+    let replacement: MacAddress = "55:55:55:55:55:30".parse()?;
+    let mut mismatched = first.clone();
+    mismatched.bmc_mac_address = second.bmc_mac_address;
+    mismatched.nvos_interfaces = vec![ExpectedNvosInterface {
+        mac_address: replacement,
+        is_primary: true,
+    }];
 
-    let reload = async |txn: &mut PgConnection| -> Result<ExpectedSwitch, DatabaseError> {
-        Ok(find_by_bmc_mac_address(txn, bmc)
-            .await?
-            .expect("the switch exists"))
-    };
-    let single_primary = |switch: &ExpectedSwitch| -> mac_address::MacAddress {
-        let primaries: Vec<_> = switch
-            .nvos_interfaces
-            .iter()
-            .filter(|i| i.is_primary)
-            .collect();
-        assert_eq!(primaries.len(), 1, "exactly one primary port");
-        // The projection lists the primary first.
-        assert!(switch.nvos_interfaces[0].is_primary);
-        primaries[0].mac_address
-    };
+    update(&mut txn, &mismatched).await?;
 
-    // Reconcile adds a port; the seeded primary flag does not move.
-    update_nvos_mac_addresses(&mut txn, bmc, &[primary, added]).await?;
-    let state = reload(&mut txn).await?;
-    assert_eq!(state.nvos_interfaces.len(), 2);
-    assert_eq!(single_primary(&state), primary);
-
-    // Reconcile drops the primary, leaving a lone port that is auto-promoted.
-    update_nvos_mac_addresses(&mut txn, bmc, &[added]).await?;
-    let state = reload(&mut txn).await?;
-    assert_eq!(state.nvos_interfaces.len(), 1);
-    assert_eq!(single_primary(&state), added);
-
-    // Re-adding a port keeps the surviving primary; an explicit move relocates it.
-    update_nvos_mac_addresses(&mut txn, bmc, &[added, moved]).await?;
-    assert_eq!(single_primary(&reload(&mut txn).await?), added);
-    set_primary_nvos_interface(&mut txn, bmc, moved).await?;
-    assert_eq!(single_primary(&reload(&mut txn).await?), moved);
+    let first_reloaded = find_by_bmc_mac_address(&mut txn, first.bmc_mac_address)
+        .await?
+        .expect("first switch exists");
+    assert_eq!(first_reloaded.nvos_interfaces, mismatched.nvos_interfaces);
+    let second_reloaded = find_by_bmc_mac_address(&mut txn, second.bmc_mac_address)
+        .await?
+        .expect("second switch exists");
+    assert_eq!(second_reloaded.nvos_interfaces, second.nvos_interfaces);
 
     txn.rollback().await?;
     Ok(())

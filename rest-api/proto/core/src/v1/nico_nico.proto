@@ -3065,7 +3065,7 @@ message SwitchSearchFilter {
   optional string controller_state = 3;
   // Filter by BMC MAC address via machine_interfaces
   optional string bmc_mac = 4;
-  // Filter by NVOS MAC address via expected_switches.nvos_mac_addresses
+  // Filter by NVOS MAC address via expected_switch_nvos_interfaces.
   optional string nvos_mac = 5;
   // For example, to search for leak alerts, set the below to "hardware-health.tray-leak-detection"
   optional string only_with_health_alert = 6;
@@ -11610,12 +11610,15 @@ message PatchExpectedSwitchRequest {
   ExpectedSwitch expected_switch = 1;
   // Required; an empty mask checks existence without changing the row.
   // Paths: bmc_username, bmc_password, switch_serial_number, bmc_ip_address,
-  // bmc_retain_credentials, rack_id, nvos_mac_addresses, nvos_primary_mac_address,
-  // nvos_ip_address, nvos_username, nvos_password, metadata.name,
+  // bmc_retain_credentials, rack_id, nvos_interfaces, nvos_ip_address,
+  // nvos_username, nvos_password, metadata.name,
   // metadata.description, metadata.labels.
   // Unselected values are ignored. Selected values replace the stored field,
-  // including empty collections, an absent `rack_id` (clear), and an empty BMC
-  // IP (clear). A selected `nvos_ip_address` clears with an absent or empty value.
+  // including empty labels, an absent `rack_id` (clear), and an empty BMC IP
+  // (clear). `nvos_interfaces` replaces the complete port set and must contain
+  // at least one port; a lone port is promoted to primary, while a multi-port
+  // set must flag exactly one primary. A selected `nvos_ip_address` clears with
+  // an absent or empty value.
   // Nonempty IPs must parse as IPv4 or IPv6. A selected `bmc_retain_credentials`
   // must be present; false is an update. BMC and NVOS usernames and passwords
   // can each be selected independently; unselected values stay unchanged.
