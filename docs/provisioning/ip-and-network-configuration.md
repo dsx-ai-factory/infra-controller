@@ -512,29 +512,29 @@ NICo's DNS layer has two distinct pieces:
 
 | Piece | Backed by | Serves |
 |---|---|---|
-| `nico-dns` | A standalone DNS server (the `carbide-dns` binary) that answers every query from `nico-api` record data (see [section 3.1](#31-nico-dns-zones-and-what-they-serve)) | The site's authoritative zones — generated from machine, instance, and tenant records in the `nico-api` database |
+| `nico-dns` | A standalone DNS server that retrieves record data from `nico-api` and caches negative answers | Machine and instance forward records, known-address PTR responses, and forward-zone SOAs |
 | `unbound` (recursive resolver) | Unbound | The resolver that managed machines (host BMCs, host OS, DPU OS, DPU BMCs) use for *all* DNS lookups |
 
 These two roles are independent. Managed machines never query `nico-dns` directly — they query the recursive resolver, which forwards or recurses as needed.
 
 ### 3.1 `nico-dns` Zones and What They Serve
 
-`nico-dns` serves the site's authoritative zones from `nico-api`'s database. It is a standalone DNS server: the binary listens on UDP and TCP 53 (`--listen`, default `[::]:53`) and answers each query by calling `nico-api` over gRPC for record data. It serves A, AAAA, and PTR records only, and it does not recurse; clients reach it through the recursive resolver ([section 3.2](#32-unbound-recursive-resolver-for-managed-machines)), not directly.
+`nico-dns` serves the site's authoritative zones from `nico-api`'s database. Its default UDP and TCP listener is `[::]:53`; the Helm `listenAddress` value supplies an explicit override. Cache misses for supported query types call `nico-api` over gRPC. The service publishes A, AAAA, PTR, and zone-apex SOA records. It accepts NS, CNAME, MX, and TXT queries but publishes no records of those types. Negative answers are cached; unsupported query types and zone transfers return NOTIMP. Refer to [DNS Process Configuration](../configuration/dns.md#dns-process-configuration) for cache lifetimes and [Reverse DNS](../configuration/dns.md#reverse-dns) for negative responses and authority limits on reverse queries.
 
-The zones served are seeded by the `initial_domain_name` field in `siteConfig` (for example, `mysite.example.com`). On first start, `nico-api` creates the corresponding domain record; `nico-dns` then exposes whatever records exist in that zone in `nico-api`'s database.
+The `initial_domain_name` field in `siteConfig` (for example, `mysite.example.com`) seeds the site's forward domain only when the domains table is empty, including soft-deleted rows. Domain ownership and network-segment subdomain associations determine which inventory records are published. Refer to [The Site Zone and Segment Subdomains](../configuration/dns.md#the-site-zone-and-segment-subdomains).
 
-UFM endpoints under `default.ufm.<initial_domain_name>` are one example of records served this way when InfiniBand is configured (see [InfiniBand Setup](../playbooks/ib_runbook.md)).
+Configure any UFM endpoint names in your site DNS separately. Configuring InfiniBand does not automatically publish UFM records through the DNS lookup handler.
 
 Operators do not edit `nico-dns` zone files directly. Zone content is a function of `nico-api`'s database state.
 
-For the record catalog these zones serve - machine, BMC, and instance names, plus the automatically derived reverse zones and their lifecycle - refer to [DNS](../configuration/dns.md).
+For machine, BMC, and instance names, plus the supported PTR behavior, refer to [DNS](../configuration/dns.md).
 
 To configure `nico-dns`:
 
 1. Set `initial_domain_name` in `siteConfig` to your site's DNS domain.
-2. Deploy the `nico-dns` StatefulSet; the binary listens on UDP/TCP 53 by default (`--listen=[::]:53`).
+2. Deploy the `nico-dns` StatefulSet; the chart defaults to a UDP/TCP listener at `[::]:53`. Set `nico-dns.listenAddress` to `0.0.0.0:53` for an IPv4-only listener.
 3. Assign a stable LoadBalancer VIP to the `nico-dns` service that listens on UDP/TCP 53 (one per replica via `perPodAnnotations`; see [Quick Start Step 3h](../getting-started/quick-start.md#3h-assign-service-vips)).
-4. Delegate the `initial_domain_name` zone from your upstream DNS to those VIPs, or configure your recursive resolver to forward queries for the zone to them.
+4. Configure your recursive resolver to forward the site domain to those VIPs, or arrange upstream delegation. Configure forwarding for required PTR lookups separately. NICo does not publish NS records, configure upstream delegation, or claim reverse-zone authority.
 
 ### 3.2 `unbound` Recursive Resolver for Managed Machines
 
@@ -551,7 +551,7 @@ The resolver is responsible for:
 To configure `unbound`:
 
 1. Populate the `local_data.conf` ConfigMap consumed by the `unbound` Helm chart with an A record for each IPv4 service VIP. To advertise the NTP fallback through DHCPv6 option 56, also add AAAA records for reachable IPv6 NTP endpoints, as described in [NICo DNS Service Endpoints](#33-nico-dns-service-endpoints). The chart derives the record type from each address in `unbound.localData`.
-2. Add a forward zone entry for `initial_domain_name` pointing at the `nico-dns` VIPs.
+2. Add a forward zone entry for `initial_domain_name` pointing at the `nico-dns` VIPs. Forward required PTR lookups there separately; NICo answers known addresses but does not provide reverse SOAs or authoritative negative reverse answers.
 3. Allow public-internet recursion (the default for the upstream `unbound` image) unless your site is fully air-gapped.
 
 The Unbound Deployment declares a ConfigMap Reloader annotation. Where that controller is installed, configuration changes trigger a rollout. Otherwise, restart the Deployment through the site's normal workflow. [Unbound IPv6 Transport](../configuration/dns.md#unbound-ipv6-transport) describes optional IPv6 DNS and metrics exposure, including the supplied-image contract and listener restart requirements. For external resolver VIPs, refer to [Unbound External Services](../configuration/dns.md#unbound-external-services).
@@ -655,12 +655,19 @@ Secure Boot or an equivalent trusted boot chain.
 
 ### 3.4 How to Verify DNS Is Working
 
-**From the site controller**, confirm `nico-dns` is responding:
+**From the site controller**, query the forward-zone SOA directly. Replace the VIP and zone placeholders with your deployment values:
 
 ```bash
 kubectl get svc nico-dns -n nico-system
-dig +short @<nico-dns-vip> <initial_domain_name>
+authoritative_dns_ip='<nico-dns-vip>'
+site_domain='<initial_domain_name>'
+dig @"$authoritative_dns_ip" "$site_domain" SOA +norecurse
+dig @"$authoritative_dns_ip" "$site_domain" SOA +norecurse +tcp
 ```
+
+Expect an authoritative SOA answer over both UDP and TCP. An A query at the
+zone apex can return an empty answer even when DNS is working. Test A or AAAA
+with a known inventory hostname, and PTR with a uniquely owned inventory address.
 
 **From a managed physical-network vantage point** (a host BMC console, a
 managed host's BMC web UI shell, or another client on its network), confirm the
