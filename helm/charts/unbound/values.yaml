@@ -138,5 +138,10 @@ localConfig:
 ##           username: ""
 ##           pidfile: ""
 ##       include: "/etc/unbound/local.conf.d/*.conf"
+## Port unbound listens on inside the container. Change to 5353 when running
+## under OpenShift restricted-v2 (no CAP_NET_BIND_SERVICE). The Services keep
+## port 53 externally; kube-proxy/OVN routes :53→containerPort.
+containerPort: 53
+
 unbound:
   mainConfig: ""  # override the main unbound.cfg content
