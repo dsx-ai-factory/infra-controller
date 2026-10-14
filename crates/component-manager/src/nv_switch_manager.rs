@@ -147,6 +147,30 @@ pub struct ConfigureSwitchCertificateJobStatus {
     pub error: Option<String>,
 }
 
+/// Aggregate lifecycle state for a switch mTLS-disable job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchMtlsDisableState {
+    /// The parent job or at least one target switch has not completed.
+    Pending,
+
+    /// The parent job and every target switch completed successfully.
+    Completed,
+
+    /// The parent job or at least one target switch failed.
+    Failed,
+}
+
+/// Backend observation of a switch mTLS-disable job and its target switches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchMtlsDisableJobStatus {
+    /// Aggregate state across the parent operation and every target switch.
+    pub state: SwitchMtlsDisableState,
+
+    /// Backend-supplied failure details when [`SwitchMtlsDisableState::Failed`] is returned.
+    /// This is `None` for pending and successful jobs.
+    pub error: Option<String>,
+}
+
 /// Backend observation of a ScaleUp Fabric Manager configuration job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScaleUpFabricManagerJobStatus {
@@ -407,6 +431,51 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
     ) -> Result<SwitchFactoryResetJobStatus, ComponentManagerError> {
         Err(ComponentManagerError::Unsupported(format!(
             "switch factory-reset job status is not supported by the {} backend",
+            self.name()
+        )))
+    }
+
+    /// Submits asynchronous removal of existing mTLS bindings for `services` on
+    /// `endpoints`.
+    ///
+    /// The backend resets the bindings without requiring a working switch API
+    /// endpoint, so stale client-CA trust cannot block recovery. `endpoints` must
+    /// contain at least one switch and `services` must be non-empty; backends that
+    /// support the operation return [`ComponentManagerError::InvalidArgument`]
+    /// otherwise, without dispatching work. `services` contains backend service
+    /// identifiers. A successful submission returns a non-empty, opaque job ID for
+    /// [`Self::get_disable_switch_mtls_job_status`].
+    ///
+    /// If dispatch may have reached the backend but no job ID is available, the
+    /// implementation returns [`ComponentManagerError::OperationOutcomeUnknown`].
+    /// Callers must not automatically resubmit after an unknown outcome. The default
+    /// implementation returns [`ComponentManagerError::Unsupported`], which
+    /// guarantees that no work was dispatched.
+    async fn batch_disable_switch_mtls(
+        &self,
+        _endpoints: &[SwitchEndpoint],
+        _services: &[i32],
+    ) -> Result<String, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "switch mTLS disable is not supported by the {} backend",
+            self.name()
+        )))
+    }
+
+    /// Returns the aggregate state for a submitted switch mTLS-disable job.
+    ///
+    /// [`SwitchMtlsDisableState::Completed`] requires the parent operation and every
+    /// target switch to complete. [`SwitchMtlsDisableState::Failed`] is also terminal
+    /// and carries backend failure details in [`SwitchMtlsDisableJobStatus::error`].
+    /// A missing or unrecognized job observation cannot establish whether the
+    /// operation ran and returns [`ComponentManagerError::OperationOutcomeUnknown`].
+    /// The default implementation returns [`ComponentManagerError::Unsupported`].
+    async fn get_disable_switch_mtls_job_status(
+        &self,
+        _job_id: &str,
+    ) -> Result<SwitchMtlsDisableJobStatus, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "switch mTLS-disable job status is not supported by the {} backend",
             self.name()
         )))
     }
