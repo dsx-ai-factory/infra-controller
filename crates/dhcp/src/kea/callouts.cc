@@ -463,6 +463,28 @@ void set_options_v6(CalloutHandle &handle, Pkt6Ptr query6_ptr,
     // because the response payload depends on the client's requested flags.
     add_client_fqdn_option6(query6_ptr, response6_ptr, machine);
 
+    // Kea copies the selected payloads. Empty selections leave any independently
+    // configured native Kea option-data unchanged.
+    if (query6_ptr) {
+      DhcpV6BootOptions boot = machine_get_boot_options_ipv6(
+          machine, nullable_data(query6_ptr->data_), query6_ptr->data_.size());
+      DhcpByteBufferGuard url(boot.url);
+      DhcpByteBufferGuard vendor(boot.vendor_class);
+      DhcpByteBufferGuard architecture(boot.architecture);
+      if (!url.empty()) {
+        add_or_replace_option6(response6_ptr, D6O_BOOTFILE_URL,
+                               url.optionBuffer());
+      }
+      if (!vendor.empty()) {
+        add_or_replace_option6(response6_ptr, D6O_VENDOR_CLASS,
+                               vendor.optionBuffer());
+      }
+      if (!architecture.empty()) {
+        add_or_replace_option6(response6_ptr, D6O_CLIENT_ARCH_TYPE,
+                               architecture.optionBuffer());
+      }
+    }
+
     // The receive-side decision is authoritative; replace any Kea-provided
     // copy so an eligible REPLY carries option 14 exactly once.
     response6_ptr->delOption(D6O_RAPID_COMMIT);

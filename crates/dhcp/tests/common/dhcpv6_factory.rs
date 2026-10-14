@@ -17,7 +17,8 @@
 use std::net::Ipv6Addr;
 
 use dhcproto::v6::{
-    DhcpOption, IAAddr, IANA, IAPD, IATA, Message, MessageType, OptionCode, UnknownOption,
+    Architecture, DhcpOption, IAAddr, IANA, IAPD, IATA, Message, MessageType, ORO, OptionCode,
+    UnknownOption, VendorClass,
 };
 use dhcproto::{Decodable, Decoder, Encodable, Encoder};
 
@@ -135,6 +136,80 @@ impl DHCPv6Factory {
         let mut message = Self::stateful_solicit_message(idx);
         Self::add_vendor_class(&mut message, vendor_class);
         Self::relay_wrap(message, true)
+    }
+
+    /// Build a stateful SOLICIT with boot options and client FQDN negotiation.
+    pub(crate) fn solicit_with_boot_options(
+        idx: u8,
+        vendor_class: VendorClass,
+        architectures: &[Architecture],
+        requested_options: &[OptionCode],
+    ) -> Vec<u8> {
+        let mut message = Self::stateful_solicit_message(idx);
+        Self::add_boot_options(&mut message, vendor_class, architectures, requested_options);
+        Self::add_client_fqdn(&mut message);
+        Self::relay_wrap(message, true)
+    }
+
+    /// Build a REQUEST with boot options for the advertised server and address.
+    pub(crate) fn request_with_boot_options(
+        idx: u8,
+        server_id: Vec<u8>,
+        address: Ipv6Addr,
+        vendor_class: VendorClass,
+        architectures: &[Architecture],
+        requested_options: &[OptionCode],
+    ) -> Vec<u8> {
+        let mut message =
+            Self::message_with_server_and_address(idx, MessageType::Request, server_id, address);
+        Self::add_boot_options(&mut message, vendor_class, architectures, requested_options);
+        Self::add_client_fqdn(&mut message);
+        Self::relay_wrap(message, true)
+    }
+
+    /// Build an INFORMATION-REQUEST with boot options but no address request.
+    pub(crate) fn information_request_with_boot_options(
+        idx: u8,
+        vendor_class: VendorClass,
+        architectures: &[Architecture],
+        requested_options: &[OptionCode],
+    ) -> Vec<u8> {
+        let mut message = Self::information_request_message(idx);
+        Self::add_boot_options(&mut message, vendor_class, architectures, requested_options);
+        Self::add_client_fqdn(&mut message);
+        Self::relay_wrap(message, true)
+    }
+
+    /// Encode client boot inputs consistently across SOLICIT, REQUEST, and INFO.
+    fn add_boot_options(
+        message: &mut Message,
+        vendor_class: VendorClass,
+        architectures: &[Architecture],
+        requested_options: &[OptionCode],
+    ) {
+        // dhcproto 0.15 counts data entries instead of bytes in option 16's
+        // length, so encode the payload explicitly as the existing fixture does.
+        let mut payload = vendor_class.num.to_be_bytes().to_vec();
+        for class in vendor_class.data {
+            payload.extend_from_slice(&(class.len() as u16).to_be_bytes());
+            payload.extend_from_slice(&class);
+        }
+        message
+            .opts_mut()
+            .insert(DhcpOption::Unknown(UnknownOption::new(
+                OptionCode::VendorClass,
+                payload,
+            )));
+        if !architectures.is_empty() {
+            message
+                .opts_mut()
+                .insert(DhcpOption::ClientArchType(architectures.to_vec()));
+        }
+        if !requested_options.is_empty() {
+            message.opts_mut().insert(DhcpOption::ORO(ORO {
+                opts: requested_options.to_vec(),
+            }));
+        }
     }
 
     /// Build a SOLICIT using a caller-supplied DUID and relay option-79 policy.
