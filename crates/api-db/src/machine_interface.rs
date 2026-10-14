@@ -44,15 +44,19 @@ use sqlx::{FromRow, PgConnection, PgTransaction};
 use super::{ColumnInfo, FilterableQueryBuilder, ObjectColumnFilter};
 use crate::db_read::DbReader;
 use crate::host_naming::{self, NamingContext};
-use crate::ip_allocator::{DhcpError, IpAllocator, UsedIpResolver};
+use crate::ip_allocator::{IpAllocator, UsedIpResolver};
 use crate::machine_interface_address::{AddressAlreadyInUseError, MachineInterfaceAddressWithType};
 use crate::{DatabaseError, DatabaseResult, Transaction, network_segment as db_network_segment};
 
 const SQL_VIOLATION_DUPLICATE_MAC: &str = "machine_interfaces_segment_id_mac_address_key";
 const SQL_VIOLATION_ONE_PRIMARY_INTERFACE: &str = "one_primary_interface_per_machine";
 const SQL_VIOLATION_MAX_ONE_ASSOCIATION: &str = "chk_max_one_association";
-const FAST_PATH_MAX_RETRIES: usize = 128;
-const FAST_PATH_CANDIDATE_BATCH: i64 = 32;
+// Savepoint attempts per segment for creation, or per family recovery after an ownership race.
+// Creation can repeat the per-prefix scan budget on contention; recovery propagates its exhaustion.
+const HOST_ALLOCATION_MAX_ATTEMPTS: usize = 128;
+// Candidate scans per prefix per attempt. Creation can perform 128 * 128 scans per prefix.
+const HOST_CANDIDATE_MAX_SCANS: usize = 128;
+const HOST_CANDIDATE_BATCH_SIZE: usize = 32;
 
 pub struct UsedAdminNetworkIpResolver {
     pub segment_id: NetworkSegmentId,
@@ -95,6 +99,10 @@ impl ColumnInfo<'_> for IdColumn {
     }
 }
 
+mod host_address_candidates;
+
+#[cfg(test)]
+mod allocation_benchmark;
 #[cfg(test)]
 mod ip_allocator;
 #[cfg(test)]
@@ -1288,7 +1296,7 @@ async fn validate_existing_mac_and_create_inner(
                     Some(ExpectedInterfaceIpAllocation::Retained) => AllocationType::Static,
                     _ => AllocationType::Dhcp,
                 };
-                let interface = create_fast_path(
+                let interface = create_dynamic(
                     txn,
                     &network_segments,
                     &mac_address,
@@ -1813,6 +1821,8 @@ async fn preallocate_machine_interface_with_options(
     }
 }
 
+/// Create a data interface with dynamically allocated or explicitly assigned host addresses.
+/// See [`create_with_type`] for address selection and error behavior.
 pub async fn create(
     txn: &mut PgConnection,
     segments: &[NetworkSegment],
@@ -1833,6 +1843,14 @@ pub async fn create(
     .await
 }
 
+/// Create an interface of `interface_type` with dynamic or static host addresses.
+///
+/// `Automatic` and `NextAvailableIp` try segments in order, continuing after
+/// exhaustion or the per-segment retry budget.
+/// Static assignment uses the containing segment or the `static-assignments` fallback.
+/// An existing static address with the same MAC reuses its interface; a different
+/// owner returns `AddressAlreadyInUse`.
+/// `NextAvailablePrefix` returns `InvalidArgument` before creating an interface.
 pub async fn create_with_type(
     txn: &mut PgConnection,
     segments: &[NetworkSegment],
@@ -1844,7 +1862,7 @@ pub async fn create_with_type(
 ) -> DatabaseResult<MachineInterfaceSnapshot> {
     let snapshot = match address_strategy {
         AddressSelectionStrategy::NextAvailableIp | AddressSelectionStrategy::Automatic => {
-            create_fast_path(
+            create_dynamic(
                 txn,
                 segments,
                 macaddr,
@@ -1865,24 +1883,11 @@ pub async fn create_with_type(
             )
             .await
         }
-        //
         AddressSelectionStrategy::NextAvailablePrefix(_) => {
-            let [segment] = segments else {
-                return Err(DatabaseError::InvalidArgument(
-                    "NextAvailablePrefix allocation requires exactly one candidate segment"
-                        .to_string(),
-                ));
-            };
-
-            create_slow_path(
-                txn,
-                segment,
-                macaddr,
-                primary_interface,
-                address_strategy,
-                interface_type,
-            )
-            .await
+            return Err(DatabaseError::InvalidArgument(
+                "machine interfaces require host addresses, not whole-prefix allocations"
+                    .to_string(),
+            ));
         }
     }?;
 
@@ -1913,7 +1918,7 @@ async fn restore_retained_boot_interface(
     Ok(snapshot)
 }
 
-async fn create_fast_path(
+async fn create_dynamic(
     txn: &mut PgConnection,
     segments: &[NetworkSegment],
     macaddr: &MacAddress,
@@ -1923,25 +1928,28 @@ async fn create_fast_path(
 ) -> DatabaseResult<MachineInterfaceSnapshot> {
     for segments_idx in 0..segments.len() {
         let segment = &segments[segments_idx];
-        for _ in 0..FAST_PATH_MAX_RETRIES {
-            let mut fast_txn = Transaction::begin_inner(txn).await?;
+        for _ in 0..HOST_ALLOCATION_MAX_ATTEMPTS {
+            let mut allocation_txn = Transaction::begin_inner(txn).await?;
 
-            // Keep IPv4-only allocation concurrent, but serialize any segment
-            // containing IPv6 because the Rust allocator reads used addresses
-            // without taking per-IP candidate locks.
+            // DHCP callers choose this lock mode before interface writes. Match it
+            // here so IPv4 never needs a shared-to-exclusive upgrade. Exclusive
+            // SVI writers also exclude allocations while changing the prefix.
             if segment
                 .prefixes
                 .iter()
                 .any(|prefix| prefix.prefix.is_ipv6())
             {
-                lock_network_segment_exclusive(&mut fast_txn, segment).await?;
+                lock_network_segment_exclusive(&mut allocation_txn, segment).await?;
             } else {
-                lock_network_segments_shared(&mut fast_txn, std::slice::from_ref(&segment.id))
-                    .await?;
+                lock_network_segments_shared(
+                    &mut allocation_txn,
+                    std::slice::from_ref(&segment.id),
+                )
+                .await?;
             }
 
-            let segment_exhausted = match try_create_fast_path(
-                &mut fast_txn,
+            let segment_exhausted = match try_create_dynamic(
+                &mut allocation_txn,
                 segment,
                 macaddr,
                 primary_interface,
@@ -1951,7 +1959,7 @@ async fn create_fast_path(
             .await
             {
                 Ok(interface_id) => {
-                    fast_txn.commit().await?;
+                    allocation_txn.commit().await?;
                     return Ok(
                         find_by(txn, ObjectColumnFilter::One(IdColumn, &interface_id))
                             .await?
@@ -1963,8 +1971,8 @@ async fn create_fast_path(
                     false
                 }
                 Err(DatabaseError::TryAgain | DatabaseError::AddressAlreadyInUse(_)) => {
-                    // The candidates we read were claimed before this attempt
-                    // could insert them. Roll back and select another batch.
+                    // Candidates stayed locked, or another writer committed an address
+                    // after selection. Roll back this attempt and select again.
                     false
                 }
                 Err(DatabaseError::ResourceExhausted(_)) if segments_idx < segments.len() - 1 => {
@@ -1973,12 +1981,12 @@ async fn create_fast_path(
                 }
                 Err(err) => {
                     // Some other error, roll back the inner transaction
-                    fast_txn.rollback().await?;
+                    allocation_txn.rollback().await?;
                     return Err(err);
                 }
             };
 
-            fast_txn.rollback().await?;
+            allocation_txn.rollback().await?;
 
             // If this segment is exhausted, go to the next segment.
             if segment_exhausted {
@@ -1994,13 +2002,12 @@ async fn create_fast_path(
         .join(", ");
 
     Err(DatabaseError::internal(format!(
-        "unable to create machine interface in fast path out of segments {} after {} retries",
-        segment_list, FAST_PATH_MAX_RETRIES
+        "unable to allocate machine interface addresses from segments {} within {} creation attempts per segment",
+        segment_list, HOST_ALLOCATION_MAX_ATTEMPTS
     )))
 }
 
 /// Create a machine interface with a specific static IP address.
-/// A perfect compliment to create_fast_path and create_slow_path.
 ///
 /// If the target IP is already allocated to an interface with
 /// same MAC, just return the existing interface snapshot.
@@ -2065,83 +2072,8 @@ async fn create_static_path(
     )
 }
 
-/// Create a machine interface and allocate IP addresses, slow path for whole-prefix allocation.
-///
-/// This uses [`crate::IpAllocator`], which requires:
-///
-/// - Locking the machine_interfaces_lock table
-/// - Reading all used IP's from the database for the given segment
-/// - Selecting a batch of IP's according to the selection strategy
-pub async fn create_slow_path(
-    txn: &mut PgConnection,
-    segment: &NetworkSegment,
-    macaddr: &MacAddress,
-    primary_interface: bool,
-    address_strategy: AddressSelectionStrategy,
-    interface_type: InterfaceType,
-) -> DatabaseResult<MachineInterfaceSnapshot> {
-    // We're potentially about to insert a couple rows, so create a savepoint.
-    let mut inner_txn = Transaction::begin_inner(txn).await?;
-
-    // If either requested addresses are auto-generated, we lock the entire table
-    // by way of the inner_txn.
-    lock_network_segment_exclusive(&mut inner_txn, segment).await?;
-
-    // Collect SVI IPs so the allocator knows they're already reserved.
-    let mut reserved_ips = vec![];
-    for prefix in &segment.prefixes {
-        if let Some(svi_ip) = prefix.svi_ip {
-            reserved_ips.push(svi_ip);
-        }
-    }
-
-    let dhcp_handler: Box<dyn UsedIpResolver<PgConnection> + Send> =
-        Box::new(UsedAdminNetworkIpResolver {
-            segment_id: segment.id,
-            busy_ips: reserved_ips,
-        });
-
-    // Allocate an address from each prefix in the segment. For dual-stack
-    // segments this means one IPv4 address and one IPv6 address.
-    let allocator = IpAllocator::new(
-        inner_txn.as_pgconn(),
-        segment,
-        dhcp_handler,
-        address_strategy,
-    )
-    .await?;
-
-    let mut allocated_addresses = Vec::new();
-    for (_, maybe_address) in allocator {
-        let address = maybe_address?;
-        allocated_addresses.push(address.ip());
-    }
-
-    let interface_id = create_inner(
-        inner_txn.as_pgconn(),
-        segment,
-        macaddr,
-        segment.config.subdomain_id,
-        primary_interface,
-        &allocated_addresses,
-        AllocationType::Dhcp,
-        interface_type,
-    )
-    .await?;
-    inner_txn.commit().await?;
-
-    Ok(
-        find_by(txn, ObjectColumnFilter::One(IdColumn, &interface_id))
-            .await?
-            .remove(0),
-    )
-}
-
-/// Fast path for single-IP allocation.
-///
-/// This allocates a single candidate IP per prefix entirely in the database, without having to read
-/// all the used IP's.
-async fn try_create_fast_path(
+/// Allocate one host address per prefix and create the interface in this transaction.
+async fn try_create_dynamic(
     // Note: Must be a transaction since we're doing locks
     txn: &mut PgTransaction<'_>,
     segment: &NetworkSegment,
@@ -2169,94 +2101,16 @@ async fn try_create_fast_path(
 ///
 /// For dual-stack segments this means one IPv4 and one IPv6 address. Callers
 /// must already hold the segment's exclusive lock when the segment contains
-/// IPv6 prefixes.
+/// IPv6 prefixes, matching the DHCPv6 and SVI writers.
 async fn allocate_addresses_from_segment(
     txn: &mut PgTransaction<'_>,
     segment: &NetworkSegment,
 ) -> DatabaseResult<Vec<IpAddr>> {
     let mut addresses = Vec::with_capacity(segment.prefixes.len());
     for prefix in &segment.prefixes {
-        if prefix.prefix.is_ipv6() {
-            // Use a single-prefix segment view so v6 allocation cannot consume
-            // or reason about unrelated prefixes on a dual-stack segment.
-            let single_prefix_segment = NetworkSegment {
-                prefixes: vec![prefix.clone()],
-                ..segment.clone()
-            };
-            addresses
-                .extend(allocate_v6_addresses_via_ip_allocator(txn, &single_prefix_segment).await?);
-        } else {
-            // IPv4 stays on the SQL fast path for its existing concurrency and
-            // allocation-order behavior.
-            let address = allocate_next_ip_with_retry(txn, segment, prefix).await?;
-            addresses.push(address);
-        }
+        addresses.push(allocate_next_ip_with_retry(txn, segment, prefix).await?);
     }
     Ok(addresses)
-}
-
-/// Allocates IPv6 DHCP addresses using the Rust `IpAllocator`.
-///
-/// The caller must hold the segment's exclusive advisory lock because
-/// `IpAllocator` reads the used-address set instead of taking per-IP advisory
-/// locks for each candidate.
-async fn allocate_v6_addresses_via_ip_allocator(
-    txn: &mut PgTransaction<'_>,
-    segment: &NetworkSegment,
-) -> DatabaseResult<Vec<IpAddr>> {
-    // Collect SVI IPs so the allocator treats those addresses as unavailable.
-    let reserved_ips = segment
-        .prefixes
-        .iter()
-        .filter_map(|prefix| prefix.svi_ip)
-        .collect();
-
-    let dhcp_handler: Box<dyn UsedIpResolver<PgConnection> + Send> =
-        Box::new(UsedAdminNetworkIpResolver {
-            segment_id: segment.id,
-            busy_ips: reserved_ips,
-        });
-
-    // Limit the allocator input to IPv6 prefixes; IPv4 remains on the SQL fast
-    // path even when the original segment is dual-stack.
-    let ipv6_segment = NetworkSegment {
-        prefixes: segment
-            .prefixes
-            .iter()
-            .filter(|prefix| prefix.prefix.is_ipv6())
-            .cloned()
-            .collect(),
-        ..segment.clone()
-    };
-
-    let allocator = IpAllocator::new(
-        txn.as_mut(),
-        &ipv6_segment,
-        dhcp_handler,
-        AddressSelectionStrategy::NextAvailableIp,
-    )
-    .await?;
-
-    let mut allocated_addresses = Vec::with_capacity(ipv6_segment.prefixes.len());
-    for (prefix_id, maybe_address) in allocator {
-        let address = match maybe_address {
-            Ok(address) => address,
-            Err(DatabaseError::DhcpError(DhcpError::PrefixExhausted(_))) => {
-                let prefix = ipv6_segment
-                    .prefixes
-                    .iter()
-                    .find(|prefix| prefix.id == prefix_id)
-                    .map_or_else(|| prefix_id.to_string(), |prefix| prefix.prefix.to_string());
-                return Err(DatabaseError::ResourceExhausted(format!(
-                    "No IP addresses left in prefix {prefix}"
-                )));
-            }
-            Err(err) => return Err(err),
-        };
-        allocated_addresses.push(address.ip());
-    }
-
-    Ok(allocated_addresses)
 }
 
 /// Create a machine interface row without inserting address rows.
@@ -2363,60 +2217,60 @@ async fn create_inner(
     Ok(interface_id)
 }
 
-/// Retries allocation for a single prefix which may be under contention.
+/// Select and lock one host candidate; the caller inserts its ownership row.
 ///
-/// Each iteration fetches a small free-IP batch, tries to take an advisory lock
-/// on each candidate, and returns once one lock is acquired.
-///
-/// This is for eliminating a big shared lock when we have lots of machines DHCP'ing for the first
-/// time simultaneously: By requesting a batch of free IP's at once and trying locks on each one, we
-/// can process roughly [`FAST_PATH_CANDIDATE_BATCH`] initial DHCP requests concurrently.
+/// Each iteration reads the first gaps between occupied addresses and selects up to
+/// `HOST_CANDIDATE_BATCH_SIZE` free candidates. Per-address advisory locks let
+/// concurrent IPv4 allocations choose different candidates from the same batch.
+/// Returns `ResourceExhausted` when no free candidates remain, or `TryAgain`
+/// after `HOST_CANDIDATE_MAX_SCANS` batches remain locked. The caller's insert
+/// still checks ownership if another writer committed after our read.
 async fn allocate_next_ip_with_retry(
     // Note: Must be a transaction since we're doing locks
     txn: &mut PgTransaction<'_>,
     segment: &NetworkSegment,
     prefix: &NetworkPrefix,
 ) -> DatabaseResult<IpAddr> {
-    // The SQL fast path is IPv4-only. IPv6 host-space math needs the Rust
-    // allocator's u128 arithmetic instead of PostgreSQL int4 shifts.
-    if prefix.prefix.is_ipv6() {
-        return Err(DatabaseError::internal(format!(
-            "IPv6 prefix {} cannot use the SQL fast-path allocator",
-            prefix.prefix
-        )));
-    }
-
-    let reserved = if prefix.gateway.is_none() {
-        prefix.num_reserved.max(2)
-    } else {
-        prefix.num_reserved.max(1)
-    };
-
-    let host_bits = 32 - prefix.prefix.prefix() as i32;
-
-    for _ in 0..FAST_PATH_MAX_RETRIES {
-        // Grab FAST_PATH_CANDIDATE_BATCH IP's at once
-        let query = r#"
-SELECT ($1::inet + ip_series.n)::inet AS ip
-FROM generate_series($3, (1 << $2) - 2) AS ip_series(n)
-LEFT JOIN machine_interface_addresses AS mia
-  ON mia.address = ($1::inet + ip_series.n)::inet
-WHERE mia.address IS NULL
-  AND ($4::inet IS NULL OR ($1::inet + ip_series.n)::inet <> $4::inet)
-  AND ($5::inet IS NULL OR ($1::inet + ip_series.n)::inet <> $5::inet)
-ORDER BY ip
-LIMIT $6;
-    "#;
-        let candidates = sqlx::query_scalar::<_, IpAddr>(query)
-            .bind(prefix.prefix.ip())
-            .bind(host_bits)
-            .bind(reserved)
-            .bind(prefix.gateway)
-            .bind(prefix.svi_ip)
-            .bind(FAST_PATH_CANDIDATE_BATCH)
-            .fetch_all(txn.as_mut())
-            .await
-            .map_err(|e| DatabaseError::query(query, e))?;
+    for _ in 0..HOST_CANDIDATE_MAX_SCANS {
+        let selector = host_address_candidates::HostAddressCandidates::new(prefix)?;
+        let candidates = if let Some((first, last)) = selector.range() {
+            // Ownership is global, including reservations parked without an
+            // interface. `lead()` pairs occupied addresses with their successors;
+            // one query returns the gap boundaries while still reading occupied
+            // rows up to the limit. The unique address index can supply the order.
+            // Keep the first row to bound the leading gap. The CASE prevents
+            // incrementing the maximum IPv6 address, even in an exhausted /128.
+            let query = "SELECT address, next_address FROM (
+                    SELECT address,
+                        lead(address) OVER (ORDER BY address) AS next_address,
+                        row_number() OVER (ORDER BY address) AS position
+                    FROM machine_interface_addresses
+                    WHERE address BETWEEN $1::inet AND $2::inet
+                ) AS occupied
+                WHERE position = 1 OR next_address IS NULL
+                    OR CASE WHEN address < $2::inet
+                        THEN address + 1 < next_address ELSE false END
+                ORDER BY address
+                LIMIT CASE WHEN (
+                    SELECT address FROM machine_interface_addresses
+                    WHERE address BETWEEN $1::inet AND $2::inet
+                    ORDER BY address LIMIT 1
+                ) >= $4::inet THEN 1 ELSE $3::bigint END";
+            // Allow one marker for the first row and two gaps containing only the
+            // gateway or SVI before we have enough candidates. If the leading
+            // gap alone fills the batch, avoid scanning the occupied tail.
+            let occupied = sqlx::query_as::<_, host_address_candidates::OccupiedAddress>(query)
+                .bind(first)
+                .bind(last)
+                .bind((HOST_CANDIDATE_BATCH_SIZE + 3) as i64)
+                .bind(selector.leading_gap_threshold(HOST_CANDIDATE_BATCH_SIZE))
+                .fetch_all(txn.as_mut())
+                .await
+                .map_err(|e| DatabaseError::query(query, e))?;
+            selector.select(&occupied, HOST_CANDIDATE_BATCH_SIZE)
+        } else {
+            Vec::new()
+        };
 
         if candidates.is_empty() {
             return Err(DatabaseError::ResourceExhausted(format!(
@@ -2487,7 +2341,7 @@ pub async fn lock_network_segments_exclusive(
 
 /// Acquire shared segment locks in ascending ID order within a transaction.
 /// IPv4 DHCP takes these before interface updates, matching its allocator's
-/// shared locks. Callers that can allocate IPv6 or a whole prefix must use
+/// shared locks. Callers that can allocate IPv6 must use
 /// exclusive locks from the start rather than upgrade shared locks later.
 pub async fn lock_network_segments_shared(
     txn: &mut PgConnection,
@@ -3811,9 +3665,14 @@ async fn reconcile_interface_segment(
 
 /// Allocate pool addresses of `allocation_type` for one missing family.
 ///
-/// First Retained allocation uses Static; ordinary allocation and recovery
-/// use Dhcp. Other families are unchanged. The interface must still belong to
-/// `segment` after locking, or the function returns `FailedPrecondition`.
+/// Other families and the caller's prior writes are unchanged. The interface must
+/// still belong to `segment` after locking, or this returns `FailedPrecondition`.
+/// Successful assignment updates its hostname and domain; no matching prefix
+/// returns an empty vector without those updates.
+///
+/// Ownership races retry within savepoints up to `HOST_ALLOCATION_MAX_ATTEMPTS`,
+/// then return `Internal`. Prefix exhaustion returns `ResourceExhausted`; candidate
+/// lock contention returns `TryAgain` after the per-prefix scan budget is spent.
 pub async fn allocate_address_for_family(
     txn: &mut PgConnection,
     interface_id: MachineInterfaceId,
@@ -3821,14 +3680,62 @@ pub async fn allocate_address_for_family(
     family: carbide_network::ip::IpAddressFamily,
     allocation_type: AllocationType,
 ) -> DatabaseResult<Vec<IpAddr>> {
-    let mut fast_txn = Transaction::begin_inner(txn).await?;
+    for _ in 0..HOST_ALLOCATION_MAX_ATTEMPTS {
+        let mut allocation_txn = Transaction::begin_inner(txn).await?;
+        match try_allocate_address_for_family(
+            &mut allocation_txn,
+            interface_id,
+            segment,
+            family,
+            allocation_type,
+        )
+        .await
+        {
+            Ok(addresses) => {
+                allocation_txn.commit().await?;
+                // With no prefix for this family, leave the hostname and
+                // domain exactly as they were.
+                if !addresses.is_empty() {
+                    sync_hostname_after_address_assignment(
+                        txn,
+                        interface_id,
+                        segment.config.subdomain_id,
+                    )
+                    .await?;
+                }
+                return Ok(addresses);
+            }
+            Err(DatabaseError::AddressAlreadyInUse(_)) => {
+                // A writer can claim the address after selection. Release this
+                // attempt's locks and writes before selecting another address.
+                allocation_txn.rollback().await?;
+            }
+            Err(error) => {
+                allocation_txn.rollback().await?;
+                return Err(error);
+            }
+        }
+    }
+
+    Err(DatabaseError::internal(format!(
+        "unable to allocate {family:?} addresses for interface {interface_id} within {HOST_ALLOCATION_MAX_ATTEMPTS} attempts"
+    )))
+}
+
+async fn try_allocate_address_for_family(
+    allocation_txn: &mut PgTransaction<'_>,
+    interface_id: MachineInterfaceId,
+    segment: &NetworkSegment,
+    family: IpAddressFamily,
+    allocation_type: AllocationType,
+) -> DatabaseResult<Vec<IpAddr>> {
     if family == IpAddressFamily::Ipv6 {
-        lock_network_segment_exclusive(&mut fast_txn, segment).await?;
+        lock_network_segment_exclusive(allocation_txn, segment).await?;
     } else {
-        lock_network_segments_shared(&mut fast_txn, std::slice::from_ref(&segment.id)).await?;
+        lock_network_segments_shared(allocation_txn, std::slice::from_ref(&segment.id)).await?;
     }
     let current_segment_id =
-        lock_for_address_assignment(fast_txn.as_pgconn(), interface_id).await?;
+        lock_for_address_assignment(allocation_txn.as_mut(), interface_id).await?;
     if current_segment_id != segment.id {
         return Err(DatabaseError::FailedPrecondition(format!(
             "interface {interface_id} belongs to segment {}, not allocation segment {}",
@@ -3837,45 +3744,21 @@ pub async fn allocate_address_for_family(
     }
 
     let mut allocated_addresses = Vec::new();
-    if family == IpAddressFamily::Ipv6 {
-        allocated_addresses =
-            allocate_v6_addresses_via_ip_allocator(&mut fast_txn, segment).await?;
-        for address in &allocated_addresses {
-            crate::machine_interface_address::insert(
-                fast_txn.as_pgconn(),
-                interface_id,
-                *address,
-                allocation_type,
-            )
-            .await?;
-        }
-    } else {
-        for prefix in segment
-            .prefixes
-            .iter()
-            .filter(|p| p.prefix.is_address_family(family))
-        {
-            let address = allocate_next_ip_with_retry(&mut fast_txn, segment, prefix).await?;
-            allocated_addresses.push(address);
-            crate::machine_interface_address::insert(
-                fast_txn.as_pgconn(),
-                interface_id,
-                address,
-                allocation_type,
-            )
-            .await?;
-        }
+    for prefix in segment
+        .prefixes
+        .iter()
+        .filter(|prefix| prefix.prefix.is_address_family(family))
+    {
+        let address = allocate_next_ip_with_retry(allocation_txn, segment, prefix).await?;
+        crate::machine_interface_address::insert(
+            allocation_txn.as_mut(),
+            interface_id,
+            address,
+            allocation_type,
+        )
+        .await?;
+        allocated_addresses.push(address);
     }
-
-    fast_txn.commit().await?;
-
-    // Nothing allocated (no prefix for the requested family): leave the
-    // hostname and domain exactly as they were.
-    if allocated_addresses.is_empty() {
-        return Ok(allocated_addresses);
-    }
-
-    sync_hostname_after_address_assignment(txn, interface_id, segment.config.subdomain_id).await?;
 
     Ok(allocated_addresses)
 }

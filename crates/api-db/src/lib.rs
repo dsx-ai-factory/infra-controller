@@ -419,7 +419,7 @@ pub enum DatabaseError {
     DhcpError(#[from] DhcpError),
     #[error("maximum one association per interface")]
     MaxOneInterfaceAssociation,
-    #[error("fast-path allocation failed and can be retried")]
+    #[error("host address allocation failed and can be retried")]
     TryAgain,
     #[error("no site-wide rotation target for credential type: {0:?}")]
     MissingSitewideRotationTarget(crate::credential_rotation::CredentialRotationType),
