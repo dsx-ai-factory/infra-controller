@@ -5983,60 +5983,60 @@ func (NicFirmwareApproach) EnumDescriptor() ([]byte, []int) {
 }
 
 // Resolver precedence is card > machine > allocation > site. `GetDesiredNicFirmware`
-// includes stored card and machine overrides, allocation preview and site defaults.
-type NicFirmwareSelectionSource int32
+// includes stored card and machine selections, allocation preview and site selections.
+type NicFirmwareSelectionScope int32
 
 const (
 	// Site-wide selection for the device's hardware pair.
-	NicFirmwareSelectionSource_NicFirmwareSelectionSourceSiteDefault NicFirmwareSelectionSource = 0
-	// Operator-supplied allocation selection, above the site default.
-	NicFirmwareSelectionSource_NicFirmwareSelectionSourceAllocation NicFirmwareSelectionSource = 1
-	// Per-machine selection, above an allocation or site default.
-	NicFirmwareSelectionSource_NicFirmwareSelectionSourceMachineOverride NicFirmwareSelectionSource = 2
+	NicFirmwareSelectionScope_NicFirmwareSelectionScopeSite NicFirmwareSelectionScope = 0
+	// Operator-supplied allocation selection, above the site selection.
+	NicFirmwareSelectionScope_NicFirmwareSelectionScopeAllocation NicFirmwareSelectionScope = 1
+	// Per-machine selection, above an allocation or site selection.
+	NicFirmwareSelectionScope_NicFirmwareSelectionScopeMachine NicFirmwareSelectionScope = 2
 	// Per-card selection, above every other selection.
-	NicFirmwareSelectionSource_NicFirmwareSelectionSourceCardOverride NicFirmwareSelectionSource = 3
+	NicFirmwareSelectionScope_NicFirmwareSelectionScopeCard NicFirmwareSelectionScope = 3
 )
 
-// Enum value maps for NicFirmwareSelectionSource.
+// Enum value maps for NicFirmwareSelectionScope.
 var (
-	NicFirmwareSelectionSource_name = map[int32]string{
-		0: "NicFirmwareSelectionSourceSiteDefault",
-		1: "NicFirmwareSelectionSourceAllocation",
-		2: "NicFirmwareSelectionSourceMachineOverride",
-		3: "NicFirmwareSelectionSourceCardOverride",
+	NicFirmwareSelectionScope_name = map[int32]string{
+		0: "NicFirmwareSelectionScopeSite",
+		1: "NicFirmwareSelectionScopeAllocation",
+		2: "NicFirmwareSelectionScopeMachine",
+		3: "NicFirmwareSelectionScopeCard",
 	}
-	NicFirmwareSelectionSource_value = map[string]int32{
-		"NicFirmwareSelectionSourceSiteDefault":     0,
-		"NicFirmwareSelectionSourceAllocation":      1,
-		"NicFirmwareSelectionSourceMachineOverride": 2,
-		"NicFirmwareSelectionSourceCardOverride":    3,
+	NicFirmwareSelectionScope_value = map[string]int32{
+		"NicFirmwareSelectionScopeSite":       0,
+		"NicFirmwareSelectionScopeAllocation": 1,
+		"NicFirmwareSelectionScopeMachine":    2,
+		"NicFirmwareSelectionScopeCard":       3,
 	}
 )
 
-func (x NicFirmwareSelectionSource) Enum() *NicFirmwareSelectionSource {
-	p := new(NicFirmwareSelectionSource)
+func (x NicFirmwareSelectionScope) Enum() *NicFirmwareSelectionScope {
+	p := new(NicFirmwareSelectionScope)
 	*p = x
 	return p
 }
 
-func (x NicFirmwareSelectionSource) String() string {
+func (x NicFirmwareSelectionScope) String() string {
 	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
 }
 
-func (NicFirmwareSelectionSource) Descriptor() protoreflect.EnumDescriptor {
+func (NicFirmwareSelectionScope) Descriptor() protoreflect.EnumDescriptor {
 	return file_nico_nico_proto_enumTypes[106].Descriptor()
 }
 
-func (NicFirmwareSelectionSource) Type() protoreflect.EnumType {
+func (NicFirmwareSelectionScope) Type() protoreflect.EnumType {
 	return &file_nico_nico_proto_enumTypes[106]
 }
 
-func (x NicFirmwareSelectionSource) Number() protoreflect.EnumNumber {
+func (x NicFirmwareSelectionScope) Number() protoreflect.EnumNumber {
 	return protoreflect.EnumNumber(x)
 }
 
-// Deprecated: Use NicFirmwareSelectionSource.Descriptor instead.
-func (NicFirmwareSelectionSource) EnumDescriptor() ([]byte, []int) {
+// Deprecated: Use NicFirmwareSelectionScope.Descriptor instead.
+func (NicFirmwareSelectionScope) EnumDescriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{106}
 }
 
@@ -25255,7 +25255,7 @@ type MachineConfig struct {
 	// The declared desired hardware SKU (set via the AssignSku API).
 	// Distinct from MachineStatus.hw_sku, which reflects the observed match.
 	HwSku *string `protobuf:"bytes,6,opt,name=hw_sku,json=hwSku,proto3,oneof" json:"hw_sku,omitempty"`
-	// Live NIC firmware profile selected by SetMachineNicFirmwareOverride, following
+	// Live NIC firmware profile selected by SetMachineNicFirmwareConfig, following
 	// NicFirmwareProfile.id. Absent means inherit allocation or site selections.
 	// Read this field and Machine.version through FindMachinesByIds before editing.
 	NicFirmwareProfileId *string `protobuf:"bytes,7,opt,name=nic_firmware_profile_id,json=nicFirmwareProfileId,proto3,oneof" json:"nic_firmware_profile_id,omitempty"`
@@ -25264,9 +25264,9 @@ type MachineConfig struct {
 	// when later observations no longer match them. Results are ordered by the stored
 	// selector JSON value; ordering has no selection significance. Edits use the same
 	// Machine.version as nic_firmware_profile_id.
-	NicFirmwareCardOverrides []*NicFirmwareCardOverride `protobuf:"bytes,8,rep,name=nic_firmware_card_overrides,json=nicFirmwareCardOverrides,proto3" json:"nic_firmware_card_overrides,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	NicFirmwareCardSelections []*NicFirmwareCardSelection `protobuf:"bytes,9,rep,name=nic_firmware_card_selections,json=nicFirmwareCardSelections,proto3" json:"nic_firmware_card_selections,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
 }
 
 func (x *MachineConfig) Reset() {
@@ -25348,9 +25348,9 @@ func (x *MachineConfig) GetNicFirmwareProfileId() string {
 	return ""
 }
 
-func (x *MachineConfig) GetNicFirmwareCardOverrides() []*NicFirmwareCardOverride {
+func (x *MachineConfig) GetNicFirmwareCardSelections() []*NicFirmwareCardSelection {
 	if x != nil {
-		return x.NicFirmwareCardOverrides
+		return x.NicFirmwareCardSelections
 	}
 	return nil
 }
@@ -25617,7 +25617,7 @@ type Machine struct {
 	Inventory *MachineComponentInventory `protobuf:"bytes,21,opt,name=inventory,proto3,oneof" json:"inventory,omitempty"`
 	// Metadata associated with the Machine
 	Metadata *Metadata `protobuf:"bytes,33,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	// Shared edit token, including metadata and NIC firmware override mutations.
+	// Shared edit token, including metadata and NIC firmware configuration edits.
 	// Other machine settings do not necessarily advance this token.
 	Version string `protobuf:"bytes,34,opt,name=version,proto3" json:"version,omitempty"`
 	// The rack this machine is assigned to (from expected machine record).
@@ -69750,9 +69750,9 @@ type UpdateNicFirmwareProfileRequest struct {
 	// Profile name; follows the NicFirmwareProfile.id contract.
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// Required complete replacement, not a merge or patch. Must support hardware
-	// pairs selected by site defaults. On machines or devices selecting this profile,
+	// pairs selected at site scope. On machines or devices selecting this profile,
 	// it must retain support for usable observed pairs the previous config supported.
-	// A device with a card override does not constrain its machine's selected profile.
+	// A device with a card selection does not constrain its machine's selected profile.
 	// A card selector matching no device or several devices does not constrain edits,
 	// but its saved profile reference still prevents deletion.
 	// Removing required support returns FAILED_PRECONDITION. A newly observed,
@@ -69823,7 +69823,7 @@ func (x *UpdateNicFirmwareProfileRequest) GetIfVersionMatch() string {
 type DeleteNicFirmwareProfileRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Profile name; follows the NicFirmwareProfile.id contract. A profile selected
-	// by a site default, machine override or card override cannot be deleted
+	// at site, machine or card scope cannot be deleted
 	// (FAILED_PRECONDITION), including card selectors no longer found in inventory.
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// Required edit-version token from a previous read. Missing or malformed
@@ -69937,7 +69937,7 @@ func (x *NicFirmwareHardware) GetPsid() string {
 }
 
 // A revisioned site-wide assignment from a hardware pair to a live profile.
-type NicFirmwareSiteDefault struct {
+type NicFirmwareSiteSelection struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Composite identity of this assignment, not a machine or physical-card identity.
 	Hardware *NicFirmwareHardware `protobuf:"bytes,1,opt,name=hardware,proto3" json:"hardware,omitempty"`
@@ -69949,20 +69949,20 @@ type NicFirmwareSiteDefault struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *NicFirmwareSiteDefault) Reset() {
-	*x = NicFirmwareSiteDefault{}
+func (x *NicFirmwareSiteSelection) Reset() {
+	*x = NicFirmwareSiteSelection{}
 	mi := &file_nico_nico_proto_msgTypes[993]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *NicFirmwareSiteDefault) String() string {
+func (x *NicFirmwareSiteSelection) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*NicFirmwareSiteDefault) ProtoMessage() {}
+func (*NicFirmwareSiteSelection) ProtoMessage() {}
 
-func (x *NicFirmwareSiteDefault) ProtoReflect() protoreflect.Message {
+func (x *NicFirmwareSiteSelection) ProtoReflect() protoreflect.Message {
 	mi := &file_nico_nico_proto_msgTypes[993]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -69974,46 +69974,47 @@ func (x *NicFirmwareSiteDefault) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use NicFirmwareSiteDefault.ProtoReflect.Descriptor instead.
-func (*NicFirmwareSiteDefault) Descriptor() ([]byte, []int) {
+// Deprecated: Use NicFirmwareSiteSelection.ProtoReflect.Descriptor instead.
+func (*NicFirmwareSiteSelection) Descriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{993}
 }
 
-func (x *NicFirmwareSiteDefault) GetHardware() *NicFirmwareHardware {
+func (x *NicFirmwareSiteSelection) GetHardware() *NicFirmwareHardware {
 	if x != nil {
 		return x.Hardware
 	}
 	return nil
 }
 
-func (x *NicFirmwareSiteDefault) GetProfileId() string {
+func (x *NicFirmwareSiteSelection) GetProfileId() string {
 	if x != nil {
 		return x.ProfileId
 	}
 	return ""
 }
 
-func (x *NicFirmwareSiteDefault) GetVersion() string {
+func (x *NicFirmwareSiteSelection) GetVersion() string {
 	if x != nil {
 		return x.Version
 	}
 	return ""
 }
 
-// Finish upgrading Core before assigning site defaults so every replica
-// validates profile edits against the hardware selected by those defaults.
-type SetNicFirmwareSiteDefaultRequest struct {
+// Site selections apply only when no card, machine or allocation selection exists
+// for the device. Finish upgrading Core before assigning site selections so every
+// replica validates profile edits against their selected hardware.
+type SetNicFirmwareSiteSelectionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Required hardware pair; missing or invalid hardware returns INVALID_ARGUMENT.
-	// Only operator callers may change defaults.
+	// Only operator callers may change site selections.
 	Hardware *NicFirmwareHardware `protobuf:"bytes,1,opt,name=hardware,proto3" json:"hardware,omitempty"`
-	// Required action. Omission returns INVALID_ARGUMENT without changing the default.
+	// Required action. Omission returns INVALID_ARGUMENT without changing the selection.
 	//
 	// Types that are valid to be assigned to Action:
 	//
-	//	*SetNicFirmwareSiteDefaultRequest_ProfileId
-	//	*SetNicFirmwareSiteDefaultRequest_Clear
-	Action isSetNicFirmwareSiteDefaultRequest_Action `protobuf_oneof:"action"`
+	//	*SetNicFirmwareSiteSelectionRequest_ProfileId
+	//	*SetNicFirmwareSiteSelectionRequest_Clear
+	Action isSetNicFirmwareSiteSelectionRequest_Action `protobuf_oneof:"action"`
 	// Omit only when creating a new assignment (ALREADY_EXISTS if one exists).
 	// Replacement and clearing require the complete current assignment token.
 	// Malformed tokens return INVALID_ARGUMENT, stale tokens FAILED_PRECONDITION,
@@ -70023,20 +70024,20 @@ type SetNicFirmwareSiteDefaultRequest struct {
 	sizeCache      protoimpl.SizeCache
 }
 
-func (x *SetNicFirmwareSiteDefaultRequest) Reset() {
-	*x = SetNicFirmwareSiteDefaultRequest{}
+func (x *SetNicFirmwareSiteSelectionRequest) Reset() {
+	*x = SetNicFirmwareSiteSelectionRequest{}
 	mi := &file_nico_nico_proto_msgTypes[994]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *SetNicFirmwareSiteDefaultRequest) String() string {
+func (x *SetNicFirmwareSiteSelectionRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*SetNicFirmwareSiteDefaultRequest) ProtoMessage() {}
+func (*SetNicFirmwareSiteSelectionRequest) ProtoMessage() {}
 
-func (x *SetNicFirmwareSiteDefaultRequest) ProtoReflect() protoreflect.Message {
+func (x *SetNicFirmwareSiteSelectionRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_nico_nico_proto_msgTypes[994]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -70048,55 +70049,55 @@ func (x *SetNicFirmwareSiteDefaultRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use SetNicFirmwareSiteDefaultRequest.ProtoReflect.Descriptor instead.
-func (*SetNicFirmwareSiteDefaultRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use SetNicFirmwareSiteSelectionRequest.ProtoReflect.Descriptor instead.
+func (*SetNicFirmwareSiteSelectionRequest) Descriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{994}
 }
 
-func (x *SetNicFirmwareSiteDefaultRequest) GetHardware() *NicFirmwareHardware {
+func (x *SetNicFirmwareSiteSelectionRequest) GetHardware() *NicFirmwareHardware {
 	if x != nil {
 		return x.Hardware
 	}
 	return nil
 }
 
-func (x *SetNicFirmwareSiteDefaultRequest) GetAction() isSetNicFirmwareSiteDefaultRequest_Action {
+func (x *SetNicFirmwareSiteSelectionRequest) GetAction() isSetNicFirmwareSiteSelectionRequest_Action {
 	if x != nil {
 		return x.Action
 	}
 	return nil
 }
 
-func (x *SetNicFirmwareSiteDefaultRequest) GetProfileId() string {
+func (x *SetNicFirmwareSiteSelectionRequest) GetProfileId() string {
 	if x != nil {
-		if x, ok := x.Action.(*SetNicFirmwareSiteDefaultRequest_ProfileId); ok {
+		if x, ok := x.Action.(*SetNicFirmwareSiteSelectionRequest_ProfileId); ok {
 			return x.ProfileId
 		}
 	}
 	return ""
 }
 
-func (x *SetNicFirmwareSiteDefaultRequest) GetClear() *emptypb.Empty {
+func (x *SetNicFirmwareSiteSelectionRequest) GetClear() *emptypb.Empty {
 	if x != nil {
-		if x, ok := x.Action.(*SetNicFirmwareSiteDefaultRequest_Clear); ok {
+		if x, ok := x.Action.(*SetNicFirmwareSiteSelectionRequest_Clear); ok {
 			return x.Clear
 		}
 	}
 	return nil
 }
 
-func (x *SetNicFirmwareSiteDefaultRequest) GetIfVersionMatch() string {
+func (x *SetNicFirmwareSiteSelectionRequest) GetIfVersionMatch() string {
 	if x != nil && x.IfVersionMatch != nil {
 		return *x.IfVersionMatch
 	}
 	return ""
 }
 
-type isSetNicFirmwareSiteDefaultRequest_Action interface {
-	isSetNicFirmwareSiteDefaultRequest_Action()
+type isSetNicFirmwareSiteSelectionRequest_Action interface {
+	isSetNicFirmwareSiteSelectionRequest_Action()
 }
 
-type SetNicFirmwareSiteDefaultRequest_ProfileId struct {
+type SetNicFirmwareSiteSelectionRequest_ProfileId struct {
 	// Assign a compatible live profile. Follows NicFirmwareProfile.id validation;
 	// malformed IDs return INVALID_ARGUMENT, missing profiles NOT_FOUND, and
 	// incompatible profiles FAILED_PRECONDITION. Profile validation happens
@@ -70104,38 +70105,38 @@ type SetNicFirmwareSiteDefaultRequest_ProfileId struct {
 	ProfileId string `protobuf:"bytes,2,opt,name=profile_id,json=profileId,proto3,oneof"`
 }
 
-type SetNicFirmwareSiteDefaultRequest_Clear struct {
+type SetNicFirmwareSiteSelectionRequest_Clear struct {
 	// Delete the assignment without changing the selected profile.
 	Clear *emptypb.Empty `protobuf:"bytes,4,opt,name=clear,proto3,oneof"`
 }
 
-func (*SetNicFirmwareSiteDefaultRequest_ProfileId) isSetNicFirmwareSiteDefaultRequest_Action() {}
+func (*SetNicFirmwareSiteSelectionRequest_ProfileId) isSetNicFirmwareSiteSelectionRequest_Action() {}
 
-func (*SetNicFirmwareSiteDefaultRequest_Clear) isSetNicFirmwareSiteDefaultRequest_Action() {}
+func (*SetNicFirmwareSiteSelectionRequest_Clear) isSetNicFirmwareSiteSelectionRequest_Action() {}
 
 // The assignment saved by Set, or its absence after Clear.
-type NicFirmwareSiteDefaultResponse struct {
+type NicFirmwareSiteSelectionResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Absent after a successful clear. Clearing deletes the assignment.
-	SiteDefault   *NicFirmwareSiteDefault `protobuf:"bytes,1,opt,name=site_default,json=siteDefault,proto3,oneof" json:"site_default,omitempty"`
+	SiteSelection *NicFirmwareSiteSelection `protobuf:"bytes,1,opt,name=site_selection,json=siteSelection,proto3,oneof" json:"site_selection,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *NicFirmwareSiteDefaultResponse) Reset() {
-	*x = NicFirmwareSiteDefaultResponse{}
+func (x *NicFirmwareSiteSelectionResponse) Reset() {
+	*x = NicFirmwareSiteSelectionResponse{}
 	mi := &file_nico_nico_proto_msgTypes[995]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *NicFirmwareSiteDefaultResponse) String() string {
+func (x *NicFirmwareSiteSelectionResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*NicFirmwareSiteDefaultResponse) ProtoMessage() {}
+func (*NicFirmwareSiteSelectionResponse) ProtoMessage() {}
 
-func (x *NicFirmwareSiteDefaultResponse) ProtoReflect() protoreflect.Message {
+func (x *NicFirmwareSiteSelectionResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_nico_nico_proto_msgTypes[995]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -70147,20 +70148,20 @@ func (x *NicFirmwareSiteDefaultResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use NicFirmwareSiteDefaultResponse.ProtoReflect.Descriptor instead.
-func (*NicFirmwareSiteDefaultResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use NicFirmwareSiteSelectionResponse.ProtoReflect.Descriptor instead.
+func (*NicFirmwareSiteSelectionResponse) Descriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{995}
 }
 
-func (x *NicFirmwareSiteDefaultResponse) GetSiteDefault() *NicFirmwareSiteDefault {
+func (x *NicFirmwareSiteSelectionResponse) GetSiteSelection() *NicFirmwareSiteSelection {
 	if x != nil {
-		return x.SiteDefault
+		return x.SiteSelection
 	}
 	return nil
 }
 
 // Optional exact filter for listing assignment keys. An empty filter lists all keys.
-type NicFirmwareSiteDefaultSearchFilter struct {
+type NicFirmwareSiteSelectionSearchFilter struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Profile name following NicFirmwareProfile.id validation. Malformed IDs return
 	// INVALID_ARGUMENT; an unknown valid ID returns an empty list.
@@ -70169,20 +70170,20 @@ type NicFirmwareSiteDefaultSearchFilter struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *NicFirmwareSiteDefaultSearchFilter) Reset() {
-	*x = NicFirmwareSiteDefaultSearchFilter{}
+func (x *NicFirmwareSiteSelectionSearchFilter) Reset() {
+	*x = NicFirmwareSiteSelectionSearchFilter{}
 	mi := &file_nico_nico_proto_msgTypes[996]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *NicFirmwareSiteDefaultSearchFilter) String() string {
+func (x *NicFirmwareSiteSelectionSearchFilter) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*NicFirmwareSiteDefaultSearchFilter) ProtoMessage() {}
+func (*NicFirmwareSiteSelectionSearchFilter) ProtoMessage() {}
 
-func (x *NicFirmwareSiteDefaultSearchFilter) ProtoReflect() protoreflect.Message {
+func (x *NicFirmwareSiteSelectionSearchFilter) ProtoReflect() protoreflect.Message {
 	mi := &file_nico_nico_proto_msgTypes[996]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -70194,42 +70195,42 @@ func (x *NicFirmwareSiteDefaultSearchFilter) ProtoReflect() protoreflect.Message
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use NicFirmwareSiteDefaultSearchFilter.ProtoReflect.Descriptor instead.
-func (*NicFirmwareSiteDefaultSearchFilter) Descriptor() ([]byte, []int) {
+// Deprecated: Use NicFirmwareSiteSelectionSearchFilter.ProtoReflect.Descriptor instead.
+func (*NicFirmwareSiteSelectionSearchFilter) Descriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{996}
 }
 
-func (x *NicFirmwareSiteDefaultSearchFilter) GetProfileId() string {
+func (x *NicFirmwareSiteSelectionSearchFilter) GetProfileId() string {
 	if x != nil && x.ProfileId != nil {
 		return *x.ProfileId
 	}
 	return ""
 }
 
-// Hardware keys matching the requested site-default filter.
-type FindNicFirmwareSiteDefaultIdsResponse struct {
+// Hardware keys matching the requested site-selection filter.
+type FindNicFirmwareSiteSelectionIdsResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Matching hardware keys, ordered by part number then PSID in database collation
-	// order. Fetch assignment details in batches with FindNicFirmwareSiteDefaultsByIds.
+	// order. Fetch assignment details in batches with FindNicFirmwareSiteSelectionsByIds.
 	Hardware      []*NicFirmwareHardware `protobuf:"bytes,1,rep,name=hardware,proto3" json:"hardware,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *FindNicFirmwareSiteDefaultIdsResponse) Reset() {
-	*x = FindNicFirmwareSiteDefaultIdsResponse{}
+func (x *FindNicFirmwareSiteSelectionIdsResponse) Reset() {
+	*x = FindNicFirmwareSiteSelectionIdsResponse{}
 	mi := &file_nico_nico_proto_msgTypes[997]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *FindNicFirmwareSiteDefaultIdsResponse) String() string {
+func (x *FindNicFirmwareSiteSelectionIdsResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*FindNicFirmwareSiteDefaultIdsResponse) ProtoMessage() {}
+func (*FindNicFirmwareSiteSelectionIdsResponse) ProtoMessage() {}
 
-func (x *FindNicFirmwareSiteDefaultIdsResponse) ProtoReflect() protoreflect.Message {
+func (x *FindNicFirmwareSiteSelectionIdsResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_nico_nico_proto_msgTypes[997]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -70241,20 +70242,20 @@ func (x *FindNicFirmwareSiteDefaultIdsResponse) ProtoReflect() protoreflect.Mess
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use FindNicFirmwareSiteDefaultIdsResponse.ProtoReflect.Descriptor instead.
-func (*FindNicFirmwareSiteDefaultIdsResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use FindNicFirmwareSiteSelectionIdsResponse.ProtoReflect.Descriptor instead.
+func (*FindNicFirmwareSiteSelectionIdsResponse) Descriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{997}
 }
 
-func (x *FindNicFirmwareSiteDefaultIdsResponse) GetHardware() []*NicFirmwareHardware {
+func (x *FindNicFirmwareSiteSelectionIdsResponse) GetHardware() []*NicFirmwareHardware {
 	if x != nil {
 		return x.Hardware
 	}
 	return nil
 }
 
-// Hardware keys whose site-default assignments should be returned.
-type FindNicFirmwareSiteDefaultsByIdsRequest struct {
+// Hardware keys whose site-selection assignments should be returned.
+type FindNicFirmwareSiteSelectionsByIdsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Required batch of 1 through max_find_by_ids hardware pairs. Invalid pairs or
 	// an empty or oversized batch reject the entire request with INVALID_ARGUMENT.
@@ -70263,20 +70264,20 @@ type FindNicFirmwareSiteDefaultsByIdsRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *FindNicFirmwareSiteDefaultsByIdsRequest) Reset() {
-	*x = FindNicFirmwareSiteDefaultsByIdsRequest{}
+func (x *FindNicFirmwareSiteSelectionsByIdsRequest) Reset() {
+	*x = FindNicFirmwareSiteSelectionsByIdsRequest{}
 	mi := &file_nico_nico_proto_msgTypes[998]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *FindNicFirmwareSiteDefaultsByIdsRequest) String() string {
+func (x *FindNicFirmwareSiteSelectionsByIdsRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*FindNicFirmwareSiteDefaultsByIdsRequest) ProtoMessage() {}
+func (*FindNicFirmwareSiteSelectionsByIdsRequest) ProtoMessage() {}
 
-func (x *FindNicFirmwareSiteDefaultsByIdsRequest) ProtoReflect() protoreflect.Message {
+func (x *FindNicFirmwareSiteSelectionsByIdsRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_nico_nico_proto_msgTypes[998]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -70288,42 +70289,42 @@ func (x *FindNicFirmwareSiteDefaultsByIdsRequest) ProtoReflect() protoreflect.Me
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use FindNicFirmwareSiteDefaultsByIdsRequest.ProtoReflect.Descriptor instead.
-func (*FindNicFirmwareSiteDefaultsByIdsRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use FindNicFirmwareSiteSelectionsByIdsRequest.ProtoReflect.Descriptor instead.
+func (*FindNicFirmwareSiteSelectionsByIdsRequest) Descriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{998}
 }
 
-func (x *FindNicFirmwareSiteDefaultsByIdsRequest) GetHardware() []*NicFirmwareHardware {
+func (x *FindNicFirmwareSiteSelectionsByIdsRequest) GetHardware() []*NicFirmwareHardware {
 	if x != nil {
 		return x.Hardware
 	}
 	return nil
 }
 
-// Existing site-default assignments for the requested keys.
-type FindNicFirmwareSiteDefaultsByIdsResponse struct {
+// Existing site-selection assignments for the requested keys.
+type FindNicFirmwareSiteSelectionsByIdsResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Existing assignments once each, ordered by part number then PSID in database
 	// collation order. Unknown valid keys are omitted; duplicate keys are collapsed.
-	SiteDefaults  []*NicFirmwareSiteDefault `protobuf:"bytes,1,rep,name=site_defaults,json=siteDefaults,proto3" json:"site_defaults,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	SiteSelections []*NicFirmwareSiteSelection `protobuf:"bytes,1,rep,name=site_selections,json=siteSelections,proto3" json:"site_selections,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
-func (x *FindNicFirmwareSiteDefaultsByIdsResponse) Reset() {
-	*x = FindNicFirmwareSiteDefaultsByIdsResponse{}
+func (x *FindNicFirmwareSiteSelectionsByIdsResponse) Reset() {
+	*x = FindNicFirmwareSiteSelectionsByIdsResponse{}
 	mi := &file_nico_nico_proto_msgTypes[999]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *FindNicFirmwareSiteDefaultsByIdsResponse) String() string {
+func (x *FindNicFirmwareSiteSelectionsByIdsResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*FindNicFirmwareSiteDefaultsByIdsResponse) ProtoMessage() {}
+func (*FindNicFirmwareSiteSelectionsByIdsResponse) ProtoMessage() {}
 
-func (x *FindNicFirmwareSiteDefaultsByIdsResponse) ProtoReflect() protoreflect.Message {
+func (x *FindNicFirmwareSiteSelectionsByIdsResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_nico_nico_proto_msgTypes[999]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -70335,14 +70336,14 @@ func (x *FindNicFirmwareSiteDefaultsByIdsResponse) ProtoReflect() protoreflect.M
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use FindNicFirmwareSiteDefaultsByIdsResponse.ProtoReflect.Descriptor instead.
-func (*FindNicFirmwareSiteDefaultsByIdsResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use FindNicFirmwareSiteSelectionsByIdsResponse.ProtoReflect.Descriptor instead.
+func (*FindNicFirmwareSiteSelectionsByIdsResponse) Descriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{999}
 }
 
-func (x *FindNicFirmwareSiteDefaultsByIdsResponse) GetSiteDefaults() []*NicFirmwareSiteDefault {
+func (x *FindNicFirmwareSiteSelectionsByIdsResponse) GetSiteSelections() []*NicFirmwareSiteSelection {
 	if x != nil {
-		return x.SiteDefaults
+		return x.SiteSelections
 	}
 	return nil
 }
@@ -70441,7 +70442,7 @@ func (*NicFirmwareCardSelector_BaseMac) isNicFirmwareCardSelector_Identity() {}
 func (*NicFirmwareCardSelector_BaseGuid) isNicFirmwareCardSelector_Identity() {}
 
 // A live profile selected for one device, above machine, allocation and site settings.
-type NicFirmwareCardOverride struct {
+type NicFirmwareCardSelection struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Required. Follows NicFirmwareCardSelector validation and matching rules.
 	Selector *NicFirmwareCardSelector `protobuf:"bytes,1,opt,name=selector,proto3" json:"selector,omitempty"`
@@ -70453,20 +70454,20 @@ type NicFirmwareCardOverride struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *NicFirmwareCardOverride) Reset() {
-	*x = NicFirmwareCardOverride{}
+func (x *NicFirmwareCardSelection) Reset() {
+	*x = NicFirmwareCardSelection{}
 	mi := &file_nico_nico_proto_msgTypes[1001]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *NicFirmwareCardOverride) String() string {
+func (x *NicFirmwareCardSelection) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*NicFirmwareCardOverride) ProtoMessage() {}
+func (*NicFirmwareCardSelection) ProtoMessage() {}
 
-func (x *NicFirmwareCardOverride) ProtoReflect() protoreflect.Message {
+func (x *NicFirmwareCardSelection) ProtoReflect() protoreflect.Message {
 	mi := &file_nico_nico_proto_msgTypes[1001]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -70478,19 +70479,19 @@ func (x *NicFirmwareCardOverride) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use NicFirmwareCardOverride.ProtoReflect.Descriptor instead.
-func (*NicFirmwareCardOverride) Descriptor() ([]byte, []int) {
+// Deprecated: Use NicFirmwareCardSelection.ProtoReflect.Descriptor instead.
+func (*NicFirmwareCardSelection) Descriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{1001}
 }
 
-func (x *NicFirmwareCardOverride) GetSelector() *NicFirmwareCardSelector {
+func (x *NicFirmwareCardSelection) GetSelector() *NicFirmwareCardSelector {
 	if x != nil {
 		return x.Selector
 	}
 	return nil
 }
 
-func (x *NicFirmwareCardOverride) GetProfileId() string {
+func (x *NicFirmwareCardSelection) GetProfileId() string {
 	if x != nil {
 		return x.ProfileId
 	}
@@ -70498,30 +70499,30 @@ func (x *NicFirmwareCardOverride) GetProfileId() string {
 }
 
 // Complete replacement of a machine's card selections, including an empty clear.
-type NicFirmwareCardOverrides struct {
+type NicFirmwareCardSelections struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Zero through Core's max_find_by_ids entries; a larger list is INVALID_ARGUMENT.
 	// Order has no selection significance. Duplicate selectors and distinct selectors
 	// matching the same device are FAILED_PRECONDITION.
-	Overrides     []*NicFirmwareCardOverride `protobuf:"bytes,1,rep,name=overrides,proto3" json:"overrides,omitempty"`
+	Selections    []*NicFirmwareCardSelection `protobuf:"bytes,1,rep,name=selections,proto3" json:"selections,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *NicFirmwareCardOverrides) Reset() {
-	*x = NicFirmwareCardOverrides{}
+func (x *NicFirmwareCardSelections) Reset() {
+	*x = NicFirmwareCardSelections{}
 	mi := &file_nico_nico_proto_msgTypes[1002]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *NicFirmwareCardOverrides) String() string {
+func (x *NicFirmwareCardSelections) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*NicFirmwareCardOverrides) ProtoMessage() {}
+func (*NicFirmwareCardSelections) ProtoMessage() {}
 
-func (x *NicFirmwareCardOverrides) ProtoReflect() protoreflect.Message {
+func (x *NicFirmwareCardSelections) ProtoReflect() protoreflect.Message {
 	mi := &file_nico_nico_proto_msgTypes[1002]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -70533,25 +70534,25 @@ func (x *NicFirmwareCardOverrides) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use NicFirmwareCardOverrides.ProtoReflect.Descriptor instead.
-func (*NicFirmwareCardOverrides) Descriptor() ([]byte, []int) {
+// Deprecated: Use NicFirmwareCardSelections.ProtoReflect.Descriptor instead.
+func (*NicFirmwareCardSelections) Descriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{1002}
 }
 
-func (x *NicFirmwareCardOverrides) GetOverrides() []*NicFirmwareCardOverride {
+func (x *NicFirmwareCardSelections) GetSelections() []*NicFirmwareCardSelection {
 	if x != nil {
-		return x.Overrides
+		return x.Selections
 	}
 	return nil
 }
 
-// Only operators may set or clear machine and card overrides. This operation
+// Only operators may set or clear machine and card selections. This operation
 // atomically updates the selections and Machine.version without changing other
 // configuration. Failure leaves both machine and card selections unchanged.
 // It does not schedule firmware or change machine readiness.
-// Finish upgrading Core before assigning overrides so every replica validates
-// profile edits against machine and card selections and honors card_overrides.
-type SetMachineNicFirmwareOverrideRequest struct {
+// Finish upgrading Core before assigning machine or card selections so every
+// replica validates their profile references and honors card_selections.
+type SetMachineNicFirmwareConfigRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Required host ID. Missing or non-host IDs return INVALID_ARGUMENT;
 	// an unknown host returns NOT_FOUND.
@@ -70564,12 +70565,12 @@ type SetMachineNicFirmwareOverrideRequest struct {
 	//
 	// Types that are valid to be assigned to Action:
 	//
-	//	*SetMachineNicFirmwareOverrideRequest_ProfileId
-	//	*SetMachineNicFirmwareOverrideRequest_Clear
-	Action isSetMachineNicFirmwareOverrideRequest_Action `protobuf_oneof:"action"`
-	// Omission preserves saved card selections, including for older clients that
-	// send only the machine action. Presence replaces the entire list; an empty
-	// wrapper clears all card overrides and restores inheritance. The machine action
+	//	*SetMachineNicFirmwareConfigRequest_ProfileId
+	//	*SetMachineNicFirmwareConfigRequest_Clear
+	Action isSetMachineNicFirmwareConfigRequest_Action `protobuf_oneof:"action"`
+	// Omission preserves saved card selections when changing only the machine
+	// selection. Presence replaces the entire list; an empty
+	// wrapper clears all card selections and restores inheritance. The machine action
 	// remains required: resubmit the desired machine profile or clear it in the same request.
 	// Resubmitting the same machine profile rechecks all devices inheriting it,
 	// including devices whose hardware changed since the previous assignment.
@@ -70579,25 +70580,25 @@ type SetMachineNicFirmwareOverrideRequest struct {
 	// New assignments use the latest stored observation after acquiring the machine
 	// lock. Clearing cards does not require inventory, though a supplied machine
 	// profile still must satisfy the machine compatibility rules above.
-	CardOverrides *NicFirmwareCardOverrides `protobuf:"bytes,5,opt,name=card_overrides,json=cardOverrides,proto3" json:"card_overrides,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	CardSelections *NicFirmwareCardSelections `protobuf:"bytes,5,opt,name=card_selections,json=cardSelections,proto3" json:"card_selections,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
-func (x *SetMachineNicFirmwareOverrideRequest) Reset() {
-	*x = SetMachineNicFirmwareOverrideRequest{}
+func (x *SetMachineNicFirmwareConfigRequest) Reset() {
+	*x = SetMachineNicFirmwareConfigRequest{}
 	mi := &file_nico_nico_proto_msgTypes[1003]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *SetMachineNicFirmwareOverrideRequest) String() string {
+func (x *SetMachineNicFirmwareConfigRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*SetMachineNicFirmwareOverrideRequest) ProtoMessage() {}
+func (*SetMachineNicFirmwareConfigRequest) ProtoMessage() {}
 
-func (x *SetMachineNicFirmwareOverrideRequest) ProtoReflect() protoreflect.Message {
+func (x *SetMachineNicFirmwareConfigRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_nico_nico_proto_msgTypes[1003]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -70609,66 +70610,66 @@ func (x *SetMachineNicFirmwareOverrideRequest) ProtoReflect() protoreflect.Messa
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use SetMachineNicFirmwareOverrideRequest.ProtoReflect.Descriptor instead.
-func (*SetMachineNicFirmwareOverrideRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use SetMachineNicFirmwareConfigRequest.ProtoReflect.Descriptor instead.
+func (*SetMachineNicFirmwareConfigRequest) Descriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{1003}
 }
 
-func (x *SetMachineNicFirmwareOverrideRequest) GetMachineId() *MachineId {
+func (x *SetMachineNicFirmwareConfigRequest) GetMachineId() *MachineId {
 	if x != nil {
 		return x.MachineId
 	}
 	return nil
 }
 
-func (x *SetMachineNicFirmwareOverrideRequest) GetIfVersionMatch() string {
+func (x *SetMachineNicFirmwareConfigRequest) GetIfVersionMatch() string {
 	if x != nil && x.IfVersionMatch != nil {
 		return *x.IfVersionMatch
 	}
 	return ""
 }
 
-func (x *SetMachineNicFirmwareOverrideRequest) GetAction() isSetMachineNicFirmwareOverrideRequest_Action {
+func (x *SetMachineNicFirmwareConfigRequest) GetAction() isSetMachineNicFirmwareConfigRequest_Action {
 	if x != nil {
 		return x.Action
 	}
 	return nil
 }
 
-func (x *SetMachineNicFirmwareOverrideRequest) GetProfileId() string {
+func (x *SetMachineNicFirmwareConfigRequest) GetProfileId() string {
 	if x != nil {
-		if x, ok := x.Action.(*SetMachineNicFirmwareOverrideRequest_ProfileId); ok {
+		if x, ok := x.Action.(*SetMachineNicFirmwareConfigRequest_ProfileId); ok {
 			return x.ProfileId
 		}
 	}
 	return ""
 }
 
-func (x *SetMachineNicFirmwareOverrideRequest) GetClear() *emptypb.Empty {
+func (x *SetMachineNicFirmwareConfigRequest) GetClear() *emptypb.Empty {
 	if x != nil {
-		if x, ok := x.Action.(*SetMachineNicFirmwareOverrideRequest_Clear); ok {
+		if x, ok := x.Action.(*SetMachineNicFirmwareConfigRequest_Clear); ok {
 			return x.Clear
 		}
 	}
 	return nil
 }
 
-func (x *SetMachineNicFirmwareOverrideRequest) GetCardOverrides() *NicFirmwareCardOverrides {
+func (x *SetMachineNicFirmwareConfigRequest) GetCardSelections() *NicFirmwareCardSelections {
 	if x != nil {
-		return x.CardOverrides
+		return x.CardSelections
 	}
 	return nil
 }
 
-type isSetMachineNicFirmwareOverrideRequest_Action interface {
-	isSetMachineNicFirmwareOverrideRequest_Action()
+type isSetMachineNicFirmwareConfigRequest_Action interface {
+	isSetMachineNicFirmwareConfigRequest_Action()
 }
 
-type SetMachineNicFirmwareOverrideRequest_ProfileId struct {
+type SetMachineNicFirmwareConfigRequest_ProfileId struct {
 	// Select a live profile following NicFirmwareProfile.id validation. Malformed
 	// IDs return INVALID_ARGUMENT and missing profiles NOT_FOUND. Profile existence
 	// is checked before host existence and the machine token. After checking the
-	// token, each complete, usable observed PN/PSID pair without a card override
+	// token, each complete, usable observed PN/PSID pair without a card selection
 	// must match an entry or the request returns FAILED_PRECONDITION. Managed-DPU
 	// devices are excluded. Validation uses the latest stored observation after
 	// acquiring the machine lock, without contacting Scout or proving freshness.
@@ -70678,16 +70679,15 @@ type SetMachineNicFirmwareOverrideRequest_ProfileId struct {
 	ProfileId string `protobuf:"bytes,3,opt,name=profile_id,json=profileId,proto3,oneof"`
 }
 
-type SetMachineNicFirmwareOverrideRequest_Clear struct {
-	// Remove the machine-wide override and restore inheritance. Does not require
-	// compatible inventory and succeeds when the override is already absent.
+type SetMachineNicFirmwareConfigRequest_Clear struct {
+	// Remove the machine-wide selection and restore inheritance. Does not require
+	// compatible inventory and succeeds when the selection is already absent.
 	Clear *emptypb.Empty `protobuf:"bytes,4,opt,name=clear,proto3,oneof"`
 }
 
-func (*SetMachineNicFirmwareOverrideRequest_ProfileId) isSetMachineNicFirmwareOverrideRequest_Action() {
-}
+func (*SetMachineNicFirmwareConfigRequest_ProfileId) isSetMachineNicFirmwareConfigRequest_Action() {}
 
-func (*SetMachineNicFirmwareOverrideRequest_Clear) isSetMachineNicFirmwareOverrideRequest_Action() {}
+func (*SetMachineNicFirmwareConfigRequest_Clear) isSetMachineNicFirmwareConfigRequest_Action() {}
 
 // A host and optional allocation profile for looking up desired firmware.
 type GetDesiredNicFirmwareRequest struct {
@@ -70696,10 +70696,10 @@ type GetDesiredNicFirmwareRequest struct {
 	// an unknown host returns NOT_FOUND. Reads stored observations without contacting Scout.
 	MachineId *MachineId `protobuf:"bytes,1,opt,name=machine_id,json=machineId,proto3" json:"machine_id,omitempty"`
 	// Optional operator-supplied profile to preview against every observed device
-	// with valid hardware and no managed-DPU association, even without a site default.
+	// with valid hardware and no managed-DPU association, even without a site selection.
 	// This is a machine-wide preview, not attachment-target selection.
-	// Omission resolves card overrides, the machine override or site defaults.
-	// A conflicting allocation and card or machine override produces a per-device
+	// Omission resolves card selections, the machine selection or site selections.
+	// A conflicting allocation and card or machine selection produces a per-device
 	// error without fallback.
 	// Malformed IDs return INVALID_ARGUMENT; missing or incompatible profiles
 	// produce per-device errors without fallback.
@@ -70757,8 +70757,8 @@ func (x *GetDesiredNicFirmwareRequest) GetAllocationProfileId() string {
 // The selected profile and compatible firmware entry from one catalog snapshot.
 type NicFirmwareResolution struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Setting that selected the profile, following NicFirmwareSelectionSource precedence.
-	Source NicFirmwareSelectionSource `protobuf:"varint,1,opt,name=source,proto3,enum=forge.NicFirmwareSelectionSource" json:"source,omitempty"`
+	// Configuration scope that selected the profile under the hierarchy's precedence.
+	Scope NicFirmwareSelectionScope `protobuf:"varint,5,opt,name=scope,proto3,enum=forge.NicFirmwareSelectionScope" json:"scope,omitempty"`
 	// Selected live catalog profile, following NicFirmwareProfile.id.
 	ProfileId string `protobuf:"bytes,2,opt,name=profile_id,json=profileId,proto3" json:"profile_id,omitempty"`
 	// Profile revision from this read, independent of any assignment edit token.
@@ -70799,11 +70799,11 @@ func (*NicFirmwareResolution) Descriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{1005}
 }
 
-func (x *NicFirmwareResolution) GetSource() NicFirmwareSelectionSource {
+func (x *NicFirmwareResolution) GetScope() NicFirmwareSelectionScope {
 	if x != nil {
-		return x.Source
+		return x.Scope
 	}
-	return NicFirmwareSelectionSource_NicFirmwareSelectionSourceSiteDefault
+	return NicFirmwareSelectionScope_NicFirmwareSelectionScopeSite
 }
 
 func (x *NicFirmwareResolution) GetProfileId() string {
@@ -70834,7 +70834,7 @@ type NicFirmwareDeviceTarget struct {
 	// PCI functions into physical cards. Missing associations mean unknown ownership.
 	Identity *MlxDeviceIdentity `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
 	// For devices with valid PN/PSID and no managed-DPU association, unset means
-	// no card override, machine override, allocation profile or matching site default
+	// no card selection, machine selection, allocation profile or matching site selection
 	// was selected (unmanaged).
 	// An invalid selected profile returns an error without fallback.
 	//
@@ -70844,11 +70844,11 @@ type NicFirmwareDeviceTarget struct {
 	//	*NicFirmwareDeviceTarget_Error
 	Result isNicFirmwareDeviceTarget_Result `protobuf_oneof:"result"`
 	// Assignment revision for a non-excluded device with valid hardware and a
-	// matching site default, even when a card or machine override or allocation
-	// preview supersedes that default or fails. Managed-DPU exclusions omit this field.
-	SiteDefaultVersion *string `protobuf:"bytes,4,opt,name=site_default_version,json=siteDefaultVersion,proto3,oneof" json:"site_default_version,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// matching site selection, even when a card or machine selection or allocation
+	// preview supersedes that selection or fails. Managed-DPU exclusions omit this field.
+	SiteSelectionVersion *string `protobuf:"bytes,5,opt,name=site_selection_version,json=siteSelectionVersion,proto3,oneof" json:"site_selection_version,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *NicFirmwareDeviceTarget) Reset() {
@@ -70913,9 +70913,9 @@ func (x *NicFirmwareDeviceTarget) GetError() string {
 	return ""
 }
 
-func (x *NicFirmwareDeviceTarget) GetSiteDefaultVersion() string {
-	if x != nil && x.SiteDefaultVersion != nil {
-		return *x.SiteDefaultVersion
+func (x *NicFirmwareDeviceTarget) GetSiteSelectionVersion() string {
+	if x != nil && x.SiteSelectionVersion != nil {
+		return *x.SiteSelectionVersion
 	}
 	return ""
 }
@@ -70934,7 +70934,7 @@ type NicFirmwareDeviceTarget_Error struct {
 	// an ambiguous card selector, multiple card selections for this device,
 	// or an invalid selection; not a machine-readable error code.
 	// These errors are returned in the report without failing the request
-	// or hiding other devices' results. Selection source and profile revision
+	// or hiding other devices' results. Selection scope and profile revision
 	// are returned only for successful resolutions.
 	Error string `protobuf:"bytes,3,opt,name=error,proto3,oneof"`
 }
@@ -74481,7 +74481,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x04port\x18\x03 \x01(\rH\x02R\x04port\x88\x01\x01B\x05\n" +
 	"\x03_ipB\x06\n" +
 	"\x04_macB\a\n" +
-	"\x05_port\"\xfc\x04\n" +
+	"\x05_port\"\xa2\x05\n" +
 	"\rMachineConfig\x128\n" +
 	"\x15maintenance_reference\x18\x01 \x01(\tH\x00R\x14maintenanceReference\x88\x01\x01\x12U\n" +
 	"\x16maintenance_start_time\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampH\x01R\x14maintenanceStartTime\x88\x01\x01\x124\n" +
@@ -74489,15 +74489,15 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x10instance_type_id\x18\x04 \x01(\tH\x03R\x0einstanceTypeId\x88\x01\x01\x12-\n" +
 	"\x03dpf\x18\x05 \x01(\v2\x16.forge.DpfMachineStateH\x04R\x03dpf\x88\x01\x01\x12\x1a\n" +
 	"\x06hw_sku\x18\x06 \x01(\tH\x05R\x05hwSku\x88\x01\x01\x12:\n" +
-	"\x17nic_firmware_profile_id\x18\a \x01(\tH\x06R\x14nicFirmwareProfileId\x88\x01\x01\x12]\n" +
-	"\x1bnic_firmware_card_overrides\x18\b \x03(\v2\x1e.forge.NicFirmwareCardOverrideR\x18nicFirmwareCardOverridesB\x18\n" +
+	"\x17nic_firmware_profile_id\x18\a \x01(\tH\x06R\x14nicFirmwareProfileId\x88\x01\x01\x12`\n" +
+	"\x1cnic_firmware_card_selections\x18\t \x03(\v2\x1f.forge.NicFirmwareCardSelectionR\x19nicFirmwareCardSelectionsB\x18\n" +
 	"\x16_maintenance_referenceB\x19\n" +
 	"\x17_maintenance_start_timeB\x16\n" +
 	"\x14_firmware_autoupdateB\x13\n" +
 	"\x11_instance_type_idB\x06\n" +
 	"\x04_dpfB\t\n" +
 	"\a_hw_skuB\x1a\n" +
-	"\x18_nic_firmware_profile_id\"\xbf\x0f\n" +
+	"\x18_nic_firmware_profile_idJ\x04\b\b\x10\tR\x1bnic_firmware_card_overrides\"\xbf\x0f\n" +
 	"\rMachineStatus\x127\n" +
 	"\n" +
 	"interfaces\x18\x01 \x03(\v2\x17.forge.MachineInterfaceR\n" +
@@ -78549,72 +78549,74 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x13NicFirmwareHardware\x12\x1f\n" +
 	"\vpart_number\x18\x01 \x01(\tR\n" +
 	"partNumber\x12\x12\n" +
-	"\x04psid\x18\x02 \x01(\tR\x04psid\"\x89\x01\n" +
-	"\x16NicFirmwareSiteDefault\x126\n" +
+	"\x04psid\x18\x02 \x01(\tR\x04psid\"\x8b\x01\n" +
+	"\x18NicFirmwareSiteSelection\x126\n" +
 	"\bhardware\x18\x01 \x01(\v2\x1a.forge.NicFirmwareHardwareR\bhardware\x12\x1d\n" +
 	"\n" +
 	"profile_id\x18\x02 \x01(\tR\tprofileId\x12\x18\n" +
-	"\aversion\x18\x03 \x01(\tR\aversion\"\xf9\x01\n" +
-	" SetNicFirmwareSiteDefaultRequest\x126\n" +
+	"\aversion\x18\x03 \x01(\tR\aversion\"\xfb\x01\n" +
+	"\"SetNicFirmwareSiteSelectionRequest\x126\n" +
 	"\bhardware\x18\x01 \x01(\v2\x1a.forge.NicFirmwareHardwareR\bhardware\x12\x1f\n" +
 	"\n" +
 	"profile_id\x18\x02 \x01(\tH\x00R\tprofileId\x12.\n" +
 	"\x05clear\x18\x04 \x01(\v2\x16.google.protobuf.EmptyH\x00R\x05clear\x12-\n" +
 	"\x10if_version_match\x18\x03 \x01(\tH\x01R\x0eifVersionMatch\x88\x01\x01B\b\n" +
 	"\x06actionB\x13\n" +
-	"\x11_if_version_match\"x\n" +
-	"\x1eNicFirmwareSiteDefaultResponse\x12E\n" +
-	"\fsite_default\x18\x01 \x01(\v2\x1d.forge.NicFirmwareSiteDefaultH\x00R\vsiteDefault\x88\x01\x01B\x0f\n" +
-	"\r_site_default\"W\n" +
-	"\"NicFirmwareSiteDefaultSearchFilter\x12\"\n" +
+	"\x11_if_version_match\"\x82\x01\n" +
+	" NicFirmwareSiteSelectionResponse\x12K\n" +
+	"\x0esite_selection\x18\x01 \x01(\v2\x1f.forge.NicFirmwareSiteSelectionH\x00R\rsiteSelection\x88\x01\x01B\x11\n" +
+	"\x0f_site_selection\"Y\n" +
+	"$NicFirmwareSiteSelectionSearchFilter\x12\"\n" +
 	"\n" +
 	"profile_id\x18\x01 \x01(\tH\x00R\tprofileId\x88\x01\x01B\r\n" +
-	"\v_profile_id\"_\n" +
-	"%FindNicFirmwareSiteDefaultIdsResponse\x126\n" +
-	"\bhardware\x18\x01 \x03(\v2\x1a.forge.NicFirmwareHardwareR\bhardware\"a\n" +
-	"'FindNicFirmwareSiteDefaultsByIdsRequest\x126\n" +
-	"\bhardware\x18\x01 \x03(\v2\x1a.forge.NicFirmwareHardwareR\bhardware\"n\n" +
-	"(FindNicFirmwareSiteDefaultsByIdsResponse\x12B\n" +
-	"\rsite_defaults\x18\x01 \x03(\v2\x1d.forge.NicFirmwareSiteDefaultR\fsiteDefaults\"a\n" +
+	"\v_profile_id\"a\n" +
+	"'FindNicFirmwareSiteSelectionIdsResponse\x126\n" +
+	"\bhardware\x18\x01 \x03(\v2\x1a.forge.NicFirmwareHardwareR\bhardware\"c\n" +
+	")FindNicFirmwareSiteSelectionsByIdsRequest\x126\n" +
+	"\bhardware\x18\x01 \x03(\v2\x1a.forge.NicFirmwareHardwareR\bhardware\"v\n" +
+	"*FindNicFirmwareSiteSelectionsByIdsResponse\x12H\n" +
+	"\x0fsite_selections\x18\x01 \x03(\v2\x1f.forge.NicFirmwareSiteSelectionR\x0esiteSelections\"a\n" +
 	"\x17NicFirmwareCardSelector\x12\x1b\n" +
 	"\bbase_mac\x18\x01 \x01(\tH\x00R\abaseMac\x12\x1d\n" +
 	"\tbase_guid\x18\x02 \x01(\tH\x00R\bbaseGuidB\n" +
 	"\n" +
-	"\bidentity\"t\n" +
-	"\x17NicFirmwareCardOverride\x12:\n" +
+	"\bidentity\"u\n" +
+	"\x18NicFirmwareCardSelection\x12:\n" +
 	"\bselector\x18\x01 \x01(\v2\x1e.forge.NicFirmwareCardSelectorR\bselector\x12\x1d\n" +
 	"\n" +
-	"profile_id\x18\x02 \x01(\tR\tprofileId\"X\n" +
-	"\x18NicFirmwareCardOverrides\x12<\n" +
-	"\toverrides\x18\x01 \x03(\v2\x1e.forge.NicFirmwareCardOverrideR\toverrides\"\xbf\x02\n" +
-	"$SetMachineNicFirmwareOverrideRequest\x120\n" +
+	"profile_id\x18\x02 \x01(\tR\tprofileId\"\\\n" +
+	"\x19NicFirmwareCardSelections\x12?\n" +
+	"\n" +
+	"selections\x18\x01 \x03(\v2\x1f.forge.NicFirmwareCardSelectionR\n" +
+	"selections\"\xc0\x02\n" +
+	"\"SetMachineNicFirmwareConfigRequest\x120\n" +
 	"\n" +
 	"machine_id\x18\x01 \x01(\v2\x11.common.MachineIdR\tmachineId\x12-\n" +
 	"\x10if_version_match\x18\x02 \x01(\tH\x01R\x0eifVersionMatch\x88\x01\x01\x12\x1f\n" +
 	"\n" +
 	"profile_id\x18\x03 \x01(\tH\x00R\tprofileId\x12.\n" +
-	"\x05clear\x18\x04 \x01(\v2\x16.google.protobuf.EmptyH\x00R\x05clear\x12F\n" +
-	"\x0ecard_overrides\x18\x05 \x01(\v2\x1f.forge.NicFirmwareCardOverridesR\rcardOverridesB\b\n" +
+	"\x05clear\x18\x04 \x01(\v2\x16.google.protobuf.EmptyH\x00R\x05clear\x12I\n" +
+	"\x0fcard_selections\x18\x05 \x01(\v2 .forge.NicFirmwareCardSelectionsR\x0ecardSelectionsB\b\n" +
 	"\x06actionB\x13\n" +
 	"\x11_if_version_match\"\xa3\x01\n" +
 	"\x1cGetDesiredNicFirmwareRequest\x120\n" +
 	"\n" +
 	"machine_id\x18\x01 \x01(\v2\x11.common.MachineIdR\tmachineId\x127\n" +
 	"\x15allocation_profile_id\x18\x02 \x01(\tH\x00R\x13allocationProfileId\x88\x01\x01B\x18\n" +
-	"\x16_allocation_profile_id\"\xd0\x01\n" +
-	"\x15NicFirmwareResolution\x129\n" +
-	"\x06source\x18\x01 \x01(\x0e2!.forge.NicFirmwareSelectionSourceR\x06source\x12\x1d\n" +
+	"\x16_allocation_profile_id\"\xdb\x01\n" +
+	"\x15NicFirmwareResolution\x126\n" +
+	"\x05scope\x18\x05 \x01(\x0e2 .forge.NicFirmwareSelectionScopeR\x05scope\x12\x1d\n" +
 	"\n" +
 	"profile_id\x18\x02 \x01(\tR\tprofileId\x12'\n" +
 	"\x0fprofile_version\x18\x03 \x01(\tR\x0eprofileVersion\x124\n" +
-	"\x05entry\x18\x04 \x01(\v2\x1e.forge.NicFirmwareProfileEntryR\x05entry\"\x82\x02\n" +
+	"\x05entry\x18\x04 \x01(\v2\x1e.forge.NicFirmwareProfileEntryR\x05entryJ\x04\b\x01\x10\x02R\x06source\"\xa4\x02\n" +
 	"\x17NicFirmwareDeviceTarget\x129\n" +
 	"\bidentity\x18\x01 \x01(\v2\x1d.mlx_device.MlxDeviceIdentityR\bidentity\x12:\n" +
 	"\bfirmware\x18\x02 \x01(\v2\x1c.forge.NicFirmwareResolutionH\x00R\bfirmware\x12\x16\n" +
-	"\x05error\x18\x03 \x01(\tH\x00R\x05error\x125\n" +
-	"\x14site_default_version\x18\x04 \x01(\tH\x01R\x12siteDefaultVersion\x88\x01\x01B\b\n" +
-	"\x06resultB\x17\n" +
-	"\x15_site_default_version\"\xc7\x01\n" +
+	"\x05error\x18\x03 \x01(\tH\x00R\x05error\x129\n" +
+	"\x16site_selection_version\x18\x05 \x01(\tH\x01R\x14siteSelectionVersion\x88\x01\x01B\b\n" +
+	"\x06resultB\x19\n" +
+	"\x17_site_selection_versionJ\x04\b\x04\x10\x05R\x14site_default_version\"\xc7\x01\n" +
 	"\x1dGetDesiredNicFirmwareResponse\x12@\n" +
 	"\vobserved_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampH\x00R\n" +
 	"observedAt\x88\x01\x01\x128\n" +
@@ -79206,12 +79208,12 @@ const file_nico_nico_proto_rawDesc = "" +
 	",MACHINE_VALIDATION_ATTEMPT_LOG_STREAM_STDOUT\x10\x01\x120\n" +
 	",MACHINE_VALIDATION_ATTEMPT_LOG_STREAM_STDERR\x10\x02* \n" +
 	"\x13NicFirmwareApproach\x12\t\n" +
-	"\x05Scout\x10\x00*\xcc\x01\n" +
-	"\x1aNicFirmwareSelectionSource\x12)\n" +
-	"%NicFirmwareSelectionSourceSiteDefault\x10\x00\x12(\n" +
-	"$NicFirmwareSelectionSourceAllocation\x10\x01\x12-\n" +
-	")NicFirmwareSelectionSourceMachineOverride\x10\x02\x12*\n" +
-	"&NicFirmwareSelectionSourceCardOverride\x10\x032\x9d\x89\x03\n" +
+	"\x05Scout\x10\x00*\xb0\x01\n" +
+	"\x19NicFirmwareSelectionScope\x12!\n" +
+	"\x1dNicFirmwareSelectionScopeSite\x10\x00\x12'\n" +
+	"#NicFirmwareSelectionScopeAllocation\x10\x01\x12$\n" +
+	" NicFirmwareSelectionScopeMachine\x10\x02\x12!\n" +
+	"\x1dNicFirmwareSelectionScopeCard\x10\x032\xab\x89\x03\n" +
 	"\x05Forge\x122\n" +
 	"\aVersion\x12\x15.forge.VersionRequest\x1a\x10.forge.BuildInfo\x12J\n" +
 	"\rGetRmsVersion\x12\x1b.forge.GetRmsVersionRequest\x1a\x1c.forge.GetRmsVersionResponse\x12Y\n" +
@@ -79608,11 +79610,11 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x19FindNicFirmwareProfileIds\x12'.forge.FindNicFirmwareProfileIdsRequest\x1a(.forge.FindNicFirmwareProfileIdsResponse\x12w\n" +
 	"\x1cFindNicFirmwareProfilesByIds\x12*.forge.FindNicFirmwareProfilesByIdsRequest\x1a+.forge.FindNicFirmwareProfilesByIdsResponse\x12e\n" +
 	"\x18UpdateNicFirmwareProfile\x12&.forge.UpdateNicFirmwareProfileRequest\x1a!.forge.NicFirmwareProfileResponse\x12Z\n" +
-	"\x18DeleteNicFirmwareProfile\x12&.forge.DeleteNicFirmwareProfileRequest\x1a\x16.google.protobuf.Empty\x12k\n" +
-	"\x19SetNicFirmwareSiteDefault\x12'.forge.SetNicFirmwareSiteDefaultRequest\x1a%.forge.NicFirmwareSiteDefaultResponse\x12x\n" +
-	"\x1dFindNicFirmwareSiteDefaultIds\x12).forge.NicFirmwareSiteDefaultSearchFilter\x1a,.forge.FindNicFirmwareSiteDefaultIdsResponse\x12\x83\x01\n" +
-	" FindNicFirmwareSiteDefaultsByIds\x12..forge.FindNicFirmwareSiteDefaultsByIdsRequest\x1a/.forge.FindNicFirmwareSiteDefaultsByIdsResponse\x12d\n" +
-	"\x1dSetMachineNicFirmwareOverride\x12+.forge.SetMachineNicFirmwareOverrideRequest\x1a\x16.google.protobuf.Empty\x12b\n" +
+	"\x18DeleteNicFirmwareProfile\x12&.forge.DeleteNicFirmwareProfileRequest\x1a\x16.google.protobuf.Empty\x12q\n" +
+	"\x1bSetNicFirmwareSiteSelection\x12).forge.SetNicFirmwareSiteSelectionRequest\x1a'.forge.NicFirmwareSiteSelectionResponse\x12~\n" +
+	"\x1fFindNicFirmwareSiteSelectionIds\x12+.forge.NicFirmwareSiteSelectionSearchFilter\x1a..forge.FindNicFirmwareSiteSelectionIdsResponse\x12\x89\x01\n" +
+	"\"FindNicFirmwareSiteSelectionsByIds\x120.forge.FindNicFirmwareSiteSelectionsByIdsRequest\x1a1.forge.FindNicFirmwareSiteSelectionsByIdsResponse\x12`\n" +
+	"\x1bSetMachineNicFirmwareConfig\x12).forge.SetMachineNicFirmwareConfigRequest\x1a\x16.google.protobuf.Empty\x12b\n" +
 	"\x15GetDesiredNicFirmware\x12#.forge.GetDesiredNicFirmwareRequest\x1a$.forge.GetDesiredNicFirmwareResponse\x12-\n" +
 	"\tCreateSku\x12\x0e.forge.SkuList\x1a\x10.forge.SkuIdList\x127\n" +
 	"\x16GenerateSkuFromMachine\x12\x11.common.MachineId\x1a\n" +
@@ -79882,7 +79884,7 @@ var file_nico_nico_proto_goTypes = []any{
 	(DpuNvConfigProfile)(0),                                                   // 103: forge.DpuNvConfigProfile
 	(MachineValidationAttemptLogStream)(0),                                    // 104: forge.MachineValidationAttemptLogStream
 	(NicFirmwareApproach)(0),                                                  // 105: forge.NicFirmwareApproach
-	(NicFirmwareSelectionSource)(0),                                           // 106: forge.NicFirmwareSelectionSource
+	(NicFirmwareSelectionScope)(0),                                            // 106: forge.NicFirmwareSelectionScope
 	(InstancePowerRequest_Operation)(0),                                       // 107: forge.InstancePowerRequest.Operation
 	(InstanceUpdateStatus_Module)(0),                                          // 108: forge.InstanceUpdateStatus.Module
 	(AdminBmcResetRequest_ResetType)(0),                                       // 109: forge.AdminBmcResetRequest.ResetType
@@ -80893,17 +80895,17 @@ var file_nico_nico_proto_goTypes = []any{
 	(*UpdateNicFirmwareProfileRequest)(nil),                                   // 1114: forge.UpdateNicFirmwareProfileRequest
 	(*DeleteNicFirmwareProfileRequest)(nil),                                   // 1115: forge.DeleteNicFirmwareProfileRequest
 	(*NicFirmwareHardware)(nil),                                               // 1116: forge.NicFirmwareHardware
-	(*NicFirmwareSiteDefault)(nil),                                            // 1117: forge.NicFirmwareSiteDefault
-	(*SetNicFirmwareSiteDefaultRequest)(nil),                                  // 1118: forge.SetNicFirmwareSiteDefaultRequest
-	(*NicFirmwareSiteDefaultResponse)(nil),                                    // 1119: forge.NicFirmwareSiteDefaultResponse
-	(*NicFirmwareSiteDefaultSearchFilter)(nil),                                // 1120: forge.NicFirmwareSiteDefaultSearchFilter
-	(*FindNicFirmwareSiteDefaultIdsResponse)(nil),                             // 1121: forge.FindNicFirmwareSiteDefaultIdsResponse
-	(*FindNicFirmwareSiteDefaultsByIdsRequest)(nil),                           // 1122: forge.FindNicFirmwareSiteDefaultsByIdsRequest
-	(*FindNicFirmwareSiteDefaultsByIdsResponse)(nil),                          // 1123: forge.FindNicFirmwareSiteDefaultsByIdsResponse
+	(*NicFirmwareSiteSelection)(nil),                                          // 1117: forge.NicFirmwareSiteSelection
+	(*SetNicFirmwareSiteSelectionRequest)(nil),                                // 1118: forge.SetNicFirmwareSiteSelectionRequest
+	(*NicFirmwareSiteSelectionResponse)(nil),                                  // 1119: forge.NicFirmwareSiteSelectionResponse
+	(*NicFirmwareSiteSelectionSearchFilter)(nil),                              // 1120: forge.NicFirmwareSiteSelectionSearchFilter
+	(*FindNicFirmwareSiteSelectionIdsResponse)(nil),                           // 1121: forge.FindNicFirmwareSiteSelectionIdsResponse
+	(*FindNicFirmwareSiteSelectionsByIdsRequest)(nil),                         // 1122: forge.FindNicFirmwareSiteSelectionsByIdsRequest
+	(*FindNicFirmwareSiteSelectionsByIdsResponse)(nil),                        // 1123: forge.FindNicFirmwareSiteSelectionsByIdsResponse
 	(*NicFirmwareCardSelector)(nil),                                           // 1124: forge.NicFirmwareCardSelector
-	(*NicFirmwareCardOverride)(nil),                                           // 1125: forge.NicFirmwareCardOverride
-	(*NicFirmwareCardOverrides)(nil),                                          // 1126: forge.NicFirmwareCardOverrides
-	(*SetMachineNicFirmwareOverrideRequest)(nil),                              // 1127: forge.SetMachineNicFirmwareOverrideRequest
+	(*NicFirmwareCardSelection)(nil),                                          // 1125: forge.NicFirmwareCardSelection
+	(*NicFirmwareCardSelections)(nil),                                         // 1126: forge.NicFirmwareCardSelections
+	(*SetMachineNicFirmwareConfigRequest)(nil),                                // 1127: forge.SetMachineNicFirmwareConfigRequest
 	(*GetDesiredNicFirmwareRequest)(nil),                                      // 1128: forge.GetDesiredNicFirmwareRequest
 	(*NicFirmwareResolution)(nil),                                             // 1129: forge.NicFirmwareResolution
 	(*NicFirmwareDeviceTarget)(nil),                                           // 1130: forge.NicFirmwareDeviceTarget
@@ -81592,7 +81594,7 @@ var file_nico_nico_proto_depIdxs = []int32{
 	1198, // 414: forge.BmcInfo.machine_interface_id:type_name -> common.MachineInterfaceId
 	1173, // 415: forge.MachineConfig.maintenance_start_time:type_name -> google.protobuf.Timestamp
 	409,  // 416: forge.MachineConfig.dpf:type_name -> forge.DpfMachineState
-	1125, // 417: forge.MachineConfig.nic_firmware_card_overrides:type_name -> forge.NicFirmwareCardOverride
+	1125, // 417: forge.MachineConfig.nic_firmware_card_selections:type_name -> forge.NicFirmwareCardSelection
 	427,  // 418: forge.MachineStatus.interfaces:type_name -> forge.MachineInterface
 	1199, // 419: forge.MachineStatus.discovery_info:type_name -> machine_discovery.DiscoveryInfo
 	1173, // 420: forge.MachineStatus.last_reboot_time:type_name -> google.protobuf.Timestamp
@@ -82532,20 +82534,20 @@ var file_nico_nico_proto_depIdxs = []int32{
 	1116, // 1354: forge.FindNicFirmwareProfileIdsRequest.hardware:type_name -> forge.NicFirmwareHardware
 	1104, // 1355: forge.FindNicFirmwareProfilesByIdsResponse.profiles:type_name -> forge.NicFirmwareProfile
 	1105, // 1356: forge.UpdateNicFirmwareProfileRequest.config:type_name -> forge.NicFirmwareProfileConfig
-	1116, // 1357: forge.NicFirmwareSiteDefault.hardware:type_name -> forge.NicFirmwareHardware
-	1116, // 1358: forge.SetNicFirmwareSiteDefaultRequest.hardware:type_name -> forge.NicFirmwareHardware
-	1241, // 1359: forge.SetNicFirmwareSiteDefaultRequest.clear:type_name -> google.protobuf.Empty
-	1117, // 1360: forge.NicFirmwareSiteDefaultResponse.site_default:type_name -> forge.NicFirmwareSiteDefault
-	1116, // 1361: forge.FindNicFirmwareSiteDefaultIdsResponse.hardware:type_name -> forge.NicFirmwareHardware
-	1116, // 1362: forge.FindNicFirmwareSiteDefaultsByIdsRequest.hardware:type_name -> forge.NicFirmwareHardware
-	1117, // 1363: forge.FindNicFirmwareSiteDefaultsByIdsResponse.site_defaults:type_name -> forge.NicFirmwareSiteDefault
-	1124, // 1364: forge.NicFirmwareCardOverride.selector:type_name -> forge.NicFirmwareCardSelector
-	1125, // 1365: forge.NicFirmwareCardOverrides.overrides:type_name -> forge.NicFirmwareCardOverride
-	1172, // 1366: forge.SetMachineNicFirmwareOverrideRequest.machine_id:type_name -> common.MachineId
-	1241, // 1367: forge.SetMachineNicFirmwareOverrideRequest.clear:type_name -> google.protobuf.Empty
-	1126, // 1368: forge.SetMachineNicFirmwareOverrideRequest.card_overrides:type_name -> forge.NicFirmwareCardOverrides
+	1116, // 1357: forge.NicFirmwareSiteSelection.hardware:type_name -> forge.NicFirmwareHardware
+	1116, // 1358: forge.SetNicFirmwareSiteSelectionRequest.hardware:type_name -> forge.NicFirmwareHardware
+	1241, // 1359: forge.SetNicFirmwareSiteSelectionRequest.clear:type_name -> google.protobuf.Empty
+	1117, // 1360: forge.NicFirmwareSiteSelectionResponse.site_selection:type_name -> forge.NicFirmwareSiteSelection
+	1116, // 1361: forge.FindNicFirmwareSiteSelectionIdsResponse.hardware:type_name -> forge.NicFirmwareHardware
+	1116, // 1362: forge.FindNicFirmwareSiteSelectionsByIdsRequest.hardware:type_name -> forge.NicFirmwareHardware
+	1117, // 1363: forge.FindNicFirmwareSiteSelectionsByIdsResponse.site_selections:type_name -> forge.NicFirmwareSiteSelection
+	1124, // 1364: forge.NicFirmwareCardSelection.selector:type_name -> forge.NicFirmwareCardSelector
+	1125, // 1365: forge.NicFirmwareCardSelections.selections:type_name -> forge.NicFirmwareCardSelection
+	1172, // 1366: forge.SetMachineNicFirmwareConfigRequest.machine_id:type_name -> common.MachineId
+	1241, // 1367: forge.SetMachineNicFirmwareConfigRequest.clear:type_name -> google.protobuf.Empty
+	1126, // 1368: forge.SetMachineNicFirmwareConfigRequest.card_selections:type_name -> forge.NicFirmwareCardSelections
 	1172, // 1369: forge.GetDesiredNicFirmwareRequest.machine_id:type_name -> common.MachineId
-	106,  // 1370: forge.NicFirmwareResolution.source:type_name -> forge.NicFirmwareSelectionSource
+	106,  // 1370: forge.NicFirmwareResolution.scope:type_name -> forge.NicFirmwareSelectionScope
 	1106, // 1371: forge.NicFirmwareResolution.entry:type_name -> forge.NicFirmwareProfileEntry
 	1242, // 1372: forge.NicFirmwareDeviceTarget.identity:type_name -> mlx_device.MlxDeviceIdentity
 	1129, // 1373: forge.NicFirmwareDeviceTarget.firmware:type_name -> forge.NicFirmwareResolution
@@ -82976,10 +82978,10 @@ var file_nico_nico_proto_depIdxs = []int32{
 	1112, // 1798: forge.Forge.FindNicFirmwareProfilesByIds:input_type -> forge.FindNicFirmwareProfilesByIdsRequest
 	1114, // 1799: forge.Forge.UpdateNicFirmwareProfile:input_type -> forge.UpdateNicFirmwareProfileRequest
 	1115, // 1800: forge.Forge.DeleteNicFirmwareProfile:input_type -> forge.DeleteNicFirmwareProfileRequest
-	1118, // 1801: forge.Forge.SetNicFirmwareSiteDefault:input_type -> forge.SetNicFirmwareSiteDefaultRequest
-	1120, // 1802: forge.Forge.FindNicFirmwareSiteDefaultIds:input_type -> forge.NicFirmwareSiteDefaultSearchFilter
-	1122, // 1803: forge.Forge.FindNicFirmwareSiteDefaultsByIds:input_type -> forge.FindNicFirmwareSiteDefaultsByIdsRequest
-	1127, // 1804: forge.Forge.SetMachineNicFirmwareOverride:input_type -> forge.SetMachineNicFirmwareOverrideRequest
+	1118, // 1801: forge.Forge.SetNicFirmwareSiteSelection:input_type -> forge.SetNicFirmwareSiteSelectionRequest
+	1120, // 1802: forge.Forge.FindNicFirmwareSiteSelectionIds:input_type -> forge.NicFirmwareSiteSelectionSearchFilter
+	1122, // 1803: forge.Forge.FindNicFirmwareSiteSelectionsByIds:input_type -> forge.FindNicFirmwareSiteSelectionsByIdsRequest
+	1127, // 1804: forge.Forge.SetMachineNicFirmwareConfig:input_type -> forge.SetMachineNicFirmwareConfigRequest
 	1128, // 1805: forge.Forge.GetDesiredNicFirmware:input_type -> forge.GetDesiredNicFirmwareRequest
 	800,  // 1806: forge.Forge.CreateSku:input_type -> forge.SkuList
 	1172, // 1807: forge.Forge.GenerateSkuFromMachine:input_type -> common.MachineId
@@ -83511,10 +83513,10 @@ var file_nico_nico_proto_depIdxs = []int32{
 	1113, // 2333: forge.Forge.FindNicFirmwareProfilesByIds:output_type -> forge.FindNicFirmwareProfilesByIdsResponse
 	1109, // 2334: forge.Forge.UpdateNicFirmwareProfile:output_type -> forge.NicFirmwareProfileResponse
 	1241, // 2335: forge.Forge.DeleteNicFirmwareProfile:output_type -> google.protobuf.Empty
-	1119, // 2336: forge.Forge.SetNicFirmwareSiteDefault:output_type -> forge.NicFirmwareSiteDefaultResponse
-	1121, // 2337: forge.Forge.FindNicFirmwareSiteDefaultIds:output_type -> forge.FindNicFirmwareSiteDefaultIdsResponse
-	1123, // 2338: forge.Forge.FindNicFirmwareSiteDefaultsByIds:output_type -> forge.FindNicFirmwareSiteDefaultsByIdsResponse
-	1241, // 2339: forge.Forge.SetMachineNicFirmwareOverride:output_type -> google.protobuf.Empty
+	1119, // 2336: forge.Forge.SetNicFirmwareSiteSelection:output_type -> forge.NicFirmwareSiteSelectionResponse
+	1121, // 2337: forge.Forge.FindNicFirmwareSiteSelectionIds:output_type -> forge.FindNicFirmwareSiteSelectionIdsResponse
+	1123, // 2338: forge.Forge.FindNicFirmwareSiteSelectionsByIds:output_type -> forge.FindNicFirmwareSiteSelectionsByIdsResponse
+	1241, // 2339: forge.Forge.SetMachineNicFirmwareConfig:output_type -> google.protobuf.Empty
 	1131, // 2340: forge.Forge.GetDesiredNicFirmware:output_type -> forge.GetDesiredNicFirmwareResponse
 	801,  // 2341: forge.Forge.CreateSku:output_type -> forge.SkuIdList
 	797,  // 2342: forge.Forge.GenerateSkuFromMachine:output_type -> forge.Sku
@@ -84156,8 +84158,8 @@ func file_nico_nico_proto_init() {
 	file_nico_nico_proto_msgTypes[990].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[991].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[994].OneofWrappers = []any{
-		(*SetNicFirmwareSiteDefaultRequest_ProfileId)(nil),
-		(*SetNicFirmwareSiteDefaultRequest_Clear)(nil),
+		(*SetNicFirmwareSiteSelectionRequest_ProfileId)(nil),
+		(*SetNicFirmwareSiteSelectionRequest_Clear)(nil),
 	}
 	file_nico_nico_proto_msgTypes[995].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[996].OneofWrappers = []any{}
@@ -84166,8 +84168,8 @@ func file_nico_nico_proto_init() {
 		(*NicFirmwareCardSelector_BaseGuid)(nil),
 	}
 	file_nico_nico_proto_msgTypes[1003].OneofWrappers = []any{
-		(*SetMachineNicFirmwareOverrideRequest_ProfileId)(nil),
-		(*SetMachineNicFirmwareOverrideRequest_Clear)(nil),
+		(*SetMachineNicFirmwareConfigRequest_ProfileId)(nil),
+		(*SetMachineNicFirmwareConfigRequest_Clear)(nil),
 	}
 	file_nico_nico_proto_msgTypes[1004].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[1006].OneofWrappers = []any{

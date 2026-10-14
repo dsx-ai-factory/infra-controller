@@ -212,16 +212,16 @@ impl NicFirmwareHardware {
     }
 }
 
-/// `NicFirmwareSiteDefault` selects a live profile for one hardware pair.
+/// `NicFirmwareSiteSelection` selects a live profile for one hardware pair.
 /// Its version tracks assignment edits, independently of profile edits.
 #[derive(Clone, Debug, sqlx::FromRow)]
-pub struct NicFirmwareSiteDefault {
+pub struct NicFirmwareSiteSelection {
     /// Literal part-number/PSID pair identifying this assignment.
     #[sqlx(flatten)]
     pub hardware: NicFirmwareHardware,
     /// Live profile selected for this hardware, not a pinned revision.
     pub profile_id: NicFirmwareProfileId,
-    /// Assignment edit token required to replace or clear this default.
+    /// Assignment edit token required to replace or clear this selection.
     pub version: ConfigVersion,
 }
 
@@ -309,47 +309,48 @@ impl NicFirmwareCardSelector {
     }
 }
 
-/// `NicFirmwareCardOverride` selects a live profile for one observed device.
+/// `NicFirmwareCardSelection` selects a live profile for one observed device.
 /// Its edits share the owning machine's configuration version.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NicFirmwareCardOverride {
+pub struct NicFirmwareCardSelection {
     /// Explicit identity used to match one device within the machine's report.
     pub selector: NicFirmwareCardSelector,
     /// Live catalog profile, not a pinned profile revision.
     pub profile_id: NicFirmwareProfileId,
 }
 
-/// `NicFirmwareBaseline` groups operator selections in order of precedence.
+/// `NicFirmwareSelections` groups stored card, machine and site profile selections.
 /// Callers supply the selected profile IDs; the resolver does not persist them.
+/// Allocation is separate because it also constrains card and machine selections.
 #[derive(Default)]
-pub struct NicFirmwareBaseline<'a> {
-    /// Operator override for this card, taking precedence over machine settings.
-    pub card_override: Option<&'a NicFirmwareProfileId>,
-    /// Operator override for this machine when no card override is selected.
-    pub machine_override: Option<&'a NicFirmwareProfileId>,
-    /// Hardware default used when neither an override nor an allocation selects a profile.
-    pub site_default: Option<&'a NicFirmwareProfileId>,
+pub struct NicFirmwareSelections<'a> {
+    /// Profile selected for this card, taking precedence over machine settings.
+    pub card: Option<&'a NicFirmwareProfileId>,
+    /// Profile selected for this machine when no card selection applies.
+    pub machine: Option<&'a NicFirmwareProfileId>,
+    /// Site profile used when no card, machine or allocation selection applies.
+    pub site: Option<&'a NicFirmwareProfileId>,
 }
 
-/// `NicFirmwareSelectionSource` tells operators which setting selected a target.
+/// `NicFirmwareSelectionScope` identifies the hierarchy level that selected a target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NicFirmwareSelectionSource {
+pub enum NicFirmwareSelectionScope {
     /// The operator selected a profile for this card within its machine.
-    CardOverride,
-    /// The operator selected a machine profile, without a card override.
-    MachineOverride,
-    /// The allocation selected a profile, without an operator override.
+    Card,
+    /// The operator selected a machine profile, without a card selection.
+    Machine,
+    /// The allocation selected a profile, without a card or machine selection.
     Allocation,
-    /// The hardware default applied, without an override or allocation selection.
-    SiteDefault,
+    /// The site's hardware selection applied, without a higher-level selection.
+    Site,
 }
 
 /// `NicFirmwareResolution` preserves the selected profile revision and exact entry.
 /// It is a read-only decision, not an admitted operation or permission to flash.
 #[derive(Clone, Debug)]
 pub struct NicFirmwareResolution {
-    /// Setting that selected this profile under the resolver's precedence rules.
-    pub source: NicFirmwareSelectionSource,
+    /// Hierarchy level that selected this profile under the resolver's precedence rules.
+    pub scope: NicFirmwareSelectionScope,
     /// Catalog identity of the selected profile.
     pub profile_id: NicFirmwareProfileId,
     /// Profile revision read for this resolution, not the assignment edit token.
@@ -360,24 +361,24 @@ pub struct NicFirmwareResolution {
 
 /// `resolve_nic_firmware` applies card > machine > allocation > site precedence.
 /// No selection returns `None`. An invalid selected profile returns an error
-/// without falling back. An operator pin conflicting with an allocation's
+/// without falling back. An operator selection conflicting with an allocation's
 /// exact version or artifact digests also fails; source URLs do not change
 /// firmware identity. Firmware versions are exact, with no ordering.
 pub fn resolve_nic_firmware(
     hardware: &NicFirmwareHardware,
     profiles: &[NicFirmwareProfile],
-    baseline: NicFirmwareBaseline<'_>,
+    selections: NicFirmwareSelections<'_>,
     allocation: Option<&NicFirmwareProfileId>,
 ) -> Result<Option<NicFirmwareResolution>, ConfigValidationError> {
-    use NicFirmwareSelectionSource::*;
+    use NicFirmwareSelectionScope::*;
 
-    let selected = baseline
-        .card_override
-        .map(|id| (CardOverride, id))
-        .or_else(|| baseline.machine_override.map(|id| (MachineOverride, id)))
+    let selected = selections
+        .card
+        .map(|id| (Card, id))
+        .or_else(|| selections.machine.map(|id| (Machine, id)))
         .or_else(|| allocation.map(|id| (Allocation, id)))
-        .or_else(|| baseline.site_default.map(|id| (SiteDefault, id)));
-    let Some((source, id)) = selected else {
+        .or_else(|| selections.site.map(|id| (Site, id)));
+    let Some((scope, id)) = selected else {
         return Ok(None);
     };
     let entry_for = |id: &NicFirmwareProfileId| {
@@ -395,7 +396,7 @@ pub fn resolve_nic_firmware(
         Ok::<_, ConfigValidationError>((profile, entry))
     };
     let (profile, entry) = entry_for(id)?;
-    if matches!(source, CardOverride | MachineOverride)
+    if matches!(scope, Card | Machine)
         && let Some(required_id) = allocation
     {
         let required = entry_for(required_id)?.1;
@@ -411,12 +412,12 @@ pub fn resolve_nic_firmware(
                     .map(|artifact| &artifact.sha256)
         {
             return Err(ConfigValidationError::InvalidValue(
-                "operator NIC firmware override conflicts with the allocation requirement".into(),
+                "operator NIC firmware selection conflicts with the allocation requirement".into(),
             ));
         }
     }
     Ok(Some(NicFirmwareResolution {
-        source,
+        scope,
         profile_id: profile.id.clone(),
         profile_version: profile.version,
         entry: entry.clone(),

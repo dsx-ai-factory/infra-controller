@@ -356,9 +356,9 @@ impl<ID: MachineIdSubtypeTrait> From<model::machine::Machine<ID>> for rpc::forge
                 .nic_firmware_profile_id
                 .as_ref()
                 .map(ToString::to_string),
-            nic_firmware_card_overrides: machine
+            nic_firmware_card_selections: machine
                 .config
-                .nic_firmware_card_overrides
+                .nic_firmware_card_selections
                 .into_iter()
                 .map(Into::into)
                 .collect(),

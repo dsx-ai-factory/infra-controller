@@ -17,9 +17,9 @@
 
 use model::ConfigValidationError;
 use model::nic_firmware::{
-    NicFirmwareApproach, NicFirmwareArtifact, NicFirmwareCardOverride, NicFirmwareCardSelector,
+    NicFirmwareApproach, NicFirmwareArtifact, NicFirmwareCardSelection, NicFirmwareCardSelector,
     NicFirmwareHardware, NicFirmwareProfile, NicFirmwareProfileConfig, NicFirmwareProfileEntry,
-    NicFirmwareResolution, NicFirmwareSelectionSource, NicFirmwareSiteDefault,
+    NicFirmwareResolution, NicFirmwareSelectionScope, NicFirmwareSiteSelection,
 };
 
 use crate::forge as rpc;
@@ -86,27 +86,29 @@ impl From<NicFirmwareCardSelector> for rpc::NicFirmwareCardSelector {
     }
 }
 
-impl TryFrom<rpc::NicFirmwareCardOverride> for NicFirmwareCardOverride {
+impl TryFrom<rpc::NicFirmwareCardSelection> for NicFirmwareCardSelection {
     type Error = ConfigValidationError;
 
-    fn try_from(card_override: rpc::NicFirmwareCardOverride) -> Result<Self, Self::Error> {
+    fn try_from(card_selection: rpc::NicFirmwareCardSelection) -> Result<Self, Self::Error> {
         Ok(Self {
-            selector: card_override
+            selector: card_selection
                 .selector
                 .ok_or_else(|| {
-                    ConfigValidationError::InvalidValue("card override selector is required".into())
+                    ConfigValidationError::InvalidValue(
+                        "card selection selector is required".into(),
+                    )
                 })?
                 .try_into()?,
-            profile_id: card_override.profile_id.parse()?,
+            profile_id: card_selection.profile_id.parse()?,
         })
     }
 }
 
-impl From<NicFirmwareCardOverride> for rpc::NicFirmwareCardOverride {
-    fn from(card_override: NicFirmwareCardOverride) -> Self {
+impl From<NicFirmwareCardSelection> for rpc::NicFirmwareCardSelection {
+    fn from(card_selection: NicFirmwareCardSelection) -> Self {
         Self {
-            selector: Some(card_override.selector.into()),
-            profile_id: card_override.profile_id.to_string(),
+            selector: Some(card_selection.selector.into()),
+            profile_id: card_selection.profile_id.to_string(),
         }
     }
 }
@@ -218,12 +220,12 @@ impl From<NicFirmwareHardware> for rpc::NicFirmwareHardware {
     }
 }
 
-impl From<NicFirmwareSiteDefault> for rpc::NicFirmwareSiteDefault {
-    fn from(binding: NicFirmwareSiteDefault) -> Self {
+impl From<NicFirmwareSiteSelection> for rpc::NicFirmwareSiteSelection {
+    fn from(site_selection: NicFirmwareSiteSelection) -> Self {
         Self {
-            hardware: Some(binding.hardware.into()),
-            profile_id: binding.profile_id.to_string(),
-            version: binding.version.to_string(),
+            hardware: Some(site_selection.hardware.into()),
+            profile_id: site_selection.profile_id.to_string(),
+            version: site_selection.version.to_string(),
         }
     }
 }
@@ -231,19 +233,11 @@ impl From<NicFirmwareSiteDefault> for rpc::NicFirmwareSiteDefault {
 impl From<NicFirmwareResolution> for rpc::NicFirmwareResolution {
     fn from(resolution: NicFirmwareResolution) -> Self {
         Self {
-            source: match resolution.source {
-                NicFirmwareSelectionSource::SiteDefault => {
-                    rpc::NicFirmwareSelectionSource::SiteDefault
-                }
-                NicFirmwareSelectionSource::Allocation => {
-                    rpc::NicFirmwareSelectionSource::Allocation
-                }
-                NicFirmwareSelectionSource::MachineOverride => {
-                    rpc::NicFirmwareSelectionSource::MachineOverride
-                }
-                NicFirmwareSelectionSource::CardOverride => {
-                    rpc::NicFirmwareSelectionSource::CardOverride
-                }
+            scope: match resolution.scope {
+                NicFirmwareSelectionScope::Site => rpc::NicFirmwareSelectionScope::Site,
+                NicFirmwareSelectionScope::Allocation => rpc::NicFirmwareSelectionScope::Allocation,
+                NicFirmwareSelectionScope::Machine => rpc::NicFirmwareSelectionScope::Machine,
+                NicFirmwareSelectionScope::Card => rpc::NicFirmwareSelectionScope::Card,
             }
             .into(),
             profile_id: resolution.profile_id.to_string(),
@@ -266,14 +260,15 @@ impl From<NicFirmwareProfile> for rpc::NicFirmwareProfile {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::{Check, check_values};
+    use prost::Message;
 
     use super::*;
     use crate::protos::mlx_device::FirmwareSpec;
 
-    // MAC spelling follows the typed address formatter, while GUID text and the
-    // profile name must survive conversion unchanged for literal matching.
+    /// MAC spelling follows the typed address formatter, while GUID text and the
+    /// profile name must survive conversion unchanged for literal matching.
     #[test]
-    fn card_override_roundtrip_preserves_identity_and_profile() {
+    fn card_selection_roundtrip_preserves_identity_and_profile() {
         use rpc::nic_firmware_card_selector::Identity;
 
         check_values(
@@ -295,24 +290,24 @@ mod tests {
                 },
             ],
             |identity| {
-                let input = rpc::NicFirmwareCardOverride {
+                let input = rpc::NicFirmwareCardSelection {
                     selector: Some(rpc::NicFirmwareCardSelector {
                         identity: Some(identity),
                     }),
                     profile_id: "Card-Profile".into(),
                 };
-                let model = NicFirmwareCardOverride::try_from(input).unwrap();
-                let output = rpc::NicFirmwareCardOverride::from(model);
+                let model = NicFirmwareCardSelection::try_from(input).unwrap();
+                let output = rpc::NicFirmwareCardSelection::from(model);
                 assert_eq!(output.profile_id, "Card-Profile");
                 output.selector.unwrap().identity.unwrap()
             },
         );
     }
 
-    // Conversion must enforce wire presence and domain validation before a
-    // transaction can store a partial or malformed card selection.
+    /// Conversion must enforce wire presence and domain validation before a
+    /// transaction can store a partial or malformed card selection.
     #[test]
-    fn card_override_conversion_rejects_missing_and_invalid_fields() {
+    fn card_selection_conversion_rejects_missing_and_invalid_fields() {
         use rpc::nic_firmware_card_selector::Identity;
 
         check_values(
@@ -320,7 +315,7 @@ mod tests {
                 Check {
                     scenario: "missing selector message",
                     input: (None, "profile"),
-                    expect: "card override selector is required".to_string(),
+                    expect: "card selection selector is required".to_string(),
                 },
                 Check {
                     scenario: "missing selector identity",
@@ -420,8 +415,8 @@ mod tests {
                     .to_string(),
                 },
             ],
-            |(selector, profile_id)| match NicFirmwareCardOverride::try_from(
-                rpc::NicFirmwareCardOverride {
+            |(selector, profile_id)| match NicFirmwareCardSelection::try_from(
+                rpc::NicFirmwareCardSelection {
                     selector,
                     profile_id: profile_id.into(),
                 },
@@ -464,8 +459,11 @@ mod tests {
         assert_eq!(rpc::NicFirmwareProfileConfig::from(model), input);
     }
 
+    /// Public scope names and numbers must identify the selected hierarchy level,
+    /// while conversion preserves the exact normalized target and profile revision.
     #[test]
-    fn resolution_preserves_operator_override_sources() {
+    fn resolution_preserves_selection_scopes() {
+        // Profile conversion normalizes digests without changing target versions.
         let mut expected_entry = config().entries.remove(0);
         expected_entry.image.as_mut().unwrap().sha256 = "ab".repeat(32);
         expected_entry.device_config.as_mut().unwrap().sha256 = "cd".repeat(32);
@@ -477,31 +475,64 @@ mod tests {
         check_values(
             [
                 Check {
-                    scenario: "machine override",
-                    input: NicFirmwareSelectionSource::MachineOverride,
-                    expect: rpc::NicFirmwareSelectionSource::MachineOverride as i32,
+                    scenario: "site selection",
+                    input: NicFirmwareSelectionScope::Site,
+                    expect: (0, "NicFirmwareSelectionScopeSite"),
                 },
                 Check {
-                    scenario: "card override",
-                    input: NicFirmwareSelectionSource::CardOverride,
-                    expect: rpc::NicFirmwareSelectionSource::CardOverride as i32,
+                    scenario: "allocation selection",
+                    input: NicFirmwareSelectionScope::Allocation,
+                    expect: (1, "NicFirmwareSelectionScopeAllocation"),
+                },
+                Check {
+                    scenario: "machine selection",
+                    input: NicFirmwareSelectionScope::Machine,
+                    expect: (2, "NicFirmwareSelectionScopeMachine"),
+                },
+                Check {
+                    scenario: "card selection",
+                    input: NicFirmwareSelectionScope::Card,
+                    expect: (3, "NicFirmwareSelectionScopeCard"),
                 },
             ],
-            |source| {
+            |scope| {
                 let resolution = rpc::NicFirmwareResolution::from(NicFirmwareResolution {
-                    source,
-                    profile_id: "operator-override".parse().unwrap(),
+                    scope,
+                    profile_id: "operator-selection".parse().unwrap(),
                     profile_version: "V7-T123456".parse().unwrap(),
                     entry: entry.clone(),
                 });
-                assert_eq!(resolution.profile_id, "operator-override", "{source:?}");
-                assert_eq!(resolution.profile_version, "V7-T123456", "{source:?}");
+                assert_eq!(resolution.profile_id, "operator-selection", "{scope:?}");
+                assert_eq!(resolution.profile_version, "V7-T123456", "{scope:?}");
                 assert_eq!(
                     resolution.entry.as_ref(),
                     Some(&expected_entry),
-                    "{source:?}"
+                    "{scope:?}"
                 );
-                resolution.source
+                // Isolate the scope so exact bytes prove tag 5 replaces retired
+                // tag 1. Proto3 omits the default site value from the wire.
+                let scope_only = rpc::NicFirmwareResolution {
+                    scope: resolution.scope,
+                    ..Default::default()
+                };
+                let encoded = scope_only.encode_to_vec();
+                let expected_bytes = if scope == NicFirmwareSelectionScope::Site {
+                    vec![]
+                } else {
+                    vec![0x28, u8::try_from(resolution.scope).unwrap()]
+                };
+                assert_eq!(encoded, expected_bytes, "{scope:?}");
+                assert_eq!(
+                    rpc::NicFirmwareResolution::decode(encoded.as_slice()).unwrap(),
+                    scope_only,
+                    "{scope:?}"
+                );
+                (
+                    resolution.scope,
+                    rpc::NicFirmwareSelectionScope::try_from(resolution.scope)
+                        .unwrap()
+                        .as_str_name(),
+                )
             },
         );
     }

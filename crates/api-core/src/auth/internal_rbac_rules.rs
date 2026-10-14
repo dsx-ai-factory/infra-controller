@@ -716,10 +716,10 @@ impl InternalRBACRules {
         x.perm("FindNicFirmwareProfilesByIds", vec![ForgeAdminCLI]);
         x.perm("UpdateNicFirmwareProfile", vec![ForgeAdminCLI]);
         x.perm("DeleteNicFirmwareProfile", vec![ForgeAdminCLI]);
-        x.perm("SetNicFirmwareSiteDefault", vec![ForgeAdminCLI]);
-        x.perm("FindNicFirmwareSiteDefaultIds", vec![ForgeAdminCLI]);
-        x.perm("FindNicFirmwareSiteDefaultsByIds", vec![ForgeAdminCLI]);
-        x.perm("SetMachineNicFirmwareOverride", vec![ForgeAdminCLI]);
+        x.perm("SetNicFirmwareSiteSelection", vec![ForgeAdminCLI]);
+        x.perm("FindNicFirmwareSiteSelectionIds", vec![ForgeAdminCLI]);
+        x.perm("FindNicFirmwareSiteSelectionsByIds", vec![ForgeAdminCLI]);
+        x.perm("SetMachineNicFirmwareConfig", vec![ForgeAdminCLI]);
         x.perm("GetDesiredNicFirmware", vec![ForgeAdminCLI]);
         x.perm("CreateSku", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GenerateSkuFromMachine", vec![ForgeAdminCLI]);
@@ -1378,10 +1378,10 @@ mod rbac_rule_tests {
                 "FindNicFirmwareProfilesByIds",
                 "UpdateNicFirmwareProfile",
                 "DeleteNicFirmwareProfile",
-                "SetNicFirmwareSiteDefault",
-                "FindNicFirmwareSiteDefaultIds",
-                "FindNicFirmwareSiteDefaultsByIds",
-                "SetMachineNicFirmwareOverride",
+                "SetNicFirmwareSiteSelection",
+                "FindNicFirmwareSiteSelectionIds",
+                "FindNicFirmwareSiteSelectionsByIds",
+                "SetMachineNicFirmwareConfig",
                 "GetDesiredNicFirmware",
             ] {
                 assert_eq!(

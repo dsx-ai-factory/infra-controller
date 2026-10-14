@@ -15,8 +15,9 @@
  * limitations under the License.
  */
 
-//! Persistence for NIC firmware profiles, site defaults, machine overrides, and
-//! card overrides.
+//! Persistence for NIC firmware profiles and their site, machine, and card selections.
+//! Selection APIs keep the existing table and constraint names so outgoing
+//! readers can use the same storage during deployment.
 
 use std::collections::HashSet;
 
@@ -26,8 +27,8 @@ use config_version::ConfigVersion;
 use model::machine::HostMachine;
 use model::machine::status::managed_dpu_machine_ids;
 use model::nic_firmware::{
-    NicFirmwareCardOverride, NicFirmwareHardware, NicFirmwareProfile, NicFirmwareProfileConfig,
-    NicFirmwareProfileId, NicFirmwareSiteDefault,
+    NicFirmwareCardSelection, NicFirmwareHardware, NicFirmwareProfile, NicFirmwareProfileConfig,
+    NicFirmwareProfileId, NicFirmwareSiteSelection,
 };
 use sqlx::PgConnection;
 
@@ -147,12 +148,12 @@ pub async fn update(
         .any(|hardware| config.entry_for(hardware).is_none())
     {
         return Err(DatabaseError::FailedPrecondition(
-            "profile replacement would remove hardware required by a NIC firmware site default"
+            "profile replacement would remove hardware required by a NIC firmware site selection"
                 .into(),
         ));
     }
     for machine in crate::machine::find_by_nic_firmware_profile(&mut *txn, id).await? {
-        let cards = &machine.config.nic_firmware_card_overrides;
+        let cards = &machine.config.nic_firmware_card_selections;
         if machine.config.nic_firmware_profile_id.as_ref() == Some(id) {
             validate_machine_profile(&machine, config, cards, Some(&old_profile.config))?;
         }
@@ -175,7 +176,7 @@ pub async fn update(
             validate_profile_hardware(&machine.id, &hardware, config, Some(&old_profile.config))
                 .map_err(|error| match error {
                     DatabaseError::FailedPrecondition(reason) => DatabaseError::FailedPrecondition(
-                        format!("card override for selector {}: {reason}", card.selector),
+                        format!("card selection for selector {}: {reason}", card.selector),
                     ),
                     error => error,
                 })?;
@@ -203,7 +204,8 @@ pub async fn update(
 /// `delete` removes a profile whose complete version matches the caller's token.
 /// Missing profiles return `NotFoundError`; stale tokens return
 /// `ConcurrentModificationError` and leave the profile in place.
-/// A profile selected by a site default, machine or card returns `FailedPrecondition`.
+/// A profile referenced by a site, machine, or card selection returns
+/// `FailedPrecondition`.
 pub async fn delete(
     txn: &mut PgConnection,
     id: &NicFirmwareProfileId,
@@ -220,21 +222,21 @@ pub async fn delete(
                 if error.constraint() == Some("nic_firmware_site_defaults_profile_id_fkey") =>
             {
                 DatabaseError::FailedPrecondition(
-                    "profile is selected by a NIC firmware site default".into(),
+                    "profile is selected by a NIC firmware site selection".into(),
                 )
             }
             sqlx::Error::Database(error)
                 if error.constraint() == Some("machines_nic_firmware_profile_id_fkey") =>
             {
                 DatabaseError::FailedPrecondition(
-                    "profile is selected by a machine NIC firmware override".into(),
+                    "profile is selected by a machine NIC firmware selection".into(),
                 )
             }
             sqlx::Error::Database(error)
                 if error.constraint() == Some("machine_nic_firmware_overrides_profile_id_fkey") =>
             {
                 DatabaseError::FailedPrecondition(
-                    "profile is selected by a card NIC firmware override".into(),
+                    "profile is selected by a card NIC firmware selection".into(),
                 )
             }
             error => DatabaseError::query(query, error),
@@ -266,8 +268,8 @@ async fn unmatched_version(
     })
 }
 
-/// `set_machine_override` sets or clears the machine profile and advances the
-/// shared edit version even when unchanged. Omitted `card_overrides` preserves
+/// `set_machine_config` sets or clears the machine profile and advances the
+/// shared edit version even when unchanged. Omitted `card_selections` preserves
 /// saved cards; a supplied slice replaces them atomically, including an empty
 /// slice to clear them.
 ///
@@ -287,17 +289,17 @@ async fn unmatched_version(
 ///
 /// Callers must use `READ COMMITTED` and hold the transaction through commit so
 /// profile edits and assignments serialize.
-pub async fn set_machine_override(
+pub async fn set_machine_config(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
     profile_id: Option<&NicFirmwareProfileId>,
-    card_overrides: Option<&[NicFirmwareCardOverride]>,
+    card_selections: Option<&[NicFirmwareCardSelection]>,
     expected_version: ConfigVersion,
 ) -> DatabaseResult<()> {
     let profile_ids: Vec<_> = profile_id
         .into_iter()
         .chain(
-            card_overrides
+            card_selections
                 .into_iter()
                 .flatten()
                 .map(|card| &card.profile_id),
@@ -336,7 +338,7 @@ pub async fn set_machine_override(
             expected_version.to_string(),
         ));
     }
-    if profile_id.is_some() || card_overrides.is_some_and(|cards| !cards.is_empty()) {
+    if profile_id.is_some() || card_selections.is_some_and(|cards| !cards.is_empty()) {
         // A Scout report or card replacement may have committed while we waited.
         // Validate the final selections against this snapshot before any write.
         let machine = crate::machine::find_one(&mut *txn, machine_id, Default::default())
@@ -345,10 +347,10 @@ pub async fn set_machine_override(
                 kind: "machine",
                 id: machine_id.to_string(),
             })?;
-        if let Some(cards) = card_overrides {
-            validate_card_overrides(&machine, cards, &profiles)?;
+        if let Some(cards) = card_selections {
+            validate_card_selections(&machine, cards, &profiles)?;
         }
-        let final_cards = card_overrides.unwrap_or(&machine.config.nic_firmware_card_overrides);
+        let final_cards = card_selections.unwrap_or(&machine.config.nic_firmware_card_selections);
         if let Some(profile) = profiles
             .iter()
             .find(|profile| Some(&profile.id) == profile_id)
@@ -356,7 +358,7 @@ pub async fn set_machine_override(
             validate_machine_profile(&machine, &profile.config, final_cards, None)?;
         }
     }
-    if let Some(cards) = card_overrides {
+    if let Some(cards) = card_selections {
         let query = "DELETE FROM machine_nic_firmware_overrides WHERE machine_id = $1";
         sqlx::query(query)
             .bind(machine_id)
@@ -399,7 +401,7 @@ pub async fn set_machine_override(
 fn validate_machine_profile(
     machine: &HostMachine,
     config: &NicFirmwareProfileConfig,
-    cards: &[NicFirmwareCardOverride],
+    cards: &[NicFirmwareCardSelection],
     previous_config: Option<&NicFirmwareProfileConfig>,
 ) -> DatabaseResult<()> {
     let Some(observation) = &machine.status.mlx_device_observation else {
@@ -420,9 +422,9 @@ fn validate_machine_profile(
     Ok(())
 }
 
-fn validate_card_overrides(
+fn validate_card_selections(
     machine: &HostMachine,
-    cards: &[NicFirmwareCardOverride],
+    cards: &[NicFirmwareCardSelection],
     profiles: &[NicFirmwareProfile],
 ) -> DatabaseResult<()> {
     if cards.is_empty() {
@@ -434,7 +436,7 @@ fn validate_card_overrides(
         .as_ref()
         .ok_or_else(|| {
             DatabaseError::FailedPrecondition(format!(
-                "card overrides require a stored MLX device observation for machine {}",
+                "card selections require a stored MLX device observation for machine {}",
                 machine.id
             ))
         })?;
@@ -445,13 +447,13 @@ fn validate_card_overrides(
             .device_index(&observation.devices)
             .map_err(|error| {
                 DatabaseError::FailedPrecondition(format!(
-                    "card override with profile {} on machine {}: {error}",
+                    "card selection with profile {} on machine {}: {error}",
                     card.profile_id, machine.id
                 ))
             })?;
         if !selected.insert(index) {
             return Err(DatabaseError::FailedPrecondition(format!(
-                "multiple card overrides select the same observed device on machine {}: selector {} with profile {}",
+                "multiple card selections select the same observed device on machine {}: selector {} with profile {}",
                 machine.id, card.selector, card.profile_id
             )));
         }
@@ -512,9 +514,9 @@ fn validate_profile_hardware(
     Ok(())
 }
 
-/// `find_site_default_ids` lists hardware pairs in ascending part-number/PSID order.
+/// `find_site_selection_ids` lists hardware pairs in ascending part-number/PSID order.
 /// `profile_id` limits the list to that exact profile; `None` returns all pairs.
-pub async fn find_site_default_ids(
+pub async fn find_site_selection_ids(
     db: impl DbReader<'_>,
     profile_id: Option<&NicFirmwareProfileId>,
 ) -> DatabaseResult<Vec<NicFirmwareHardware>> {
@@ -530,13 +532,13 @@ pub async fn find_site_default_ids(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
-/// `find_site_defaults_by_ids` returns assignments for the exact hardware pairs,
+/// `find_site_selections_by_ids` returns assignments for the exact hardware pairs,
 /// once each, in ascending part-number/PSID order. Missing pairs are omitted,
 /// and an empty list returns no assignments.
-pub async fn find_site_defaults_by_ids(
+pub async fn find_site_selections_by_ids(
     db: impl DbReader<'_>,
     hardware: &[NicFirmwareHardware],
-) -> DatabaseResult<Vec<NicFirmwareSiteDefault>> {
+) -> DatabaseResult<Vec<NicFirmwareSiteSelection>> {
     let (part_numbers, psids): (Vec<_>, Vec<_>) = hardware
         .iter()
         .map(|hardware| (hardware.part_number.as_str(), hardware.psid.as_str()))
@@ -556,12 +558,12 @@ pub async fn find_site_defaults_by_ids(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
-/// `find_site_defaults` loads all assignments for desired firmware selection,
+/// `find_site_selections` loads all assignments for desired firmware selection,
 /// ordered by part number and PSID.
 /// Assignment versions do not pin profile versions.
-pub async fn find_site_defaults(
+pub async fn find_site_selections(
     db: impl DbReader<'_>,
-) -> DatabaseResult<Vec<NicFirmwareSiteDefault>> {
+) -> DatabaseResult<Vec<NicFirmwareSiteSelection>> {
     let query = "SELECT part_number, psid, profile_id, version FROM nic_firmware_site_defaults ORDER BY part_number, psid";
     sqlx::query_as(query)
         .fetch_all(db)
@@ -569,7 +571,7 @@ pub async fn find_site_defaults(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
-/// `set_site_default` validates under a shared profile lock, then inserts without
+/// `set_site_selection` validates under a shared profile lock, then inserts without
 /// a token or replaces only the assignment matching `expected_version`.
 /// Profile existence and compatibility are checked before the assignment token.
 /// Callers must use a `READ COMMITTED` transaction and hold it through commit to
@@ -578,12 +580,12 @@ pub async fn find_site_defaults(
 /// or conditional-update target returns `NotFoundError`; an incompatible profile
 /// returns `FailedPrecondition`. Duplicate creates return `AlreadyFoundError`,
 /// and stale assignment tokens return `ConcurrentModificationError`.
-pub async fn set_site_default(
+pub async fn set_site_selection(
     txn: &mut PgConnection,
     hardware: &NicFirmwareHardware,
     profile_id: &NicFirmwareProfileId,
     expected_version: Option<ConfigVersion>,
-) -> DatabaseResult<NicFirmwareSiteDefault> {
+) -> DatabaseResult<NicFirmwareSiteSelection> {
     let query = "SELECT id, config, version FROM nic_firmware_profiles WHERE id = $1 FOR SHARE";
     let profile: NicFirmwareProfile = sqlx::query_as(query)
         .bind(profile_id)
@@ -611,7 +613,7 @@ pub async fn set_site_default(
             .map_err(|error| match error {
                 sqlx::Error::Database(error) if error.is_unique_violation() => {
                     DatabaseError::AlreadyFoundError {
-                        kind: "NIC firmware site default",
+                        kind: "NIC firmware site selection",
                         id: format!("{}/{}", hardware.part_number, hardware.psid),
                     }
                 }
@@ -629,16 +631,16 @@ pub async fn set_site_default(
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     match result {
-        Some(binding) => Ok(binding),
-        None => Err(unmatched_site_default_version(txn, hardware, expected_version).await?),
+        Some(selection) => Ok(selection),
+        None => Err(unmatched_site_selection_version(txn, hardware, expected_version).await?),
     }
 }
 
-/// `clear_site_default` removes only the assignment matching the full version.
+/// `clear_site_selection` removes only the assignment matching the full version.
 /// It remains usable when a selected profile no longer supports the hardware.
 /// `hardware` must have passed `NicFirmwareHardware::validate`. Missing assignments
 /// return `NotFoundError`; stale tokens return `ConcurrentModificationError`.
-pub async fn clear_site_default(
+pub async fn clear_site_selection(
     txn: &mut PgConnection,
     hardware: &NicFirmwareHardware,
     expected_version: ConfigVersion,
@@ -652,12 +654,12 @@ pub async fn clear_site_default(
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     if deleted.rows_affected() == 0 {
-        return Err(unmatched_site_default_version(txn, hardware, expected_version).await?);
+        return Err(unmatched_site_selection_version(txn, hardware, expected_version).await?);
     }
     Ok(())
 }
 
-async fn unmatched_site_default_version(
+async fn unmatched_site_selection_version(
     txn: &mut PgConnection,
     hardware: &NicFirmwareHardware,
     expected_version: ConfigVersion,
@@ -672,12 +674,12 @@ async fn unmatched_site_default_version(
     let id = format!("{}/{}", hardware.part_number, hardware.psid);
     Ok(if exists {
         DatabaseError::ConcurrentModificationError(
-            "NIC firmware site default",
+            "NIC firmware site selection",
             expected_version.to_string(),
         )
     } else {
         DatabaseError::NotFoundError {
-            kind: "NIC firmware site default",
+            kind: "NIC firmware site selection",
             id,
         }
     })
@@ -691,8 +693,8 @@ mod tests {
     use model::machine::status::MlxDeviceObservation;
     use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
     use model::nic_firmware::{
-        NicFirmwareApproach, NicFirmwareArtifact, NicFirmwareCardOverride, NicFirmwareCardSelector,
-        NicFirmwareProfileEntry,
+        NicFirmwareApproach, NicFirmwareArtifact, NicFirmwareCardSelection,
+        NicFirmwareCardSelector, NicFirmwareProfileEntry,
     };
 
     use super::*;
@@ -717,7 +719,7 @@ mod tests {
     }
 
     // Use the production insert and snapshot read so the fixture also works
-    // before the nullable override column exists in the migration test.
+    // before the nullable profile column exists in the migration test.
     async fn create_host(txn: &mut PgConnection, index: u8) -> HostMachine {
         let id = MachineId::new(MachineIdSource::Tpm, [index; 32], MachineType::Host);
         crate::machine::create(
@@ -758,7 +760,7 @@ mod tests {
     // Whole-row comparisons protect unrelated settings, including fields added
     // later, while every accepted set or clear consumes the shared token.
     #[crate::sqlx_test]
-    async fn machine_override_changes_only_selection_and_shared_edit_version(pool: sqlx::PgPool) {
+    async fn machine_config_changes_only_selection_and_shared_edit_version(pool: sqlx::PgPool) {
         let id: NicFirmwareProfileId = "profile".parse().unwrap();
         let mut txn = pool.begin().await.unwrap();
         create(&mut txn, &id, &profile_config()).await.unwrap();
@@ -784,10 +786,10 @@ mod tests {
             ("set without inventory", Some(&id)),
             ("set unchanged profile", Some(&id)),
             ("clear", None),
-            ("clear absent override", None),
+            ("clear absent selection", None),
         ] {
             let mut txn = pool.begin().await.unwrap();
-            set_machine_override(&mut txn, &host.id, selection, None, version)
+            set_machine_config(&mut txn, &host.id, selection, None, version)
                 .await
                 .unwrap();
             txn.commit().await.unwrap();
@@ -815,7 +817,7 @@ mod tests {
             version = stored.version;
         }
 
-        // Metadata and the override use one token. Exercise both directions so
+        // Metadata and the selection use one token. Exercise both directions so
         // neither writer can reuse a snapshot consumed by the other.
         let metadata = model::metadata::Metadata {
             name: "operator edit".into(),
@@ -836,7 +838,7 @@ mod tests {
             .unwrap();
         txn.commit().await.unwrap();
         let mut txn = pool.begin().await.unwrap();
-        let error = set_machine_override(&mut txn, &host.id, Some(&id), None, version)
+        let error = set_machine_config(&mut txn, &host.id, Some(&id), None, version)
             .await
             .unwrap_err();
         assert!(
@@ -856,7 +858,7 @@ mod tests {
             .try_into()
             .unwrap();
         let mut txn = pool.begin().await.unwrap();
-        let error = set_machine_override(&mut txn, &missing, None, None, version)
+        let error = set_machine_config(&mut txn, &missing, None, None, version)
             .await
             .unwrap_err();
         assert!(
@@ -887,7 +889,7 @@ mod tests {
         inventory_config.entries.extend(card_config.entries.clone());
         let mut inventory = observation(&inventory_config);
         inventory.devices[1].base_guid = Some("reported-card-guid".into());
-        let cards = [NicFirmwareCardOverride {
+        let cards = [NicFirmwareCardSelection {
             selector: NicFirmwareCardSelector::Guid("reported-card-guid".into()),
             profile_id: card_id.clone(),
         }];
@@ -916,7 +918,7 @@ mod tests {
         // The machine profile cannot support the second device. Admission
         // must use the card selection supplied by this same request.
         let mut txn = pool.begin().await.unwrap();
-        set_machine_override(
+        set_machine_config(
             &mut txn,
             &host.id,
             Some(&machine_id),
@@ -934,7 +936,7 @@ mod tests {
             configured.config.nic_firmware_profile_id,
             Some(machine_id.clone())
         );
-        assert_eq!(configured.config.nic_firmware_card_overrides, cards);
+        assert_eq!(configured.config.nic_firmware_card_selections, cards);
         assert_eq!(
             configured.version.version_nr(),
             host.version.version_nr() + 1
@@ -980,7 +982,7 @@ mod tests {
                 "{scenario}"
             );
             assert_eq!(
-                stored_host.config.nic_firmware_card_overrides, cards,
+                stored_host.config.nic_firmware_card_selections, cards,
                 "{scenario}"
             );
             assert_eq!(stored_host.version, configured.version, "{scenario}");
@@ -1004,7 +1006,7 @@ mod tests {
 
         // Clearing the card would expose an incompatible machine profile.
         let mut txn = pool.begin().await.unwrap();
-        let error = set_machine_override(
+        let error = set_machine_config(
             &mut txn,
             &host.id,
             Some(&machine_id),
@@ -1027,14 +1029,14 @@ mod tests {
             configured.config.nic_firmware_profile_id
         );
         assert_eq!(
-            stored.config.nic_firmware_card_overrides,
-            configured.config.nic_firmware_card_overrides
+            stored.config.nic_firmware_card_selections,
+            configured.config.nic_firmware_card_selections
         );
         assert_eq!(stored.version, configured.version);
 
         // A caller rollback must undo both tables and the shared version.
         let mut txn = pool.begin().await.unwrap();
-        set_machine_override(&mut txn, &host.id, None, Some(&[]), configured.version)
+        set_machine_config(&mut txn, &host.id, None, Some(&[]), configured.version)
             .await
             .unwrap();
         txn.rollback().await.unwrap();
@@ -1047,15 +1049,15 @@ mod tests {
             configured.config.nic_firmware_profile_id
         );
         assert_eq!(
-            stored.config.nic_firmware_card_overrides,
-            configured.config.nic_firmware_card_overrides
+            stored.config.nic_firmware_card_selections,
+            configured.config.nic_firmware_card_selections
         );
         assert_eq!(stored.version, configured.version);
 
         let mut version = configured.version;
         for profile in [Some(&machine_id), None] {
             let mut txn = pool.begin().await.unwrap();
-            set_machine_override(&mut txn, &host.id, profile, None, version)
+            set_machine_config(&mut txn, &host.id, profile, None, version)
                 .await
                 .unwrap();
             txn.commit().await.unwrap();
@@ -1064,7 +1066,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(stored.config.nic_firmware_profile_id.as_ref(), profile);
-            assert_eq!(stored.config.nic_firmware_card_overrides, cards);
+            assert_eq!(stored.config.nic_firmware_card_selections, cards);
             assert_eq!(stored.version.version_nr(), version.version_nr() + 1);
             version = stored.version;
         }
@@ -1076,7 +1078,7 @@ mod tests {
             .execute(&mut *txn)
             .await
             .unwrap();
-        set_machine_override(&mut txn, &host.id, None, Some(&[]), version)
+        set_machine_config(&mut txn, &host.id, None, Some(&[]), version)
             .await
             .unwrap();
         txn.commit().await.unwrap();
@@ -1085,7 +1087,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.config.nic_firmware_profile_id, None);
-        assert!(stored.config.nic_firmware_card_overrides.is_empty());
+        assert!(stored.config.nic_firmware_card_selections.is_empty());
         assert_eq!(stored.version.version_nr(), version.version_nr() + 1);
     }
 
@@ -1102,11 +1104,11 @@ mod tests {
         second.base_mac = Some("02:00:00:00:00:02".parse().unwrap());
         second.base_guid = Some("second-card".into());
         inventory.devices.push(second);
-        let saved = [NicFirmwareCardOverride {
+        let saved = [NicFirmwareCardSelection {
             selector: NicFirmwareCardSelector::Mac("02:00:00:00:00:01".parse().unwrap()),
             profile_id: id.clone(),
         }];
-        let replacement = NicFirmwareCardOverride {
+        let replacement = NicFirmwareCardSelection {
             selector: NicFirmwareCardSelector::Mac("02:00:00:00:00:02".parse().unwrap()),
             profile_id: id.clone(),
         };
@@ -1117,7 +1119,7 @@ mod tests {
         struct AdmissionCase {
             scenario: &'static str,
             observation: Option<MlxDeviceObservation>,
-            cards: Vec<NicFirmwareCardOverride>,
+            cards: Vec<NicFirmwareCardSelection>,
             managed: bool,
             error: &'static str,
         }
@@ -1127,13 +1129,13 @@ mod tests {
                 observation: Some(inventory.clone()),
                 cards: vec![
                     replacement.clone(),
-                    NicFirmwareCardOverride {
+                    NicFirmwareCardSelection {
                         selector: NicFirmwareCardSelector::Guid("second-card".into()),
                         profile_id: id.clone(),
                     },
                 ],
                 managed: false,
-                error: "multiple card overrides",
+                error: "multiple card selections",
             },
             AdmissionCase {
                 scenario: "selector matches two reports",
@@ -1178,7 +1180,7 @@ mod tests {
                     .unwrap(),
                 crate::ConditionalWrite::Applied(())
             );
-            set_machine_override(&mut txn, &host.id, Some(&id), Some(&saved), host.version)
+            set_machine_config(&mut txn, &host.id, Some(&id), Some(&saved), host.version)
                 .await
                 .unwrap();
             if let Some(rejected_inventory) = case.observation.as_mut() {
@@ -1243,7 +1245,7 @@ mod tests {
             );
             let mut txn = pool.begin().await.unwrap();
             let error =
-                set_machine_override(&mut txn, &host.id, None, Some(&case.cards), before.version)
+                set_machine_config(&mut txn, &host.id, None, Some(&case.cards), before.version)
                     .await
                     .unwrap_err();
             assert!(
@@ -1260,7 +1262,7 @@ mod tests {
                 "{scenario}"
             );
             assert_eq!(
-                after.config.nic_firmware_card_overrides, saved,
+                after.config.nic_firmware_card_selections, saved,
                 "{scenario}"
             );
             assert_eq!(after.version, before.version, "{scenario}");
@@ -1276,14 +1278,14 @@ mod tests {
         create(&mut txn, &id, &profile_config()).await.unwrap();
         txn.commit().await.unwrap();
 
-        let cards = [NicFirmwareCardOverride {
+        let cards = [NicFirmwareCardSelection {
             selector: NicFirmwareCardSelector::Mac("02:00:00:00:00:01".parse().unwrap()),
             profile_id: id.clone(),
         }];
         for (index, scenario, winning_selection, winning_cards, stale_selection, stale_cards) in [
             (
                 1,
-                "combined set beats stale legacy clear",
+                "combined set beats stale machine-only clear",
                 Some(&id),
                 Some(cards.as_slice()),
                 None,
@@ -1291,7 +1293,7 @@ mod tests {
             ),
             (
                 2,
-                "legacy clear beats stale combined set",
+                "machine-only clear beats stale combined set",
                 None,
                 None,
                 Some(&id),
@@ -1308,7 +1310,7 @@ mod tests {
                     .unwrap(),
                 crate::ConditionalWrite::Applied(())
             );
-            set_machine_override(&mut txn, &host.id, Some(&id), None, host.version)
+            set_machine_config(&mut txn, &host.id, Some(&id), None, host.version)
                 .await
                 .unwrap();
             let host = crate::machine::find_one(&mut *txn, &host.id, Default::default())
@@ -1318,7 +1320,7 @@ mod tests {
             txn.commit().await.unwrap();
 
             let mut winner = pool.begin().await.unwrap();
-            set_machine_override(
+            set_machine_config(
                 &mut winner,
                 &host.id,
                 winning_selection,
@@ -1337,7 +1339,7 @@ mod tests {
                 .unwrap();
             let loser = async {
                 let mut txn = pool.begin().await.unwrap();
-                let error = set_machine_override(
+                let error = set_machine_config(
                     &mut txn,
                     &host.id,
                     stale_selection,
@@ -1368,8 +1370,8 @@ mod tests {
                 "{scenario}"
             );
             assert_eq!(
-                stored.config.nic_firmware_card_overrides,
-                expected.config.nic_firmware_card_overrides,
+                stored.config.nic_firmware_card_selections,
+                expected.config.nic_firmware_card_selections,
                 "{scenario}"
             );
             assert_eq!(stored.version, expected.version, "{scenario}");
@@ -1383,7 +1385,7 @@ mod tests {
         let config = profile_config();
         let mut initial_observation = observation(&config);
         initial_observation.devices[0].base_guid = Some("observed-card".into());
-        let replacement_cards = [NicFirmwareCardOverride {
+        let replacement_cards = [NicFirmwareCardSelection {
             selector: NicFirmwareCardSelector::Guid("observed-card".into()),
             profile_id: replacement_id.clone(),
         }];
@@ -1395,7 +1397,7 @@ mod tests {
         struct AssignmentCase<'a> {
             scenario: &'static str,
             profile_id: Option<&'a NicFirmwareProfileId>,
-            cards: Option<&'a [NicFirmwareCardOverride]>,
+            cards: Option<&'a [NicFirmwareCardSelection]>,
         }
         // Both admission paths must use facts committed while the setter waits.
         let cases = [
@@ -1424,7 +1426,7 @@ mod tests {
                 .unwrap(),
                 crate::ConditionalWrite::Applied(())
             );
-            set_machine_override(&mut txn, &host.id, Some(&selected_id), None, host.version)
+            set_machine_config(&mut txn, &host.id, Some(&selected_id), None, host.version)
                 .await
                 .unwrap();
             let host = crate::machine::find_one(&mut *txn, &host.id, Default::default())
@@ -1458,7 +1460,7 @@ mod tests {
                 .unwrap();
             let setter = async {
                 let mut txn = pool.begin().await.unwrap();
-                let error = set_machine_override(
+                let error = set_machine_config(
                     &mut txn,
                     &host.id,
                     case.profile_id,
@@ -1482,7 +1484,7 @@ mod tests {
             // With both failures present, the machine token is checked before
             // inventory compatibility. Neither request may change intent.
             let mut txn = pool.begin().await.unwrap();
-            let error = set_machine_override(
+            let error = set_machine_config(
                 &mut txn,
                 &host.id,
                 case.profile_id,
@@ -1506,7 +1508,7 @@ mod tests {
                 "{scenario}"
             );
             assert!(
-                stored.config.nic_firmware_card_overrides.is_empty(),
+                stored.config.nic_firmware_card_selections.is_empty(),
                 "{scenario}"
             );
             assert_eq!(stored.version, host.version, "{scenario}");
@@ -1546,11 +1548,11 @@ mod tests {
                     .unwrap(),
                 crate::ConditionalWrite::Applied(())
             );
-            let cards = [NicFirmwareCardOverride {
+            let cards = [NicFirmwareCardSelection {
                 selector: NicFirmwareCardSelector::Guid("second-card".into()),
                 profile_id: id.clone(),
             }];
-            set_machine_override(
+            set_machine_config(
                 &mut txn,
                 &host.id,
                 (index == 1).then_some(&id),
@@ -1594,7 +1596,7 @@ mod tests {
             expected_hosts.push((
                 host.id,
                 host.config.nic_firmware_profile_id,
-                host.config.nic_firmware_card_overrides,
+                host.config.nic_firmware_card_selections,
                 host.version,
             ));
         }
@@ -1623,7 +1625,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(&stored.config.nic_firmware_profile_id, selection);
-            assert_eq!(&stored.config.nic_firmware_card_overrides, cards);
+            assert_eq!(&stored.config.nic_firmware_card_selections, cards);
             assert_eq!(&stored.version, version);
         }
 
@@ -1661,7 +1663,7 @@ mod tests {
                     "{scenario}: {host_id}"
                 );
                 assert_eq!(
-                    &stored.config.nic_firmware_card_overrides, cards,
+                    &stored.config.nic_firmware_card_selections, cards,
                     "{scenario}: {host_id}"
                 );
                 assert_eq!(&stored.version, version, "{scenario}: {host_id}");
@@ -1680,7 +1682,7 @@ mod tests {
         config.entries.push(card_entry);
         let mut inventory = observation(&config);
         inventory.devices[1].base_guid = Some("selected-card".into());
-        let cards = [NicFirmwareCardOverride {
+        let cards = [NicFirmwareCardSelection {
             selector: NicFirmwareCardSelector::Guid("selected-card".into()),
             profile_id: id.clone(),
         }];
@@ -1693,7 +1695,7 @@ mod tests {
                 .unwrap(),
             crate::ConditionalWrite::Applied(())
         );
-        set_machine_override(&mut txn, &host.id, Some(&id), Some(&cards), host.version)
+        set_machine_config(&mut txn, &host.id, Some(&id), Some(&cards), host.version)
             .await
             .unwrap();
         txn.commit().await.unwrap();
@@ -1705,14 +1707,14 @@ mod tests {
             configured.config.nic_firmware_profile_id.as_ref(),
             Some(&id)
         );
-        assert_eq!(configured.config.nic_firmware_card_overrides, cards);
+        assert_eq!(configured.config.nic_firmware_card_selections, cards);
 
         for (scenario, removed_entry, error_context) in [
             ("machine pair", 0, "profile does not support machine"),
             (
                 "card pair",
                 1,
-                "card override for selector base GUID selected-card",
+                "card selection for selector base GUID selected-card",
             ),
         ] {
             let mut incompatible = config.clone();
@@ -1745,7 +1747,7 @@ mod tests {
                 "{scenario}"
             );
             assert_eq!(
-                stored_host.config.nic_firmware_card_overrides, cards,
+                stored_host.config.nic_firmware_card_selections, cards,
                 "{scenario}"
             );
             assert_eq!(stored_host.version, configured.version, "{scenario}");
@@ -1766,7 +1768,7 @@ mod tests {
             let mut inventory = observation(&original);
             inventory.devices[1].base_guid = Some("selected-card".into());
             inventory.devices[1].base_mac = Some("02:00:00:00:00:02".parse().unwrap());
-            let cards = [NicFirmwareCardOverride {
+            let cards = [NicFirmwareCardSelection {
                 selector: NicFirmwareCardSelector::Guid("selected-card".into()),
                 profile_id: id.clone(),
             }];
@@ -1779,7 +1781,7 @@ mod tests {
                     .unwrap(),
                 crate::ConditionalWrite::Applied(())
             );
-            set_machine_override(&mut txn, &host.id, None, Some(&cards), host.version)
+            set_machine_config(&mut txn, &host.id, None, Some(&cards), host.version)
                 .await
                 .unwrap();
             txn.commit().await.unwrap();
@@ -1838,7 +1840,7 @@ mod tests {
             let error = delete(&mut txn, &id, updated.version).await.unwrap_err();
             assert!(
                 matches!(error, DatabaseError::FailedPrecondition(ref reason)
-                    if reason.contains("card NIC firmware override")),
+                    if reason.contains("card NIC firmware selection")),
                 "{scenario}: {error:?}"
             );
             txn.rollback().await.unwrap();
@@ -1863,7 +1865,7 @@ mod tests {
                 "{scenario}"
             );
             assert_eq!(
-                stored_host.config.nic_firmware_card_overrides, cards,
+                stored_host.config.nic_firmware_card_selections, cards,
                 "{scenario}"
             );
             assert_eq!(stored_host.version, configured.version, "{scenario}");
@@ -1905,7 +1907,7 @@ mod tests {
             let host = create_host(&mut txn, index).await;
             let mut inventory = observation(&original);
             inventory.devices[1].base_guid = Some("second-card".into());
-            let cards = [NicFirmwareCardOverride {
+            let cards = [NicFirmwareCardSelection {
                 selector: NicFirmwareCardSelector::Guid("second-card".into()),
                 profile_id: id.clone(),
             }];
@@ -1921,7 +1923,7 @@ mod tests {
 
             let mut winner = pool.begin().await.unwrap();
             let expected_profile = if assign_first {
-                set_machine_override(
+                set_machine_config(
                     &mut winner,
                     &host.id,
                     machine_selection,
@@ -1952,7 +1954,7 @@ mod tests {
                         .await
                         .unwrap_err()
                 } else {
-                    set_machine_override(
+                    set_machine_config(
                         &mut txn,
                         &host.id,
                         machine_selection,
@@ -1996,8 +1998,8 @@ mod tests {
                 "{scenario}"
             );
             assert_eq!(
-                stored_host.config.nic_firmware_card_overrides,
-                expected_host.config.nic_firmware_card_overrides,
+                stored_host.config.nic_firmware_card_selections,
+                expected_host.config.nic_firmware_card_selections,
                 "{scenario}"
             );
             assert_eq!(stored_host.version, expected_host.version, "{scenario}");
@@ -2074,7 +2076,7 @@ mod tests {
                             "{drift}"
                         );
                         assert_eq!(
-                            persisted_host.config.nic_firmware_card_overrides, cards,
+                            persisted_host.config.nic_firmware_card_selections, cards,
                             "{drift}"
                         );
                         assert_eq!(persisted_host.version, stored_host.version, "{drift}");
@@ -2087,7 +2089,7 @@ mod tests {
                         let mut txn = pool.begin().await.unwrap();
                         let error = delete(&mut txn, &id, profile_version).await.unwrap_err();
                         assert!(
-                            matches!(error, DatabaseError::FailedPrecondition(ref reason) if reason.contains("card NIC firmware override")),
+                            matches!(error, DatabaseError::FailedPrecondition(ref reason) if reason.contains("card NIC firmware selection")),
                             "{drift}: {error:?}"
                         );
                         txn.rollback().await.unwrap();
@@ -2112,7 +2114,7 @@ mod tests {
                     .unwrap(),
                     crate::ConditionalWrite::Applied(())
                 );
-                set_machine_override(&mut txn, &host.id, None, Some(&[]), stored_host.version)
+                set_machine_config(&mut txn, &host.id, None, Some(&[]), stored_host.version)
                     .await
                     .unwrap();
                 delete(&mut txn, &id, profile_version).await.unwrap();
@@ -2130,9 +2132,7 @@ mod tests {
     // A populated upgrade must preserve existing hosts, then enforce the same
     // profile reference used by assignment and deletion in production.
     #[crate::sqlx_test]
-    async fn machine_override_migration_preserves_hosts_and_enforces_references(
-        pool: sqlx::PgPool,
-    ) {
+    async fn machine_profile_migration_preserves_hosts_and_enforces_references(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.unwrap();
         // The harness applies all migrations. Remove only this migration's
         // column to restore its predecessor before populating the host.
@@ -2164,7 +2164,7 @@ mod tests {
         let mut expected = before;
         expected["nic_firmware_profile_id"] = serde_json::Value::Null;
         assert_eq!(after, expected);
-        set_machine_override(&mut txn, &host.id, Some(&id), None, host.version)
+        set_machine_config(&mut txn, &host.id, Some(&id), None, host.version)
             .await
             .unwrap();
         let stored = crate::machine::find_one(&mut *txn, &host.id, Default::default())
@@ -2193,10 +2193,10 @@ mod tests {
         txn.rollback().await.unwrap();
     }
 
-    // Existing intent survives the additive migration. The new child rows must
-    // enforce references and follow the host's rename and deletion lifecycle.
+    /// Existing intent survives the additive migration.
+    /// Card rows still enforce references and follow the host's lifecycle.
     #[crate::sqlx_test]
-    async fn card_override_migration_preserves_intent_and_enforces_references(pool: sqlx::PgPool) {
+    async fn card_selection_migration_preserves_intent_and_enforces_references(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.unwrap();
         let id: NicFirmwareProfileId = "existing".parse().unwrap();
         let config = profile_config();
@@ -2210,7 +2210,7 @@ mod tests {
                 .unwrap(),
             crate::ConditionalWrite::Applied(())
         );
-        set_machine_override(&mut txn, &host.id, Some(&id), None, host.version)
+        set_machine_config(&mut txn, &host.id, Some(&id), None, host.version)
             .await
             .unwrap();
         let before = crate::machine::find_one(&mut *txn, &host.id, Default::default())
@@ -2224,7 +2224,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        // `set_machine_override` and `find_one` read the child aggregate, so
+        // `set_machine_config` and `find_one` read the child aggregate, so
         // finish preparing the fixture before removing that table.
         sqlx::query("DROP TABLE machine_nic_firmware_overrides")
             .execute(&mut *txn)
@@ -2248,14 +2248,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(after.config.nic_firmware_profile_id, Some(id.clone()));
-        assert!(after.config.nic_firmware_card_overrides.is_empty());
+        assert!(after.config.nic_firmware_card_selections.is_empty());
         assert_eq!(after.version, before.version);
 
-        let cards = [NicFirmwareCardOverride {
+        let cards = [NicFirmwareCardSelection {
             selector: NicFirmwareCardSelector::Guid("existing-card".into()),
             profile_id: id.clone(),
         }];
-        set_machine_override(&mut txn, &host.id, None, Some(&cards), after.version)
+        set_machine_config(&mut txn, &host.id, None, Some(&cards), after.version)
             .await
             .unwrap();
         txn.commit().await.unwrap();
@@ -2310,7 +2310,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(renamed.config.nic_firmware_card_overrides, cards);
+        assert_eq!(renamed.config.nic_firmware_card_selections, cards);
         sqlx::query("DELETE FROM machines WHERE id = $1")
             .bind(missing_host)
             .execute(&mut *txn)
@@ -2434,7 +2434,7 @@ mod tests {
     }
 
     #[crate::sqlx_test]
-    async fn concurrent_site_default_writes_preserve_the_winner(pool: sqlx::PgPool) {
+    async fn concurrent_site_selection_writes_preserve_the_winner(pool: sqlx::PgPool) {
         for (scenario, clear, check_error) in [
             (
                 "replace",
@@ -2465,20 +2465,20 @@ mod tests {
             for id in [&profile_a, &profile_b] {
                 create(&mut txn, id, &config).await.unwrap();
             }
-            let created = set_site_default(&mut txn, &hardware, &profile_a, None)
+            let created = set_site_selection(&mut txn, &hardware, &profile_a, None)
                 .await
                 .unwrap();
             txn.commit().await.unwrap();
 
             let mut winner = pool.begin().await.unwrap();
             let expected = if clear {
-                clear_site_default(&mut winner, &hardware, created.version)
+                clear_site_selection(&mut winner, &hardware, created.version)
                     .await
                     .unwrap();
                 None
             } else {
                 let updated =
-                    set_site_default(&mut winner, &hardware, &profile_b, Some(created.version))
+                    set_site_selection(&mut winner, &hardware, &profile_b, Some(created.version))
                         .await
                         .unwrap();
                 assert_eq!(
@@ -2494,7 +2494,7 @@ mod tests {
             let competing_update = async {
                 let mut txn = pool.begin().await.unwrap();
                 let error =
-                    set_site_default(&mut txn, &hardware, &profile_a, Some(created.version))
+                    set_site_selection(&mut txn, &hardware, &profile_a, Some(created.version))
                         .await
                         .unwrap_err();
                 txn.rollback().await.unwrap();
@@ -2508,17 +2508,21 @@ mod tests {
             let (error, ()) = tokio::join!(competing_update, release_winner);
             check_error(&error);
 
-            let bindings = find_site_defaults_by_ids(&pool, std::slice::from_ref(&hardware))
+            let selections = find_site_selections_by_ids(&pool, std::slice::from_ref(&hardware))
                 .await
                 .unwrap();
             assert_eq!(
-                bindings
+                selections
                     .iter()
-                    .map(|binding| (&binding.hardware, &binding.profile_id, binding.version))
+                    .map(|selection| (
+                        &selection.hardware,
+                        &selection.profile_id,
+                        selection.version
+                    ))
                     .collect::<Vec<_>>(),
                 expected
                     .iter()
-                    .map(|binding| (&hardware, &profile_b, binding.version))
+                    .map(|selection| (&hardware, &profile_b, selection.version))
                     .collect::<Vec<_>>(),
                 "{scenario}"
             );
@@ -2526,7 +2530,7 @@ mod tests {
     }
 
     #[crate::sqlx_test]
-    async fn clear_site_default_survives_an_incompatible_profile_write(pool: sqlx::PgPool) {
+    async fn clear_site_selection_survives_an_incompatible_profile_write(pool: sqlx::PgPool) {
         let id: NicFirmwareProfileId = "profile".parse().unwrap();
         let config = profile_config();
         let hardware = NicFirmwareHardware {
@@ -2535,7 +2539,7 @@ mod tests {
         };
         let mut txn = pool.begin().await.unwrap();
         let profile = create(&mut txn, &id, &config).await.unwrap();
-        let binding = set_site_default(&mut txn, &hardware, &id, None)
+        let selection = set_site_selection(&mut txn, &hardware, &id, None)
             .await
             .unwrap();
         let mut incompatible = config;
@@ -2555,18 +2559,18 @@ mod tests {
         txn.commit().await.unwrap();
 
         let mut txn = pool.begin().await.unwrap();
-        clear_site_default(&mut txn, &hardware, binding.version)
+        clear_site_selection(&mut txn, &hardware, selection.version)
             .await
             .unwrap();
         txn.commit().await.unwrap();
-        assert!(find_site_defaults(&pool).await.unwrap().is_empty());
+        assert!(find_site_selections(&pool).await.unwrap().is_empty());
         let stored = find_by_ids(&pool, &[id]).await.unwrap().pop().unwrap();
         assert_eq!(stored.config, incompatible);
         assert_eq!(stored.version, profile_version);
     }
 
     #[crate::sqlx_test]
-    async fn site_default_serializes_profile_edits_and_deletion(pool: sqlx::PgPool) {
+    async fn site_selection_serializes_profile_edits_and_deletion(pool: sqlx::PgPool) {
         for (scenario, delete_profile, bind_first) in [
             ("bind_before_edit", false, true),
             ("edit_before_bind", false, false),
@@ -2583,7 +2587,7 @@ mod tests {
             original.entries[0].firmware.psid = hardware.psid.clone();
             let mut replacement = original.clone();
             if bind_first && !delete_profile {
-                // Retain the first referenced pair so checking only one binding
+                // Retain the first referenced pair so checking only one selection
                 // would miss the second pair removed by this replacement.
                 let mut removed_entry = original.entries[0].clone();
                 removed_entry.firmware.psid = format!("{scenario}_removed");
@@ -2595,15 +2599,15 @@ mod tests {
             let profile = create(&mut txn, &id, &original).await.unwrap();
             txn.commit().await.unwrap();
             let mut winner = pool.begin().await.unwrap();
-            let mut expected_bindings = Vec::new();
+            let mut expected_selections = Vec::new();
             let expected_profile = if bind_first {
                 for entry in &original.entries {
                     let hardware = NicFirmwareHardware {
                         part_number: entry.firmware.part_number.clone(),
                         psid: entry.firmware.psid.clone(),
                     };
-                    expected_bindings.push(
-                        set_site_default(&mut winner, &hardware, &id, None)
+                    expected_selections.push(
+                        set_site_selection(&mut winner, &hardware, &id, None)
                             .await
                             .unwrap(),
                     );
@@ -2626,7 +2630,7 @@ mod tests {
             let loser = async {
                 let mut txn = pool.begin().await.unwrap();
                 let result = if !bind_first {
-                    set_site_default(&mut txn, &hardware, &id, None)
+                    set_site_selection(&mut txn, &hardware, &id, None)
                         .await
                         .map(|_| ())
                 } else if delete_profile {
@@ -2676,16 +2680,20 @@ mod tests {
                     .map(|profile| (&profile.config, profile.version)),
                 "{scenario}"
             );
-            let bindings: Vec<_> = find_site_defaults(&pool)
+            let selections: Vec<_> = find_site_selections(&pool)
                 .await
                 .unwrap()
                 .into_iter()
-                .filter(|binding| binding.profile_id == id)
+                .filter(|selection| selection.profile_id == id)
                 .collect();
-            assert_eq!(bindings.len(), expected_bindings.len(), "{scenario}");
-            for (binding, expected) in bindings.iter().zip(&expected_bindings) {
+            assert_eq!(selections.len(), expected_selections.len(), "{scenario}");
+            for (selection, expected) in selections.iter().zip(&expected_selections) {
                 assert_eq!(
-                    (&binding.hardware, &binding.profile_id, binding.version),
+                    (
+                        &selection.hardware,
+                        &selection.profile_id,
+                        selection.version
+                    ),
                     (&expected.hardware, &expected.profile_id, expected.version),
                     "{scenario}"
                 );
@@ -2693,9 +2701,9 @@ mod tests {
             if bind_first && !delete_profile {
                 // Removing the second assignment makes that pair removable from
                 // the profile, while the first assignment stays valid.
-                let removed = &expected_bindings[1];
+                let removed = &expected_selections[1];
                 let mut txn = pool.begin().await.unwrap();
-                clear_site_default(&mut txn, &removed.hardware, removed.version)
+                clear_site_selection(&mut txn, &removed.hardware, removed.version)
                     .await
                     .unwrap();
                 let updated = update(&mut txn, &id, &replacement, profile.version)
@@ -2724,18 +2732,19 @@ mod tests {
                     .unwrap();
                 assert_eq!(stored.config, replacement);
                 assert_eq!(stored.version, updated.version);
-                let bindings = find_site_defaults_by_ids(&pool, std::slice::from_ref(&hardware))
-                    .await
-                    .unwrap();
-                assert_eq!(bindings.len(), 1);
-                assert_eq!(bindings[0].profile_id, id);
-                assert_eq!(bindings[0].version, expected_bindings[0].version);
+                let selections =
+                    find_site_selections_by_ids(&pool, std::slice::from_ref(&hardware))
+                        .await
+                        .unwrap();
+                assert_eq!(selections.len(), 1);
+                assert_eq!(selections[0].profile_id, id);
+                assert_eq!(selections[0].version, expected_selections[0].version);
             }
         }
     }
 
     #[crate::sqlx_test]
-    async fn site_default_reads_filter_and_order_exact_hardware_pairs(pool: sqlx::PgPool) {
+    async fn site_selection_reads_filter_and_order_exact_hardware_pairs(pool: sqlx::PgPool) {
         let hardware = [
             NicFirmwareHardware {
                 part_number: "PN_A".into(),
@@ -2775,7 +2784,7 @@ mod tests {
             (&hardware[0], &profile_a),
         ] {
             created.push(
-                set_site_default(&mut txn, hardware, id, None)
+                set_site_selection(&mut txn, hardware, id, None)
                     .await
                     .unwrap(),
             );
@@ -2788,15 +2797,15 @@ mod tests {
             ("unknown profile", Some(&missing_profile), &[]),
         ] {
             assert_eq!(
-                find_site_default_ids(&pool, profile_id).await.unwrap(),
+                find_site_selection_ids(&pool, profile_id).await.unwrap(),
                 expected,
                 "{scenario}"
             );
         }
-        let all = find_site_defaults(&pool).await.unwrap();
+        let all = find_site_selections(&pool).await.unwrap();
         assert_eq!(
             all.iter()
-                .map(|binding| &binding.hardware)
+                .map(|selection| &selection.hardware)
                 .collect::<Vec<_>>(),
             hardware.iter().collect::<Vec<_>>()
         );
@@ -2817,28 +2826,34 @@ mod tests {
             ),
             ("empty selection", vec![], &[]),
         ] {
-            let bindings = find_site_defaults_by_ids(&pool, &requested).await.unwrap();
+            let selections = find_site_selections_by_ids(&pool, &requested)
+                .await
+                .unwrap();
             assert_eq!(
-                bindings
+                selections
                     .iter()
-                    .map(|binding| &binding.hardware)
+                    .map(|selection| &selection.hardware)
                     .collect::<Vec<_>>(),
                 expected.iter().collect::<Vec<_>>(),
                 "{scenario}"
             );
-            for binding in bindings {
+            for selection in selections {
                 let original = created
                     .iter()
-                    .find(|original| original.hardware == binding.hardware)
+                    .find(|original| original.hardware == selection.hardware)
                     .unwrap();
-                assert_eq!(binding.profile_id, original.profile_id, "{scenario}");
-                assert_eq!(binding.version, original.version, "{scenario}");
+                assert_eq!(selection.profile_id, original.profile_id, "{scenario}");
+                assert_eq!(selection.version, original.version, "{scenario}");
             }
         }
     }
 
+    /// The site-table migration preserves catalog data and enforces its profile
+    /// FK through the production selection read and write paths.
     #[crate::sqlx_test]
-    async fn site_default_migration_preserves_profiles_and_enforces_references(pool: sqlx::PgPool) {
+    async fn site_selection_migration_preserves_profiles_and_enforces_references(
+        pool: sqlx::PgPool,
+    ) {
         let mut txn = pool.begin().await.unwrap();
         // Recreate only the predecessor tables in a private schema, with a real
         // catalog row present before applying the migration being tested.
@@ -2864,11 +2879,16 @@ mod tests {
             part_number: profile.config.entries[0].firmware.part_number.clone(),
             psid: profile.config.entries[0].firmware.psid.clone(),
         };
-        let binding = set_site_default(&mut txn, &hardware, &id, None)
+        let selection = set_site_selection(&mut txn, &hardware, &id, None)
             .await
             .unwrap();
-        let rows = find_site_defaults(&mut *txn).await.unwrap();
-        assert_eq!(rows[0].version, binding.version);
+        let rows = find_site_selections(&mut *txn).await.unwrap();
+        // Logical selection names must still read the complete row stored by
+        // the unchanged predecessor schema.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].hardware, hardware);
+        assert_eq!(rows[0].profile_id, id);
+        assert_eq!(rows[0].version, selection.version);
         let stored = find_by_ids(&mut *txn, std::slice::from_ref(&id))
             .await
             .unwrap()
@@ -2881,11 +2901,12 @@ mod tests {
             .execute(&mut *txn)
             .await
             .unwrap_err();
-        assert!(
-            error
-                .as_database_error()
-                .unwrap()
-                .is_foreign_key_violation()
+        let error = error.as_database_error().unwrap();
+        assert!(error.is_foreign_key_violation());
+        // Profile deletion classifies this existing constraint by its physical name.
+        assert_eq!(
+            error.constraint(),
+            Some("nic_firmware_site_defaults_profile_id_fkey")
         );
         txn.rollback().await.unwrap();
     }

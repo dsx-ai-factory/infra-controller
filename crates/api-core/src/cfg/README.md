@@ -97,7 +97,7 @@ behavior.
 | `host_models` | `HashMap<String, Firmware>` | `{}` | `machines` | Maps host model identifiers to firmware definitions. |
 | `firmware_global` | `FirmwareGlobal` | *(see below)* | `machines` | Global firmware update settings (see [FirmwareGlobal](#firmwareglobal)). |
 | `machine_updater` | `MachineUpdater` | *(see below)* | `machines` | Machine update policies (see [MachineUpdater](#machineupdater)). |
-| `max_find_by_ids` | `u32` | `100` | `server` | Max IDs accepted by `find_*_by_ids` APIs. |
+| `max_find_by_ids` | `u32` | `100` | `server` | Maximum number of IDs accepted by `find_*_by_ids` APIs and card selections accepted by `SetMachineNicFirmwareConfig`. |
 | `network_security_group` | `NetworkSecurityGroupConfig` | *(see below)* | `networking` | NSG settings (see [NetworkSecurityGroupConfig](#networksecuritygroupconfig)). |
 | `min_dpu_functioning_links` | `Option<u32>` | unset (effective value `2`) | `machines` | Controls DPU ToR BGP health checks. Refer to [DPU ToR Uplink Health](../../../../docs/dpu-management/dpu_configuration.md#dpu-tor-uplink-health) for values and lifecycle effects. |
 | `host_health` | `HostHealthConfig` | *(default)* | `machines` | Host health monitoring thresholds for hardware health and DPU agent compliance. |
@@ -862,24 +862,24 @@ BF4 Astra follows the same topology-backed PF/VF inventory and instance-admissio
 Intercept topology is site-wide. NICo supplies the same configured PF/VF inventory to every enabled deployment profile. When the namespace is already deployment-scoped, the first topology-backed startup automatically removes only the historical scoped PF/VF ServiceInterfaces for the fixed-xplane profile. Other scoped profiles require manual cleanup. A separate change from unscoped to scoped mode removes every unscoped ServiceInterface automatically, so follow the procedure below with all replicas stopped rather than overlapping the two migrations. This transition is not safe as an ordinary rolling upgrade because DPF resources are applied during startup: an old-version replica that initializes while cleanup is in progress can reapply topology-free interfaces after the new replica deletes them.
 
 1. Configure the incoming release with `dpf.dpu_service_sync_enabled=false`, prevent new allocations on every affected DPF host, and drain affected tenant workloads.
-1. Stop every old NICo API replica.
-1. Delete the topology-free PF/VF ServiceInterfaces for each affected BF3, BF3 GB200, and generic BF4 profile, and wait for DPF to finish deletion. In scoped mode, delete `pf0hpf-{suffix}`, `pf0vf{vf}-{suffix}`, and `pf1hpf-{suffix}` when present, where `{suffix}` is `bf3`, `bf3gb200`, or `bf4`. In unscoped mode, omit the suffix. Do not delete `p0` or `p1`.
-1. Start one new replica with the intercept topology configured. When BF4 Astra is configured, startup deletes only `pf0hpf-astra`, `pf1hpf-astra`, and `pf0vf0-astra` through `pf0vf13-astra`, waits for DPF to finish deletion, and then applies the topology-backed PF/VF ServiceInterfaces. It retains scoped `p0` and `p1`, fixed Astra CX/xplane Patch interfaces, and immutable historical `DPUFlavorTemplate` resources.
-1. If deletion remains incomplete for ten minutes, inspect DPUServiceInterface deletion and finalizer status. NICo logs an operator error and continues waiting in the same startup attempt. It does not apply replacement interfaces early.
-1. Re-ingest every affected DPU and verify its flavor or flavor template, ServiceInterfaces, mandatory services, and Ready state.
-1. Scale the new release, restore `dpf.dpu_service_sync_enabled=true`, restart NICo to load that setting, and resume allocations.
+2. Stop every old NICo API replica.
+3. Delete the topology-free PF/VF ServiceInterfaces for each affected BF3, BF3 GB200, and generic BF4 profile, and wait for DPF to finish deletion. In scoped mode, delete `pf0hpf-{suffix}`, `pf0vf{vf}-{suffix}`, and `pf1hpf-{suffix}` when present, where `{suffix}` is `bf3`, `bf3gb200`, or `bf4`. In unscoped mode, omit the suffix. Do not delete `p0` or `p1`.
+4. Start one new replica with the intercept topology configured. When BF4 Astra is configured, startup deletes only `pf0hpf-astra`, `pf1hpf-astra`, and `pf0vf0-astra` through `pf0vf13-astra`, waits for DPF to finish deletion, and then applies the topology-backed PF/VF ServiceInterfaces. It retains scoped `p0` and `p1`, fixed Astra CX/xplane Patch interfaces, and immutable historical `DPUFlavorTemplate` resources.
+5. If deletion remains incomplete for ten minutes, inspect DPUServiceInterface deletion and finalizer status. NICo logs an operator error and continues waiting in the same startup attempt. It does not apply replacement interfaces early.
+6. Re-ingest every affected DPU and verify its flavor or flavor template, ServiceInterfaces, mandatory services, and Ready state.
+7. Scale the new release, restore `dpf.dpu_service_sync_enabled=true`, restart NICo to load that setting, and resume allocations.
 
 ### Reversing or Changing Intercept Topology
 
 Reverse and subsequent topology changes are site-wide, manual operations that require the same safety envelope as initial enablement.
 
 1. Configure the incoming release with `dpf.dpu_service_sync_enabled=false`, prevent new allocations on every affected DPF host, and drain tenant workloads.
-1. Stop every NICo API replica.
-1. Delete the current topology-specific ServiceInterfaces for every affected profile and wait for DPF to finish deletion. In scoped mode, delete `c{controller}pf{pf}-{suffix}` and `c{controller}pf{pf}vf{vf}-{suffix}`, where `{suffix}` is `bf3`, `bf3gb200`, `bf4`, or `astra`. In unscoped mode, omit the suffix. Do not delete `p0`, `p1`, or fixed Astra CX/xplane Patch interfaces.
-1. To return to topology-free mode, remove the entire effective parent configuration block that contains `allow_instance_vf`, `hbn_reps`, and `bridging` from every merged configuration file and environment-variable override. Removing only `bridging` or its interface map leaves a configured empty topology and causes startup validation to fail. To change the topology, configure the complete replacement instead.
-1. Start one new replica.
-1. Re-ingest each affected DPU and verify its flavor or flavor template, ServiceInterfaces, mandatory services, and Ready state.
-1. Scale the new release, restore `dpf.dpu_service_sync_enabled=true`, restart NICo to load that setting, and resume allocations.
+2. Stop every NICo API replica.
+3. Delete the current topology-specific ServiceInterfaces for every affected profile and wait for DPF to finish deletion. In scoped mode, delete `c{controller}pf{pf}-{suffix}` and `c{controller}pf{pf}vf{vf}-{suffix}`, where `{suffix}` is `bf3`, `bf3gb200`, `bf4`, or `astra`. In unscoped mode, omit the suffix. Do not delete `p0`, `p1`, or fixed Astra CX/xplane Patch interfaces.
+4. To return to topology-free mode, remove the entire effective parent configuration block that contains `allow_instance_vf`, `hbn_reps`, and `bridging` from every merged configuration file and environment-variable override. Removing only `bridging` or its interface map leaves a configured empty topology and causes startup validation to fail. To change the topology, configure the complete replacement instead.
+5. Start one new replica.
+6. Re-ingest each affected DPU and verify its flavor or flavor template, ServiceInterfaces, mandatory services, and Ready state.
+7. Scale the new release, restore `dpf.dpu_service_sync_enabled=true`, restart NICo to load that setting, and resume allocations.
 
 For a DPF-managed host with no configured intercept topology, BF3 and generic BF4 derive their inventory from the established static VF0–VF13 layout but omit every VF whose ID is greater than or equal to `dpu_config.num_of_vfs`. At the default value of 16, the full VF0–VF13 inventory and its VF0–VF7 DHCP subset remain. These profiles retain historical boolean-only instance admission in this mode. Their `pf_total_sf_reserved` value is the complete `PF_TOTAL_SF` pool and defaults to `30`. Their managed endpoints and all service-VPC and additional SF reservations must fit inside it, subject to the [deployment capacity limits](#dpuconfig). BF3 GB200 performs the same capacity validation but always emits `PF_TOTAL_SF=128`. Topology-free Astra does not use `dpu_config.num_of_vfs` to filter its inventory and retains the complete VF0–VF13 static inventory for provisioning and admission. It derives `PF_TOTAL_SF=40` from 28 service endpoints, eight Weave DHCP Agent SFs, and four headroom SFs. Reconciling these DPF inventory and DHCP surfaces would change existing ServiceInterfaces and the hashed DPUFlavor or DPUFlavorTemplate, so other inventory transitions require controlled cleanup and DPU re-ingestion.
 

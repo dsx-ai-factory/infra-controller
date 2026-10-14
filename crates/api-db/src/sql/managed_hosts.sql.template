@@ -23,7 +23,7 @@ SELECT m.* FROM (
     INNER JOIN LATERAL (
         SELECT
         m2.*,
-        COALESCE(nic_firmware.json, '[]') AS nic_firmware_card_overrides,
+        COALESCE(nic_firmware.json, '[]') AS nic_firmware_card_selections,
         boot_interface.desired_mac_address AS desired_boot_interface_mac,
         boot_interface.desired_interface_id AS desired_boot_interface_id,
         boot_interface.desired_version AS desired_boot_interface_version,

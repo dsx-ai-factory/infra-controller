@@ -413,10 +413,10 @@ const (
 	Forge_FindNicFirmwareProfilesByIds_FullMethodName                       = "/forge.Forge/FindNicFirmwareProfilesByIds"
 	Forge_UpdateNicFirmwareProfile_FullMethodName                           = "/forge.Forge/UpdateNicFirmwareProfile"
 	Forge_DeleteNicFirmwareProfile_FullMethodName                           = "/forge.Forge/DeleteNicFirmwareProfile"
-	Forge_SetNicFirmwareSiteDefault_FullMethodName                          = "/forge.Forge/SetNicFirmwareSiteDefault"
-	Forge_FindNicFirmwareSiteDefaultIds_FullMethodName                      = "/forge.Forge/FindNicFirmwareSiteDefaultIds"
-	Forge_FindNicFirmwareSiteDefaultsByIds_FullMethodName                   = "/forge.Forge/FindNicFirmwareSiteDefaultsByIds"
-	Forge_SetMachineNicFirmwareOverride_FullMethodName                      = "/forge.Forge/SetMachineNicFirmwareOverride"
+	Forge_SetNicFirmwareSiteSelection_FullMethodName                        = "/forge.Forge/SetNicFirmwareSiteSelection"
+	Forge_FindNicFirmwareSiteSelectionIds_FullMethodName                    = "/forge.Forge/FindNicFirmwareSiteSelectionIds"
+	Forge_FindNicFirmwareSiteSelectionsByIds_FullMethodName                 = "/forge.Forge/FindNicFirmwareSiteSelectionsByIds"
+	Forge_SetMachineNicFirmwareConfig_FullMethodName                        = "/forge.Forge/SetMachineNicFirmwareConfig"
 	Forge_GetDesiredNicFirmware_FullMethodName                              = "/forge.Forge/GetDesiredNicFirmware"
 	Forge_CreateSku_FullMethodName                                          = "/forge.Forge/CreateSku"
 	Forge_GenerateSkuFromMachine_FullMethodName                             = "/forge.Forge/GenerateSkuFromMachine"
@@ -1289,21 +1289,23 @@ type ForgeClient interface {
 	GetDesiredFirmwareVersions(ctx context.Context, in *GetDesiredFirmwareVersionsRequest, opts ...grpc.CallOption) (*GetDesiredFirmwareVersionsResponse, error)
 	UpsertHostFirmwareConfig(ctx context.Context, in *UpsertHostFirmwareConfigRequest, opts ...grpc.CallOption) (*HostFirmwareConfigResponse, error)
 	DeleteHostFirmwareConfig(ctx context.Context, in *DeleteHostFirmwareConfigRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Operator-only NIC firmware profiles, site defaults, machine overrides and desired firmware.
+	// Operator-only NIC firmware profiles, scoped selections and desired firmware.
 	// These methods do not update devices or change machine readiness.
+	// NIC firmware selections require matching v2.4 Core and client schemas,
+	// including clients that read MachineConfig or GetDesiredNicFirmware responses.
 	CreateNicFirmwareProfile(ctx context.Context, in *CreateNicFirmwareProfileRequest, opts ...grpc.CallOption) (*NicFirmwareProfileResponse, error)
 	FindNicFirmwareProfileIds(ctx context.Context, in *FindNicFirmwareProfileIdsRequest, opts ...grpc.CallOption) (*FindNicFirmwareProfileIdsResponse, error)
 	FindNicFirmwareProfilesByIds(ctx context.Context, in *FindNicFirmwareProfilesByIdsRequest, opts ...grpc.CallOption) (*FindNicFirmwareProfilesByIdsResponse, error)
 	UpdateNicFirmwareProfile(ctx context.Context, in *UpdateNicFirmwareProfileRequest, opts ...grpc.CallOption) (*NicFirmwareProfileResponse, error)
 	DeleteNicFirmwareProfile(ctx context.Context, in *DeleteNicFirmwareProfileRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Select or clear the site default for an exact hardware pair.
-	SetNicFirmwareSiteDefault(ctx context.Context, in *SetNicFirmwareSiteDefaultRequest, opts ...grpc.CallOption) (*NicFirmwareSiteDefaultResponse, error)
-	// List hardware keys for all defaults or those selecting one profile.
-	FindNicFirmwareSiteDefaultIds(ctx context.Context, in *NicFirmwareSiteDefaultSearchFilter, opts ...grpc.CallOption) (*FindNicFirmwareSiteDefaultIdsResponse, error)
+	// Select or clear the site profile for an exact hardware pair.
+	SetNicFirmwareSiteSelection(ctx context.Context, in *SetNicFirmwareSiteSelectionRequest, opts ...grpc.CallOption) (*NicFirmwareSiteSelectionResponse, error)
+	// List hardware keys for all site selections or those selecting one profile.
+	FindNicFirmwareSiteSelectionIds(ctx context.Context, in *NicFirmwareSiteSelectionSearchFilter, opts ...grpc.CallOption) (*FindNicFirmwareSiteSelectionIdsResponse, error)
 	// Retrieve existing assignments for a bounded batch of hardware keys.
-	FindNicFirmwareSiteDefaultsByIds(ctx context.Context, in *FindNicFirmwareSiteDefaultsByIdsRequest, opts ...grpc.CallOption) (*FindNicFirmwareSiteDefaultsByIdsResponse, error)
+	FindNicFirmwareSiteSelectionsByIds(ctx context.Context, in *FindNicFirmwareSiteSelectionsByIdsRequest, opts ...grpc.CallOption) (*FindNicFirmwareSiteSelectionsByIdsResponse, error)
 	// Set or clear the operator's machine and card selections using Machine.version.
-	SetMachineNicFirmwareOverride(ctx context.Context, in *SetMachineNicFirmwareOverrideRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	SetMachineNicFirmwareConfig(ctx context.Context, in *SetMachineNicFirmwareConfigRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Get desired firmware for each device using stored host observations.
 	GetDesiredNicFirmware(ctx context.Context, in *GetDesiredNicFirmwareRequest, opts ...grpc.CallOption) (*GetDesiredNicFirmwareResponse, error)
 	// Create A SKU to be assigned to a machine so the machine hardware can be validated.
@@ -5510,40 +5512,40 @@ func (c *forgeClient) DeleteNicFirmwareProfile(ctx context.Context, in *DeleteNi
 	return out, nil
 }
 
-func (c *forgeClient) SetNicFirmwareSiteDefault(ctx context.Context, in *SetNicFirmwareSiteDefaultRequest, opts ...grpc.CallOption) (*NicFirmwareSiteDefaultResponse, error) {
+func (c *forgeClient) SetNicFirmwareSiteSelection(ctx context.Context, in *SetNicFirmwareSiteSelectionRequest, opts ...grpc.CallOption) (*NicFirmwareSiteSelectionResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(NicFirmwareSiteDefaultResponse)
-	err := c.cc.Invoke(ctx, Forge_SetNicFirmwareSiteDefault_FullMethodName, in, out, cOpts...)
+	out := new(NicFirmwareSiteSelectionResponse)
+	err := c.cc.Invoke(ctx, Forge_SetNicFirmwareSiteSelection_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *forgeClient) FindNicFirmwareSiteDefaultIds(ctx context.Context, in *NicFirmwareSiteDefaultSearchFilter, opts ...grpc.CallOption) (*FindNicFirmwareSiteDefaultIdsResponse, error) {
+func (c *forgeClient) FindNicFirmwareSiteSelectionIds(ctx context.Context, in *NicFirmwareSiteSelectionSearchFilter, opts ...grpc.CallOption) (*FindNicFirmwareSiteSelectionIdsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(FindNicFirmwareSiteDefaultIdsResponse)
-	err := c.cc.Invoke(ctx, Forge_FindNicFirmwareSiteDefaultIds_FullMethodName, in, out, cOpts...)
+	out := new(FindNicFirmwareSiteSelectionIdsResponse)
+	err := c.cc.Invoke(ctx, Forge_FindNicFirmwareSiteSelectionIds_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *forgeClient) FindNicFirmwareSiteDefaultsByIds(ctx context.Context, in *FindNicFirmwareSiteDefaultsByIdsRequest, opts ...grpc.CallOption) (*FindNicFirmwareSiteDefaultsByIdsResponse, error) {
+func (c *forgeClient) FindNicFirmwareSiteSelectionsByIds(ctx context.Context, in *FindNicFirmwareSiteSelectionsByIdsRequest, opts ...grpc.CallOption) (*FindNicFirmwareSiteSelectionsByIdsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(FindNicFirmwareSiteDefaultsByIdsResponse)
-	err := c.cc.Invoke(ctx, Forge_FindNicFirmwareSiteDefaultsByIds_FullMethodName, in, out, cOpts...)
+	out := new(FindNicFirmwareSiteSelectionsByIdsResponse)
+	err := c.cc.Invoke(ctx, Forge_FindNicFirmwareSiteSelectionsByIds_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *forgeClient) SetMachineNicFirmwareOverride(ctx context.Context, in *SetMachineNicFirmwareOverrideRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *forgeClient) SetMachineNicFirmwareConfig(ctx context.Context, in *SetMachineNicFirmwareConfigRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, Forge_SetMachineNicFirmwareOverride_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Forge_SetMachineNicFirmwareConfig_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7692,21 +7694,23 @@ type ForgeServer interface {
 	GetDesiredFirmwareVersions(context.Context, *GetDesiredFirmwareVersionsRequest) (*GetDesiredFirmwareVersionsResponse, error)
 	UpsertHostFirmwareConfig(context.Context, *UpsertHostFirmwareConfigRequest) (*HostFirmwareConfigResponse, error)
 	DeleteHostFirmwareConfig(context.Context, *DeleteHostFirmwareConfigRequest) (*emptypb.Empty, error)
-	// Operator-only NIC firmware profiles, site defaults, machine overrides and desired firmware.
+	// Operator-only NIC firmware profiles, scoped selections and desired firmware.
 	// These methods do not update devices or change machine readiness.
+	// NIC firmware selections require matching v2.4 Core and client schemas,
+	// including clients that read MachineConfig or GetDesiredNicFirmware responses.
 	CreateNicFirmwareProfile(context.Context, *CreateNicFirmwareProfileRequest) (*NicFirmwareProfileResponse, error)
 	FindNicFirmwareProfileIds(context.Context, *FindNicFirmwareProfileIdsRequest) (*FindNicFirmwareProfileIdsResponse, error)
 	FindNicFirmwareProfilesByIds(context.Context, *FindNicFirmwareProfilesByIdsRequest) (*FindNicFirmwareProfilesByIdsResponse, error)
 	UpdateNicFirmwareProfile(context.Context, *UpdateNicFirmwareProfileRequest) (*NicFirmwareProfileResponse, error)
 	DeleteNicFirmwareProfile(context.Context, *DeleteNicFirmwareProfileRequest) (*emptypb.Empty, error)
-	// Select or clear the site default for an exact hardware pair.
-	SetNicFirmwareSiteDefault(context.Context, *SetNicFirmwareSiteDefaultRequest) (*NicFirmwareSiteDefaultResponse, error)
-	// List hardware keys for all defaults or those selecting one profile.
-	FindNicFirmwareSiteDefaultIds(context.Context, *NicFirmwareSiteDefaultSearchFilter) (*FindNicFirmwareSiteDefaultIdsResponse, error)
+	// Select or clear the site profile for an exact hardware pair.
+	SetNicFirmwareSiteSelection(context.Context, *SetNicFirmwareSiteSelectionRequest) (*NicFirmwareSiteSelectionResponse, error)
+	// List hardware keys for all site selections or those selecting one profile.
+	FindNicFirmwareSiteSelectionIds(context.Context, *NicFirmwareSiteSelectionSearchFilter) (*FindNicFirmwareSiteSelectionIdsResponse, error)
 	// Retrieve existing assignments for a bounded batch of hardware keys.
-	FindNicFirmwareSiteDefaultsByIds(context.Context, *FindNicFirmwareSiteDefaultsByIdsRequest) (*FindNicFirmwareSiteDefaultsByIdsResponse, error)
+	FindNicFirmwareSiteSelectionsByIds(context.Context, *FindNicFirmwareSiteSelectionsByIdsRequest) (*FindNicFirmwareSiteSelectionsByIdsResponse, error)
 	// Set or clear the operator's machine and card selections using Machine.version.
-	SetMachineNicFirmwareOverride(context.Context, *SetMachineNicFirmwareOverrideRequest) (*emptypb.Empty, error)
+	SetMachineNicFirmwareConfig(context.Context, *SetMachineNicFirmwareConfigRequest) (*emptypb.Empty, error)
 	// Get desired firmware for each device using stored host observations.
 	GetDesiredNicFirmware(context.Context, *GetDesiredNicFirmwareRequest) (*GetDesiredNicFirmwareResponse, error)
 	// Create A SKU to be assigned to a machine so the machine hardware can be validated.
@@ -9166,17 +9170,17 @@ func (UnimplementedForgeServer) UpdateNicFirmwareProfile(context.Context, *Updat
 func (UnimplementedForgeServer) DeleteNicFirmwareProfile(context.Context, *DeleteNicFirmwareProfileRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteNicFirmwareProfile not implemented")
 }
-func (UnimplementedForgeServer) SetNicFirmwareSiteDefault(context.Context, *SetNicFirmwareSiteDefaultRequest) (*NicFirmwareSiteDefaultResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method SetNicFirmwareSiteDefault not implemented")
+func (UnimplementedForgeServer) SetNicFirmwareSiteSelection(context.Context, *SetNicFirmwareSiteSelectionRequest) (*NicFirmwareSiteSelectionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetNicFirmwareSiteSelection not implemented")
 }
-func (UnimplementedForgeServer) FindNicFirmwareSiteDefaultIds(context.Context, *NicFirmwareSiteDefaultSearchFilter) (*FindNicFirmwareSiteDefaultIdsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method FindNicFirmwareSiteDefaultIds not implemented")
+func (UnimplementedForgeServer) FindNicFirmwareSiteSelectionIds(context.Context, *NicFirmwareSiteSelectionSearchFilter) (*FindNicFirmwareSiteSelectionIdsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindNicFirmwareSiteSelectionIds not implemented")
 }
-func (UnimplementedForgeServer) FindNicFirmwareSiteDefaultsByIds(context.Context, *FindNicFirmwareSiteDefaultsByIdsRequest) (*FindNicFirmwareSiteDefaultsByIdsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method FindNicFirmwareSiteDefaultsByIds not implemented")
+func (UnimplementedForgeServer) FindNicFirmwareSiteSelectionsByIds(context.Context, *FindNicFirmwareSiteSelectionsByIdsRequest) (*FindNicFirmwareSiteSelectionsByIdsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindNicFirmwareSiteSelectionsByIds not implemented")
 }
-func (UnimplementedForgeServer) SetMachineNicFirmwareOverride(context.Context, *SetMachineNicFirmwareOverrideRequest) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "method SetMachineNicFirmwareOverride not implemented")
+func (UnimplementedForgeServer) SetMachineNicFirmwareConfig(context.Context, *SetMachineNicFirmwareConfigRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetMachineNicFirmwareConfig not implemented")
 }
 func (UnimplementedForgeServer) GetDesiredNicFirmware(context.Context, *GetDesiredNicFirmwareRequest) (*GetDesiredNicFirmwareResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetDesiredNicFirmware not implemented")
@@ -16634,74 +16638,74 @@ func _Forge_DeleteNicFirmwareProfile_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_SetNicFirmwareSiteDefault_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SetNicFirmwareSiteDefaultRequest)
+func _Forge_SetNicFirmwareSiteSelection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetNicFirmwareSiteSelectionRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).SetNicFirmwareSiteDefault(ctx, in)
+		return srv.(ForgeServer).SetNicFirmwareSiteSelection(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_SetNicFirmwareSiteDefault_FullMethodName,
+		FullMethod: Forge_SetNicFirmwareSiteSelection_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).SetNicFirmwareSiteDefault(ctx, req.(*SetNicFirmwareSiteDefaultRequest))
+		return srv.(ForgeServer).SetNicFirmwareSiteSelection(ctx, req.(*SetNicFirmwareSiteSelectionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_FindNicFirmwareSiteDefaultIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(NicFirmwareSiteDefaultSearchFilter)
+func _Forge_FindNicFirmwareSiteSelectionIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(NicFirmwareSiteSelectionSearchFilter)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).FindNicFirmwareSiteDefaultIds(ctx, in)
+		return srv.(ForgeServer).FindNicFirmwareSiteSelectionIds(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_FindNicFirmwareSiteDefaultIds_FullMethodName,
+		FullMethod: Forge_FindNicFirmwareSiteSelectionIds_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).FindNicFirmwareSiteDefaultIds(ctx, req.(*NicFirmwareSiteDefaultSearchFilter))
+		return srv.(ForgeServer).FindNicFirmwareSiteSelectionIds(ctx, req.(*NicFirmwareSiteSelectionSearchFilter))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_FindNicFirmwareSiteDefaultsByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(FindNicFirmwareSiteDefaultsByIdsRequest)
+func _Forge_FindNicFirmwareSiteSelectionsByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FindNicFirmwareSiteSelectionsByIdsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).FindNicFirmwareSiteDefaultsByIds(ctx, in)
+		return srv.(ForgeServer).FindNicFirmwareSiteSelectionsByIds(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_FindNicFirmwareSiteDefaultsByIds_FullMethodName,
+		FullMethod: Forge_FindNicFirmwareSiteSelectionsByIds_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).FindNicFirmwareSiteDefaultsByIds(ctx, req.(*FindNicFirmwareSiteDefaultsByIdsRequest))
+		return srv.(ForgeServer).FindNicFirmwareSiteSelectionsByIds(ctx, req.(*FindNicFirmwareSiteSelectionsByIdsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_SetMachineNicFirmwareOverride_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SetMachineNicFirmwareOverrideRequest)
+func _Forge_SetMachineNicFirmwareConfig_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetMachineNicFirmwareConfigRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).SetMachineNicFirmwareOverride(ctx, in)
+		return srv.(ForgeServer).SetMachineNicFirmwareConfig(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_SetMachineNicFirmwareOverride_FullMethodName,
+		FullMethod: Forge_SetMachineNicFirmwareConfig_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).SetMachineNicFirmwareOverride(ctx, req.(*SetMachineNicFirmwareOverrideRequest))
+		return srv.(ForgeServer).SetMachineNicFirmwareConfig(ctx, req.(*SetMachineNicFirmwareConfigRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -20797,20 +20801,20 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_DeleteNicFirmwareProfile_Handler,
 		},
 		{
-			MethodName: "SetNicFirmwareSiteDefault",
-			Handler:    _Forge_SetNicFirmwareSiteDefault_Handler,
+			MethodName: "SetNicFirmwareSiteSelection",
+			Handler:    _Forge_SetNicFirmwareSiteSelection_Handler,
 		},
 		{
-			MethodName: "FindNicFirmwareSiteDefaultIds",
-			Handler:    _Forge_FindNicFirmwareSiteDefaultIds_Handler,
+			MethodName: "FindNicFirmwareSiteSelectionIds",
+			Handler:    _Forge_FindNicFirmwareSiteSelectionIds_Handler,
 		},
 		{
-			MethodName: "FindNicFirmwareSiteDefaultsByIds",
-			Handler:    _Forge_FindNicFirmwareSiteDefaultsByIds_Handler,
+			MethodName: "FindNicFirmwareSiteSelectionsByIds",
+			Handler:    _Forge_FindNicFirmwareSiteSelectionsByIds_Handler,
 		},
 		{
-			MethodName: "SetMachineNicFirmwareOverride",
-			Handler:    _Forge_SetMachineNicFirmwareOverride_Handler,
+			MethodName: "SetMachineNicFirmwareConfig",
+			Handler:    _Forge_SetMachineNicFirmwareConfig_Handler,
 		},
 		{
 			MethodName: "GetDesiredNicFirmware",

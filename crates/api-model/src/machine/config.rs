@@ -20,7 +20,7 @@ use config_version::Versioned;
 
 use crate::machine::Dpf;
 use crate::machine_boot_interface::{BootInterfaceSelection, MachineBootInterfaceTarget};
-use crate::nic_firmware::{NicFirmwareCardOverride, NicFirmwareProfileId};
+use crate::nic_firmware::{NicFirmwareCardSelection, NicFirmwareProfileId};
 
 /// `MachineConfig` contains the machine's desired settings. Each setting's
 /// update path determines whether it advances the shared machine version.
@@ -35,12 +35,12 @@ pub struct MachineConfig {
     pub firmware_autoupdate: Option<bool>,
 
     /// Live NIC firmware profile selected for this host; `None` inherits an
-    /// allocation requirement or compatible site default. This does not flash.
+    /// allocation requirement or compatible site selection. This does not flash.
     pub nic_firmware_profile_id: Option<NicFirmwareProfileId>,
 
     /// Live profiles selected for individual observed devices, taking precedence
     /// over the machine profile. Empty means every device inherits.
-    pub nic_firmware_card_overrides: Vec<NicFirmwareCardOverride>,
+    pub nic_firmware_card_selections: Vec<NicFirmwareCardSelection>,
 
     /// The instance type this machine is associated with, if any.
     pub instance_type_id: Option<InstanceTypeId>,

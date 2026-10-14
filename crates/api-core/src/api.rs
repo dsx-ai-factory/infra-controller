@@ -3066,32 +3066,32 @@ impl Forge for Api {
         crate::handlers::nic_firmware::update(self, request).await
     }
 
-    async fn set_nic_firmware_site_default(
+    async fn set_nic_firmware_site_selection(
         &self,
-        request: Request<rpc::SetNicFirmwareSiteDefaultRequest>,
-    ) -> Result<Response<rpc::NicFirmwareSiteDefaultResponse>, Status> {
-        crate::handlers::nic_firmware::set_site_default(self, request).await
+        request: Request<rpc::SetNicFirmwareSiteSelectionRequest>,
+    ) -> Result<Response<rpc::NicFirmwareSiteSelectionResponse>, Status> {
+        crate::handlers::nic_firmware::set_site_selection(self, request).await
     }
 
-    async fn find_nic_firmware_site_default_ids(
+    async fn find_nic_firmware_site_selection_ids(
         &self,
-        request: Request<rpc::NicFirmwareSiteDefaultSearchFilter>,
-    ) -> Result<Response<rpc::FindNicFirmwareSiteDefaultIdsResponse>, Status> {
-        crate::handlers::nic_firmware::find_site_default_ids(self, request).await
+        request: Request<rpc::NicFirmwareSiteSelectionSearchFilter>,
+    ) -> Result<Response<rpc::FindNicFirmwareSiteSelectionIdsResponse>, Status> {
+        crate::handlers::nic_firmware::find_site_selection_ids(self, request).await
     }
 
-    async fn find_nic_firmware_site_defaults_by_ids(
+    async fn find_nic_firmware_site_selections_by_ids(
         &self,
-        request: Request<rpc::FindNicFirmwareSiteDefaultsByIdsRequest>,
-    ) -> Result<Response<rpc::FindNicFirmwareSiteDefaultsByIdsResponse>, Status> {
-        crate::handlers::nic_firmware::find_site_defaults_by_ids(self, request).await
+        request: Request<rpc::FindNicFirmwareSiteSelectionsByIdsRequest>,
+    ) -> Result<Response<rpc::FindNicFirmwareSiteSelectionsByIdsResponse>, Status> {
+        crate::handlers::nic_firmware::find_site_selections_by_ids(self, request).await
     }
 
-    async fn set_machine_nic_firmware_override(
+    async fn set_machine_nic_firmware_config(
         &self,
-        request: Request<rpc::SetMachineNicFirmwareOverrideRequest>,
+        request: Request<rpc::SetMachineNicFirmwareConfigRequest>,
     ) -> Result<Response<()>, Status> {
-        crate::handlers::nic_firmware::set_machine_override(self, request).await
+        crate::handlers::nic_firmware::set_machine_config(self, request).await
     }
 
     async fn get_desired_nic_firmware(

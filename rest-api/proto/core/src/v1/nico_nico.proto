@@ -895,21 +895,23 @@ service Forge {
   rpc UpsertHostFirmwareConfig(UpsertHostFirmwareConfigRequest) returns (HostFirmwareConfigResponse);
   rpc DeleteHostFirmwareConfig(DeleteHostFirmwareConfigRequest) returns (google.protobuf.Empty);
 
-  // Operator-only NIC firmware profiles, site defaults, machine overrides and desired firmware.
+  // Operator-only NIC firmware profiles, scoped selections and desired firmware.
   // These methods do not update devices or change machine readiness.
+  // NIC firmware selections require matching v2.4 Core and client schemas,
+  // including clients that read MachineConfig or GetDesiredNicFirmware responses.
   rpc CreateNicFirmwareProfile(CreateNicFirmwareProfileRequest) returns (NicFirmwareProfileResponse);
   rpc FindNicFirmwareProfileIds(FindNicFirmwareProfileIdsRequest) returns (FindNicFirmwareProfileIdsResponse);
   rpc FindNicFirmwareProfilesByIds(FindNicFirmwareProfilesByIdsRequest) returns (FindNicFirmwareProfilesByIdsResponse);
   rpc UpdateNicFirmwareProfile(UpdateNicFirmwareProfileRequest) returns (NicFirmwareProfileResponse);
   rpc DeleteNicFirmwareProfile(DeleteNicFirmwareProfileRequest) returns (google.protobuf.Empty);
-  // Select or clear the site default for an exact hardware pair.
-  rpc SetNicFirmwareSiteDefault(SetNicFirmwareSiteDefaultRequest) returns (NicFirmwareSiteDefaultResponse);
-  // List hardware keys for all defaults or those selecting one profile.
-  rpc FindNicFirmwareSiteDefaultIds(NicFirmwareSiteDefaultSearchFilter) returns (FindNicFirmwareSiteDefaultIdsResponse);
+  // Select or clear the site profile for an exact hardware pair.
+  rpc SetNicFirmwareSiteSelection(SetNicFirmwareSiteSelectionRequest) returns (NicFirmwareSiteSelectionResponse);
+  // List hardware keys for all site selections or those selecting one profile.
+  rpc FindNicFirmwareSiteSelectionIds(NicFirmwareSiteSelectionSearchFilter) returns (FindNicFirmwareSiteSelectionIdsResponse);
   // Retrieve existing assignments for a bounded batch of hardware keys.
-  rpc FindNicFirmwareSiteDefaultsByIds(FindNicFirmwareSiteDefaultsByIdsRequest) returns (FindNicFirmwareSiteDefaultsByIdsResponse);
+  rpc FindNicFirmwareSiteSelectionsByIds(FindNicFirmwareSiteSelectionsByIdsRequest) returns (FindNicFirmwareSiteSelectionsByIdsResponse);
   // Set or clear the operator's machine and card selections using Machine.version.
-  rpc SetMachineNicFirmwareOverride(SetMachineNicFirmwareOverrideRequest) returns (google.protobuf.Empty);
+  rpc SetMachineNicFirmwareConfig(SetMachineNicFirmwareConfigRequest) returns (google.protobuf.Empty);
   // Get desired firmware for each device using stored host observations.
   rpc GetDesiredNicFirmware(GetDesiredNicFirmwareRequest) returns (GetDesiredNicFirmwareResponse);
 
@@ -4530,7 +4532,7 @@ message MachineConfig {
   // Distinct from MachineStatus.hw_sku, which reflects the observed match.
   optional string hw_sku = 6;
 
-  // Live NIC firmware profile selected by SetMachineNicFirmwareOverride, following
+  // Live NIC firmware profile selected by SetMachineNicFirmwareConfig, following
   // NicFirmwareProfile.id. Absent means inherit allocation or site selections.
   // Read this field and Machine.version through FindMachinesByIds before editing.
   optional string nic_firmware_profile_id = 7;
@@ -4540,7 +4542,9 @@ message MachineConfig {
   // when later observations no longer match them. Results are ordered by the stored
   // selector JSON value; ordering has no selection significance. Edits use the same
   // Machine.version as nic_firmware_profile_id.
-  repeated NicFirmwareCardOverride nic_firmware_card_overrides = 8;
+  repeated NicFirmwareCardSelection nic_firmware_card_selections = 9;
+  reserved 8;
+  reserved "nic_firmware_card_overrides";
 }
 
 message MachineStatus {
@@ -4654,7 +4658,7 @@ message Machine {
   // Metadata associated with the Machine
   Metadata metadata = 33;
 
-  // Shared edit token, including metadata and NIC firmware override mutations.
+  // Shared edit token, including metadata and NIC firmware configuration edits.
   // Other machine settings do not necessarily advance this token.
   string version = 34;
 
@@ -11734,9 +11738,9 @@ message UpdateNicFirmwareProfileRequest {
   // Profile name; follows the NicFirmwareProfile.id contract.
   string id = 1;
   // Required complete replacement, not a merge or patch. Must support hardware
-  // pairs selected by site defaults. On machines or devices selecting this profile,
+  // pairs selected at site scope. On machines or devices selecting this profile,
   // it must retain support for usable observed pairs the previous config supported.
-  // A device with a card override does not constrain its machine's selected profile.
+  // A device with a card selection does not constrain its machine's selected profile.
   // A card selector matching no device or several devices does not constrain edits,
   // but its saved profile reference still prevents deletion.
   // Removing required support returns FAILED_PRECONDITION. A newly observed,
@@ -11753,7 +11757,7 @@ message UpdateNicFirmwareProfileRequest {
 
 message DeleteNicFirmwareProfileRequest {
   // Profile name; follows the NicFirmwareProfile.id contract. A profile selected
-  // by a site default, machine override or card override cannot be deleted
+  // at site, machine or card scope cannot be deleted
   // (FAILED_PRECONDITION), including card selectors no longer found in inventory.
   string id = 1;
   // Required edit-version token from a previous read. Missing or malformed
@@ -11774,7 +11778,7 @@ message NicFirmwareHardware {
 }
 
 // A revisioned site-wide assignment from a hardware pair to a live profile.
-message NicFirmwareSiteDefault {
+message NicFirmwareSiteSelection {
   // Composite identity of this assignment, not a machine or physical-card identity.
   NicFirmwareHardware hardware = 1;
   // Selects the live profile, not a pinned catalog revision. Follows NicFirmwareProfile.id.
@@ -11783,13 +11787,14 @@ message NicFirmwareSiteDefault {
   string version = 3;
 }
 
-// Finish upgrading Core before assigning site defaults so every replica
-// validates profile edits against the hardware selected by those defaults.
-message SetNicFirmwareSiteDefaultRequest {
+// Site selections apply only when no card, machine or allocation selection exists
+// for the device. Finish upgrading Core before assigning site selections so every
+// replica validates profile edits against their selected hardware.
+message SetNicFirmwareSiteSelectionRequest {
   // Required hardware pair; missing or invalid hardware returns INVALID_ARGUMENT.
-  // Only operator callers may change defaults.
+  // Only operator callers may change site selections.
   NicFirmwareHardware hardware = 1;
-  // Required action. Omission returns INVALID_ARGUMENT without changing the default.
+  // Required action. Omission returns INVALID_ARGUMENT without changing the selection.
   oneof action {
     // Assign a compatible live profile. Follows NicFirmwareProfile.id validation;
     // malformed IDs return INVALID_ARGUMENT, missing profiles NOT_FOUND, and
@@ -11807,37 +11812,37 @@ message SetNicFirmwareSiteDefaultRequest {
 }
 
 // The assignment saved by Set, or its absence after Clear.
-message NicFirmwareSiteDefaultResponse {
+message NicFirmwareSiteSelectionResponse {
   // Absent after a successful clear. Clearing deletes the assignment.
-  optional NicFirmwareSiteDefault site_default = 1;
+  optional NicFirmwareSiteSelection site_selection = 1;
 }
 
 // Optional exact filter for listing assignment keys. An empty filter lists all keys.
-message NicFirmwareSiteDefaultSearchFilter {
+message NicFirmwareSiteSelectionSearchFilter {
   // Profile name following NicFirmwareProfile.id validation. Malformed IDs return
   // INVALID_ARGUMENT; an unknown valid ID returns an empty list.
   optional string profile_id = 1;
 }
 
-// Hardware keys matching the requested site-default filter.
-message FindNicFirmwareSiteDefaultIdsResponse {
+// Hardware keys matching the requested site-selection filter.
+message FindNicFirmwareSiteSelectionIdsResponse {
   // Matching hardware keys, ordered by part number then PSID in database collation
-  // order. Fetch assignment details in batches with FindNicFirmwareSiteDefaultsByIds.
+  // order. Fetch assignment details in batches with FindNicFirmwareSiteSelectionsByIds.
   repeated NicFirmwareHardware hardware = 1;
 }
 
-// Hardware keys whose site-default assignments should be returned.
-message FindNicFirmwareSiteDefaultsByIdsRequest {
+// Hardware keys whose site-selection assignments should be returned.
+message FindNicFirmwareSiteSelectionsByIdsRequest {
   // Required batch of 1 through max_find_by_ids hardware pairs. Invalid pairs or
   // an empty or oversized batch reject the entire request with INVALID_ARGUMENT.
   repeated NicFirmwareHardware hardware = 1;
 }
 
-// Existing site-default assignments for the requested keys.
-message FindNicFirmwareSiteDefaultsByIdsResponse {
+// Existing site-selection assignments for the requested keys.
+message FindNicFirmwareSiteSelectionsByIdsResponse {
   // Existing assignments once each, ordered by part number then PSID in database
   // collation order. Unknown valid keys are omitted; duplicate keys are collapsed.
-  repeated NicFirmwareSiteDefault site_defaults = 1;
+  repeated NicFirmwareSiteSelection site_selections = 1;
 }
 
 // Explicit identity of one device in a machine's latest stored MLX observation.
@@ -11858,7 +11863,7 @@ message NicFirmwareCardSelector {
 }
 
 // A live profile selected for one device, above machine, allocation and site settings.
-message NicFirmwareCardOverride {
+message NicFirmwareCardSelection {
   // Required. Follows NicFirmwareCardSelector validation and matching rules.
   NicFirmwareCardSelector selector = 1;
   // Required live profile following NicFirmwareProfile.id. Invalid IDs return
@@ -11868,20 +11873,20 @@ message NicFirmwareCardOverride {
 }
 
 // Complete replacement of a machine's card selections, including an empty clear.
-message NicFirmwareCardOverrides {
+message NicFirmwareCardSelections {
   // Zero through Core's max_find_by_ids entries; a larger list is INVALID_ARGUMENT.
   // Order has no selection significance. Duplicate selectors and distinct selectors
   // matching the same device are FAILED_PRECONDITION.
-  repeated NicFirmwareCardOverride overrides = 1;
+  repeated NicFirmwareCardSelection selections = 1;
 }
 
-// Only operators may set or clear machine and card overrides. This operation
+// Only operators may set or clear machine and card selections. This operation
 // atomically updates the selections and Machine.version without changing other
 // configuration. Failure leaves both machine and card selections unchanged.
 // It does not schedule firmware or change machine readiness.
-// Finish upgrading Core before assigning overrides so every replica validates
-// profile edits against machine and card selections and honors card_overrides.
-message SetMachineNicFirmwareOverrideRequest {
+// Finish upgrading Core before assigning machine or card selections so every
+// replica validates their profile references and honors card_selections.
+message SetMachineNicFirmwareConfigRequest {
   // Required host ID. Missing or non-host IDs return INVALID_ARGUMENT;
   // an unknown host returns NOT_FOUND.
   common.MachineId machine_id = 1;
@@ -11894,7 +11899,7 @@ message SetMachineNicFirmwareOverrideRequest {
     // Select a live profile following NicFirmwareProfile.id validation. Malformed
     // IDs return INVALID_ARGUMENT and missing profiles NOT_FOUND. Profile existence
     // is checked before host existence and the machine token. After checking the
-    // token, each complete, usable observed PN/PSID pair without a card override
+    // token, each complete, usable observed PN/PSID pair without a card selection
     // must match an entry or the request returns FAILED_PRECONDITION. Managed-DPU
     // devices are excluded. Validation uses the latest stored observation after
     // acquiring the machine lock, without contacting Scout or proving freshness.
@@ -11902,13 +11907,13 @@ message SetMachineNicFirmwareOverrideRequest {
     // GetDesiredNicFirmware reads report per-device errors if facts are unusable
     // or later observations are incompatible.
     string profile_id = 3;
-    // Remove the machine-wide override and restore inheritance. Does not require
-    // compatible inventory and succeeds when the override is already absent.
+    // Remove the machine-wide selection and restore inheritance. Does not require
+    // compatible inventory and succeeds when the selection is already absent.
     google.protobuf.Empty clear = 4;
   }
-  // Omission preserves saved card selections, including for older clients that
-  // send only the machine action. Presence replaces the entire list; an empty
-  // wrapper clears all card overrides and restores inheritance. The machine action
+  // Omission preserves saved card selections when changing only the machine
+  // selection. Presence replaces the entire list; an empty
+  // wrapper clears all card selections and restores inheritance. The machine action
   // remains required: resubmit the desired machine profile or clear it in the same request.
   // Resubmitting the same machine profile rechecks all devices inheriting it,
   // including devices whose hardware changed since the previous assignment.
@@ -11918,7 +11923,7 @@ message SetMachineNicFirmwareOverrideRequest {
   // New assignments use the latest stored observation after acquiring the machine
   // lock. Clearing cards does not require inventory, though a supplied machine
   // profile still must satisfy the machine compatibility rules above.
-  NicFirmwareCardOverrides card_overrides = 5;
+  NicFirmwareCardSelections card_selections = 5;
 }
 
 // A host and optional allocation profile for looking up desired firmware.
@@ -11927,10 +11932,10 @@ message GetDesiredNicFirmwareRequest {
   // an unknown host returns NOT_FOUND. Reads stored observations without contacting Scout.
   common.MachineId machine_id = 1;
   // Optional operator-supplied profile to preview against every observed device
-  // with valid hardware and no managed-DPU association, even without a site default.
+  // with valid hardware and no managed-DPU association, even without a site selection.
   // This is a machine-wide preview, not attachment-target selection.
-  // Omission resolves card overrides, the machine override or site defaults.
-  // A conflicting allocation and card or machine override produces a per-device
+  // Omission resolves card selections, the machine selection or site selections.
+  // A conflicting allocation and card or machine selection produces a per-device
   // error without fallback.
   // Malformed IDs return INVALID_ARGUMENT; missing or incompatible profiles
   // produce per-device errors without fallback.
@@ -11940,22 +11945,24 @@ message GetDesiredNicFirmwareRequest {
 }
 
 // Resolver precedence is card > machine > allocation > site. `GetDesiredNicFirmware`
-// includes stored card and machine overrides, allocation preview and site defaults.
-enum NicFirmwareSelectionSource {
+// includes stored card and machine selections, allocation preview and site selections.
+enum NicFirmwareSelectionScope {
   // Site-wide selection for the device's hardware pair.
-  NicFirmwareSelectionSourceSiteDefault = 0;
-  // Operator-supplied allocation selection, above the site default.
-  NicFirmwareSelectionSourceAllocation = 1;
-  // Per-machine selection, above an allocation or site default.
-  NicFirmwareSelectionSourceMachineOverride = 2;
+  NicFirmwareSelectionScopeSite = 0;
+  // Operator-supplied allocation selection, above the site selection.
+  NicFirmwareSelectionScopeAllocation = 1;
+  // Per-machine selection, above an allocation or site selection.
+  NicFirmwareSelectionScopeMachine = 2;
   // Per-card selection, above every other selection.
-  NicFirmwareSelectionSourceCardOverride = 3;
+  NicFirmwareSelectionScopeCard = 3;
 }
 
 // The selected profile and compatible firmware entry from one catalog snapshot.
 message NicFirmwareResolution {
-  // Setting that selected the profile, following NicFirmwareSelectionSource precedence.
-  NicFirmwareSelectionSource source = 1;
+  reserved 1;
+  reserved "source";
+  // Configuration scope that selected the profile under the hierarchy's precedence.
+  NicFirmwareSelectionScope scope = 5;
   // Selected live catalog profile, following NicFirmwareProfile.id.
   string profile_id = 2;
   // Profile revision from this read, independent of any assignment edit token.
@@ -11970,7 +11977,7 @@ message NicFirmwareDeviceTarget {
   // PCI functions into physical cards. Missing associations mean unknown ownership.
   mlx_device.MlxDeviceIdentity identity = 1;
   // For devices with valid PN/PSID and no managed-DPU association, unset means
-  // no card override, machine override, allocation profile or matching site default
+  // no card selection, machine selection, allocation profile or matching site selection
   // was selected (unmanaged).
   // An invalid selected profile returns an error without fallback.
   oneof result {
@@ -11980,14 +11987,16 @@ message NicFirmwareDeviceTarget {
     // an ambiguous card selector, multiple card selections for this device,
     // or an invalid selection; not a machine-readable error code.
     // These errors are returned in the report without failing the request
-    // or hiding other devices' results. Selection source and profile revision
+    // or hiding other devices' results. Selection scope and profile revision
     // are returned only for successful resolutions.
     string error = 3;
   }
   // Assignment revision for a non-excluded device with valid hardware and a
-  // matching site default, even when a card or machine override or allocation
-  // preview supersedes that default or fails. Managed-DPU exclusions omit this field.
-  optional string site_default_version = 4;
+  // matching site selection, even when a card or machine selection or allocation
+  // preview supersedes that selection or fails. Managed-DPU exclusions omit this field.
+  optional string site_selection_version = 5;
+  reserved 4;
+  reserved "site_default_version";
 }
 
 // Desired firmware from database-backed selections and the optional allocation preview.
