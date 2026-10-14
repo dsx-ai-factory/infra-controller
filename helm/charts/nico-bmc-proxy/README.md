@@ -115,11 +115,16 @@ Path wildcards:
 - `foo*bar` is not valid.
 - Only one `**` is allowed per path pattern.
 
-Allow wildcards do not consume percent escapes; each `%HH` must be written explicitly, with
-case-insensitive hexadecimal digits. Escapes stay encoded during matching, so `%4A` and `%4a`
-match each other but require a separate rule from `J`. Deny wildcards remain broad.
+By default, allow wildcards do not consume percent escapes; each `%HH` must be written
+explicitly, with case-insensitive hexadecimal digits. Structured allow entries can opt in
+with `{ pattern = "/nvue_v1/**", allow_escapes = ["%2F", "%3A"] }`; omitted or empty
+`allow_escapes` keeps the strict default. `["*"]` permits unrestricted wildcard escape
+matching after path validation. This exception is scoped to the entry and accepts upstream
+path-interpretation risks; existing shipped principals have no opt-in. Escapes stay encoded
+during matching, so `%4A` and `%4a` match each other while literals remain distinct from `J`.
+Deny wildcards remain broad.
 Ambiguous request paths return `400` before ACL evaluation; other escaped paths need an explicit
-allow or receive `403`.
+allow or receive `403`. `allow_escapes` never overrides the pre-ACL path guard.
 The chart's default API ACL includes `GET /redfish/v1/Registries/%23*` for escaped registry names.
 Overrides in `configFiles.nicoBmcProxyConfig` must supply their own exceptions. See the
 [complete path and ACL contract](../../../crates/bmc-proxy/README.md#authacls).

@@ -57,8 +57,8 @@ pub(super) fn reject_ambiguous_path<B>(request: &Request<B>) -> Option<Response<
 /// A reserved, non-routable origin used only to reproduce upstream URL parsing.
 const PATH_PROBE_BASE: &str = "https://bmc-proxy.invalid";
 
-/// Reject URL-parser rewrites and escapes that change path structure. Other
-/// escapes remain literal: an ACL allow must explicitly spell each one.
+/// Reject URL-parser rewrites, encoded backslashes, controls and nested
+/// encoding. Encoded slashes remain literal for the ACL's escape policy.
 fn path_rejection_reason(path: &str) -> Option<PathRejectionReason> {
     let Ok(parsed) = Url::parse(&format!("{PATH_PROBE_BASE}{path}")) else {
         return Some(PathRejectionReason::InvalidPath);
@@ -76,7 +76,7 @@ fn path_rejection_reason(path: &str) -> Option<PathRejectionReason> {
         let octet = u8::from_str_radix(digits, 16)
             .expect("two ASCII hexadecimal digits always fit in a u8");
         match octet {
-            b'/' | b'\\' => Some(PathRejectionReason::EncodedSeparator),
+            b'\\' => Some(PathRejectionReason::EncodedSeparator),
             b'%' => Some(PathRejectionReason::NestedEncoding),
             0..=0x1f | 0x7f => Some(PathRejectionReason::EncodedControl),
             _ => None,
@@ -462,6 +462,7 @@ mod tests {
                 "/redfish/v1/" => None,
                 "/redfish/v1//Systems" => None,
                 "/redfish/v1/Registries/%23Resource%20Name" => None,
+                "/nvue_v1/revision/changeset%2Fadmin%2f2026-10-14_12.00.00" => None,
                 "/redfish/v1/Managers/BMC/Hosts/[2001:db8::1]" => None,
             }
             "upstream URL parsing changes the path" {
@@ -471,7 +472,6 @@ mod tests {
                 "/redfish/v1/Systems/{id}" => Some(PathRejectionReason::RewrittenPath),
             }
             "escapes change structure or enable another decoding pass" {
-                "/redfish/v1/Systems%2Ffoo" => Some(PathRejectionReason::EncodedSeparator),
                 "/redfish/v1/Systems%5cfoo" => Some(PathRejectionReason::EncodedSeparator),
                 "/redfish/v1/%252e%252e/x" => Some(PathRejectionReason::NestedEncoding),
                 "/redfish/v1/%00" => Some(PathRejectionReason::EncodedControl),

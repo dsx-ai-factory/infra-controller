@@ -24,7 +24,7 @@ use std::str::FromStr;
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer};
 
-use crate::pattern::{PatternParseError, RequestPattern};
+use crate::pattern::{PatternParseError, RequestPattern, WildcardEscapes};
 
 /// Top-level ACL configuration keyed by authenticated principal identifier.
 ///
@@ -78,6 +78,7 @@ impl AclConfig {
 struct AclEntry {
     pattern: RequestPattern,
     action: AclAction,
+    allow_escapes: WildcardEscapes,
 }
 
 impl<'de> Deserialize<'de> for AclEntry {
@@ -85,8 +86,52 @@ impl<'de> Deserialize<'de> for AclEntry {
     where
         D: Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        s.parse().map_err(D::Error::custom)
+        #[derive(Deserialize)]
+        #[serde(untagged, deny_unknown_fields)]
+        enum ConfigEntry {
+            Text(String),
+            Options {
+                pattern: String,
+                #[serde(default)]
+                allow_escapes: Vec<String>,
+            },
+        }
+
+        let (pattern, escapes) = match ConfigEntry::deserialize(deserializer)? {
+            ConfigEntry::Text(pattern) => (pattern, Vec::new()),
+            ConfigEntry::Options {
+                pattern,
+                allow_escapes,
+            } => (pattern, allow_escapes),
+        };
+        let mut entry = pattern.parse::<Self>().map_err(D::Error::custom)?;
+        if matches!(entry.action, AclAction::Deny) && !escapes.is_empty() {
+            return Err(D::Error::custom(
+                "allow_escapes is only supported on allow rules",
+            ));
+        }
+        entry.allow_escapes = if escapes.as_slice() == ["*"] {
+            WildcardEscapes::All
+        } else {
+            let octets = escapes
+                .iter()
+                .map(|escape| {
+                    escape
+                        .strip_prefix('%')
+                        .filter(|digits| {
+                            digits.len() == 2 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                        .and_then(|digits| u8::from_str_radix(digits, 16).ok())
+                        .ok_or_else(|| {
+                            D::Error::custom(
+                                "allow_escapes must contain %HH escapes or a single \"*\"",
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            WildcardEscapes::Listed(octets)
+        };
+        Ok(entry)
     }
 }
 
@@ -108,11 +153,14 @@ impl AclEntry {
         }
     }
 
-    /// Allow rules must spell each percent escape explicitly, ignoring hex
-    /// case. Deny wildcards remain broad so escapes cannot evade those denials.
+    /// Allow wildcards consume only opted-in escapes; other escapes must be
+    /// literal. Deny wildcards retain their unrestricted escape matching.
     fn matches(&self, method: &http::Method, path: &str) -> bool {
         match self.action {
-            AclAction::Allow => self.pattern.matches_literal_escapes(method, path),
+            AclAction::Allow => {
+                self.pattern
+                    .matches_allow_escapes(method, path, &self.allow_escapes)
+            }
             AclAction::Deny => self.pattern.matches(method, path),
         }
     }
@@ -133,6 +181,7 @@ impl FromStr for AclEntry {
         Ok(Self {
             pattern,
             action: allowed.into(),
+            allow_escapes: WildcardEscapes::Listed(Vec::new()),
         })
     }
 }
@@ -646,6 +695,92 @@ mod tests {
             }
             "changing hex case cannot bypass an explicit denial" {
                 ("escaped_deny_first", "/redfish/v1/Registries/%4AResource") => false,
+            }
+        );
+    }
+
+    /// Structured escape policies affect only their principal and matching allow.
+    #[test]
+    fn acl_escape_policies_are_scoped_to_each_allow() {
+        let acls = parse_acl_config(
+            r#"
+        [acls]
+        strict = [{ pattern = "GET /nvue_v1/**" }]
+        empty = [{ pattern = "GET /nvue_v1/**", allow_escapes = [] }]
+        nvue = [
+            "!GET /nvue_v1/private/**",
+            { pattern = "GET /nvue_v1/**", allow_escapes = ["%2f", "%3A"] },
+            "GET /redfish/v1/**",
+        ]
+        prefix = [{ pattern = "GET /nvue_v1/revision/changeset%23*", allow_escapes = ["%2F"] }]
+        suffix = [{ pattern = "GET /nvue_v1/revision/*%23status", allow_escapes = ["%2F"] }]
+        literal = ["GET /nvue_v1/revision/changeset%2Fadmin%2F*"]
+        admin = [{ pattern = "/nvue_v1/**", allow_escapes = ["*"] }]
+        "#,
+        );
+
+        value_scenarios!(
+            run = |(principal, method, path)| acls.allows(principal, &method, path);
+            "omitted and empty policies keep wildcards strict" {
+                ("strict", http::Method::GET, "/nvue_v1/revision/1") => true,
+                ("strict", http::Method::GET, "/nvue_v1/revision/changeset%2Fadmin%2F1") => false,
+                ("empty", http::Method::GET, "/nvue_v1/revision/changeset%2Fadmin%2F1") => false,
+            }
+            "listed escapes support variable IDs and IPv6 CIDRs" {
+                ("nvue", http::Method::GET, "/nvue_v1/revision/changeset%2Fadmin%2f1%2Fextra") => true,
+                ("nvue", http::Method::GET, "/nvue_v1/interface/lo/ip/address/2001%3adb8%3A%3A1%2F64") => true,
+                ("nvue", http::Method::GET, "/nvue_v1/revision/name%20with%2Fspace") => false,
+            }
+            "the policy does not widen other entries, methods or denials" {
+                ("nvue", http::Method::GET, "/redfish/v1/Systems/a%2Fb") => false,
+                ("nvue", http::Method::PATCH, "/nvue_v1/revision/changeset%2Fadmin%2F1") => false,
+                ("nvue", http::Method::GET, "/nvue_v1/private/name%2Fsecret") => false,
+            }
+            "single wildcards check only the portion they consume" {
+                ("prefix", http::Method::GET, "/nvue_v1/revision/changeset%23admin%2F1") => true,
+                ("prefix", http::Method::GET, "/nvue_v1/revision/changeset%23admin%20name") => false,
+                ("suffix", http::Method::GET, "/nvue_v1/revision/admin%2F1%23status") => true,
+                ("suffix", http::Method::GET, "/nvue_v1/revision/admin%20name%23status") => false,
+            }
+            "literal slash exceptions still work without opt-in" {
+                ("literal", http::Method::GET, "/nvue_v1/revision/changeset%2fadmin%2F1") => true,
+            }
+            "the star policy accepts unlisted escapes without changing literal prefixes" {
+                ("admin", http::Method::DELETE, "/nvue_v1/revision/name%20with%2Fspace%23suffix") => true,
+                ("admin", http::Method::GET, "/redfish/v1/Systems/a%2Fb") => false,
+            }
+        );
+    }
+
+    /// Invalid escape policy syntax and unknown fields fail configuration loading.
+    #[test]
+    fn acl_escape_policy_configuration_errors() {
+        #[derive(Deserialize)]
+        struct MockConfig {
+            #[serde(rename = "acls")]
+            _acls: AclConfig,
+        }
+
+        scenarios!(
+            run = |entries| figment::Figment::new()
+                .merge(Toml::string(&format!("[acls]\nservice = {entries}")))
+                .extract::<MockConfig>()
+                .map(drop)
+                .map_err(drop);
+            "invalid escape spellings" {
+                r#"[{ pattern = "/nvue_v1/**", allow_escapes = ["%2"] }]"# => Fails,
+                r#"[{ pattern = "/nvue_v1/**", allow_escapes = ["%GG"] }]"# => Fails,
+                r#"[{ pattern = "/nvue_v1/**", allow_escapes = ["%+1"] }]"# => Fails,
+                r#"[{ pattern = "/nvue_v1/**", allow_escapes = ["2F"] }]"# => Fails,
+            }
+            "star must be the sole list value" {
+                r#"[{ pattern = "/nvue_v1/**", allow_escapes = ["*", "%2F"] }]"# => Fails,
+                r#"[{ pattern = "/nvue_v1/**", allow_escapes = "*" }]"# => Fails,
+            }
+            "misconfigured structured entries" {
+                r#"[{ pattern = "!GET /nvue_v1/**", allow_escapes = ["%2F"] }]"# => Fails,
+                r#"[{ pattern = "/nvue_v1/**", allow_escape = ["%2F"] }]"# => Fails,
+                r#"[{ allow_escapes = ["%2F"] }]"# => Fails,
             }
         );
     }

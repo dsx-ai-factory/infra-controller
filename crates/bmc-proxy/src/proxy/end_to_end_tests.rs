@@ -565,6 +565,45 @@ async fn escape_case_matching_preserves_the_upstream_request_target() {
     assert_eq!(received.path_and_query, path_and_query);
 }
 
+/// Escape opt-in preserves the request target and cannot bypass the path guard.
+#[tokio::test]
+async fn escape_policies_preserve_nvue_ids_without_bypassing_the_path_guard() {
+    let metrics = MetricsCapture::start();
+    let metrics_window = &metrics;
+    let path = "/nvue_v1/revision/changeset%2fadmin%2F2026-10-14%2Fextra?rev=changeset%2Fadmin";
+    check_cases_async(
+        [
+            Case {
+                scenario: "a broad allow cannot consume the encoded ID separators",
+                input: (r#"["GET /nvue_v1/**"]"#, path),
+                expect: Yields((403, Vec::<String>::new())),
+            },
+            Case {
+                scenario: "opt-in allows additional encoded slashes and forwards the original target",
+                input: (r#"[{ pattern = "GET /nvue_v1/revision/*", allow_escapes = ["%2F"] }]"#, path),
+                expect: Yields((404, vec![path.to_string()])),
+            },
+            Case {
+                scenario: "even unrestricted escape matching cannot authorize nested encoding",
+                input: (r#"[{ pattern = "/**", allow_escapes = ["*"] }]"#, "/nvue_v1/revision/name%252Fextra"),
+                expect: Yields((400, Vec::<String>::new())),
+            },
+        ],
+        |(acl, request_path)| async move {
+            let (addr, bmc) = spawn_fake_bmc();
+            let state = proxy_to(&addr.to_string(), acl, root_password()).await;
+            let response = exchange(metrics_window, &state, get(request_path)).await;
+            let paths = bmc
+                .received()
+                .into_iter()
+                .map(|request| request.path_and_query)
+                .collect();
+            Ok::<_, Infallible>((response.status, paths))
+        },
+    )
+    .await;
+}
+
 /// With `bmc_proxy` overriding the host, the proxy names the BMC to that
 /// host in a `Forwarded` of its own, in place of the caller's.
 #[tokio::test]

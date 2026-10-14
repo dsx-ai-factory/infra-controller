@@ -47,6 +47,31 @@ pub(crate) struct RequestPattern {
     path: PathPattern,
 }
 
+/// Percent escapes an ACL allow wildcard is permitted to consume.
+#[derive(Clone)]
+pub(crate) enum WildcardEscapes {
+    /// Only these decoded octet values; an empty list keeps wildcards strict.
+    Listed(Vec<u8>),
+    /// Any percent escape, subject to the proxy's separate path guard.
+    All,
+}
+
+impl WildcardEscapes {
+    /// Checks only the wildcard's portion, leaving literal escapes to the pattern.
+    fn matches(&self, fragment: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Listed(octets) => fragment.split('%').skip(1).all(|suffix| {
+                suffix
+                    .get(..2)
+                    .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                    .and_then(|digits| u8::from_str_radix(digits, 16).ok())
+                    .is_some_and(|octet| octets.contains(&octet))
+            }),
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for RequestPattern {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -113,12 +138,17 @@ impl FromStr for RequestPattern {
 impl RequestPattern {
     /// Returns whether this pattern matches `method` and `path`.
     pub(crate) fn matches(&self, method: &http::Method, path: &str) -> bool {
-        self.matches_with_wildcard_escapes(method, path, true)
+        self.matches_with_wildcard_escapes(method, path, &WildcardEscapes::All)
     }
 
-    /// Matches an ACL allow rule: wildcards cannot consume percent escapes.
-    pub(crate) fn matches_literal_escapes(&self, method: &http::Method, path: &str) -> bool {
-        self.matches_with_wildcard_escapes(method, path, false)
+    /// Matches an ACL allow rule, limiting wildcard escapes to its explicit policy.
+    pub(crate) fn matches_allow_escapes(
+        &self,
+        method: &http::Method,
+        path: &str,
+        allow_escapes: &WildcardEscapes,
+    ) -> bool {
+        self.matches_with_wildcard_escapes(method, path, allow_escapes)
     }
 
     /// ACL literals must contain complete `%HH` escapes. This restriction does
@@ -147,12 +177,12 @@ impl RequestPattern {
     }
 
     /// Matches the method and path, normalizing escape hex case.
-    /// `wildcards_match_percent` controls whether wildcards may consume escapes.
+    /// `allow_escapes` controls which escapes wildcards may consume.
     fn matches_with_wildcard_escapes(
         &self,
         method: &http::Method,
         path: &str,
-        wildcards_match_percent: bool,
+        allow_escapes: &WildcardEscapes,
     ) -> bool {
         if !self.verbs.is_empty() && !self.verbs.iter().any(|verb| verb.0.eq(method)) {
             return false;
@@ -189,7 +219,7 @@ impl RequestPattern {
                 pattern_components.len() == path_components.len()
                     && pattern_components.iter().zip(path_components.iter()).all(
                         |(pattern_component, path_component)| {
-                            pattern_component.matches(path_component, wildcards_match_percent)
+                            pattern_component.matches(path_component, allow_escapes)
                         },
                     )
             }
@@ -203,21 +233,20 @@ impl RequestPattern {
                 }
 
                 let wildcard_end = path_components.len() - suffix.len();
-                if !wildcards_match_percent
-                    && path_components[prefix.len()..wildcard_end]
-                        .iter()
-                        .any(|component| component.contains('%'))
+                if !path_components[prefix.len()..wildcard_end]
+                    .iter()
+                    .all(|component| allow_escapes.matches(component))
                 {
                     return false;
                 }
 
                 prefix.iter().zip(path_components.iter()).all(
                     |(pattern_component, path_component)| {
-                        pattern_component.matches(path_component, wildcards_match_percent)
+                        pattern_component.matches(path_component, allow_escapes)
                     },
                 ) && suffix.iter().rev().zip(path_components.iter().rev()).all(
                     |(pattern_component, path_component)| {
-                        pattern_component.matches(path_component, wildcards_match_percent)
+                        pattern_component.matches(path_component, allow_escapes)
                     },
                 )
             }
@@ -326,7 +355,7 @@ impl FromStr for PathComponent {
 }
 
 /// RFC 3986 section 6.2.2.1 makes hex digits in `%HH` case-insensitive.
-/// Keep escapes encoded so ACL allow wildcards still cannot consume them.
+/// Keep escapes encoded so ACL allow wildcards can enforce their escape policy.
 fn normalize_percent_escape_case(path: &str) -> Cow<'_, str> {
     let mut normalized = Cow::Borrowed(path);
     for (index, _) in path.match_indices('%') {
@@ -373,19 +402,18 @@ impl Display for PathComponent {
 
 impl PathComponent {
     /// Matches a component whose escape hex case is already normalized.
-    /// When `wildcards_match_percent` is false, each percent escape must occur
-    /// in the pattern's literal portion.
-    fn matches(&self, s: &str, wildcards_match_percent: bool) -> bool {
+    /// Literal portions match independently of the wildcard's escape policy.
+    fn matches(&self, s: &str, allow_escapes: &WildcardEscapes) -> bool {
         match self {
             PathComponent::SingleWildcard | PathComponent::DoubleWildcard => {
-                wildcards_match_percent || !s.contains('%')
+                allow_escapes.matches(s)
             }
             PathComponent::PrefixWildcard(prefix) => s
                 .strip_prefix(prefix)
-                .is_some_and(|rest| wildcards_match_percent || !rest.contains('%')),
+                .is_some_and(|rest| allow_escapes.matches(rest)),
             PathComponent::SuffixWildcard(suffix) => s
                 .strip_suffix(suffix)
-                .is_some_and(|rest| wildcards_match_percent || !rest.contains('%')),
+                .is_some_and(|rest| allow_escapes.matches(rest)),
             PathComponent::Exact(expected) => expected == s,
         }
     }
