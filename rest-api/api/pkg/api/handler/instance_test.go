@@ -9618,6 +9618,18 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 	testUpdateInterfaceWithIPs(t, dbSession, instsubarr[0], []string{"192.168.1.100", "192.168.1.101", "2001:db8::1"})
 	testUpdateInterfaceWithIPs(t, dbSession, instsubarr[1], []string{"192.168.2.200"})
 
+	// Tenant with an Instance on a Site where it has no Tenant/Site association
+	tnOrg2 := "test-tenant-org-2"
+	tnu2 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg2, tnOrgRoles1)
+	tn2 := common.TestBuildTenantWithDisplayName(t, dbSession, "test-tenant-2", tnOrg2, tnu2, "Test Tenant 2")
+	st4 := testInstanceBuildSite(t, dbSession, ip, "test-site-4", cdbm.SiteStatusRegistered, true, ipu)
+	ist5 := testInstanceBuildInstanceType(t, dbSession, ip, "test-instance-type-5", st4, cdbm.InstanceStatusReady)
+	vpc5 := testInstanceBuildVPC(t, dbSession, "test-vpc-5", ip, tn2, st4, nil, nil, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, cdbm.VpcStatusReady, tnu2)
+	mc7 := testInstanceBuildMachineWithID(t, dbSession, ip.ID, st4.ID, cutil.GetPtr(false), nil, "machine-getall-7")
+	instNoTenantSite := testInstanceBuildInstance(t, dbSession, "test-instance-no-tenant-site", tn2.ID, ip.ID, st4.ID, &ist5.ID, vpc5.ID, cutil.GetPtr(mc7.ID), nil, nil, cdbm.InstanceStatusReady)
+	common.TestBuildStatusDetail(t, dbSession, instNoTenantSite.ID.String(), cdbm.InstanceStatusPending, cutil.GetPtr("request received, pending processing"))
+	common.TestBuildStatusDetail(t, dbSession, instNoTenantSite.ID.String(), cdbm.InstanceStatusProvisioning, cutil.GetPtr("Instance is being provisioned on Site"))
+
 	e := echo.New()
 	cfg := common.GetTestConfig()
 	tc := &tmocks.Client{}
@@ -9660,6 +9672,7 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 		expectedIBInterfaceID                       *string
 		expectedDpuExtensionServiceDeploymentID     *string
 		expectedMachineIDOverride                   *string
+		expectedSerialConsoleURL                    *string
 		expectedAnyNetworkSecurityGroupInherited    bool
 		expectedAnyNetworkSecurityGroupNotInherited bool
 		expectedNetworkSecurityGroupInheritedByName map[string]bool
@@ -10724,6 +10737,24 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 			expectedFirstEntryName: instarr[0].Name,
 			wantErr:                false,
 		},
+		{
+			name: "test Instance getall API endpoint returns serial console URL for Site without Tenant/Site association",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqOrg:   tnOrg2,
+				reqUser:  tnu2,
+				respCode: http.StatusOK,
+			},
+			expectedCount:             1,
+			expectedTotal:             1,
+			expectedFirstEntryName:    instNoTenantSite.Name,
+			expectedMachineIDOverride: cutil.GetPtr(mc7.ID),
+			expectedSerialConsoleURL:  cutil.GetPtr(fmt.Sprintf("ssh://%s@%s", instNoTenantSite.ControllerInstanceID.String(), *st4.SerialConsoleHostname)),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -10861,6 +10892,11 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 
 				assert.Equal(t, *rst[0].MachineID, *expectedMachineID)
 				assert.Equal(t, rst[0].Status, cdbm.InstanceStatusReady)
+
+				if tt.expectedSerialConsoleURL != nil {
+					require.NotNil(t, rst[0].SerialConsoleURL)
+					assert.Equal(t, *tt.expectedSerialConsoleURL, *rst[0].SerialConsoleURL)
+				}
 
 				if tt.expectSubnet {
 					assert.Equal(t, *rst[0].Interfaces[0].SubnetID, instsub1.SubnetID.String())
@@ -11568,45 +11604,6 @@ func TestNewGetInstanceHandler(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestGetAllInstanceHandler_SerialConsoleURLWithoutTenantSite(t *testing.T) {
-	dbSession := testInstanceInitDB(t)
-	defer dbSession.Close()
-
-	testInstanceSetupSchema(t, dbSession)
-
-	ipOrg := "test-provider-org"
-	tnOrg := "test-tenant-org"
-
-	ipu := testInstanceBuildUser(t, dbSession, "test-starfleet-id-1", ipOrg, []string{authz.ProviderAdminRole})
-	ip := testInstanceSiteBuildInfrastructureProvider(t, dbSession, "test-infrastructure-provider", ipOrg, ipu)
-	st := testInstanceBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, true, ipu)
-	require.NotNil(t, st.SerialConsoleHostname)
-
-	tnu := testInstanceBuildUser(t, dbSession, "test-starfleet-id-2", tnOrg, []string{authz.TenantAdminRole})
-	tn := common.TestBuildTenantWithDisplayName(t, dbSession, "test-tenant", tnOrg, tnu, "Test Tenant")
-	ist := testInstanceBuildInstanceType(t, dbSession, ip, "test-instance-type", st, cdbm.InstanceStatusReady)
-	vpc := testInstanceBuildVPC(t, dbSession, "test-vpc", ip, tn, st, nil, nil, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, cdbm.VpcStatusReady, tnu)
-	inst := testInstanceBuildInstance(t, dbSession, "test-instance", tn.ID, ip.ID, st.ID, &ist.ID, vpc.ID, nil, nil, nil, cdbm.InstanceStatusReady)
-
-	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v2/org/%s/nico/instance", tnOrg), nil)
-	rec := httptest.NewRecorder()
-	ec := echo.New().NewContext(req, rec)
-	ec.SetParamNames("orgName")
-	ec.SetParamValues(tnOrg)
-	ec.Set("user", tnu)
-	ec.SetRequest(ec.Request().WithContext(common.TestCommonTraceProviderSetup(t, context.Background())))
-
-	handler := GetAllInstanceHandler{dbSession: dbSession, tc: &tmocks.Client{}, cfg: common.GetTestConfig()}
-	require.NoError(t, handler.Handle(ec))
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-
-	rst := []model.APIInstance{}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rst))
-	require.Len(t, rst, 1)
-	require.NotNil(t, rst[0].SerialConsoleURL)
-	assert.Equal(t, fmt.Sprintf("ssh://%s@%s", inst.ControllerInstanceID.String(), *st.SerialConsoleHostname), *rst[0].SerialConsoleURL)
 }
 
 func TestNewGetAllInstanceHandler(t *testing.T) {

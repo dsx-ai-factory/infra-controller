@@ -5391,7 +5391,8 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 	// Get Sites for Instances that weren't loaded from the siteId query
 	unloadedSiteIDs := goset.NewSet[uuid.UUID]()
 	for _, ins := range dbInstances {
-		if _, ok := sitesByID[ins.SiteID]; !ok {
+		_, loaded := sitesByID[ins.SiteID]
+		if !loaded {
 			unloadedSiteIDs.Add(ins.SiteID)
 		}
 	}
