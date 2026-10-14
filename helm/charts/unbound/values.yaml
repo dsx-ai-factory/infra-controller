@@ -28,6 +28,14 @@ exporter:
 ##   command: ["/bin/sh", "-c"]
 ##   args:
 ##     - |
+##       exec unbound -d -c /etc/unbound/main.cfg
+## When `unbound.mainConfig` (below) is set, the chart mounts it at
+## /etc/unbound/main.cfg — pass that path to `unbound -c`, and include the
+## local.conf.d fragments from inside mainConfig (see the example there).
+## Without mainConfig, generate the config yourself as before:
+##   command: ["/bin/sh", "-c"]
+##   args:
+##     - |
 ##       printf 'server:\n  interface: 0.0.0.0\n  interface: ::0\ninclude: "/etc/unbound/local.conf.d/*.conf"\n' > /tmp/unbound.conf
 ##       exec unbound -d -c /tmp/unbound.conf
 ## If reusing an older copy, remove its inline `access-control: 0.0.0.0/0 allow`.
@@ -113,13 +121,33 @@ localConfig:
     server:
         verbosity: 1
   nico_local_unknowndomain.conf: |
-    # This .unknowndomain value is hardcoded in nico as a default if a VPC
-    # doesn't have one configured. We shouldn't forward any of these queries further
-    # upstream.
-    local-zone: "unknowndomain." static
-    local-data: "unknowndomain. 10800 IN NS localhost."
-    local-data: "unknowndomain. 10800 IN SOA localhost. nobody.invalid. 1 3600 1200 604800 10800"
+    server:
+        # This .unknowndomain value is hardcoded in nico as a default if a VPC
+        # doesn't have one configured. We shouldn't forward any of these queries further
+        # upstream.
+        local-zone: "unknowndomain." static
+        local-data: "unknowndomain. 10800 IN NS localhost."
+        local-data: "unknowndomain. 10800 IN SOA localhost. nobody.invalid. 1 3600 1200 604800 10800"
   forwarders.conf: |
-    # This file's contents are intended to be broken if used at runtime. The base
-    # configMapGenerator should be merged with a later one that replaces this file.
-    include: patchme/patchme.conf
+    # No forwarders configured. Override localConfig.forwarders.conf in values
+    # to add forward-zone blocks for upstream resolvers.
+
+## Optional override for the main unbound.cfg. When non-empty, the value is
+## mounted at /etc/unbound/main.cfg (not inside local.conf.d — the *.conf
+## include glob would never load it there). Pass it to the binary via
+## `unbound -c /etc/unbound/main.cfg` (see the command example above), and
+## include the local.conf.d fragments from here. Use this to supply
+## interface, chroot, pidfile, and username directives required by stock UBI
+## unbound images (which do not ship the NVIDIA nvforge entrypoint wrapper).
+## Example (OpenShift / UBI unbound, port 5353):
+##   unbound:
+##     mainConfig: |
+##       server:
+##           interface: 0.0.0.0@5353
+##           interface: ::0@5353
+##           chroot: ""
+##           username: ""
+##           pidfile: ""
+##       include: "/etc/unbound/local.conf.d/*.conf"
+unbound:
+  mainConfig: ""  # override the main unbound.cfg content

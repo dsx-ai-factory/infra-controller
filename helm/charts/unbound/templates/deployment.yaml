@@ -53,6 +53,16 @@ spec:
           volumeMounts:
             - name: local-config
               mountPath: /etc/unbound/local.conf.d
+            {{- if .Values.unbound.mainConfig }}
+            # mainConfig is a full unbound.cfg, not a *.conf fragment — it is
+            # not picked up by the local.conf.d include glob. Mount it at a
+            # dedicated path so a stock-image command can pass it to
+            # `unbound -c /etc/unbound/main.cfg`.
+            - name: main-config
+              mountPath: /etc/unbound/main.cfg
+              subPath: unbound.cfg
+              readOnly: true
+            {{- end }}
             - name: control-keys
               mountPath: /etc/unbound/keys
           envFrom:
@@ -78,5 +88,10 @@ spec:
         - name: local-config
           configMap:
             name: unbound-local-config
+        {{- if .Values.unbound.mainConfig }}
+        - name: main-config
+          configMap:
+            name: unbound-local-config
+        {{- end }}
         - name: control-keys
           emptyDir: {}
