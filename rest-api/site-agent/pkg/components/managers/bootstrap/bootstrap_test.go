@@ -71,7 +71,7 @@ func TestNewBootstrapConfig(t *testing.T) {
 	err := newBootstrapConfig(dir + string(os.PathSeparator))
 	require.NoError(t, err)
 
-	bCfg := ManagerAccess.Data.EB.Managers.Bootstrap.ConfigSnapshot()
+	bCfg := ManagerAccess.Data.EB.Managers.Bootstrap.GetConfig()
 	assert.Equal(t, testOTP, bCfg.OTP)
 
 	assert.NotContains(t, logged.String(), testOTP)
@@ -227,14 +227,14 @@ func TestBoostrapAPI_ReloadBootstrapCredentials(t *testing.T) {
 			err := (&BoostrapAPI{}).reloadBootstrapCredentials(secretDir)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
-				assert.Equal(t, initialConfig, ManagerAccess.Data.EB.Managers.Bootstrap.ConfigSnapshot())
+				assert.Equal(t, initialConfig, ManagerAccess.Data.EB.Managers.Bootstrap.GetConfig())
 				assert.Equal(t, 0, len(requests))
 				assert.Zero(t, ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadAttempted.Load())
 				return
 			}
 
 			require.NoError(t, err)
-			assert.Equal(t, updatedConfig, ManagerAccess.Data.EB.Managers.Bootstrap.ConfigSnapshot())
+			assert.Equal(t, updatedConfig, ManagerAccess.Data.EB.Managers.Bootstrap.GetConfig())
 			assert.Equal(t, uint64(1), ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadAttempted.Load())
 			assert.Equal(t, uint64(1), ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadSucceeded.Load())
 			require.NoError(t, ManagerAccess.Data.EB.Managers.Bootstrap.Registration.Check(siteID, rotatedOTP))
