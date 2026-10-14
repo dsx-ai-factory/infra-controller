@@ -3106,6 +3106,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbide-resource-pool-api"
+version = "0.0.0"
+dependencies = [
+ "carbide-resource-pool-api",
+ "carbide-test-support",
+ "prost",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
 name = "carbide-rms-mock"
 version = "0.0.1"
 dependencies = [
