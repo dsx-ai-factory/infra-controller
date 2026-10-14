@@ -452,7 +452,7 @@ impl ExpectedInterface {
             })
         }
 
-        if let Some(name) = &self.cerebro_ifname
+        if let Some(name) = &self.physical_ifname
             && !only_ifname_chars(name, true)
         {
             return Err(
