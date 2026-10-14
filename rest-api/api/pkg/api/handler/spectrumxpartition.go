@@ -146,9 +146,7 @@ func (csxph CreateSpectrumXPartitionHandler) Handle(c echo.Context) error {
 	var ssd *cdbm.StatusDetail
 
 	err = cdb.WithTx(ctx, csxph.dbSession, func(tx *cdb.Tx) error {
-		// Serialize the existence check and create for this Tenant/Site/name
-		// namespace. Core creation remains inside the transaction, so a
-		// concurrent request cannot allocate another VNI before the row commits.
+		// Acquire a lock so that another concurrent request with the same name cannot succeed.
 		lockKey := fmt.Sprintf("spectrumx-partition-create:%s:%s:%s", orgTenant.ID, site.ID, apiRequest.Name)
 		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
 		if derr != nil {
@@ -159,7 +157,7 @@ func (csxph CreateSpectrumXPartitionHandler) Handle(c echo.Context) error {
 					Str("siteId", site.ID.String()).
 					Str("name", apiRequest.Name).
 					Msg("concurrent SpectrumX Partition create detected")
-				return cutil.NewAPIError(http.StatusConflict, "Another SpectrumX Partition with specified name already exists for Tenant", nil)
+				return cutil.NewAPIError(http.StatusConflict, "Creation of a SpectrumX Partition with specified name is already in progress in another request", nil)
 			}
 			logger.Error().Err(derr).Msg("unable to acquire advisory lock for SpectrumX Partition creation")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SpectrumX Partition due to DB error", nil)
