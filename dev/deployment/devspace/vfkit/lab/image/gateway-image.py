@@ -13,11 +13,15 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "lib"))
+import image_verification
+
 VAR = Path(os.environ.get("VXLAB_VAR", ROOT / "var"))
 VERSION = os.environ.get("ALPINE_VERSION", "3.24.1")
 ARCH = os.environ.get("ALPINE_ARCH", "aarch64")
@@ -26,6 +30,7 @@ ASSETS = IMAGES / f"gateway-{VERSION}-{ARCH}"
 WORLD = ROOT / "image/gateway-world"
 CMDLINE = "console=hvc0 modules=loop,squashfs,sd-mod,usb-storage quiet"
 KEY_NAME = "vflab-repository.rsa.pub"
+IMAGE_SIGNING_KEY = ROOT / "image/keys/alpine.asc"
 
 
 def run(*args, **kwargs):
@@ -68,15 +73,22 @@ def make_iso(source: Path, target: Path, apkovl: Path, packages: Path | None = N
 def stock_iso() -> Path:
     filename = f"alpine-virt-{VERSION}-{ARCH}.iso"
     path = IMAGES / "downloads" / filename
-    if path.exists():
-        return path
     path.parent.mkdir(parents=True, exist_ok=True)
     url = f"https://dl-cdn.alpinelinux.org/alpine/v{VERSION.rsplit('.', 1)[0]}/releases/{ARCH}/{filename}"
+    signature = path.with_suffix(".iso.asc")
+    if not signature.exists():
+        pending_signature = signature.with_suffix(".asc.part")
+        run("curl", "-fL", "--retry", "3", "-o", pending_signature, url + ".asc")
+        pending_signature.replace(signature)
+    if path.exists():
+        image_verification.verify_signature(path, signature, IMAGE_SIGNING_KEY)
+        return path
     run("curl", "-fL", "--retry", "3", "-o", str(path) + ".part", url)
     checksum = run("curl", "-fsSL", url + ".sha256", capture_output=True, text=True).stdout.split()[0]
     pending = Path(str(path) + ".part")
     if hashlib.sha256(pending.read_bytes()).hexdigest() != checksum:
         raise SystemExit("Alpine ISO SHA-256 mismatch")
+    image_verification.verify_signature(pending, signature, IMAGE_SIGNING_KEY)
     pending.replace(path)
     return path
 
@@ -98,7 +110,8 @@ def sign_index(index: Path, directory: Path):
 
 def fingerprint() -> str:
     digest = hashlib.sha256((VERSION + ARCH).encode())
-    for path in (WORLD, ROOT / "guest/fetch-gateway-packages.sh", Path(__file__)):
+    for path in (WORLD, ROOT / "guest/fetch-gateway-packages.sh", Path(__file__),
+                 Path(image_verification.__file__), IMAGE_SIGNING_KEY):
         digest.update(path.read_bytes())
     return digest.hexdigest()
 

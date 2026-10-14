@@ -28,6 +28,28 @@ class LifecycleTests(unittest.TestCase):
     def args(self, *options):
         return vm.parser().parse_args(["--vm-dir", str(self.directory), *options, "up"])
 
+    def test_ubuntu_manifest_must_be_signed_and_match_the_pin_before_image_download(self):
+        self.machine.create(self.args())
+
+        def download(args, **kwargs):
+            self.assertEqual(args[0], "curl")
+            self.assertIn(args[-1].rsplit("/", 1)[1], ("SHA256SUMS", "SHA256SUMS.gpg"))
+            Path(args[args.index("--output") + 1]).write_text(
+                "0" * 64 + " *" + vm.IMAGE_URL.rsplit("/", 1)[1] + "\n")
+
+        cases = [(ValueError("invalid signature"), "invalid signature"),
+                 (None, "pinned image SHA256")]
+        for failure, message in cases:
+            with self.subTest(message=message), patch.object(vm.shutil, "which", return_value="/tool"), \
+                    patch.object(vm, "run", side_effect=download), \
+                    patch.object(vm, "verify_signature", side_effect=failure) as verify, \
+                    self.assertRaisesRegex(ValueError, message):
+                self.machine.ensure_disk(self.args())
+            verify.assert_called_once()
+            self.assertEqual(verify.call_args.args[2], vm.IMAGE_SIGNING_KEY)
+            self.assertFalse((self.directory / "root.raw").exists())
+            self.assertFalse((self.directory / "image.json").exists())
+
     def test_socket_modes_launch_supervisor_but_native_networks_do_not(self):
         (self.directory / "root.raw").touch()
         for network in ("lab", "socket", "nat", "bridged"):
