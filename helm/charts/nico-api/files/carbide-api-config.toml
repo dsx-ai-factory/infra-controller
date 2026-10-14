@@ -30,7 +30,8 @@ anycast_site_prefixes = ["0.0.0.0/0"]
 
 [certificates]
 use_cert_manager = {{ .Values.global.certificate.useCertManager }}
-{{- if .Values.global.certificate.useCertManager }}
+use_cert_manager_ufm = {{ .Values.global.certificate.useCertManagerUfm }}
+{{- if or .Values.global.certificate.useCertManager .Values.global.certificate.useCertManagerUfm }}
 
 [certificates.cert_manager]
 namespace = {{ include "nico-api.namespace" . | quote }}

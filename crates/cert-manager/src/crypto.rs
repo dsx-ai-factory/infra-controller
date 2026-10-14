@@ -19,6 +19,9 @@ use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
 use crate::resources::RequestStatus;
 use crate::{Error, MIN_CERTIFICATE_TTL};
 
+// The issuer and API may have different clocks when checking the signed expiry.
+const CERTIFICATE_CLOCK_SKEW: Duration = Duration::from_secs(5 * 60);
+
 pub(crate) struct CertificateRequestMaterial {
     key: KeyPair,
     params: CertificateParams,
@@ -188,7 +191,8 @@ impl CertificateRequestMaterial {
             ));
         }
         let now = UnixTime::now();
-        if cert.validity().not_after.timestamp() > (now.as_secs() + self.lifetime.as_secs()) as i64
+        if cert.validity().not_after.timestamp()
+            > (now.as_secs() + self.lifetime.as_secs() + CERTIFICATE_CLOCK_SKEW.as_secs()) as i64
         {
             return Err(Error::Certificate(
                 "certificate exceeds the requested lifetime".into(),

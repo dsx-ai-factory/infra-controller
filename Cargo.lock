@@ -1100,6 +1100,7 @@ dependencies = [
 name = "carbide-api"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "carbide-api-core",
  "carbide-api-db",
  "carbide-api-web",

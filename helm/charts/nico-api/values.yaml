@@ -14,8 +14,10 @@ global:
     pullPolicy: IfNotPresent
   imagePullSecrets: []
   certificate:
-    ## Use cert-manager for Scout, DPU, and UFM certificates; the default is Vault.
+    ## Use cert-manager for Scout and DPU certificates; the default is Vault.
     useCertManager: false
+    ## Independently enable UFM issuance after approval policy allows its DNS SANs.
+    useCertManagerUfm: false
     duration: 720h0m0s
     renewBefore: 360h0m0s
     privateKey:

@@ -360,6 +360,30 @@ fn optional_issuer_chain_contract() {
 }
 
 #[test]
+fn issued_lifetime_allows_bounded_clock_skew() {
+    let ca = TestCa::new();
+    let request = CertificateRequestMaterial::new(
+        &spiffe_identity(),
+        MACHINE_ID,
+        None,
+        Some("720h"),
+        default_max_ttl(),
+    )
+    .unwrap();
+    for (name, skew_seconds, accepted) in [
+        ("issuer clock four minutes ahead", 4 * 60, true),
+        ("issuer clock exceeds five-minute allowance", 6 * 60, false),
+    ] {
+        let status = ca.sign(
+            &request.csr_pem().unwrap(),
+            request.lifetime + Duration::from_secs(skew_seconds),
+        );
+        let result = request.validate(&status, ca.pem.as_bytes());
+        assert_eq!(result.is_ok(), accepted, "{name}: {result:?}");
+    }
+}
+
+#[test]
 fn rejects_incompatible_issued_material() {
     let ca = TestCa::new();
     let request = CertificateRequestMaterial::new(

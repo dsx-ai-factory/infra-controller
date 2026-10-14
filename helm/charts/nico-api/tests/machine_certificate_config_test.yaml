@@ -10,6 +10,9 @@ tests:
       - matchRegex:
           path: data["nico-api-config.toml"]
           pattern: '(?m)^use_cert_manager = false$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^use_cert_manager_ufm = false$'
       - notMatchRegex:
           path: data["nico-api-config.toml"]
           pattern: '\[certificates\.cert_manager\]'
@@ -23,6 +26,9 @@ tests:
       - matchRegex:
           path: data["nico-api-config.toml"]
           pattern: '(?m)^use_cert_manager = true$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^use_cert_manager_ufm = false$'
       - matchRegex:
           path: data["nico-api-config.toml"]
           pattern: '(?m)^namespace = "test-site"$'
@@ -56,3 +62,18 @@ tests:
       - matchRegex:
           path: data["nico-api-config.toml"]
           pattern: '(?m)^request_timeout_secs = 60$'
+
+  - it: enables UFM independently with shared signer settings
+    documentIndex: 0
+    set:
+      global.certificate.useCertManagerUfm: true
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^use_cert_manager = false$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^use_cert_manager_ufm = true$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^issuer_name = "site-issuer"$'

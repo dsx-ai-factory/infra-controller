@@ -27,7 +27,7 @@ use carbide_api_core::secrets::{PostgresCredentialManager, SecretRouting, Secret
 use carbide_kms_provider::{
     DEFAULT_TRANSIT_MOUNT, IntegratedKmsProvider, KmsBackend, MultiKmsProvider, TransitKmsProvider,
 };
-use carbide_secrets::certificates::CertificateProvider;
+use carbide_secrets::certificates::{Certificate, CertificateProvider};
 use carbide_secrets::chained_reader::{
     BmcSiteWideRootV0BackendCredentialBlocker, NonBmcSiteWideRootV0CredentialReader,
     NonUfmCredentialReader, UfmBackendCredentialBlocker,
@@ -69,6 +69,31 @@ type CredentialRuntimeParts = (
     Option<SecretsContext>,
 );
 
+struct CertificateProviders {
+    machine: Arc<dyn CertificateProvider>,
+    ufm: Arc<dyn CertificateProvider>,
+}
+
+#[async_trait::async_trait]
+impl CertificateProvider for CertificateProviders {
+    async fn get_certificate(
+        &self,
+        unique_identifier: &str,
+        alt_names: Option<String>,
+        ttl: Option<String>,
+    ) -> Result<Certificate, SecretsError> {
+        // UFM issuance supplies DNS SANs; machine issuance supplies only its SPIFFE URI.
+        let provider = if alt_names.is_some() {
+            &self.ufm
+        } else {
+            &self.machine
+        };
+        provider
+            .get_certificate(unique_identifier, alt_names, ttl)
+            .await
+    }
+}
+
 pub(crate) async fn setup_resources(
     carbide_config: &CarbideConfig,
     credential_config: &CredentialConfig,
@@ -90,22 +115,40 @@ pub(crate) async fn setup_resources(
         trust_domain: vault_config.spiffe_trust_domain(),
         machine_base_path: vault_config.spiffe_machine_base_path(),
     };
+    let vault_provider = || -> eyre::Result<Arc<dyn CertificateProvider>> {
+        let cert_config = carbide_config.certificates.to_certificate_config()?;
+        create_certificate_provider(&cert_config, &vault_client, spiffe.clone())
+    };
     let certificate_provider: Arc<dyn CertificateProvider> =
         if let Some(config) = carbide_config.certificates.cert_manager_config()? {
             let tls = carbide_config.tls.as_ref().ok_or_else(|| {
-                eyre::eyre!("certificates.use_cert_manager requires [tls] root_cafile_path")
+                eyre::eyre!("cert-manager certificate issuance requires [tls] root_cafile_path")
             })?;
-            Arc::new(
+            let cert_manager_provider: Arc<dyn CertificateProvider> = Arc::new(
                 cert_manager::CertManagerCertificateProvider::from_config(
                     config,
-                    spiffe,
+                    spiffe.clone(),
                     tls.root_cafile_path.clone().into(),
                 )
                 .await?,
-            )
+            );
+            match (
+                carbide_config.certificates.use_cert_manager,
+                carbide_config.certificates.use_cert_manager_ufm,
+            ) {
+                (true, true) => cert_manager_provider,
+                (true, false) => Arc::new(CertificateProviders {
+                    machine: cert_manager_provider,
+                    ufm: vault_provider()?,
+                }),
+                (false, true) => Arc::new(CertificateProviders {
+                    machine: vault_provider()?,
+                    ufm: cert_manager_provider,
+                }),
+                (false, false) => unreachable!("cert-manager settings require an enabled flag"),
+            }
         } else {
-            let cert_config = carbide_config.certificates.to_certificate_config()?;
-            create_certificate_provider(&cert_config, &vault_client, spiffe)?
+            vault_provider()?
         };
 
     let db_pool = connect_postgres(carbide_config).await?;
@@ -857,6 +900,57 @@ mod tests {
     use carbide_secrets::credentials::{CredentialKey, Credentials};
 
     use super::*;
+
+    struct TestCertificateProvider(&'static str);
+
+    #[async_trait::async_trait]
+    impl CertificateProvider for TestCertificateProvider {
+        async fn get_certificate(
+            &self,
+            unique_identifier: &str,
+            alt_names: Option<String>,
+            ttl: Option<String>,
+        ) -> Result<Certificate, SecretsError> {
+            assert_eq!(unique_identifier, "test-identifier");
+            assert_eq!(ttl.as_deref(), Some("720h"));
+            Ok(Certificate {
+                public_key: self.0.as_bytes().to_vec(),
+                issuing_ca: alt_names.unwrap_or_default().into_bytes(),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn certificate_providers_route_machine_and_ufm_requests() {
+        let provider = CertificateProviders {
+            machine: Arc::new(TestCertificateProvider("machine-provider")),
+            ufm: Arc::new(TestCertificateProvider("ufm-provider")),
+        };
+        for (name, alt_names, expected_provider) in [
+            ("machine SPIFFE request", None, "machine-provider"),
+            ("UFM DNS request", Some("ufm.example.com"), "ufm-provider"),
+        ] {
+            let certificate = provider
+                .get_certificate(
+                    "test-identifier",
+                    alt_names.map(String::from),
+                    Some("720h".into()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                certificate.public_key,
+                expected_provider.as_bytes(),
+                "{name}"
+            );
+            assert_eq!(
+                certificate.issuing_ca,
+                alt_names.unwrap_or_default().as_bytes(),
+                "{name}: DNS SANs are preserved"
+            );
+        }
+    }
 
     #[test]
     fn vault_import_allows_an_excluded_only_source() {
