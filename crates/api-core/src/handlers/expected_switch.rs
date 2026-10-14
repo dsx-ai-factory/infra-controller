@@ -162,12 +162,19 @@ fn validate_nvos_credentials_pair(switch: &ExpectedSwitch) -> Result<(), Carbide
     }
 }
 
-/// Enforce the switch NVOS port contract and canonicalize the port set in place:
-/// at least one port, exactly one primary (a lone port auto-promoted), no
-/// duplicate MACs. Must run before persisting a create, legacy update, or PATCH.
-fn validate_expected_switch(switch: &mut ExpectedSwitch) -> Result<(), CarbideError> {
-    switch.nvos_interfaces = normalize_nvos_interfaces(&switch.nvos_interfaces)
-        .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?;
+/// Validate the switch fields carried by a write.
+///
+/// Zero-port rows predate the structured NVOS interface contract and remain
+/// writable. The stronger port-set invariant is enforced only when a request
+/// supplies a nonempty set or explicitly selects `nvos_interfaces` in a patch.
+fn validate_expected_switch(
+    switch: &mut ExpectedSwitch,
+    validate_nvos_interfaces: bool,
+) -> Result<(), CarbideError> {
+    if validate_nvos_interfaces {
+        switch.nvos_interfaces = normalize_nvos_interfaces(&switch.nvos_interfaces)
+            .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?;
+    }
     validate_nvos_ip_pairing(switch)?;
     validate_nvos_credentials_pair(switch)?;
 
@@ -186,7 +193,8 @@ pub(crate) async fn add_expected_switch(
                 CarbideError::InvalidArgument(e.to_string())
             })?;
 
-    validate_expected_switch(&mut switch)?;
+    let validate_nvos_interfaces = !switch.nvos_interfaces.is_empty();
+    validate_expected_switch(&mut switch, validate_nvos_interfaces)?;
 
     let mut txn = api
         .database_connection
@@ -244,6 +252,10 @@ pub(crate) async fn update_expected_switch(
 ) -> Result<Response<()>, Status> {
     let update_mask = parse_expected_switch_update_mask(&request)?;
     let patch = request.into_inner();
+    let validate_nvos_interfaces = update_mask.as_ref().map_or_else(
+        || !patch.nvos_interfaces.is_empty(),
+        |fields| fields.contains(&ExpectedSwitchUpdateField::NvosInterfaces),
+    );
 
     let mut txn = api
         .database_connection
@@ -291,6 +303,7 @@ pub(crate) async fn update_expected_switch(
     let preallocations = update_switch_in_transaction(
         &mut txn,
         &mut switch,
+        validate_nvos_interfaces,
         api.runtime_config.retained_boot_interface_window,
     )
     .await?;
@@ -362,7 +375,7 @@ pub(crate) async fn patch_expected_switch(
     if fields.contains(UpdateField::NvosInterfaces) {
         // Replace the whole port set. Each supplied interface carries its own
         // primary flag; the invariant check (exactly one primary, lone port
-        // auto-primary) runs in `validate_expected_switch` before persisting.
+        // auto-primary) runs before persisting.
         switch.nvos_interfaces = patch
             .nvos_interfaces
             .into_iter()
@@ -405,6 +418,7 @@ pub(crate) async fn patch_expected_switch(
     let preallocations = update_switch_in_transaction(
         &mut txn,
         &mut switch,
+        fields.contains(UpdateField::NvosInterfaces),
         api.runtime_config.retained_boot_interface_window,
     )
     .await?;
@@ -418,9 +432,10 @@ pub(crate) async fn patch_expected_switch(
 async fn update_switch_in_transaction(
     txn: &mut sqlx::PgConnection,
     switch: &mut ExpectedSwitch,
+    validate_nvos_interfaces: bool,
     retained_window: Option<chrono::Duration>,
 ) -> Result<Vec<PreallocationSuccess>, CarbideError> {
-    validate_expected_switch(switch)?;
+    validate_expected_switch(switch, validate_nvos_interfaces)?;
 
     // Lock the inventory before allocating addresses so PATCH and legacy
     // updates cannot wait on each other's locks.
@@ -536,7 +551,8 @@ pub(crate) async fn replace_all_expected_switches(
                     CarbideError::InvalidArgument(e.to_string())
                 })?;
 
-        validate_expected_switch(&mut switch)?;
+        let validate_nvos_interfaces = !switch.nvos_interfaces.is_empty();
+        validate_expected_switch(&mut switch, validate_nvos_interfaces)?;
 
         switches.push(switch);
     }

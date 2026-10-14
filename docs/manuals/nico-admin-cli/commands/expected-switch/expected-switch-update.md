@@ -161,6 +161,7 @@ nico-admin-cli expected-switch update --bmc-mac-address 00:11:22:33:44:55 --bmc-
 nico-admin-cli expected-switch update --id 12345678-1234-5678-90ab-cdef01234567 --switch-serial-number DGX-H100-640GB
 nico-admin-cli expected-switch update --bmc-mac-address 00:11:22:33:44:55 --nvos-password mynewpassword
 nico-admin-cli expected-switch update --bmc-mac-address 00:11:22:33:44:55 --nvos-username admin --nvos-password mynewpassword
+nico-admin-cli expected-switch update --bmc-mac-address 00:11:22:33:44:55 --nvos-interface aa:bb:cc:dd:ee:ff,primary --nvos-interface aa:bb:cc:dd:ee:00
 ```
 
 ---

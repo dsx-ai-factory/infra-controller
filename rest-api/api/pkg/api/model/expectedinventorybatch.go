@@ -114,7 +114,7 @@ func (r *APIReplaceAllExpectedSwitchesRequest) Validate() error {
 			return validation.Errors{"expectedSwitches": fmt.Errorf("entry %d: duplicate switchSerialNumber also used by entry %d", i, previous)}
 		}
 		serials[serial] = i
-		for _, iface := range expectedSwitch.NvosInterfaces {
+		for _, iface := range expectedSwitch.ResolvedNvosInterfaces() {
 			mac = cdbm.NormalizeMacAddress(iface.MacAddress)
 			if previous, ok := nvosMACs[mac]; ok {
 				return validation.Errors{"expectedSwitches": fmt.Errorf("entry %d: duplicate nvosMacAddress also used by entry %d", i, previous)}

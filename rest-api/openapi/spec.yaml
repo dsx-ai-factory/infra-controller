@@ -194,6 +194,10 @@ tags:
     description: |-
       Expected Switch identifies an NVLink Switch that is expected to be discovered at a Site. Infrastructure Providers can pre-register Expected Switches using BMC, NVOS credentials
       and serial numbers to help with NVLink Switch discovery and ingestion.
+
+      Deprecation history:
+
+      - `nvosMacAddresses` is deprecated in favor of `nvosInterfaces`. It remains accepted and returned for the rest of the v2 major release; removal requires a future major release and the notice defined by the release policy.
   - name: SKU
     x-displayName: SKU
     description: |-
@@ -31176,6 +31180,9 @@ components:
               isPrimary: true
             - macAddress: '00:1A:2B:3C:4D:61'
               isPrimary: false
+          nvosMacAddresses:
+            - '00:1A:2B:3C:4D:60'
+            - '00:1A:2B:3C:4D:61'
           rackId: rack-01
           manufacturer: NVIDIA
           labels:
@@ -31206,6 +31213,14 @@ components:
           description: NVOS ethernet ports of the Expected Switch, with the primary (eth0) port flagged.
           items:
             $ref: '#/components/schemas/NvosInterface'
+        nvosMacAddresses:
+          type: array
+          uniqueItems: true
+          deprecated: true
+          description: Deprecated flat NVOS MAC list retained for v2 compatibility. Use `nvosInterfaces`. Responses emit both fields, and this array contains the same MACs in the same order as `nvosInterfaces`.
+          items:
+            type: string
+            pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
         rackId:
           type:
             - string
@@ -31330,9 +31345,17 @@ components:
           description: NvOS password for the Expected Switch
         nvosInterfaces:
           type: array
-          description: NVOS ethernet ports of the Expected Switch. Mark one entry primary to choose eth0; when none is marked, the first entry on a multi-port switch defaults to primary and a single-port switch is always its own primary.
+          description: NVOS ethernet ports of the Expected Switch. Mark one entry primary to choose eth0; when none is marked, the first entry on a multi-port switch defaults to primary and a single-port switch is always its own primary. Do not provide this field together with `nvosMacAddresses`.
           items:
             $ref: '#/components/schemas/NvosInterface'
+        nvosMacAddresses:
+          type: array
+          uniqueItems: true
+          deprecated: true
+          description: Deprecated flat NVOS MAC list retained for v2 compatibility. Use `nvosInterfaces`. When supplied, REST marks the first MAC as primary. Do not provide both fields.
+          items:
+            type: string
+            pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
         rackId:
           type:
             - string
@@ -31499,9 +31522,18 @@ components:
           description: NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
         nvosInterfaces:
           type: array
-          description: Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array is rejected because a switch must keep at least one NVOS port. Mark one entry primary to choose eth0.
+          description: Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array is rejected because a switch must keep at least one NVOS port. Mark one entry primary to choose eth0. Do not provide this field together with `nvosMacAddresses`.
           items:
             $ref: '#/components/schemas/NvosInterface'
+        nvosMacAddresses:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          deprecated: true
+          description: Deprecated flat NVOS MAC list retained for v2 compatibility. Use `nvosInterfaces`. When supplied, REST marks the first MAC as primary and replaces the complete stored port set. Omission or null preserves the stored ports; an empty array is rejected. Do not provide both fields.
+          items:
+            type: string
+            pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
         rackId:
           type:
             - string

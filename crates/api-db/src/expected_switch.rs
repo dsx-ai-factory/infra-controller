@@ -98,14 +98,13 @@ async fn lock_expected_switch_writes(txn: &mut PgConnection) -> DatabaseResult<(
 /// already claims, if any. A switch owns its ports in
 /// `expected_switch_nvos_interfaces`, so "different" means a row owned by another
 /// `bmc_mac_address`. `macaddr` comparison canonicalizes case and separator
-/// differences. `update_nvos_mac_addresses` stays unguarded on purpose -- it
-/// records hardware-observed truth from site-explorer.
+/// differences.
 async fn find_nvos_mac_claimed_elsewhere(
     txn: &mut PgConnection,
     nvos_mac_addresses: &[MacAddress],
-    switch: &ExpectedSwitch,
+    exclude_bmc_mac_address: MacAddress,
 ) -> DatabaseResult<Option<MacAddress>> {
-    nvos_interface::find_mac_claimed_elsewhere(txn, nvos_mac_addresses, switch.bmc_mac_address)
+    nvos_interface::find_mac_claimed_elsewhere(txn, nvos_mac_addresses, exclude_bmc_mac_address)
         .await
 }
 
@@ -267,8 +266,12 @@ pub async fn create(
     // conflict. The advisory lock makes the check-then-insert deterministic
     // under concurrent writers.
     lock_expected_switch_writes(&mut *txn).await?;
-    if let Some(mac) =
-        find_nvos_mac_claimed_elsewhere(&mut *txn, &switch.nvos_mac_addresses(), &switch).await?
+    if let Some(mac) = find_nvos_mac_claimed_elsewhere(
+        &mut *txn,
+        &switch.nvos_mac_addresses(),
+        switch.bmc_mac_address,
+    )
+    .await?
     {
         return Err(DatabaseError::ExpectedSwitchDuplicateNvosMacAddress(mac));
     }
@@ -447,30 +450,6 @@ pub async fn delete_by_id(txn: &mut PgConnection, id: Uuid) -> DatabaseResult<()
     Ok(())
 }
 
-/// Reconcile a switch's NVOS port set to the hardware-observed `nvos_mac_addresses`
-/// without disturbing the operator-chosen primary. New ports are added
-/// non-primary and ports no longer present are dropped; a surviving lone port
-/// becomes primary. This records hardware-observed truth from site-explorer, so
-/// it stays unguarded by the duplicate-MAC conflict check.
-pub async fn update_nvos_mac_addresses(
-    txn: &mut PgConnection,
-    bmc_mac_address: MacAddress,
-    nvos_mac_addresses: &[MacAddress],
-) -> DatabaseResult<()> {
-    nvos_interface::reconcile_macs(txn, bmc_mac_address, nvos_mac_addresses).await
-}
-
-/// Move the primary NVOS port of a switch to `mac_address`, clearing the flag on
-/// its other ports. Errors if the MAC is not one of the switch's ports.
-pub async fn set_primary_nvos_interface(
-    txn: &mut PgConnection,
-    bmc_mac_address: MacAddress,
-    mac_address: MacAddress,
-) -> DatabaseResult<()> {
-    lock_expected_switch_writes(&mut *txn).await?;
-    nvos_interface::set_primary(txn, bmc_mac_address, mac_address).await
-}
-
 pub async fn clear(txn: &mut PgConnection) -> Result<(), DatabaseError> {
     // Take the write lock before the DELETE grabs row locks so clear-then-
     // create flows (`replace_all_expected_switches`) acquire locks in the same
@@ -496,9 +475,7 @@ pub async fn update(txn: &mut PgConnection, switch: &ExpectedSwitch) -> Database
 
     // Resolve the target first: a missing switch reports NotFound rather than
     // a MAC conflict, and the current row bounds the conflict check to newly
-    // claimed MACs -- re-asserting a list the row already holds stays valid
-    // even when pre-existing data or site-explorer's hardware-truth writes
-    // recorded the same MAC on two switches.
+    // claimed MACs. Re-asserting a list the row already holds stays valid.
     let current = find(
         &mut *txn,
         &ExpectedSwitchRequest {
@@ -521,7 +498,9 @@ pub async fn update(txn: &mut PgConnection, switch: &ExpectedSwitch) -> Database
         .into_iter()
         .filter(|mac| !current_macs.contains(mac))
         .collect();
-    if let Some(mac) = find_nvos_mac_claimed_elsewhere(&mut *txn, &newly_claimed, switch).await? {
+    if let Some(mac) =
+        find_nvos_mac_claimed_elsewhere(&mut *txn, &newly_claimed, current.bmc_mac_address).await?
+    {
         return Err(DatabaseError::ExpectedSwitchDuplicateNvosMacAddress(mac));
     }
 
@@ -577,7 +556,7 @@ pub async fn update(txn: &mut PgConnection, switch: &ExpectedSwitch) -> Database
     }
 
     let interfaces = prepare_interfaces_for_persist(&switch.nvos_interfaces);
-    nvos_interface::replace_for_switch(&mut *txn, switch.bmc_mac_address, &interfaces).await?;
+    nvos_interface::replace_for_switch(&mut *txn, current.bmc_mac_address, &interfaces).await?;
     Ok(())
 }
 
