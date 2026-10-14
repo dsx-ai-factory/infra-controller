@@ -45,6 +45,10 @@ annotations:
 listenAddress: "[::]:53"
 
 service:
+  # Allow configuring a different targetPort (e.g. 5353 when running as
+  # unprivileged user under OpenShift restricted-v2 SCC). Applies to the
+  # cluster-internal Service and the per-pod external LoadBalancer Services.
+  targetPort: null  # defaults to the service port when null
   ports:
     - port: 53
       name: tcp
