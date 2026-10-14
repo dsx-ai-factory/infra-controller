@@ -50,7 +50,8 @@ const (
 	MetricCredDnloadAttempt = "credentials_download_attempted"
 	// MetricCredDnloadSucc - Metric Cred Dnload Succ
 	MetricCredDnloadSucc = "credentials_download_succeeded"
-	// kubernetesSecretDataSymlink is atomically replaced when a projected Secret changes.
+	// Kubernetes projects Secret keys through the ..data symlink and atomically
+	// replaces that symlink on updates, so watching only the key paths misses changes.
 	kubernetesSecretDataSymlink = "..data"
 )
 
@@ -62,10 +63,22 @@ func readBootstrapConfig(dir string) (bootstraptypes.SecretConfig, []string, err
 		tag   string
 		value *string
 	}{
-		{tag: bootstraptypes.TagUUID, value: &config.UUID},
-		{tag: bootstraptypes.TagOTP, value: &config.OTP},
-		{tag: bootstraptypes.TagCredsURL, value: &config.CredsURL},
-		{tag: bootstraptypes.TagCACert, value: &config.CACert},
+		{
+			tag:   bootstraptypes.TagUUID,
+			value: &config.UUID,
+		},
+		{
+			tag:   bootstraptypes.TagOTP,
+			value: &config.OTP,
+		},
+		{
+			tag:   bootstraptypes.TagCredsURL,
+			value: &config.CredsURL,
+		},
+		{
+			tag:   bootstraptypes.TagCACert,
+			value: &config.CACert,
+		},
 	}
 	files := make([]string, 0, len(fields))
 	for _, field := range fields {
@@ -211,7 +224,7 @@ func (bs *BoostrapAPI) reloadBootstrapCredentials(dir string) error {
 		return err
 	}
 
-	currentSiteID := ManagerAccess.Data.EB.Managers.Bootstrap.ConfigSnapshot().UUID
+	currentSiteID := ManagerAccess.Data.EB.Managers.Bootstrap.GetConfig().UUID
 	if currentSiteID != "" && config.UUID != currentSiteID {
 		return fmt.Errorf("bootstrap Secret Site ID changed from %s to %s", currentSiteID, config.UUID)
 	}
@@ -312,7 +325,7 @@ func (bs *BoostrapAPI) CheckRegistration() error {
 func (bs *BoostrapAPI) DownloadAndStoreCreds(otpOverride []byte) error {
 	// Check if certs for this OTP have already been downloaded
 	bootstrap := ManagerAccess.Data.EB.Managers.Bootstrap
-	bCfg := bootstrap.ConfigSnapshot()
+	bCfg := bootstrap.GetConfig()
 
 	otpFilePath := ManagerAccess.Conf.EB.Temporal.GetTemporalCertOTPFullPath()
 	otpBytes, err := os.ReadFile(otpFilePath)
