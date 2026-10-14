@@ -389,10 +389,10 @@ those shared scripts; it does not supply a separate DevSpace implementation.
 
 [`setup-devspace-mac-vfkit.sh`](setup-devspace-mac-vfkit.sh) manages one Ubuntu 24.04 ARM64 VM using [vfkit and Apple's Virtualization.framework](https://github.com/crc-org/vfkit/blob/main/doc/usage.md). Docker Engine runs inside Ubuntu; the entire DevSpace stack, including machine-a-tron, runs in kind inside that Docker Engine. Native Rust builds and tests run directly in Ubuntu. MAT retains its existing Helm configuration, service discovery, and certificates.
 
-The host requires Apple Silicon M3 or newer, macOS 15 or newer, Python 3, vfkit 0.6.2 or newer, Git, curl, OpenSSH, and macOS tar. [vfkit 0.6.2](https://github.com/crc-org/vfkit/releases/tag/v0.6.2) added the nested virtualization and cloud-init `network-config` support used by this launcher. `up` and `start` reject older or unrecognized vfkit versions before accessing VM state. Install vfkit, Python, and the image conversion tool with Homebrew:
+The host requires Apple Silicon M3 or newer, macOS 15 or newer, Python 3, vfkit 0.6.2 or newer, GnuPG, Git, curl, OpenSSH, and macOS tar. [vfkit 0.6.2](https://github.com/crc-org/vfkit/releases/tag/v0.6.2) added the nested virtualization and cloud-init `network-config` support used by this launcher. `up` and `start` reject older or unrecognized vfkit versions before accessing VM state. Install vfkit, Python, and the image conversion and verification tools with Homebrew:
 
 ```bash
-brew install vfkit python qemu
+brew install vfkit python qemu gnupg
 ```
 
 The Ubuntu VM always starts with `vfkit --nested` so its Linux kernel can expose
@@ -414,7 +414,35 @@ bash dev/deployment/devspace/setup-devspace-mac-vfkit.sh exec -- cargo test --pr
 bash dev/deployment/devspace/setup-devspace-mac-vfkit.sh deploy
 ```
 
-`up` downloads Canonical's Ubuntu 24.04 ARM64 cloud image, verifies it against the HTTPS-published SHA256 manifest, converts it to raw format, boots Ubuntu, copies this checkout, and invokes [`setup-devspace-on-host.sh`](setup-devspace-on-host.sh) with `--skip-deploy --ip-family dual`. A mismatch aborts before creating the root disk. The image URL and checksum are recorded in `image.json`; an existing disk is reused without downloading again. A predownloaded, raw EFI-bootable Ubuntu 24.04 ARM64 cloud image can be supplied with `--image PATH --image-sha256 HEX`, avoiding the qemu-img dependency. Both options are required together and only used when creating a disk.
+`up` downloads Canonical's Ubuntu 24.04 ARM64 cloud image from the pinned
+`release-20260926` directory. Before conversion, it verifies `SHA256SUMS.gpg`
+against the bundled Ubuntu cloud-image signing key, requires the signed manifest
+to match the SHA256 pinned in `vfkit/vm.py`, and checks the downloaded image.
+Any failure aborts before creating the root disk; there is no unsigned fallback.
+It then converts the image to raw format, boots Ubuntu, copies this checkout,
+and invokes [`setup-devspace-on-host.sh`](setup-devspace-on-host.sh) with
+`--skip-deploy --ip-family dual`. The image URL and checksum are recorded in
+`image.json`; an existing writable VM disk is reused without downloading or
+comparing it with the original cloud image again.
+
+The bundled public keys are trust anchors, independent of the download server
+and the user's GPG keyring. The Ubuntu key's fingerprint is
+`D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81`, published in
+[Canonical's image verification instructions](https://ubuntu.com/docs/public-images/public-images-how-to/verify-image-checksum/).
+The Alpine key's fingerprint is `0482D84022F52DF1C4E7CD43293ACD0907D9495A`,
+published on the [Alpine downloads page](https://www.alpinelinux.org/downloads/);
+its public key comes from [Alpine's key distribution](https://alpinelinux.org/keys/ncopa.asc).
+Updating an image pin or rotating a key requires a reviewed source change and
+verification against the publisher's independently documented key fingerprint.
+Only base images are pinned: package installations and DevSpace dependencies
+still follow their configured repositories, so the complete VM is not a
+bit-for-bit reproducible build.
+
+A predownloaded, raw EFI-bootable Ubuntu 24.04 ARM64 cloud image can be supplied
+with `--image PATH --image-sha256 HEX`, avoiding qemu-img and GnuPG for that image.
+Both options are required together and only used when creating a disk. This is
+an explicit user-trusted image: the caller must establish its provenance, since
+the launcher checks only the supplied SHA256, not a publisher signature.
 
 `up` also invokes [`prepare-ubuntu-host-for-dev.sh`](prepare-ubuntu-host-for-dev.sh) to install native test prerequisites. This includes the repository's Rust toolchain, C/C++ build tools, protobuf, TPM/OpenIPMI/SSH libraries, Kea DHCPv4/DHCPv6, Vault, and a separate loopback-only PostgreSQL test container. PostgreSQL permits at least 1,000 connections, matching CI's parallel test budget. Kea's AppArmor rules allow the checkout's `target/debug` and `target/ci-tests` hooks. Native tests do not require a DevSpace deployment; both `cargo test` and `cargo test --profile ci-tests` run directly in Ubuntu.
 
@@ -562,8 +590,15 @@ Each lab has a separate switch and unique gateway MACs. Forwarding to
 also blocks corporate/VPN services in those ranges. This is development network
 isolation, not a security boundary against the Mac administrator or trusted guests.
 
-On first use, the launcher downloads and checksum-verifies the Alpine ISO and
-builds an offline gateway image using a temporary diskless VM. Subsequent starts
+On first use, the launcher downloads the version-pinned Alpine 3.24.1 ISO,
+checks its SHA256, and verifies its `.asc` signature with the bundled Alpine key
+before building an offline gateway image using a temporary diskless VM. Cached
+source ISOs are signature-verified before reuse, including when offline; a
+legacy cache without a signature requires one download of the `.asc` file.
+Missing or invalid signatures fail closed. To retry a damaged cache, remove
+the affected ISO and its `.asc` file from the lab root's `images/downloads/`
+directory. Verification-code or key changes invalidate the derived image cache;
+stop gateways using that cache before rebuilding it. Subsequent starts
 reuse the image cache; gateway leases and SSH host keys persist separately for
 each lab. The gateway's other files are reconstructed in RAM at boot. NAT
 uplinks use MTU 1280 and advertise it to lab clients; bridged labs advertise 1500.
