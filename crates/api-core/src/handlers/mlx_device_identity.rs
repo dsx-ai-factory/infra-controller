@@ -15,13 +15,10 @@
  * limitations under the License.
  */
 
-use std::collections::BTreeSet;
-
-use carbide_uuid::machine::{DpuMachineId, HostMachineId};
-use mac_address::MacAddress;
+use carbide_uuid::machine::HostMachineId;
 use model::machine::MachineInterfaceSnapshot;
 use model::machine::machine_search_config::MachineSearchConfig;
-use model::machine::status::MlxDeviceObservation;
+use model::machine::status::{MlxDeviceObservation, managed_dpu_machine_ids};
 use rpc::protos::mlx_device::{
     MlxAdminDeviceIdentitiesRequest, MlxAdminDeviceIdentitiesResponse, MlxDeviceIdentity,
     MlxDeviceIdentityReport,
@@ -86,31 +83,6 @@ fn identity_report(
         observed_at: Some(observation.observed_at.into()),
         devices,
     }
-}
-
-/// `managed_dpu_machine_ids` shares the stored identity report's association
-/// rules with desired firmware selection. Empty means unknown ownership,
-/// not a SuperNIC.
-pub(super) fn managed_dpu_machine_ids(
-    base_mac: Option<MacAddress>,
-    interfaces: &[MachineInterfaceSnapshot],
-) -> Vec<DpuMachineId> {
-    let mac = base_mac.filter(valid_mac);
-    // Site exploration records the host PF MAC, normally from Redfish's
-    // `base_mac`. A fallback MAC may differ. Preserve conflicting associations;
-    // neither an association nor an old report proves what is installed now.
-    interfaces
-        .iter()
-        .filter(|interface| Some(interface.mac_address) == mac)
-        .filter_map(|interface| interface.attached_dpu_machine_id)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-fn valid_mac(mac: &MacAddress) -> bool {
-    let bytes = mac.bytes();
-    bytes != [0; 6] && bytes[0] & 1 == 0
 }
 
 #[cfg(test)]

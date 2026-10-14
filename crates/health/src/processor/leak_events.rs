@@ -118,7 +118,11 @@ impl EventProcessor for LeakEventProcessor {
                         detail_kind,
                         details
                     ),
-                    classifications: vec![Classification::Leak],
+                    classifications: vec![
+                        Classification::TrayLeak,
+                        Classification::SensorCritical,
+                        Classification::PreventAllocations,
+                    ],
                 }],
             )
         } else {
@@ -228,11 +232,13 @@ mod tests {
         assert_eq!(derived.target, Some(HealthReportTarget::Machine));
         assert_eq!(derived.alerts.len(), 1);
         assert_eq!(derived.alerts[0].probe_id, Probe::LeakDetection);
-        assert!(
-            derived.alerts[0]
-                .classifications
-                .iter()
-                .any(|classification| classification == &Classification::Leak)
+        assert_eq!(
+            derived.alerts[0].classifications,
+            vec![
+                Classification::TrayLeak,
+                Classification::SensorCritical,
+                Classification::PreventAllocations,
+            ]
         );
     }
 
@@ -267,10 +273,13 @@ mod tests {
         assert_eq!(derived.target, Some(HealthReportTarget::Switch));
         assert_eq!(derived.alerts.len(), 1);
 
-        assert!(
-            derived.alerts[0]
-                .classifications
-                .contains(&Classification::Leak)
+        assert_eq!(
+            derived.alerts[0].classifications,
+            vec![
+                Classification::TrayLeak,
+                Classification::SensorCritical,
+                Classification::PreventAllocations,
+            ]
         );
     }
 

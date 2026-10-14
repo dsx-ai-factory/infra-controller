@@ -4084,6 +4084,7 @@ dependencies = [
  "carbide-test-support",
  "carbide-uuid",
  "chrono",
+ "futures-util",
  "libredfish",
  "librms",
  "mac_address",

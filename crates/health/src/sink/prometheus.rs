@@ -668,7 +668,7 @@ mod tests {
 
         switch.serial = None;
 
-        let labels = PrometheusSink::stream_static_labels(&context);
+        let labels = context.series_labels();
 
         assert!(
             !labels

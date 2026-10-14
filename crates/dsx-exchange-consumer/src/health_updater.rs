@@ -223,6 +223,20 @@ impl<S: RackHealthReportSink> HealthUpdater<S> {
 
 /// Build a health report for a leak alert.
 fn build_leak_alert_report(metadata: &LeakMetadata, leak_type: LeakPointType) -> HealthReport {
+    let classifications = match leak_type {
+        LeakPointType::LeakDetectRack | LeakPointType::LeakDetectRackTray => vec![
+            HealthAlertClassification::rack_leak(),
+            HealthAlertClassification::hardware(),
+            HealthAlertClassification::sensor_critical(),
+            HealthAlertClassification::prevent_allocations(),
+        ],
+        LeakPointType::LeakSensorFaultRack => vec![
+            HealthAlertClassification::prevent_allocations(),
+            HealthAlertClassification::sensor_critical(),
+            HealthAlertClassification::hardware(),
+        ],
+    };
+
     let alert = HealthProbeAlert {
         id: leak_type.probe_id(),
         target: Some(metadata.rack_id.clone()),
@@ -234,11 +248,7 @@ fn build_leak_alert_report(metadata: &LeakMetadata, leak_type: LeakPointType) ->
             metadata.rack_id
         ),
         tenant_message: None,
-        classifications: vec![
-            HealthAlertClassification::prevent_allocations(),
-            HealthAlertClassification::sensor_critical(),
-            HealthAlertClassification::hardware(),
-        ],
+        classifications,
     };
 
     HealthReport {
@@ -408,7 +418,12 @@ mod tests {
             alert.classifications.iter().map(|c| c.as_str()).collect();
         assert_eq!(
             classification_strs,
-            vec!["PreventAllocations", "SensorCritical", "Hardware"]
+            vec![
+                "RackLeak",
+                "Hardware",
+                "SensorCritical",
+                "PreventAllocations"
+            ]
         );
     }
 
@@ -420,6 +435,14 @@ mod tests {
         let alert = &report.alerts[0];
         assert_eq!(alert.id.as_str(), "BmsLeakSensorFaultRack");
         assert!(alert.message.contains("Leak sensor fault"));
+        assert_eq!(
+            alert
+                .classifications
+                .iter()
+                .map(HealthAlertClassification::as_str)
+                .collect::<Vec<_>>(),
+            vec!["PreventAllocations", "SensorCritical", "Hardware"]
+        );
     }
 
     #[test]
@@ -430,6 +453,19 @@ mod tests {
         let alert = &report.alerts[0];
         assert_eq!(alert.id.as_str(), "BmsLeakDetectRackTray");
         assert!(alert.message.contains("Rack tray leak detected"));
+        assert_eq!(
+            alert
+                .classifications
+                .iter()
+                .map(HealthAlertClassification::as_str)
+                .collect::<Vec<_>>(),
+            vec![
+                "RackLeak",
+                "Hardware",
+                "SensorCritical",
+                "PreventAllocations"
+            ]
+        );
     }
 
     #[tokio::test]

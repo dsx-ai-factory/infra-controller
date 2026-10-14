@@ -31,10 +31,45 @@ gRPC API.
 - [Decommission Managed Power Shelves](power-shelves.md): factory-reset the shelf BMC or
   PMC, then remove its managed BMC credential.
 
+## DHCP Suppression Acknowledgement
+
+During decommissioning, NICo marks DHCP suppression as acknowledged when a DHCP
+request for the suppressed MAC reaches the NICo API and NICo refuses address
+allocation. The acknowledgement is an internal record. NICo does not send a
+DHCPACK message to the device.
+
+Each DHCP wait checks the relevant MAC addresses separately. A recorded DHCP
+suppression acknowledgement for decommissioning satisfies the wait for that MAC.
+Without that acknowledgement, the MAC must meet all these conditions for the
+wait to complete:
+
+- The MAC has at least one recorded interface.
+- Every interface for that MAC has a current `static` allocation.
+- No current address on those interfaces falls within any configured network prefix.
+
+External fixed addresses normally use the `static-assignments` network segment,
+but the wait checks address containment rather than segment membership. Managed
+fixed or retained addresses, missing interfaces, and interfaces without a current
+static allocation still require acknowledgement. An interface with an external
+address in one address family and a managed address in the other also requires
+acknowledgement. If acknowledgement is required and no DHCP request reaches the
+NICo API, the controller remains in its DHCP wait state.
+
+Verify that the endpoint sends DHCP requests to NICo's DHCP service and that
+the service can reach the NICo API. Restore connectivity where either path
+is blocked.
+
+Completing the wait without acknowledgement leaves DHCP suppression recorded.
+Decommissioning still performs the power cycle, reboot, or factory reset that
+precedes each wait.
+
 ## Troubleshooting
 
 If decommissioning stops progressing, check the device's controller state and
 handler message to identify the blocked operation.
+
+For DHCP wait states, refer to
+[DHCP Suppression Acknowledgement](#dhcp-suppression-acknowledgement).
 
 NICo retries temporary failures automatically. If an error persists or the message
 requests manual intervention, check connectivity, credentials, and the procedure's

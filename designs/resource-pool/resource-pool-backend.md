@@ -56,7 +56,7 @@ Existing composite database helpers cannot call the new service without creating
 
 ### ResourcePoolBackend
 
-Use `ResourcePoolBackend` as an explicit execution choice with Integrated and Remote variants. Integrated contains the adapter for the existing SQL functions. Remote holds a transport-neutral provider interface implemented first by gRPC. Standalone PostgreSQL and REST use the Remote execution contract because they commit independently of the entity transaction.
+Use `ResourcePoolBackend` as an explicit execution choice with Integrated and Remote variants. `ResourcePoolBackend` provides `allocate`, `allocate_exact`, and `release`; its Integrated variant forwards them to the existing SQL functions. Remote holds a transport-neutral provider interface implemented first by gRPC. Standalone PostgreSQL and REST use the Remote execution contract because they commit independently of the entity transaction.
 
 [P02: library foundation](https://github.com/dsx-ai-factory/infra-controller/issues/7131) introduces the Integrated adapter and `ResourcePoolWithBackend<T>`, a borrowed association between a typed pool and its selected backend. It changes no production caller. The association does not resolve configuration or establish persisted authority; [P03](https://github.com/dsx-ai-factory/infra-controller/issues/7132) owns those responsibilities. The Remote provider interface and gRPC implementation follow in [P04](https://github.com/dsx-ai-factory/infra-controller/issues/7133) and [P05](https://github.com/dsx-ai-factory/infra-controller/issues/7134).
 
@@ -64,12 +64,14 @@ The operations have different execution contexts:
 
 | Execution Path | Inputs | Transaction Ownership |
 | --- | --- | --- |
-| Integrated allocate, exact allocate, and release | Typed handle, caller's mutable `PgConnection`, existing owner identity, selection | Caller begins and commits; adapter forwards to existing SQL |
+| Integrated allocate, exact allocate, and release | Typed handle, caller's mutable `PgConnection`, existing owner identity, selection | Caller begins and commits; enum methods forward to existing SQL |
 | Remote reserve, recover, cancel, lookup, and release | Immutable durable operation or allocation identity, effective policy, provider client | No entity transaction or borrowed database connection crosses the provider call |
 | Remote attachment | Validated assignment and durable operation identity | Short local transaction changes entity and operation atomically |
 | Pool inspection | Resolved binding and capability | Local read or bounded provider call; unavailable is distinct from empty |
 
 Do not use one method with an optional transaction argument. Choose the pool and resolve its binding under the caller's required locks. Integrated work can continue in that transaction. For Remote work, persist the selected binding and intent, then end the transaction before dispatch. Attachment revalidates the selection against current tenant and routing state; a changed selection requires cancellation and a new attempt. A Remote method must not accept a database executor as an unused parameter.
+
+The Integrated operation methods borrow the caller's transaction. Adding Remote in [P07: recovery](https://github.com/dsx-ai-factory/infra-controller/issues/7136) and [P11: gated VPC integration](https://github.com/dsx-ai-factory/infra-controller/issues/7140) requires revisiting these method signatures and their callers so provider calls do not hold an entity transaction.
 
 Keep generic conversion at the typed pool boundary. The provider interface handles a closed value enum, so one client supports every pool without a VNI-specific transport. Validate the response against the authoritative configured or persisted pool value kind and the Rust consumer type. The legacy `IpAddr` handles for `lo-ip` and `vpc-dpu-lo` have an `Ipv4` descriptor tag but accept either address family; that tag must not reject a valid IPv6 pool. An `Ipv6Addr` consumer remains IPv6-only. Apply narrower domain checks, such as VNI width or ASN validity, at the consumer boundary.
 
@@ -79,7 +81,7 @@ Startup constructs one registry and the clients it owns, then injects shared han
 
 ### Integrated Preservation
 
-The Integrated adapter must retain the existing SQL success path, owner strings, partition selection, errors, rollback, and conditional-release results. Adding the service must not create a second transaction or make successful allocation depend on remote operation records.
+The Integrated backend must retain the existing SQL success path, owner strings, partition selection, errors, rollback, and conditional-release results. Adding the service must not create a second transaction or make successful allocation depend on remote operation records.
 
 Old Integrated allocations remain valid without acquiring remote handles. Integrated cleanup continues using its existing ownership checks. New remote generations do not retroactively change the same-owner semantics of Integrated exact allocation.
 

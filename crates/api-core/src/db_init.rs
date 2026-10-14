@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_resource_pool::{
-    ResourcePoolBackend, ResourcePoolRegistry, ResourcePoolRegistryError, ResourcePoolWithBackend,
+    ResourcePoolRegistry, ResourcePoolRegistryError, ResourcePoolWithBackend,
 };
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::vpc::VpcId;
@@ -281,19 +281,16 @@ pub(crate) async fn create_initial_vpcs(
         {
             Ok(Some(backend)) => {
                 let selected_pool = ResourcePoolWithBackend::new(vni_pool, backend.as_ref());
-                match selected_pool.backend() {
-                    ResourcePoolBackend::Integrated(integrated) => {
-                        integrated
-                            .allocate(
-                                selected_pool.pool(),
-                                &mut txn,
-                                resource_pool::OwnerType::Vpc,
-                                &owner_id,
-                                def.vni,
-                            )
-                            .await
-                    }
-                }
+                selected_pool
+                    .backend()
+                    .allocate(
+                        selected_pool.pool(),
+                        &mut txn,
+                        resource_pool::OwnerType::Vpc,
+                        &owner_id,
+                        def.vni,
+                    )
+                    .await
             }
             // A pool with neither a binding nor values has nothing to allocate.
             Ok(None) => Err(resource_pool::ResourcePoolError::Empty.into()),

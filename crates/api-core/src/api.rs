@@ -3087,6 +3087,13 @@ impl Forge for Api {
         crate::handlers::nic_firmware::find_site_defaults_by_ids(self, request).await
     }
 
+    async fn set_machine_nic_firmware_override(
+        &self,
+        request: Request<rpc::SetMachineNicFirmwareOverrideRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::nic_firmware::set_machine_override(self, request).await
+    }
+
     async fn get_desired_nic_firmware(
         &self,
         request: Request<rpc::GetDesiredNicFirmwareRequest>,

@@ -18,6 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::{AsMachineId, MachineId, MachineIdSubtypeTrait};
 use chrono::{TimeDelta, Utc};
 use itertools::Itertools;
@@ -46,13 +47,16 @@ async fn update(
         %machine_id,
         "Discovery data for machine already exists. Updating now.",
     );
-    let query = "UPDATE machine_topologies SET topology=jsonb_set(topology, '{discovery_data}', $2::jsonb), topology_update_needed=false, updated=NOW() WHERE machine_id=$1 RETURNING machine_id, topology, created, updated, topology_update_needed";
-    let res = sqlx::query_as(query)
+    let query = format!(
+        "UPDATE machine_topologies SET topology=jsonb_set(topology, '{{discovery_data}}', $2::jsonb), topology_update_needed=false, updated=NOW() WHERE machine_id=$1 RETURNING {}",
+        MachineTopology::db_table_columns(),
+    );
+    let res = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(machine_id)
         .bind(sqlx::types::Json(&discovery_data))
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+        .map_err(|e| DatabaseError::query(&query, e))?;
 
     Ok(res)
 }
@@ -92,8 +96,11 @@ pub async fn create_or_update(
         "Discovery data for machine did not exist. Creating now.",
     );
 
-    let query = "INSERT INTO machine_topologies VALUES ($1, $2::json) RETURNING machine_id, topology, created, updated, topology_update_needed";
-    let res = sqlx::query_as(query)
+    let query = format!(
+        "INSERT INTO machine_topologies VALUES ($1, $2::json) RETURNING {}",
+        MachineTopology::db_table_columns(),
+    );
+    let res = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(machine_id)
         .bind(sqlx::types::Json(&topology_data))
         .fetch_one(txn)
@@ -112,7 +119,7 @@ pub async fn create_or_update(
                     "Machine topology machine_id foreign key violation: {e}"
                 ))
             }
-            _ => DatabaseError::query(query, e),
+            _ => DatabaseError::query(&query, e),
         })?;
 
     Ok(res)
@@ -202,12 +209,15 @@ pub async fn find_by_machine_ids<ID: MachineIdSubtypeTrait>(
     // since there is a check in create that for existing interfaces
     // But due to race conditions we can likely still have multiple of those interfaces
     let str_ids: Vec<String> = machine_ids.iter().map(|id| id.to_string()).collect();
-    let query = "SELECT machine_id, topology, created, updated, topology_update_needed FROM machine_topologies WHERE machine_id=ANY($1)";
-    let topologies = sqlx::query_as(query)
+    let query = format!(
+        "SELECT {} FROM machine_topologies WHERE machine_id=ANY($1)",
+        MachineTopology::db_table_columns(),
+    );
+    let topologies = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(str_ids)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?
+        .map_err(|e| DatabaseError::query(&query, e))?
         .into_iter()
         .filter_map(|t: MachineTopology| Some((ID::try_from(t.machine_id).ok()?, t)))
         .into_group_map();

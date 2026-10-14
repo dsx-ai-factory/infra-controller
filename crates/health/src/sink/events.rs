@@ -601,6 +601,10 @@ pub enum Classification {
     PreventAllocations,
     Leak,
     LeakDetector,
+    /// Identifies a derived active tray-level leak.
+    TrayLeak,
+    /// Identifies a derived active rack-level leak.
+    RackLeak,
 }
 
 impl Classification {
@@ -614,6 +618,8 @@ impl Classification {
             Self::PreventAllocations => "PreventAllocations",
             Self::Leak => "Leak",
             Self::LeakDetector => "LeakDetector",
+            Self::TrayLeak => "TrayLeak",
+            Self::RackLeak => "RackLeak",
         }
     }
 }
@@ -756,6 +762,8 @@ mod tests {
     enum AlertCase {
         WithTarget,
         Intrusion,
+        TrayLeak,
+        RackLeak,
         WithoutClassifications,
     }
 
@@ -925,6 +933,28 @@ mod tests {
                 target: Some("HostBMC".to_string()),
                 message: "Physical Chassis Intrusion Alert".to_string(),
                 classifications: vec![
+                    Classification::SensorCritical,
+                    Classification::PreventAllocations,
+                ],
+            },
+            AlertCase::TrayLeak => HealthReportAlert {
+                attribution: None,
+                probe_id: Probe::LeakDetection,
+                target: None,
+                message: "tray leak".to_string(),
+                classifications: vec![
+                    Classification::TrayLeak,
+                    Classification::SensorCritical,
+                    Classification::PreventAllocations,
+                ],
+            },
+            AlertCase::RackLeak => HealthReportAlert {
+                attribution: None,
+                probe_id: Probe::LeakDetection,
+                target: None,
+                message: "rack leak".to_string(),
+                classifications: vec![
+                    Classification::RackLeak,
                     Classification::SensorCritical,
                     Classification::PreventAllocations,
                 ],
@@ -1187,6 +1217,20 @@ mod tests {
                 },
             }
 
+            "tray leak" {
+                Classification::TrayLeak => ClassificationSummary {
+                    as_str: "TrayLeak",
+                    health_report_classification: "TrayLeak".to_string(),
+                },
+            }
+
+            "rack leak" {
+                Classification::RackLeak => ClassificationSummary {
+                    as_str: "RackLeak",
+                    health_report_classification: "RackLeak".to_string(),
+                },
+            }
+
         );
     }
 
@@ -1288,6 +1332,38 @@ mod tests {
                     tenant_message: None,
                     in_alert_since: false,
                     classifications: vec![
+                        "SensorCritical".to_string(),
+                        "PreventAllocations".to_string(),
+                        "Hardware".to_string(),
+                    ],
+                },
+            }
+
+            "tray leak alert" {
+                AlertCase::TrayLeak => AlertSummary {
+                    id: "BmcLeakDetection".to_string(),
+                    target: None,
+                    message: "tray leak".to_string(),
+                    tenant_message: None,
+                    in_alert_since: false,
+                    classifications: vec![
+                        "TrayLeak".to_string(),
+                        "SensorCritical".to_string(),
+                        "PreventAllocations".to_string(),
+                        "Hardware".to_string(),
+                    ],
+                },
+            }
+
+            "rack leak alert" {
+                AlertCase::RackLeak => AlertSummary {
+                    id: "BmcLeakDetection".to_string(),
+                    target: None,
+                    message: "rack leak".to_string(),
+                    tenant_message: None,
+                    in_alert_since: false,
+                    classifications: vec![
+                        "RackLeak".to_string(),
                         "SensorCritical".to_string(),
                         "PreventAllocations".to_string(),
                         "Hardware".to_string(),

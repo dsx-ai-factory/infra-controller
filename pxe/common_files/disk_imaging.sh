@@ -40,10 +40,24 @@ forge_test_pass=
 update_grub_template="yes"
 update_grub_cfg="yes"
 
+# Downloads the complete request URL to one caller-visible local filename while
+# preserving each forwarded curl argument as a separate value.
 function curl_url() {
 	url=$1
 	shift
-	curl --retry 5 --retry-all-errors -k -L -O "$@" "$url" 2>&1 | tee "$log_output"
+	# Keep a distro-selected checksum filename; otherwise use only the
+	# explicit URL path so query parameters cannot change the local name.
+	if [ -z "$file" ]; then
+		file=$(basename "${url%%\?*}")
+	fi
+	curl --retry 5 --retry-all-errors -k -L "$@" \
+		--output "$file" "$url" 2>&1 | tee "$log_output"
+}
+
+# Announces the download without exposing URL queries, which may contain
+# credentials, to stdout or the imaging log.
+function announce_image_download() {
+	echo "Downloading image" | tee "$log_output"
 }
 
 # build_image_auth_args populates the image_auth array with the curl arguments
@@ -1092,10 +1106,6 @@ function main() {
 		return 1;
 	fi
 
-	if [ -z $file ]; then
-		file=$(basename $image_url)
-	fi
-
 	if ! build_image_auth_args; then
 		echo "Failed to prepare image authentication" | tee "$log_output"
 		return 1
@@ -1106,7 +1116,7 @@ function main() {
 		trap 'rm -f "$image_auth_header_file"' EXIT INT TERM
 	fi
 
-	echo "Downloading image from $image_url" | tee $log_output
+	announce_image_download
 	curl_url "$image_url" "${image_auth[@]}"
 	if [ -n "$image_auth_header_file" ]; then
 		rm -f "$image_auth_header_file"
@@ -1137,7 +1147,7 @@ function main() {
 	precheck_image_identifiers || return 1
 
 	echo "Imaging $file to $image_disk" | tee $log_output
-	qemu-img convert -p -O raw -S 0 $file $image_disk 2>&1 | tee $log_output
+	qemu-img convert -p -O raw -S 0 "$file" "$image_disk" 2>&1 | tee $log_output
 	ret=$?
 	if [ $ret -ne 0 ]; then
 		echo "Imaging failed $ret" | tee $log_output

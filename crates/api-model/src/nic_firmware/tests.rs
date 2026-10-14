@@ -459,7 +459,15 @@ fn requires_valid_digests() {
 #[test]
 fn named_profile_ids_are_not_silently_normalized() {
     value_scenarios!(
-        run = |id: &str| id.parse::<NicFirmwareProfileId>().ok().map(|id| id.to_string());
+        run = |id: &str| {
+            let parsed = id.parse::<NicFirmwareProfileId>().ok();
+            let decoded = serde_json::from_value::<NicFirmwareProfileId>(serde_json::json!(id)).ok();
+            assert_eq!(decoded, parsed);
+            parsed.map(|profile| {
+                assert_eq!(serde_json::to_value(&profile).unwrap(), serde_json::json!(id));
+                profile.to_string()
+            })
+        };
         "case-sensitive name" { "Baseline" => Some("Baseline".to_string()) }
         "invalid names" { "" => None, " baseline " => None, "base\nline" => None }
     );
