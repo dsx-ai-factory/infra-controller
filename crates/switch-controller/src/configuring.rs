@@ -58,6 +58,15 @@ pub async fn handle_configuring(
     };
 
     match config_state {
+        // The disable step is wired in by a follow-up change; until then it
+        // forwards to certificate configuration, preserving prior behavior.
+        ConfiguringState::DisableMtls { .. } => Ok(StateHandlerOutcome::transition(
+            SwitchControllerState::Configuring {
+                config_state: ConfiguringState::ConfigureCertificate {
+                    configure_certificate: ConfigureCertificateState::Start,
+                },
+            },
+        )),
         ConfiguringState::ConfigureCertificate {
             configure_certificate,
         } => handle_configure_certificate(switch_id, state, ctx, configure_certificate).await,
