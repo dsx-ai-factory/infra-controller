@@ -239,7 +239,11 @@ pub(crate) async fn find_by_nic_firmware_profile(
     profile_id: &NicFirmwareProfileId,
 ) -> DatabaseResult<Vec<HostMachine>> {
     let query = format!(
-        "{} WHERE m.nic_firmware_profile_id = $1",
+        "{} WHERE m.id IN (\
+            SELECT id FROM machines WHERE nic_firmware_profile_id = $1 \
+            UNION \
+            SELECT machine_id FROM machine_nic_firmware_overrides WHERE profile_id = $1\
+        )",
         JSON_MACHINE_SNAPSHOT_QUERY.as_str()
     );
     let machines: Vec<AnyMachine> = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
@@ -1866,9 +1870,8 @@ pub async fn try_sync_stable_id_with_current_machine_id_for_host(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    // machine_interfaces and dpa_interfaces both carry a machines(id) FK with
-    // ON UPDATE CASCADE, so their machine_id rows follow this rename
-    // automatically.
+    // Interface and NIC firmware selection rows reference machines(id) with
+    // ON UPDATE CASCADE, so their machine_id follows this rename automatically.
     let query = "UPDATE machines SET id=$1 WHERE id=$2 RETURNING id";
     let machine_id = sqlx::query_as(query)
         .bind(stable_machine_id)

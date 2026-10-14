@@ -15,10 +15,144 @@
  * limitations under the License.
  */
 
-use carbide_test_support::Outcome::Fails;
+use carbide_test_support::Outcome::{Fails, Yields};
 use carbide_test_support::{Case, check_cases, value_scenarios};
 
 use super::*;
+
+// Leave firmware facts absent so selector tests depend only on reported identity.
+fn device(base_mac: Option<MacAddress>, base_guid: Option<&str>) -> MlxDeviceInfo {
+    MlxDeviceInfo {
+        pci_name: "0000:01:00.0".into(),
+        device_type: "ConnectX-8".into(),
+        psid: None,
+        device_description: None,
+        part_number: None,
+        fw_version_current: None,
+        pxe_version_current: None,
+        uefi_version_current: None,
+        uefi_version_virtio_blk_current: None,
+        uefi_version_virtio_net_current: None,
+        base_mac,
+        base_guid: base_guid.map(str::to_string),
+        status: None,
+    }
+}
+
+// GUIDs are opaque MFT values. Validation must preserve valid text while keeping
+// absence placeholders and oversized values out of persisted selector keys.
+#[test]
+fn card_selectors_reject_unusable_identities_without_normalizing() {
+    use NicFirmwareCardSelector::{Guid, Mac};
+
+    value_scenarios!(
+        run = |selector: NicFirmwareCardSelector| {
+            let validated = selector.clone().validate();
+            if let Ok(validated) = &validated {
+                assert_eq!(validated, &selector);
+            }
+            validated.is_ok()
+        };
+        "nonzero unicast MAC" { Mac("02:ab:cd:01:02:03".parse().unwrap()) => true, }
+        "zero MAC" { Mac(MacAddress::new([0; 6])) => false, }
+        "multicast MAC" { Mac("01:ab:cd:01:02:03".parse().unwrap()) => false, }
+        "opaque GUID" { Guid("opaque-Base_Guid".into()) => true, }
+        "maximum GUID byte length" { Guid("é".repeat(128)) => true, }
+        "oversized GUID" { Guid("é".repeat(129)) => false, }
+        "absent GUID" { Guid(String::new()) => false, }
+        "padded GUID" { Guid(" guid ".into()) => false, }
+        "control in GUID" { Guid("gu\nid".into()) => false, }
+        "MFT absence placeholders" {
+            Guid("--".into()) => false,
+            Guid("N/A".into()) => false,
+        }
+    );
+}
+
+// Later reports can repeat a saved identity. Ambiguity must stay an error so
+// changing report order cannot silently change the selected device.
+#[test]
+fn card_selectors_require_one_literal_observed_match() {
+    use NicFirmwareCardSelector::{Guid, Mac};
+
+    let mac_address = "02:ab:cd:01:02:03".parse().unwrap();
+    assert_eq!(Mac(mac_address).to_string(), "base MAC 02:AB:CD:01:02:03");
+    let mac_device = device(Some(mac_address), None);
+    let guid_device = device(None, Some("opaque-Base_Guid"));
+    check_cases(
+        [
+            Case {
+                scenario: "MAC selects the matching report index",
+                input: (
+                    Mac(mac_address),
+                    vec![guid_device.clone(), mac_device.clone()],
+                ),
+                expect: Yields(1),
+            },
+            Case {
+                scenario: "GUID selects a device without MAC",
+                input: (Guid("opaque-Base_Guid".into()), vec![guid_device.clone()]),
+                expect: Yields(0),
+            },
+            Case {
+                scenario: "GUID case is literal",
+                input: (Guid("opaque-base_guid".into()), vec![guid_device.clone()]),
+                expect: Fails,
+            },
+            Case {
+                scenario: "missing observed identity",
+                input: (Mac(mac_address), vec![guid_device.clone()]),
+                expect: Fails,
+            },
+            Case {
+                scenario: "duplicate observed MAC",
+                input: (Mac(mac_address), vec![mac_device.clone(), mac_device]),
+                expect: Fails,
+            },
+            Case {
+                scenario: "duplicate observed GUID",
+                input: (
+                    Guid("opaque-Base_Guid".into()),
+                    vec![guid_device.clone(), guid_device],
+                ),
+                expect: Fails,
+            },
+        ],
+        |(selector, devices)| selector.device_index(&devices).map_err(drop),
+    );
+}
+
+// The database stores the enum tag as part of the selector key. A JSON roundtrip
+// must preserve both the identity kind and its value for subsequent matching.
+#[test]
+fn card_override_json_preserves_the_selector_variant() {
+    use NicFirmwareCardSelector::{Guid, Mac};
+
+    value_scenarios!(
+        run = |selector: NicFirmwareCardSelector| {
+            let card_override = NicFirmwareCardOverride {
+                selector,
+                profile_id: "operator-profile".parse().unwrap(),
+            };
+            let json = serde_json::to_value(&card_override).unwrap();
+            let restored: NicFirmwareCardOverride = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(restored, card_override);
+            json
+        };
+        "MAC selector" {
+            Mac("02:ab:cd:01:02:03".parse().unwrap()) => serde_json::json!({
+                "selector": { "BaseMac": "02:AB:CD:01:02:03" },
+                "profile_id": "operator-profile",
+            }),
+        }
+        "opaque GUID selector" {
+            Guid("opaque-Base_Guid".into()) => serde_json::json!({
+                "selector": { "BaseGuid": "opaque-Base_Guid" },
+                "profile_id": "operator-profile",
+            }),
+        }
+    );
+}
 
 fn artifact() -> NicFirmwareArtifact {
     NicFirmwareArtifact {

@@ -631,8 +631,8 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub machine_updater: MachineUpdater,
 
-    /// Maximum number of IDs accepted by
-    /// `find_*_by_ids` APIs to prevent oversized queries.
+    /// Maximum number of IDs accepted by `find_*_by_ids` APIs and
+    /// card overrides accepted by `SetMachineNicFirmwareOverride`.
     /// Default is 100.
     #[serde(default = "default_max_find_by_ids")]
     pub max_find_by_ids: u32,

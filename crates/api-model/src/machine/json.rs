@@ -48,7 +48,7 @@ use crate::machine_boot_interface::{
     MachineBootInterfaceTarget, canonical_redfish_boot_interface_id,
 };
 use crate::metadata::Metadata;
-use crate::nic_firmware::NicFirmwareProfileId;
+use crate::nic_firmware::{NicFirmwareCardOverride, NicFirmwareProfileId};
 use crate::power_manager::PowerOptions;
 use crate::rack::RackFirmwareUpgradeStatus;
 use crate::sku::SkuStatus;
@@ -107,6 +107,10 @@ pub struct MachineSnapshotPgJson {
     pub firmware_autoupdate: Option<bool>,
     /// Optional machine-wide NIC firmware profile reference.
     pub nic_firmware_profile_id: Option<NicFirmwareProfileId>,
+    /// Device selections; DPU snapshot projections and older fixtures omit this
+    /// field. An omitted field decodes as an empty list.
+    #[serde(default)]
+    pub nic_firmware_card_overrides: Vec<NicFirmwareCardOverride>,
     pub health_reports: Option<HealthReportSources>,
     pub on_demand_machine_validation_id: Option<MachineValidationId>,
     pub on_demand_machine_validation_request: Option<bool>,
@@ -350,6 +354,7 @@ impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
             config: MachineConfig {
                 firmware_autoupdate: value.firmware_autoupdate,
                 nic_firmware_profile_id: value.nic_firmware_profile_id,
+                nic_firmware_card_overrides: value.nic_firmware_card_overrides,
                 instance_type_id: value.instance_type_id,
                 dpf: value.dpf,
                 hw_sku: value.hw_sku,
@@ -435,10 +440,58 @@ delegate_try_from_machine_snapshot_pg_json_impl!(StableHostMachine);
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::{Fails, Yields};
-    use carbide_test_support::{Case, check_cases};
+    use carbide_test_support::{Case, Check, check_cases, check_values};
 
     use super::*;
     use crate::machine_boot_interface::MachineBootInterface;
+    use crate::nic_firmware::NicFirmwareCardSelector;
+    use crate::test_support::machine_snapshot::{host_machine_id, machine_snapshot_pg_json};
+
+    // DPU snapshot projections and older fixtures omit the card collection.
+    // Omission must decode as empty, while host selections reach machine config.
+    #[test]
+    fn nic_firmware_card_overrides_decode_from_omitted_and_populated_fields() {
+        let card_override = NicFirmwareCardOverride {
+            selector: NicFirmwareCardSelector::Guid("opaque-Base_Guid".into()),
+            profile_id: "operator-profile".parse().unwrap(),
+        };
+        check_values(
+            [
+                Check {
+                    scenario: "omitted projection field means no card selections",
+                    input: None,
+                    expect: vec![],
+                },
+                Check {
+                    scenario: "stored card override reaches machine configuration",
+                    input: Some(vec![card_override.clone()]),
+                    expect: vec![card_override],
+                },
+            ],
+            |card_overrides| {
+                let mut json = serde_json::to_value(machine_snapshot_pg_json(host_machine_id()))
+                    .expect("serialize machine snapshot");
+                let fields = json.as_object_mut().expect("snapshot is an object");
+                match card_overrides {
+                    Some(card_overrides) => {
+                        fields.insert(
+                            "nic_firmware_card_overrides".into(),
+                            serde_json::to_value(card_overrides).expect("serialize card overrides"),
+                        );
+                    }
+                    None => {
+                        fields.remove("nic_firmware_card_overrides");
+                    }
+                }
+                let snapshot: MachineSnapshotPgJson =
+                    serde_json::from_value(json).expect("deserialize machine snapshot");
+                AnyMachine::try_from(snapshot)
+                    .expect("convert machine snapshot")
+                    .config
+                    .nic_firmware_card_overrides
+            },
+        );
+    }
 
     #[derive(Debug)]
     struct Input {

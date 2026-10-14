@@ -1301,7 +1301,7 @@ type ForgeClient interface {
 	FindNicFirmwareSiteDefaultIds(ctx context.Context, in *NicFirmwareSiteDefaultSearchFilter, opts ...grpc.CallOption) (*FindNicFirmwareSiteDefaultIdsResponse, error)
 	// Retrieve existing assignments for a bounded batch of hardware keys.
 	FindNicFirmwareSiteDefaultsByIds(ctx context.Context, in *FindNicFirmwareSiteDefaultsByIdsRequest, opts ...grpc.CallOption) (*FindNicFirmwareSiteDefaultsByIdsResponse, error)
-	// Set or clear the operator's machine-wide selection using Machine.version.
+	// Set or clear the operator's machine and card selections using Machine.version.
 	SetMachineNicFirmwareOverride(ctx context.Context, in *SetMachineNicFirmwareOverrideRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Get desired firmware for each device using stored host observations.
 	GetDesiredNicFirmware(ctx context.Context, in *GetDesiredNicFirmwareRequest, opts ...grpc.CallOption) (*GetDesiredNicFirmwareResponse, error)
@@ -7684,7 +7684,7 @@ type ForgeServer interface {
 	FindNicFirmwareSiteDefaultIds(context.Context, *NicFirmwareSiteDefaultSearchFilter) (*FindNicFirmwareSiteDefaultIdsResponse, error)
 	// Retrieve existing assignments for a bounded batch of hardware keys.
 	FindNicFirmwareSiteDefaultsByIds(context.Context, *FindNicFirmwareSiteDefaultsByIdsRequest) (*FindNicFirmwareSiteDefaultsByIdsResponse, error)
-	// Set or clear the operator's machine-wide selection using Machine.version.
+	// Set or clear the operator's machine and card selections using Machine.version.
 	SetMachineNicFirmwareOverride(context.Context, *SetMachineNicFirmwareOverrideRequest) (*emptypb.Empty, error)
 	// Get desired firmware for each device using stored host observations.
 	GetDesiredNicFirmware(context.Context, *GetDesiredNicFirmwareRequest) (*GetDesiredNicFirmwareResponse, error)

@@ -460,6 +460,7 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
         }),
         firmware_autoupdate: Some(true),
         nic_firmware_profile_id: None,
+        nic_firmware_card_overrides: vec![],
         health_reports: Some(health_reports(if dpu_machine_id.is_some() {
             HealthReport::DPU_AGENT_SOURCE
         } else {

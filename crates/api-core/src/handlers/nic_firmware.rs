@@ -20,8 +20,8 @@ use carbide_uuid::machine::HostMachineId;
 use config_version::ConfigVersion;
 use model::machine::status::managed_dpu_machine_ids;
 use model::nic_firmware::{
-    NicFirmwareBaseline, NicFirmwareHardware, NicFirmwareProfileConfig, NicFirmwareProfileId,
-    resolve_nic_firmware,
+    NicFirmwareBaseline, NicFirmwareCardOverride, NicFirmwareHardware, NicFirmwareProfileConfig,
+    NicFirmwareProfileId, resolve_nic_firmware,
 };
 use rpc::forge as rpc;
 use tonic::{Request, Response, Status};
@@ -293,11 +293,33 @@ pub(crate) async fn set_machine_override(
         }
         rpc::set_machine_nic_firmware_override_request::Action::Clear(()) => None,
     };
+    let card_overrides = request
+        .card_overrides
+        .map(|cards| {
+            if cards.overrides.len() > api.runtime_config.max_find_by_ids as usize {
+                return Err(CarbideError::InvalidArgument(format!(
+                    "too many NIC firmware card overrides; maximum is {}",
+                    api.runtime_config.max_find_by_ids
+                )));
+            }
+            cards
+                .overrides
+                .into_iter()
+                .enumerate()
+                .map(|(index, card)| {
+                    NicFirmwareCardOverride::try_from(card).map_err(|error| {
+                        CarbideError::InvalidArgument(format!("card_overrides[{index}]: {error}"))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
     let mut txn = api.txn_begin().await.map_err(CarbideError::from)?;
     db::nic_firmware::set_machine_override(
         &mut txn,
         &machine_id,
         profile_id.as_ref(),
+        card_overrides.as_deref(),
         expected_version,
     )
     .await
@@ -310,6 +332,7 @@ pub(crate) async fn set_machine_override(
 /// from a consistent catalog snapshot.
 /// Per-device errors are returned in the report without failing the request
 /// or hiding results for other devices.
+/// Saved card selectors with no observed match are returned as warnings.
 pub(crate) async fn get_desired(
     api: &Api,
     request: Request<rpc::GetDesiredNicFirmwareRequest>,
@@ -349,15 +372,36 @@ pub(crate) async fn get_desired(
         .map(|binding| binding.profile_id.clone())
         .chain(allocation.iter().cloned())
         .chain(machine.config.nic_firmware_profile_id.iter().cloned())
+        .chain(
+            machine
+                .config
+                .nic_firmware_card_overrides
+                .iter()
+                .map(|card| card.profile_id.clone()),
+        )
         .collect();
     let profiles = db::nic_firmware::find_by_ids(&mut txn, &profile_ids)
         .await
         .map_err(CarbideError::from)?;
     txn.commit().await.map_err(CarbideError::from)?;
     let mut response = rpc::GetDesiredNicFirmwareResponse::default();
-    if let Some(observation) = machine.status.mlx_device_observation {
+    let devices = machine
+        .status
+        .mlx_device_observation
+        .as_ref()
+        .map(|observation| observation.devices.as_slice())
+        .unwrap_or_default();
+    for card in &machine.config.nic_firmware_card_overrides {
+        if !devices.iter().any(|device| card.selector.matches(device)) {
+            response.warnings.push(format!(
+                "NIC firmware override for {} selects profile {} but does not match any observed device",
+                card.selector, card.profile_id
+            ));
+        }
+    }
+    if let Some(observation) = &machine.status.mlx_device_observation {
         response.observed_at = Some(observation.observed_at.into());
-        for device in observation.devices {
+        for device in &observation.devices {
             let managed = managed_dpu_machine_ids(device.base_mac, &machine.status.interfaces);
             let mut target = rpc::NicFirmwareDeviceTarget {
                 identity: Some(::rpc::protos::mlx_device::MlxDeviceIdentity {
@@ -376,20 +420,40 @@ pub(crate) async fn get_desired(
                 let hardware = NicFirmwareHardware {
                     part_number: device
                         .part_number
+                        .clone()
                         .ok_or("device report is missing a part number")?,
-                    psid: device.psid.ok_or("device report is missing a PSID")?,
+                    psid: device
+                        .psid
+                        .clone()
+                        .ok_or("device report is missing a PSID")?,
                 }
                 .validate()
                 .map_err(|error| error.to_string())?;
                 let binding = bindings.iter().find(|binding| binding.hardware == hardware);
                 target.site_default_version = binding.map(|binding| binding.version.to_string());
+                let mut cards = machine
+                    .config
+                    .nic_firmware_card_overrides
+                    .iter()
+                    .filter(|card| card.selector.matches(device));
+                let card_override = cards.next();
+                if cards.next().is_some() {
+                    return Err("multiple NIC firmware overrides match this device".to_string());
+                }
+                if let Some(card) = card_override {
+                    // A later report can make a previously unique selector
+                    // ambiguous. Do not select one of those devices arbitrarily.
+                    card.selector
+                        .device_index(devices)
+                        .map_err(|error| error.to_string())?;
+                }
                 resolve_nic_firmware(
                     &hardware,
                     &profiles,
                     NicFirmwareBaseline {
+                        card_override: card_override.map(|card| &card.profile_id),
                         machine_override: machine.config.nic_firmware_profile_id.as_ref(),
                         site_default: binding.map(|binding| &binding.profile_id),
-                        ..Default::default()
                     },
                     allocation.as_ref(),
                 )

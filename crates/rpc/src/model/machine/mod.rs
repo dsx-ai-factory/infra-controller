@@ -356,6 +356,12 @@ impl<ID: MachineIdSubtypeTrait> From<model::machine::Machine<ID>> for rpc::forge
                 .nic_firmware_profile_id
                 .as_ref()
                 .map(ToString::to_string),
+            nic_firmware_card_overrides: machine
+                .config
+                .nic_firmware_card_overrides
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         };
 
         // -- Build the new structured status sub-message --
