@@ -31,7 +31,8 @@ use url::Url;
 
 use crate::config::AuthConfig;
 use crate::metrics::{
-    AuthContextMissing, PrincipalAllowListDenied, RequestAclDenied, RequestPathRejected,
+    AuthContextMissing, PathRejectionReason, PrincipalAllowListDenied, RequestAclDenied,
+    RequestPathRejected,
 };
 use crate::proxy::{BmcProxyError, BmcProxyState, error_response};
 
@@ -58,26 +59,26 @@ const PATH_PROBE_BASE: &str = "https://bmc-proxy.invalid";
 
 /// Reject URL-parser rewrites and escapes that change path structure. Other
 /// escapes remain literal: an ACL allow must explicitly spell each one.
-fn path_rejection_reason(path: &str) -> Option<&'static str> {
+fn path_rejection_reason(path: &str) -> Option<PathRejectionReason> {
     let Ok(parsed) = Url::parse(&format!("{PATH_PROBE_BASE}{path}")) else {
-        return Some("invalid_path");
+        return Some(PathRejectionReason::InvalidPath);
     };
     if parsed.path() != path {
-        return Some("rewritten_path");
+        return Some(PathRejectionReason::RewrittenPath);
     }
     path.split('%').skip(1).find_map(|suffix| {
         let Some(digits) = suffix.get(..2) else {
-            return Some("malformed_escape");
+            return Some(PathRejectionReason::MalformedEscape);
         };
         if !digits.bytes().all(|digit| digit.is_ascii_hexdigit()) {
-            return Some("malformed_escape");
+            return Some(PathRejectionReason::MalformedEscape);
         }
         let octet = u8::from_str_radix(digits, 16)
             .expect("two ASCII hexadecimal digits always fit in a u8");
         match octet {
-            b'/' | b'\\' => Some("encoded_separator"),
-            b'%' => Some("nested_encoding"),
-            0..=0x1f | 0x7f => Some("encoded_control"),
+            b'/' | b'\\' => Some(PathRejectionReason::EncodedSeparator),
+            b'%' => Some(PathRejectionReason::NestedEncoding),
+            0..=0x1f | 0x7f => Some(PathRejectionReason::EncodedControl),
             _ => None,
         }
     })
@@ -196,7 +197,7 @@ mod tests {
         BmcProxyState, authorize_principal_allow_list, path_rejection_reason,
         reject_ambiguous_path, request_principal_ids,
     };
-    use crate::metrics::MethodLabel;
+    use crate::metrics::{MethodLabel, PathRejectionReason};
     use crate::proxy::test_support::*;
 
     const AUTHORIZATION_TEST_CONFIG: &str = r#"
@@ -464,22 +465,22 @@ mod tests {
                 "/redfish/v1/Managers/BMC/Hosts/[2001:db8::1]" => None,
             }
             "upstream URL parsing changes the path" {
-                "/redfish/v1/Systems/../Managers" => Some("rewritten_path"),
-                "/redfish/v1/%2e%2e/Managers" => Some("rewritten_path"),
-                "/redfish/v1/Systems\\..\\Managers" => Some("rewritten_path"),
-                "/redfish/v1/Systems/{id}" => Some("rewritten_path"),
+                "/redfish/v1/Systems/../Managers" => Some(PathRejectionReason::RewrittenPath),
+                "/redfish/v1/%2e%2e/Managers" => Some(PathRejectionReason::RewrittenPath),
+                "/redfish/v1/Systems\\..\\Managers" => Some(PathRejectionReason::RewrittenPath),
+                "/redfish/v1/Systems/{id}" => Some(PathRejectionReason::RewrittenPath),
             }
             "escapes change structure or enable another decoding pass" {
-                "/redfish/v1/Systems%2Ffoo" => Some("encoded_separator"),
-                "/redfish/v1/Systems%5cfoo" => Some("encoded_separator"),
-                "/redfish/v1/%252e%252e/x" => Some("nested_encoding"),
-                "/redfish/v1/%00" => Some("encoded_control"),
-                "/redfish/v1/%7f" => Some("encoded_control"),
+                "/redfish/v1/Systems%2Ffoo" => Some(PathRejectionReason::EncodedSeparator),
+                "/redfish/v1/Systems%5cfoo" => Some(PathRejectionReason::EncodedSeparator),
+                "/redfish/v1/%252e%252e/x" => Some(PathRejectionReason::NestedEncoding),
+                "/redfish/v1/%00" => Some(PathRejectionReason::EncodedControl),
+                "/redfish/v1/%7f" => Some(PathRejectionReason::EncodedControl),
             }
             "malformed escapes" {
-                "/redfish/v1/%2" => Some("malformed_escape"),
-                "/redfish/v1/%GG" => Some("malformed_escape"),
-                "/redfish/v1/%+1" => Some("malformed_escape"),
+                "/redfish/v1/%2" => Some(PathRejectionReason::MalformedEscape),
+                "/redfish/v1/%GG" => Some(PathRejectionReason::MalformedEscape),
+                "/redfish/v1/%+1" => Some(PathRejectionReason::MalformedEscape),
             }
         );
     }
@@ -495,6 +496,15 @@ mod tests {
                         Some(StatusCode::BAD_REQUEST),
                         1.0,
                         Some("rewritten_path".to_string()),
+                    ),
+                },
+                Check {
+                    scenario: "typed backslash reason preserves its existing log spelling",
+                    input: "/redfish/v1/Systems%5cfoo",
+                    expect: (
+                        Some(StatusCode::BAD_REQUEST),
+                        1.0,
+                        Some("encoded_separator".to_string()),
                     ),
                 },
                 Check {
