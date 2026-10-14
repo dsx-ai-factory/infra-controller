@@ -28,7 +28,7 @@ type TaskRunFirmwareOperation struct {
 	Version string `json:"version"`
 	// Operation Rule to pin for each target's firmware Task. Null to let Flow's default rule resolution pick one.
 	RuleId NullableString `json:"ruleId,omitempty"`
-	// When true, request that the selected component backend override firmware version-based checks when deciding whether to apply the update. This permits same-version reapplication and downgrade when supported. The opt-in `nicolegacy` compute manager rejects this option before creating a task. It does not bypass readiness checks or state-controller routing.
+	// When true, request that the selected component backend override firmware version-based checks when deciding whether to apply the update. This permits same-version reapplication and downgrade when supported. It does not bypass readiness checks or state-controller routing.
 	OverrideVersionCheck *bool `json:"overrideVersionCheck,omitempty"`
 	// Skip the pre-flight readiness check when true.
 	OverrideReadinessCheck *bool `json:"overrideReadinessCheck,omitempty"`

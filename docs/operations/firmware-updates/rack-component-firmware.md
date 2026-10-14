@@ -74,7 +74,7 @@ The request supports these controls in addition to `siteId`:
 | `targets` | Optional component subset for tray requests. Rack handlers do not forward this field, so do not send it with a rack request. |
 | `ruleId` | Pins the task to a custom Flow operation rule. When omitted, Flow resolves a rule and falls back to its built-in firmware rule. |
 | `overrideReadinessCheck` | Bypasses Flow's readiness gate and tells Core to bypass its state controller where supported. Use only during supervised maintenance after tenant impact has been accepted. |
-| `overrideVersionCheck` | Defaults to `false`. Requests an update without version-based skip or downgrade checks; enforcement depends on the backend. The opt-in `nicolegacy` compute manager rejects this option before creating a task. Does not bypass readiness checks. |
+| `overrideVersionCheck` | Defaults to `false`. Requests an update without version-based skip or downgrade checks; enforcement depends on the backend. Does not bypass readiness checks. |
 | `authenticationData` | Optional firmware-download credentials, shared or scoped by component type. See [Firmware authentication](#firmware-authentication). |
 
 `version` carries the target firmware input. Its representation is a contract
