@@ -36,7 +36,7 @@ spec:
     statefulset.kubernetes.io/pod-name: {{ include "nico-dns.name" $ }}-{{ $i }}
   ports:
     - port: 53
-      targetPort: 53
+      targetPort: {{ $.Values.service.targetPort | default 53 }}
       name: udp
       protocol: UDP
 ---
@@ -68,7 +68,7 @@ spec:
     statefulset.kubernetes.io/pod-name: {{ include "nico-dns.name" $ }}-{{ $i }}
   ports:
     - port: 53
-      targetPort: 53
+      targetPort: {{ $.Values.service.targetPort | default 53 }}
       name: tcp
       protocol: TCP
 {{- end }}
