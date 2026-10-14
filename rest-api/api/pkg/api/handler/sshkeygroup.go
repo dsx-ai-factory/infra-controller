@@ -145,9 +145,8 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 	skaDAO := cdbm.NewSSHKeyAssociationDAO(cskgh.dbSession)
 	skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(cskgh.dbSession)
 
-	// Validate inputs (Tenant/Site access, requested Sites, requested SSH Keys)
-	// outside the transaction — these are pure read-only checks and don't need
-	// to be in the tx scope. The tx is opened later just for the writes.
+	// Validate requested Sites and SSH Keys outside the transaction; these are
+	// read-only checks, so the tx is opened later just for the writes.
 	rdbst := []cdbm.Site{}
 	for _, stID := range apiRequest.SiteIDs {
 		// Validate the site for which this SSH Key Group is being created
