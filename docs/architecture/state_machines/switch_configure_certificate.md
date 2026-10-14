@@ -9,21 +9,32 @@ Service (RMS)** asynchronously and polls job status until completion.
 
 - Install or rotate the switch NVOS certificate as part of initial switch
   bring-up, before NVOS admin credentials are stored (`RotateOsPassword`).
+- Reset existing mTLS bindings before installing certificates during initial
+  bring-up, so stale client-CA trust cannot block installation.
 - Keep RMS-specific protobuf and job semantics behind the CM `NvSwitchManager`
   abstraction so the state handler stays backend-agnostic (RMS, NSM, mock).
 - Persist the async **job ID** in controller state so restarts can resume polling.
 
 ## Placement in the Switch FSM
 
-`ConfigureCertificate` is a sub-state of `SwitchControllerState::Configuring`,
-before `RotateOsPassword`, `FetchInfo`, and `Validating`.
+`DisableMtls` and `ConfigureCertificate` are sub-states of
+`SwitchControllerState::Configuring`, before `RotateOsPassword`, `FetchInfo`,
+and `Validating`. Initial ingestion enters `DisableMtls` first; maintenance
+`ReconfigureCertificate` does not run it.
 
 ```mermaid
 stateDiagram-v2
 direction TB
 
 state Configuring {
-    [*] --> ConfigureCertificate
+    [*] --> DisableMtls
+    state DisableMtls {
+        [*] --> DisableStart
+        DisableStart --> DisableWaitForComplete : job submitted
+        DisableStart --> DisableStart : CM start error (retry next iteration)
+        DisableWaitForComplete --> DisableWaitForComplete : in progress or CM poll error (retry next iteration)
+    }
+    DisableMtls --> ConfigureCertificate : job Completed or skipped
     state ConfigureCertificate {
         [*] --> Start
         Start --> WaitForComplete : job submitted
@@ -36,13 +47,57 @@ state Configuring {
 
 FetchInfo --> Validating : slot and tray lookup complete
 
+DisableMtls --> Error : job Failed, outcome unknown, or unobservable
 ConfigureCertificate --> Error : job Failed
 ```
+
+`DisableStart` and `DisableWaitForComplete` are the `Start` and
+`WaitForComplete { job_id }` values of `DisableMtlsState`. Persisted states from
+before `DisableMtls` existed deserialize unchanged; a switch already in
+`ConfigureCertificate` continues there without running the disable step.
 
 Transient CM or transport failures during `Start` or `WaitForComplete` return
 `StateHandlerError` and leave the switch in the same sub-state for retry on the
 next handler iteration. Only a terminal RMS job status of `Failed` (or missing
 component manager while polling) transitions to `Error`.
+
+### Disable mTLS before certificate installation
+
+RMS checks NVUE connectivity with its current client certificate before it
+installs replacement certificates. A switch whose existing mTLS bindings trust
+a different CA rejects that certificate, so the install never starts and
+re-ingestion repeats the failure. Initial ingestion therefore calls RMS
+`BatchDisableSwitchMtls` for the switch first, and submits
+`ConfigureSwitchCertificate` only after the disable job completes. RMS removes
+the bindings over SSH, which does not depend on a working NVUE endpoint.
+
+The disable request uses the same service selection as certificate
+installation, including the primary-switch filtering described below.
+
+### Sub-states (`DisableMtlsState`)
+
+| Sub-state | Purpose |
+|-----------|---------|
+| `Start` | Resolve credentials and the switch endpoint, call CM to start the RMS disable job. |
+| `WaitForComplete { job_id }` | Poll CM, which reads RMS `GetJobStatus` with child jobs, until terminal. |
+
+The disable parent job and every child job RMS declares must complete before
+the state advances to `ConfigureCertificate` `Start`.
+
+| Condition | Behavior |
+|-----------|----------|
+| `rack_id` is `None`, no component manager, or no services remain | Skip; advance to `ConfigureCertificate` `Start`, which skips as well. |
+| Backend returns `Unsupported` (for example NSM, or RMS without the RPC) | Log a warning, skip; advance to `ConfigureCertificate` `Start`. |
+| `bmc_mac_address` is `None`, or the endpoint cannot be resolved | Transition to `Error`. |
+| CM returns `OperationOutcomeUnknown` on submission | Transition to `Error`; the submission is not retried. |
+| CM returns another error on submission | `StateHandlerError`; remain in `Start` and retry. |
+| CM returns `NotFound`, `OperationOutcomeUnknown`, or `Unsupported` on status | Transition to `Error`; certificate configuration is not submitted. |
+| CM returns another error on status | `StateHandlerError`; remain in `WaitForComplete` and retry. |
+| RMS job is pending | Wait; poll again on the next iteration. |
+| RMS job (or any child) `Failed` | Transition to `Error`; certificate configuration is not submitted. |
+
+If certificate installation fails after the disable step, the `Error` cause
+states that mTLS restoration is incomplete.
 
 ### Sub-states (`ConfigureCertificateState`)
 
@@ -140,6 +195,8 @@ for rack maintenance, and a shared status method:
 | `configure_switch_certificate` | `SwitchEndpoint`, `domain_name: Option<&str>`, `services: Option<&[i32]>` | `job_id: String` |
 | `batch_configure_switch_certificate` | `&[SwitchCertificateEndpoint]`, `domain_name: Option<&str>`, `services: Option<&[i32]>` | parent `job_id: String` |
 | `get_configure_switch_certificate_job_status` | `job_id: &str` | `ConfigureSwitchCertificateJobStatus { state, error }` |
+| `batch_disable_switch_mtls` | `&[SwitchEndpoint]`, `services: &[i32]` | parent `job_id: String` |
+| `get_disable_switch_mtls_job_status` | `job_id: &str` | `SwitchMtlsDisableJobStatus { state, error }` |
 
 The single-switch `SwitchEndpoint` is built from:
 
@@ -164,6 +221,10 @@ The subsequent V2 phase keeps its existing full-endpoint requirements.
 
 Rack-wide batch submission is implemented by the RMS backend. Other backends
 return `Unsupported` through the default implementation.
+
+`batch_disable_switch_mtls` and `get_disable_switch_mtls_job_status` are
+implemented by the RMS backend. Other backends return `Unsupported` through the
+default implementation, which the switch handler treats as a skipped step.
 
 ## RMS integration
 
@@ -332,7 +393,7 @@ single-switch, single-job certificate operation.
 
 | Layer | Location |
 |-------|----------|
-| State types | `crates/api-model/src/switch/mod.rs` — `ConfigureCertificateState`, `ConfiguringState` |
+| State types | `crates/api-model/src/switch/mod.rs` — `DisableMtlsState`, `ConfigureCertificateState`, `ConfiguringState` |
 | Job status enum | `crates/api-model/src/component_manager.rs` — `ConfigureSwitchCertificateState` |
 | Shared certificate logic | `crates/switch-controller/src/certificate.rs` |
 | Bring-up handler | `crates/switch-controller/src/configuring.rs` |
