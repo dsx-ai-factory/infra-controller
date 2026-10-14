@@ -446,11 +446,13 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
     /// identifiers. A successful submission returns a non-empty, opaque job ID for
     /// [`Self::get_disable_switch_mtls_job_status`].
     ///
-    /// If dispatch may have reached the backend but no job ID is available, the
-    /// implementation returns [`ComponentManagerError::OperationOutcomeUnknown`].
-    /// Callers must not automatically resubmit after an unknown outcome. The default
-    /// implementation returns [`ComponentManagerError::Unsupported`], which
-    /// guarantees that no work was dispatched.
+    /// A failure to prepare the request, such as an unresolved switch identity,
+    /// returns [`ComponentManagerError::RejectedBeforeDispatch`]. If dispatch may
+    /// have reached the backend but no job ID is available, the implementation
+    /// returns [`ComponentManagerError::OperationOutcomeUnknown`]. Callers must not
+    /// automatically resubmit after an unknown outcome. The default implementation
+    /// returns [`ComponentManagerError::Unsupported`], which guarantees that no work
+    /// was dispatched.
     async fn batch_disable_switch_mtls(
         &self,
         _endpoints: &[SwitchEndpoint],
