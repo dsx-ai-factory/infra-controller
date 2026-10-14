@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+ARG RUNTIME_IMAGE=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
+FROM nico-devspace-core-artifacts AS artifacts
+FROM ${RUNTIME_IMAGE}
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libvirt-clients \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=artifacts /artifacts/bmc-mock /usr/local/bin/bmc-mock
+COPY crates/bmc-mock/tls.crt crates/bmc-mock/tls.key /opt/carbide/
+ENTRYPOINT ["/usr/local/bin/bmc-mock"]

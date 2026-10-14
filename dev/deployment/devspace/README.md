@@ -410,3 +410,10 @@ devspace deploy -n nico-system --profile full
 - [`values.base.yaml`](values.base.yaml)
 - `values.generated.yaml`, written by `bootstrap-prereqs.sh` and not tracked
 - [`nuke-postgres.sh`](nuke-postgres.sh)
+
+## Real zero-DPU target VMs
+
+The opt-in [`vm-hosts` profile](vm-hosts/README.md) extends `full` with native x86_64 or ARM64
+KVM guests controlled by standalone `bmc-mock` endpoints. It replaces MAT for
+that profile and requires KVM and real Scout boot artifacts. Provisioning uses
+IPv4; running the stack inside a VM additionally requires nested virtualization.

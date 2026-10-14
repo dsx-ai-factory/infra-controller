@@ -143,8 +143,12 @@ mod tests {
             r#"#!/bin/sh
 case "$3" in
     domstate) printf '%s\n' running ;;
-    dumpxml) printf '%s\n' '<domain><os><type>hvm</type></os><devices/></domain>' ;;
-    define) exit 0 ;;
+    dumpxml)
+        if [ -f "$0.xml" ]; then cat "$0.xml";
+        else printf '%s\n' '<domain><os><type>hvm</type></os><devices/></domain>'; fi ;;
+    define) cp "$4" "$0.xml" ;;
+    start) cp "$0.xml" "$0.booted" ;;
+    destroy) exit 0 ;;
     *) exit 2 ;;
 esac
 "#,
@@ -287,6 +291,137 @@ esac
         assert_eq!(restored.persisted(), saved);
         second_callbacks.finish().await.unwrap();
         second.join_all().await;
+    }
+
+    #[tokio::test]
+    async fn restart_retains_lockdown_and_boot_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let (router, state, running, callbacks) = fixture(path.clone()).await;
+        let changes = [
+            (
+                "/redfish/v1/Systems/Self/Bios",
+                serde_json::json!({"Attributes": {"KCSACP": "Deny All", "USB000": "Disabled"}}),
+            ),
+            (
+                "/redfish/v1/Managers/Self/HostInterfaces/Self",
+                serde_json::json!({"InterfaceEnabled": false}),
+            ),
+            (
+                "/redfish/v1/Systems/Self",
+                serde_json::json!({"Boot": {"BootOrder": ["Boot0001", "Boot0000"]}}),
+            ),
+        ];
+        let mut expected = Vec::new();
+        for (uri, body) in changes {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                response.status().is_success(),
+                "{uri}: {}",
+                response.status()
+            );
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            expected.push((
+                uri,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            ));
+        }
+        wait_saved(&path, &state.persisted()).await;
+        callbacks.finish().await.unwrap();
+        running.join_all().await;
+        let (restored, _, second, second_callbacks) = fixture(path).await;
+        for (uri, before) in expected {
+            let response = restored
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let after: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            for key in ["Attributes", "InterfaceEnabled", "Boot"] {
+                assert_eq!(after.get(key), before.get(key), "{uri}: {key}");
+            }
+        }
+        second_callbacks.finish().await.unwrap();
+        second.join_all().await;
+    }
+
+    #[tokio::test]
+    async fn full_power_cycle_after_restart_consumes_saved_once_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let (router, state, running, callbacks) = fixture(path.clone()).await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/redfish/v1/Systems/Self")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"Boot": {
+                            "BootOrder": ["Boot0001", "Boot0000"],
+                            "BootSourceOverrideEnabled": "Once", "BootSourceOverrideTarget": "Pxe"
+                        }})
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        wait_saved(&path, &state.persisted()).await;
+        callbacks.finish().await.unwrap();
+        running.join_all().await;
+        let (_, restored, second, second_callbacks) = fixture(path.clone()).await;
+        second_callbacks
+            .computer_system_reset(crate::ResourceResetType::FullPowerCycle)
+            .await
+            .unwrap();
+        let booted = path.with_extension("virsh.booted");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !booted.exists()
+                || restored
+                    .system_state
+                    .controlled_system()
+                    .unwrap()
+                    .boot_source_override()["BootSourceOverrideEnabled"]
+                    != "Disabled"
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            std::fs::read_to_string(booted)
+                .unwrap()
+                .contains("dev=\"network\"")
+        );
+        second_callbacks.finish().await.unwrap();
+        second.join_all().await;
+        let persistent_xml = std::fs::read_to_string(path.with_extension("virsh.xml")).unwrap();
+        assert!(persistent_xml.contains("dev=\"hd\""));
+        assert!(!persistent_xml.contains("dev=\"network\""));
     }
 
     #[tokio::test]

@@ -9,12 +9,19 @@ ENV CARGO_HOME=/cargo-home
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 ENV CARGO_TARGET_DIR=/cargo-target
 
+ARG TARGET_BACKEND=machine-a-tron
+
 WORKDIR /workspace
 
 COPY . .
 
 RUN --mount=type=cache,id=nico-devspace-cargo-home,target=/cargo-home,sharing=locked \
   --mount=type=cache,id=nico-devspace-cargo-target,target=/cargo-target,sharing=locked \
+  case "${TARGET_BACKEND}" in \
+    machine-a-tron) target_package=carbide-machine-a-tron ;; \
+    bmc-mock) target_package=bmc-mock ;; \
+    *) echo "unsupported target backend: ${TARGET_BACKEND}" >&2; exit 1 ;; \
+  esac && \
   cargo build --locked \
     -p carbide-api --bin carbide-api \
     -p nico-admin-cli --bin nico-admin-cli \
@@ -23,7 +30,7 @@ RUN --mount=type=cache,id=nico-devspace-cargo-home,target=/cargo-home,sharing=lo
     -p carbide-dns --bin carbide-dns \
     -p carbide-health --bin forge-hw-health \
     -p carbide-ssh-console --bin ssh-console \
-    -p carbide-machine-a-tron --bin machine-a-tron \
+    -p "${target_package}" --bin "${TARGET_BACKEND}" \
     -p carbide-pxe --bin carbide && \
   mkdir -p /artifacts && \
   cp \
@@ -34,7 +41,7 @@ RUN --mount=type=cache,id=nico-devspace-cargo-home,target=/cargo-home,sharing=lo
     /cargo-target/debug/carbide-dns \
     /cargo-target/debug/forge-hw-health \
     /cargo-target/debug/ssh-console \
-    /cargo-target/debug/machine-a-tron \
+    /cargo-target/debug/"${TARGET_BACKEND}" \
     /cargo-target/debug/carbide \
     /artifacts/
 
