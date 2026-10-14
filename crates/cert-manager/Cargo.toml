@@ -1,0 +1,43 @@
+[package]
+name = "cert-manager"
+version = "0.0.1"
+description = "Machine and UFM certificate issuance through cert-manager CertificateRequests"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+carbide-authn = { path = "../authn" }
+carbide-secrets = { path = "../secrets" }
+carbide-tls = { path = "../tls" }
+eyre = { workspace = true }
+humantime = { workspace = true }
+humantime-serde = { workspace = true }
+k8s-openapi = { workspace = true, features = ["latest"] }
+kube = { workspace = true, features = ["client", "rustls-tls", "aws-lc-rs"] }
+rand = { workspace = true }
+rcgen = { workspace = true, features = ["aws_lc_rs", "pem"] }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rustls-pki-types = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+x509-parser = { workspace = true }
+
+[dev-dependencies]
+carbide-test-support = { path = "../test-support" }
+http = { workspace = true }
+http-body-util = { workspace = true }
+rcgen = { workspace = true, features = ["aws_lc_rs", "pem", "x509-parser"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+time = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true

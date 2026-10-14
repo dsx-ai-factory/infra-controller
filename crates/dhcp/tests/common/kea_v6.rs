@@ -63,6 +63,8 @@ pub(crate) struct Kea6Config {
     pub(crate) rebind_timer: u32,
     pub(crate) rapid_commit_v6: bool,
     pub(crate) kea_rapid_commit_v6: bool,
+    pub(crate) provisioning_server_ipv6: &'static str,
+    pub(crate) dns_servers_ipv6: &'static [&'static str],
     pub(crate) mac_sources: Option<&'static [&'static str]>,
     pub(crate) expired_leases_processing: Option<Kea6ExpiredLeasesProcessing>,
 }
@@ -76,6 +78,8 @@ impl Default for Kea6Config {
             rebind_timer: 2880,
             rapid_commit_v6: false,
             kea_rapid_commit_v6: true,
+            provisioning_server_ipv6: "",
+            dns_servers_ipv6: &HOOK_DNS_SERVERS_IPV6,
             mac_sources: None,
             expired_leases_processing: None,
         }
@@ -532,11 +536,11 @@ impl Kea6 {
                     "parameters": {
                         "carbide-api-url": api_server_url,
                         "carbide-metrics-endpoint": metrics_endpoint,
-                        "hook-dns-servers-ipv6": HOOK_DNS_SERVERS_IPV6.join(","),
+                        "hook-dns-servers-ipv6": config.dns_servers_ipv6.join(","),
                         "hook-ntp-servers-ipv6": HOOK_NTP_SERVERS_IPV6.join(","),
                         // Keep optional v6 parameters explicit so loader
                         // parsing is exercised even when the option is off.
-                        "hook-provisioning-server-ipv6": "",
+                        "hook-provisioning-server-ipv6": config.provisioning_server_ipv6,
                         "hook-rapid-commit-v6": config.rapid_commit_v6
                     }
                 }

@@ -67,10 +67,11 @@ pub async fn run(
     cancel_token: CancellationToken,
     ready_channel: Sender<ApiServerReady>,
 ) -> eyre::Result<()> {
-    let carbide_config = carbide_api_core::cfg::load::parse_carbide_config(
-        &config_path,
-        site_config_path.as_deref(),
-    )?;
+    let (carbide_config, config_diagnostics) =
+        carbide_api_core::cfg::load::parse_carbide_config_with_deferred_diagnostics(
+            &config_path,
+            site_config_path.as_deref(),
+        )?;
 
     // The server has two separate route trees on one listener: the gRPC API
     // (always served, lives in `carbide-api-core`) and the admin web UI — the
@@ -84,23 +85,6 @@ pub async fn run(
     // the core runtime. (We can't read config here: it's parsed inside `carbide::run`.)
     // See the docs on `carbide::AdminUiRoutesBuilder` for the full story.
     let admin_ui_routes_builder = Box::new(carbide_api_web::routes);
-
-    // If `CarbideConfig.initial_objects_file` is set, load it into an
-    // `InitialObjectsConfig` so that the core runtime can reconcile its contents
-    // against the database on first startup.
-    let initial_objects = if let Some(path) = carbide_config.initial_objects_file.as_deref() {
-        Some(
-            carbide_api_core::cfg::load::parse_initial_objects_config_with_policy(
-                path,
-                carbide_config.deny_unknown_fields,
-            )?,
-        )
-    } else {
-        None
-    };
-
-    carbide_api_core::validate_resource_pool_config(&carbide_config, initial_objects.as_ref())?;
-    validate_network_prefixes(&carbide_config)?;
 
     let log_history_max_bytes = carbide_config
         .log_history
@@ -120,7 +104,23 @@ pub async fn run(
         .wrap_err("setup_telemetry")?
     };
 
+    config_diagnostics.emit();
     carbide_api_core::cfg::load::log_vpc_peering_policy_deprecations(&carbide_config);
+    validate_network_prefixes(&carbide_config)?;
+
+    // Load initial objects after logging setup so warn-mode unknown-field
+    // diagnostics from this second configuration file are observable too.
+    let initial_objects = if let Some(path) = carbide_config.initial_objects_file.as_deref() {
+        Some(
+            carbide_api_core::cfg::load::parse_initial_objects_config_with_policy(
+                path,
+                carbide_config.deny_unknown_fields,
+            )?,
+        )
+    } else {
+        None
+    };
+    carbide_api_core::validate_resource_pool_config(&carbide_config, initial_objects.as_ref())?;
 
     let Metrics {
         registry,

@@ -370,6 +370,7 @@ fn short_expiry_config() -> Kea6Config {
             max_reclaim_time: 100,
             unwarned_reclaim_cycles: 1,
         }),
+        ..Kea6Config::default()
     }
 }
 
