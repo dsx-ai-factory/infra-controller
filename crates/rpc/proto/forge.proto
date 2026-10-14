@@ -1218,6 +1218,16 @@ service Forge {
 
   // --- Component management (unified switch + power shelf operations) ---
   rpc ComponentPowerControl(ComponentPowerControlRequest) returns (ComponentPowerControlResponse);
+  // Reads fresh hardware power state and independently stored desired policy.
+  // Flow and ForgeAdminCLI may call this method. A consistent database snapshot
+  // has five seconds, including pool acquisition; failure aborts with INTERNAL.
+  // After releasing that snapshot, queued targets, credentials, and live reads
+  // share fifteen seconds with at most eight targets active. Completed results
+  // survive expiry; unfinished reads report DeadlineExceeded. Earlier caller
+  // cancellation drops pending work. Core and RMS also enforce ten-second local
+  // read budgets, whose expiry reports ReadFailed. This method never registers
+  // devices, writes policy, or submits power operations.
+  rpc GetComponentPowerDetails(GetComponentPowerDetailsRequest) returns (GetComponentPowerDetailsResponse);
   rpc ComponentConfigureSwitchCertificate(ComponentConfigureSwitchCertificateRequest) returns (ComponentConfigureSwitchCertificateResponse);
   rpc GetComponentInventory(GetComponentInventoryRequest) returns (GetComponentInventoryResponse);
   rpc UpdateComponentFirmware(UpdateComponentFirmwareRequest) returns (UpdateComponentFirmwareResponse);
@@ -10729,6 +10739,162 @@ message ComponentInventoryEntry {
 
 message GetComponentInventoryResponse {
   repeated ComponentInventoryEntry entries = 1;
+}
+
+// --- Component power details ---
+
+// Selects one managed target kind and requires 1-64 unique IDs. Missing
+// target, empty/oversized batches, and duplicate IDs return INVALID_ARGUMENT.
+// ID strings rejected by the typed decoder, including DPU IDs in machine_ids,
+// return INTERNAL before handler validation. IDs absent from the database
+// snapshot report NotFound per entry. Deletion-marked switches and shelves
+// remain readable until their database records are removed.
+//
+// Without a discovered BMC/PMC endpoint, a managed target reports
+// EndpointUnavailable before configuration or backend checks. For resolved
+// endpoints, an expired shared budget reports DeadlineExceeded; otherwise the
+// checks are Component Manager configuration (Disabled), passive-read capability
+// (Unsupported), and BMC/PMC credentials (CredentialsUnavailable), in that order.
+// Switches then require an NVOS endpoint and NVOS credentials, in that order.
+// Missing BMC credentials therefore take precedence over a missing NVOS endpoint.
+// PSM, NSM, and mock backends do not advertise passive live power reads.
+//
+// A host is standalone when it has no rack association and its discovered
+// hardware is not MNNVL-capable. Standalone hosts use the direct Core Redfish
+// reader; rack-scale hosts use the configured compute reader. Core readers use
+// direct BMC authentication even when the site's general Redfish pool uses a
+// proxy. Switches and shelves use their configured component readers.
+message GetComponentPowerDetailsRequest {
+  // Required homogeneous selection; exactly one target kind is accepted.
+  oneof target {
+    // Host machine IDs; DPU IDs are rejected by typed decoding.
+    common.MachineIdList machine_ids = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineIdList"];
+    // Managed NVLink switch IDs.
+    SwitchIdList switch_ids = 2;
+    // Managed power shelf IDs.
+    PowerShelfIdList power_shelf_ids = 3;
+  }
+}
+
+// A hardware observation, including explicit Unknown, rather than policy.
+enum ComponentPowerState {
+  // Hardware explicitly reported an unknown state; this is still an observation.
+  COMPONENT_POWER_STATE_UNKNOWN = 0;
+  // Hardware reported power on.
+  COMPONENT_POWER_STATE_ON = 1;
+  // Hardware reported power off.
+  COMPONENT_POWER_STATE_OFF = 2;
+  // Hardware reported a transition toward power on.
+  COMPONENT_POWER_STATE_POWERING_ON = 3;
+  // Hardware reported a transition toward power off.
+  COMPONENT_POWER_STATE_POWERING_OFF = 4;
+  // Hardware reported a paused state.
+  COMPONENT_POWER_STATE_PAUSED = 5;
+  // Hardware reported a reset state.
+  COMPONENT_POWER_STATE_RESET = 6;
+}
+
+// Source of hardware evidence or persisted desired policy.
+enum ComponentPowerSource {
+  // Default enum value; this RPC omits unknown sources instead of emitting it.
+  COMPONENT_POWER_SOURCE_UNSPECIFIED = 0;
+  // A direct BMC Redfish power read.
+  COMPONENT_POWER_SOURCE_REDFISH = 1;
+  // A live read through Rack Management Service.
+  COMPONENT_POWER_SOURCE_RMS = 2;
+  // Desired policy persisted in Core's host power policy table.
+  COMPONENT_POWER_SOURCE_CORE_POWER_POLICY = 3;
+}
+
+// Bounded failure categories; no backend payloads or credentials are exposed.
+enum ComponentPowerErrorCode {
+  // Default enum value; this RPC emits a specific failure category instead.
+  COMPONENT_POWER_ERROR_CODE_UNSPECIFIED = 0;
+  // The requested ID was absent from the managed database snapshot.
+  COMPONENT_POWER_ERROR_CODE_NOT_FOUND = 1;
+  // Component Manager is not configured, including for standalone hosts.
+  COMPONENT_POWER_ERROR_CODE_DISABLED = 2;
+  // The selected backend cannot provide a fresh passive read.
+  COMPONENT_POWER_ERROR_CODE_UNSUPPORTED = 3;
+  // A required discovered BMC, PMC, or NVOS endpoint is missing.
+  COMPONENT_POWER_ERROR_CODE_ENDPOINT_UNAVAILABLE = 4;
+  // Required BMC, PMC, or NVOS credentials are missing or could not be loaded.
+  COMPONENT_POWER_ERROR_CODE_CREDENTIALS_UNAVAILABLE = 5;
+  // The read failed or returned mismatched/multiple results. Backend-local
+  // timeouts also use this category; they do not expire the shared RPC budget.
+  COMPONENT_POWER_ERROR_CODE_READ_FAILED = 6;
+  // The backend returned no result or a matching result without a state.
+  COMPONENT_POWER_ERROR_CODE_NO_OBSERVATION = 7;
+  // The shared fifteen-second credential/read budget expired for this target.
+  COMPONENT_POWER_ERROR_CODE_DEADLINE_EXCEEDED = 8;
+}
+
+// Safe details for one target whose actual power state could not be observed.
+message ComponentPowerError {
+  // Specific failure category; clients should branch on this value.
+  ComponentPowerErrorCode code = 1;
+  // Fixed explanatory text with no dependency payload or credential details.
+  string message = 2;
+}
+
+// One successful hardware observation or one categorized failure.
+message ComponentPowerObservation {
+  // Always populated by this RPC: exactly one observed state or failure.
+  oneof outcome {
+    // Explicit Unknown is a successful observation. Check the selected outcome:
+    // a generated getter's default Unknown does not imply success.
+    ComponentPowerState state = 1;
+    // Selected when no hardware state could be observed.
+    ComponentPowerError error = 4;
+  }
+  // Redfish or Rms after backend selection, including subsequent failures.
+  // Absent for earlier failures or an outer shared-budget timeout. Always
+  // present with state; CorePowerPolicy and Unspecified are never emitted here.
+  optional ComponentPowerSource source = 2;
+  // NICo receipt time, not a device-provided timestamp; present only with state.
+  google.protobuf.Timestamp observed_at = 3;
+}
+
+// Whether a persisted desired policy exists and applies to the requested ID.
+enum ComponentPowerPolicyStatus {
+  // No host policy row or no managed target; also the default status value.
+  COMPONENT_POWER_POLICY_STATUS_UNAVAILABLE = 0;
+  // A host policy row exists, including a policy that disables power management.
+  COMPONENT_POWER_POLICY_STATUS_AVAILABLE = 1;
+  // Managed switches and shelves have no applicable stored desired policy.
+  COMPONENT_POWER_POLICY_STATUS_NOT_APPLICABLE = 2;
+}
+
+// Desired host policy from the database snapshot, independent of hardware reads.
+message ComponentPowerPolicy {
+  // Available for a host with a policy row; NotApplicable for managed switches
+  // and shelves; Unavailable for a missing host policy or missing managed ID.
+  ComponentPowerPolicyStatus status = 1;
+  // Present exactly when Available: On, Off, or PowerManagerDisabled. Disabled
+  // is a stored policy, not missing policy. Check presence/status before using a
+  // generated getter; its default On does not imply that a policy exists.
+  optional PowerState state = 2;
+  // CorePowerPolicy when Available; absent otherwise.
+  optional ComponentPowerSource source = 3;
+  // Not populated by this RPC. Initial policy versions contain a fixed
+  // timestamp rather than policy creation time.
+  google.protobuf.Timestamp updated_at = 4;
+}
+
+// Actual and desired power facts for one requested managed component ID.
+message ComponentPowerDetails {
+  // The requested managed ID, in its canonical representation.
+  string component_id = 1;
+  // Always present, with either an observed state or a per-target error.
+  ComponentPowerObservation actual = 2;
+  // Always present; loaded independently and retained when actual is unavailable.
+  ComponentPowerPolicy desired = 3;
+}
+
+// Power facts for every requested ID, including targets with unavailable reads.
+message GetComponentPowerDetailsResponse {
+  // Exactly one entry per requested ID, in request order, including missing IDs.
+  repeated ComponentPowerDetails entries = 1;
 }
 
 // --- Component power control ---

@@ -3934,6 +3934,16 @@ impl Forge for Api {
             .await
     }
 
+    async fn get_component_power_details(
+        &self,
+        request: Request<rpc::GetComponentPowerDetailsRequest>,
+    ) -> Result<Response<rpc::GetComponentPowerDetailsResponse>, Status> {
+        crate::handlers::component_manager::power_details::get_component_power_details(
+            self, request,
+        )
+        .await
+    }
+
     async fn component_power_control(
         &self,
         request: Request<rpc::ComponentPowerControlRequest>,

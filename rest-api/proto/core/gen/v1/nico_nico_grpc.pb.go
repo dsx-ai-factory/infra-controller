@@ -543,6 +543,7 @@ const (
 	Forge_ListDPUServiceSyncHistory_FullMethodName                          = "/forge.Forge/ListDPUServiceSyncHistory"
 	Forge_ReleaseDPUServiceSyncHold_FullMethodName                          = "/forge.Forge/ReleaseDPUServiceSyncHold"
 	Forge_ComponentPowerControl_FullMethodName                              = "/forge.Forge/ComponentPowerControl"
+	Forge_GetComponentPowerDetails_FullMethodName                           = "/forge.Forge/GetComponentPowerDetails"
 	Forge_ComponentConfigureSwitchCertificate_FullMethodName                = "/forge.Forge/ComponentConfigureSwitchCertificate"
 	Forge_GetComponentInventory_FullMethodName                              = "/forge.Forge/GetComponentInventory"
 	Forge_UpdateComponentFirmware_FullMethodName                            = "/forge.Forge/UpdateComponentFirmware"
@@ -1554,6 +1555,16 @@ type ForgeClient interface {
 	ReleaseDPUServiceSyncHold(ctx context.Context, in *ReleaseDPUServiceSyncHoldRequest, opts ...grpc.CallOption) (*ReleaseDPUServiceSyncHoldResponse, error)
 	// --- Component management (unified switch + power shelf operations) ---
 	ComponentPowerControl(ctx context.Context, in *ComponentPowerControlRequest, opts ...grpc.CallOption) (*ComponentPowerControlResponse, error)
+	// Reads fresh hardware power state and independently stored desired policy.
+	// Flow and ForgeAdminCLI may call this method. A consistent database snapshot
+	// has five seconds, including pool acquisition; failure aborts with INTERNAL.
+	// After releasing that snapshot, queued targets, credentials, and live reads
+	// share fifteen seconds with at most eight targets active. Completed results
+	// survive expiry; unfinished reads report DeadlineExceeded. Earlier caller
+	// cancellation drops pending work. Core and RMS also enforce ten-second local
+	// read budgets, whose expiry reports ReadFailed. This method never registers
+	// devices, writes policy, or submits power operations.
+	GetComponentPowerDetails(ctx context.Context, in *GetComponentPowerDetailsRequest, opts ...grpc.CallOption) (*GetComponentPowerDetailsResponse, error)
 	ComponentConfigureSwitchCertificate(ctx context.Context, in *ComponentConfigureSwitchCertificateRequest, opts ...grpc.CallOption) (*ComponentConfigureSwitchCertificateResponse, error)
 	GetComponentInventory(ctx context.Context, in *GetComponentInventoryRequest, opts ...grpc.CallOption) (*GetComponentInventoryResponse, error)
 	UpdateComponentFirmware(ctx context.Context, in *UpdateComponentFirmwareRequest, opts ...grpc.CallOption) (*UpdateComponentFirmwareResponse, error)
@@ -6802,6 +6813,16 @@ func (c *forgeClient) ComponentPowerControl(ctx context.Context, in *ComponentPo
 	return out, nil
 }
 
+func (c *forgeClient) GetComponentPowerDetails(ctx context.Context, in *GetComponentPowerDetailsRequest, opts ...grpc.CallOption) (*GetComponentPowerDetailsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetComponentPowerDetailsResponse)
+	err := c.cc.Invoke(ctx, Forge_GetComponentPowerDetails_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) ComponentConfigureSwitchCertificate(ctx context.Context, in *ComponentConfigureSwitchCertificateRequest, opts ...grpc.CallOption) (*ComponentConfigureSwitchCertificateResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ComponentConfigureSwitchCertificateResponse)
@@ -7937,6 +7958,16 @@ type ForgeServer interface {
 	ReleaseDPUServiceSyncHold(context.Context, *ReleaseDPUServiceSyncHoldRequest) (*ReleaseDPUServiceSyncHoldResponse, error)
 	// --- Component management (unified switch + power shelf operations) ---
 	ComponentPowerControl(context.Context, *ComponentPowerControlRequest) (*ComponentPowerControlResponse, error)
+	// Reads fresh hardware power state and independently stored desired policy.
+	// Flow and ForgeAdminCLI may call this method. A consistent database snapshot
+	// has five seconds, including pool acquisition; failure aborts with INTERNAL.
+	// After releasing that snapshot, queued targets, credentials, and live reads
+	// share fifteen seconds with at most eight targets active. Completed results
+	// survive expiry; unfinished reads report DeadlineExceeded. Earlier caller
+	// cancellation drops pending work. Core and RMS also enforce ten-second local
+	// read budgets, whose expiry reports ReadFailed. This method never registers
+	// devices, writes policy, or submits power operations.
+	GetComponentPowerDetails(context.Context, *GetComponentPowerDetailsRequest) (*GetComponentPowerDetailsResponse, error)
 	ComponentConfigureSwitchCertificate(context.Context, *ComponentConfigureSwitchCertificateRequest) (*ComponentConfigureSwitchCertificateResponse, error)
 	GetComponentInventory(context.Context, *GetComponentInventoryRequest) (*GetComponentInventoryResponse, error)
 	UpdateComponentFirmware(context.Context, *UpdateComponentFirmwareRequest) (*UpdateComponentFirmwareResponse, error)
@@ -9524,6 +9555,9 @@ func (UnimplementedForgeServer) ReleaseDPUServiceSyncHold(context.Context, *Rele
 }
 func (UnimplementedForgeServer) ComponentPowerControl(context.Context, *ComponentPowerControlRequest) (*ComponentPowerControlResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ComponentPowerControl not implemented")
+}
+func (UnimplementedForgeServer) GetComponentPowerDetails(context.Context, *GetComponentPowerDetailsRequest) (*GetComponentPowerDetailsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetComponentPowerDetails not implemented")
 }
 func (UnimplementedForgeServer) ComponentConfigureSwitchCertificate(context.Context, *ComponentConfigureSwitchCertificateRequest) (*ComponentConfigureSwitchCertificateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ComponentConfigureSwitchCertificate not implemented")
@@ -18929,6 +18963,24 @@ func _Forge_ComponentPowerControl_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_GetComponentPowerDetails_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetComponentPowerDetailsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetComponentPowerDetails(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetComponentPowerDetails_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetComponentPowerDetails(ctx, req.(*GetComponentPowerDetailsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_ComponentConfigureSwitchCertificate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ComponentConfigureSwitchCertificateRequest)
 	if err := dec(in); err != nil {
@@ -21259,6 +21311,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ComponentPowerControl",
 			Handler:    _Forge_ComponentPowerControl_Handler,
+		},
+		{
+			MethodName: "GetComponentPowerDetails",
+			Handler:    _Forge_GetComponentPowerDetails_Handler,
 		},
 		{
 			MethodName: "ComponentConfigureSwitchCertificate",

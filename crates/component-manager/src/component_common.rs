@@ -6,6 +6,15 @@
 use mac_address::MacAddress;
 use model::machine::PowerState;
 
+/// Backend providing fresh power observations without registering or mutating devices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerStateSource {
+    /// Direct BMC Redfish reads.
+    Redfish,
+    /// Live reads through Rack Management Service.
+    Rms,
+}
+
 /// `ComponentPowerStateResult` identifies a component and its power observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComponentPowerStateResult {

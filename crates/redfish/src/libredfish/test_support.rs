@@ -106,9 +106,11 @@ struct RedfishSimState {
     machine_setup_status_targets: HashMap<String, Vec<Option<RedfishSimBootInterfaceRef>>>,
     /// Opt-in authentication enforcement. Off by default so existing tests
     /// (which pass arbitrary or anonymous credentials) are undisturbed. When on,
-    /// `get_accounts` returns `401` unless the client was created with a
-    /// `Direct` credential whose password matches the seeded `users` entry, so
-    /// credential-probe paths (e.g. `bmc_credentials_valid`) can be exercised.
+    /// `get_accounts`, `change_password`, `change_password_by_id`,
+    /// `get_systems`, and `get_power_state` return `401` unless the client was
+    /// created with a `Direct` credential whose password matches the seeded
+    /// `users` entry. This makes credential selection and rejection observable
+    /// in callers such as `bmc_credentials_valid`.
     enforce_auth: bool,
     auth_attempts: Vec<RedfishSimAuthAttempt>,
     /// When set, `get_accounts` fails with a non-authentication transport error
@@ -487,8 +489,9 @@ impl RedfishSim {
     }
 
     /// Enable opt-in authentication enforcement (see [`RedfishSimState::enforce_auth`]):
-    /// once on, `get_accounts` authorizes against the seeded `users` map, so
-    /// credential-probe paths can distinguish valid from rejected credentials.
+    /// `get_accounts`, `change_password`, `change_password_by_id`,
+    /// `get_systems`, and `get_power_state` authorize against the seeded `users`
+    /// map, so callers can distinguish valid from rejected credentials.
     pub fn set_enforce_auth(&self, enforce: bool) {
         self.state.lock().unwrap().enforce_auth = enforce;
     }
@@ -824,6 +827,7 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::PowerState, RedfishError>> {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
+            self.authorize(&mut state, "Systems/System.Embedded.1")?;
             if let Some(error) = state.next_power_state_error.take() {
                 return Err(RedfishError::GenericError { error });
             }

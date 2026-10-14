@@ -8,7 +8,7 @@ use carbide_secrets::credentials::Credentials;
 use mac_address::MacAddress;
 use model::component_manager::{ComputeTrayComponent, FirmwareState, PowerAction};
 
-use crate::component_common::ComponentPowerStateResult;
+use crate::component_common::{ComponentPowerStateResult, PowerStateSource};
 use crate::error::ComponentManagerError;
 use crate::types::FirmwareUpdateOptions;
 
@@ -108,6 +108,13 @@ impl std::fmt::Display for Backend {
 #[async_trait::async_trait]
 pub trait ComputeTrayManager: Send + Sync + Debug + 'static {
     fn name(&self) -> &str;
+
+    /// Identifies the source when `get_power_state` supports fresh, passive reads.
+    /// `None` means callers must reject passive reads before fetching credentials
+    /// or invoking the getter; its default implementation is unsupported.
+    fn power_state_source(&self) -> Option<PowerStateSource> {
+        None
+    }
 
     fn backend(&self) -> Backend;
 

@@ -74,6 +74,10 @@ fn map_power_action(action: PowerAction) -> libredfish::SystemPowerControl {
 
 #[async_trait::async_trait]
 impl crate::compute_tray_manager::ComputeTrayManager for CoreComputeTrayManager {
+    fn power_state_source(&self) -> Option<crate::component_common::PowerStateSource> {
+        Some(crate::component_common::PowerStateSource::Redfish)
+    }
+
     fn name(&self) -> &str {
         "core"
     }

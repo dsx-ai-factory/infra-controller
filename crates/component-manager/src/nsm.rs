@@ -422,6 +422,18 @@ mod tests {
 
     use super::*;
 
+    /// NSM's no-observation stub must not advertise fresh hardware evidence.
+    #[tokio::test]
+    async fn power_getter_stub_is_not_a_passive_capability() {
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let backend = NsmSwitchBackend {
+            client: nsm::nv_switch_manager_client::NvSwitchManagerClient::new(
+                TraceInjectService::new(channel),
+            ),
+        };
+        assert_eq!(backend.power_state_source(), None);
+    }
+
     #[test]
     fn nsm_update_state_maps_each_variant() {
         value_scenarios!(run = |state: nsm::UpdateState| map_nsm_update_state(state as i32);
