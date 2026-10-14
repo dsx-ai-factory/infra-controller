@@ -39,17 +39,17 @@ spec:
           {{- end }}
           ports:
             - name: dns-udp
-              containerPort: 53
+              containerPort: {{ .Values.containerPort | default 53 }}
               protocol: UDP
             - name: dns-tcp
-              containerPort: 53
+              containerPort: {{ .Values.containerPort | default 53 }}
               protocol: TCP
           livenessProbe:
             tcpSocket:
-              port: 53
+              port: {{ .Values.containerPort | default 53 }}
           readinessProbe:
             tcpSocket:
-              port: 53
+              port: {{ .Values.containerPort | default 53 }}
           volumeMounts:
             - name: local-config
               mountPath: /etc/unbound/local.conf.d
