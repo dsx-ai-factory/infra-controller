@@ -55,6 +55,8 @@ type DpuMachine struct {
 	LastRebooted NullableTime `json:"lastRebooted,omitempty"`
 	// Physical placement of the DPU Machine within its Rack, when known
 	PlacementInRack *PlacementInRack `json:"placementInRack,omitempty"`
+	// LLDP neighbors observed on the DPU ports, as last reported by the DPU agent. Empty when the DPU has not reported any neighbors.
+	LldpNeighbors []MachineLldpNeighbor `json:"lldpNeighbors"`
 }
 
 type _DpuMachine DpuMachine
@@ -63,7 +65,7 @@ type _DpuMachine DpuMachine
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewDpuMachine(id string, infrastructureProviderId string, siteId string, hostMachineId string, state string, dpuNetworkConfig DpuNetworkConfig) *DpuMachine {
+func NewDpuMachine(id string, infrastructureProviderId string, siteId string, hostMachineId string, state string, dpuNetworkConfig DpuNetworkConfig, lldpNeighbors []MachineLldpNeighbor) *DpuMachine {
 	this := DpuMachine{}
 	this.Id = id
 	this.InfrastructureProviderId = infrastructureProviderId
@@ -71,6 +73,7 @@ func NewDpuMachine(id string, infrastructureProviderId string, siteId string, ho
 	this.HostMachineId = hostMachineId
 	this.State = state
 	this.DpuNetworkConfig = dpuNetworkConfig
+	this.LldpNeighbors = lldpNeighbors
 	return &this
 }
 
@@ -525,6 +528,30 @@ func (o *DpuMachine) SetPlacementInRack(v PlacementInRack) {
 	o.PlacementInRack = &v
 }
 
+// GetLldpNeighbors returns the LldpNeighbors field value
+func (o *DpuMachine) GetLldpNeighbors() []MachineLldpNeighbor {
+	if o == nil {
+		var ret []MachineLldpNeighbor
+		return ret
+	}
+
+	return o.LldpNeighbors
+}
+
+// GetLldpNeighborsOk returns a tuple with the LldpNeighbors field value
+// and a boolean to check if the value has been set.
+func (o *DpuMachine) GetLldpNeighborsOk() ([]MachineLldpNeighbor, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.LldpNeighbors, true
+}
+
+// SetLldpNeighbors sets field value
+func (o *DpuMachine) SetLldpNeighbors(v []MachineLldpNeighbor) {
+	o.LldpNeighbors = v
+}
+
 func (o DpuMachine) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -568,6 +595,7 @@ func (o DpuMachine) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.PlacementInRack) {
 		toSerialize["placementInRack"] = o.PlacementInRack
 	}
+	toSerialize["lldpNeighbors"] = o.LldpNeighbors
 	return toSerialize, nil
 }
 
@@ -582,6 +610,7 @@ func (o *DpuMachine) UnmarshalJSON(data []byte) (err error) {
 		"hostMachineId",
 		"state",
 		"dpuNetworkConfig",
+		"lldpNeighbors",
 	}
 
 	allProperties := make(map[string]interface{})

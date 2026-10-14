@@ -11334,6 +11334,21 @@ paths:
                           numaNode: 1
                           description: 'MT28908 Family [ConnectX-6]'
                           slot: '0000:ca:00.0'
+                      lldpNeighbors:
+                        - macAddress: '02:00:00:00:01:b0'
+                          localPort: enp1s0np0
+                          name: leaf-switch-01
+                          description: Cumulus Linux
+                          ipAddresses:
+                            - 10.0.2.194
+                          chassisIdType: mac
+                          chassisIdValue: '02:00:00:00:01:d4'
+                          remotePortType: ifname
+                          remotePortValue: swp1
+                          medInventory:
+                            serial: SN0000000002
+                            manufacturer: 'https://www.mellanox.com'
+                            model: BlueField-3 DPU
                     status: InUse
                     isUsableByTenant: true
                     statusHistory:
@@ -12454,6 +12469,17 @@ paths:
                       placementInRack:
                         slotNumber: 1
                         trayIndex: 0
+                      lldpNeighbors:
+                        - macAddress: '02:00:00:00:02:a0'
+                          localPort: p0
+                          name: leaf-switch-01
+                          description: Cumulus Linux
+                          ipAddresses:
+                            - 10.0.3.1
+                          chassisIdType: mac
+                          chassisIdValue: '02:00:00:00:02:d4'
+                          remotePortType: ifname
+                          remotePortValue: swp10
         '400':
           $ref: '#/components/responses/GenericHttpError'
         '403':
@@ -28868,6 +28894,21 @@ components:
             isAboveSLA: false
             updated: '2026-01-15T12:00:00Z'
             slaSeconds: 300
+          lldpNeighbors:
+            - macAddress: '02:00:00:00:01:b0'
+              localPort: enp1s0np0
+              name: leaf-switch-01
+              description: Cumulus Linux
+              ipAddresses:
+                - 10.0.2.194
+              chassisIdType: mac
+              chassisIdValue: '02:00:00:00:01:d4'
+              remotePortType: ifname
+              remotePortValue: swp1
+              medInventory:
+                serial: SN0000000002
+                manufacturer: 'https://www.mellanox.com'
+                model: BlueField-3 DPU
       properties:
         dmiData:
           $ref: '#/components/schemas/MachineDMIData'
@@ -28895,6 +28936,11 @@ components:
             - $ref: '#/components/schemas/MachineLifecycleState'
             - type: 'null'
           description: 'Lifecycle state details for the Machine'
+        lldpNeighbors:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineLldpNeighbor'
+          description: 'LLDP neighbors observed on the machine NICs, as last reported by the machine (scout or DPU agent). Empty when the machine has not reported any neighbors.'
     MachineLifecycleState:
       title: MachineLifecycleState
       type: object
@@ -28925,6 +28971,83 @@ components:
           type: integer
           format: int64
           description: 'Defined SLA for the current lifecycle state in seconds'
+    MachineLldpNeighbor:
+      title: MachineLldpNeighbor
+      type: object
+      description: Describes an LLDP neighbor observed on one of the Machine NICs
+      examples:
+        - macAddress: '02:00:00:00:01:b0'
+          localPort: enp1s0np0
+          name: leaf-switch-01
+          description: Cumulus Linux
+          ipAddresses:
+            - 10.0.2.194
+            - 'fe80::ff:fe00:1d4'
+          chassisIdType: mac
+          chassisIdValue: '02:00:00:00:01:d4'
+          remotePortType: ifname
+          remotePortValue: swp1
+          medInventory:
+            serial: SN0000000002
+            manufacturer: 'https://www.mellanox.com'
+            model: BlueField-3 DPU
+      properties:
+        macAddress:
+          type: string
+          description: 'MAC address of the Machine NIC on which the neighbor was observed'
+        localPort:
+          type: string
+          description: 'Name of the Machine local interface on which the neighbor was observed'
+        name:
+          type: string
+          description: 'System name advertised by the neighbor'
+        description:
+          type: string
+          description: 'System description advertised by the neighbor'
+        ipAddresses:
+          type: array
+          items:
+            type: string
+          description: 'Management addresses advertised by the neighbor'
+        chassisIdType:
+          type: string
+          description: 'LLDP chassis id subtype advertised by the neighbor (e.g. mac, local)'
+        chassisIdValue:
+          type: string
+          description: 'LLDP chassis id value advertised by the neighbor'
+        remotePortType:
+          type: string
+          description: 'LLDP port id subtype advertised by the neighbor (e.g. ifname, mac)'
+        remotePortValue:
+          type: string
+          description: 'LLDP port id value advertised by the neighbor'
+        medInventory:
+          $ref: '#/components/schemas/MachineLldpMedInventory'
+          description: 'LLDP-MED inventory, present only when the neighbor advertises it'
+    MachineLldpMedInventory:
+      title: MachineLldpMedInventory
+      type: object
+      description: LLDP-MED inventory advertised by an LLDP neighbor (e.g. a BlueField DPU)
+      examples:
+        - serial: SN0000000002
+          manufacturer: 'https://www.mellanox.com'
+          model: BlueField-3 DPU
+      properties:
+        serial:
+          type:
+            - string
+            - 'null'
+          description: 'Serial number advertised by the neighbor'
+        manufacturer:
+          type:
+            - string
+            - 'null'
+          description: 'Manufacturer advertised by the neighbor'
+        model:
+          type:
+            - string
+            - 'null'
+          description: 'Model advertised by the neighbor'
     MachineBMCInfo:
       title: MachineBMCInfo
       type: object
@@ -34267,6 +34390,11 @@ components:
         placementInRack:
           $ref: '#/components/schemas/PlacementInRack'
           description: 'Physical placement of the DPU Machine within its Rack, when known'
+        lldpNeighbors:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineLldpNeighbor'
+          description: 'LLDP neighbors observed on the DPU ports, as last reported by the DPU agent. Empty when the DPU has not reported any neighbors.'
       required:
         - id
         - infrastructureProviderId
@@ -34274,6 +34402,7 @@ components:
         - hostMachineId
         - state
         - dpuNetworkConfig
+        - lldpNeighbors
     DpuMachineSummary:
       title: DpuMachineSummary
       type: object
@@ -34289,6 +34418,7 @@ components:
         - dpuNetworkConfig
         - lastRebooted
         - placementInRack
+        - lldpNeighbors
       properties:
         id:
           type: string
@@ -34365,6 +34495,14 @@ components:
             - $ref: '#/components/schemas/PlacementInRack'
             - type: 'null'
           description: 'Physical placement of the DPU Machine within its Rack, when known'
+        lldpNeighbors:
+          x-go-required-nullable: true
+          type:
+            - array
+            - 'null'
+          items:
+            $ref: '#/components/schemas/MachineLldpNeighbor'
+          description: 'LLDP neighbors observed on the DPU ports, as last reported by the DPU agent. Empty when the DPU has not reported any neighbors.'
       required:
         - id
         - infrastructureProviderId
@@ -34381,6 +34519,7 @@ components:
         - dpuNetworkConfig
         - lastRebooted
         - placementInRack
+        - lldpNeighbors
     DpuMachineInterface:
       title: DpuMachineInterface
       type: object
