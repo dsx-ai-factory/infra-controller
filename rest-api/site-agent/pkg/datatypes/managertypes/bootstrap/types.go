@@ -105,6 +105,7 @@ type Bootstrap struct {
 	Secretfiles  map[string]bool
 	Registration *Registration
 	mutex        sync.RWMutex // protects Config
+	updateMutex  sync.Mutex   // serializes credential download and publication
 }
 
 // GetConfig returns a consistent copy of the active bootstrap configuration.
@@ -127,14 +128,11 @@ func (b *Bootstrap) ReplaceConfig(config SecretConfig) {
 	*b.Config = config
 }
 
-// SetOTP replaces only the active bootstrap OTP.
-func (b *Bootstrap) SetOTP(otp string) {
-	b.mutex.Lock()
-	defer b.mutex.Unlock()
-	if b.Config == nil {
-		b.Config = &SecretConfig{}
-	}
-	b.Config.OTP = otp
+// RunCredentialUpdate serializes one credential download, store, and publication operation.
+func (b *Bootstrap) RunCredentialUpdate(update func() error) error {
+	b.updateMutex.Lock()
+	defer b.updateMutex.Unlock()
+	return update()
 }
 
 // NewBootstrapInstance - creates a new instance of Bootstrap

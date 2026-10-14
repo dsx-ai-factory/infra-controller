@@ -30,6 +30,65 @@ import (
 // testOTP matches what Site Manager issues: 20 random bytes in URL-safe base64.
 const testOTP = "8Nn5Qk0mVQqHqk2hXwfXQz1Yk5A="
 
+func TestReadBootstrapConfigUsesOneProjectedSecretRevision(t *testing.T) {
+	root := t.TempDir()
+	oldRevision := filepath.Join(root, "..old")
+	newRevision := filepath.Join(root, "..new")
+	require.NoError(t, os.Mkdir(oldRevision, 0700))
+	require.NoError(t, os.Mkdir(newRevision, 0700))
+
+	writeConfig := func(dir string, config bootstraptypes.SecretConfig) {
+		t.Helper()
+		for name, contents := range map[string]string{
+			bootstraptypes.TagUUID:     config.UUID,
+			bootstraptypes.TagOTP:      config.OTP,
+			bootstraptypes.TagCredsURL: config.CredsURL,
+			bootstraptypes.TagCACert:   config.CACert,
+		} {
+			require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(contents), 0600))
+		}
+	}
+	oldConfig := bootstraptypes.SecretConfig{
+		UUID:     "old-site",
+		OTP:      "old-otp",
+		CredsURL: "https://old.example.test",
+		CACert:   "old-ca",
+	}
+	newConfig := bootstraptypes.SecretConfig{
+		UUID:     "new-site",
+		OTP:      "new-otp",
+		CredsURL: "https://new.example.test",
+		CACert:   "new-ca",
+	}
+	writeConfig(oldRevision, oldConfig)
+	writeConfig(newRevision, newConfig)
+	require.NoError(t, os.Symlink(filepath.Base(newRevision), filepath.Join(root, kubernetesSecretDataSymlink)))
+
+	for _, tag := range []string{
+		bootstraptypes.TagUUID,
+		bootstraptypes.TagOTP,
+		bootstraptypes.TagCredsURL,
+		bootstraptypes.TagCACert,
+	} {
+		targetRevision := kubernetesSecretDataSymlink
+		if tag == bootstraptypes.TagUUID {
+			// Simulate a symlink view changing between separate key reads.
+			targetRevision = filepath.Base(oldRevision)
+		}
+		require.NoError(t, os.Symlink(filepath.Join(targetRevision, tag), filepath.Join(root, tag)))
+	}
+
+	config, files, err := readBootstrapConfig(root)
+	require.NoError(t, err)
+	assert.Equal(t, newConfig, config)
+	assert.ElementsMatch(t, []string{
+		filepath.Join(root, bootstraptypes.TagUUID),
+		filepath.Join(root, bootstraptypes.TagOTP),
+		filepath.Join(root, bootstraptypes.TagCredsURL),
+		filepath.Join(root, bootstraptypes.TagCACert),
+	}, files)
+}
+
 // TestNewBootstrapConfig guards the startup record every Site Agent
 // initialization emits, which has to identify the Site and the secret it read
 // without carrying the OTP that is still live at that point.
@@ -136,7 +195,9 @@ func TestBoostrapAPI_ReloadBootstrapCredentials(t *testing.T) {
 	tests := []struct {
 		name          string
 		updatedSiteID string
+		downloadFails bool
 		wantErr       string
+		wantAttempts  uint64
 	}{
 		{
 			name:          "reloads a same-Site OTP rotation",
@@ -146,6 +207,13 @@ func TestBoostrapAPI_ReloadBootstrapCredentials(t *testing.T) {
 			name:          "rejects a Site re-pair",
 			updatedSiteID: otherSiteID,
 			wantErr:       "bootstrap Secret Site ID changed",
+		},
+		{
+			name:          "download failure preserves the active configuration",
+			updatedSiteID: siteID,
+			downloadFails: true,
+			wantErr:       "missing protocol scheme",
+			wantAttempts:  1,
 		},
 	}
 	previousAccess := ManagerAccess
@@ -222,6 +290,9 @@ func TestBoostrapAPI_ReloadBootstrapCredentials(t *testing.T) {
 				CredsURL: server.URL,
 				CACert:   caCert,
 			}
+			if tt.downloadFails {
+				updatedConfig.CredsURL = "://invalid"
+			}
 			writeConfig(updatedConfig)
 
 			err := (&BoostrapAPI{}).reloadBootstrapCredentials(secretDir)
@@ -229,7 +300,9 @@ func TestBoostrapAPI_ReloadBootstrapCredentials(t *testing.T) {
 				require.ErrorContains(t, err, tt.wantErr)
 				assert.Equal(t, initialConfig, ManagerAccess.Data.EB.Managers.Bootstrap.GetConfig())
 				assert.Equal(t, 0, len(requests))
-				assert.Zero(t, ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadAttempted.Load())
+				assert.Equal(t, tt.wantAttempts, ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadAttempted.Load())
+				assert.Zero(t, ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadSucceeded.Load())
+				assert.Error(t, ManagerAccess.Data.EB.Managers.Bootstrap.Registration.Check(tt.updatedSiteID, rotatedOTP))
 				return
 			}
 
