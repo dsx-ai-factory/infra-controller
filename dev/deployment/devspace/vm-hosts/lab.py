@@ -180,12 +180,6 @@ def domain_xml(host, root, memory, cpus, bridge, architecture=None):
     node(disk, "driver", name="qemu", type="qcow2")
     node(disk, "source", file=str(root / "disks" / f"{host['name']}.qcow2"))
     node(disk, "target", dev="vda", bus="virtio")
-    node(devices, "controller", type="scsi", model="virtio-scsi")
-    for dev in ("sdb", "sdc"):
-        cd = node(devices, "disk", type="file", device="cdrom")
-        node(cd, "driver", name="qemu", type="raw")
-        node(cd, "target", dev=dev, bus="scsi")
-        node(cd, "readonly")
     nic = node(devices, "interface", type="bridge")
     node(nic, "mac", address=host["host_mac"])
     node(nic, "source", bridge=bridge)

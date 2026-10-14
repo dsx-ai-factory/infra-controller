@@ -32,13 +32,6 @@ class LabTests(unittest.TestCase):
                 self.assertEqual(
                     [x.get("dev") for x in xml.findall("os/boot")], ["network", "hd"]
                 )
-                self.assertEqual(
-                    [
-                        x.get("dev")
-                        for x in xml.findall("devices/disk[@device='cdrom']/target")
-                    ],
-                    ["sdb", "sdc"],
-                )
 
     def test_native_architecture_selects_matching_firmware_and_emulator(self):
         for arch, machine, firmware in (
@@ -61,6 +54,11 @@ class LabTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     xml.find("devices/emulator").text, f"/usr/bin/qemu-system-{arch}"
+                )
+                # bmc-mock creates and owns its virtual-media devices at startup.
+                self.assertEqual(
+                    [disk.get("device") for disk in xml.findall("devices/disk")],
+                    ["disk"],
                 )
         with self.assertRaisesRegex(ValueError, "architecture"):
             lab.domain_xml(lab.target(1), Path("/lab"), 4096, 2, lab.BRIDGE, "s390x")
