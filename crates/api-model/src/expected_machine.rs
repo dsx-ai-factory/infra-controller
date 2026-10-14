@@ -437,6 +437,41 @@ impl ExpectedInterface {
         Ok(())
     }
 
+    /// Interface names come from outside NICo and are rendered into the Astra
+    /// flavor's shell script, so accept only the characters that script accepts.
+    /// Names are rejected, never rewritten. Reads stay lenient because
+    /// deserialization only calls [`Self::validate_identity`].
+    pub fn validate_ifnames(&self) -> Result<(), &'static str> {
+        const MAX_LOGICAL_IFNAME_LEN: usize = 127;
+
+        fn only_ifname_chars(name: &str, allow_colon: bool) -> bool {
+            name.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '_' | '.' | '-')
+                    || (allow_colon && c == ':')
+            })
+        }
+
+        if let Some(name) = &self.cerebro_ifname
+            && !only_ifname_chars(name, true)
+        {
+            return Err(
+                "cerebro_ifname may contain only ASCII letters, digits, '_', '.', ':' and '-'",
+            );
+        }
+        if let Some(name) = &self.logical_ifname {
+            if name.len() > MAX_LOGICAL_IFNAME_LEN {
+                return Err("logical_ifname must be at most 127 characters");
+            }
+            if !only_ifname_chars(name, false) {
+                return Err(
+                    "logical_ifname may contain only ASCII letters, digits, '_', '.' and '-'",
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Display the supplied MAC or Cerebro identifier without resolving a name to a MAC.
     pub fn identity(&self) -> String {
         self.mac_address

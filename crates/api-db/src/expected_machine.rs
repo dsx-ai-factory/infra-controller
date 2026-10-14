@@ -367,6 +367,9 @@ pub async fn create(
         interface
             .validate_identity()
             .map_err(|message| DatabaseError::InvalidArgument(message.to_string()))?;
+        interface
+            .validate_ifnames()
+            .map_err(|message| DatabaseError::InvalidArgument(message.to_string()))?;
     }
     let id = machine.id.unwrap_or_else(Uuid::new_v4);
     let query = "INSERT INTO expected_machines
@@ -564,6 +567,9 @@ pub async fn update(txn: &mut PgConnection, machine: &ExpectedMachine) -> Databa
     for interface in &machine.data.interfaces {
         interface
             .validate_identity()
+            .map_err(|message| DatabaseError::InvalidArgument(message.to_string()))?;
+        interface
+            .validate_ifnames()
             .map_err(|message| DatabaseError::InvalidArgument(message.to_string()))?;
     }
     macro_rules! update_expected_machine_query {
