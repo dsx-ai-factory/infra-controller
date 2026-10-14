@@ -70,7 +70,8 @@ use crate::nv_switch_manager::{
     ScaleUpFabricManagerJobStatus, ScaleUpFabricResponseStatus, ScaleUpFabricServiceStatuses,
     ScaleUpFabricStatus, ScaleUpFabricSwitchStatus, SwitchCertificateEndpoint,
     SwitchComponentResult, SwitchEndpoint, SwitchFactoryResetJobStatus, SwitchFactoryResetState,
-    SwitchFirmwareUpdateStatus, SwitchPasswordRotationState, SwitchSlotAndTrayResult,
+    SwitchFirmwareUpdateStatus, SwitchMtlsDisableJobStatus, SwitchMtlsDisableState,
+    SwitchPasswordRotationState, SwitchSlotAndTrayResult,
 };
 use crate::power_shelf_manager::{
     Backend as PowerShelfBackend, PowerShelfComponentResult, PowerShelfEndpoint,
@@ -4028,6 +4029,56 @@ impl NvSwitchManager for RmsBackend {
         rms_get_switch_factory_reset_job_status(self.client.as_ref(), job_id).await
     }
 
+    #[instrument(skip(self, endpoints, services), fields(backend = "rms"))]
+    async fn batch_disable_switch_mtls(
+        &self,
+        endpoints: &[SwitchEndpoint],
+        services: &[i32],
+    ) -> Result<String, ComponentManagerError> {
+        if endpoints.is_empty() {
+            return Err(ComponentManagerError::InvalidArgument(
+                "switch mTLS disable requires at least one endpoint".to_string(),
+            ));
+        }
+
+        if services.is_empty() {
+            return Err(ComponentManagerError::InvalidArgument(
+                "switch mTLS disable requires at least one service".to_string(),
+            ));
+        }
+
+        let macs: Vec<MacAddress> = endpoints.iter().map(|endpoint| endpoint.bmc_mac).collect();
+        let identities = resolve_switch_identities(&self.db, &macs).await?;
+        let hostnames = resolve_switch_machine_interface_hostnames(&self.db, endpoints).await?;
+        let mut nodes = Vec::with_capacity(endpoints.len());
+
+        for endpoint in endpoints {
+            let resolved = self
+                .resolve_switch_or_power_shelf_node(
+                    &identities,
+                    endpoint.bmc_mac,
+                    SwitchOrPowerShelfRole::Switch,
+                )
+                .map_err(ComponentManagerError::Internal)?;
+
+            nodes.push(build_switch_node_info(
+                endpoint,
+                &resolved,
+                hostnames.get(&endpoint.nvos_mac).cloned(),
+            ));
+        }
+
+        rms_batch_disable_switch_mtls(self.client.as_ref(), nodes, services).await
+    }
+
+    #[instrument(skip(self), fields(backend = "rms", job_id))]
+    async fn get_disable_switch_mtls_job_status(
+        &self,
+        job_id: &str,
+    ) -> Result<SwitchMtlsDisableJobStatus, ComponentManagerError> {
+        rms_get_switch_mtls_disable_job_status(self.client.as_ref(), job_id).await
+    }
+
     #[instrument(skip(self, endpoints, topology), fields(backend = "rms"))]
     async fn configure_scale_up_fabric_manager(
         &self,
@@ -4311,7 +4362,55 @@ async fn rms_batch_reset_switch_factory_default(
     )))
 }
 
-fn rms_switch_factory_reset_job_failure(job: &rms::JobStatus) -> String {
+/// Names an asynchronous switch operation in aggregated RMS job diagnostics.
+#[derive(Clone, Copy)]
+struct RmsSwitchJobLabels {
+    /// Operation description used in messages, such as `switch factory-reset`.
+    operation: &'static str,
+
+    /// Noun for the outcome that cannot be established, such as `reset`.
+    outcome: &'static str,
+}
+
+const FACTORY_RESET_JOB_LABELS: RmsSwitchJobLabels = RmsSwitchJobLabels {
+    operation: "switch factory-reset",
+    outcome: "reset",
+};
+
+const MTLS_DISABLE_JOB_LABELS: RmsSwitchJobLabels = RmsSwitchJobLabels {
+    operation: "switch mTLS-disable",
+    outcome: "disable",
+};
+
+/// Aggregate state of an RMS parent job and its per-switch children.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RmsSwitchJobTreeState {
+    Pending,
+    Completed,
+    Failed,
+}
+
+impl From<RmsSwitchJobTreeState> for SwitchFactoryResetState {
+    fn from(state: RmsSwitchJobTreeState) -> Self {
+        match state {
+            RmsSwitchJobTreeState::Pending => Self::Pending,
+            RmsSwitchJobTreeState::Completed => Self::Completed,
+            RmsSwitchJobTreeState::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<RmsSwitchJobTreeState> for SwitchMtlsDisableState {
+    fn from(state: RmsSwitchJobTreeState) -> Self {
+        match state {
+            RmsSwitchJobTreeState::Pending => Self::Pending,
+            RmsSwitchJobTreeState::Completed => Self::Completed,
+            RmsSwitchJobTreeState::Failed => Self::Failed,
+        }
+    }
+}
+
+fn rms_switch_job_failure(labels: RmsSwitchJobLabels, job: &rms::JobStatus) -> String {
     let error_code = rms::JobError::try_from(job.error_code).map_or_else(
         |_| format!("unknown({})", job.error_code),
         |error| error.as_str_name().to_string(),
@@ -4330,8 +4429,8 @@ fn rms_switch_factory_reset_job_failure(job: &rms::JobStatus) -> String {
     };
 
     format!(
-        "switch factory-reset job {}{node} failed with {error_code}: {message}",
-        job.job_id
+        "{} job {}{node} failed with {error_code}: {message}",
+        labels.operation, job.job_id
     )
 }
 
@@ -4342,16 +4441,18 @@ fn rms_switch_factory_reset_job_failure(job: &rms::JobStatus) -> String {
 /// be present and completed. A missing child remains pending because RMS may expose it
 /// on a later poll. A missing parent or unknown execution state cannot establish the
 /// outcome and is reported as [`ComponentManagerError::OperationOutcomeUnknown`].
-fn summarize_rms_switch_factory_reset_jobs(
+fn summarize_rms_switch_job_tree(
+    labels: RmsSwitchJobLabels,
     job_id: &str,
     jobs: &[rms::JobStatus],
-) -> Result<SwitchFactoryResetJobStatus, ComponentManagerError> {
+) -> Result<(RmsSwitchJobTreeState, Option<String>), ComponentManagerError> {
     let parent = jobs
         .iter()
         .find(|job| job.job_id == job_id)
         .ok_or_else(|| {
             ComponentManagerError::OperationOutcomeUnknown(format!(
-                "RMS returned no state for switch factory-reset job {job_id}; the reset outcome is unknown"
+                "RMS returned no state for {} job {job_id}; the {} outcome is unknown",
+                labels.operation, labels.outcome
             ))
         })?;
 
@@ -4375,20 +4476,20 @@ fn summarize_rms_switch_factory_reset_jobs(
             Ok(rms::JobExecutionState::Failed)
         )
     }) {
-        return Ok(SwitchFactoryResetJobStatus {
-            state: SwitchFactoryResetState::Failed,
-            error: Some(rms_switch_factory_reset_job_failure(failed)),
-        });
+        return Ok((
+            RmsSwitchJobTreeState::Failed,
+            Some(rms_switch_job_failure(labels, failed)),
+        ));
     }
 
     if matches!(
         rms::JobExecutionState::try_from(parent.execution_state),
         Ok(rms::JobExecutionState::Failed)
     ) {
-        return Ok(SwitchFactoryResetJobStatus {
-            state: SwitchFactoryResetState::Failed,
-            error: Some(rms_switch_factory_reset_job_failure(parent)),
-        });
+        return Ok((
+            RmsSwitchJobTreeState::Failed,
+            Some(rms_switch_job_failure(labels, parent)),
+        ));
     }
 
     // A successful reset must include per-switch evidence. Keep polling when RMS has
@@ -4407,38 +4508,68 @@ fn summarize_rms_switch_factory_reset_jobs(
             }
             Ok(rms::JobExecutionState::Completed) => {}
             Ok(rms::JobExecutionState::Failed) => {
-                return Ok(SwitchFactoryResetJobStatus {
-                    state: SwitchFactoryResetState::Failed,
-                    error: Some(rms_switch_factory_reset_job_failure(job)),
-                });
+                return Ok((
+                    RmsSwitchJobTreeState::Failed,
+                    Some(rms_switch_job_failure(labels, job)),
+                ));
             }
             Ok(rms::JobExecutionState::Unspecified) | Err(_) => {
                 return Err(ComponentManagerError::OperationOutcomeUnknown(format!(
-                    "RMS switch factory-reset job {} returned unknown execution state {}; the reset outcome is unknown",
-                    job.job_id, job.execution_state
+                    "RMS {} job {} returned unknown execution state {}; the {} outcome is unknown",
+                    labels.operation, job.job_id, job.execution_state, labels.outcome
                 )));
             }
         }
     }
 
     let state = if pending {
-        SwitchFactoryResetState::Pending
+        RmsSwitchJobTreeState::Pending
     } else {
-        SwitchFactoryResetState::Completed
+        RmsSwitchJobTreeState::Completed
     };
 
-    Ok(SwitchFactoryResetJobStatus { state, error: None })
+    Ok((state, None))
 }
 
-/// Reads and aggregates the RMS parent and child states for a factory reset.
-async fn rms_get_switch_factory_reset_job_status(
-    client: &dyn RmsApi,
+fn summarize_rms_switch_factory_reset_jobs(
     job_id: &str,
+    jobs: &[rms::JobStatus],
 ) -> Result<SwitchFactoryResetJobStatus, ComponentManagerError> {
+    let (state, error) = summarize_rms_switch_job_tree(FACTORY_RESET_JOB_LABELS, job_id, jobs)?;
+
+    Ok(SwitchFactoryResetJobStatus {
+        state: state.into(),
+        error,
+    })
+}
+
+fn summarize_rms_switch_mtls_disable_jobs(
+    job_id: &str,
+    jobs: &[rms::JobStatus],
+) -> Result<SwitchMtlsDisableJobStatus, ComponentManagerError> {
+    let (state, error) = summarize_rms_switch_job_tree(MTLS_DISABLE_JOB_LABELS, job_id, jobs)?;
+
+    Ok(SwitchMtlsDisableJobStatus {
+        state: state.into(),
+        error,
+    })
+}
+
+/// Reads the RMS parent and child job states for one asynchronous switch operation.
+///
+/// Once submission returned a durable handle, a rejected or missing observation does
+/// not prove that the operation never started, so those cases preserve the unknown
+/// outcome.
+async fn rms_get_switch_job_tree(
+    client: &dyn RmsApi,
+    labels: RmsSwitchJobLabels,
+    job_id: &str,
+) -> Result<Vec<rms::JobStatus>, ComponentManagerError> {
     if job_id.trim().is_empty() {
-        return Err(ComponentManagerError::InvalidArgument(
-            "switch factory-reset job ID must be non-empty".to_string(),
-        ));
+        return Err(ComponentManagerError::InvalidArgument(format!(
+            "{} job ID must be non-empty",
+            labels.operation
+        )));
     }
 
     let request = rms::GetJobStatusRequest {
@@ -4447,35 +4578,109 @@ async fn rms_get_switch_factory_reset_job_status(
     };
 
     match red::instrumented("rms", "get_job_status", client.get_job_status(request)).await {
-        Ok(response) => summarize_rms_switch_factory_reset_jobs(job_id, &response.job_states),
+        Ok(response) => Ok(response.job_states),
         Err(RackManagerError::ApiInvocationError(status)) => match status.code() {
-            // Once submission returned a durable handle, a rejected or missing
-            // observation does not prove that the destructive job never started.
             tonic::Code::NotFound => Err(ComponentManagerError::OperationOutcomeUnknown(format!(
-                "RMS has no state for switch factory-reset job {job_id}; the reset outcome is unknown"
+                "RMS has no state for {} job {job_id}; the {} outcome is unknown",
+                labels.operation, labels.outcome
             ))),
             tonic::Code::InvalidArgument => {
                 Err(ComponentManagerError::OperationOutcomeUnknown(format!(
-                    "RMS rejected observation of switch factory-reset job {job_id}; the reset outcome is unknown"
+                    "RMS rejected observation of {} job {job_id}; the {} outcome is unknown",
+                    labels.operation, labels.outcome
                 )))
             }
-            tonic::Code::Unimplemented => Err(ComponentManagerError::Unsupported(
-                "RMS does not support switch factory-reset job status".to_string(),
-            )),
+            tonic::Code::Unimplemented => Err(ComponentManagerError::Unsupported(format!(
+                "RMS does not support {} job status",
+                labels.operation
+            ))),
             tonic::Code::Unavailable
             | tonic::Code::DeadlineExceeded
             | tonic::Code::Cancelled
-            | tonic::Code::ResourceExhausted => Err(ComponentManagerError::Unavailable(
-                "RMS switch factory-reset job status is temporarily unavailable".to_string(),
-            )),
+            | tonic::Code::ResourceExhausted => Err(ComponentManagerError::Unavailable(format!(
+                "RMS {} job status is temporarily unavailable",
+                labels.operation
+            ))),
             _ => Err(ComponentManagerError::Rms(format!(
-                "RMS could not read switch factory-reset job {job_id}: {status}"
+                "RMS could not read {} job {job_id}: {status}",
+                labels.operation
             ))),
         },
-        Err(RackManagerError::TlsError(_)) => Err(ComponentManagerError::Unavailable(
-            "RMS switch factory-reset job status is temporarily unavailable".to_string(),
-        )),
+        Err(RackManagerError::TlsError(_)) => Err(ComponentManagerError::Unavailable(format!(
+            "RMS {} job status is temporarily unavailable",
+            labels.operation
+        ))),
     }
+}
+
+/// Reads and aggregates the RMS parent and child states for a factory reset.
+async fn rms_get_switch_factory_reset_job_status(
+    client: &dyn RmsApi,
+    job_id: &str,
+) -> Result<SwitchFactoryResetJobStatus, ComponentManagerError> {
+    let jobs = rms_get_switch_job_tree(client, FACTORY_RESET_JOB_LABELS, job_id).await?;
+
+    summarize_rms_switch_factory_reset_jobs(job_id, &jobs)
+}
+
+/// Reads and aggregates the RMS parent and child states for an mTLS disable.
+async fn rms_get_switch_mtls_disable_job_status(
+    client: &dyn RmsApi,
+    job_id: &str,
+) -> Result<SwitchMtlsDisableJobStatus, ComponentManagerError> {
+    let jobs = rms_get_switch_job_tree(client, MTLS_DISABLE_JOB_LABELS, job_id).await?;
+
+    summarize_rms_switch_mtls_disable_jobs(job_id, &jobs)
+}
+
+/// Submits one mTLS-disable batch and requires a durable job handle.
+async fn rms_batch_disable_switch_mtls(
+    client: &dyn RmsApi,
+    nodes: Vec<rms::NodeInfo>,
+    services: &[i32],
+) -> Result<String, ComponentManagerError> {
+    let request = rms::BatchDisableSwitchMtlsRequest {
+        nodes: Some(rms::NodeSet { nodes }),
+        services: services.to_vec(),
+    };
+
+    let response = red::instrumented(
+        "rms",
+        "batch_disable_switch_mtls",
+        client.batch_disable_switch_mtls(request),
+    )
+    .await
+    .map_err(|error| match error {
+        // The contract guarantees that an unimplemented RPC accepted no work. Other
+        // status or transport failures can arrive after dispatch, so they must not
+        // invite an automatic retry.
+        RackManagerError::ApiInvocationError(status)
+            if status.code() == tonic::Code::Unimplemented =>
+        {
+            ComponentManagerError::Unsupported(
+                "RMS does not support switch mTLS disable".to_string(),
+            )
+        }
+        _ => ComponentManagerError::OperationOutcomeUnknown(
+            "RMS switch mTLS-disable submission returned no durable job ID".to_string(),
+        ),
+    })?;
+
+    let batch = response.response.ok_or_else(|| {
+        ComponentManagerError::OperationOutcomeUnknown(
+            "RMS switch mTLS-disable submission returned no operation response or job ID"
+                .to_string(),
+        )
+    })?;
+
+    if !batch.job_id.trim().is_empty() {
+        return Ok(batch.job_id);
+    }
+
+    Err(ComponentManagerError::OperationOutcomeUnknown(format!(
+        "RMS switch mTLS-disable submission returned no job ID (status {}); the operation outcome is unknown",
+        batch.status
+    )))
 }
 
 /// Summarizes parent and child job observations for one password rotation.
