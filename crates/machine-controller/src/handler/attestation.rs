@@ -261,9 +261,7 @@ pub(crate) async fn handle_spdm_attestation_failed_recovery(
             host_machine_id,
         )
         .await?;
-        attestation_status == SpdmAttestationStatus::InProgress
-            || attestation_status == SpdmAttestationStatus::Cancelled
-            || attestation_status == SpdmAttestationStatus::Passed
+        attestation_status == SpdmAttestationStatus::Passed
     };
     if should_resume_attestation {
         match &details.source {
