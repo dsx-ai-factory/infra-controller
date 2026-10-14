@@ -142,34 +142,12 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 
 	// Verify or validate site
 	sdDAO := cdbm.NewStatusDetailDAO(cskgh.dbSession)
-	tsDAO := cdbm.NewTenantSiteDAO(cskgh.dbSession)
 	skaDAO := cdbm.NewSSHKeyAssociationDAO(cskgh.dbSession)
 	skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(cskgh.dbSession)
-
-	sttsmap := map[uuid.UUID]*cdbm.TenantSite{}
 
 	// Validate inputs (Tenant/Site access, requested Sites, requested SSH Keys)
 	// outside the transaction — these are pure read-only checks and don't need
 	// to be in the tx scope. The tx is opened later just for the writes.
-	tss, _, err := tsDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.TenantSiteFilterInput{
-			TenantIDs: []uuid.UUID{tenant.ID},
-		},
-		cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
-		nil,
-	)
-	if err != nil {
-		logger.Error().Err(err).Msg("db error retrieving TenantSite records for Tenant")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site associations for Tenant, DB error", nil)
-	}
-
-	for _, ts := range tss {
-		cts := ts
-		sttsmap[ts.SiteID] = &cts
-	}
-
 	rdbst := []cdbm.Site{}
 	for _, stID := range apiRequest.SiteIDs {
 		// Validate the site for which this SSH Key Group is being created
@@ -381,7 +359,7 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 	}
 
 	// Create response
-	apiskg := model.NewAPISSHKeyGroup(uskg, dbskgsas, sttsmap, dbska, dbskgsd)
+	apiskg := model.NewAPISSHKeyGroup(uskg, dbskgsas, nil, dbska, dbskgsd)
 
 	logger.Info().Msg("finishing API handler")
 
@@ -529,32 +507,9 @@ func (uskgh UpdateSSHKeyGroupHandler) Handle(c echo.Context) error {
 		}
 	}
 
-	tsDAO := cdbm.NewTenantSiteDAO(uskgh.dbSession)
 	skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(uskgh.dbSession)
 	sdDAO := cdbm.NewStatusDetailDAO(uskgh.dbSession)
 	skaDAO := cdbm.NewSSHKeyAssociationDAO(uskgh.dbSession)
-
-	// Pre-validate the Tenant's site access map outside the transaction (e.g.
-	// does the tenant own the site they're targeting?), which doesn't need to
-	// be in the tx scope; we open it later for lock + writes.
-	sttsmap := map[uuid.UUID]*cdbm.TenantSite{}
-	tss, _, err := tsDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.TenantSiteFilterInput{
-			TenantIDs: []uuid.UUID{tenant.ID},
-		},
-		cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
-		nil,
-	)
-	if err != nil {
-		logger.Error().Err(err).Msg("db error retrieving TenantSite records for Tenant")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site associations for Tenant, DB error", nil)
-	}
-	for _, ts := range tss {
-		cts := ts
-		sttsmap[ts.SiteID] = &cts
-	}
 
 	skgsasToSync := []cdbm.SSHKeyGroupSiteAssociation{}
 	skgsasToDelete := []cdbm.SSHKeyGroupSiteAssociation{}
@@ -951,7 +906,7 @@ func (uskgh UpdateSSHKeyGroupHandler) Handle(c echo.Context) error {
 	}
 
 	// Create response
-	apiskg := model.NewAPISSHKeyGroup(skg, dbskgsas, sttsmap, dbska, dbskgsd)
+	apiskg := model.NewAPISSHKeyGroup(skg, dbskgsas, nil, dbska, dbskgsd)
 	logger.Info().Msg("finishing API handler")
 	return c.JSON(http.StatusOK, apiskg)
 }
