@@ -2537,6 +2537,7 @@ pub async fn handle_maintenance(
                         state.config.maintenance_requested = None;
                         db_rack::update(recovery_txn.as_mut(), id, &state.config).await?;
                     }
+                    tracing::warn!(rack_id = %id, %cause, "Rack maintenance failed, transitioning to Error");
                     return Ok(StateHandlerOutcome::transition(RackState::Error {
                         certificate_failure: None,
                         cause,
@@ -2737,6 +2738,7 @@ pub async fn handle_maintenance(
                             state.config.maintenance_requested = None;
                             db_rack::update(recovery_txn.as_mut(), id, &state.config).await?;
                         }
+                        tracing::warn!(rack_id = %id, %cause, "Rack maintenance failed, transitioning to Error");
                         Ok(StateHandlerOutcome::transition(RackState::Error {
                             certificate_failure: None,
                             cause,
@@ -3279,9 +3281,11 @@ pub async fn handle_maintenance(
                         state.config.maintenance_requested = None;
                         db_rack::update(txn.as_mut(), id, &state.config).await?;
                     }
+                    let cause = format!("NVOS update failed: {}/{} switches failed", failed, total);
+                    tracing::warn!(rack_id = %id, %cause, "Rack maintenance failed, transitioning to Error");
                     return Ok(StateHandlerOutcome::transition(RackState::Error {
                         certificate_failure: None,
-                        cause: format!("NVOS update failed: {}/{} switches failed", failed, total),
+                        cause,
                         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
                     })
                     .with_txn(txn));
