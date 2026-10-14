@@ -504,10 +504,11 @@ impl ApiEndpointSource {
         }
     }
 
-    /// Fetches endpoints only after every component membership query succeeds.
+    /// Returns usable endpoints after all component queries succeed.
     ///
-    /// Incomplete endpoint membership returns an error. Inventory-only metadata
-    /// errors do not discard usable collector endpoints.
+    /// Query failures and incomplete detail pages return an error.
+    /// Individual endpoint extraction failures are logged and skipped.
+    /// Inventory-only metadata errors do not discard usable collector endpoints.
     pub async fn fetch_bmc_hosts(&self) -> Result<Vec<Arc<BmcEndpoint>>, HealthError> {
         Ok(self.fetch_component_endpoints().await?.endpoints)
     }
@@ -519,8 +520,9 @@ impl ApiEndpointSource {
             mut inventory_error,
         } = self.fetch_machine_endpoints().await?;
 
-        // Membership must be complete before missing endpoints can be pruned.
-        // Inventory-only projection errors remain separate from membership.
+        // Prune cached clients only after all component queries and detail-page
+        // checks succeed. Endpoint extraction can still skip individual records.
+        // Inventory-only projection errors are tracked separately.
         let power_shelves = self.fetch_power_shelf_endpoints().await?;
         endpoints.extend(power_shelves.endpoints);
         components.extend(power_shelves.components);
