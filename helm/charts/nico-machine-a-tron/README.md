@@ -211,10 +211,15 @@ prefix that `underlayDhcpRelayAddress` belongs to) must meet the same
 [Requirements](#requirements) as the BMC network. Override mode has no
 per-switch routing, so NICo cannot reach either mock there.
 
-Because NICo dials by address, it verifies the mock's certificate against
-`nvlink_config.nmx_c_tls_authority`. Every pod's certificate carries
+Because NICo dials by address, it verifies the NMX-C mock's certificate
+against `nvlink_config.nmx_c_tls_authority`. Every pod's certificate carries
 `certificate.extraDnsNames`, `mat-mock.nvidia.com` by default, for that
-purpose. `helm-prereqs/values/nico-core-simulation.yaml` ships the matching
+purpose. That setting does not cover the NVUE mock on port 443: hardware
+health's NVUE REST collector accepts any server certificate unless its
+`[tls.switch]` profile is configured, in which case it verifies the mock
+against that profile's CA bundle and `tls_server_name`, and the BMC proxy
+accepts any upstream certificate. The simulation profile
+`helm-prereqs/values/nico-core-simulation.yaml` ships the matching
 `[nvlink_config]` block; refer to
 [Machine-a-tron NMX-C Mock](../../../docs/development/machine-a-tron-nmxc-mock.md)
 for what it serves and its limitations. The optional `[nmxc_mock]` section of

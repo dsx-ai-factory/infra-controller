@@ -309,8 +309,9 @@ address, and the `NvueState` behind it. machine-a-tron mounts it at the
 switch's NVOS lease on the same listener as the BMCs.
 
 The router answers `GET` on the `/nvue_v1/` trees NICo reads, with HTTP Basic
-auth as the NVOS administrator, `admin` with the factory password until a
-password rotation changes it through `NvueState::set_password`. The responses
+auth as the NVOS administrator: user `admin` (`DUMMY_NVOS_USERNAME`) with
+password `factory_password` (`DUMMY_FACTORY_PASSWORD`) until a password
+rotation changes it through `NvueState::set_password`. The responses
 follow a capture from an N5400_LD switch tray running NVOS 25.02.4463: the
 sensor roster, thresholds and application versions are that tray's, while the
 NVLink port count, the partition and the management MAC address are the
@@ -332,10 +333,10 @@ simulated switch's.
 | `/nvue_v1/cluster/apps` | The NMX controller and telemetry applications |
 | `/nvue_v1/sdn/partition` | The NVLink partitions, keyed by id |
 
-`rev` is accepted and ignored, so every revision reads as operational, where
-NVOS answers `{}` for an operational-only tree asked for `applied`. `filter_`
-is ignored as NVOS 25.02 ignores it, so `/nvue_v1/interface` lists every
-interface whatever the type filter; `include` and `omit` are ignored, so
+The mock ignores `rev` and always returns operational values, where real NVOS
+answers `{}` when asked for `applied` on an operational-only tree. It also
+ignores `filter_`, as NVOS 25.02 does, so `/nvue_v1/interface` lists every
+interface regardless of the type filter. It ignores `include` and `omit`, so
 responses carry every field. A request without valid credentials gets the
 switch's nginx `text/html` 401 page with
 `WWW-Authenticate: Basic realm="nvueapi"`, and `HEAD` or `OPTIONS` gets its
