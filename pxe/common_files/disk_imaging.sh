@@ -541,7 +541,7 @@ function resolve_boot_partition() {
 	if [ ! -z "$bootfs_uuid" ]; then
 		boot_part=$(resolve_device_on_disk UUID "$bootfs_uuid" "$image_disk") || return 1
 		boot_part_source=override
-		echo "Resolved /boot from bootfs_uuid=$bootfs_uuid to $boot_part" | tee $log_output
+		echo "Resolved /boot from bootfs_uuid=$bootfs_uuid to $boot_part" | tee "$log_output"
 		return 0
 	fi
 
@@ -551,12 +551,12 @@ function resolve_boot_partition() {
 		0)
 			boot_part=$fstab_spec
 			boot_part_source=fstab
-			echo "Resolved /boot from $fstab to $boot_part" | tee $log_output
+			echo "Resolved /boot from $fstab to $boot_part" | tee "$log_output"
 			return 0
 			;;
 		2)
 			if [ -f "$fstab" ]; then
-				echo "$fstab has no /boot entry; /boot stays on the root filesystem" | tee $log_output
+				echo "$fstab has no /boot entry; /boot stays on the root filesystem" | tee "$log_output"
 				return 0
 			fi
 			;;
@@ -567,12 +567,12 @@ function resolve_boot_partition() {
 
 	boot_part=$(partition_on_disk "$image_disk" 1)
 	if [ "$boot_part" == "$root_dev" ]; then
-		echo "No $fstab in the image and $boot_part is the root filesystem; /boot stays on it" | tee $log_output
+		echo "No $fstab in the image and $boot_part is the root filesystem; /boot stays on it" | tee "$log_output"
 		boot_part=
 		return 0
 	fi
 	boot_part_source=default
-	echo "No $fstab in the image; defaulting /boot to $boot_part" | tee $log_output
+	echo "No $fstab in the image; defaulting /boot to $boot_part" | tee "$log_output"
 	return 0
 }
 
@@ -591,7 +591,7 @@ function modify_grub_cfg() {
 				# This is not error, as CentOS, for example, does not have dedicated /boot partition
 				echo "Boot partition $boot_part not found or is not a block device" | tee $log_output
 			else
-				mount "$boot_part" /mnt/boot 2>&1 | tee $log_output
+				mount "$boot_part" /mnt/boot 2>&1 | tee "$log_output"
 				if [ "${PIPESTATUS[0]}" -ne 0 ] && [ "$boot_part_source" != "default" ]; then
 					echo "Failed to mount $boot_part on /mnt/boot" | tee "$log_output" >&2
 					return 1
@@ -618,9 +618,9 @@ function modify_grub_cfg() {
 		fi
 		if [ -z "$grub_cfg" ]; then
 			echo "grub.cfg not found" | tee $log_output
-			umount /mnt/boot/efi 2>&1 | tee $log_output
+			umount /mnt/boot/efi 2>&1 | tee "$log_output"
 			if mountpoint -q /mnt/boot; then
-				umount /mnt/boot 2>&1 | tee $log_output
+				umount /mnt/boot 2>&1 | tee "$log_output"
 			fi
 			return 0
 		fi
