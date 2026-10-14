@@ -2595,14 +2595,31 @@ export -f run_stage ovs-vsctl
         let log = fixture.join("stages.log");
         // Replace external hooks and fixed scripts while leaving generated topology commands
         // intact for exact inspection.
-        let script = get_bf4_astra_ovs_defaults(Some(&intercept_bridging()))
+        // The generated script wraps its fixed OVS and xplane invocations in a Go-template
+        // `{{ if ...cerebro_ifname }}` branch that DPF renders per device. Render the legacy
+        // (non-Cerebro) branch here so the staged bash below is executable while still exercising
+        // the fixed OVS, telemetry, and xplane ordering around the topology commands.
+        let template = get_bf4_astra_ovs_defaults(Some(&intercept_bridging()));
+        let (prefix, after_if) = template
+            .split_once("{{ if ")
+            .expect("astra script must contain the cerebro branch guard");
+        let (_, after_cond) = after_if
+            .split_once(" }}\n")
+            .expect("astra cerebro branch guard must close");
+        let (_, after_else) = after_cond
+            .split_once("{{ else }}\n")
+            .expect("astra script must contain the legacy branch");
+        let (legacy, suffix) = after_else
+            .split_once("{{ end }}\n")
+            .expect("astra legacy branch must close");
+        let script = format!("{prefix}{legacy}{suffix}")
             .replace("/opt/dpf/extra-script-pre-ovs.sh", "\"$TEST_PRE_OVS\"")
             .replace(
                 "bash -e /etc/mellanox/ovs-script.sh",
                 "bash -e \"$TEST_FIXED_OVS\"",
             )
             .replace(
-                "/etc/mellanox/xplane-bridge.sh",
+                "/usr/local/sbin/configure-xplane-network.sh",
                 "bash \"$TEST_XPLANE\"",
             )
             .replace(
@@ -2649,7 +2666,7 @@ export -f run_stage ovs-vsctl
         // Pin the complete serialized template spec rather than one nested script.
         assert_eq!(
             template.unique_name(DEFAULT_FLAVOR_NAME).unwrap(),
-            "dpu-flavor-369cd609a3d2e3a4"
+            "dpu-flavor-97651f8d94f18f42"
         );
     }
 
