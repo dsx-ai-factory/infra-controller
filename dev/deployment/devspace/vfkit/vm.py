@@ -20,11 +20,14 @@ import time
 import uuid
 
 import lab_manager
+from lab.lib.image_verification import verify_signature
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO = SCRIPT_DIR.parents[3]
 GUEST_REPO = "/home/nico/infra-controller"
-IMAGE_URL = "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img"
+IMAGE_URL = "https://cloud-images.ubuntu.com/releases/noble/release-20260926/ubuntu-24.04-server-cloudimg-arm64.img"
+IMAGE_SHA256 = "1d6bffe64b848468ac97f821d369a4846d983de1800ccf6b5ec8853e85cefc55"
+IMAGE_SIGNING_KEY = SCRIPT_DIR / "keys/ubuntu-cloudimage.asc"
 
 
 def run(args, **kwargs):
@@ -297,11 +300,16 @@ class VM:
                 checksums = work / "SHA256SUMS"
                 run(["curl", "--fail", "--location", "--retry", "3", "--output", checksums,
                      IMAGE_URL.rsplit("/", 1)[0] + "/SHA256SUMS"])
+                signature = work / "SHA256SUMS.gpg"
+                run(["curl", "--fail", "--location", "--retry", "3", "--output", signature,
+                     IMAGE_URL.rsplit("/", 1)[0] + "/SHA256SUMS.gpg"])
+                verify_signature(checksums, signature, IMAGE_SIGNING_KEY)
                 matches = [line.split()[0] for line in checksums.read_text().splitlines()
-                           if line.split()[-1].lstrip("*") == IMAGE_URL.rsplit("/", 1)[1]]
-                if len(matches) != 1:
-                    raise ValueError("Ubuntu checksum manifest does not contain one matching image")
-                expected = matches[0]
+                           if len(line.split()) == 2 and
+                           line.split()[1].lstrip("*") == IMAGE_URL.rsplit("/", 1)[1]]
+                if matches != [IMAGE_SHA256]:
+                    raise ValueError("Ubuntu signed manifest does not match the pinned image SHA256")
+                expected = IMAGE_SHA256
                 run(["curl", "--fail", "--location", "--retry", "3", "--output", source, IMAGE_URL])
                 image_format = "qcow2"
             if digest(source) != expected.lower():
