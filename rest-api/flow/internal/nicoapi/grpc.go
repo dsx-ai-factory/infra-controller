@@ -289,7 +289,7 @@ func NewClient(grpcTimeout time.Duration) (Client, error) {
 	tlsConfig, _, dynamicConfig, err := certs.DynamicTLSConfig()
 	if err != nil {
 		if err == certs.ErrNotPresent {
-			return nil, errors.New("Certificates not present, unable to authenticate with nico-core-api")
+			return nil, errors.New("certificates not present, unable to authenticate with nico-core-api")
 		}
 		return nil, err
 	}
@@ -297,7 +297,7 @@ func NewClient(grpcTimeout time.Duration) (Client, error) {
 	conn, err := grpc.NewClient(nicoURL, coreGRPCDialOptions(credentials.NewTLS(tlsConfig))...)
 	if err != nil {
 		dynamicConfig.Close()
-		return nil, fmt.Errorf("Unable to connect to nico-core-api: %w", err)
+		return nil, fmt.Errorf("unable to connect to nico-core-api: %w", err)
 	}
 
 	return &grpcClient{
@@ -319,7 +319,7 @@ func (c *grpcClient) GetMachines(ctx context.Context) ([]MachineDetail, error) {
 	}
 
 	req := &corev1.MachinesByIdsRequest{}
-	req.MachineIds = append(req.MachineIds, machineIDs.MachineIds...)
+	req.MachineIds = append(req.MachineIds, machineIDs.GetMachineIds()...)
 
 	if len(req.MachineIds) == 0 {
 		return nil, nil
@@ -995,7 +995,7 @@ func (c *grpcClient) FindSwitchNvosIPs(ctx context.Context, switchIds []string) 
 			if sid == "" {
 				continue
 			}
-			if ip := sw.GetNvosInfo().GetIp(); ip != "" {
+			if ip := sw.GetNvosInfo().GetIp(); ip != "" { //nolint:staticcheck // Older Core servers return the NVOS address in this field.
 				result[sid] = ip
 			}
 		}
@@ -1513,7 +1513,7 @@ func (c *grpcClient) InsertHealthReportOverride(ctx context.Context, machineID s
 		},
 	}
 
-	_, err := c.gclient.InsertHealthReportOverride(ctx, req)
+	_, err := c.gclient.InsertHealthReportOverride(ctx, req) //nolint:staticcheck // Retain the existing maintenance RPC for older Core servers.
 	if err != nil {
 		return fmt.Errorf("failed to insert health report override for machine %s: %w", machineID, err)
 	}
@@ -1529,7 +1529,7 @@ func (c *grpcClient) RemoveHealthReportOverride(ctx context.Context, machineID s
 		Source:    source,
 	}
 
-	_, err := c.gclient.RemoveHealthReportOverride(ctx, req)
+	_, err := c.gclient.RemoveHealthReportOverride(ctx, req) //nolint:staticcheck // Pair cleanup with the legacy maintenance RPC used above.
 	if err != nil {
 		return fmt.Errorf("failed to remove health report override for machine %s: %w", machineID, err)
 	}

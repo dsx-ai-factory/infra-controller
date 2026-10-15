@@ -5,6 +5,7 @@ syntax = "proto3";
 
 package v1;
 
+import "nico_nico.proto";
 import "google/protobuf/empty.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/field_mask.proto";
@@ -120,6 +121,11 @@ service Flow {
     rpc ResumeOperationRun(ResumeOperationRunRequest) returns (OperationRun);
     rpc AdvanceOperationRunPhase(AdvanceOperationRunPhaseRequest) returns (OperationRun);
     rpc CancelOperationRun(CancelOperationRunRequest) returns (OperationRun);
+
+    // Reads live Core power details and outstanding Flow power tasks independently.
+    // This is not an atomic snapshot and does not change power or task state.
+    // Caller cancellation fails the RPC; child read failures remain section errors.
+    rpc GetTrayPowerDetails(GetTrayPowerDetailsRequest) returns (GetTrayPowerDetailsResponse);
 }
 
 message UUID {
@@ -1384,10 +1390,11 @@ message ListTaskSchedulesResponse {
 // AddTaskScheduleScope / RemoveTaskScheduleScope instead.
 //
 // update_mask is required and controls which fields are written. Supported paths:
-//   "schedule.name"           – display name
-//   "schedule.overlap_policy" – overlap behaviour
-//   "schedule.spec"           – full spec block (type + spec string + next_run_at recomputed)
-//   "schedule.spec.timezone"  – timezone only (spec type/string unchanged)
+//
+// - `schedule.name` – display name
+// - `schedule.overlap_policy` – overlap behaviour
+// - `schedule.spec` – full spec block (type + spec string + next_run_at recomputed)
+// - `schedule.spec.timezone` – timezone only (spec type/string unchanged)
 message UpdateTaskScheduleRequest {
     UUID                      id          = 1;
     ScheduleConfig            schedule    = 2;
@@ -1958,4 +1965,132 @@ message HealthProbeAlert {
     string message = 4;
     optional string tenant_message = 5;
     repeated string classifications = 6;
+}
+
+// Uses the same external component ID or BMC/PMC MAC selector as tray inventory.
+// Empty identifiers return InvalidArgument, missing identifiers NotFound, and
+// ambiguous identifiers FailedPrecondition. Only compute, NVLink switch, and
+// power shelf components are supported; other types return InvalidArgument.
+message GetTrayPowerDetailsRequest {
+    string id = 1;
+}
+
+// Contains independently available power facts for the resolved inventory member.
+message GetTrayPowerDetailsResponse {
+    TrayPowerDetails details = 1;
+}
+
+// Flow inventory identity remains usable before a managed Core ID exists.
+// Every section is populated with either its value or a categorized error.
+// Inventory and both child reads share at most 30 seconds from RPC entry, capped
+// at one second before a caller deadline. Completed sections survive another
+// section's failure. Core hardware, policy, and actions may describe different
+// instants from Flow tasks; Running tasks do not imply active Core actions.
+// The encoded proxy response is limited to 1,991,680 bytes (1945 KiB).
+// An oversized task section is replaced with LimitExceeded; if the rest exceeds the
+// limit, the RPC returns ResourceExhausted. No task targets are truncated.
+message TrayPowerDetails {
+    UUID flow_component_id = 1;
+    // Absent until the inventory member has a managed Core identity.
+    optional string core_component_id = 2;
+    ComponentType component_type = 3;
+    // Absent when this member has no Flow rack assignment.
+    UUID rack_id = 4;
+    PowerActualDetails actual = 5;
+    PowerDesiredDetails desired = 6;
+    PowerOperations operations = 7;
+}
+
+// Flow lookup failures are distinct from errors returned inside Core values.
+// Dependency error strings and credentials are never included.
+enum PowerDetailsReadError {
+    // Not emitted as an error by this RPC.
+    POWER_DETAILS_READ_ERROR_UNSPECIFIED = 0;
+    // The section lacks its required identity: a managed Core ID for Core
+    // sections, or a Flow rack assignment for tasks.
+    POWER_DETAILS_READ_ERROR_NOT_LINKED = 1;
+    // Flow has no NICo provider client.
+    POWER_DETAILS_READ_ERROR_NOT_CONFIGURED = 2;
+    // Core lacks the RPC or did not provide this section.
+    POWER_DETAILS_READ_ERROR_UNSUPPORTED = 3;
+    // A child read exceeded its caller or provider deadline.
+    POWER_DETAILS_READ_ERROR_DEADLINE_EXCEEDED = 4;
+    // The dependency returned an error other than unsupported/deadline.
+    POWER_DETAILS_READ_ERROR_READ_FAILED = 5;
+    // A dependency returned the wrong identity/cardinality, an absent required
+    // value, or task data that cannot be converted to the declared operation.
+    POWER_DETAILS_READ_ERROR_INVALID_RESPONSE = 6;
+    // The rack task count or encoded response exceeded its documented bound.
+    POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED = 7;
+}
+
+// A Core observation, including its per-device failure, or a Flow read failure.
+message PowerActualDetails {
+    oneof result {
+        forge.ComponentPowerObservation value = 1;
+        PowerDetailsReadError error = 2;
+    }
+}
+
+// Stored Core policy, including NotApplicable/Unavailable, or a Flow read failure.
+message PowerDesiredDetails {
+    oneof result {
+        forge.ComponentPowerPolicy value = 1;
+        PowerDetailsReadError error = 2;
+    }
+}
+
+// Core maintenance and Flow tasks are separate records without a correlation ID.
+message PowerOperations {
+    PowerActionDetails actions = 1;
+    PowerTaskDetailsList tasks = 2;
+}
+
+// A present Core value with no actions and no nested error means no tracked
+// maintenance was found. A nested error still makes that Core value unavailable.
+// Unsupported means the Core server did not provide action details; it must not
+// be interpreted as a successful empty action list.
+message PowerActionDetails {
+    oneof result {
+        forge.ComponentPowerActionDetails value = 1;
+        PowerDetailsReadError error = 2;
+    }
+}
+
+// Outstanding power tasks for the tray's current Flow rack, ordered by created_at,
+// then task ID, ascending. Missing rack assignment returns NotLinked. Tasks from
+// a former rack are excluded. Only recorded selections or power-shelf tasks
+// affecting this rack are included; tasks with no recorded targets are excluded.
+// More than 256 outstanding rack power tasks makes this entire section unavailable,
+// even if fewer target this tray. Error is absent on success, including empty;
+// entries is empty on failure. Non-power tasks and execution reports are excluded.
+message PowerTaskDetailsList {
+    repeated PowerTaskDetails entries = 1;
+    optional PowerDetailsReadError error = 2;
+}
+
+// Why this task is included for the requested tray.
+enum PowerTaskRelevance {
+    POWER_TASK_RELEVANCE_UNSPECIFIED = 0;
+    // The task's recorded UUID/type selection explicitly includes this tray.
+    POWER_TASK_RELEVANCE_SELECTED = 1;
+    // The task selects a power shelf on this rack; the tray is not a selected target.
+    POWER_TASK_RELEVANCE_RACK_AFFECTED = 2;
+}
+
+// Informational task details with recorded identities, not inferred live targets.
+message PowerTaskDetails {
+    UUID id = 1;
+    UUID rack_id = 2;
+    TaskOperation operation = 3;
+    // Recorded Flow UUIDs grouped by type, including IDs no longer in inventory.
+    // Absent when no targets were recorded.
+    ComponentsByType targets = 4;
+    // Waiting, Pending, or Running. Running does not prove hardware dispatch.
+    TaskStatus status = 5;
+    google.protobuf.Timestamp created_at = 6;
+    google.protobuf.Timestamp updated_at = 7;
+    // Present only if the task store recorded an execution start.
+    google.protobuf.Timestamp started_at = 8;
+    PowerTaskRelevance relevance = 9;
 }
