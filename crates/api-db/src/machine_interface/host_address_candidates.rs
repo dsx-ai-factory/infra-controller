@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ipnetwork::IpNetwork;
@@ -31,8 +32,9 @@ pub(super) struct OccupiedAddress {
     next_address: Option<IpAddr>,
 }
 
-/// `HostAddressCandidates` selects free addresses from gaps between occupied
-/// addresses without enumerating the prefix, even for an IPv6 /0.
+/// `HostAddressCandidates` counts free addresses and selects them from gaps
+/// in the same eligible interval. It does not enumerate the prefix, even
+/// for an IPv6 /0.
 /// IPv6 reservations mirror `IpAllocator`; IPv4 retains the machine-interface
 /// policy, which also reserves an implicit gateway when none is configured.
 pub(super) struct HostAddressCandidates<'a> {
@@ -79,6 +81,23 @@ impl<'a> HostAddressCandidates<'a> {
         self.first
             .filter(|first| *first <= self.last)
             .map(|first| (self.address(first), self.address(self.last)))
+    }
+
+    pub(super) fn num_free(&self, used_ips: &[IpAddr]) -> u128 {
+        let Some((first, last)) = self.range() else {
+            return 0;
+        };
+        let unavailable = used_ips
+            .iter()
+            .copied()
+            .chain(self.prefix.gateway)
+            .chain(self.prefix.svi_ip)
+            .filter(|address| (first..=last).contains(address))
+            .collect::<HashSet<_>>();
+
+        // IPv6 /0 excludes both endpoints, so the interval fits in u128.
+        // Count an owned gateway or SVI once, and only inside that interval.
+        address_number(last) - address_number(first) + 1 - unavailable.len() as u128
     }
 
     // A leading gap this large fills the batch even if it includes both the
@@ -166,6 +185,149 @@ mod tests {
         svi: Option<&'static str>,
         occupied: &'static [(&'static str, Option<&'static str>)],
         limit: usize,
+    }
+
+    #[test]
+    fn free_counts_use_host_bounds_and_distinct_exclusions() {
+        #[derive(Debug)]
+        struct CountInput {
+            prefix: &'static str,
+            num_reserved: i32,
+            gateway: Option<&'static str>,
+            svi: Option<&'static str>,
+            used_ips: &'static [&'static str],
+        }
+
+        check_cases(
+            [
+                Case {
+                    scenario: "unowned gateway and SVI addresses remain unavailable",
+                    input: CountInput {
+                        prefix: "192.0.2.0/29",
+                        num_reserved: 0,
+                        gateway: Some("192.0.2.2"),
+                        svi: Some("192.0.2.3"),
+                        used_ips: &[],
+                    },
+                    expect: Yields(4),
+                },
+                Case {
+                    scenario: "IPv4 /31 has no host addresses even with a configured gateway",
+                    input: CountInput {
+                        prefix: "192.0.2.0/31",
+                        num_reserved: 0,
+                        gateway: Some("192.0.2.0"),
+                        svi: None,
+                        used_ips: &[],
+                    },
+                    expect: Yields(0),
+                },
+                Case {
+                    scenario: "IPv4 /32 has no host addresses",
+                    input: CountInput {
+                        prefix: "0.0.0.0/32",
+                        num_reserved: 0,
+                        gateway: None,
+                        svi: None,
+                        used_ips: &[],
+                    },
+                    expect: Yields(0),
+                },
+                Case {
+                    scenario: "only distinct exclusions within the host interval reduce its count",
+                    input: CountInput {
+                        prefix: "192.0.2.0/29",
+                        num_reserved: 3,
+                        gateway: Some("192.0.2.3"),
+                        svi: Some("192.0.2.2"),
+                        used_ips: &[
+                            "192.0.2.0",
+                            "192.0.2.1",
+                            "192.0.2.3",
+                            "192.0.2.3",
+                            "192.0.2.4",
+                            "192.0.2.7",
+                            "192.0.3.4",
+                            "::4",
+                        ],
+                    },
+                    expect: Yields(2),
+                },
+                Case {
+                    scenario: "IPv6 /0 counts a large reserved range without enumerating it",
+                    input: CountInput {
+                        prefix: "::/0",
+                        num_reserved: i32::MAX,
+                        gateway: None,
+                        svi: None,
+                        used_ips: &["::7fff:ffff"],
+                    },
+                    expect: Yields(u128::MAX - i32::MAX as u128 - 1),
+                },
+                Case {
+                    scenario: "IPv6 /128 includes the maximum host address",
+                    input: CountInput {
+                        prefix: "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+                        num_reserved: 0,
+                        gateway: None,
+                        svi: None,
+                        used_ips: &[],
+                    },
+                    expect: Yields(1),
+                },
+                Case {
+                    scenario: "reservation past the maximum IPv6 address leaves no hosts",
+                    input: CountInput {
+                        prefix: "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe/127",
+                        num_reserved: 2,
+                        gateway: None,
+                        svi: None,
+                        used_ips: &[],
+                    },
+                    expect: Yields(0),
+                },
+                Case {
+                    scenario: "negative IPv4 reservation count remains an accounting error",
+                    input: CountInput {
+                        prefix: "192.0.2.0/24",
+                        num_reserved: -1,
+                        gateway: None,
+                        svi: None,
+                        used_ips: &[],
+                    },
+                    expect: Fails,
+                },
+            ],
+            |input| {
+                let prefix = NetworkPrefix {
+                    id: NetworkPrefixId::new(),
+                    segment_id: NetworkSegmentId::new(),
+                    prefix: input.prefix.parse().unwrap(),
+                    gateway: input.gateway.map(|address| address.parse().unwrap()),
+                    dhcpv6_link_address: None,
+                    num_reserved: input.num_reserved,
+                    vpc_prefix_id: None,
+                    vpc_prefix: None,
+                    svi_ip: input.svi.map(|address| address.parse().unwrap()),
+                    num_free_ips: None,
+                };
+                let used_ips = input
+                    .used_ips
+                    .iter()
+                    .map(|address| address.parse().unwrap())
+                    .collect::<Vec<_>>();
+                super::super::num_free_host_addresses(&prefix, &used_ips).map_err(|error| {
+                    assert!(
+                        matches!(
+                            &error,
+                            DatabaseError::Internal { message }
+                                if message.contains("negative reservation count -1")
+                        ),
+                        "{error:?}"
+                    );
+                })
+            },
+        );
     }
 
     #[test]

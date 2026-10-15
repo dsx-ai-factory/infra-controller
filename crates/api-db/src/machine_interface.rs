@@ -60,8 +60,6 @@ const HOST_CANDIDATE_BATCH_SIZE: usize = 32;
 
 pub struct UsedAdminNetworkIpResolver {
     pub segment_id: NetworkSegmentId,
-    // All the IPs which can not be allocated, e.g. SVI IP.
-    pub busy_ips: Vec<IpAddr>,
 }
 
 #[derive(Debug)]
@@ -113,6 +111,23 @@ mod test_duplicate_mac;
 mod test_explicit_columns;
 #[cfg(test)]
 mod tests;
+
+/// Count unowned addresses eligible for host allocation across the full prefix.
+/// Candidate locks held by other transactions do not reduce this snapshot.
+pub(crate) fn num_free_host_addresses(
+    prefix: &NetworkPrefix,
+    used_ips: &[IpAddr],
+) -> DatabaseResult<u128> {
+    // Accounting rejects negative stored counts even though IPv4 allocation
+    // clamps them to its minimum reservation. Preserve both behaviors here.
+    if prefix.num_reserved < 0 {
+        return Err(DatabaseError::internal(format!(
+            "network prefix {} has negative reservation count {}",
+            prefix.id, prefix.num_reserved
+        )));
+    }
+    Ok(host_address_candidates::HostAddressCandidates::new(prefix)?.num_free(used_ips))
+}
 
 #[derive(Clone, Copy)]
 pub struct MacAddressColumn;
@@ -2413,7 +2428,6 @@ pub async fn allocate_svi_ip(
     let dhcp_handler: Box<dyn UsedIpResolver<PgConnection> + Send> =
         Box::new(UsedAdminNetworkIpResolver {
             segment_id: segment.id,
-            busy_ips: vec![],
         });
 
     // Prevent other allocations from happening concurrently in this network segment
@@ -3870,14 +3884,6 @@ impl<DB> UsedIpResolver<DB> for UsedAdminNetworkIpResolver
 where
     for<'db> &'db mut DB: DbReader<'db>,
 {
-    // DEPRECATED
-    // With the introduction of `used_prefixes()` this is no
-    // longer an accurate approach for finding all allocated
-    // IPs in a segment, since used_ips() completely ignores
-    // the fact wider prefixes may have been allocated, even
-    // though in the case of machine interfaces, its probably
-    // always going to just be a /32.
-    //
     // used_ips returns globally owned machine-interface addresses contained by
     // this segment's prefixes. Filtering by the owning interface's segment
     // would miss a static assignment that predates its containing managed
@@ -3914,9 +3920,7 @@ WHERE np.segment_id = $1::uuid";
             .await
             .map_err(|e| DatabaseError::query(query, e))?;
 
-        let mut ips: Vec<IpAddr> = containers.iter().map(|c| c.address).collect();
-        ips.extend(self.busy_ips.iter());
-        Ok(ips)
+        Ok(containers.iter().map(|c| c.address).collect())
     }
 
     // used_prefixes returns the used (or allocated) prefixes
