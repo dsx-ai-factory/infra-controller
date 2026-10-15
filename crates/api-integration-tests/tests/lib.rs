@@ -455,10 +455,13 @@ async fn test_integration() -> eyre::Result<()> {
         "the MaT scout path must exercise PCI comparison observability",
     );
     for object_type in ["switches", "racks", "power_shelves"] {
-        for family in ["object_tasks_completed_total", "per_state"] {
+        for (family, metric_type) in [
+            ("object_tasks_completed_total", "counter"),
+            ("per_state", "gauge"),
+        ] {
             metrics::wait_for_metric_line(
                 &test_env.carbide_metrics_addrs,
-                &format!("carbide_{object_type}_{family}"),
+                &format!("# TYPE carbide_{object_type}_{family} {metric_type}\n"),
             )
             .await?;
         }
