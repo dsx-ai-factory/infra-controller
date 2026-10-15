@@ -343,3 +343,26 @@ API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} added
 # SSH Keys have no status field; these orderings were advertised but always rejected.
 GET /v2/org/{org}/nico/sshkey removed the enum value `STATUS_ASC` from the `query` request parameter `orderBy`
 GET /v2/org/{org}/nico/sshkey removed the enum value `STATUS_DESC` from the `query` request parameter `orderBy`
+
+# Provider contract corrections reflect existing null responses and request validation.
+# Populated nullable objects still validate against their referenced schemas.
+API POST /v2/org/{org}/nico/instance/type request property `machineCapabilities/items/deviceType` was restricted to a list of enum values
+API PATCH /v2/org/{org}/nico/machine/{machineId} added the pattern `[^ \t\n\f\r]` to the request property `maintenanceMessage`
+API GET /v2/org/{org}/nico/tenant/account added `#/components/schemas/User, subschema #2` to the `items/tenantContact` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/tenant/account the `items/tenantContact` response's property `type` changed from `object` to `any` for status `200`
+API POST /v2/org/{org}/nico/tenant/account added `#/components/schemas/User, subschema #2` to the `tenantContact` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/tenant/account the `tenantContact` response's property `type` changed from `object` to `any` for status `201`
+API GET /v2/org/{org}/nico/tenant/account/{accountId} added `#/components/schemas/User, subschema #2` to the `tenantContact` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/tenant/account/{accountId} the `tenantContact` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/tenant/account/{accountId} added `#/components/schemas/User, subschema #2` to the `tenantContact` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/tenant/account/{accountId} the `tenantContact` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/vpc added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `items/networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/vpc the `items/networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
+API POST /v2/org/{org}/nico/vpc added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/vpc the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `201`
+API GET /v2/org/{org}/nico/vpc/{vpcId} added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
