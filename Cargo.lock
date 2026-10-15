@@ -1414,6 +1414,7 @@ dependencies = [
  "carbide-tls",
  "carbide-utils",
  "carbide-uuid",
+ "config-version",
  "ctor",
  "eyre",
  "futures",
