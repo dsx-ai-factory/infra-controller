@@ -345,8 +345,14 @@ GET /v2/org/{org}/nico/sshkey removed the enum value `STATUS_ASC` from the `quer
 GET /v2/org/{org}/nico/sshkey removed the enum value `STATUS_DESC` from the `query` request parameter `orderBy`
 
 # Instance propagation details can be absent; allow the existing null responses.
-API GET /v2/org/{org}/nico/instance the response property `items/networkSecurityGroupPropagationDetails` became nullable for the status `200`
-API POST /v2/org/{org}/nico/instance the response property `networkSecurityGroupPropagationDetails` became nullable for the status `201`
-API POST /v2/org/{org}/nico/instance/batch the response property `items/networkSecurityGroupPropagationDetails` became nullable for the status `201`
-API GET /v2/org/{org}/nico/instance/{instanceId} the response property `networkSecurityGroupPropagationDetails` became nullable for the status `200`
-API PATCH /v2/org/{org}/nico/instance/{instanceId} the response property `networkSecurityGroupPropagationDetails` became nullable for the status `200`
+# Match the reports emitted by CI's pinned oasdiff v1.21.0.
+API GET /v2/org/{org}/nico/instance added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `items/networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/instance the `items/networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
+API POST /v2/org/{org}/nico/instance added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/instance the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/instance/batch added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `items/networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/instance/batch the `items/networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `201`
+API GET /v2/org/{org}/nico/instance/{instanceId} added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/instance/{instanceId} the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/instance/{instanceId} added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
