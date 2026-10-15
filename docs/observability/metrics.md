@@ -537,7 +537,7 @@ discounted, probe and classification breakdowns, operator overrides, hosts missi
 BIOS password, and rack, switch, and power shelf health.
 
 **Network segments and VPC prefixes** - State distribution, above-SLA objects,
-transitions, time in state and handler errors for both object types.
+transitions, time in state, and handler errors for both object types.
 
 **InfiniBand** - Fabric count, UFM version, fabric errors, insecure configuration,
 UFM-visible ports and partitions, pkey mismatches, UFM write outcomes, monitor
@@ -548,7 +548,7 @@ latency and timeouts, applied changes, configuration apply delay, and switch
 certificate expiry.
 
 **State controller performance** - Processor and enqueuer iteration latency, task
-enqueue, dispatch, completion and requeue rates, per-state handler latency, and
+enqueue, dispatch, completion, and requeue rates, per-state handler latency, and
 database queries attributed to each controller.
 
 **API requests** - Request and error rate by method, availability with and without
@@ -578,7 +578,7 @@ rates, dropped requests, DNS negative cache, and DHCP certificate expiry.
 connected clients, and stream errors.
 
 **Logs and Kubernetes workloads** - Log event rate by level, the noisiest components at
-WARN and ERROR, and per-container CPU, memory, restarts and readiness. The Kubernetes
+WARN and ERROR, and per-container CPU, memory, restarts, and readiness. The Kubernetes
 panels need kube-state-metrics and cAdvisor.
 
 ### Fleet dashboard
@@ -610,7 +610,7 @@ per site, with the stuck objects of each type.
 hosts discounted, unhealthy hosts, failing probes, alert classifications, overrides,
 hosts missing a BIOS password, and unhealthy DPUs.
 
-**InfiniBand fabrics** - Fabrics, errors, insecure fabrics, UFM versions and pkey
+**InfiniBand fabrics** - Fabrics, errors, insecure fabrics, UFM versions, and pkey
 mismatches per site.
 
 **API service level** - Availability, request and error rate, mean and p95 latency,
@@ -618,9 +618,9 @@ controller iteration latency, Vault availability, warning and error log rate, an
 busiest pods.
 
 **Site explorer** - Hosts explored, managed hosts identified, failures, missing expected
-inventory, serial number mismatches and incomplete preingestions per site.
+inventory, serial number mismatches, and incomplete preingestions per site.
 
-**Serial console proxy** - Connected BMC share, connection counts and attached clients
+**Serial console proxy** - Connected BMC share, connection counts, and attached clients
 per site.
 
 ### Object lifecycle dashboard
@@ -667,7 +667,7 @@ Catches secret management issues before they cause auth failures.
 ### BMC performance dashboard
 
 The BMC performance dashboard (`nico-bmc-performance.json`) covers the Redfish calls the
-hardware-health service makes, broken down by machine, BMC address, request path and BMC
+hardware-health service makes, broken down by machine, BMC address, request path, and BMC
 model: availability, error counts and latency. Use it when hardware operations are slow
 or failing and you need to know whether the BMCs or NICo are responsible.
 
