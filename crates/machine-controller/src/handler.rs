@@ -8210,18 +8210,6 @@ impl StateHandler for HostMachineStateHandler {
                     if *measuring_state == MeasuringState::WaitingForMeasurements
                         && measuring_outcome == MeasuringOutcome::NoChange
                     {
-                        if let Some(last_contact) =
-                            mh_snapshot.host_snapshot.status.last_scout_contact_time
-                            && Utc::now().signed_duration_since(last_contact)
-                                < self
-                                    .host_handler_params
-                                    .reachability_params
-                                    .scout_reporting_timeout
-                        {
-                            return Ok(StateHandlerOutcome::wait(format!(
-                                "Waiting for Scout measurements: last Scout contact at {last_contact}"
-                            )));
-                        }
                         let status = trigger_reboot_if_needed(
                             &mh_snapshot.host_snapshot,
                             mh_snapshot,

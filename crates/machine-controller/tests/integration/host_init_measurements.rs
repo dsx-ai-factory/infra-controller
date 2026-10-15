@@ -173,42 +173,6 @@ async fn missing_ek_status_reboots_before_measurement_timeout(pool: PgPool) {
 }
 
 #[sqlx_test]
-async fn recent_scout_contact_suppresses_measurement_reboot(pool: PgPool) {
-    let mut env = Env::builder(pool)
-        .configure_runtime(|config| {
-            config.attestation_enabled = true;
-            config.machine_state_controller.scout_reporting_timeout = Duration::minutes(5);
-            config
-                .machine_state_controller
-                .waiting_for_measurements_timeout = Duration::hours(1);
-        })
-        .build()
-        .await;
-    let host = setup_waiting_host(&env, Duration::minutes(10)).await;
-    insert_verified_ek(&env, &host).await;
-    sqlx::query("UPDATE machines SET last_scout_contact_time = NOW() WHERE id = $1")
-        .bind(host.host.id)
-        .execute(&env.test_harness.api().database_connection)
-        .await
-        .unwrap();
-    let timepoint = env.redfish_sim.timepoint();
-
-    env.run_single_iteration().await;
-
-    assert_eq!(
-        host.host.machine().await.current_state(),
-        &HOST_INIT_MEASURING
-    );
-    assert!(
-        env.redfish_sim
-            .actions_since(&timepoint)
-            .all_hosts()
-            .is_empty(),
-        "recent Scout contact should suppress the host reboot"
-    );
-}
-
-#[sqlx_test]
 async fn pending_bundle_does_not_reboot(pool: PgPool) {
     let mut env = Env::builder(pool)
         .configure_runtime(|config| {
