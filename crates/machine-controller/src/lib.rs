@@ -121,7 +121,8 @@ pub(crate) fn waiting_for_measurements_outcome(
     state_entered_at: DateTime<Utc>,
     waiting_for_measurements_timeout: Duration,
 ) -> MeasuringOutcome {
-    let elapsed = Utc::now().signed_duration_since(state_entered_at);
+    let now = Utc::now();
+    let elapsed = now.signed_duration_since(state_entered_at);
     if elapsed < waiting_for_measurements_timeout {
         return MeasuringOutcome::NoChange;
     }
@@ -133,7 +134,7 @@ pub(crate) fn waiting_for_measurements_outcome(
                     "no measurement report received after {elapsed}; host may not be network-booting"
                 ),
             },
-            failed_at: Utc::now(),
+            failed_at: now,
             source: FailureSource::StateMachineArea(StateMachineArea::Default),
         },
         *machine_id,

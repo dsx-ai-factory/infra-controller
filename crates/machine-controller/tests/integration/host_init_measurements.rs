@@ -20,6 +20,7 @@ use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use chrono::{Duration, Utc};
 use config_version::ConfigVersion;
+use measured_boot::pcr::PcrRegisterValue;
 use model::machine::{
     FailureCause, MachineLastRebootRequested, MachineLastRebootRequestedMode, MachineState,
     ManagedHostState, MeasuringState,
@@ -31,6 +32,12 @@ use crate::env::Env;
 const HOST_INIT_MEASURING: ManagedHostState = ManagedHostState::HostInit {
     machine_state: MachineState::Measuring {
         measuring_state: MeasuringState::WaitingForMeasurements,
+    },
+};
+
+const HOST_INIT_PENDING_BUNDLE: ManagedHostState = ManagedHostState::HostInit {
+    machine_state: MachineState::Measuring {
+        measuring_state: MeasuringState::PendingBundle,
     },
 };
 
@@ -58,6 +65,7 @@ async fn setup_waiting_host(env: &Env, age: Duration) -> TestManagedHost {
     )
     .parse()
     .unwrap();
+    // The test retry interval is one second; age the prior request so a retry is due.
     let last_reboot_requested = MachineLastRebootRequested {
         time: entered_at,
         mode: MachineLastRebootRequestedMode::Reboot,
@@ -77,18 +85,7 @@ async fn setup_waiting_host(env: &Env, age: Duration) -> TestManagedHost {
     host
 }
 
-#[sqlx_test]
-async fn host_init_reboots_while_waiting_for_measurements(pool: PgPool) {
-    let mut env = Env::builder(pool)
-        .configure_runtime(|config| {
-            config.attestation_enabled = true;
-            config
-                .machine_state_controller
-                .waiting_for_measurements_timeout = Duration::hours(1);
-        })
-        .build()
-        .await;
-    let host = setup_waiting_host(&env, Duration::minutes(10)).await;
+async fn insert_verified_ek(env: &Env, host: &TestManagedHost) {
     let mut txn = env
         .test_harness
         .api()
@@ -110,6 +107,21 @@ async fn host_init_reboots_while_waiting_for_measurements(pool: PgPool) {
     .unwrap()
     .expect("verified EK status should be inserted");
     txn.commit().await.unwrap();
+}
+
+#[sqlx_test]
+async fn host_init_reboots_while_waiting_for_measurements(pool: PgPool) {
+    let mut env = Env::builder(pool)
+        .configure_runtime(|config| {
+            config.attestation_enabled = true;
+            config
+                .machine_state_controller
+                .waiting_for_measurements_timeout = Duration::hours(1);
+        })
+        .build()
+        .await;
+    let host = setup_waiting_host(&env, Duration::minutes(10)).await;
+    insert_verified_ek(&env, &host).await;
     let timepoint = env.redfish_sim.timepoint();
 
     env.run_single_iteration().await;
@@ -126,6 +138,119 @@ async fn host_init_reboots_while_waiting_for_measurements(pool: PgPool) {
                 libredfish::SystemPowerControl::ForceRestart,
             )),
         "waiting for Scout measurements should retry the host boot"
+    );
+}
+
+#[sqlx_test]
+async fn missing_ek_status_reboots_before_measurement_timeout(pool: PgPool) {
+    let mut env = Env::builder(pool)
+        .configure_runtime(|config| {
+            config.attestation_enabled = true;
+            config
+                .machine_state_controller
+                .waiting_for_measurements_timeout = Duration::hours(1);
+        })
+        .build()
+        .await;
+    let host = setup_waiting_host(&env, Duration::minutes(10)).await;
+    let timepoint = env.redfish_sim.timepoint();
+
+    env.run_single_iteration().await;
+
+    assert_eq!(
+        host.host.machine().await.current_state(),
+        &HOST_INIT_MEASURING
+    );
+    assert!(
+        env.redfish_sim
+            .actions_since(&timepoint)
+            .all_hosts()
+            .contains(&RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ForceRestart,
+            )),
+        "missing EK status should retry the host boot before timeout"
+    );
+}
+
+#[sqlx_test]
+async fn recent_scout_contact_suppresses_measurement_reboot(pool: PgPool) {
+    let mut env = Env::builder(pool)
+        .configure_runtime(|config| {
+            config.attestation_enabled = true;
+            config.machine_state_controller.scout_reporting_timeout = Duration::minutes(5);
+            config
+                .machine_state_controller
+                .waiting_for_measurements_timeout = Duration::hours(1);
+        })
+        .build()
+        .await;
+    let host = setup_waiting_host(&env, Duration::minutes(10)).await;
+    insert_verified_ek(&env, &host).await;
+    sqlx::query("UPDATE machines SET last_scout_contact_time = NOW() WHERE id = $1")
+        .bind(host.host.id)
+        .execute(&env.test_harness.api().database_connection)
+        .await
+        .unwrap();
+    let timepoint = env.redfish_sim.timepoint();
+
+    env.run_single_iteration().await;
+
+    assert_eq!(
+        host.host.machine().await.current_state(),
+        &HOST_INIT_MEASURING
+    );
+    assert!(
+        env.redfish_sim
+            .actions_since(&timepoint)
+            .all_hosts()
+            .is_empty(),
+        "recent Scout contact should suppress the host reboot"
+    );
+}
+
+#[sqlx_test]
+async fn pending_bundle_does_not_reboot(pool: PgPool) {
+    let mut env = Env::builder(pool)
+        .configure_runtime(|config| {
+            config.attestation_enabled = true;
+        })
+        .build()
+        .await;
+    let host = setup_waiting_host(&env, Duration::minutes(10)).await;
+    insert_verified_ek(&env, &host).await;
+    let mut txn = env
+        .test_harness
+        .api()
+        .database_connection
+        .begin()
+        .await
+        .unwrap();
+    db::measured_boot::report::new(
+        &mut txn,
+        *host.host.id,
+        &[PcrRegisterValue {
+            pcr_register: 0,
+            sha_any: "test-pcr".to_string(),
+        }],
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    host.advance_state(HOST_INIT_PENDING_BUNDLE.clone()).await;
+    let timepoint = env.redfish_sim.timepoint();
+
+    env.run_single_iteration().await;
+
+    assert_eq!(
+        host.host.machine().await.current_state(),
+        &HOST_INIT_PENDING_BUNDLE
+    );
+    assert!(
+        env.redfish_sim
+            .actions_since(&timepoint)
+            .all_hosts()
+            .is_empty(),
+        "PendingBundle should not reboot the host"
     );
 }
 
