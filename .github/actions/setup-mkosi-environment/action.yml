@@ -123,6 +123,7 @@ runs:
           erofs-utils \
           tar \
           cpio \
+          initramfs-tools-core \
           zstd \
           xz-utils \
           btrfs-progs \

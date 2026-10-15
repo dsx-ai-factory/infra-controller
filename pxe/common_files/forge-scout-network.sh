@@ -22,10 +22,22 @@ cmdline_file=${SCOUT_CMDLINE_FILE:-/proc/cmdline}
 sys_class_net=${SCOUT_SYS_CLASS_NET:-/sys/class/net}
 ip_command=${SCOUT_IP_COMMAND:-ip}
 networkctl_command=${SCOUT_NETWORKCTL_COMMAND:-networkctl}
+systemctl_command=${SCOUT_SYSTEMCTL_COMMAND:-systemctl}
 networkd_runtime_dir=${SCOUT_NETWORKD_RUNTIME_DIR:-/run/systemd/network}
+networkd_config_dir=${SCOUT_NETWORKD_CONFIG_DIR:-/etc/systemd/network}
+wait_online_command=${SCOUT_WAIT_ONLINE_COMMAND:-/usr/lib/systemd/systemd-networkd-wait-online}
 networkd_dhcp_file=${SCOUT_NETWORKD_DHCP_FILE:-/etc/systemd/network/dhcp.network}
 network_wait_seconds=${SCOUT_NETWORK_WAIT_SECONDS:-120}
 network_poll_interval=${SCOUT_NETWORK_POLL_INTERVAL:-1}
+
+mode=${1:-configure}
+nextroot=${2:-}
+preferred_network_file="$networkd_runtime_dir/00-forge-scout-preferred.network"
+runtime_network_file="$networkd_runtime_dir/01-forge-scout-nonpreferred.network"
+legacy_runtime_file="$networkd_runtime_dir/00-forge-scout-nonpreferred.network"
+legacy_network_file="$networkd_config_dir/00-forge-scout-nonpreferred.network"
+temporary_network_file=
+prepare_cleanup_armed=false
 
 uptime_seconds() {
 	uptime_value=
@@ -58,6 +70,11 @@ script_start_seconds=$(uptime_seconds)
 
 report_exit() {
 	exit_status=$?
+	trap - HUP INT TERM
+	[ -z "$temporary_network_file" ] || rm -f "$temporary_network_file"
+	if [ "$exit_status" -ne 0 ] && [ "$prepare_cleanup_armed" = true ]; then
+		remove_policy || exit_status=1
+	fi
 	current_seconds=$(uptime_seconds)
 	duration_seconds=unknown
 
@@ -79,6 +96,134 @@ finish() {
 }
 
 trap report_exit 0
+trap 'finish failed interrupted 1' HUP INT TERM
+
+remove_runtime_policy() {
+	rm -f "$preferred_network_file" "$runtime_network_file" "$legacy_runtime_file"
+}
+
+remove_policy() {
+	remove_runtime_policy && rm -f "$legacy_network_file"
+}
+
+restore_broad_networking() {
+	if [ "$mode" = wait-online ]; then
+		# Root systemctl uses PID 1's private socket before the system bus starts.
+		remove_policy && "$systemctl_command" reload systemd-networkd.service
+		return
+	fi
+	set +f
+	# Remember the links using our configuration before removing it. Matching
+	# networkd's selection also includes alternative interface names.
+	set --
+	recovery_failed=false
+	for net_path in "$sys_class_net"/*
+	do
+		[ -d "$net_path" ] || continue
+		interface=${net_path##*/}
+		if ! network_status=$("$networkctl_command" --json=short status "$interface"); then
+			[ -e "$net_path" ] || continue
+			echo "Failed to inspect interface during Scout network recovery: interface=$interface" >&2
+			recovery_failed=true
+			continue
+		fi
+		case "$network_status" in
+			*"\"NetworkFile\":\"$preferred_network_file\""*|*"\"NetworkFile\":\"$runtime_network_file\""*|*"\"NetworkFile\":\"$legacy_runtime_file\""*|*"\"NetworkFile\":\"$legacy_network_file\""*)
+				set -- "$@" "$interface"
+				;;
+		esac
+	done
+	if [ "$#" -eq 0 ] && [ ! -e "$preferred_network_file" ] &&
+		[ ! -e "$runtime_network_file" ] && [ ! -e "$legacy_runtime_file" ] &&
+		[ ! -e "$legacy_network_file" ]; then
+		[ "$recovery_failed" = false ]
+		return
+	fi
+	if ! remove_policy || ! "$networkctl_command" reload; then
+		echo "Failed to restore Scout's broad network configuration" >&2
+		return 1
+	fi
+	for interface
+	do
+		if ! "$networkctl_command" reconfigure "$interface"; then
+			echo "Failed to restore DHCP during Scout network recovery: interface=$interface" >&2
+			recovery_failed=true
+		fi
+	done
+	[ "$recovery_failed" = false ]
+}
+
+use_broad_networking() {
+	fallback_result=$1
+	fallback_reason=$2
+	fallback_status=$3
+	if ! restore_broad_networking; then
+		finish failed network_recovery_failed 1
+	fi
+	if [ "$mode" = wait-online ]; then
+		# Recovery needs one routable link, even if the selected NIC stays down.
+		if "$wait_online_command" --any --operational-state=routable --timeout="$network_wait_seconds"; then
+			finish fallback "$fallback_reason" 0
+		fi
+		finish failed fallback_wait_online_failed 1
+	fi
+	finish "$fallback_result" "$fallback_reason" "$fallback_status"
+}
+
+write_network_file() {
+	network_file=$1
+	if ! mkdir -p "${network_file%/*}" ||
+		! temporary_network_file=$(mktemp "${network_file%/*}/.forge-scout-network.XXXXXX"); then
+		return 1
+	fi
+	if ! cat >"$temporary_network_file" || ! chmod 0644 "$temporary_network_file"; then
+		return 1
+	fi
+	# A repeated readiness check must not restart DHCP on the selected link.
+	if cmp -s "$temporary_network_file" "$network_file"; then
+		rm -f "$temporary_network_file" || return 1
+	else
+		mv -f "$temporary_network_file" "$network_file" || return 1
+	fi
+	temporary_network_file=
+}
+
+install_policy() {
+	# networkd uses the first matching file. Install the MAC allow rule before
+	# the data-NIC exclusion so an interrupted write cannot exclude every NIC.
+	write_network_file "$preferred_network_file" <<EOF || return 1
+[Match]
+MACAddress=$preferred_mac
+
+[Network]
+DHCP=yes
+
+[DHCP]
+ClientIdentifier=mac
+EOF
+	write_network_file "$runtime_network_file" <<'EOF'
+[Match]
+Name=enx* enp* enP*
+
+[Link]
+RequiredForOnline=no
+
+[Network]
+DHCP=no
+IPv6AcceptRA=no
+ConfigureWithoutCarrier=yes
+EOF
+}
+
+case "$mode:$#" in
+	prepare:1|configure:0|wait-online:1) ;;
+	handoff:2)
+		if [ ! -d "$nextroot" ]; then
+			finish failed nextroot_missing 1
+		fi
+		;;
+	*) finish failed invalid_arguments 1 ;;
+esac
 
 validate_positive_integer() {
 	value=$1
@@ -95,45 +240,53 @@ validate_positive_integer() {
 validate_positive_integer "$network_wait_seconds" SCOUT_NETWORK_WAIT_SECONDS
 validate_positive_integer "$network_poll_interval" SCOUT_NETWORK_POLL_INTERVAL
 
-if ! cmdline=$(cat "$cmdline_file"); then
-	echo "Skipping Scout network configuration: reason=cmdline_unreadable" >&2
-	finish skipped cmdline_unreadable 0
+# The loader's /run survives a soft reboot. Remove only Scout-owned policy;
+# a name-based rule copied into /etc by an older loader must not override it.
+if [ "$mode" = prepare ]; then
+	prepare_cleanup_armed=true
+	remove_policy || finish failed inherited_policy_remove_failed 1
 fi
 
-preferred_mac=
-mac_parameter_count=0
-for parameter in $cmdline
-do
-	case "$parameter" in
-		mac=*)
-			mac_parameter_count=$((mac_parameter_count + 1))
-			preferred_mac=${parameter#mac=}
+read_selection() {
+	selection_reason=
+	if ! cmdline=$(cat "$cmdline_file"); then
+		echo "Skipping Scout network configuration: reason=cmdline_unreadable" >&2
+		selection_reason=cmdline_unreadable
+		return 1
+	fi
+
+	preferred_mac=
+	mac_parameter_count=0
+	for parameter in $cmdline
+	do
+		case "$parameter" in
+			mac=*)
+				mac_parameter_count=$((mac_parameter_count + 1))
+				preferred_mac=${parameter#mac=}
+				;;
+		esac
+	done
+	if [ "$mac_parameter_count" -ne 1 ]; then
+		echo "Skipping Scout network configuration: reason=mac_parameter_count count=$mac_parameter_count" >&2
+		selection_reason=mac_parameter_count
+		return 1
+	fi
+
+	case "$preferred_mac" in
+		[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]) ;;
+		*)
+			echo "Skipping Scout network configuration: reason=invalid_mac_parameter" >&2
+			selection_reason=invalid_mac_parameter
+			return 1
 			;;
 	esac
-done
+	preferred_mac=$(printf '%s\n' "$preferred_mac" | tr '[:upper:]' '[:lower:]')
+}
+
+read_selection
 set +f
 
-if [ "$mac_parameter_count" -ne 1 ]; then
-	echo "Skipping Scout network configuration: reason=mac_parameter_count count=$mac_parameter_count" >&2
-	finish skipped mac_parameter_count 0
-fi
-
-case "$preferred_mac" in
-	[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f])
-		;;
-	*)
-		echo "Skipping Scout network configuration: reason=invalid_mac_parameter" >&2
-		finish skipped invalid_mac_parameter 0
-		;;
-esac
-preferred_mac=$(printf '%s\n' "$preferred_mac" | tr '[:upper:]' '[:lower:]')
-
-probe_start_seconds=$(uptime_seconds)
-probe_deadline_seconds=$((probe_start_seconds + network_wait_seconds))
-
-preferred_interface=
-while :
-do
+probe_preferred_interface() {
 	preferred_interface=
 	preferred_interface_count=0
 	for net_path in "$sys_class_net"/*
@@ -153,7 +306,8 @@ do
 	# a timing issue. Waiting cannot resolve it, so give up immediately.
 	if [ "$preferred_interface_count" -gt 1 ]; then
 		echo "Skipping Scout network configuration: reason=preferred_interface_count count=$preferred_interface_count" >&2
-		finish skipped preferred_interface_count 0
+		not_ready=preferred_interface_count
+		return 1
 	fi
 
 	not_ready=
@@ -165,7 +319,7 @@ do
 		# administratively down, so treat an unreadable value as no carrier yet.
 		if [ ! -r "$carrier_file" ] || [ "$(cat "$carrier_file" 2>/dev/null)" != 1 ]; then
 			not_ready=no_carrier
-		# Wait for IPv6 duplicate address detection before disabling other interfaces.
+		# Tentative or DAD-failed IPv6 addresses do not establish readiness.
 		elif ! global_addresses=$("$ip_command" -o address show dev "$preferred_interface" scope global -tentative -dadfailed); then
 			not_ready=address_inspection_failed
 		elif [ -z "$global_addresses" ]; then
@@ -173,15 +327,88 @@ do
 		fi
 	fi
 
-	[ -z "$not_ready" ] && break
+	[ -z "$not_ready" ]
+}
 
+if [ "$mode" = handoff ]; then
+	legacy_target="$nextroot/etc/systemd/network/00-forge-scout-nonpreferred.network"
+	if [ -f "$nextroot/etc/systemd/system/systemd-network-generator.service.d/50-forge-scout-network.conf" ]; then
+		# The new root regenerates policy from mac= before starting networking.
+		rm -f "$legacy_target" || finish failed handoff_policy_remove_failed 1
+		finish success handoff_preparation_supported 0
+	fi
+
+	if [ -n "$selection_reason" ] || ! probe_preferred_interface; then
+		if [ "${not_ready:-}" = address_inspection_failed ]; then
+			finish failed address_inspection_failed 1
+		fi
+		# An old root cannot regenerate the MAC rule. Let it bootstrap broadly
+		# if the selected interface is not usable at the handoff.
+		rm -f "$legacy_target" || finish failed handoff_policy_remove_failed 1
+		remove_runtime_policy || finish failed handoff_runtime_remove_failed 1
+		finish fallback handoff_without_usable_selection 0
+	fi
+
+	# Old Scout images need a self-contained rule, not a blanket exclusion
+	# whose allow rule lives only in the loader's /run.
+	write_network_file "$legacy_target" <<EOF || finish failed handoff_policy_write_failed 1
+[Match]
+Name=enx* enp* enP*
+Property=!INTERFACE=$preferred_interface
+
+[Link]
+RequiredForOnline=no
+
+[Network]
+DHCP=no
+IPv6AcceptRA=no
+ConfigureWithoutCarrier=yes
+EOF
+	remove_runtime_policy || finish failed handoff_runtime_remove_failed 1
+	finish success handoff_legacy_policy_installed 0
+fi
+
+if [ -n "$selection_reason" ]; then
+	if [ "$mode" = prepare ]; then
+		finish skipped "$selection_reason" 0
+	fi
+	use_broad_networking skipped "$selection_reason" 0
+fi
+
+if [ "$mode" = prepare ]; then
+	install_policy || finish failed network_configuration_install_failed 1
+	finish success prepared 0
+fi
+
+probe_start_seconds=$(uptime_seconds)
+probe_deadline_seconds=$((probe_start_seconds + network_wait_seconds))
+while ! probe_preferred_interface
+do
+	if [ "$not_ready" = preferred_interface_count ]; then
+		use_broad_networking skipped preferred_interface_count 0
+	fi
 	if ! sleep_before_deadline "$probe_deadline_seconds"; then
 		echo "Scout network configuration timed out: interface=${preferred_interface:-<none>} mac=$preferred_mac reason=$not_ready waited=${network_wait_seconds}s" >&2
-		finish failed preferred_interface_timeout 1
+		if [ "$not_ready" = address_inspection_failed ]; then
+			finish failed address_inspection_failed 1
+		fi
+		use_broad_networking failed preferred_interface_timeout 1
 	fi
 done
 
-runtime_network_file="$networkd_runtime_dir/00-forge-scout-nonpreferred.network"
+if [ "$mode" = wait-online ]; then
+	# Native wait observes networkd without requiring the system bus. Detailed
+	# policy and competing-address checks run in the later configure call.
+	"$wait_online_command" --timeout="$network_wait_seconds" || finish failed selected_wait_online_failed 1
+	if ! probe_preferred_interface; then
+		echo "Selected Scout interface lost readiness: reason=$not_ready" >&2
+		if [ "$not_ready" = address_inspection_failed ]; then
+			finish failed address_inspection_failed 1
+		fi
+		use_broad_networking failed preferred_interface_lost_readiness 1
+	fi
+	finish success completed 0
+fi
 
 # Build the target set from the configuration networkd selected for each link.
 # Name= also matches alternative interface names, so matching only the current
@@ -189,61 +416,29 @@ runtime_network_file="$networkd_runtime_dir/00-forge-scout-nonpreferred.network"
 set --
 for net_path in "$sys_class_net"/*
 do
-	[ -e "$net_path" ] || continue
+	[ -d "$net_path" ] || continue
 
 	interface=${net_path##*/}
 	[ "$interface" = "$preferred_interface" ] && continue
 
 	if ! network_status=$(
-		"$networkctl_command" --json=short status "$interface" 2>/dev/null
+		"$networkctl_command" --json=short status "$interface"
 	); then
 		# A link can disappear while interfaces are being enumerated.
 		[ -e "$net_path" ] || continue
 
-		echo "Skipping Scout network configuration: interface=$interface reason=network_status_inspection_failed" >&2
-		finish skipped network_status_inspection_failed 0
+		echo "Failed to inspect Scout network configuration: interface=$interface reason=network_status_inspection_failed" >&2
+		finish failed network_status_inspection_failed 1
 	fi
 
 	case "$network_status" in
-		*"\"NetworkFile\":\"$networkd_dhcp_file\""*|*"\"NetworkFile\":\"$runtime_network_file\""*)
+		*"\"NetworkFile\":\"$networkd_dhcp_file\""*|*"\"NetworkFile\":\"$runtime_network_file\""*|*"\"NetworkFile\":\"$legacy_runtime_file\""*|*"\"NetworkFile\":\"$legacy_network_file\""*)
 			set -- "$@" "$interface"
 			;;
 	esac
 done
 
-if ! mkdir -p "$networkd_runtime_dir"; then
-	echo "Failed to create networkd runtime directory: directory=$networkd_runtime_dir" >&2
-	finish failed runtime_directory_create_failed 1
-fi
-
-if ! temporary_network_file=$(mktemp "$networkd_runtime_dir/.forge-scout-network.XXXXXX"); then
-	echo "Failed to create temporary networkd configuration: directory=$networkd_runtime_dir" >&2
-	finish failed temporary_file_create_failed 1
-fi
-
-if ! {
-	printf '%s\n' \
-		'[Match]' \
-		'Name=enx* enp* enP*' \
-		"Property=!INTERFACE=$preferred_interface" \
-		'' \
-		'[Link]' \
-		'RequiredForOnline=no' \
-		'' \
-		'[Network]' \
-		'DHCP=no' \
-		'IPv6AcceptRA=no' \
-		'ConfigureWithoutCarrier=yes'
-} >"$temporary_network_file"; then
-	echo "Failed to write networkd configuration: path=$temporary_network_file" >&2
-	rm -f "$temporary_network_file"
-	finish failed network_configuration_write_failed 1
-fi
-
-if ! chmod 0644 "$temporary_network_file" ||
-	! mv -f "$temporary_network_file" "$runtime_network_file"; then
-	echo "Failed to install networkd configuration: path=$runtime_network_file" >&2
-	rm -f "$temporary_network_file"
+if ! install_policy || ! rm -f "$legacy_runtime_file" "$legacy_network_file"; then
 	finish failed network_configuration_install_failed 1
 fi
 
@@ -256,6 +451,9 @@ echo "Selected preferred network interface: interface=$preferred_interface mac=$
 failed=false
 failure_reason=unknown_failure
 
+# Reload can restart DHCP when switching from broad bootstrap to the MAC rule.
+# Verify the selected link again alongside withdrawal on the other links.
+set -- "$preferred_interface" "$@"
 reconfiguration_start_seconds=$(uptime_seconds)
 reconfiguration_deadline_seconds=$((reconfiguration_start_seconds + network_wait_seconds))
 wait_complete=false
@@ -267,21 +465,25 @@ do
 	incomplete_report=
 	for interface
 	do
-		# A removed interface is safe; if it reappears, networkd will apply the
-		# persistent wildcard configuration.
-		if [ ! -e "$sys_class_net/$interface" ]; then
+		# A removed nonpreferred link is safe; if it reappears, networkd will
+		# apply the wildcard configuration.
+		if [ "$interface" != "$preferred_interface" ] && [ ! -e "$sys_class_net/$interface" ]; then
 			continue
 		fi
 
+		expected_network_file=$runtime_network_file
+		[ "$interface" != "$preferred_interface" ] || expected_network_file=$preferred_network_file
 		incomplete_reason=
 		incomplete_detail=
-		if ! network_status=$(
-			"$networkctl_command" --json=short status "$interface" 2>/dev/null
+		if [ "$interface" = "$preferred_interface" ] && [ ! -e "$sys_class_net/$interface" ]; then
+			incomplete_reason=no_interface
+		elif ! network_status=$(
+			"$networkctl_command" --json=short status "$interface"
 		); then
 			incomplete_reason=network_status_inspection_failed
 		else
 			case "$network_status" in
-				*"\"NetworkFile\":\"$runtime_network_file\""*)
+				*"\"NetworkFile\":\"$expected_network_file\""*)
 					;;
 				*)
 					incomplete_reason=unexpected_network_file
@@ -299,7 +501,17 @@ do
 						break
 						;;
 					*'"AdministrativeState":"configured"'*)
-						if ! global_addresses=$(
+						if [ "$interface" = "$preferred_interface" ]; then
+							if [ "$(cat "$sys_class_net/$interface/carrier" 2>/dev/null)" != 1 ]; then
+								incomplete_reason=no_carrier
+							elif ! global_addresses=$("$ip_command" -o address show dev "$interface" scope global -tentative -dadfailed); then
+								incomplete_reason=address_inspection_failed
+							elif [ -n "$global_addresses" ]; then
+								continue
+							else
+								incomplete_reason=no_global_address
+							fi
+						elif ! global_addresses=$(
 							"$ip_command" -o address show dev "$interface" scope global
 						); then
 							incomplete_reason=address_inspection_failed
@@ -358,6 +570,10 @@ $incomplete_message"
 
 	if ! sleep_before_deadline "$reconfiguration_deadline_seconds"; then
 		[ -z "$incomplete_report" ] || printf '%s\n' "$incomplete_report" >&2
+		if ! probe_preferred_interface && [ "$not_ready" != address_inspection_failed ]; then
+			echo "Selected Scout interface unavailable after reconfiguration: reason=$not_ready" >&2
+			use_broad_networking failed preferred_interface_timeout 1
+		fi
 		break
 	fi
 done
