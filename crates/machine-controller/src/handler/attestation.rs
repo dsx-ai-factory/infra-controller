@@ -334,11 +334,25 @@ pub(crate) async fn handle_spdm_poll_state(
     job_id: &uuid::Uuid,
     failure_source: FailureSource,
     next_skip_state: ManagedHostState,
+    restart_state: ManagedHostState,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let mut txn = db_pool.begin().await?;
 
+    // A completed job may be removed before the machine controller reads its result.
+    // Restart in the caller's lifecycle stage; the next iteration creates a fresh job.
     let attestation_status =
-        db::attestation::spdm::get_attestation_job_status(&mut txn, job_id).await?;
+        match db::attestation::spdm::get_attestation_job_status(&mut txn, job_id).await {
+            Ok(status) => status,
+            Err(db::DatabaseError::NotFoundError { .. }) => {
+                tracing::info!(
+                    machine_id = %host_machine_id,
+                    %job_id,
+                    "SPDM attestation job not found; restarting attestation"
+                );
+                return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
+            }
+            Err(error) => return Err(error.into()),
+        };
 
     // passed or cancelled -> just move to the next state
     // failed -> get states for all devices and log to the Failed state logging them there
@@ -347,9 +361,21 @@ pub(crate) async fn handle_spdm_poll_state(
             Ok(StateHandlerOutcome::transition(next_skip_state).with_txn(txn))
         }
         SpdmAttestationStatus::Failed => {
+            // The job can also disappear between the status and details queries.
             let attestation_states =
-                db::attestation::spdm::get_attestations_for_job_id(&mut txn, job_id).await?;
-            // here, move to failed state with a full details
+                match db::attestation::spdm::get_attestations_for_job_id(&mut txn, job_id).await {
+                    Ok(states) => states,
+                    Err(db::DatabaseError::NotFoundError { .. }) => {
+                        tracing::info!(
+                            machine_id = %host_machine_id,
+                            %job_id,
+                            "SPDM attestation job not found; restarting attestation"
+                        );
+                        return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+            // here, move to failed state with full details
             Ok(StateHandlerOutcome::transition(ManagedHostState::Failed {
                 details: FailureDetails {
                     cause: FailureCause::SpdmAttestationFailed {

@@ -2136,6 +2136,12 @@ impl MachineStateHandler {
                                         StateMachineArea::AssignedInstance,
                                     ),
                                     next_skip_state,
+                                    ManagedHostState::PostAssignedMeasuring {
+                                        attestation_mode: AttestationMode::SpdmAttestation {
+                                            spdm_measuring_state:
+                                                SpdmMeasuringState::TriggerMeasurements,
+                                        },
+                                    },
                                 )
                                 .await
                             }
@@ -2170,6 +2176,9 @@ impl MachineStateHandler {
                             job_id,
                             FailureSource::StateMachineArea(StateMachineArea::MainFlow),
                             next_skip_state,
+                            ManagedHostState::PreAssignedMeasuring {
+                                spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
+                            },
                         )
                         .await
                     }
@@ -7924,6 +7933,12 @@ impl StateHandler for HostMachineStateHandler {
                                 job_id,
                                 FailureSource::StateMachineArea(StateMachineArea::HostInit),
                                 next_skip_state,
+                                ManagedHostState::HostInit {
+                                    machine_state: MachineState::SpdmMeasuring {
+                                        spdm_measuring_state:
+                                            SpdmMeasuringState::TriggerMeasurements,
+                                    },
+                                },
                             )
                             .await
                         }

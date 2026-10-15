@@ -528,6 +528,7 @@ pub async fn get_attestations_for_machine_id(
     Ok(attestation_details)
 }
 
+/// Returns all device attestations for a job, or `NotFoundError` if it has no devices.
 pub async fn get_attestations_for_job_id(
     txn: &mut PgConnection,
     job_id: &uuid::Uuid,
@@ -538,11 +539,21 @@ pub async fn get_attestations_for_job_id(
         WHERE job_id = $1
     "#;
 
-    sqlx::query_as(query)
+    let attestation_details: Vec<SpdmDeviceAttestationDetails> = sqlx::query_as(query)
         .bind(job_id)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    // A job exists only through its device rows; an empty result means it is missing.
+    if attestation_details.is_empty() {
+        return Err(DatabaseError::NotFoundError {
+            kind: "SPDM Attestation Job",
+            id: job_id.to_string(),
+        });
+    }
+
+    Ok(attestation_details)
 }
 
 /// this loads a device attestation from the DB
