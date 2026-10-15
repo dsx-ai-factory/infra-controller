@@ -282,8 +282,17 @@ pub struct StaticBmcEndpoint {
     #[serde(default)]
     pub port: Option<u16>,
     pub mac: String,
-    pub username: String,
+    /// Inline username, required unless `username_file` is set.
+    pub username: Option<String>,
+    /// Optional inline password. Mutually exclusive with `password_file`.
     pub password: Option<String>,
+    /// UTF-8 username file, mutually exclusive with `username`.
+    /// Reread before requests and stream connections; one trailing LF or CRLF
+    /// is removed. Relative paths use the process working directory.
+    pub username_file: Option<PathBuf>,
+    /// UTF-8 password file, mutually exclusive with `password`.
+    /// Uses the same path and reload rules as `username_file`.
+    pub password_file: Option<PathBuf>,
     pub machine: Option<StaticMachineEndpoint>,
     pub power_shelf: Option<StaticPowerShelfEndpoint>,
     pub switch: Option<StaticSwitchEndpoint>,
@@ -384,6 +393,28 @@ impl StaticBmcEndpoint {
     }
 
     fn validate(&self, config_path: &str, index: usize) -> Result<(), String> {
+        if self.username.is_none() && self.username_file.is_none() {
+            return Err(format!(
+                "{config_path}[{index}] requires username or username_file"
+            ));
+        }
+        for (name, inline, path) in [
+            ("username", &self.username, &self.username_file),
+            ("password", &self.password, &self.password_file),
+        ] {
+            if let Some(path) = path {
+                if path.as_os_str().is_empty() {
+                    return Err(format!(
+                        "{config_path}[{index}].{name}_file must not be empty"
+                    ));
+                }
+                if inline.is_some() {
+                    return Err(format!(
+                        "{config_path}[{index}].{name} and {name}_file are mutually exclusive"
+                    ));
+                }
+            }
+        }
         if self.identity_count() > 1 {
             return Err(format!(
                 "{config_path}[{index}] must specify at most one of machine, power_shelf, or switch"
@@ -3100,7 +3131,9 @@ mod tests {
             ip: "192.0.2.1".parse().unwrap(),
             port: None,
             mac: "00:11:22:33:44:55".to_string(),
-            username: "admin".to_string(),
+            username: Some("admin".to_string()),
+            username_file: None,
+            password_file: None,
             password: None,
             machine: None,
             power_shelf: None,
@@ -3470,6 +3503,30 @@ username = "root"
             .extract::<Config>();
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn static_credential_source_validation() {
+        scenarios!(run = |fields: &str| -> Result<(), ()> {
+            let input = format!("ip = \"192.0.2.1\"\nmac = \"00:11:22:33:44:55\"\n{fields}");
+            let endpoint: StaticBmcEndpoint = Figment::new()
+                .merge(Toml::string(&input)).extract().map_err(|_| ())?;
+            endpoint.validate("endpoint_sources.static_bmc_endpoints", 0).map_err(|_| ())
+        };
+            "supported sources" {
+                "username = \"admin\"" => Yields(()),
+                "username_file = \"user\"\npassword_file = \"pass\"" => Yields(()),
+                "username = \"admin\"\npassword_file = \"pass\"" => Yields(()),
+                "username_file = \"user\"\npassword = \"secret\"" => Yields(()),
+            }
+            "invalid sources" {
+                "password_file = \"pass\"" => Fails,
+                "username = \"admin\"\nusername_file = \"user\"" => Fails,
+                "username = \"admin\"\npassword = \"secret\"\npassword_file = \"pass\"" => Fails,
+                "username_file = \"\"" => Fails,
+                "username = \"admin\"\npassword_file = \"\"" => Fails,
+            }
+        );
     }
 
     #[test]

@@ -169,6 +169,13 @@ fn admit_one_after_cooldown(since: &mut Instant, cooldown: Duration) -> bool {
 pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 pub trait CredentialProvider: Send + Sync {
+    /// Whether consumers must reread credentials before Redfish operations,
+    /// REST collection passes, and gNMI connections. Defaults to false.
+    /// Fixed and API credentials retain their existing authentication-error refresh policy.
+    fn reload_before_use(&self) -> bool {
+        false
+    }
+
     fn fetch_credentials<'a>(
         &'a self,
         endpoint: &'a BmcAddr,
@@ -253,7 +260,7 @@ pub struct BmcClient {
     provider: Arc<dyn CredentialProvider>,
     credential_generation: AtomicU64,
     init: OnceCell<()>,
-    refresh_lock: Mutex<()>,
+    refresh_lock: Mutex<Option<BmcCredentials>>,
 
     circuit: StdMutex<CircuitState>,
     /// Lock-free fast-path hint mirroring `circuit`: `false` iff the circuit is
@@ -318,7 +325,7 @@ impl BmcClient {
             provider,
             credential_generation: AtomicU64::new(0),
             init: OnceCell::new(),
-            refresh_lock: Mutex::new(()),
+            refresh_lock: Mutex::new(None),
             circuit: StdMutex::new(CircuitState::Closed),
             circuit_tripped: AtomicBool::new(false),
             known_bad_credentials: StdMutex::new(None),
@@ -370,7 +377,20 @@ impl BmcClient {
         result
     }
 
+    /// Loads initial credentials, or rereads file credentials before use.
+    /// Changed values replace the client's credentials; read failures prevent
+    /// the operation and are retried after the credential-fetch cooldown.
     pub async fn ensure_credentials(&self) -> Result<(), HealthError> {
+        if self.provider.reload_before_use() {
+            let mut applied = self.refresh_lock.lock().await;
+            let credentials = self.fetch_credentials().await?;
+            if applied.as_ref() != Some(&credentials) {
+                self.inner.set_credentials(credentials.clone().into());
+                self.credential_generation.fetch_add(1, Ordering::AcqRel);
+                *applied = Some(credentials);
+            }
+            return Ok(());
+        }
         self.init
             .get_or_try_init(|| async {
                 // The cell runs one initializer at a time, so a fan-out that
@@ -399,7 +419,7 @@ impl BmcClient {
         error: &HealthError,
         observed_generation: Option<u64>,
     ) -> Result<(), HealthError> {
-        let _guard = self.refresh_lock.lock().await;
+        let mut applied = self.refresh_lock.lock().await;
         if observed_generation.is_some_and(|generation| {
             generation != self.credential_generation.load(Ordering::Acquire)
         }) {
@@ -421,7 +441,8 @@ impl BmcClient {
                 "failed to refresh BMC credentials after auth error {error}: {refresh_error}"
             ))
         })?;
-        self.inner.set_credentials(credentials.into());
+        self.inner.set_credentials(credentials.clone().into());
+        *applied = Some(credentials);
         self.credential_generation.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
@@ -3740,6 +3761,96 @@ mod tests {
         ];
 
         check_values(cases, |error| error.error_class());
+    }
+
+    #[tokio::test]
+    async fn static_credential_files_reload_before_public_requests() {
+        use std::io::{Read, Write};
+
+        use base64::Engine;
+
+        use crate::config::StaticBmcEndpoint;
+        use crate::endpoint::{EndpointSource, StaticEndpointSource};
+
+        let dir = tempfile::tempdir().unwrap();
+        let username_file = dir.path().join("username");
+        let password_file = dir.path().join("password");
+        std::fs::write(&username_file, "admin\n").unwrap();
+        std::fs::write(&password_file, "first\n").unwrap();
+        let config: StaticBmcEndpoint = serde_json::from_value(serde_json::json!({
+            "ip": "127.0.0.1",
+            "mac": "00:11:22:33:44:55",
+            "username_file": username_file,
+            "password_file": password_file,
+        }))
+        .unwrap();
+
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let base_url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut headers = Vec::new();
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                headers.push(
+                    request
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("authorization")
+                                .then(|| value.trim().to_string())
+                        })
+                        .unwrap(),
+                );
+                write!(stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    ENTITY_BODY.len(), ENTITY_BODY).unwrap();
+            }
+            headers
+        });
+        let source =
+            StaticEndpointSource::from_config(&[config], &reqwest(), Some(&base_url), 0, None);
+        let endpoints = source.fetch_bmc_hosts().await.unwrap();
+        let client = &endpoints[0].bmc;
+        client
+            .get::<TestEntity>(&ODataId::service_root())
+            .await
+            .unwrap();
+        client
+            .get::<TestEntity>(&ODataId::service_root())
+            .await
+            .unwrap();
+        assert_eq!(
+            client.credential_generation.load(Ordering::Acquire),
+            1,
+            "unchanged files must not invalidate credential generations"
+        );
+
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, "second \r\n").unwrap();
+        std::fs::rename(&replacement, &password_file).unwrap();
+        std::fs::write(&username_file, "rotated\n").unwrap();
+        client
+            .get::<TestEntity>(&ODataId::service_root())
+            .await
+            .unwrap();
+        assert_eq!(client.credential_generation.load(Ordering::Acquire), 2);
+        let expected = ["admin:first", "admin:first", "rotated:second "].map(|value| {
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(value)
+            )
+        });
+        assert_eq!(server.join().unwrap(), expected);
     }
 
     #[tokio::test]

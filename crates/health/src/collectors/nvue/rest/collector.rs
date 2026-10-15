@@ -275,7 +275,7 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
     async fn run_iteration(&mut self) -> Result<IterationResult, HealthError> {
         self.client.ensure_http_client().await?;
 
-        if !self.client.has_credentials()
+        if (self.provider.reload_before_use() || !self.client.has_credentials())
             && let Err(error) = self.refresh_rest_credentials().await
         {
             tracing::warn!(
@@ -2312,6 +2312,31 @@ mod tests {
             summarize_iteration_response,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn rest_iterations_reread_credential_files_and_recover() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("password");
+        std::fs::write(&path, "first").unwrap();
+        let config = serde_json::from_value(serde_json::json!({
+            "ip": "127.0.0.1", "mac": "00:11:22:33:44:55",
+            "username": "admin", "password_file": path,
+        }))
+        .unwrap();
+        let provider =
+            Arc::new(crate::file_credentials::FileCredentialProvider::from_config(&config));
+        let mut collector = collector_with_provider(provider);
+        assert_eq!(collector.run_iteration().await.unwrap().fetch_failures, 0);
+        std::fs::remove_file(&path).unwrap();
+        let failed = collector.run_iteration().await.unwrap();
+        assert_eq!(failed.fetch_failures, 1);
+        assert!(
+            !failed.refresh_triggered,
+            "unreadable files must prevent collection with stale credentials"
+        );
+        std::fs::write(&path, "second").unwrap();
+        assert_eq!(collector.run_iteration().await.unwrap().fetch_failures, 0);
     }
 
     #[tokio::test]
