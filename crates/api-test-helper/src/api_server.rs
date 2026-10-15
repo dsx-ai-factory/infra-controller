@@ -103,6 +103,7 @@ pub async fn start(
         allow_insecure_discovery = {insecure_discovery}
         scout_boot_interface_correction_enabled = true
         enable_admin_ui = false
+        panic_on_early_task_return = true
 
         [ib_config]
         max_partition_per_tenant = 31

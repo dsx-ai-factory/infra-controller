@@ -50,7 +50,7 @@ use crate::cfg::file::{
     default_database_pool_acquire_timeout, default_database_pool_idle_timeout,
     default_database_pool_max_lifetime, default_database_startup_retry_timeout,
     default_max_find_by_ids, default_max_site_prefix_isolation_rules,
-    default_max_site_prefixes_per_tenant, default_pxe_public_base_url,
+    default_max_site_prefixes_per_tenant, default_pxe_public_base_url, default_shutdown_timeout,
 };
 #[cfg(test)]
 use crate::cfg::file::{
@@ -385,6 +385,8 @@ pub fn get() -> CarbideConfig {
         credentials: Default::default(),
         dhcp_lease_expiry_handling: false,
         certificates: Default::default(),
+        shutdown_timeout: default_shutdown_timeout(),
+        panic_on_early_task_return: true,
     }
 }
 

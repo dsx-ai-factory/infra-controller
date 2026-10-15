@@ -1010,6 +1010,21 @@ pub struct CarbideConfig {
     /// store; absent means certs are issued from the credential Vault.
     #[serde(default)]
     pub certificates: CertificatesConfig,
+
+    /// How long to wait for the nico-api server to shut down gracefully before forcing background
+    /// tasks to abort.
+    #[serde(
+        default = "default_shutdown_timeout",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub shutdown_timeout: std::time::Duration,
+
+    /// Intended for integration testing: Whether to panic if a background task (for instance, state
+    /// controllers, site-explorer) finishes early before we've shut down. Not recommended for
+    /// production.
+    #[serde(default)]
+    pub panic_on_early_task_return: bool,
 }
 
 /// Global admission limits for business requests handled by nico-api.
@@ -3979,6 +3994,10 @@ pub const fn default_bmc_session_lockout_threshold() -> u32 {
 
 pub const fn default_bmc_max_sessions_per_caller() -> usize {
     4
+}
+
+pub const fn default_shutdown_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(60)
 }
 
 /// Routing of core's own BMC Redfish traffic through nico-bmc-proxy.
