@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the MachineLldpNeighbor type satisfies the MappedNullable interface at compile time
@@ -41,15 +43,18 @@ type MachineLldpNeighbor struct {
 	// LLDP port id value advertised by the neighbor
 	RemotePortValue *string `json:"remotePortValue,omitempty"`
 	// LLDP-MED inventory advertised by the neighbor. Always present; null when the neighbor does not advertise one.
-	MedInventory NullableMachineLldpMedInventory `json:"medInventory,omitempty"`
+	MedInventory NullableMachineLldpMedInventory `json:"medInventory"`
 }
+
+type _MachineLldpNeighbor MachineLldpNeighbor
 
 // NewMachineLldpNeighbor instantiates a new MachineLldpNeighbor object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineLldpNeighbor() *MachineLldpNeighbor {
+func NewMachineLldpNeighbor(medInventory NullableMachineLldpMedInventory) *MachineLldpNeighbor {
 	this := MachineLldpNeighbor{}
+	this.MedInventory = medInventory
 	return &this
 }
 
@@ -349,16 +354,18 @@ func (o *MachineLldpNeighbor) SetRemotePortValue(v string) {
 	o.RemotePortValue = &v
 }
 
-// GetMedInventory returns the MedInventory field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetMedInventory returns the MedInventory field value
+// If the value is explicit nil, the zero value for MachineLldpMedInventory will be returned
 func (o *MachineLldpNeighbor) GetMedInventory() MachineLldpMedInventory {
-	if o == nil || IsNil(o.MedInventory.Get()) {
+	if o == nil || o.MedInventory.Get() == nil {
 		var ret MachineLldpMedInventory
 		return ret
 	}
+
 	return *o.MedInventory.Get()
 }
 
-// GetMedInventoryOk returns a tuple with the MedInventory field value if set, nil otherwise
+// GetMedInventoryOk returns a tuple with the MedInventory field value
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineLldpNeighbor) GetMedInventoryOk() (*MachineLldpMedInventory, bool) {
@@ -368,28 +375,9 @@ func (o *MachineLldpNeighbor) GetMedInventoryOk() (*MachineLldpMedInventory, boo
 	return o.MedInventory.Get(), o.MedInventory.IsSet()
 }
 
-// HasMedInventory returns a boolean if a field has been set.
-func (o *MachineLldpNeighbor) HasMedInventory() bool {
-	if o != nil && o.MedInventory.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetMedInventory gets a reference to the given NullableMachineLldpMedInventory and assigns it to the MedInventory field.
+// SetMedInventory sets field value
 func (o *MachineLldpNeighbor) SetMedInventory(v MachineLldpMedInventory) {
 	o.MedInventory.Set(&v)
-}
-
-// SetMedInventoryNil sets the value for MedInventory to be an explicit nil
-func (o *MachineLldpNeighbor) SetMedInventoryNil() {
-	o.MedInventory.Set(nil)
-}
-
-// UnsetMedInventory ensures that no value is present for MedInventory, not even an explicit nil
-func (o *MachineLldpNeighbor) UnsetMedInventory() {
-	o.MedInventory.Unset()
 }
 
 func (o MachineLldpNeighbor) MarshalJSON() ([]byte, error) {
@@ -429,10 +417,48 @@ func (o MachineLldpNeighbor) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.RemotePortValue) {
 		toSerialize["remotePortValue"] = o.RemotePortValue
 	}
-	if o.MedInventory.IsSet() {
-		toSerialize["medInventory"] = o.MedInventory.Get()
-	}
+	toSerialize["medInventory"] = o.MedInventory.Get()
 	return toSerialize, nil
+}
+
+func (o *MachineLldpNeighbor) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"medInventory",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	nullableRequiredProperties := map[string]struct{}{
+		"medInventory": {},
+	}
+	for _, requiredProperty := range requiredProperties {
+		_, nullable := nullableRequiredProperties[requiredProperty]
+		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varMachineLldpNeighbor := _MachineLldpNeighbor{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varMachineLldpNeighbor)
+
+	if err != nil {
+		return err
+	}
+
+	*o = MachineLldpNeighbor(varMachineLldpNeighbor)
+
+	return err
 }
 
 type NullableMachineLldpNeighbor struct {

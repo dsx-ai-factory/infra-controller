@@ -28975,6 +28975,9 @@ components:
       title: MachineLldpNeighbor
       type: object
       description: Describes an LLDP neighbor observed on one of the Machine NICs
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - medInventory
       examples:
         - macAddress: '02:00:00:00:01:b0'
           localPort: enp1s0np0
@@ -29026,6 +29029,8 @@ components:
             - $ref: '#/components/schemas/MachineLldpMedInventory'
             - type: 'null'
           description: 'LLDP-MED inventory advertised by the neighbor. Always present; null when the neighbor does not advertise one.'
+      required:
+        - medInventory
     MachineLldpMedInventory:
       title: MachineLldpMedInventory
       type: object
