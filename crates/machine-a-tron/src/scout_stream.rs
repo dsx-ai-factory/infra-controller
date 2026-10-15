@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::future::Future;
 use std::time::Duration;
 
 use carbide_uuid::machine::MachineId;
@@ -39,6 +40,7 @@ use rpc::protos::mlx_device::{
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tonic::Code;
 
 const STREAM_CHANNEL_CAPACITY: usize = 8;
 const UNSUPPORTED_MESSAGE: &str = "machine-a-tron does not simulate Mellanox ScoutStream requests";
@@ -98,9 +100,31 @@ async fn run(
     reconnect_interval: Duration,
     cancellation: CancellationToken,
 ) {
+    tracing::info!(%machine_id, %api_endpoint, "ScoutStream actor started");
+    supervise(machine_id, reconnect_interval, &cancellation, || {
+        run_connection(machine_id, &api_endpoint, &client_config, &cancellation)
+    })
+    .await;
+}
+
+/// Reopens the stream through `connect` until the actor is cancelled or the API
+/// denies it.
+///
+/// A closed or failed stream is reopened after `reconnect_interval`.
+/// `PermissionDenied` is terminal: the identity the actor presents does not change
+/// while it runs, so a retry would be denied again.
+async fn supervise<Connect, Connection>(
+    machine_id: MachineId,
+    reconnect_interval: Duration,
+    cancellation: &CancellationToken,
+    mut connect: Connect,
+) where
+    Connect: FnMut() -> Connection,
+    Connection: Future<Output = Result<(), Error>>,
+{
     loop {
-        tracing::info!(%machine_id, %api_endpoint, "ScoutStream connection attempt started");
-        let result = run_connection(machine_id, &api_endpoint, &client_config, &cancellation).await;
+        tracing::info!(%machine_id, "ScoutStream connection attempt started");
+        let result = connect().await;
 
         if cancellation.is_cancelled() {
             tracing::info!(%machine_id, "ScoutStream actor stopped");
@@ -109,6 +133,10 @@ async fn run(
 
         match result {
             Ok(()) => tracing::info!(%machine_id, "ScoutStream connection closed"),
+            Err(Error::Grpc(status)) if status.code() == Code::PermissionDenied => {
+                tracing::warn!(%machine_id, error = %status, "ScoutStream denied, actor stopped");
+                return;
+            }
             Err(error) => {
                 tracing::warn!(%machine_id, error = %error, "ScoutStream connection failed")
             }
@@ -269,12 +297,97 @@ fn mlx_error() -> MlxDeviceStreamError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::{Case, check_cases_async};
     use carbide_uuid::machine::{MachineIdSource, MachineType};
+    use tonic::Status;
 
     use super::*;
 
+    const RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
+
     fn machine_id() -> MachineId {
         MachineId::new(MachineIdSource::Tpm, [1; 32], MachineType::Host)
+    }
+
+    /// What the actor loop did before it exited.
+    #[derive(Debug, PartialEq)]
+    struct Observed {
+        attempt_count: usize,
+        waited: Duration,
+    }
+
+    /// Drives the actor loop with scripted connection results. Once the script is
+    /// exhausted the next attempt cancels the actor, which bounds every row.
+    async fn supervise_scripted(script: Vec<Result<(), Error>>) -> Result<Observed, ()> {
+        let cancellation = CancellationToken::new();
+        let mut script = VecDeque::from(script);
+        let mut attempt_count = 0;
+        let started = tokio::time::Instant::now();
+        let actor = supervise(machine_id(), RECONNECT_INTERVAL, &cancellation, || {
+            attempt_count += 1;
+            let next = script.pop_front();
+            let cancellation = cancellation.clone();
+            async move {
+                next.unwrap_or_else(|| {
+                    cancellation.cancel();
+                    Ok(())
+                })
+            }
+        });
+        tokio::time::timeout(RECONNECT_INTERVAL * 4, actor)
+            .await
+            .map_err(drop)?;
+        Ok(Observed {
+            attempt_count,
+            waited: started.elapsed(),
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnects_unless_denied_or_cancelled() {
+        check_cases_async(
+            [
+                Case {
+                    scenario: "closed stream reconnects after the interval",
+                    input: vec![Ok(())],
+                    expect: Yields(Observed {
+                        attempt_count: 2,
+                        waited: RECONNECT_INTERVAL,
+                    }),
+                },
+                Case {
+                    scenario: "transport failure reconnects after the interval",
+                    input: vec![Err(Error::Grpc(Status::unavailable("api restarting")))],
+                    expect: Yields(Observed {
+                        attempt_count: 2,
+                        waited: RECONNECT_INTERVAL,
+                    }),
+                },
+                Case {
+                    scenario: "permission denied stops without a retry",
+                    input: vec![Err(Error::Grpc(Status::permission_denied(
+                        "caller is not the machine",
+                    )))],
+                    expect: Yields(Observed {
+                        attempt_count: 1,
+                        waited: Duration::ZERO,
+                    }),
+                },
+                Case {
+                    scenario: "cancellation during an attempt exits",
+                    input: vec![],
+                    expect: Yields(Observed {
+                        attempt_count: 1,
+                        waited: Duration::ZERO,
+                    }),
+                },
+            ],
+            supervise_scripted,
+        )
+        .await;
     }
 
     #[test]
