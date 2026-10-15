@@ -16,7 +16,6 @@
  */
 
 //! Describes hardware that is discovered by Forge
-
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::IpAddr;
@@ -327,10 +326,13 @@ impl HardwareInfo {
             .collect()
     }
 
-    pub fn is_gbx00(&self) -> bool {
-        self.dmi_data
-            .as_ref()
-            .is_some_and(|dmi| dmi.product_name.contains("GB200")) // TODO: for now just do GB200
+    /// Returns true when hardware reports at least one GPU with NVLink platform metadata
+    /// and an MNNVL family name on the GPU or, when absent there, in DMI `product_name`.
+    pub fn is_mnnvl_capable(&self) -> bool {
+        let dmi_product_name = self.dmi_data.as_ref().map(|dmi| dmi.product_name.as_str());
+        self.gpus
+            .iter()
+            .any(|gpu| is_mnnvl_capable_gpu(gpu, dmi_product_name))
     }
 
     pub fn is_dgx_h100(&self) -> bool {
@@ -338,6 +340,48 @@ impl HardwareInfo {
             .as_ref()
             .is_some_and(|dmi| dmi.sys_vendor == "NVIDIA" && dmi.product_name == "DGXH100")
     }
+}
+
+/// Substrings matched against GPU `name` or DMI `product_name` to identify MNNVL-capable hardware.
+pub const MNNVL_KNOWN_GPU_NAMES: &[&str] = &["GB200", "GB300", "VR NVL"];
+
+/// Returns true when `name` contains any [`MNNVL_KNOWN_GPU_NAMES`] entry.
+pub fn gpu_name_indicates_mnnvl(name: &str) -> bool {
+    MNNVL_KNOWN_GPU_NAMES
+        .iter()
+        .any(|marker| name.contains(marker))
+}
+
+/// Returns true when a GPU has `platform_info` and its name matches an MNNVL marker, or when
+/// the GPU name does not match and DMI `product_name` does.
+pub fn is_mnnvl_capable_gpu(gpu: &Gpu, dmi_product_name: Option<&str>) -> bool {
+    if gpu.platform_info.is_none() {
+        return false;
+    }
+    if gpu_name_indicates_mnnvl(&gpu.name) {
+        return true;
+    }
+    dmi_product_name.is_some_and(gpu_name_indicates_mnnvl)
+}
+
+/// Builds SQL `LIKE` conditions matching GPU `name` or DMI `product_name` against
+/// [`MNNVL_KNOWN_GPU_NAMES`].
+pub fn mnnvl_gpu_name_sql_like_conditions() -> String {
+    let gpu_name_conditions = MNNVL_KNOWN_GPU_NAMES
+        .iter()
+        .map(|marker| format!("gpu->>'name' LIKE '%{marker}%'"))
+        .collect::<Vec<_>>()
+        .join("\n                      OR ");
+    let dmi_product_name_conditions = MNNVL_KNOWN_GPU_NAMES
+        .iter()
+        .map(|marker| {
+            format!(
+                "mt.topology->'discovery_data'->'Info'->'dmi_data'->>'product_name' LIKE '%{marker}%'"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n                      OR ");
+    format!("{gpu_name_conditions}\n                      OR {dmi_product_name_conditions}")
 }
 
 #[derive(Debug, Default, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -911,41 +955,97 @@ mod tests {
         );
     }
 
-    // `is_gbx00()` checks for a "GB200" substring in the product name; `is_dgx_h100()`
-    // wants an exact NVIDIA / DGXH100 pairing.
+    fn gpu_with_platform_info(name: &str) -> Gpu {
+        Gpu {
+            name: name.to_string(),
+            serial: String::new(),
+            driver_version: String::new(),
+            vbios_version: String::new(),
+            inforom_version: String::new(),
+            total_memory: String::new(),
+            frequency: String::new(),
+            pci_bus_id: String::new(),
+            platform_info: Some(GpuPlatformInfo {
+                chassis_serial: "chassis-1".to_string(),
+                slot_number: 1,
+                tray_index: 1,
+                host_id: 1,
+                module_id: 1,
+                fabric_guid: "0x1".to_string(),
+            }),
+        }
+    }
+
     #[test]
-    fn hardware_info_product_predicates() {
+    fn hardware_info_is_mnnvl_capable() {
         value_scenarios!(
-            run = |(product_name, _)| {
-                info_with_dmi(
-                    CpuArchitecture::Aarch64,
-                    DmiData {
-                        product_name: product_name.to_string(),
-                        ..Default::default()
-                    },
-                )
-                .is_gbx00()
+            run = |(gpu_name, has_platform_info)| {
+                let mut info = HardwareInfo::default();
+                if has_platform_info {
+                    info.gpus.push(gpu_with_platform_info(gpu_name));
+                } else {
+                    info.gpus.push(Gpu {
+                        name: gpu_name.to_string(),
+                        serial: String::new(),
+                        driver_version: String::new(),
+                        vbios_version: String::new(),
+                        inforom_version: String::new(),
+                        total_memory: String::new(),
+                        frequency: String::new(),
+                        pci_bus_id: String::new(),
+                        platform_info: None,
+                    });
+                }
+                info.is_mnnvl_capable()
             };
-            "exact GB200 product name" {
-                ("GB200", false) => true,
+            "GB200 GPU with platform_info is MNNVL capable" {
+                ("NVIDIA GB200", true) => true,
             }
 
-            "GB200 as a substring" {
-                ("NVIDIA GB200 NVL72", false) => true,
+            "GB300 GPU with platform_info is MNNVL capable" {
+                ("NVIDIA GB300", true) => true,
             }
 
-            "different product is not gbx00" {
-                ("GB300", false) => false,
+            "VR GPU with platform_info is MNNVL capable" {
+                ("NVIDIA VR NVL72 ES", true) => true,
             }
 
-            "empty product name is not gbx00" {
-                ("", false) => false,
+            "GPU name without platform_info is not MNNVL capable" {
+                ("NVIDIA GB200", false) => false,
             }
 
-            "case-sensitive: lowercase gb200 is not gbx00" {
-                ("gb200", false) => false,
+            "platform_info without MNNVL GPU name is not MNNVL capable" {
+                ("NVIDIA H100 PCIe", true) => false,
             }
         );
+    }
+
+    #[test]
+    fn hardware_info_is_mnnvl_capable_falls_back_to_dmi_product_name() {
+        let mut info = info_with_dmi(
+            CpuArchitecture::Aarch64,
+            DmiData {
+                product_name: "GB200 NVL".to_string(),
+                ..Default::default()
+            },
+        );
+        info.gpus.push(gpu_with_platform_info("NVIDIA H100 PCIe"));
+        assert!(info.is_mnnvl_capable());
+    }
+
+    #[test]
+    fn mnnvl_gpu_name_sql_like_conditions_match_markers() {
+        let sql = mnnvl_gpu_name_sql_like_conditions();
+        for marker in MNNVL_KNOWN_GPU_NAMES {
+            assert!(
+                sql.contains(&format!("gpu->>'name' LIKE '%{marker}%'")),
+                "expected SQL filter to include GPU name marker {marker:?}, got: {sql}"
+            );
+            assert!(
+                sql.contains(&format!("dmi_data'->>'product_name' LIKE '%{marker}%'")),
+                "expected SQL filter to include DMI product_name marker {marker:?}, got: {sql}"
+            );
+        }
     }
 
     // `is_dgx_h100()` requires both sys_vendor == "NVIDIA" and product_name == "DGXH100".

@@ -35,7 +35,9 @@ use lazy_static::lazy_static;
 use mac_address::MacAddress;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::expected_machine::ExpectedMachineData;
-use model::hardware_info::{MachineInventory, MachineNvLinkInfo};
+use model::hardware_info::{
+    MachineInventory, MachineNvLinkInfo, mnnvl_gpu_name_sql_like_conditions,
+};
 use model::machine::infiniband::MachineInfinibandStatusObservation;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::network::{
@@ -1955,9 +1957,20 @@ pub async fn find_machine_ids(
         qb.push("->'alerts') > 0");
     }
     if search_config.mnnvl_only {
-        qb.push(
-            " AND mt.topology->'discovery_data'->'Info'->'dmi_data'->>'product_name' LIKE '%GB200%'",
-        );
+        qb.push(format!(
+            " AND EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements(
+                    COALESCE(mt.topology->'discovery_data'->'Info'->'gpus', '[]'::jsonb)
+                ) AS gpu
+                WHERE gpu->'platform_info' IS NOT NULL
+                  AND gpu->'platform_info' <> 'null'::jsonb
+                  AND (
+                      {}
+                  )
+            )",
+            mnnvl_gpu_name_sql_like_conditions()
+        ));
     }
 
     if let Some(id) = search_config.instance_type_id {

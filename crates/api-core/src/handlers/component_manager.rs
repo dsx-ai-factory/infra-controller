@@ -584,12 +584,12 @@ async fn group_machine_ids_by_rack(
     Ok(targets)
 }
 
-/// Returns whether the machine is a rack-scale server (today just GB200, but will later include other SKUs)
+/// Returns whether the machine is a rack-scale MNNVL server (GB200, GB300, etc.).
 fn is_rack_scale_server(machine: &Machine) -> bool {
     machine
         .hardware_info
         .as_ref()
-        .is_some_and(|hw| hw.is_gbx00())
+        .is_some_and(|hw| hw.is_mnnvl_capable())
 }
 
 /// Splits the requested compute machines into two lists: rack-scale and standalone servers.

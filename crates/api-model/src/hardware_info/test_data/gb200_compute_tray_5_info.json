@@ -234,7 +234,7 @@
     "tpm_ek_certificate": "U29tZSBhcmJpdHJhcnkgYmFzZTY0",
     "gpus": [
         {
-            "name": "NVIDIA H100 PCIe",
+            "name": "NVIDIA GB200",
             "serial": "2054422005699",
             "driver_version": "530.30.02",
             "vbios_version": "96.00.30.00.01",
@@ -252,7 +252,7 @@
             }
         },
         {
-            "name": "NVIDIA H100 PCIe",
+            "name": "NVIDIA GB200",
             "serial": "2154422005699",
             "driver_version": "530.30.02",
             "vbios_version": "96.00.30.00.01",
@@ -270,7 +270,7 @@
             }
         },
         {
-            "name": "NVIDIA H100 PCIe",
+            "name": "NVIDIA GB200",
             "serial": "2254422005699",
             "driver_version": "530.30.02",
             "vbios_version": "96.00.30.00.01",
@@ -288,7 +288,7 @@
             }
         },
         {
-            "name": "NVIDIA H100 PCIe",
+            "name": "NVIDIA GB200",
             "serial": "2354422005699",
             "driver_version": "530.30.02",
             "vbios_version": "96.00.30.00.01",

@@ -91,6 +91,7 @@ fn domain_uuid_from_nmx_c_hello(
         .as_ref()
         .and_then(|header| uuid::Uuid::parse_str(&header.domain_uuid).ok())
         .map(NvLinkDomainId::from)
+        .filter(|domain_uuid| *domain_uuid != NvLinkDomainId::nil())
         .ok_or_else(|| {
             NvLinkManagerError::internal(format!(
                 "Failed to parse domain UUID from NMX-C hello response: {hello:?}"
@@ -129,9 +130,8 @@ fn build_machine_nvlink_info_from_nmx_c_hello(
 ) -> MachineNvLinkInfo {
     if let Some(existing) = existing {
         let mut info = existing.clone();
-        if info.domain_uuid == NvLinkDomainId::nil() {
-            info.domain_uuid = domain_uuid;
-        }
+        info.domain_uuid = domain_uuid;
+
         if info.chassis_serial.trim().is_empty() {
             info.chassis_serial = chassis_serial.to_string();
         }
@@ -164,8 +164,7 @@ fn build_machine_nvlink_info_from_nmx_c_hello(
     }
 }
 
-/// Populates missing `machines.nvlink_info` entries, nil `domain_uuid`, or empty `chassis_serial`
-/// using NMX-C hello.
+/// Updates missing or stale machine NVLink domains using a validated NMX-C Hello.
 fn populate_machine_nvlink_info_if_needed(
     machine_nvlink_info: &mut HashMap<MachineId, Option<MachineNvLinkInfo>>,
     managed_host_snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
@@ -180,9 +179,7 @@ fn populate_machine_nvlink_info_if_needed(
             .and_then(|info| info.as_ref());
         let needs_update = match existing {
             None => true,
-            Some(info) => {
-                info.domain_uuid == NvLinkDomainId::nil() || info.chassis_serial.trim().is_empty()
-            }
+            Some(info) => info.domain_uuid != domain_uuid || info.chassis_serial.trim().is_empty(),
         };
         if !needs_update {
             continue;
@@ -2582,6 +2579,100 @@ fn record_domain_health(
     }
     for (state, count) in counts {
         map.insert((domain.to_string(), state), count);
+    }
+}
+
+#[cfg(test)]
+mod domain_uuid_observation_tests {
+    use carbide_uuid::machine::{MachineIdSource, MachineType};
+    use libnmxc::nmxc_model::{ServerHeader, ServerHello};
+
+    use super::*;
+
+    #[test]
+    fn hello_domain_uuid_accepts_only_valid_non_nil_values() {
+        let cases = [
+            ("11111111-1111-1111-1111-111111111111", true),
+            ("not-a-uuid", false),
+            ("00000000-0000-0000-0000-000000000000", false),
+        ];
+
+        for (domain_uuid, expected) in cases {
+            let hello = ServerHello {
+                server_header: Some(ServerHeader {
+                    domain_uuid: domain_uuid.to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert_eq!(
+                domain_uuid_from_nmx_c_hello(&hello).is_ok(),
+                expected,
+                "domain UUID {domain_uuid:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn valid_domain_observations_update_only_changed_machine_domains()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let machine_id = MachineId::new(MachineIdSource::Tpm, [1; 32], MachineType::Host);
+        let old_domain: NvLinkDomainId = "11111111-1111-1111-1111-111111111111".parse()?;
+        let observed_domain: NvLinkDomainId = "22222222-2222-2222-2222-222222222222".parse()?;
+
+        let gpu = NvLinkGpu {
+            tray_index: 1,
+            slot_id: 2,
+            device_id: 3,
+            guid: 4,
+        };
+
+        let old_info = MachineNvLinkInfo {
+            domain_uuid: old_domain,
+            chassis_serial: "CHASSIS-A".to_string(),
+            gpus: vec![gpu],
+        };
+
+        let observed_info = MachineNvLinkInfo {
+            domain_uuid: observed_domain,
+            ..old_info.clone()
+        };
+
+        let initial_info = MachineNvLinkInfo {
+            domain_uuid: observed_domain,
+            chassis_serial: "CHASSIS-A".to_string(),
+            gpus: Vec::new(),
+        };
+
+        let cases = [
+            ("initial population", None, (1, initial_info)),
+            ("changed UUID", Some(old_info), (1, observed_info.clone())),
+            (
+                "identical persisted UUID after restart",
+                Some(observed_info.clone()),
+                (0, observed_info),
+            ),
+        ];
+
+        for (scenario, existing, expected) in cases {
+            let mut machine_nvlink_info = HashMap::from([(machine_id, existing)]);
+
+            let updates = populate_machine_nvlink_info_if_needed(
+                &mut machine_nvlink_info,
+                &HashMap::new(),
+                "CHASSIS-A",
+                &[machine_id],
+                observed_domain,
+            );
+
+            let info = machine_nvlink_info
+                .remove(&machine_id)
+                .flatten()
+                .expect("observation populates machine NVLink info");
+            assert_eq!((updates.len(), info), expected, "{scenario}");
+        }
+
+        Ok(())
     }
 }
 
