@@ -94,13 +94,16 @@ the state advances to `ConfigureCertificate` `Start`.
 |-----------|----------|
 | `rack_id` is `None`, no component manager, or no services remain | Skip; advance to `ConfigureCertificate` `Start`, which skips as well. |
 | Backend returns `Unsupported` (for example NSM, or RMS without the RPC) | Log a warning, skip; advance to `ConfigureCertificate` `Start`. |
-| Per-switch NVOS admin credential is absent and cannot be seeded, or its source data is invalid | Wait in `Start`; the next iteration retries after the credential is imported or corrected. |
+| `rack_id`, a component manager, and `bmc_mac_address` are all present, and the per-switch NVOS admin credential is absent with no seed source, or its source data is invalid | Wait in `Start`; the next iteration retries after the credential is imported or corrected. This check runs before the services check, so it applies even when no services remain. |
+| The credential store or database fails during that credential check | `StateHandlerError`; remain in `Start` and retry. |
 | `bmc_mac_address` is `None`, or the endpoint cannot be resolved | Transition to `Error`. |
 | CM returns `OperationOutcomeUnknown` on submission | Transition to `Error`; the submission is not retried. |
 | CM returns another error on submission | `StateHandlerError`; remain in `Start` and retry. |
 | CM returns `NotFound`, `OperationOutcomeUnknown`, or `Unsupported` on status | Transition to `Error`; certificate configuration is not submitted. |
 | CM returns another error on status | `StateHandlerError`; remain in `WaitForComplete` and retry. |
+| Component manager not configured while polling | Transition to `Error` (no job ID to resume); certificate configuration is not submitted. |
 | RMS job is pending | Wait; poll again on the next iteration. |
+| RMS job and every child it declares `Completed` | Advance to `ConfigureCertificate` `Start`. |
 | RMS job (or any child) `Failed` | Transition to `Error`; certificate configuration is not submitted. |
 
 If certificate installation fails after the disable step, the `Error` cause
@@ -182,14 +185,18 @@ The target switch build must support each selected binding.
 | Condition | Behavior |
 |-----------|----------|
 | `rack_id` is `None` | Bring-up skips certificate configuration and advances to `RotateOsPassword`. Maintenance `ReconfigureCertificate` transitions to `Error`. |
+| No services remain after primary-switch filtering | Bring-up advances to `RotateOsPassword` without an RMS job. Maintenance `ReconfigureCertificate` returns to `Ready`. This is checked before the component manager check. |
 | Component manager not configured | Bring-up skips certificate configuration. Maintenance `ReconfigureCertificate` transitions to `Error`. |
+| Bring-up only: `rack_id`, a component manager, and `bmc_mac_address` are all present, and the per-switch NVOS admin credential is absent with no seed source, or its source data is invalid | Wait in `Start`; the next iteration retries after the credential is imported or corrected. Maintenance does not run this check. |
+| Bring-up only: the credential store or database fails during that credential check | `StateHandlerError`; remain in `Start` and retry. |
 | `bmc_mac_address` is `None` | Transition to `Error`. |
-| Missing NVOS MAC/IP, credentials, or endpoint row | Transition to `Error` with a descriptive cause (no `0.0.0.0` placeholder). |
+| Missing NVOS MAC/IP, missing NVOS admin credential (maintenance, or bring-up after the check above), or missing endpoint row | Transition to `Error` with a descriptive cause (no `0.0.0.0` placeholder). |
 | CM returns error on `configure_switch_certificate` | `StateHandlerError`; remain in `Start` and retry on the next iteration. |
 | CM returns `NotFound` on `get_configure_switch_certificate_job_status` | Transition to `Error` because the persisted job can no longer be observed. |
 | CM returns another error on `get_configure_switch_certificate_job_status` | `StateHandlerError`; remain in `WaitForComplete` and retry on the next iteration. |
 | RMS job status is `Started` or `InProgress` | Wait; poll again on the next iteration. |
-| RMS job status is `Failed` | Transition to `Error` with the job error message. |
+| RMS job status is `Completed` | Bring-up advances to `RotateOsPassword`. Maintenance returns to `Ready`. |
+| RMS job status is `Failed` | Transition to `Error` with the job error message. Bring-up's cause also states that mTLS restoration is incomplete. |
 | Component manager not configured while polling | Transition to `Error` (no job ID to resume). |
 
 ## Component Manager API
