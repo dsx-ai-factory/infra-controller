@@ -310,7 +310,7 @@ impl<B: Bmc + 'static> LogsCollector<B> {
             let entries = match last_seen_id {
                 Some(last_id) => {
                     let entries = match service
-                        .filter_entries(FilterQuery::gt(&"Id", last_id))
+                        .filter_entries(FilterQuery::gt(&"Id", last_id.to_string()))
                         .await
                     {
                         Ok(Some(e)) => e,
@@ -566,11 +566,17 @@ fn service_is_excluded(exclude_services: &[String], service_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use axum::http::{StatusCode, Uri};
+    use axum::routing::get;
+    use axum::{Json, Router};
     use carbide_test_support::{Check, check_values};
+    use nv_redfish::bmc_http::{BmcCredentials, CacheSettings, HttpBmc};
     use serde_json::{Value, json};
 
     use super::*;
     use crate::endpoint::test_support::{mac, test_endpoint};
+    use crate::endpoint::{EndpointMetadata, PowerShelfData};
     use crate::sink::LogSeverity;
 
     const JOURNAL_BMC: &str = "/redfish/v1/Managers/BMC_0/LogServices/Journal";
@@ -578,6 +584,111 @@ mod tests {
     const EVENTLOG: &str = "/redfish/v1/Systems/System_0/LogServices/EventLog";
     const XID: &str = "/redfish/v1/Chassis/HGX_GPU_0/LogServices/XID";
     const SEL: &str = "/redfish/v1/Systems/System_0/LogServices/SEL";
+
+    #[tokio::test]
+    async fn periodic_poll_quotes_ids_and_advances_checkpoint()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let router = Router::new().fallback(get(
+            |uri: Uri, Query(query): Query<HashMap<String, String>>| async move {
+                let body = match uri.path() {
+                    "/redfish/v1" => json!({
+                        "@odata.id": "/redfish/v1", "Id": "Root", "Name": "Root",
+                        "Links": {"Sessions": {"@odata.id": "/sessions"}},
+                        "Managers": {
+                            "@odata.id": "/managers",
+                            "@odata.type": "#ManagerCollection.ManagerCollection", "Name": "Managers",
+                            "Members": [{
+                                "@odata.id": "/manager", "Id": "BMC", "Name": "BMC",
+                                "LogServices": {"@odata.id": "/services"},
+                            }],
+                        },
+                    }),
+                    "/services" => json!({
+                        "@odata.id": "/services",
+                        "@odata.type": "#LogServiceCollection.LogServiceCollection", "Name": "Logs",
+                        "Members": [{
+                            "@odata.id": EVENTLOG, "Id": "EventLog", "Name": "Events",
+                            "Entries": {"@odata.id": "/entries"},
+                        }],
+                    }),
+                    "/entries" => {
+                        let id = match query.get("$filter").map(String::as_str) {
+                            Some("Id gt '-1'") => Some("0"),
+                            Some("Id gt '9'") => Some("10"),
+                            Some("Id gt '0'" | "Id gt '10'") => None,
+                            _ => return Err(StatusCode::BAD_REQUEST),
+                        };
+
+                        let members: Vec<_> = id.into_iter().map(|id| json!({
+                            "@odata.id": format!("/entries/{id}"), "Id": id,
+                            "Name": "Event", "EntryType": "Event", "Message": "New event",
+                        })).collect();
+
+                        json!({
+                            "@odata.id": "/entries", "Members": members,
+                            "@odata.type": "#LogEntryCollection.LogEntryCollection", "Name": "Entries",
+                            "Members@odata.count": 100,
+                        })
+                    }
+                    _ => return Err(StatusCode::NOT_FOUND),
+                };
+
+                Ok(Json(body))
+            },
+        ));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+
+        let mut servers = tokio::task::JoinSet::new();
+        servers.spawn(async move { axum::serve(listener, router).await });
+
+        let bmc = Arc::new(HttpBmc::new(
+            crate::endpoint::test_support::reqwest(),
+            format!("http://{address}").parse()?,
+            BmcCredentials::new("test".into(), "test".into()),
+            CacheSettings::with_capacity(0),
+        ));
+
+        for (cursor, expected_id) in [(-1, 0), (9, 10)] {
+            let directory = tempfile::tempdir()?;
+
+            let mut endpoint = test_endpoint(mac("00:11:22:33:44:88"));
+
+            endpoint.metadata = Some(EndpointMetadata::PowerShelf(PowerShelfData {
+                id: None,
+                serial: None,
+                nvlink_domain_uuid: None,
+            }));
+
+            let service = ODataId::from(EVENTLOG.to_string());
+
+            let mut collector = LogsCollector::new_runner(
+                bmc.clone(),
+                Arc::new(endpoint),
+                LogsCollectorConfig {
+                    state_file_path: directory.path().join("state.json"),
+                    service_refresh_interval: Duration::from_secs(1800),
+                    data_sink: None,
+                    initial_last_seen_ids: Some(HashMap::from([(service.clone(), cursor)])),
+                    include_diagnostics: false,
+                    exclude_services: Vec::new(),
+                    skip_initial_history: false,
+                },
+            )?;
+
+            for expected_count in [1, 0] {
+                let result = collector.run_iteration().await?;
+                let saved = collector.load_persistent_state().await;
+
+                assert_eq!(result.fetch_failures, 0, "cursor {cursor}");
+                assert_eq!(result.entity_count, Some(expected_count), "cursor {cursor}");
+                assert_eq!(saved.last_seen_ids.get(&service), Some(&expected_id));
+            }
+        }
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn downgrade_handoff_replaces_persisted_periodic_cursor()
