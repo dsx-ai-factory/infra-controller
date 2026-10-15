@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -211,7 +212,11 @@ func (gth GetTrayHandler) Handle(c echo.Context) error {
 	}
 
 	// Get tray ID from URL param
-	trayStrID := c.Param("id")
+	trayStrID, err := url.PathUnescape(c.Param("id"))
+	if err != nil {
+		logger.Warn().Err(err).Msg("invalid percent-encoding in Tray identifier")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Tray identifier in URL is invalid", nil)
+	}
 	cotel.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID))
 
 	// Get the temporal client for the site

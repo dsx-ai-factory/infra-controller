@@ -159,7 +159,6 @@ func createMockComponent(id, name, manufacturer, modelStr, componentID string, c
 
 func TestGetTrayHandler_Handle(t *testing.T) {
 	// Setup
-	e := echo.New()
 	dbSession := testTrayInitDB(t)
 	defer dbSession.Close()
 
@@ -199,6 +198,7 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 	)
 
 	mockComponent.Bmcs = []*flowv1.BMCInfo{{MacAddress: "d8:ab:cd:ef:00:01"}}
+	trayMAC := model.NewAPITray(mockComponent).BMCs[0].MacAddress
 
 	ctx := context.Background()
 
@@ -207,6 +207,7 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 		reqOrg         string
 		user           *cdbm.User
 		trayID         string
+		expectedTrayID string
 		queryParams    map[string]string
 		mockComponent  *flowv1.Component
 		expectedStatus int
@@ -228,7 +229,17 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 			name:           "success - get tray by response MAC",
 			reqOrg:         org,
 			user:           providerUser,
-			trayID:         model.NewAPITray(mockComponent).BMCs[0].MacAddress,
+			trayID:         trayMAC,
+			queryParams:    map[string]string{"siteId": site.ID.String()},
+			mockComponent:  mockComponent,
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "success - get tray by percent-encoded response MAC",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         strings.ReplaceAll(trayMAC, ":", "%3A"),
+			expectedTrayID: trayMAC,
 			queryParams:    map[string]string{"siteId": site.ID.String()},
 			mockComponent:  mockComponent,
 			expectedStatus: http.StatusOK,
@@ -301,7 +312,11 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 			testFlowProxyMethodDispatch(t, mockTemporalClient, mockWorkflowRun, flowv1.Flow_GetComponentInfoByID_FullMethodName, func(args mock.Arguments) {
 				var request flowv1.GetComponentInfoByIDRequest
 				testFlowProxyRequest(t, args, &request)
-				assert.Equal(t, tt.trayID, request.GetId().GetId())
+				expectedTrayID := tt.trayID
+				if tt.expectedTrayID != "" {
+					expectedTrayID = tt.expectedTrayID
+				}
+				assert.Equal(t, expectedTrayID, request.GetId().GetId())
 			})
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
@@ -316,16 +331,17 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
-			ec := e.NewContext(req, rec)
-			ec.SetParamNames("orgName", "id")
-			ec.SetParamValues(tt.reqOrg, tt.trayID)
-			ec.Set("user", tt.user)
-
-			ec.SetRequest(ec.Request().WithContext(ctx))
-
-			err := handler.Handle(ec)
+			e := echo.New()
+			e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+				return func(c echo.Context) error {
+					c.Set("user", tt.user)
+					return next(c)
+				}
+			})
+			e.GET("/v2/org/:orgName/nico/tray/:id", handler.Handle)
+			e.ServeHTTP(rec, req.WithContext(ctx))
 			if tt.expectedStatus != rec.Code {
-				t.Errorf("GetTrayHandler.Handle() status = %v, want %v, response: %v, err: %v", rec.Code, tt.expectedStatus, rec.Body.String(), err)
+				t.Errorf("GetTrayHandler.Handle() status = %v, want %v, response: %v", rec.Code, tt.expectedStatus, rec.Body.String())
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
