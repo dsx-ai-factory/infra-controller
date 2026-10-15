@@ -669,6 +669,7 @@ async fn credentials_finishing_after_deadline_do_not_start_more_work(
 /// Policy must match the initially read machine even after a concurrent write.
 /// A fresh request must see the new maintenance, proving the original absence
 /// was meaningful rather than a reader that always omits pending requests.
+/// Successful snapshots must also return their healthy connection for reuse.
 #[crate::sqlx_test]
 async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
     pool: sqlx::PgPool,
@@ -692,8 +693,8 @@ async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
     )
     .build();
 
-    // A table lock blocks the plain policy SELECT; a row lock would not. The
-    // machine query does not access this table, so it establishes the snapshot.
+    // A table lock blocks the plain policy SELECT; a row lock would not.
+    // Snapshot setup and identity reads precede this blocked policy read.
     let mut writer = pool.begin().await?;
     sqlx::query("LOCK TABLE power_options IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *writer)
@@ -785,6 +786,11 @@ async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
         policy_after.desired_power_state_version,
         policy_before.desired_power_state_version
     );
+    // A completed snapshot should return its healthy connection for reuse.
+    let reused_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&reader_pool)
+        .await?;
+    assert_eq!(reused_pid, reader_pid);
     reader_pool.close().await;
 
     Ok(())
@@ -858,6 +864,131 @@ async fn snapshot_deadline_aborts_before_live_reads(pool: sqlx::PgPool) -> TestR
             .await
             .is_empty()
     );
+    Ok(())
+}
+
+/// Cancelling a blocked snapshot must release its pool slot synchronously, so
+/// further requests can proceed without waiting for SQLx cleanup.
+#[crate::sqlx_test]
+async fn blocked_snapshots_release_pool_capacity(pool: sqlx::PgPool) -> TestResult {
+    /// Exercises caller cancellation during setup and reads, plus the RPC deadline.
+    #[derive(Clone, Copy, Debug)]
+    enum Cancellation {
+        Deadline,
+        CallerDrop,
+        SetupCallerDrop,
+    }
+
+    let env = create_test_env(pool.clone()).await;
+    let mut txn = pool.begin().await?;
+    let host = create_host(&mut txn, 62, None, Some(PowerState::Off)).await?;
+    txn.commit().await?;
+
+    for cancellation in [
+        // The RPC's own timeout must also release the database capacity.
+        Cancellation::Deadline,
+        // A disconnected caller has no response path to perform cleanup.
+        Cancellation::CallerDrop,
+        // Setup must release its slot before the server cap has been installed.
+        Cancellation::SetupCallerDrop,
+    ] {
+        let reader_pool = single_connection_pool(&pool).await?;
+        // Remove any shorter inherited timeout that could rescue SQLx cleanup.
+        let configured_timeout: String =
+            sqlx::query_scalar("SELECT set_config('statement_timeout', '0', false)")
+                .fetch_one(&reader_pool)
+                .await?;
+        assert_eq!(configured_timeout, "0");
+        let reader_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&reader_pool)
+            .await?;
+
+        let credentials = Arc::new(CountingCredentialReader::default());
+        let mut api = api_with_rms(
+            &env,
+            reader_pool.clone(),
+            power_profiles(0, 0, 0),
+            PowerRole::Compute,
+        );
+        api.credential_manager = Arc::new(CompositeCredentialManager::new(
+            credentials.clone(),
+            env.test_credential_manager.clone(),
+        ));
+
+        // The setup case blocks inside `begin`, before it can install the
+        // server cap. The other cases stop an inventory read after setup.
+        let (lock_statement, query_fragment) = match cancellation {
+            Cancellation::SetupCallerDrop => (
+                "LOCK TABLE pg_settings IN ACCESS EXCLUSIVE MODE",
+                "FROM pg_settings",
+            ),
+            Cancellation::Deadline | Cancellation::CallerDrop => (
+                "LOCK TABLE power_options IN ACCESS EXCLUSIVE MODE",
+                "FROM power_options",
+            ),
+        };
+        let mut blocker = pool.begin().await?;
+        sqlx::query(lock_statement).execute(&mut *blocker).await?;
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
+        let mut request = Box::pin(api.get_component_power_details(host_request(&[host])));
+        let blocked_pid = tokio::select! {
+            result = tokio::time::timeout(
+                Duration::from_secs(2),
+                wait_for_blocked_query(&pool, blocker_pid, query_fragment),
+            ) => result.expect("snapshot query must block before its deadline"),
+            result = &mut request => panic!("request completed before the query blocked: {result:?}"),
+        };
+        assert_eq!(blocked_pid, reader_pid, "{cancellation:?}");
+
+        match cancellation {
+            Cancellation::Deadline => {
+                // Require completion immediately after advancing the client
+                // deadline, rather than letting paused time reach a later timer.
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(5)).await;
+                let expired_at = tokio::time::Instant::now();
+                let response = tokio::time::timeout(Duration::from_millis(1), &mut request).await;
+                let finished_at = tokio::time::Instant::now();
+                tokio::time::resume();
+                assert!(finished_at <= expired_at + Duration::from_millis(1));
+                let error = response
+                    .expect("snapshot must finish at its five-second deadline")
+                    .expect_err("an incomplete snapshot must abort the RPC");
+                assert_eq!(error.code(), tonic::Code::Internal);
+                assert_eq!(
+                    error.message(),
+                    "internal error: power details database snapshot failed"
+                );
+            }
+            Cancellation::CallerDrop | Cancellation::SetupCallerDrop => {}
+        }
+        drop(request);
+        // Detachment releases capacity synchronously, before any cleanup task
+        // or server timeout has a chance to return a connection to this pool.
+        assert_eq!(reader_pool.size(), 0, "{cancellation:?}");
+
+        // Keep the table lock held until this independent query either finishes
+        // or times out. Releasing it earlier would hide SQLx's blocked cleanup.
+        let recovered = tokio::time::timeout(
+            Duration::from_secs(2),
+            sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&reader_pool),
+        )
+        .await;
+        blocker.rollback().await?;
+        reader_pool.close().await;
+
+        // Every hardware read needs this credential lookup first, so zero
+        // admissions also proves that no backend read started.
+        assert_eq!(credentials.0.load(Ordering::SeqCst), 0, "{cancellation:?}");
+        assert_eq!(
+            recovered.expect("cancelled snapshot must release its pool slot")?,
+            1,
+            "{cancellation:?}"
+        );
+    }
+
     Ok(())
 }
 
