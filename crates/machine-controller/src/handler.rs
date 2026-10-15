@@ -9629,14 +9629,13 @@ fn requires_manual_firmware_upgrade(
         return false;
     }
 
-    let is_gb200 = state
+    let is_mnnvl_capable = state
         .host_snapshot
         .hardware_info
         .as_ref()
-        .map(|hi| hi.is_gbx00())
-        .unwrap_or(false);
+        .is_some_and(|hi| hi.is_mnnvl_capable());
 
-    if !is_gb200 {
+    if !is_mnnvl_capable {
         return false;
     }
 

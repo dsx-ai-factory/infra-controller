@@ -102,7 +102,7 @@ pub(crate) async fn discover_machine(
         .filter_map(|gpu| gpu.platform_info.as_ref())
         .collect();
 
-    let nvlink_info = if hardware_info.is_gbx00()
+    let nvlink_info = if hardware_info.is_mnnvl_capable()
         && !gpu_platform_infos.is_empty()
         && api
             .runtime_config

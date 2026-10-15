@@ -40,7 +40,8 @@ pub struct MachineSearchConfig {
     /// and any joined tables.  The value is *not*
     /// propagated to any additional underlying queries.
     pub for_update: bool,
-    /// Only include NVLink capable machines (GB200/GB300 etc)
+    /// Only include NVLink capable machines (GB200/GB300/VR etc), identified by GPU
+    /// `name` or DMI `product_name` on entries with `platform_info` in discovered topology.
     pub mnnvl_only: bool,
     pub only_with_power_state: Option<String>,
     pub only_with_health_alert: Option<String>,

@@ -22,7 +22,7 @@ use carbide_uuid::machine::MachineId;
 use serde::{Deserialize, Serialize};
 
 use super::infiniband::MachineInfinibandStatusObservation;
-use crate::hardware_info::{CpuInfo, InfinibandInterface};
+use crate::hardware_info::{CpuInfo, InfinibandInterface, is_mnnvl_capable_gpu};
 use crate::machine::{HardwareInfo, MachineInterfaceSnapshot};
 
 lazy_static::lazy_static! {
@@ -302,8 +302,17 @@ impl MachineCapabilitiesSet {
 
         let mut gpu_map = HashMap::<String, MachineCapabilityGpu>::new();
 
-        let is_gbx00 = hardware_info.is_gbx00();
+        let dmi_product_name = hardware_info
+            .dmi_data
+            .as_ref()
+            .map(|dmi| dmi.product_name.as_str());
+
         for gpu_info in hardware_info.gpus.into_iter() {
+            let device_type = if is_mnnvl_capable_gpu(&gpu_info, dmi_product_name) {
+                Some(MachineCapabilityDeviceType::NvLink)
+            } else {
+                Some(MachineCapabilityDeviceType::Unknown)
+            };
             match gpu_map.get_mut(&gpu_info.name) {
                 None => {
                     gpu_map.insert(
@@ -316,11 +325,7 @@ impl MachineCapabilitiesSet {
                             cores: None,   // hardware_info doesn't provide this.
                             threads: None, // hardware_info doesn't provide this.
                             memory_capacity: Some(gpu_info.total_memory),
-                            device_type: if is_gbx00 {
-                                Some(MachineCapabilityDeviceType::NvLink)
-                            } else {
-                                Some(MachineCapabilityDeviceType::Unknown)
-                            },
+                            device_type,
                         },
                     );
                 }
