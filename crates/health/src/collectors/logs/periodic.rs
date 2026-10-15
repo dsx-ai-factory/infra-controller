@@ -159,11 +159,13 @@ impl EntityTypeRef for LogEntryPage {
     }
 }
 
-/// Discovery cache containing only SDK navigation IDs, not expanded log bodies.
+/// Cached URIs for a log service and its entries collection, plus the SDK flag
+/// allowing oversized member counts on filtered scans.
 #[derive(Clone)]
 struct ServiceRef {
     id: ODataId,
     entries: ODataId,
+    filtered_count_is_unreliable: bool,
 }
 
 struct LogsCollectorState {
@@ -339,6 +341,7 @@ impl<B: Bmc + 'static> LogsCollector<B> {
                 services.push(ServiceRef {
                     id: raw.odata_id.clone(),
                     entries: entries.id().clone(),
+                    filtered_count_is_unreliable: service.filtered_entries_count_is_unreliable(),
                 });
             }
         };
@@ -573,16 +576,16 @@ impl<B: Bmc + 'static> LogsCollector<B> {
     }
 
     /// Collects navigation IDs, following even empty pages with continuations.
-    /// Paginated responses require a stable count. Filtered scans may report the
-    /// unfiltered total; unfiltered scans require the count to match the complete walk.
+    /// Paginated responses require a stable count matching the complete walk,
+    /// except for oversized filtered counts covered by the SDK quirk.
     async fn collect_entry_uris(
         &self,
         base: &Url,
-        entries: &ODataId,
+        service: &ServiceRef,
         cursor: Option<i64>,
         filter_disabled: &mut bool,
     ) -> Result<Vec<ODataId>, HealthError> {
-        let mut uri = resolve_log_uri(base, "/", &entries.to_string())?;
+        let mut uri = resolve_log_uri(base, "/", &service.entries.to_string())?;
         let mut visited = HashSet::new();
         let mut member_count = None;
         let mut filtered = false;
@@ -651,9 +654,11 @@ impl<B: Bmc + 'static> LogsCollector<B> {
             uri = resolve_log_uri(base, &current_uri, &next.to_string())?;
         }
 
-        if member_count
-            .is_some_and(|count| count < members.len() || (!filtered && count != members.len()))
-        {
+        let allow_oversized_count = filtered && service.filtered_count_is_unreliable;
+
+        if member_count.is_some_and(|count| {
+            count < members.len() || (!allow_oversized_count && count != members.len())
+        }) {
             // Retry invalid counts without filtering.
             *filter_disabled |= cursor.is_some();
 
@@ -699,7 +704,7 @@ impl<B: Bmc + 'static> LogsCollector<B> {
         let cursor = original.map(|anchor| anchor.id);
 
         let members = self
-            .collect_entry_uris(&base, &service.entries, cursor, filter_disabled)
+            .collect_entry_uris(&base, service, cursor, filter_disabled)
             .await?;
 
         // An empty baseline must still collect its first future entry.
@@ -1029,6 +1034,7 @@ mod tests {
 
     #[derive(Default)]
     struct Source {
+        vendor: Option<&'static str>,
         entries: Vec<Value>,
         reads: usize,
         filtered_reads: usize,
@@ -1154,6 +1160,7 @@ mod tests {
         let response = match uri.path() {
             "/redfish/v1" => Json(json!({
                 "@odata.id": "/redfish/v1", "Id": "Root", "Name": "Root",
+                "Vendor": source.vendor,
                 "Links": {"Sessions": {"@odata.id": "/sessions"}},
                 "Managers": {
                     "@odata.id": "/managers",
@@ -1537,6 +1544,8 @@ mod tests {
     async fn stale_filtered_counts_keep_filtering_without_retry() {
         for (page_size, expected_reads) in [(1, 2), (2, 1)] {
             let mut rig = Rig::new(false);
+            rig.source.lock().unwrap().vendor = Some("NVIDIA");
+
             rig.collect(&[(0, "old")], Some(0), &["old"]).await;
 
             {
@@ -1567,6 +1576,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_filtered_counts_without_quirk_retry_unfiltered() {
+        let mut rig = Rig::new(false);
+        rig.source.lock().unwrap().vendor = Some("Dell");
+
+        rig.collect(&[(0, "old")], Some(0), &["old"]).await;
+
+        {
+            let mut source = rig.source.lock().unwrap();
+            source.entries.push(entry(1, "new"));
+
+            source.fail = Some("unfiltered_count");
+            source.reads = 0;
+            source.filtered_reads = 0;
+        }
+
+        rig.fail_scan("stale filtered count without SDK quirk")
+            .await;
+
+        assert_eq!(*rig.sink.0.lock().unwrap(), ["old"]);
+
+        // Leave the server unchanged; the next scan must retry without filtering.
+        rig.collect(&[(0, "old"), (1, "new")], Some(1), &["new"])
+            .await;
+
+        let source = rig.source.lock().unwrap();
+
+        assert_eq!(source.reads, 3);
+        assert_eq!(source.filtered_reads, 1);
+    }
+
+    #[tokio::test]
     async fn invalid_counts_preserve_checkpoint_after_filtering_or_fallback() {
         for (failure, filter_disabled, expected_reads) in [
             ("undersized_count", false, 2),
@@ -1574,6 +1614,8 @@ mod tests {
             ("filter_truncated", false, 2),
         ] {
             let mut rig = Rig::new(false);
+            rig.source.lock().unwrap().vendor = Some("NVIDIA");
+
             rig.collect(&[(0, "old")], Some(0), &["old"]).await;
 
             {
