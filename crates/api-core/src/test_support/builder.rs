@@ -41,6 +41,7 @@ use librms::RmsApi;
 use model::resource_pool::common::CommonPools;
 use sqlx::PgPool;
 use state_controller::controller::Enqueuer;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 use super::Api;
@@ -369,6 +370,7 @@ impl TestApiBuilder {
             console_log_source: self
                 .console_log_source
                 .unwrap_or_else(|| Arc::new(crate::console_logs::UnavailableSource)),
+            cancel_token: CancellationToken::new(),
         }
     }
 }

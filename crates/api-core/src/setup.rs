@@ -755,6 +755,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         bms_client: std::sync::OnceLock::new(),
         secrets_context,
         console_log_source,
+        cancel_token: cancel_token.clone(),
     });
 
     if carbide_config.listen_only {

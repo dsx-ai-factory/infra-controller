@@ -57,6 +57,7 @@ use model::resource_pool::common::CommonPools;
 use sqlx::PgTransaction;
 use state_controller::controller::Enqueuer;
 use tokio_stream::Stream;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, Streaming};
 
 use self::metrics::ApiMetricsEmitter;
@@ -116,6 +117,7 @@ pub struct Api {
     /// listener.
     pub(crate) node_jwt_validator: Option<Arc<crate::node_auth::NodeJwtValidator>>,
     pub(crate) console_log_source: Arc<dyn crate::console_logs::ConsoleLogSource>,
+    pub(crate) cancel_token: CancellationToken,
 }
 
 pub(crate) type ScoutStreamType =
