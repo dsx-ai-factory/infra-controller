@@ -4682,14 +4682,35 @@ async fn rms_batch_disable_switch_mtls(
         )
     })?;
 
-    if !batch.job_id.trim().is_empty() {
-        return Ok(batch.job_id);
+    let status = batch.status;
+    let (success, error, job_id) = summarize_firmware_batch(
+        Some(batch),
+        None,
+        "",
+        "RMS switch mTLS-disable batch failed",
+    );
+    let job_id = job_id.filter(|job_id| !job_id.trim().is_empty());
+
+    if !success {
+        // A failed batch can still have accepted work. Its parent job covers only
+        // accepted children, so completion cannot prove every requested switch was
+        // reset. Retain the ID for operator reconciliation without letting
+        // certificate installation proceed.
+        let error = error.unwrap_or_else(|| "RMS switch mTLS-disable batch failed".to_owned());
+
+        return Err(ComponentManagerError::OperationOutcomeUnknown(
+            match job_id {
+                Some(job_id) => format!("{error}; RMS job ID: {job_id}"),
+                None => error,
+            },
+        ));
     }
 
-    Err(ComponentManagerError::OperationOutcomeUnknown(format!(
-        "RMS switch mTLS-disable submission returned no job ID (status {}); the operation outcome is unknown",
-        batch.status
-    )))
+    job_id.ok_or_else(|| {
+        ComponentManagerError::OperationOutcomeUnknown(format!(
+            "RMS switch mTLS-disable submission returned no job ID (status {status}); the operation outcome is unknown"
+        ))
+    })
 }
 
 /// Summarizes parent and child job observations for one password rotation.
@@ -9042,6 +9063,39 @@ mod tests {
                 "{scenario}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn sw_batch_disable_switch_mtls_failed_batch_with_job_id_is_not_accepted() {
+        let mock = MockRmsApi::new();
+
+        mock.enqueue_batch_disable_switch_mtls(Ok(rms::BatchDisableSwitchMtlsResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Failure as i32,
+                job_id: "disable-mtls-partial".to_string(),
+                message: "one switch rejected".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await;
+
+        let error = rms_batch_disable_switch_mtls(
+            &mock,
+            vec![rms::NodeInfo::default()],
+            &[rms::SwitchService::NvueApi as i32],
+        )
+        .await
+        .expect_err("a failed batch must not report an accepted job");
+
+        assert!(
+            matches!(
+                &error,
+                ComponentManagerError::OperationOutcomeUnknown(message)
+                    if message.contains("one switch rejected")
+                        && message.contains("disable-mtls-partial")
+            ),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]
