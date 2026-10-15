@@ -940,10 +940,11 @@ func TestAPIMachineUpdateRequest_ToInsertHealthReportProto(t *testing.T) {
 		HealthIssue *APIMachineHealthIssue
 	}
 	tests := []struct {
-		name      string
-		machineID string
-		fields    fields
-		wantErr   bool
+		name         string
+		machineID    string
+		fields       fields
+		wantCategory string
+		wantErr      bool
 	}{
 		{
 			name:      "maps Performance health issue to proto payload with PERFORMANCE issue_category",
@@ -955,7 +956,8 @@ func TestAPIMachineUpdateRequest_ToInsertHealthReportProto(t *testing.T) {
 					Details:  cutil.GetPtr("dcgmi diag logs attached"),
 				},
 			},
-			wantErr: false,
+			wantCategory: "PERFORMANCE",
+			wantErr:      false,
 		},
 		{
 			name:      "maps Hardware health issue to proto payload with HARDWARE issue_category",
@@ -967,7 +969,8 @@ func TestAPIMachineUpdateRequest_ToInsertHealthReportProto(t *testing.T) {
 					Details:  cutil.GetPtr("port 1 logs attached"),
 				},
 			},
-			wantErr: false,
+			wantCategory: "HARDWARE",
+			wantErr:      false,
 		},
 	}
 	for _, tt := range tests {
@@ -1011,7 +1014,7 @@ func TestAPIMachineUpdateRequest_ToInsertHealthReportProto(t *testing.T) {
 			}
 			require.NoError(t, json.Unmarshal([]byte(alert.Message), &payload))
 			assert.Equal(t, *mhi.Details, payload.Details)
-			assert.Equal(t, ValidHealthIssueCategoriesMap[mhi.Category], payload.IssueCategory)
+			assert.Equal(t, tt.wantCategory, payload.IssueCategory)
 			assert.Equal(t, *mhi.Summary, payload.Summary)
 		})
 	}

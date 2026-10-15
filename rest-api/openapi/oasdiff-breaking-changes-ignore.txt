@@ -413,3 +413,28 @@ POST /v2/org/{org}/nico/operating-system request property `imageAuthType` was re
 POST /v2/org/{org}/nico/operating-system request property `ipxeTemplateArtifacts/items/authType` was restricted to a list of enum values
 PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} request property `imageAuthType` was restricted to a list of enum values
 PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} request property `ipxeTemplateArtifacts/items/authType` was restricted to a list of enum values
+
+# SkuComponents.tpm is a single object on the wire (Go *APISkuTpm, no omitempty): the array declaration never
+# matched a response, and a SKU without a TPM serializes it as null, so the schema now allows SkuTpm or null.
+GET /v2/org/{org}/nico/expected-machine added `#/components/schemas/SkuTpm, subschema #2` to the `items/sku/components/tpm` response property `oneOf` list for the response status `200`
+GET /v2/org/{org}/nico/expected-machine the `items/sku/components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`
+GET /v2/org/{org}/nico/expected-machine/{expectedMachineId} added `#/components/schemas/SkuTpm, subschema #2` to the `sku/components/tpm` response property `oneOf` list for the response status `200`
+GET /v2/org/{org}/nico/expected-machine/{expectedMachineId} the `sku/components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`
+GET /v2/org/{org}/nico/sku added `#/components/schemas/SkuTpm, subschema #2` to the `items/components/tpm` response property `oneOf` list for the response status `200`
+GET /v2/org/{org}/nico/sku the `items/components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`
+GET /v2/org/{org}/nico/sku/{skuId} added `#/components/schemas/SkuTpm, subschema #2` to the `components/tpm` response property `oneOf` list for the response status `200`
+GET /v2/org/{org}/nico/sku/{skuId} the `components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`
+PATCH /v2/org/{org}/nico/expected-machine/batch added `#/components/schemas/SkuTpm, subschema #2` to the `items/sku/components/tpm` response property `oneOf` list for the response status `200`
+PATCH /v2/org/{org}/nico/expected-machine/batch the `items/sku/components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`
+PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} added `#/components/schemas/SkuTpm, subschema #2` to the `sku/components/tpm` response property `oneOf` list for the response status `200`
+PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the `sku/components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`
+PATCH /v2/org/{org}/nico/sku/{skuId} added `#/components/schemas/SkuTpm, subschema #2` to the `components/tpm` response property `oneOf` list for the response status `200`
+PATCH /v2/org/{org}/nico/sku/{skuId} the `components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`
+POST /v2/org/{org}/nico/expected-machine added `#/components/schemas/SkuTpm, subschema #2` to the `sku/components/tpm` response property `oneOf` list for the response status `201`
+POST /v2/org/{org}/nico/expected-machine the `sku/components/tpm` response's property `type` changed from `array<object>` to `any` for status `201`
+POST /v2/org/{org}/nico/expected-machine/batch added `#/components/schemas/SkuTpm, subschema #2` to the `items/sku/components/tpm` response property `oneOf` list for the response status `201`
+POST /v2/org/{org}/nico/expected-machine/batch the `items/sku/components/tpm` response's property `type` changed from `array<object>` to `any` for status `201`
+POST /v2/org/{org}/nico/sku added `#/components/schemas/SkuTpm, subschema #2` to the `components/tpm` response property `oneOf` list for the response status `201`
+POST /v2/org/{org}/nico/sku the `components/tpm` response's property `type` changed from `array<object>` to `any` for status `201`
+PUT /v2/org/{org}/nico/expected-machine/all added `#/components/schemas/SkuTpm, subschema #2` to the `items/sku/components/tpm` response property `oneOf` list for the response status `200`
+PUT /v2/org/{org}/nico/expected-machine/all the `items/sku/components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`

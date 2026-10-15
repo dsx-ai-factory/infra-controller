@@ -26,6 +26,7 @@ const (
 	VPCPREFIXSTATUS_PROVISIONING VpcPrefixStatus = "Provisioning"
 	VPCPREFIXSTATUS_READY        VpcPrefixStatus = "Ready"
 	VPCPREFIXSTATUS_DELETING     VpcPrefixStatus = "Deleting"
+	VPCPREFIXSTATUS_DELETED      VpcPrefixStatus = "Deleted"
 	VPCPREFIXSTATUS_ERROR        VpcPrefixStatus = "Error"
 )
 
@@ -34,6 +35,7 @@ var AllowedVpcPrefixStatusEnumValues = []VpcPrefixStatus{
 	"Provisioning",
 	"Ready",
 	"Deleting",
+	"Deleted",
 	"Error",
 }
 
