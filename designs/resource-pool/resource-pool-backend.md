@@ -58,7 +58,7 @@ Existing composite database helpers cannot call the new service without creating
 
 Use `ResourcePoolBackend` as an explicit execution choice with Integrated and Remote variants. `ResourcePoolBackend` provides `allocate`, `allocate_exact`, and `release`; its Integrated variant forwards them to the existing SQL functions. Remote execution uses a provider client, initially gRPC. Standalone PostgreSQL and REST use the same execution contract because they commit independently of the entity transaction.
 
-[P02: library foundation](https://github.com/dsx-ai-factory/infra-controller/issues/7131) introduces the Integrated adapter and `ResourcePoolWithBackend<T>`, a borrowed association between a typed pool and its selected backend. It changes no production caller. The association does not resolve configuration or establish persisted authority; [P03](https://github.com/dsx-ai-factory/infra-controller/issues/7132) owns those responsibilities. [P04](https://github.com/dsx-ai-factory/infra-controller/issues/7133) supplies the provider's gRPC schema, generated bindings, and reusable checks. [P05](https://github.com/dsx-ai-factory/infra-controller/issues/7134) adds NICo's client adapter and conversions to its existing pool models.
+[P02: library foundation](https://github.com/dsx-ai-factory/infra-controller/issues/7131) introduces the Integrated adapter and `ResourcePoolWithBackend<T>`, a borrowed association between a typed pool and its selected backend. It changes no production caller. The association does not resolve configuration or establish persisted authority; [P03](https://github.com/dsx-ai-factory/infra-controller/issues/7132) owns those responsibilities. [P04](https://github.com/dsx-ai-factory/infra-controller/issues/7133) supplies the provider's gRPC schema, generated bindings, and reusable checks. [P05](https://github.com/dsx-ai-factory/infra-controller/issues/7134) adds NICo's client adapter; [the conversion library](https://github.com/dsx-ai-factory/infra-controller/issues/7634) connects provider values to its existing pool models.
 
 The operations have different execution contexts:
 
@@ -144,7 +144,7 @@ The shared contract preserves these value domains and expansion rules:
 
 Wire values use a discriminated value kind, not an unsigned VNI field or a string that every consumer reparses differently. Prefix validation rejects malformed or noncanonical provider values before attachment. Transport encoding must round-trip every supported value without narrowing it.
 
-P05 converts accepted TOML declarations to these wire values. IPv4 and IPv6 address prefixes and delegated-prefix parents use their network address, preserving existing expansion. Prefix-range endpoints with host bits remain invalid. The [provider API README](../../crates/resource-pool-api/README.md#definitions-and-growth) gives a concrete normalization example.
+The [conversion library](https://github.com/dsx-ai-factory/infra-controller/issues/7634) converts accepted TOML declarations to these wire values. IPv4 and IPv6 address prefixes and delegated-prefix parents use their network address, preserving existing expansion. Prefix-range endpoints with host bits remain invalid. The [provider API README](../../crates/resource-pool-api/README.md#definitions-and-growth) gives a concrete normalization example.
 
 Selection is explicit:
 

@@ -74,11 +74,13 @@ addresses. The protobuf comments specify the endpoint and presence rules.
 
 Wire prefixes require zero host bits. TOML parsing can preserve host bits in a
 prefix such as `192.0.2.7/24`, so the
-[P05 converter](https://github.com/dsx-ai-factory/infra-controller/issues/7134)
-must use the network address (`192.0.2.0/24` here) for IPv4 and IPv6 address
+[`ResourcePoolEligibility` converter](../resource-pool/src/value.rs)
+uses the network address (`192.0.2.0/24` here) for IPv4 and IPv6 address
 prefixes and delegated-prefix parents. Prefix-range endpoints with host bits
-remain invalid and must be rejected. This preserves the existing expansion and
-validation rules without changing accepted TOML.
+remain invalid and are rejected. These
+[pool conversions](https://github.com/dsx-ai-factory/infra-controller/issues/7634)
+preserve the existing parsing, normalization, and eligibility rules, but do not
+apply Integrated's `MAX_POOL_SIZE` inventory limit or enumerate values.
 
 ## Lost replies and delayed requests
 
@@ -136,12 +138,14 @@ Run the package tests, including the generated client/server loopback test:
 cargo test -p carbide-resource-pool-api
 ```
 
-Core's transport adapter and conversions to existing pool models belong to
+Core's [pool conversions](https://github.com/dsx-ai-factory/infra-controller/issues/7634)
+live in [`carbide_resource_pool::value`](../resource-pool/src/value.rs).
+Core's transport adapter belongs to
 [P05](https://github.com/dsx-ai-factory/infra-controller/issues/7134).
 Saved operations belong to
 [P06](https://github.com/dsx-ai-factory/infra-controller/issues/7135), and recovery
 polling belongs to
 [P07](https://github.com/dsx-ai-factory/infra-controller/issues/7136).
-This crate does not activate remote allocation. See the
+Neither this crate nor these conversions activate a new backend. See the
 [execution and recovery design](../../designs/resource-pool/resource-pool-backend.md)
 for the complete lifecycle and release boundaries.

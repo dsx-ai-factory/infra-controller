@@ -31,6 +31,7 @@ carbide-resource-pool-api = { path = "../resource-pool-api" }
 trace-propagation = { path = "../trace-propagation" }
 
 hyper-util = { workspace = true, features = ["client-legacy", "tokio"] }
+ipnetwork = { workspace = true }
 libc = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

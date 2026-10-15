@@ -24,6 +24,7 @@
 //! allocations in the caller's transaction. [`grpc::GrpcResourcePoolBackend`]
 //! independently calls a provider using identities and inputs saved by its caller;
 //! remote selection remains separate from the Integrated backend enum.
+//! [`value`] converts Core definitions and typed values to and from provider messages.
 
 #![cfg_attr(test, allow(txn_held_across_await, txn_without_commit))]
 
@@ -34,6 +35,7 @@ mod tests;
 
 pub mod grpc;
 mod registry;
+pub mod value;
 
 use std::str::FromStr;
 
