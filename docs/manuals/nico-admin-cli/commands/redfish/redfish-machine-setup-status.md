@@ -11,8 +11,8 @@ does already done? Whats missing?
 
 ```text
 nico-admin-cli redfish machine-setup-status
-[--boot-interface-mac] [--extended] [--sort-by]
-[-h|--help]
+[--boot-interface-mac] [--disable-onboard-nic] [--extended]
+[--sort-by] [-h|--help]
 ```
 
 ## DESCRIPTION
@@ -24,6 +24,12 @@ Is everything MachineSetup does already done? Whats missing?
 `--boot-interface-mac <BOOT_INTERFACE_MAC>`
 
 boot_interface_mac
+
+`--disable-onboard-nic`
+
+Report onboard management NIC (e.g. VR72) as drift when it is still
+enabled. Use for managed-DPU hosts; leave off for zero-DPU hosts that
+keep the onboard NIC
 
 `--extended`
 
@@ -51,6 +57,10 @@ Print help (see a summary with -h)
 
 ```sh
 nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypassword machine-setup-status --boot-interface-mac 00:11:22:33:44:55
+```
+
+```sh
+nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypassword machine-setup-status --boot-interface-mac 00:11:22:33:44:55 --disable-onboard-nic
 ```
 
 ---

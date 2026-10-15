@@ -110,6 +110,7 @@ pub(crate) async fn action(action: RedfishAction) -> color_eyre::Result<()> {
                     &bios_profiles,
                     selected_profile,
                     &HashMap::default(),
+                    machine_setup_args.disable_onboard_nic,
                 )
                 .await?;
         }
@@ -121,7 +122,15 @@ pub(crate) async fn action(action: RedfishAction) -> color_eyre::Result<()> {
                 .transpose()
                 .map_err(|e| eyre!("invalid boot_interface_mac: {e}"))?
                 .map(libredfish::BootInterfaceRef::Mac);
-            println!("{}", redfish.machine_setup_status(boot_interface).await?);
+            println!(
+                "{}",
+                redfish
+                    .machine_setup_status(
+                        boot_interface,
+                        machine_setup_status_args.disable_onboard_nic
+                    )
+                    .await?
+            );
         }
         SetForgePasswordPolicy => {
             redfish.set_machine_password_policy().await?;

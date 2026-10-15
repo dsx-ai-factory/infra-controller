@@ -149,7 +149,7 @@ pub(super) async fn inspect_host_boot_config(
     boot_interface: &BootInterfaceTarget,
 ) -> Result<HostBootConfigInspection, StateHandlerError> {
     let is_bios_setup = boot_interface
-        .run(|bi| redfish_client.is_bios_setup(Some(bi)))
+        .run(|bi| redfish_client.is_bios_setup(Some(bi), mh_snapshot.has_managed_dpus()))
         .await
         .map_err(|e| redfish_error("is_bios_setup", e))?;
 

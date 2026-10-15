@@ -276,12 +276,18 @@ impl Redfish for InstrumentedRedfish {
             bios_profiles: &'a BiosProfileVendor,
             selected_profile: BiosProfileType,
             oem_manager_profiles: &'a BiosProfileVendor,
+            disable_onboard_nic: bool,
         ) -> Option<String>;
         fn machine_setup_status<'a>(
             &'a self,
             boot_interface: Option<BootInterfaceRef<'a>>,
+            disable_onboard_nic: bool,
         ) -> MachineSetupStatus;
-        fn is_bios_setup<'a>(&'a self, boot_interface: Option<BootInterfaceRef<'a>>) -> bool;
+        fn is_bios_setup<'a>(
+            &'a self,
+            boot_interface: Option<BootInterfaceRef<'a>>,
+            disable_onboard_nic: bool,
+        ) -> bool;
         fn set_machine_password_policy<'a>(&'a self) -> ();
         fn lockdown<'a>(&'a self, target: EnabledDisabled) -> ();
         fn lockdown_status<'a>(&'a self) -> Status;

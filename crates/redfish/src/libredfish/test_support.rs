@@ -722,6 +722,10 @@ pub enum RedfishSimAction {
         /// ran setup without one, e.g. DPU setup), letting tests assert which
         /// NIC boot-device configuration was applied for.
         boot_interface_mac: Option<String>,
+        /// Whether the caller asked to disable the host's onboard management
+        /// NIC, letting tests assert the controller derives it from the host
+        /// DPU policy (true only for managed-DPU hosts).
+        disable_onboard_nic: bool,
     },
     /// Records a call to `Redfish::is_boot_order_setup`, letting
     /// tests assert that the managed-host state controller actually
@@ -945,6 +949,7 @@ impl Redfish for RedfishSimClient {
                 HashMap<libredfish::BiosProfileType, HashMap<String, serde_json::Value>>,
             >,
         >,
+        disable_onboard_nic: bool,
     ) -> libredfish::RedfishFuture<'a, Result<Option<String>, RedfishError>> {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
@@ -962,6 +967,7 @@ impl Redfish for RedfishSimClient {
             host_state.actions.push(RedfishSimAction::MachineSetup {
                 oem_manager_profiles: oem_manager_profiles.clone(),
                 boot_interface_mac: boot_interface.map(boot_interface_ref_to_string),
+                disable_onboard_nic,
             });
             Ok(job_id)
         })
@@ -970,6 +976,7 @@ impl Redfish for RedfishSimClient {
     fn machine_setup_status<'a>(
         &'a self,
         boot_interface: Option<libredfish::BootInterfaceRef<'a>>,
+        _disable_onboard_nic: bool,
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::MachineSetupStatus, RedfishError>> {
         Box::pin(async move {
             self.state
@@ -2255,6 +2262,7 @@ impl Redfish for RedfishSimClient {
     fn is_bios_setup<'a>(
         &'a self,
         boot_interface: Option<libredfish::BootInterfaceRef<'a>>,
+        _disable_onboard_nic: bool,
     ) -> libredfish::RedfishFuture<'a, Result<bool, RedfishError>> {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();

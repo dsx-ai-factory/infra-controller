@@ -519,6 +519,10 @@ Run the standard machine setup:
     $ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypassword \
     machine-setup --boot-interface-mac 00:11:22:33:44:55
 
+Run machine setup and disable the onboard management NIC (managed-DPU hosts):
+    $ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypassword \
+    machine-setup --boot-interface-mac 00:11:22:33:44:55 --disable-onboard-nic
+
 ")]
 pub(super) struct MachineSetupArgs {
     #[clap(long, help = "boot_interface_mac")]
@@ -527,6 +531,13 @@ pub(super) struct MachineSetupArgs {
     pub(super) bios_profiles: Option<String>,
     #[clap(long, help = "BIOS profile to use")]
     pub(super) selected_profile: Option<libredfish::BiosProfileType>,
+    #[clap(
+        long,
+        help = "Disable the host's onboard management NIC (e.g. VR72). Use for managed-DPU \
+                hosts, where the onboard NIC conflicts with the DPU NIC and bypasses tenant \
+                isolation; leave off for zero-DPU hosts that use the onboard NIC as their data path"
+    )]
+    pub(super) disable_onboard_nic: bool,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
@@ -537,10 +548,20 @@ Check what machine-setup steps remain:
     $ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypassword \
     machine-setup-status --boot-interface-mac 00:11:22:33:44:55
 
+Include onboard-NIC drift in the status (managed-DPU hosts):
+    $ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypassword \
+    machine-setup-status --boot-interface-mac 00:11:22:33:44:55 --disable-onboard-nic
+
 ")]
 pub(super) struct MachineSetupStatusArgs {
     #[clap(long, help = "boot_interface_mac")]
     pub(super) boot_interface_mac: Option<String>,
+    #[clap(
+        long,
+        help = "Report onboard management NIC (e.g. VR72) as drift when it is still enabled. \
+                Use for managed-DPU hosts; leave off for zero-DPU hosts that keep the onboard NIC"
+    )]
+    pub(super) disable_onboard_nic: bool,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]

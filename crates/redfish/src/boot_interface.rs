@@ -44,7 +44,7 @@ impl BootInterfaceTarget {
     /// `op` is invoked with a [`BootInterfaceRef`] and should call the desired
     /// Redfish trait method with it, e.g.
     /// `|bi| client.set_boot_order_dpu_first(bi)` or
-    /// `|bi| client.is_bios_setup(Some(bi))`.
+    /// `|bi| client.is_bios_setup(Some(bi), disable_onboard_nic)`.
     pub async fn run<'s, T, F, Fut>(&'s self, op: F) -> Result<T, RedfishError>
     where
         F: FnOnce(BootInterfaceRef<'s>) -> Fut,
