@@ -9754,16 +9754,32 @@ impl StateHandler for InstanceStateHandler {
                     // be in the current state.
 
                     if ctx.services.site_config.ewethers_enabled {
+                        let mut matching_count = 0;
                         for dpa_interface in &mh_snapshot.dpa_interface_snapshots {
                             if !dpa_interface.managed_host_network_config_version_synced(
                                 &mh_snapshot.instance,
                                 &mh_snapshot.host_snapshot.status.spx_status_observation,
                             ) {
-                                return Ok(StateHandlerOutcome::wait(format!(
-                                    "Waiting for DPA agent {dpa_id} to apply network config and report healthy network",
-                                    dpa_id = dpa_interface.id,
-                                )));
+                                tracing::warn!(
+                                    "DPA agent {} has not applied network config and reported healthy network",
+                                    dpa_interface.id
+                                );
+                            } else {
+                                matching_count += 1;
                             }
+                        }
+                        // XXX TODO XXX
+                        // This is a temporary workaround, to be removed once we have the cabling fixed in Redstone
+                        // XXX TODO XXX
+                        if matching_count == mh_snapshot.dpa_interface_snapshots.len() / 2 {
+                            let next_state = ManagedHostState::Assigned {
+                                instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
+                            };
+                            return Ok(StateHandlerOutcome::transition(next_state));
+                        } else {
+                            return Ok(StateHandlerOutcome::wait(
+                                "Waiting for DPA agents to apply network config and report healthy network".to_string(),
+                            ));
                         }
                     }
 
