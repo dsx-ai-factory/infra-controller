@@ -532,6 +532,7 @@ fn mixed_address_and_prefix_requests_keep_address_lease() -> Result<(), eyre::Re
     Ok(())
 }
 
+/// Verify prefix refusal is scoped to IA_PD while the address allocation succeeds.
 fn assert_address_with_no_prefix(response: &v6::Message, address: Ipv6Addr, idx: u8) {
     assert_eq!(DHCPv6Factory::ia_addr(response), Some(address));
     let Some(DhcpOption::IAPD(prefix)) = response.opts().get(OptionCode::IAPD) else {
