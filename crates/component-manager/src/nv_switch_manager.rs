@@ -448,9 +448,12 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
     ///
     /// A failure to prepare the request, such as an unresolved switch identity,
     /// returns [`ComponentManagerError::RejectedBeforeDispatch`]. If dispatch may
-    /// have reached the backend but no job ID is available, the implementation
-    /// returns [`ComponentManagerError::OperationOutcomeUnknown`]. Callers must not
-    /// automatically resubmit after an unknown outcome. The default implementation
+    /// have reached the backend but no job ID is available, or the backend reports
+    /// the batch as failed, the implementation returns
+    /// [`ComponentManagerError::OperationOutcomeUnknown`]. A failed batch can
+    /// include a parent job ID covering only the accepted switches, so its
+    /// diagnostic retains that ID without reporting complete-batch acceptance.
+    /// Callers must not automatically resubmit after an unknown outcome. The default implementation
     /// returns [`ComponentManagerError::Unsupported`], which guarantees that no work
     /// was dispatched.
     async fn batch_disable_switch_mtls(
