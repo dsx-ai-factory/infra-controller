@@ -26,8 +26,8 @@ Print help (see a summary with -h)
 
 `<ID>`
 
-Declaration UUID; missing declarations return an error. Does not bring
-down hardware
+Declaration UUID. A missing declaration returns an error. Deleting does
+not change hardware or observed NVLink domains.
 
 ## Examples
 

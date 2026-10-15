@@ -16,7 +16,12 @@ nico-admin-cli expected-nvlink-domain create <--member>
 
 ## DESCRIPTION
 
-Create immutable expected membership without configuring hardware
+Create immutable expected membership without configuring hardware.
+
+While a declaration exists, the racks field of its rack group cannot be
+changed and the group cannot be deleted. Site-wide expected-rack-group
+replace-all and erase are also blocked. Delete the declarations with
+expected-nvlink-domain delete before these operations.
 
 ## OPTIONS
 

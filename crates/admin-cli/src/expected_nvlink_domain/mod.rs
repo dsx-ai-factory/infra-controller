@@ -26,6 +26,12 @@ use crate::{async_write, async_write_table_as_csv};
 }))]
 pub(crate) enum Cmd {
     /// Create immutable expected membership without configuring hardware
+    #[command(
+        long_about = "Create immutable expected membership without configuring hardware.\n\n\
+        While a declaration exists, the racks field of its rack group cannot be changed and the group \
+        cannot be deleted. Site-wide expected-rack-group replace-all and erase are also blocked. \
+        Delete the declarations with expected-nvlink-domain delete before these operations."
+    )]
     Create(Create),
     /// Show one declaration or list declarations in UUID order
     Show(Show),
@@ -158,7 +164,9 @@ Delete a declaration and release its tray membership claims:
 
 ")]
 pub(crate) struct Delete {
-    /// Declaration UUID; missing declarations return an error. Does not bring down hardware.
+    /// Declaration UUID. A missing declaration returns an error. Deleting
+    /// does not change hardware or observed NVLink domains.
+    #[arg(verbatim_doc_comment)]
     id: Uuid,
 }
 
