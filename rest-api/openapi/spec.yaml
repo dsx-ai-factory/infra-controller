@@ -34425,7 +34425,6 @@ components:
         - dpuNetworkConfig
         - lastRebooted
         - placementInRack
-        - lldpNeighbors
       properties:
         id:
           type: string
@@ -34503,10 +34502,7 @@ components:
             - type: 'null'
           description: 'Physical placement of the DPU Machine within its Rack, when known'
         lldpNeighbors:
-          x-go-required-nullable: true
-          type:
-            - array
-            - 'null'
+          type: array
           items:
             $ref: '#/components/schemas/MachineLldpNeighbor'
           description: 'LLDP neighbors observed on the DPU ports, as last reported by the DPU agent. Empty when the DPU has not reported any neighbors.'

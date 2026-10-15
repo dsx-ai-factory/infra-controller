@@ -469,7 +469,6 @@ func (o *DpuMachineSummary) SetPlacementInRack(v PlacementInRack) {
 }
 
 // GetLldpNeighbors returns the LldpNeighbors field value
-// If the value is explicit nil, the zero value for []MachineLldpNeighbor will be returned
 func (o *DpuMachineSummary) GetLldpNeighbors() []MachineLldpNeighbor {
 	if o == nil {
 		var ret []MachineLldpNeighbor
@@ -482,7 +481,7 @@ func (o *DpuMachineSummary) GetLldpNeighbors() []MachineLldpNeighbor {
 // GetLldpNeighborsOk returns a tuple with the LldpNeighbors field value
 // and a boolean to check if the value has been set.
 func (o *DpuMachineSummary) GetLldpNeighborsOk() ([]MachineLldpNeighbor, bool) {
-	if o == nil || IsNil(o.LldpNeighbors) {
+	if o == nil {
 		return nil, false
 	}
 	return o.LldpNeighbors, true
@@ -563,7 +562,6 @@ func (o *DpuMachineSummary) UnmarshalJSON(data []byte) (err error) {
 		"dpuNetworkConfig":   {},
 		"lastRebooted":       {},
 		"placementInRack":    {},
-		"lldpNeighbors":      {},
 	}
 	for _, requiredProperty := range requiredProperties {
 		_, nullable := nullableRequiredProperties[requiredProperty]
