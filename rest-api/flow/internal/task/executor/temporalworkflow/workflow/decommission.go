@@ -60,6 +60,7 @@ func decommission(
 		ctx,
 		reqInfo.TaskID,
 		typeToTargets,
+		typeToTargets,
 		info,
 		reqInfo.RuleDefinition,
 	)

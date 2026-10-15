@@ -5,6 +5,7 @@ package nicolegacy
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -13,6 +14,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // Any call through the embedded nil client panics, proving rejection occurs
@@ -79,20 +81,49 @@ func TestManager_PowerControl(t *testing.T) {
 }
 
 func TestManager_FirmwareControl(t *testing.T) {
-	for name, ids := range map[string][]string{
-		"MAC only":                      {""},
-		"mixed ingested and uningested": {"machine-1", ""},
+	for name, tc := range map[string]struct {
+		macCount        int
+		actual          map[string]string
+		expectScheduled bool
+	}{
+		"MAC only":                            {macCount: 1},
+		"mixed ingested and uningested":       {macCount: 2},
+		"desired firmware skips scheduling":   {actual: map[string]string{"bmc": "1.0"}},
+		"different firmware schedules update": {actual: map[string]string{"bmc": "0.9"}, expectScheduled: true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			target := common.Target{Type: devicetypes.ComponentTypeCompute, IdentifierType: common.IdentifierTypeMACAddress,
-				Identifiers: []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"}[:len(ids)]}
+			scheduleError := errors.New("firmware update scheduled")
+			target := common.Target{Type: devicetypes.ComponentTypeCompute, Identifiers: []string{"machine-1"}}
+			var client nicoapi.Client = noCallsClient{}
+			if tc.macCount > 0 {
+				target.IdentifierType = common.IdentifierTypeMACAddress
+				target.Identifiers = []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"}[:tc.macCount]
+			} else {
+				mockClient := nicoapi.NewMockClient()
+				mockClient.SetFirmwareUpdateTimeWindowError(scheduleError)
+				mockClient.AddMachine(nicoapi.MachineDetail{MachineID: "machine-1", BmcIP: "192.0.2.1"})
+				client = &firmwareStateClient{
+					Client:  mockClient,
+					desired: []*corev1.DesiredFirmwareVersionEntry{{ComponentVersions: map[string]string{"bmc": "1.0"}}},
+					endpoints: []*corev1.ExploredEndpoint{{
+						Address: "192.0.2.1",
+						Report:  &corev1.EndpointExplorationReport{FirmwareVersions: tc.actual},
+					}},
+				}
+			}
 			require.NoError(t, target.Validate())
-			m := New(noCallsClient{}, 0, nil)
+			m := New(client, 0, nil)
 			err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
 				Operation:              operations.FirmwareOperationUpgrade,
-				OverrideReadinessCheck: true,
+				OverrideReadinessCheck: tc.macCount > 0,
 			})
-			require.ErrorContains(t, err, "MAC-address targets are not supported by the nicolegacy compute manager")
+			if tc.macCount > 0 {
+				require.ErrorContains(t, err, "MAC-address targets are not supported by the nicolegacy compute manager")
+			} else if tc.expectScheduled {
+				require.ErrorIs(t, err, scheduleError)
+			} else {
+				require.NoError(t, err)
+			}
 		})
 	}
 }
