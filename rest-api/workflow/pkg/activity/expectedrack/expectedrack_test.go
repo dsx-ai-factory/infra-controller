@@ -30,7 +30,6 @@ import (
 	cwu "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -656,8 +655,8 @@ func TestManageExpectedRack_UpdateExpectedRacksInDB(t *testing.T) {
 		// Update creation and update timestamp to be earlier than inventory processing interval so
 		// reconciliation considers them outside the race-condition window.
 		_, uerr := dbSession.DB.Exec("UPDATE expected_rack SET created = ?, updated = ? WHERE id = ?",
-			time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval*2)),
-			time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval*2)),
+			time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)),
+			time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)),
 			er.ID.String())
 		assert.NoError(t, uerr)
 
@@ -699,13 +698,14 @@ func TestManageExpectedRack_UpdateExpectedRacksInDB(t *testing.T) {
 		}
 
 		// Test label updates
-		if i == 1 {
+		switch i {
+		case 1:
 			// Add labels to a rack that didn't have them before
 			ctrlExpectedRack.Metadata.Labels = []*corev1.Label{
 				{Key: "new-label", Value: cutil.GetPtr("new-value")},
 			}
 			expectedRacksToUpdate = append(expectedRacksToUpdate, pagedExpectedRacks[i])
-		} else if i == 5 {
+		case 5:
 			// Modify existing labels
 			ctrlExpectedRack.Metadata.Labels = []*corev1.Label{
 				{Key: "region", Value: cutil.GetPtr(fmt.Sprintf("region-updated-%d", i/5))},
@@ -713,7 +713,7 @@ func TestManageExpectedRack_UpdateExpectedRacksInDB(t *testing.T) {
 				{Key: "status", Value: cutil.GetPtr("active")},
 			}
 			expectedRacksToUpdate = append(expectedRacksToUpdate, pagedExpectedRacks[i])
-		} else if i == 10 {
+		case 10:
 			// Remove labels (set to empty labels array)
 			ctrlExpectedRack.Metadata.Labels = []*corev1.Label{}
 			expectedRacksToUpdate = append(expectedRacksToUpdate, pagedExpectedRacks[i])
@@ -1063,7 +1063,7 @@ func testExpectedRackInventoryNoChange(t *testing.T) {
 
 	// Push the row's Updated timestamp into the past so we can detect whether the activity
 	// touched it (an Update would refresh Updated to current time).
-	pastTime := time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval * 2))
+	pastTime := time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval * 2))
 	_, uerr := dbSession.DB.Exec("UPDATE expected_rack SET created = ?, updated = ? WHERE id = ?",
 		pastTime, pastTime, er.ID.String())
 	assert.NoError(t, uerr)

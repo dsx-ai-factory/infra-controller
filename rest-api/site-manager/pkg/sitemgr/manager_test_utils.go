@@ -153,7 +153,8 @@ func (s *Suite) setup() error {
 	rtr := mux.NewRouter()
 	rtr.HandleFunc("/v1/pki/ca/pem", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Write([]byte(testCACert))
+		// Mock response writes are best-effort if the client closes the connection.
+		_, _ = w.Write([]byte(testCACert))
 		if s.forceErr {
 			http.Error(w, "forced error", http.StatusInternalServerError)
 		}
@@ -169,7 +170,7 @@ func (s *Suite) setup() error {
 			panic(err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(c)
+		_, _ = w.Write(c)
 		if s.forceErr {
 			http.Error(w, "forced error", http.StatusInternalServerError)
 		}

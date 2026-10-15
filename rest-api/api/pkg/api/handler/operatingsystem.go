@@ -31,7 +31,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
@@ -1241,7 +1240,7 @@ func (gsh GetOperatingSystemHandler) Handle(c echo.Context) error {
 
 	// If caller has dual role (Tenant+Provider) we already know we can go forward.
 	// Otherwise we need additional checks:
-	if !(tenant != nil && ip != nil) {
+	if tenant == nil || ip == nil {
 		if ip != nil && !ownedByProvider {
 			logger.Warn().Msg("provider admin cannot view tenant-owned operating system")
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Operating System does not belong to the infrastructure provider in org", nil)
@@ -1972,7 +1971,7 @@ func (dsh DeleteOperatingSystemHandler) Handle(c echo.Context) error {
 	if tenant != nil {
 		instanceFilter.TenantIDs = []uuid.UUID{tenant.ID}
 	}
-	instances, _, err := isDAO.GetAll(ctx, nil, instanceFilter, paginator.PageInput{}, nil)
+	instances, _, err := isDAO.GetAll(ctx, nil, instanceFilter, cdbp.PageInput{}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Instances for Operating System from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Instances for deleting operatingsystem", nil)

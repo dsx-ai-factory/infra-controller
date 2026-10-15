@@ -16,7 +16,6 @@ import (
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 
@@ -158,7 +157,7 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 
 	vpcDAO := cdbm.NewVpcDAO(cvh.dbSession)
 	if apiRequest.ID != nil {
-		_, total, err := vpcDAO.GetAll(ctx, nil, cdbm.VpcFilterInput{VpcIDs: []uuid.UUID{*apiRequest.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(paginator.DefaultLimit)}, nil)
+		_, total, err := vpcDAO.GetAll(ctx, nil, cdbm.VpcFilterInput{VpcIDs: []uuid.UUID{*apiRequest.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.DefaultLimit)}, nil)
 		if err != nil {
 			logger.Error().Err(err).Msg("db error checking for ID uniqueness of tenant vpc")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create Vpc due to DB error", nil)

@@ -597,9 +597,9 @@ func TestKeycloakClaims_TimeHandling(t *testing.T) {
 		}
 
 		// Validate time fields
-		assert.True(t, claims.RegisteredClaims.ExpiresAt.Before(time.Now()))
+		assert.True(t, claims.ExpiresAt.Before(time.Now()))
 		timeHelper.AssertTimeWithinRange(
-			claims.RegisteredClaims.ExpiresAt.Time,
+			claims.ExpiresAt.Time,
 			expiredTime,
 			time.Second,
 			"Expiration time should match expected expired time",
@@ -619,7 +619,7 @@ func TestKeycloakClaims_TimeHandling(t *testing.T) {
 		}
 
 		// Validate future time handling
-		assert.True(t, claims.RegisteredClaims.NotBefore.After(time.Now()))
+		assert.True(t, claims.NotBefore.After(time.Now()))
 	})
 }
 
@@ -724,9 +724,7 @@ func TestRealmRolesProcessing_InputVariations(t *testing.T) {
 	// Convert to individual strings for testing
 	var testStrings []string
 	for _, roles := range roleArraySeeds {
-		for _, role := range roles {
-			testStrings = append(testStrings, role)
-		}
+		testStrings = append(testStrings, roles...)
 	}
 
 	for _, roleString := range testStrings {

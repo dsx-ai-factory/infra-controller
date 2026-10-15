@@ -35,9 +35,9 @@ const (
 )
 
 var (
-	LeadingWhitespaceRegexp  = regexp.MustCompile("^\\s+.*")
-	TrailingWhitespaceRegexp = regexp.MustCompile(".*\\s+$")
-	NotAllWhitespaceRegexp   = regexp.MustCompile("[^\\s]+")
+	LeadingWhitespaceRegexp  = regexp.MustCompile(`^\s+.*`)
+	TrailingWhitespaceRegexp = regexp.MustCompile(`.*\s+$`)
+	NotAllWhitespaceRegexp   = regexp.MustCompile(`[^\s]+`)
 	ShaHashRegex             = regexp.MustCompile("^[A-Fa-f0-9]+$")
 	Sha256LowercaseHexRegex  = regexp.MustCompile("^[a-f0-9]{64}$")
 	DiskImagePathRegex       = regexp.MustCompile(`^(smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/[:space:]]+))$`)

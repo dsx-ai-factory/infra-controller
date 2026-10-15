@@ -23,7 +23,8 @@ func TestSlackClient_sendHttpRequest(t *testing.T) {
 
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		// Mock response writes are best-effort if the client closes the connection.
+		_, _ = w.Write([]byte("ok"))
 	}))
 
 	tests := []struct {

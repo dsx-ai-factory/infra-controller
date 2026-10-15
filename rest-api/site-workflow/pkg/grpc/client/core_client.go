@@ -467,11 +467,7 @@ func equalMD5(a, b []byte) bool {
 
 func SliceToChunks[T any](slice []T, chunkSize int) (chunks [][]T) {
 	chunks = [][]T{}
-	for {
-		if len(slice) == 0 {
-			break
-		}
-
+	for len(slice) != 0 {
 		if len(slice) < chunkSize {
 			chunkSize = len(slice)
 		}

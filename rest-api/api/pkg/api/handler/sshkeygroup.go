@@ -570,7 +570,7 @@ func (uskgh UpdateSSHKeyGroupHandler) Handle(c echo.Context) error {
 			}
 
 			// Validating and creating new SSH Key Group's Site Association
-			for stID, _ := range newSiteAssociationIDMap {
+			for stID := range newSiteAssociationIDMap {
 				// Validate the site for which this SSH Key Group is being created
 				site, serr := common.GetSiteFromIDString(ctx, nil, stID, uskgh.dbSession)
 				if serr != nil {
@@ -628,7 +628,7 @@ func (uskgh UpdateSSHKeyGroupHandler) Handle(c echo.Context) error {
 			}
 
 			// Updating existing SSH Key Group Association status as deleting
-			for sgaID, _ := range deletingSiteAssociationIDMap {
+			for sgaID := range deletingSiteAssociationIDMap {
 				_, serr := skgsaDAO.Update(ctx, tx, cdbm.SSHKeyGroupSiteAssociationUpdateInput{
 					ID:     sgaID,
 					Status: cutil.GetPtr(cdbm.SSHKeyGroupSiteAssociationStatusDeleting),
@@ -1079,7 +1079,7 @@ func (gskgh GetSSHKeyGroupHandler) Handle(c echo.Context) error {
 	}
 
 	// Update respective site with infranstructure provider relation
-	for i, _ := range dbskgsas {
+	for i := range dbskgsas {
 		dbskgsas[i].Site = dbstMap[dbskgsas[i].SiteID]
 	}
 
