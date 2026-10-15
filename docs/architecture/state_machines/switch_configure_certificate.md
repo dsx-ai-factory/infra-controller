@@ -101,7 +101,7 @@ the state advances to `ConfigureCertificate` `Start`.
 | CM returns `RejectedBeforeDispatch` or another error on submission | `StateHandlerError`; remain in `Start` and retry. `RejectedBeforeDispatch` establishes that RMS received nothing. |
 | CM returns `NotFound`, `OperationOutcomeUnknown`, or `Unsupported` on status | Transition to `Error`; certificate configuration is not submitted. |
 | CM returns another error on status | `StateHandlerError`; remain in `WaitForComplete` and retry. |
-| Component manager not configured while polling | Transition to `Error` (no job ID to resume); certificate configuration is not submitted. |
+| Component manager not configured while polling | Transition to `Error` because the persisted job ID cannot be polled without a component manager; certificate configuration is not submitted. |
 | RMS job is pending | Wait; poll again on the next iteration. |
 | RMS job and every child it declares `Completed` | Advance to `ConfigureCertificate` `Start`. |
 | RMS job (or any child) `Failed` | Transition to `Error`; certificate configuration is not submitted. |
@@ -197,7 +197,7 @@ The target switch build must support each selected binding.
 | RMS job status is `Started` or `InProgress` | Wait; poll again on the next iteration. |
 | RMS job status is `Completed` | Bring-up advances to `RotateOsPassword`. Maintenance returns to `Ready`. |
 | RMS job status is `Failed` | Transition to `Error` with the job error message. Bring-up's cause also states that mTLS restoration is incomplete. |
-| Component manager not configured while polling | Transition to `Error` (no job ID to resume). |
+| Component manager not configured while polling | Transition to `Error` because the persisted job ID cannot be polled without a component manager. |
 
 ## Component Manager API
 
