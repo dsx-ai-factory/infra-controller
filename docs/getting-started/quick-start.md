@@ -74,18 +74,20 @@ Everything in this step must be done **before** running `setup.sh`. Skipping any
 export KUBECONFIG=/path/to/kubeconfig          # your cluster kubeconfig
 export REGISTRY_PULL_SECRET=<pull-secret-or-api-key>  # your registry pull credential
 export NICO_IMAGE_REGISTRY=my-registry.example.com/nico  # base registry for all NICo images
+export NICO_CORE_IMAGE_NAME=nico                   # optional; defaults to nico
 export NICO_CORE_IMAGE_TAG=<nico-core-image-tag>  # e.g. v2025.12.30-rc1
 export NICO_REST_IMAGE_TAG=<nico-rest-image-tag>      # e.g. v1.0.4
 ```
 
-`NICO_IMAGE_REGISTRY` is used for both NICo Core (`<registry>/nvmetal-carbide`) and NICo REST (`<registry>/nico-rest-*`). Push all images to this registry before running setup.
+`NICO_IMAGE_REGISTRY` is used for both NICo Core (`<registry>/<NICO_CORE_IMAGE_NAME>`) and NICo REST (`<registry>/nico-rest-*`). `NICO_CORE_IMAGE_NAME` defaults to `nico`, matching the image produced by `make images`; set it to `nvmetal-carbide` when deploying a legacy image. Push all images to this registry before running setup.
 
 Obtain an NGC API key at [ngc.nvidia.com](https://ngc.nvidia.com) → **API Keys** → **Generate Personal Key**.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `REGISTRY_PULL_SECRET` | **Yes** | Pull secret and API key for your image registry. Used to create the image pull secret for both NICo Core and NICo REST. |
-| `NICO_IMAGE_REGISTRY` | **Yes** | Base image registry for all NICo images (e.g. `my-registry.example.com/nico`). Used for NICo Core (`<registry>/nvmetal-carbide`) and NICo REST (`<registry>/nico-rest-*`). |
+| `NICO_IMAGE_REGISTRY` | **Yes** | Base image registry for all NICo images (e.g. `my-registry.example.com/nico`). Used for NICo Core and NICo REST (`<registry>/nico-rest-*`). |
+| `NICO_CORE_IMAGE_NAME` | No | NICo Core image name under `NICO_IMAGE_REGISTRY`. Defaults to `nico`; use `nvmetal-carbide` for legacy images. |
 | `NICO_CORE_IMAGE_TAG` | **Yes** | NICo Core image tag (e.g. `v2025.12.30`). |
 | `NICO_REST_IMAGE_TAG` | **Yes** | NICo REST image tag (e.g. `v1.0.4`). |
 | `KUBECONFIG` | **Yes** | Path to your cluster kubeconfig. |
