@@ -126,6 +126,25 @@ async fn test_tenant(pool: sqlx::PgPool) {
         }
     );
 
+    // Creating the same organization again is a conflict, not a server fault, and the
+    // message must not carry the database error.
+    let duplicate_tenant = env
+        .api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: "Org".to_string(),
+            routing_profile_type: None,
+            metadata: Some(rpc::forge::Metadata {
+                name: "Name".to_string(),
+                description: "".to_string(),
+                labels: vec![],
+            }),
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(duplicate_tenant.code(), Code::AlreadyExists);
+    assert_eq!(duplicate_tenant.message(), "Tenant already exists: Org");
+
     let find_tenant = env
         .api
         .find_tenant(tonic::Request::new(rpc::forge::FindTenantRequest {
@@ -708,6 +727,28 @@ async fn test_tenant_create_keyset(pool: sqlx::PgPool) {
     );
 
     assert!(keyset.keyset_content.unwrap().public_keys.is_empty());
+
+    // Creating the same keyset again is a conflict, not a server fault, and the
+    // message must not carry the database error.
+    let duplicate_keyset = env
+        .api
+        .create_tenant_keyset(tonic::Request::new(rpc::forge::CreateTenantKeysetRequest {
+            keyset_identifier: Some(rpc::forge::TenantKeysetIdentifier {
+                organization_id: "Org1".to_string(),
+                keyset_id: "keyset1".to_string(),
+            }),
+            keyset_content: Some(rpc::forge::TenantKeysetContent {
+                public_keys: vec![],
+            }),
+            version: "V1-T1691517639501025".to_string(),
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(duplicate_keyset.code(), Code::AlreadyExists);
+    let message = duplicate_keyset.message();
+    assert!(message.starts_with("keyset already exists: "), "{message}");
+    assert!(message.contains("keyset1"), "{message}");
 }
 
 #[crate::sqlx_test]

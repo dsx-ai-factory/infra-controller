@@ -37,13 +37,21 @@ pub async fn create_and_persist(
         RETURNING organization_id, organization_name, version, routing_profile_type";
 
     sqlx::query_as(query)
-        .bind(organization_id)
+        .bind(&organization_id)
         .bind(metadata.name)
         .bind(version)
         .bind(routing_profile_type)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|error| match error {
+            sqlx::Error::Database(db_error) if db_error.is_unique_violation() => {
+                DatabaseError::AlreadyFoundError {
+                    kind: "Tenant",
+                    id: organization_id,
+                }
+            }
+            error => DatabaseError::query(query, error),
+        })
 }
 
 pub async fn find<S: AsRef<str>>(
