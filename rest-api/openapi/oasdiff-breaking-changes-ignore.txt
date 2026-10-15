@@ -465,3 +465,10 @@ API GET /v2/org/{org}/nico/machine/{machineId} the response property `metadata/b
 API GET /v2/org/{org}/nico/machine/{machineId} the response property `metadata/dmiData` became nullable for the status `200`
 API PATCH /v2/org/{org}/nico/machine/{machineId} the response property `metadata/bmcInfo` became nullable for the status `200`
 API PATCH /v2/org/{org}/nico/machine/{machineId} the response property `metadata/dmiData` became nullable for the status `200`
+
+# Instance propagation details can be absent; allow the existing null responses.
+API GET /v2/org/{org}/nico/instance the response property `items/networkSecurityGroupPropagationDetails` became nullable for the status `200`
+API POST /v2/org/{org}/nico/instance the response property `networkSecurityGroupPropagationDetails` became nullable for the status `201`
+API POST /v2/org/{org}/nico/instance/batch the response property `items/networkSecurityGroupPropagationDetails` became nullable for the status `201`
+API GET /v2/org/{org}/nico/instance/{instanceId} the response property `networkSecurityGroupPropagationDetails` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the response property `networkSecurityGroupPropagationDetails` became nullable for the status `200`

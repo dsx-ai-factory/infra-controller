@@ -24656,7 +24656,9 @@ components:
             - 'null'
           description: External power provisioning profile associated with the Instance.
         networkSecurityGroupPropagationDetails:
-          $ref: '#/components/schemas/NetworkSecurityGroupPropagationDetails'
+          oneOf:
+            - $ref: '#/components/schemas/NetworkSecurityGroupPropagationDetails'
+            - type: 'null'
           description: Propagation details for the attached Network Security Group
         networkSecurityGroupInherited:
           type: boolean
