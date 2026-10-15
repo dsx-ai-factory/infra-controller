@@ -29,14 +29,9 @@
 // is *ignored* for DPU reprovisioning. Core's `DpuReprovisioningRequest`
 // has no `target_version` field — the reprovisioning state machine
 // always rolls DPUs to the site-configured target firmware version
-// (`HardwareModel.dpu_firmware`). The REST surface still requires
-// `version` to be set when `targets` is non-empty (see model
-// `validateFirmwareTargets`); for a `targets: ["dpu"]`-only request the
-// caller has to supply *some* version string but the value will not
-// influence the reprovisioning. This is documented at the API surface
-// rather than enforced as a flow precondition because relaxing the
-// general `targets requires version` validation would weaken the
-// guarantees other component managers depend on.
+// (`HardwareModel.dpu_firmware`). The REST surface permits an omitted
+// version. Any supplied value is ignored for a `targets: ["dpu"]`-only
+// request and does not influence reprovisioning.
 package dpureprov
 
 import (

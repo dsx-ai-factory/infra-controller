@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-//! Firmware-object retrieval boundary for automatic rack maintenance.
+//! Firmware-object retrieval boundary for rack-profile firmware updates.
 //!
 //! Fetching is separate from the state handler so callers can provide the
 //! production HTTP client or a deterministic implementation for tests.
@@ -35,7 +35,7 @@ pub trait FirmwareObjectFetcher: std::fmt::Debug + Send + Sync {
     /// Fetches the complete document body from `url` within `timeout`.
     ///
     /// A successful call returns the body unchanged. JSON validation belongs
-    /// to the state handler that consumes the document.
+    /// to the caller that consumes the document.
     ///
     /// # Errors
     ///
