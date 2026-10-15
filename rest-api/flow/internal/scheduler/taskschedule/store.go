@@ -266,7 +266,7 @@ func (s *PostgresStore) List(
 	}
 
 	// Fetch the page.
-	q = q.OrderExpr("ts.created_at ASC")
+	q = q.OrderExpr("ts.created_at ASC, ts.id ASC")
 	if opts.Pagination != nil {
 		q = q.Offset(opts.Pagination.Offset).Limit(opts.Pagination.Limit)
 	}

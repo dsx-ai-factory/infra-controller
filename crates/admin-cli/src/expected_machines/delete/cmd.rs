@@ -17,11 +17,12 @@
 
 use rpc::forge::ExpectedMachineRequest;
 
-use super::args::Args;
 use crate::rpc::ApiClient;
 
-pub(super) async fn delete(data: Args, api_client: &ApiClient) -> color_eyre::Result<()> {
-    let req: ExpectedMachineRequest = data.try_into()?;
-    api_client.0.delete_expected_machine(req).await?;
+pub(super) async fn delete(
+    request: ExpectedMachineRequest,
+    api_client: &ApiClient,
+) -> color_eyre::Result<()> {
+    api_client.0.delete_expected_machine(request).await?;
     Ok(())
 }

@@ -79,6 +79,24 @@ fmds:
   # Empty keeps NICo's Forge signer.
   sign_proxy_url: ""
 
+### Serves the agent's Prometheus /metrics and /ready on metricsPort
+### (default 8888). /ready is bound to this endpoint and backs the
+### readinessProbe, so setting this to false removes the metrics port and the
+### readinessProbe and writes `prometheus-enabled = false` into the agent config.
+prometheusEnabled: true
+
+### Readiness probe for the dpu-agent container, rendered verbatim. /ready
+### turns 200 after the first successful HBN, DHCP and FMDS apply. Set to {}
+### to disable the probe. Not rendered when prometheusEnabled is false.
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: metrics
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
 ### Supplemental NVUE network config (operator escape hatch, e.g. the DPF
 ### storage test bed). References an externally managed ConfigMap in the
 ### release namespace holding an RFC 7386 JSON Merge Patch document that the

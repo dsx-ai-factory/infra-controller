@@ -25,13 +25,21 @@ use crate::metrics::{ComponentKind, ComponentMetrics, MetricsManager};
 pub struct CompositeDataSink {
     sinks: Vec<Arc<dyn DataSink>>,
     component_metrics: Arc<ComponentMetrics>,
+    share_metrics: bool,
 }
 
 impl CompositeDataSink {
     pub fn new(sinks: Vec<Arc<dyn DataSink>>, metrics_manager: Arc<MetricsManager>) -> Self {
+        let share_metrics = sinks
+            .iter()
+            .filter(|sink| sink.accepts_shared_metric())
+            .nth(1)
+            .is_some();
+
         Self {
             sinks,
             component_metrics: metrics_manager.component_metrics(),
+            share_metrics,
         }
     }
 
@@ -55,6 +63,25 @@ impl DataSink for CompositeDataSink {
         "composite_sink"
     }
 
+    fn prune_metrics(
+        &self,
+        context: &EventContext,
+        metric_type: Option<&str>,
+        labels: &[crate::metrics::MetricLabel],
+        unit: Option<&str>,
+        label_names: Option<&[&str]>,
+    ) {
+        for sink in &self.sinks {
+            sink.prune_metrics(context, metric_type, labels, unit, label_names);
+        }
+    }
+
+    fn prune_metric_key(&self, context: &EventContext, key: &str, metric_type: &str, unit: &str) {
+        for sink in &self.sinks {
+            sink.prune_metric_key(context, key, metric_type, unit);
+        }
+    }
+
     /// Fans the event out to every sink, recording each sink's duration and
     /// outcome. A failing sink never blocks the others: its error is fully
     /// reported here (the sink logs its own detail, the composite meters the
@@ -64,9 +91,27 @@ impl DataSink for CompositeDataSink {
         context: &EventContext,
         event: &CollectorEvent,
     ) -> Result<(), HealthError> {
+        let sample = match event {
+            CollectorEvent::Metric(sample) if self.share_metrics => Some(sample.as_ref()),
+            _ => None,
+        };
+
+        let mut shared_metric = None;
+
         for sink in &self.sinks {
             let start = Instant::now();
-            let result = sink.try_handle_event(context, event);
+
+            let result = if let Some(sample) = sample.filter(|_| sink.accepts_shared_metric()) {
+                // Charge the first copy to the first target's timed dispatch.
+                // Later targets retain the same immutable observation.
+                let shared_metric = shared_metric
+                    .get_or_insert_with(|| Arc::new((context.clone(), (*sample).clone())));
+
+                sink.try_handle_shared_metric(context, event, shared_metric)
+            } else {
+                sink.try_handle_event(context, event)
+            };
+
             self.record_sink_operation(sink.as_ref(), start.elapsed(), result.is_ok());
         }
         Ok(())

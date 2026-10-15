@@ -38,6 +38,10 @@ message RackProfileId {
   string id = 1;
 }
 
+message RackGroupId {
+  string id = 1;
+}
+
 message SwitchId {
   string id = 1;
 }

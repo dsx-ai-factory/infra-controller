@@ -18,9 +18,10 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bmc_mock::HostMachineInfo;
 use bmc_mock::injection::InjectionStore;
+use bmc_mock::{ActionError, HostMachineInfo, ResourceResetType};
 use carbide_uuid::machine::MachineId;
+use nv_redfish::schema::resource::PowerState;
 use uuid::Uuid;
 
 use crate::api_client::ApiClient;
@@ -68,6 +69,22 @@ impl DeviceHandle {
             DeviceHandleInner::Machine(handle) => handle.mat_id(),
             DeviceHandleInner::Switch(handle) => handle.mat_id(),
             DeviceHandleInner::PowerShelf(handle) => handle.mat_id(),
+        }
+    }
+
+    pub(crate) fn set_system_power(&self, request: ResourceResetType) -> Result<(), ActionError> {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => handle.set_system_power(request),
+            DeviceHandleInner::Switch(handle) => handle.set_system_power(request),
+            DeviceHandleInner::PowerShelf(handle) => handle.set_system_power(request),
+        }
+    }
+
+    pub(crate) fn power_state(&self) -> PowerState {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => handle.power_state(),
+            DeviceHandleInner::Switch(handle) => handle.power_state(),
+            DeviceHandleInner::PowerShelf(handle) => handle.power_state(),
         }
     }
 
@@ -265,5 +282,43 @@ impl DeviceHandle {
             None,
             machine_config_section,
         ))
+    }
+
+    /// A host handle for control-router tests, backed by `host_info`.
+    #[cfg(test)]
+    pub(crate) fn for_control_test_host(
+        host_info: HostMachineInfo,
+        machine_config_section: &str,
+    ) -> Self {
+        Self::machine(MachineHandle::for_control_test_host(
+            host_info,
+            Vec::new(),
+            machine_config_section,
+        ))
+    }
+
+    /// A switch handle for control-router tests with an optional NVOS lease.
+    #[cfg(test)]
+    pub(crate) fn for_control_test_switch(
+        host_info: HostMachineInfo,
+        machine_config_section: &str,
+        nvos_ip: Option<Ipv4Addr>,
+    ) -> Self {
+        Self::switch(SwitchHandle::for_control_test(
+            host_info,
+            machine_config_section,
+            nvos_ip,
+        ))
+    }
+
+    /// Sets the simulated NVOS lease of a switch handle; other devices have none.
+    #[cfg(test)]
+    pub(crate) fn set_control_test_nvos_ip(&self, ip: Option<Ipv4Addr>) {
+        match &self.0 {
+            DeviceHandleInner::Switch(handle) => handle.set_control_test_nvos_ip(ip),
+            DeviceHandleInner::Machine(_) | DeviceHandleInner::PowerShelf(_) => {
+                unreachable!("control-test NVOS addresses are only set on switches")
+            }
+        }
     }
 }

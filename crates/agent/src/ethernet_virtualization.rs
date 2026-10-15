@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -30,7 +30,9 @@ use ::rpc::forge::{
     self as rpc, FlatInterfaceConfig, ManagedHostNetworkConfigResponse,
     NetworkSecurityGroupRuleAction, NetworkSecurityGroupRuleProtocol,
 };
+use carbide_network::ip::prefix::{IpNet, Ipv6Net, aggregate};
 use carbide_network::virtualization::{VpcVirtualizationType, build_dual_stack_list};
+use carbide_rpc_utils::dhcp::{DhcpConfig, DhcpV6ServerId};
 use eyre::WrapErr;
 use mac_address::MacAddress;
 use nvue_client::client::{NvueClient, NvueClientError};
@@ -152,6 +154,18 @@ fn split_addresses_by_family(addresses: &[IpAddr]) -> (Vec<Ipv4Addr>, Vec<Ipv6Ad
         })
 }
 
+/// Converts the presence-bearing Core value without collapsing explicit zero
+/// into the legacy omitted-field behavior.
+fn dhcpv6_server_preference(
+    network_config: &rpc::ManagedHostNetworkConfigResponse,
+) -> eyre::Result<Option<u8>> {
+    network_config
+        .dhcpv6_server_preference
+        .map(u8::try_from)
+        .transpose()
+        .wrap_err("DHCPv6 server preference must be between 0 and 255")
+}
+
 /// Resolve site-configured DHCPv4 NTP and DNS-discovered DHCPv6 NTP options.
 fn build_dhcp_ntp_servers(
     nc: &rpc::ManagedHostNetworkConfigResponse,
@@ -190,7 +204,6 @@ fn build_dhcp_ntp_servers(
 #[derive(Debug)]
 struct PostAction {
     cmd: &'static str,
-    path: FPath,
 }
 
 pub(super) enum NvueUpdateFlavor<'a> {
@@ -316,6 +329,158 @@ fn parse_managed_host_loopback_ips(
     Ok((loopback_ip, loopback_ip_v6))
 }
 
+/// Returns peer VNIs only when Core explicitly marks them as policy-filtered.
+///
+/// The protobuf default is false, so configurations from Core versions that
+/// predate the marker cannot reactivate peerings during a rolling upgrade.
+fn vpc_peer_vnis_for_rendering(authoritative: bool, vnis: &[u32]) -> Vec<u32> {
+    if authoritative {
+        vnis.to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Selects the isolation prefixes for the active virtualizer.
+///
+/// New Core versions resolve FNN null-route policy before transmission and
+/// preserve explicit prefix boundaries in the presence-bearing field. During
+/// an agent-first rolling upgrade, an older Core omits that field and the
+/// agent reduces the legacy site-prefix list to its minimal exact union before
+/// using it as the fallback.
+fn site_isolation_prefixes_for_rendering(
+    virtualization_type: VpcVirtualizationType,
+    config: &rpc::ManagedHostNetworkConfigResponse,
+) -> eyre::Result<Vec<String>> {
+    if virtualization_type == VpcVirtualizationType::Fnn {
+        if let Some(prefixes) = config.site_fabric_null_routes.as_ref() {
+            Ok(prefixes.items.clone())
+        } else {
+            let legacy_prefixes = config
+                .site_fabric_prefixes
+                .iter()
+                .map(|prefix| {
+                    prefix.parse::<IpNet>().map_err(|error| {
+                        eyre::eyre!("invalid legacy site-fabric prefix {prefix}: {error}")
+                    })
+                })
+                .collect::<eyre::Result<Vec<_>>>()?;
+            Ok(aggregate(legacy_prefixes)
+                .into_iter()
+                .map(|prefix| prefix.to_string())
+                .collect())
+        }
+    } else {
+        Ok(config.site_fabric_prefixes.clone())
+    }
+}
+
+/// Builds tenant RA inputs from Core's mode-specific allocation without
+/// confusing the stateful tenant `/128` with its containing `/127` linknet.
+fn tenant_ipv6_router_advertisement(
+    interface: &FlatInterfaceConfig,
+    rdnss_servers: &[Ipv6Addr],
+) -> Option<nvue::Ipv6RouterAdvertisementConfig> {
+    let address = interface
+        .addresses
+        .iter()
+        .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))?;
+    let IpNet::V6(prefix) = address.prefix.parse().ok()? else {
+        return None;
+    };
+    let IpNet::V6(interface_prefix) = address.interface_prefix.parse().ok()? else {
+        return None;
+    };
+    let mode = if address.ip.is_empty() {
+        // VPC-level SLAAC is explicit only when Core supplies the allocated /64.
+        if prefix.prefix_len() != 64
+            || interface_prefix.prefix_len() != 64
+            || interface_prefix.network() != prefix.network()
+        {
+            return None;
+        }
+        nvue::Ipv6RouterAdvertisementMode::Slaac
+    } else {
+        // Stateful FNN persists the second /127 endpoint as a tenant /128;
+        // the first endpoint remains the DPU address derived from the linknet.
+        let host_address = address.ip.parse::<Ipv6Addr>().ok()?;
+        if prefix.prefix_len() != 127
+            || interface_prefix.prefix_len() != 128
+            || interface_prefix.network() != host_address
+            || !prefix.contains(&host_address)
+            || host_address == prefix.network()
+        {
+            return None;
+        }
+        nvue::Ipv6RouterAdvertisementMode::Stateful
+    };
+
+    Some(nvue::Ipv6RouterAdvertisementConfig {
+        prefix: prefix.to_string(),
+        mode,
+        rdnss_servers: rdnss_servers.to_vec(),
+    })
+}
+
+/// Returns Core's authoritative IPv6 address-list entry, when present.
+fn canonical_ipv6_address(interface: &FlatInterfaceConfig) -> Option<&rpc::InterfaceAddressConfig> {
+    interface
+        .addresses
+        .iter()
+        .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))
+}
+
+/// Parses and network-normalizes the segment prefix in a canonical V6 entry.
+fn normalized_ipv6_segment_prefix(address: &rpc::InterfaceAddressConfig) -> Option<Ipv6Net> {
+    let Ok(IpNet::V6(prefix)) = address.prefix.parse() else {
+        return None;
+    };
+    Some(prefix.trunc())
+}
+
+/// Selects Core's authoritative segment prefix, falling back to the deprecated
+/// sidecar only when the canonical V6 entry is absent.
+fn ipv6_segment_prefix(interface: &FlatInterfaceConfig, legacy_fallback: &str) -> Option<String> {
+    let Some(address) = canonical_ipv6_address(interface) else {
+        return Some(legacy_fallback.to_owned());
+    };
+    normalized_ipv6_segment_prefix(address).map(|prefix| prefix.to_string())
+}
+
+/// Builds stateful RA inputs for the existing primary-DPU admin VLAN SVI.
+///
+/// The canonical address entry keeps the host `/128` distinct from the
+/// containing segment so the host route cannot become the advertised prefix.
+fn admin_ipv6_router_advertisement(
+    virtualization_type: VpcVirtualizationType,
+    interface: &FlatInterfaceConfig,
+    address: &rpc::InterfaceAddressConfig,
+    rdnss_servers: &[Ipv6Addr],
+) -> Option<nvue::Ipv6RouterAdvertisementConfig> {
+    // The caller supplies admin ports only on the primary DPU. Keep the
+    // render-side guard for the FNN L2 SVI that can actually emit RA.
+    if virtualization_type != VpcVirtualizationType::Fnn || !interface.is_l2_segment {
+        return None;
+    }
+
+    let prefix = normalized_ipv6_segment_prefix(address)?;
+    let host_address = address.ip.parse::<Ipv6Addr>().ok()?;
+    let interface_prefix = address.interface_prefix.parse::<Ipv6Net>().ok()?;
+
+    if interface_prefix.prefix_len() != 128
+        || interface_prefix.network() != host_address
+        || !prefix.contains(&host_address)
+    {
+        return None;
+    }
+
+    Some(nvue::Ipv6RouterAdvertisementConfig {
+        prefix: prefix.to_string(),
+        mode: nvue::Ipv6RouterAdvertisementMode::Stateful,
+        rdnss_servers: rdnss_servers.to_vec(),
+    })
+}
+
 /// Update the NVUE network config, returning whether NVUE applied a change.
 /// With `StartupFile` and `skip_post`, only save the desired file and return
 /// whether that file was replaced. Errors from saving or applying the desired
@@ -326,6 +491,7 @@ pub(super) async fn update_nvue(
     vpc_virtualization_type: VpcVirtualizationType,
     update_flavor: NvueUpdateFlavor<'_>,
     nc: &rpc::ManagedHostNetworkConfigResponse,
+    service_addrs: &ServiceAddresses,
     hbn_device_names: HBNDeviceNames,
     supplemental_config: Option<&str>,
 ) -> eyre::Result<bool> {
@@ -350,15 +516,14 @@ pub(super) async fn update_nvue(
             .admin_interface
             .as_ref()
             .ok_or_else(|| eyre::eyre!("missing admin_interface"))?;
+        let admin_ipv6 = canonical_ipv6_address(admin_interface);
         vec![nvue::VlanConfig {
             vlan_id: admin_interface.vlan_id,
             network: admin_interface.interface_prefix.clone().unwrap_or_default(),
             ip: admin_interface.ip.clone().unwrap_or_default(),
-            ipv6_vlan_config: admin_interface.ipv6_interface_config.as_ref().map(|v6| {
-                nvue::Ipv6VlanConfig {
-                    network: v6.interface_prefix.clone(),
-                    ip: v6.ip.clone(),
-                }
+            ipv6_vlan_config: admin_ipv6.map(|ipv6| nvue::Ipv6VlanConfig {
+                network: ipv6.interface_prefix.clone(),
+                ip: ipv6.ip.clone(),
             }),
         }]
     } else {
@@ -387,25 +552,21 @@ pub(super) async fn update_nvue(
     let tenancy_enabled = !nc.use_admin_network || nc.is_primary_dpu;
 
     let physical_name = hbn_device_names.reps[0].to_string();
+    let (_, rdnss_servers) = split_addresses_by_family(&service_addrs.nameservers);
     let networks = if nc.use_admin_network {
         if nc.is_primary_dpu {
             let admin_interface = nc
                 .admin_interface
                 .as_ref()
                 .ok_or_else(|| eyre::eyre!("missing admin_interface"))?;
+            let admin_ipv6 = canonical_ipv6_address(admin_interface);
             vec![nvue::PortConfig {
                 interface_name: physical_name,
                 is_phy: true,
                 host_ip: admin_interface.ip.clone().unwrap_or_default(),
                 host_route: admin_interface.interface_prefix.clone().unwrap_or_default(),
-                host_ipv6: admin_interface
-                    .ipv6_interface_config
-                    .as_ref()
-                    .map(|v6| v6.ip.clone()),
-                host_ipv6_route: admin_interface
-                    .ipv6_interface_config
-                    .as_ref()
-                    .map(|v6| v6.interface_prefix.clone()),
+                host_ipv6: admin_ipv6.map(|ipv6| ipv6.ip.clone()),
+                host_ipv6_route: admin_ipv6.map(|ipv6| ipv6.interface_prefix.clone()),
                 vlan: admin_interface.vlan_id as u16,
                 vni: if nc.network_virtualization_type() == ::rpc::forge::VpcVirtualizationType::Fnn
                 {
@@ -421,15 +582,24 @@ pub(super) async fn update_nvue(
                     None
                 },
                 gateway_cidr: admin_interface.gateway.clone().unwrap_or_default(),
-                ipv6_port_config: admin_interface.ipv6_interface_config.as_ref().map(|v6| {
-                    nvue::Ipv6PortConfig {
-                        gateway_cidr: v6.interface_prefix.clone(),
-                        svi_ip: v6.svi_ip.clone(),
-                    }
+                ipv6_port_config: admin_ipv6.map(|ipv6| nvue::Ipv6PortConfig {
+                    gateway_cidr: normalized_ipv6_segment_prefix(ipv6)
+                        .map(|prefix| prefix.to_string())
+                        .unwrap_or_default(),
+                    svi_ip: ipv6.svi_ip.clone(),
+                    router_advertisement: admin_ipv6_router_advertisement(
+                        vpc_virtualization_type,
+                        admin_interface,
+                        ipv6,
+                        &rdnss_servers,
+                    ),
                 }),
                 vpc_prefixes: admin_interface.vpc_prefixes.clone(),
                 vpc_peer_prefixes: admin_interface.vpc_peer_prefixes.clone(),
-                vpc_peer_vnis: admin_interface.vpc_peer_vnis.clone(),
+                vpc_peer_vnis: vpc_peer_vnis_for_rendering(
+                    nc.vpc_peer_vnis_authoritative,
+                    &admin_interface.vpc_peer_vnis,
+                ),
                 svi_ip: admin_interface.svi_ip.clone(),
                 tenant_vrf_loopback_ip: admin_interface.tenant_vrf_loopback_ip.clone(),
                 network_security_group_id: None, // NSGs are not applied on the admin network.
@@ -467,10 +637,9 @@ pub(super) async fn update_nvue(
                 }
             };
 
-            // For stateful FNN interfaces with IPv6, the address configured on
-            // the DPU is the network address of the /127 linknet (the ::0 end).
-            // The ::1 end is the host. SLAAC instead carries the selected /64
-            // without a concrete host address.
+            // Core owns the IPv6 link prefix. The DPU address is its first
+            // address, while stateful DHCPv6 assigns the second /127 endpoint
+            // carried independently as the tenant /128.
             ifs.push(nvue::PortConfig {
                 interface_name: name,
                 is_phy: net.function_type == rpc::InterfaceFunctionType::Physical as i32,
@@ -486,14 +655,30 @@ pub(super) async fn update_nvue(
                 l3_vni: Some(net.vpc_vni),
                 gateway_cidr: net.gateway.clone().unwrap_or_default(),
                 ipv6_port_config: net.ipv6_interface_config.as_ref().map(|v6| {
+                    // New configs derive the DPU address from Core's one
+                    // authoritative prefix. Only configs without a V6 entry
+                    // retain the legacy sidecar mapping during upgrades.
+                    let gateway_cidr =
+                        ipv6_segment_prefix(net, &v6.interface_prefix).unwrap_or_default();
                     nvue::Ipv6PortConfig {
-                        gateway_cidr: v6.interface_prefix.clone(),
+                        gateway_cidr,
                         svi_ip: v6.svi_ip.clone(),
+                        router_advertisement: if vpc_virtualization_type
+                            == VpcVirtualizationType::Fnn
+                            && !net.is_l2_segment
+                        {
+                            tenant_ipv6_router_advertisement(net, &rdnss_servers)
+                        } else {
+                            None
+                        },
                     }
                 }),
                 vpc_prefixes: net.vpc_prefixes.clone(),
                 vpc_peer_prefixes: net.vpc_peer_prefixes.clone(),
-                vpc_peer_vnis: net.vpc_peer_vnis.clone(),
+                vpc_peer_vnis: vpc_peer_vnis_for_rendering(
+                    nc.vpc_peer_vnis_authoritative,
+                    &net.vpc_peer_vnis,
+                ),
                 svi_ip: net.svi_ip.clone(),
                 tenant_vrf_loopback_ip: net.tenant_vrf_loopback_ip.clone(),
                 network_security_group_id: net
@@ -613,7 +798,7 @@ pub(super) async fn update_nvue(
         ct_vrf_name: format!("vpc_{}", nc.vpc_vni.unwrap_or_default()),
         ct_access_vlans: access_vlans,
         deny_prefixes: nc.deny_prefixes.clone(),
-        site_fabric_prefixes: nc.site_fabric_prefixes.clone(),
+        site_fabric_prefixes: site_isolation_prefixes_for_rendering(vpc_virtualization_type, nc)?,
         anycast_site_prefixes: nc.anycast_site_prefixes.clone(),
         tenant_host_asn: nc.tenant_host_asn,
         stateful_acls_enabled: nc.stateful_acls_enabled && has_stateful_nsg,
@@ -826,62 +1011,6 @@ fn build_quarantined_network_security_group_rules() -> Vec<NetworkSecurityGroupR
     ]
 }
 
-async fn do_post(
-    skip_post: bool,
-    post_actions: Vec<PostAction>,
-    mut errs: Vec<String>,
-) -> eyre::Result<bool> {
-    let has_changes = !post_actions.is_empty();
-    if !skip_post {
-        for post in post_actions {
-            match hbn::run_in_container_shell(post.cmd).await {
-                Ok(_) => {
-                    let path_bak = post.path.backup();
-                    if path_bak.exists()
-                        && let Err(err) = fs::remove_file(&path_bak)
-                    {
-                        errs.push(format!(
-                            "remove .BAK on success {}: {err:#}",
-                            path_bak.display()
-                        ));
-                    }
-                }
-                Err(err) => {
-                    errs.push(format!("running reload cmd '{}': {err:#}", post.cmd));
-
-                    // If reload failed we won't be using the new config. Move it out of the way..
-                    let path_tmp = post.path.temp();
-                    if let Err(err) = fs::rename(&post.path, &path_tmp) {
-                        errs.push(format!(
-                            "rename {} to {} on error: {err:#}",
-                            post.path,
-                            path_tmp.display()
-                        ));
-                    }
-                    // .. and copy the old one back.
-                    // This also ensures that we retry writing the config on subsequent runs.
-                    let path_bak = post.path.backup();
-                    if path_bak.exists()
-                        && let Err(err) = fs::rename(&path_bak, &post.path)
-                    {
-                        errs.push(format!(
-                            "rename {} to {}, reverting on error: {err:#}",
-                            path_bak.display(),
-                            post.path
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    let err_message = errs.join(", ");
-    if !err_message.is_empty() {
-        eyre::bail!(err_message);
-    }
-    Ok(has_changes)
-}
-
 async fn get_interface_state(interface_name: &str) -> eyre::Result<InterfaceState> {
     let mut cmd = tokio::process::Command::new("ip");
     cmd.arg("link").arg("show").arg(interface_name);
@@ -935,47 +1064,79 @@ async fn stop_dhcp_via_grpc(grpc_addr: &str) -> eyre::Result<bool> {
     Ok(false)
 }
 
-/// Sends the current DHCP server config to the dhcp-server process via gRPC.
-///
-/// Builds YAML representations of [`DhcpConfig`] and [`HostConfig`] from the
-/// supplied network config and service addresses, then calls `UpdateConfig`
-/// followed by `ReloadConfig` on the remote control service.  The server only
-/// restarts when the content has actually changed (see server-side diffing in
-/// `grpc_server.rs`), so this is safe to call on every agent tick.
-///
-/// Returns `Ok(true)` on success (matching the convention of the file-write
-/// path) so callers can treat both paths uniformly.
-async fn update_dhcp_via_grpc(
-    grpc_addr: &str,
+/// `managed_host_ipv4_loopback` selects the primary loopback for DHCPv4.
+/// IPv6 primary addresses disable DHCPv4; missing or malformed loopbacks fail.
+pub(super) fn managed_host_ipv4_loopback(
+    config: &rpc::ManagedHostNetworkConfig,
+) -> eyre::Result<Option<Ipv4Addr>> {
+    match parse_managed_host_loopback_ips(config)?.0 {
+        IpAddr::V4(address) => Ok(Some(address)),
+        IpAddr::V6(_) => Ok(None),
+    }
+}
+
+/// Build the same DHCP options for file and gRPC delivery.
+fn build_dhcp_server_config(
     network_config: &rpc::ManagedHostNetworkConfigResponse,
     service_addrs: &ServiceAddresses,
-    hbn_device_names: HBNDeviceNames,
-    interface_translation_mode: Option<&InterfaceTranslationMode>,
-) -> eyre::Result<bool> {
+) -> eyre::Result<DhcpConfig> {
     let Some(mh_nc) = &network_config.managed_host_config else {
         eyre::bail!("loopback IP is missing. can't write dhcp-server config");
     };
-    let loopback_ip: Ipv4Addr = mh_nc.loopback_ip.parse()?;
+    let loopback_ip = managed_host_ipv4_loopback(mh_nc)?;
 
     let (nameservers_v4, nameservers_v6) = split_addresses_by_family(&service_addrs.nameservers);
 
     let (ntpservers_v4, ntpservers_v6) = build_dhcp_ntp_servers(network_config, service_addrs);
 
-    let pxe_ip_v4 = service_addrs
+    let pxe_ip_v4 = match loopback_ip {
+        Some(_) => Some(
+            service_addrs
+                .pxe_ips
+                .iter()
+                .find_map(|address| match address {
+                    IpAddr::V4(address) => Some(*address),
+                    IpAddr::V6(_) => None,
+                })
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "DHCPv4 server config requires an IPv4 PXE/UEFI HTTP boot address, but none found in {:?}",
+                        service_addrs.pxe_ips
+                    )
+                })?,
+        ),
+        None => None,
+    };
+
+    let pxe_ip_v6 = service_addrs
         .pxe_ips
         .iter()
-        .find_map(|x| match x {
-            IpAddr::V4(x) => Some(*x),
-            _ => None,
-        })
-        .ok_or_else(|| {
-            eyre::eyre!(
-                "DHCPv4 server config requires an IPv4 PXE/UEFI HTTP boot address, but none found in {:?}",
-                service_addrs.pxe_ips
-            )
-        })?;
+        .find_map(|address| match address {
+            IpAddr::V6(address) => Some(*address),
+            IpAddr::V4(_) => None,
+        });
 
-    let mut dhcp_config = carbide_rpc_utils::dhcp::DhcpConfig::from_forge_dhcp_config(
+    if pxe_ip_v4.is_none() && pxe_ip_v6.is_none() {
+        let interfaces = if network_config.use_admin_network {
+            network_config.admin_interface.as_slice()
+        } else {
+            network_config.tenant_interfaces.as_slice()
+        };
+        // Explicit interface boot URLs do not use the discovered PXE address;
+        // an explicitly empty URL disables boot URL generation.
+        // Keep requiring one if any interface still needs a generated URL.
+        if interfaces
+            .iter()
+            .any(|interface| interface.booturl.is_none())
+        {
+            eyre::bail!(
+                "PXE/UEFI HTTP boot server has no address usable by this DPU; resolved addresses: {:?}",
+                service_addrs.pxe_ips
+            );
+        }
+    }
+
+    let mut dhcp_config = DhcpConfig::from_forge_dhcp_config(
         pxe_ip_v4,
         ntpservers_v4,
         nameservers_v4,
@@ -983,10 +1144,33 @@ async fn update_dhcp_via_grpc(
         loopback_ip,
     )?;
 
-    // Keep the gRPC model byte-equivalent to the file-backed YAML builder.
+    dhcp_config.carbide_provisioning_server_ipv6 = pxe_ip_v6;
     dhcp_config.carbide_ntpservers_v6 = ntpservers_v6;
     dhcp_config.dhcpv6_preferred_lifetime_secs = dhcp::DHCPV6_PREFERRED_LIFETIME_SECS;
     dhcp_config.dhcpv6_valid_lifetime_secs = dhcp::DHCPV6_VALID_LIFETIME_SECS;
+    dhcp_config.dhcpv6_server_preference = dhcpv6_server_preference(network_config)?;
+    if loopback_ip.is_none() {
+        dhcp_config.dhcpv6_server_id =
+            Some(DhcpV6ServerId::from_remote_id(&network_config.remote_id)?);
+    }
+    dhcp_config.validate()?;
+    Ok(dhcp_config)
+}
+
+/// Send DHCP and host configuration through `UpdateAndReloadConfig`.
+///
+/// Matching configuration and interfaces do not restart a running server, so
+/// this is safe to call on every tick. Returns `Ok(true)` after the control
+/// update succeeds. With no interfaces, the server stages the configuration
+/// without applying it; success does not guarantee every listener has bound.
+async fn update_dhcp_via_grpc(
+    grpc_addr: &str,
+    network_config: &rpc::ManagedHostNetworkConfigResponse,
+    service_addrs: &ServiceAddresses,
+    hbn_device_names: HBNDeviceNames,
+    interface_translation_mode: Option<&InterfaceTranslationMode>,
+) -> eyre::Result<bool> {
+    let dhcp_config = build_dhcp_server_config(network_config, service_addrs)?;
     let mut host_config = carbide_rpc_utils::dhcp::HostConfig::try_from(
         network_config.clone(),
         hbn_device_names.reps[0],
@@ -1022,12 +1206,17 @@ async fn update_dhcp_via_grpc(
 /// When `dhcp_grpc_server` is `Some`, delegates to [`update_dhcp_via_grpc`]
 /// which pushes YAML configs to the dhcp-server control service directly.
 ///
-/// When `dhcp_grpc_server` is `None`, falls back to the original behaviour:
-/// writes config files into the HBN container and triggers a supervisord
-/// restart via [`do_post`] if any file changed.
+/// When `dhcp_grpc_server` is `None`, validates IPv6-only configuration with
+/// the installed server before replacing files and restarting supervisord.
+/// Write-only updates (`skip_post`) defer that check until application. Stopping
+/// a secondary admin DHCP server preserves DHCP configuration and identity
+/// without preparing a replacement. Failed writes or reloads attempt to
+/// restore the previous files and report any restoration failure.
 ///
-/// Returns `Ok(true)` if a reload was triggered, `Ok(false)` if configs were
-/// already up-to-date.
+/// Returns `Ok(true)` after changed files are saved, a pending file update is
+/// applied, or a control update succeeds (including staging with no interfaces).
+/// With `skip_post`, saved files still need application on a later call.
+/// Returns `Ok(false)` for unchanged files or a successful gRPC stop.
 pub(super) async fn update_dhcp(
     hbn_root: &Path,
     network_config: &rpc::ManagedHostNetworkConfigResponse,
@@ -1073,43 +1262,100 @@ pub(super) async fn update_dhcp(
         config: FPath(hbn_root.join(dhcp::SERVER_CONFIG_PATH)),
         host_config: FPath(hbn_root.join(dhcp::SERVER_HOST_CONFIG_PATH)),
     };
-    let mut has_cleaned_dhcp_relay_config = path_dhcp_relay.cleanup();
-    has_cleaned_dhcp_relay_config = has_cleaned_dhcp_relay_config || path_dhcp_relay_nvue.cleanup();
-
-    // Delete NVUE relay config in case we used that previously
-    let _ = fs::remove_file(path_dhcp_relay_nvue);
-
-    // Start DHCP Server in HBN.
-    let post_action = match write_dhcp_v4_server_config(
-        &path_dhcp_relay,
-        &paths_dhcp_server,
-        network_config,
-        service_addrs,
-        &hbn_device_names,
-    ) {
-        Ok(true) if stop_server => PostAction {
-            path: paths_dhcp_server.server,
-            cmd: dhcp::STOP_DHCP_SERVER,
-        },
-        Ok(true) => PostAction {
-            path: paths_dhcp_server.server,
-            cmd: dhcp::RELOAD_DHCP_SERVER,
-        },
-        Ok(false) => {
-            // If we deleted an old relay config we need to reload to stop the relay running
-            if has_cleaned_dhcp_relay_config {
-                PostAction {
-                    path: paths_dhcp_server.server,
-                    cmd: dhcp::RELOAD_DHCP_SERVER,
-                }
+    // Stopping must not depend on a replacement configuration or identity.
+    // Keep the live DHCP files so the next start can recover the same DUID.
+    let mut config = if stop_server {
+        None
+    } else {
+        Some(prepare_dhcp_server_config(
+            network_config,
+            service_addrs,
+            &hbn_device_names,
+        )?)
+    };
+    let files = match config.as_mut() {
+        Some(config) => {
+            if config.dhcp.ipv4()?.is_none() {
+                config.preserve_server_identifier(&paths_dhcp_server.config)?;
+            }
+            config.files(&path_dhcp_relay, &paths_dhcp_server, &path_dhcp_relay_nvue)?
+        }
+        None => {
+            let supervisor =
+                dhcp::build_server_supervisord_config(dhcp::DhcpServerSupervisordConfig {
+                    interfaces: Vec::new(),
+                    autostart: false,
+                })?;
+            [
+                (&path_dhcp_relay, Some(dhcp::blank())),
+                (&paths_dhcp_server.server, Some(supervisor)),
+                (&path_dhcp_relay_nvue, None),
+            ]
+            .into_iter()
+            .map(|(path, next)| DhcpFileUpdate::new(path, next))
+            .collect::<eyre::Result<Vec<_>>>()?
+        }
+    };
+    let pending_apply = paths_dhcp_server.config.with_ext("PENDING");
+    if !files.iter().any(|file| file.previous != file.next)
+        && (skip_post || !pending_apply.try_exists()?)
+    {
+        return Ok(false);
+    }
+    if let Some(config) = &config
+        && config.dhcp.ipv4()?.is_none()
+        && !skip_post
+    {
+        // Check the installed binary before replacing files. An older binary
+        // rejects this flag without seeing any changed live configuration.
+        config
+            .validate_in_hbn(hbn_root, &paths_dhcp_server.config)
+            .await?;
+    }
+    // Matching files do not prove supervisord loaded them. Keep this marker
+    // until reload succeeds, including across an interrupted agent update.
+    fs::write(&pending_apply, [])
+        .wrap_err_with(|| format!("record pending DHCP reload: {}", pending_apply.display()))?;
+    let mut written = 0;
+    let apply_result = async {
+        for file in &files {
+            file.write(file.next.as_deref())?;
+            written += 1;
+        }
+        if !skip_post {
+            let command = if stop_server {
+                dhcp::STOP_DHCP_SERVER
             } else {
-                return Ok(false);
+                dhcp::RELOAD_DHCP_SERVER
+            };
+            hbn::run_in_container_shell(command).await?;
+        }
+        Ok::<_, eyre::Report>(())
+    }
+    .await;
+    if let Err(error) = apply_result {
+        let mut rollback_errors = Vec::new();
+        for file in files[..written].iter().rev() {
+            if let Err(rollback_error) = file.write(file.previous.as_deref()) {
+                rollback_errors.push(format!("{}: {rollback_error:#}", file.path));
             }
         }
-        Err(err) => eyre::bail!("write dhcp server config file: {err:#}"),
-    };
-
-    do_post(skip_post, vec![post_action], vec![]).await
+        if !rollback_errors.is_empty() {
+            return Err(error.wrap_err(format!(
+                "restore DHCP files: {}",
+                rollback_errors.join(", ")
+            )));
+        }
+        return Err(error);
+    }
+    if !skip_post {
+        fs::remove_file(&pending_apply)
+            .wrap_err_with(|| format!("complete DHCP reload: {}", pending_apply.display()))?;
+    }
+    for file in &files {
+        file.path.cleanup();
+    }
+    Ok(true)
 }
 
 /// Interfaces to report back to server
@@ -1258,7 +1504,6 @@ pub(super) async fn reset(hbn_root: &Path, skip_post: bool) {
     let dhcp_relay_path = FPath(hbn_root.join(dhcp::RELAY_PATH));
     match write(dhcp::blank(), &dhcp_relay_path, "DHCP relay", false) {
         Ok(true) => post_actions.push(PostAction {
-            path: dhcp_relay_path,
             cmd: dhcp::RELOAD_CMD,
         }),
         Ok(false) => {}
@@ -1267,7 +1512,6 @@ pub(super) async fn reset(hbn_root: &Path, skip_post: bool) {
     let dhcp_server_path = FPath(hbn_root.join(dhcp::SERVER_PATH));
     match write(dhcp::blank(), &dhcp_server_path, "DHCP server", false) {
         Ok(true) => post_actions.push(PostAction {
-            path: dhcp_server_path,
             cmd: dhcp::RELOAD_CMD,
         }),
         Ok(false) => {}
@@ -1296,34 +1540,11 @@ pub(super) async fn reset(hbn_root: &Path, skip_post: bool) {
     }
 }
 
-// In case DHCP server has to be configured in HBN,
-// 1. stop dhcp-relay
-// 2. Copy dhcp_config file
-// 3. Copy host_config file
-// 4. Reload supervisord
-//
-// This is currently scoped to IPv4 only, and there are
-// a few IPv4-specific checks for things like NTP servers,
-// UEFI HTTP/PXE IP, and nameservers below.
-fn write_dhcp_v4_server_config(
-    dhcp_relay_path: &FPath,
-    dhcp_server_path: &DhcpServerPaths,
+fn prepare_dhcp_server_config(
     nc: &rpc::ManagedHostNetworkConfigResponse,
     service_addrs: &ServiceAddresses,
     hbn_device_names: &HBNDeviceNames,
-) -> eyre::Result<bool> {
-    match write(dhcp::blank(), dhcp_relay_path, "blank DHCP relay", false) {
-        Ok(true) => {
-            dhcp_relay_path.del("BAK");
-        }
-        Ok(false) => {}
-        Err(err) => tracing::warn!(
-            %dhcp_relay_path,
-            error = format!("{err:#}"),
-            "Write blank DHCP relay"
-        ),
-    }
-
+) -> eyre::Result<PreparedDhcpServerConfig> {
     let interfaces = if nc.use_admin_network {
         let vlan_intf = nc
             .admin_interface
@@ -1365,101 +1586,152 @@ fn write_dhcp_v4_server_config(
         interfaces
     };
 
-    let Some(mh_nc) = &nc.managed_host_config else {
-        return Err(eyre::eyre!(
-            "loopback IP is missing. can't write dhcp-server config"
-        ));
-    };
-
-    let loopback_ip = mh_nc.loopback_ip.parse()?;
-
-    // Split the dual-stack nameservers by family for the sibling v4 and v6
-    // listeners that consume this shared server configuration.
-    let (nameservers_v4, nameservers_v6) = split_addresses_by_family(&service_addrs.nameservers);
-
-    let (ntpservers_v4, ntpservers_v6) = build_dhcp_ntp_servers(nc, service_addrs);
-
-    let pxe_ip_v4 = service_addrs
-        .pxe_ips
-        .iter()
-        .find_map(|x| match x {
-            IpAddr::V4(x) => Some(*x),
-            _ => None,
-        })
-        .ok_or_else(|| {
-            eyre::eyre!("DHCPv4 server config requires an IPv4 PXE/UEFI HTTP boot address, but none found in {:?}", service_addrs.pxe_ips)
-        })?;
-
-    let mut has_changes = false;
-
-    let next_contents = dhcp::build_server_supervisord_config(dhcp::DhcpServerSupervisordConfig {
+    let dhcp = build_dhcp_server_config(nc, service_addrs)?;
+    let supervisor = dhcp::build_server_supervisord_config(dhcp::DhcpServerSupervisordConfig {
         interfaces,
         autostart: (!nc.use_admin_network || nc.is_primary_dpu),
     })?;
-    match write(
-        next_contents,
-        &dhcp_server_path.server,
-        "DHCP server",
-        false,
-    ) {
-        Ok(true) => {
-            has_changes = true;
-            dhcp_server_path.server.del("BAK");
+    let host = dhcp::build_server_host_config(nc.clone(), hbn_device_names)?;
+    Ok(PreparedDhcpServerConfig {
+        dhcp,
+        supervisor,
+        host,
+    })
+}
+
+struct PreparedDhcpServerConfig {
+    dhcp: DhcpConfig,
+    supervisor: String,
+    host: String,
+}
+
+impl PreparedDhcpServerConfig {
+    fn preserve_server_identifier(&mut self, live_config: &FPath) -> eyre::Result<()> {
+        let identity_path = format!("{live_config}.duid");
+        match fs::read(&identity_path) {
+            Ok(bytes) => {
+                // A saved identity lets us replace damaged YAML without
+                // changing the server identity that clients already know.
+                self.dhcp.dhcpv6_server_id = Some(
+                    DhcpV6ServerId::try_from(bytes)
+                        .wrap_err_with(|| format!("read DHCP identity {identity_path}"))?,
+                );
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).wrap_err_with(|| format!("read DHCP identity {identity_path}"));
+            }
         }
-        Ok(false) => {}
-        Err(err) => tracing::error!(
-            dhcp_server_path = %dhcp_server_path.server,
-            error = format!("{err:#}"),
-            "Write DHCP server"
-        ),
+        let previous = match read_limited(live_config) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).wrap_err_with(|| format!("read DHCP config {live_config}"));
+            }
+        };
+        let previous: DhcpConfig = serde_yaml::from_str(&previous)
+            .wrap_err_with(|| format!("parse previous DHCP config {live_config}"))?;
+        // Without a saved identity, capture the IPv4-derived DUID before
+        // removing its only input.
+        self.dhcp.dhcpv6_server_id =
+            Some(previous.server_identifier().wrap_err_with(|| {
+                format!("read server identity from DHCP config {live_config}")
+            })?);
+        Ok(())
     }
 
-    let next_contents = dhcp::build_server_config(
-        pxe_ip_v4,
-        ntpservers_v4,
-        ntpservers_v6,
-        nameservers_v4,
-        nameservers_v6,
-        loopback_ip,
-    )?;
-    match write(
-        next_contents,
-        &dhcp_server_path.config,
-        "DHCP server config",
-        false,
-    ) {
-        Ok(true) => {
-            has_changes = true;
-            dhcp_server_path.config.del("BAK");
-        }
-        Ok(false) => {}
-        Err(err) => tracing::error!(
-            dhcp_server_config_path = %dhcp_server_path.config,
-            error = format!("{err:#}"),
-            "Write DHCP server config"
-        ),
+    async fn validate_in_hbn(&self, hbn_root: &Path, live_config: &FPath) -> eyre::Result<()> {
+        let directory = live_config
+            .0
+            .parent()
+            .ok_or_else(|| eyre::eyre!("DHCP config has no parent directory"))?;
+        let mut candidate = tempfile::NamedTempFile::new_in(directory)?;
+        candidate.write_all(serde_yaml::to_string(&self.dhcp)?.as_bytes())?;
+        let mut host = tempfile::NamedTempFile::new_in(directory)?;
+        host.write_all(self.host.as_bytes())?;
+        let in_container = |path: &Path| -> eyre::Result<String> {
+            Ok(Path::new("/")
+                .join(path.strip_prefix(hbn_root)?)
+                .to_string_lossy()
+                .into_owned())
+        };
+        let candidate_path = in_container(candidate.path())?;
+        let host_path = in_container(host.path())?;
+        let live_path = in_container(&live_config.0)?;
+        let container = hbn::get_hbn_container_id().await?;
+        hbn::run_in_container(
+            &container,
+            &[
+                "/var/support/forge-dhcp/bin/forge-dhcp-server",
+                "--validate-config",
+                &candidate_path,
+                "--host-config",
+                &host_path,
+                "--dhcp-config",
+                &live_path,
+            ],
+            true,
+        )
+        .await
+        .wrap_err("validate IPv6-only DHCP config with installed server")?;
+        Ok(())
     }
 
-    let next_contents = dhcp::build_server_host_config(nc.clone(), hbn_device_names)?;
-    match write(
-        next_contents,
-        &dhcp_server_path.host_config,
-        "DHCP server host config",
-        false,
-    ) {
-        Ok(true) => {
-            has_changes = true;
-            dhcp_server_path.host_config.del("BAK");
-        }
-        Ok(false) => {}
-        Err(err) => tracing::error!(
-            dhcp_server_host_config_path = %dhcp_server_path.host_config,
-            error = format!("{err:#}"),
-            "Write DHCP server host config"
-        ),
+    fn files(
+        &self,
+        relay: &FPath,
+        server: &DhcpServerPaths,
+        nvue_relay: &FPath,
+    ) -> eyre::Result<Vec<DhcpFileUpdate>> {
+        [
+            (relay, Some(dhcp::blank())),
+            (&server.server, Some(self.supervisor.clone())),
+            (&server.config, Some(serde_yaml::to_string(&self.dhcp)?)),
+            (&server.host_config, Some(self.host.clone())),
+            (nvue_relay, None),
+        ]
+        .into_iter()
+        .map(|(path, next)| DhcpFileUpdate::new(path, next))
+        .collect()
+    }
+}
+
+struct DhcpFileUpdate {
+    path: FPath,
+    previous: Option<String>,
+    next: Option<String>,
+}
+
+impl DhcpFileUpdate {
+    fn new(path: &FPath, next: Option<String>) -> eyre::Result<Self> {
+        let previous = match read_limited(path) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).wrap_err_with(|| format!("read DHCP file {path}")),
+        };
+        Ok(Self {
+            path: path.clone(),
+            previous,
+            next,
+        })
     }
 
-    Ok(has_changes)
+    fn write(&self, contents: Option<&str>) -> eyre::Result<()> {
+        match contents {
+            Some(contents) => {
+                write(contents.to_owned(), &self.path, "DHCP configuration", false)?;
+            }
+            None => match fs::remove_file(&self.path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).wrap_err_with(|| format!("remove DHCP file {}", self.path));
+                }
+            },
+        }
+        Ok(())
+    }
 }
 
 // Update configuration file
@@ -1729,8 +2001,8 @@ impl FPath {
     /// `.TMP` is the pending config before it is applied. It should be removed
     /// on drop.
     ///
-    /// `.BAK` is the backup so that we can rollback if the reload command fails.
-    /// It should either be removed (success) or renamed back to the main file (failure).
+    /// `.BAK` holds the previous file contents and is removed after successful
+    /// application. Callers handle restoration before invoking cleanup.
     pub fn cleanup(&self) -> bool {
         let mut has_deleted = self.del("TEST");
         has_deleted = has_deleted || self.del("TMP");
@@ -1853,6 +2125,600 @@ mod tests {
         InterfaceState, ServiceAddresses, needed_interface_state,
     };
     use crate::{HBNDeviceNames, dhcp, nvue};
+
+    /// Supplies stable service discovery results to NVUE tests so RDNSS and
+    /// DHCPv6 can be compared against one agent-local source.
+    fn test_service_addresses() -> ServiceAddresses {
+        ServiceAddresses {
+            pxe_ips: vec!["192.0.2.10".parse().unwrap()],
+            ntpservers: vec![],
+            nameservers: vec![
+                "192.0.2.53".parse().unwrap(),
+                "2001:db8::53".parse().unwrap(),
+                "2001:db8::54".parse().unwrap(),
+            ],
+        }
+    }
+
+    #[test]
+    fn ipv6_only_dhcp_uses_dpu_identity_without_placeholder_ipv4() -> eyre::Result<()> {
+        let mut config = netconf(
+            VpcVirtualizationType::EthernetVirtualizer,
+            32,
+            24,
+            false,
+            None,
+            true,
+            false,
+        );
+        let mut addresses = ServiceAddresses {
+            pxe_ips: vec!["192.0.2.80".parse()?, "2001:db8::80".parse()?],
+            ntpservers: vec![],
+            nameservers: vec![],
+        };
+        config.managed_host_config.as_mut().unwrap().loopback_ip = "2001:db8::1".to_string();
+        let dhcp = build_dhcp_server_config(&config, &addresses)?;
+        assert_eq!(dhcp.carbide_dhcp_server, None);
+        assert_eq!(dhcp.carbide_provisioning_server_ipv4, None);
+        assert_eq!(
+            dhcp.carbide_provisioning_server_ipv6,
+            Some("2001:db8::80".parse()?),
+        );
+        assert_eq!(
+            dhcp.server_identifier()?,
+            DhcpV6ServerId::from_remote_id(&config.remote_id)?,
+        );
+        for (case, loopback, pxe_ips, expected_error) in [
+            (
+                "missing primary loopback",
+                "",
+                addresses.pxe_ips.clone(),
+                "missing loopback IP",
+            ),
+            (
+                "malformed primary loopback",
+                "not-an-address",
+                addresses.pxe_ips.clone(),
+                "invalid primary loopback IP: not-an-address",
+            ),
+            (
+                "no provisioning addresses",
+                "2001:db8::1",
+                vec![],
+                "PXE/UEFI HTTP boot server has no address usable by this DPU; resolved addresses: []",
+            ),
+            (
+                "no usable provisioning address",
+                "2001:db8::1",
+                vec!["192.0.2.80".parse()?],
+                "PXE/UEFI HTTP boot server has no address usable by this DPU; resolved addresses: [192.0.2.80]",
+            ),
+        ] {
+            config.managed_host_config.as_mut().unwrap().loopback_ip = loopback.to_string();
+            addresses.pxe_ips = pxe_ips;
+            let error = build_dhcp_server_config(&config, &addresses).expect_err(case);
+            assert!(
+                format!("{error:#}").contains(expected_error),
+                "{case}: {error:#}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_boot_urls_do_not_require_a_default_ipv6_provisioning_address() -> eyre::Result<()> {
+        for (scenario, use_admin_network, tenant_boot_urls, expected_success) in [
+            ("admin override", true, vec![], true),
+            (
+                "every tenant interface has an override",
+                false,
+                vec![
+                    Some("http://[2001:db8::80]/boot.efi"),
+                    Some("http://[2001:db8::81]/boot.efi"),
+                ],
+                true,
+            ),
+            (
+                "one tenant still needs the default",
+                false,
+                vec![Some("http://[2001:db8::80]/boot.efi"), None],
+                false,
+            ),
+            (
+                "empty override disables boot URL generation",
+                false,
+                vec![Some("")],
+                true,
+            ),
+            (
+                "no interfaces need a generated boot URL",
+                false,
+                vec![],
+                true,
+            ),
+        ] {
+            let mut config = netconf(
+                VpcVirtualizationType::EthernetVirtualizer,
+                32,
+                24,
+                false,
+                None,
+                true,
+                false,
+            );
+            config.managed_host_config.as_mut().unwrap().loopback_ip = "2001:db8::1".to_string();
+            config.use_admin_network = use_admin_network;
+            config.admin_interface.as_mut().unwrap().booturl =
+                Some("http://[2001:db8::80]/boot.efi".to_string());
+            let interface = config.tenant_interfaces[0].clone();
+            config.tenant_interfaces = tenant_boot_urls
+                .into_iter()
+                .map(|booturl| rpc::FlatInterfaceConfig {
+                    booturl: booturl.map(str::to_string),
+                    ..interface.clone()
+                })
+                .collect();
+            let result = build_dhcp_server_config(&config, &test_service_addresses());
+            if expected_success {
+                let dhcp = result.wrap_err(scenario)?;
+                assert_eq!(dhcp.ipv4()?, None, "{scenario}");
+                assert_eq!(dhcp.carbide_provisioning_server_ipv6, None, "{scenario}");
+            } else {
+                assert!(
+                    format!("{:#}", result.expect_err(scenario))
+                        .contains("no address usable by this DPU"),
+                    "{scenario}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_dhcp_identity_does_not_require_readable_yaml() -> eyre::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let live_config = FPath(directory.path().join("dhcp.yaml"));
+        let identity_path = format!("{live_config}.duid");
+        let saved = DhcpV6ServerId::try_from(vec![0, 2, 0, 0, 0x16, 0x47, 192, 0, 2, 1])?;
+        fs::write(&live_config, "invalid: [")?;
+        fs::write(&identity_path, saved.as_bytes())?;
+        let mut prepared = PreparedDhcpServerConfig {
+            dhcp: DhcpConfig {
+                dhcpv6_server_id: Some(DhcpV6ServerId::from_remote_id("test-dpu")?),
+                ..Default::default()
+            },
+            supervisor: String::new(),
+            host: String::new(),
+        };
+
+        prepared.preserve_server_identifier(&live_config)?;
+
+        assert_eq!(prepared.dhcp.server_identifier()?, saved);
+        assert_eq!(fs::read_to_string(&live_config)?, "invalid: [");
+        assert_eq!(fs::read(&identity_path)?, saved.as_bytes());
+
+        // A corrupt sidecar must not fall back to otherwise valid YAML.
+        fs::write(&live_config, serde_yaml::to_string(&prepared.dhcp)?)?;
+        fs::write(&identity_path, b"invalid")?;
+        let error = prepared
+            .preserve_server_identifier(&live_config)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains(&identity_path));
+        assert!(
+            error
+                .downcast_ref::<carbide_rpc_utils::dhcp::DhcpDataError>()
+                .is_some()
+        );
+        assert_eq!(fs::read(&identity_path)?, b"invalid");
+        Ok(())
+    }
+
+    /// DHCP validation and reload failures must preserve configuration so a
+    /// compatible binary can retry the update, including after a restart.
+    #[tokio::test]
+    async fn ipv6_only_file_update_waits_for_compatible_binary() -> eyre::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        if std::env::var_os("DHCP_UPDATE_TEST_CHILD").is_none() {
+            // Create `crictl` only after entering a process running this test
+            // alone. Otherwise, an unrelated test can spawn while `crictl` is
+            // open for writing and retain that descriptor until exec, making
+            // our next execution fail with `ETXTBSY` after we close the file.
+            let child_log = tempfile::NamedTempFile::new()?;
+            let mut command = TokioCommand::new(std::env::current_exe()?);
+            command
+                .args([
+                    "--exact",
+                    "ethernet_virtualization::tests::ipv6_only_file_update_waits_for_compatible_binary",
+                    "--nocapture",
+                ])
+                .env("DHCP_UPDATE_TEST_CHILD", "true")
+                .stdout(child_log.as_file().try_clone()?)
+                .stderr(child_log.as_file().try_clone()?)
+                .kill_on_drop(true);
+
+            // The argument check and nine stages each allow 30 seconds. Leave
+            // another 30 seconds for setup and cleanup in the isolated child.
+            // Keep output outside the timed future so a timeout retains the
+            // child's diagnostics as well as reporting that it timed out.
+            let status = timeout(Duration::from_secs(330), command.status()).await;
+            let output = fs::read(child_log.path())
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_else(|error| format!("could not read child output: {error}"));
+            let status = status
+                .wrap_err_with(|| format!("isolated DHCP update test timed out:\n{output}"))?
+                .wrap_err_with(|| format!("isolated DHCP update test could not run:\n{output}"))?;
+
+            assert!(
+                status.success() && output.contains("1 passed; 0 failed"),
+                "isolated DHCP update test failed ({status}):\n{output}",
+            );
+            return Ok(());
+        }
+
+        if let Some(root) = std::env::var_os("DHCP_UPDATE_TEST_ROOT") {
+            let root = PathBuf::from(root);
+            let stage = std::env::var("DHCP_UPDATE_TEST_STAGE")?;
+            let mut config = netconf(
+                VpcVirtualizationType::EthernetVirtualizer,
+                32,
+                24,
+                false,
+                None,
+                true,
+                false,
+            );
+            if stage != "ipv4-old-binary" {
+                config.managed_host_config.as_mut().unwrap().loopback_ip =
+                    "2001:db8::1".to_string();
+            }
+            if stage.starts_with("stop-") {
+                config.use_admin_network = true;
+                config.is_primary_dpu = false;
+                config.managed_host_config = None;
+                config.remote_id.clear();
+            }
+            let addresses = ServiceAddresses {
+                pxe_ips: vec!["192.0.2.80".parse()?, "2001:db8::80".parse()?],
+                ntpservers: vec![],
+                nameservers: vec![],
+            };
+            let result = update_dhcp(
+                &root,
+                &config,
+                stage == "saved-before-reload",
+                &addresses,
+                HBNDeviceNames::pre_23(),
+                None,
+                None,
+            )
+            .await;
+            match stage.as_str() {
+                "old-binary" => assert!(
+                    format!(
+                        "{:#}",
+                        result.expect_err("old binary should reject validation")
+                    )
+                    .contains("unexpected argument")
+                ),
+                "write-failure" => {
+                    let error = format!(
+                        "{:#}",
+                        result.expect_err("blocked temporary file should fail the update")
+                    );
+                    assert!(error.contains("fs::write"));
+                    assert!(!error.contains("restore DHCP files"));
+                }
+                "reload-failure" => assert!(
+                    format!("{:#}", result.expect_err("reload should fail"))
+                        .contains("injected reload failure")
+                ),
+                "stop-failure" => assert!(
+                    format!("{:#}", result.expect_err("stop should fail"))
+                        .contains("injected stop failure")
+                ),
+                "saved-before-reload" | "retry" | "ipv4-old-binary" | "stop-old-binary" => {
+                    assert!(result?)
+                }
+                "unchanged" => assert!(!result?),
+                _ => panic!("unexpected DHCP update stage: {stage}"),
+            }
+            return Ok(());
+        }
+
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        let legacy = build_dhcp_server_config(
+            &netconf(
+                VpcVirtualizationType::EthernetVirtualizer,
+                32,
+                24,
+                false,
+                None,
+                true,
+                false,
+            ),
+            &test_service_addresses(),
+        )?;
+        let previous = [
+            (dhcp::RELAY_PATH, "old relay".to_string()),
+            (dhcp::RELAY_PATH_NVUE, "old NVUE relay".to_string()),
+            (dhcp::SERVER_PATH, "old supervisor".to_string()),
+            (dhcp::SERVER_CONFIG_PATH, serde_yaml::to_string(&legacy)?),
+            (dhcp::SERVER_HOST_CONFIG_PATH, "old host config".to_string()),
+        ];
+        for (path, contents) in &previous {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap())?;
+            fs::write(path, contents)?;
+        }
+        fs::copy(
+            root.join(dhcp::SERVER_CONFIG_PATH),
+            root.join("previous-dhcp.yaml"),
+        )?;
+        fs::create_dir(root.join("bin"))?;
+        let crictl = root.join("bin/crictl");
+        fs::write(
+            &crictl,
+            r#"#!/bin/sh
+set -eu
+root="$DHCP_UPDATE_TEST_ROOT"
+if [ "$DHCP_UPDATE_TEST_STAGE" = saved-before-reload ]; then
+    printf '%s\n' 'unexpected crictl call' >> "$root/commands"
+    printf '%s\n' 'saving configuration must not call crictl' >&2
+    exit 1
+fi
+if [ "$*" = 'ps --name=doca-hbn -o=json' ]; then
+    printf '%s\n' '{"containers":[{"id":"test-hbn"}]}'
+    exit 0
+fi
+[ "$1" = exec ] || exit 1
+[ "$2" = test-hbn ] || exit 1
+shift 2
+case "$1" in
+    /var/support/forge-dhcp/bin/forge-dhcp-server)
+        [ "$#" = 7 ] || exit 1
+        [ "$2" = --validate-config ] || exit 1
+        [ "$4" = --host-config ] || exit 1
+        [ "$6" = --dhcp-config ] || exit 1
+        [ "$7" = /var/support/forge-dhcp/conf/dhcp.yaml ] || exit 1
+        [ -f "$root$3" ] || exit 1
+        [ -f "$root$5" ] || exit 1
+        [ -f "$root$7" ] || exit 1
+        printf '%s\n' validate >> "$root/commands"
+        case "$DHCP_UPDATE_TEST_STAGE" in
+            old-binary|write-failure|reload-failure)
+                cmp -s "$root$7" "$root/previous-dhcp.yaml" || exit 1 ;;
+        esac
+        case "$DHCP_UPDATE_TEST_STAGE" in
+            *old-binary)
+                printf '%s\n' 'unexpected argument --validate-config' >&2
+                exit 2 ;;
+        esac
+        cp "$root$3" "$root/validated-dhcp.yaml"
+        cp "$root$5" "$root/validated-host.yaml" ;;
+    bash)
+        [ "$#" = 3 ] || exit 1
+        [ "$2" = -c ] || exit 1
+        [ "$3" = "$DHCP_UPDATE_EXPECTED_COMMAND" ] || exit 1
+        [ -f "$root/var/support/forge-dhcp/conf/dhcp.PENDING" ] || exit 1
+        case "$DHCP_UPDATE_TEST_STAGE" in
+            stop-*) printf '%s\n' stop >> "$root/commands" ;;
+            ipv4-old-binary) printf '%s\n' reload >> "$root/commands" ;;
+            *)
+                cmp -s "$root/validated-dhcp.yaml" "$root/var/support/forge-dhcp/conf/dhcp.yaml" || exit 1
+                cmp -s "$root/validated-host.yaml" "$root/var/support/forge-dhcp/conf/host.yaml" || exit 1
+                printf '%s\n' reload >> "$root/commands" ;;
+        esac
+        if [ "$DHCP_UPDATE_TEST_STAGE" = reload-failure ]; then
+            printf '%s\n' 'injected reload failure' >&2
+            exit 1
+        elif [ "$DHCP_UPDATE_TEST_STAGE" = stop-failure ]; then
+            printf '%s\n' 'injected stop failure' >&2
+            exit 1
+        fi ;;
+    *) exit 1 ;;
+esac
+"#,
+        )?;
+        fs::set_permissions(&crictl, fs::Permissions::from_mode(0o755))?;
+        let inherited_path =
+            std::env::var_os("PATH").ok_or_else(|| eyre::eyre!("missing test PATH"))?;
+        let path = std::env::join_paths(
+            std::iter::once(root.join("bin")).chain(std::env::split_paths(&inherited_path)),
+        )?;
+        // An incorrect early argument must fail even when all later file
+        // checks pass; shell `set -e` alone does not enforce an AND list.
+        let mut invalid_command = TokioCommand::new(&crictl);
+        invalid_command
+            .args([
+                "exec",
+                "test-hbn",
+                "/var/support/forge-dhcp/bin/forge-dhcp-server",
+                "--wrong-validation-flag",
+                "/previous-dhcp.yaml",
+                "--host-config",
+                "/previous-dhcp.yaml",
+                "--dhcp-config",
+                "/var/support/forge-dhcp/conf/dhcp.yaml",
+            ])
+            .env("DHCP_UPDATE_TEST_ROOT", root)
+            .env("DHCP_UPDATE_TEST_STAGE", "check-arguments")
+            .kill_on_drop(true);
+        let output = timeout(Duration::from_secs(30), invalid_command.output()).await??;
+        assert!(
+            !output.status.success(),
+            "fake accepted the wrong validation flag"
+        );
+        let pending_apply = FPath(root.join(dhcp::SERVER_CONFIG_PATH)).with_ext("PENDING");
+        for stage in [
+            "old-binary",
+            "write-failure",
+            "reload-failure",
+            "saved-before-reload",
+            "retry",
+            "unchanged",
+            "ipv4-old-binary",
+            "stop-failure",
+            "stop-old-binary",
+        ] {
+            fs::write(root.join("commands"), "")?;
+            if stage == "saved-before-reload" {
+                // Earlier failed applications deliberately retain the marker.
+                // Remove it so this stage proves write-only mode creates one.
+                fs::remove_file(&pending_apply)?;
+                assert!(!pending_apply.exists());
+            }
+            let blocked_temp = FPath(root.join(dhcp::SERVER_HOST_CONFIG_PATH)).temp();
+            if stage == "write-failure" {
+                fs::create_dir(&blocked_temp)?;
+            }
+            if stage == "stop-failure" {
+                fs::write(
+                    root.join(format!("{}.duid", dhcp::SERVER_CONFIG_PATH)),
+                    b"invalid identity",
+                )?;
+            }
+            let before_stop = if stage.starts_with("stop-") {
+                Some((
+                    fs::read(root.join(dhcp::SERVER_CONFIG_PATH))?,
+                    fs::read(root.join(dhcp::SERVER_HOST_CONFIG_PATH))?,
+                    fs::read(root.join(dhcp::SERVER_PATH))?,
+                ))
+            } else {
+                None
+            };
+            let mut command = TokioCommand::new(std::env::current_exe()?);
+            command.args(["--exact", "ethernet_virtualization::tests::ipv6_only_file_update_waits_for_compatible_binary", "--nocapture"])
+                .env("DHCP_UPDATE_TEST_ROOT", root)
+                .env("DHCP_UPDATE_TEST_STAGE", stage)
+                .env("DHCP_UPDATE_EXPECTED_COMMAND", if stage.starts_with("stop-") { dhcp::STOP_DHCP_SERVER } else { dhcp::RELOAD_DHCP_SERVER })
+                .env("IGNORE_MGMT_VRF", "true")
+                .env("PATH", &path)
+                .kill_on_drop(true);
+            let output = timeout(Duration::from_secs(30), command.output()).await??;
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+                "DHCP stage {stage} failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if matches!(stage, "old-binary" | "write-failure" | "reload-failure") {
+                for (path, contents) in &previous {
+                    assert_eq!(
+                        &fs::read_to_string(root.join(path))?,
+                        contents,
+                        "{stage}: {path}"
+                    );
+                }
+            }
+            if stage == "write-failure" {
+                fs::remove_dir(blocked_temp)?;
+            }
+            assert_eq!(
+                pending_apply.exists(),
+                matches!(
+                    stage,
+                    "write-failure" | "reload-failure" | "saved-before-reload" | "stop-failure"
+                ),
+                "{stage}"
+            );
+            let expected_commands = match stage {
+                "old-binary" | "write-failure" => "validate\n",
+                "reload-failure" | "retry" => "validate\nreload\n",
+                "saved-before-reload" | "unchanged" => "",
+                "ipv4-old-binary" => "reload\n",
+                "stop-failure" | "stop-old-binary" => "stop\n",
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                fs::read_to_string(root.join("commands"))?,
+                expected_commands,
+                "{stage}"
+            );
+            if let Some((dhcp_config, host_config, supervisor)) = before_stop {
+                assert_eq!(fs::read(root.join(dhcp::SERVER_CONFIG_PATH))?, dhcp_config);
+                assert_eq!(
+                    fs::read(root.join(dhcp::SERVER_HOST_CONFIG_PATH))?,
+                    host_config
+                );
+                assert_eq!(
+                    fs::read(root.join(format!("{}.duid", dhcp::SERVER_CONFIG_PATH)))?,
+                    b"invalid identity"
+                );
+                if stage == "stop-failure" {
+                    assert_eq!(fs::read(root.join(dhcp::SERVER_PATH))?, supervisor);
+                } else {
+                    let supervisor = fs::read_to_string(root.join(dhcp::SERVER_PATH))?;
+                    assert!(supervisor.contains("autostart = false"));
+                    assert!(supervisor.contains("autorestart = false"));
+                }
+            }
+            if stage == "saved-before-reload" {
+                // The next process sees matching live files, but still owes a reload.
+                assert!(pending_apply.exists());
+                let saved: DhcpConfig = serde_yaml::from_str(&fs::read_to_string(
+                    root.join(dhcp::SERVER_CONFIG_PATH),
+                )?)?;
+                assert_eq!(saved.ipv4()?, None);
+                assert_eq!(saved.server_identifier()?, legacy.server_identifier()?);
+                assert!(!root.join(dhcp::RELAY_PATH_NVUE).exists());
+            } else if stage == "ipv4-old-binary" {
+                let saved: DhcpConfig = serde_yaml::from_str(&fs::read_to_string(
+                    root.join(dhcp::SERVER_CONFIG_PATH),
+                )?)?;
+                assert!(saved.ipv4()?.is_some());
+            }
+        }
+        Ok(())
+    }
+
+    /// Provides matching canonical and deprecated dual-stack admin projections.
+    ///
+    /// Keeping both projections realistic makes mapping and reconciliation
+    /// tests detect accidental reuse of the host `/128` as the segment CIDR.
+    #[allow(deprecated)]
+    fn dual_stack_admin_interface() -> rpc::FlatInterfaceConfig {
+        rpc::FlatInterfaceConfig {
+            function_type: rpc::InterfaceFunctionType::Physical.into(),
+            vlan_id: 123,
+            vni: 5555,
+            vpc_vni: 7777,
+            gateway: Some("10.217.4.65/26".to_string()),
+            ip: Some("10.217.4.70".to_string()),
+            interface_prefix: Some("10.217.4.70/32".to_string()),
+            prefix: Some("10.217.4.64/26".to_string()),
+            svi_ip: Some("10.217.4.66/26".to_string()),
+            is_l2_segment: true,
+            ipv6_interface_config: Some(rpc::FlatInterfaceIpv6Config {
+                ip: "2001:db8:100::70".to_string(),
+                interface_prefix: "2001:db8:100::70/128".to_string(),
+                svi_ip: Some("2001:db8:100::66/64".to_string()),
+            }),
+            addresses: vec![
+                rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V4.into(),
+                    gateway: Some("10.217.4.65/26".to_string()),
+                    ip: "10.217.4.70".to_string(),
+                    interface_prefix: "10.217.4.70/32".to_string(),
+                    prefix: "10.217.4.64/26".to_string(),
+                    svi_ip: Some("10.217.4.66/26".to_string()),
+                    ..Default::default()
+                },
+                rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V6.into(),
+                    ip: "2001:db8:100::70".to_string(),
+                    interface_prefix: "2001:db8:100::70/128".to_string(),
+                    prefix: "2001:db8:100::/64".to_string(),
+                    svi_ip: Some("2001:db8:100::66/64".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
     /// Verifies managed-host loopbacks preserve optional IPv6 and reject invalid families.
     ///
     /// This keeps family validation at the NVUE rendering boundary.
@@ -1904,6 +2770,56 @@ mod tests {
                     loopback_ip_v6: None,
                     quarantine_state: None,
                 } => Fails,
+            }
+        );
+    }
+
+    /// Presence, including an empty list, makes Core's resolved FNN policy
+    /// authoritative. Only an older Core's absent field falls back to an
+    /// aggregated legacy site-prefix list, while ETV retains the original list.
+    #[test]
+    fn site_isolation_prefixes_honor_resolved_fnn_policy_presence() {
+        use carbide_test_support::Outcome::Yields;
+        use carbide_test_support::scenarios;
+
+        // Nested and adjacent legacy roots reveal whether fallback aggregation
+        // is incorrectly applied to authoritative operator policy.
+        let legacy = vec![
+            "10.0.0.0/9".to_string(),
+            "10.128.0.0/9".to_string(),
+            "10.2.0.0/24".to_string(),
+        ];
+        let explicit = vec!["10.0.0.0/8".to_string(), "10.2.0.0/24".to_string()];
+
+        // Keep the legacy source fixed and compare the selected policy before NVUE renders it.
+        scenarios!(
+            run = |(virtualization_type, null_routes): (_, Option<Vec<String>>)| {
+                let config = rpc::ManagedHostNetworkConfigResponse {
+                    site_fabric_prefixes: legacy.clone(),
+                    site_fabric_null_routes: null_routes.map(|items| rpc_common::StringList { items }),
+                    ..Default::default()
+                };
+                site_isolation_prefixes_for_rendering(virtualization_type, &config)
+                    .map_err(|error| error.to_string())
+            };
+            "explicit FNN routes preserve boundaries" {
+                // A child boundary is stronger policy than its parent and must survive.
+                (VpcVirtualizationType::Fnn, Some(explicit.clone())) => Yields(explicit),
+            }
+            "explicit empty FNN routes disable fallback" {
+                // Present-but-empty disables isolation routes instead of inheriting roots.
+                (VpcVirtualizationType::Fnn, Some(vec![])) => Yields(vec![]),
+            }
+            "old Core FNN response uses legacy fallback" {
+                // An absent field identifies old Core and requires the legacy fallback.
+                (VpcVirtualizationType::Fnn, None) => Yields(vec!["10.0.0.0/8".to_string()]),
+            }
+            "ETV ignores the FNN-only field" {
+                // ETV still consumes its legacy ACL list even if the new field is present.
+                (
+                    VpcVirtualizationType::EthernetVirtualizer,
+                    Some(vec!["203.0.113.0/24".to_string()]),
+                ) => Yields(legacy.clone()),
             }
         );
     }
@@ -1985,6 +2901,7 @@ mod tests {
                         skip_post,
                     },
                     &network_config,
+                    &test_service_addresses(),
                     HBNDeviceNames::hbn_23(),
                     None,
                 )
@@ -2140,6 +3057,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2191,6 +3109,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2242,6 +3161,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2302,6 +3222,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2315,6 +3236,477 @@ esac
         let expected = include_str!("../templates/tests/nvue_startup_fnn_with_leaks.yaml.expected");
         compare_diffed(hbn_root.join(nvue::PATH), expected)?;
 
+        Ok(())
+    }
+
+    /// Verifies one segment prefix drives both the DPU address and RA PIO while
+    /// the stateful tenant `/128` remains a separate host route.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn stateful_tenant_ipv6_renders_dpu_address_and_ra_from_segment_prefix()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut network_config = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        let interface = &mut network_config.tenant_interfaces[1];
+        interface.ipv6_interface_config = Some(rpc::FlatInterfaceIpv6Config {
+            ip: "2001:db8::1".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
+            svi_ip: None,
+        });
+        interface.addresses.push(rpc::InterfaceAddressConfig {
+            address_family: rpc::AddressFamily::V6.into(),
+            ip: "2001:db8::1".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
+            prefix: "2001:db8::/127".to_string(),
+            ..Default::default()
+        });
+
+        // Render through the full Core-response-to-NVUE wiring boundary.
+        let tempdir = tempfile::tempdir()?;
+        let hbn_root = tempdir.path();
+        fs::create_dir_all(hbn_root.join("var/support"))?;
+        fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
+        super::update_nvue(
+            VpcVirtualizationType::Fnn,
+            NvueUpdateFlavor::StartupFile {
+                hbn_root,
+                skip_post: true,
+            },
+            &network_config,
+            &test_service_addresses(),
+            HBNDeviceNames::hbn_23(),
+            None,
+        )
+        .await?;
+        let output = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+        let docs: serde_yaml::Value = serde_yaml::from_str(&output)?;
+        let set = &docs.as_sequence().expect("two YAML documents")[1]["set"];
+        let interface = &set["interface"]["pf0hpf_if"];
+        let ip = &interface["ip"];
+
+        // The DPU derives ::0/127 from the prefix; ::1/128 remains the tenant route.
+        assert!(!ip["address"]["2001:db8::/127"].is_null());
+        assert!(ip["address"]["2001:db8::1/128"].is_null());
+        assert!(
+            set["interface"]["pf0hpf_if"]["acl"]["admin_ipv6_host_to_overlay_flood_prevention"]
+                .is_null()
+        );
+        assert!(set["acl"]["admin_ipv6_host_to_overlay_flood_prevention"].is_null());
+        assert!(set["acl"]["admin_ipv6_overlay_to_host_flood_prevention"].is_null());
+        let frr_snippet = docs.as_sequence().expect("two YAML documents")[1]["set"]["system"]
+            ["config"]["snippet"]["frr.conf"]
+            .as_str()
+            .expect("stateful tenant should render an FRR snippet");
+        assert!(
+            frr_snippet.contains("interface pf0hpf_if vrf vpc_1025186")
+                && frr_snippet.contains("ipv6 nd prefix 2001:db8::/127 no-autoconfig")
+                && frr_snippet
+                    .lines()
+                    .any(|line| line.trim() == "ipv6 nd managed-config-flag")
+        );
+        assert!(
+            !frr_snippet
+                .lines()
+                .any(|line| line.trim() == "no ipv6 nd managed-config-flag")
+        );
+        Ok(())
+    }
+
+    /// Proves tenant L2 keeps its IPv6 SVI/VRR state without enabling RA at
+    /// the full response-through-`update_nvue` wiring boundary.
+    /// Agent-generated tenant RA belongs only on routed interfaces; advertising on a shared
+    /// L2 segment could make hosts select a DPU as an unintended IPv6 default router.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn slaac_tenant_l2_renders_vrr_without_router_advertisement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut network_config =
+            netconf(VpcVirtualizationType::Fnn, 32, 24, false, None, true, false);
+        let interface = &mut network_config.tenant_interfaces[1];
+        interface.ipv6_interface_config = Some(rpc::FlatInterfaceIpv6Config {
+            ip: String::new(),
+            interface_prefix: "2001:db8:185::/64".to_string(),
+            svi_ip: Some("2001:db8:185::2/64".to_string()),
+        });
+        interface.addresses.push(rpc::InterfaceAddressConfig {
+            address_family: rpc::AddressFamily::V6.into(),
+            interface_prefix: "2001:db8:185::/64".to_string(),
+            prefix: "2001:db8:185::/64".to_string(),
+            svi_ip: Some("2001:db8:185::2/64".to_string()),
+            ..Default::default()
+        });
+
+        let tempdir = tempfile::tempdir()?;
+        let hbn_root = tempdir.path();
+        fs::create_dir_all(hbn_root.join("var/support"))?;
+        fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
+        super::update_nvue(
+            VpcVirtualizationType::Fnn,
+            NvueUpdateFlavor::StartupFile {
+                hbn_root,
+                skip_post: true,
+            },
+            &network_config,
+            &test_service_addresses(),
+            HBNDeviceNames::hbn_23(),
+            None,
+        )
+        .await?;
+
+        let output = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+        let docs: serde_yaml::Value = serde_yaml::from_str(&output)?;
+        let set = &docs.as_sequence().expect("two YAML documents")[1]["set"];
+        assert!(set["system"]["config"]["snippet"].is_null());
+        assert!(!set["interface"]["vlan185"]["ip"]["address"]["2001:db8:185::2/64"].is_null());
+        assert!(
+            !set["interface"]["vlan185"]["ip"]["vrr"]["address"]["2001:db8:185::/64"].is_null()
+        );
+        assert!(set["acl"]["admin_ipv6_host_to_overlay_flood_prevention"].is_null());
+        assert!(set["acl"]["admin_ipv6_overlay_to_host_flood_prevention"].is_null());
+        Ok(())
+    }
+
+    /// Verifies a realistic dual-stack admin response drives the existing SVI,
+    /// explicit RA target, resolver changes, and complete IPv6 withdrawal.
+    /// Host routes must be originated and withdrawn with that state so routed reachability follows it.
+    #[tokio::test]
+    async fn stateful_admin_ipv6_reconciles_svi_ra_and_rdnss()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut network_config = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        network_config.use_admin_network = true;
+        network_config.network_virtualization_type = Some(rpc::VpcVirtualizationType::Fnn.into());
+        network_config.admin_interface = Some(dual_stack_admin_interface());
+
+        let tempdir = tempfile::tempdir()?;
+        let hbn_root = tempdir.path();
+        fs::create_dir_all(hbn_root.join("var/support"))?;
+        fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
+
+        // Render the populated response through the complete update path.
+        assert!(
+            super::update_nvue(
+                VpcVirtualizationType::Fnn,
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                },
+                &network_config,
+                &test_service_addresses(),
+                HBNDeviceNames::hbn_23(),
+                None,
+            )
+            .await?
+        );
+        let output = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+        let docs: serde_yaml::Value = serde_yaml::from_str(&output)?;
+        let set = &docs.as_sequence().expect("two YAML documents")[1]["set"];
+        let vlan = &set["interface"]["vlan123"];
+        let snippet = set["system"]["config"]["snippet"]["frr.conf"]
+            .as_str()
+            .expect("admin RA should render an FRR snippet");
+
+        // The segment configures VRR and PIO while the host /128 is not
+        // reinterpreted as the segment CIDR.
+        assert!(!vlan["ip"]["address"]["2001:db8:100::66/64"].is_null());
+        assert!(!vlan["ip"]["vrr"]["address"]["2001:db8:100::/64"].is_null());
+        assert!(vlan["ip"]["vrr"]["address"]["2001:db8:100::70/128"].is_null());
+
+        // Both host routes must exist locally before BGP can originate them into EVPN.
+        let admin_router = &set["vrf"]["vpc_7777"]["router"];
+        for (prefix, family) in [
+            // Adding IPv6 must preserve the existing IPv4 route and origination.
+            ("10.217.4.70/32", "ipv4-unicast"),
+            // IPv6 originates the individual host, not the shared admin segment.
+            ("2001:db8:100::70/128", "ipv6-unicast"),
+        ] {
+            assert_eq!(
+                admin_router["static"][prefix],
+                serde_yaml::from_str::<serde_yaml::Value>(&format!(
+                    "address-family: {family}\nvia:\n  vlan123:\n    type: interface\n"
+                ))?
+            );
+            assert_eq!(
+                admin_router["bgp"]["address-family"][family]["network"],
+                serde_yaml::from_str::<serde_yaml::Value>(&format!("{prefix}: {{}}\n"))?
+            );
+        }
+
+        // EVPN origination must not bypass the disabled underlay export policy.
+        assert!(
+            set["router"]["policy"]["prefix-list"]["ALLOW_TO_UNDERLAY_PREFIX_LIST_IPV6"]["rule"]
+                ["65002"]
+                .is_null()
+        );
+
+        // Stateful RA targets the VLAN SVI, sets M=1/O=1/A=0, and advertises
+        // only the IPv6 service resolvers with finite lifetimes.
+        assert!(snippet.contains("interface vlan123 vrf vpc_7777"));
+        assert!(!snippet.contains("interface pf0hpf_if vrf vpc_7777"));
+        assert!(snippet.contains("ipv6 nd prefix 2001:db8:100::/64 no-autoconfig"));
+        assert!(snippet.contains("ipv6 nd ra-lifetime 1800"));
+        assert!(
+            snippet
+                .lines()
+                .any(|line| line.trim() == "ipv6 nd managed-config-flag")
+        );
+        assert!(
+            !snippet
+                .lines()
+                .any(|line| line.trim() == "no ipv6 nd managed-config-flag")
+        );
+        assert!(
+            snippet
+                .lines()
+                .any(|line| line.trim() == "ipv6 nd other-config-flag")
+        );
+        assert!(
+            !snippet
+                .lines()
+                .any(|line| line.trim() == "no ipv6 nd other-config-flag")
+        );
+        assert_eq!(
+            snippet
+                .lines()
+                .filter(|line| line.contains("ipv6 nd rdnss"))
+                .collect::<Vec<_>>(),
+            [
+                " ipv6 nd rdnss 2001:db8::53 1800",
+                " ipv6 nd rdnss 2001:db8::54 1800",
+            ]
+        );
+
+        // The existing IPv4 and two directional IPv6 containment policies are
+        // attached at the host-facing admin boundary.
+        let interface_acl = &set["interface"]["pf0hpf_if"]["acl"];
+        assert_eq!(
+            interface_acl["dhcp_flood_prevention"],
+            serde_yaml::from_str::<serde_yaml::Value>("inbound: {}\n")?
+        );
+        assert_eq!(
+            interface_acl["admin_ipv6_host_to_overlay_flood_prevention"],
+            serde_yaml::from_str::<serde_yaml::Value>("inbound: {}\n")?
+        );
+        assert_eq!(
+            interface_acl["admin_ipv6_overlay_to_host_flood_prevention"],
+            serde_yaml::from_str::<serde_yaml::Value>("outbound: {}\n")?
+        );
+
+        // Replacing VLAN, VRF, prefix, host, SVI, and resolver inputs must
+        // produce only the replacement desired state.
+        let admin_interface = network_config
+            .admin_interface
+            .as_mut()
+            .expect("fixture should contain an admin interface");
+        admin_interface.vlan_id = 124;
+        admin_interface.vni = 6666;
+        admin_interface.vpc_vni = 8888;
+        admin_interface.vpc_routing_profile = Some(rpc::RoutingProfile {
+            leak_tenant_host_routes_to_underlay: true, // Export the host /128.
+            ..Default::default()
+        });
+        // Leave the deprecated sidecar stale: every admin IPv6 render input
+        // must come from the authoritative address entry below.
+        let canonical = admin_interface
+            .addresses
+            .iter_mut()
+            .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))
+            .expect("fixture should contain canonical IPv6");
+        canonical.ip = "2001:db8:200::80".to_string();
+        canonical.interface_prefix = "2001:db8:200::80/128".to_string();
+        canonical.prefix = "2001:db8:200::/64".to_string();
+        canonical.svi_ip = Some("2001:db8:200::66/64".to_string());
+        let replacement_services = ServiceAddresses {
+            pxe_ips: vec![],
+            ntpservers: vec![],
+            nameservers: vec!["2001:db8:ffff::53".parse().unwrap()],
+        };
+        assert!(
+            super::update_nvue(
+                VpcVirtualizationType::Fnn,
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                },
+                &network_config,
+                &replacement_services,
+                HBNDeviceNames::hbn_23(),
+                None,
+            )
+            .await?
+        );
+        let replacement = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+        let replacement_docs: serde_yaml::Value = serde_yaml::from_str(&replacement)?;
+        let replacement_set =
+            &replacement_docs.as_sequence().expect("two YAML documents")[1]["set"];
+        let replacement_snippet = replacement_set["system"]["config"]["snippet"]["frr.conf"]
+            .as_str()
+            .expect("replacement admin RA should render an FRR snippet");
+        assert!(replacement_snippet.contains("interface vlan124 vrf vpc_8888"));
+        assert!(replacement_snippet.contains("ipv6 nd prefix 2001:db8:200::/64 no-autoconfig"));
+        assert!(replacement_snippet.contains("ipv6 nd rdnss 2001:db8:ffff::53 1800"));
+        assert!(
+            !replacement_set["interface"]["vlan124"]["ip"]["address"]["2001:db8:200::66/64"]
+                .is_null()
+        );
+        assert!(
+            !replacement_set["interface"]["vlan124"]["ip"]["vrr"]["address"]["2001:db8:200::/64"]
+                .is_null()
+        );
+        // Route installation, origination, and permitted export must follow the new host and VLAN.
+        let replacement_router = &replacement_set["vrf"]["vpc_8888"]["router"];
+        assert_eq!(
+            replacement_router["static"]["2001:db8:200::80/128"],
+            serde_yaml::from_str::<serde_yaml::Value>(
+                "address-family: ipv6-unicast\nvia:\n  vlan124:\n    type: interface\n"
+            )?
+        );
+        assert_eq!(
+            replacement_router["bgp"]["address-family"]["ipv6-unicast"]["network"],
+            serde_yaml::from_str::<serde_yaml::Value>("2001:db8:200::80/128: {}\n")?
+        );
+        assert_eq!(
+            replacement_set["router"]["policy"]["prefix-list"]["ALLOW_TO_UNDERLAY_PREFIX_LIST_IPV6"]
+                ["rule"]["65002"]["match"],
+            serde_yaml::from_str::<serde_yaml::Value>("2001:db8:200::80/128: {}\n")?
+        );
+        let replacement_neighbors =
+            &replacement_set["vrf"]["vpc_8888"]["router"]["bgp"]["neighbor"];
+        assert!(replacement_neighbors["2001:db8:100::70"].is_null());
+        assert_eq!(
+            replacement_neighbors["2001:db8:200::80"]["peer-group"].as_str(),
+            Some("tenant")
+        );
+        assert_eq!(
+            replacement_neighbors["2001:db8:200::80"]["passive-mode"].as_str(),
+            Some("on")
+        );
+        for stale in [
+            "interface vlan123 vrf vpc_7777",
+            "2001:db8:100::/64",
+            "2001:db8:100::70",
+            "2001:db8::53",
+            "2001:db8::54",
+        ] {
+            assert!(
+                !replacement.contains(stale),
+                "stale admin RA input: {stale}"
+            );
+        }
+
+        // Removing IPv6 resolver membership from the replacement state keeps
+        // RA/SVI desired state while withdrawing the complete RDNSS list.
+        let ipv4_only_services = ServiceAddresses {
+            pxe_ips: vec![],
+            ntpservers: vec![],
+            nameservers: vec!["192.0.2.53".parse().unwrap()],
+        };
+        assert!(
+            super::update_nvue(
+                VpcVirtualizationType::Fnn,
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                },
+                &network_config,
+                &ipv4_only_services,
+                HBNDeviceNames::hbn_23(),
+                None,
+            )
+            .await?
+        );
+        let without_rdnss = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+        let without_rdnss_docs: serde_yaml::Value = serde_yaml::from_str(&without_rdnss)?;
+        let without_rdnss_set = &without_rdnss_docs
+            .as_sequence()
+            .expect("two YAML documents")[1]["set"];
+        let without_rdnss_snippet = without_rdnss_set["system"]["config"]["snippet"]["frr.conf"]
+            .as_str()
+            .expect("admin RA should remain without RDNSS");
+        assert!(without_rdnss_snippet.contains("ipv6 nd prefix 2001:db8:200::/64 no-autoconfig"));
+        assert!(!without_rdnss_snippet.contains("ipv6 nd rdnss"));
+        assert!(
+            !without_rdnss_set["interface"]["vlan124"]["ip"]["address"]["2001:db8:200::66/64"]
+                .is_null()
+        );
+        assert!(
+            !without_rdnss_set["interface"]["vlan124"]["ip"]["vrr"]["address"]["2001:db8:200::/64"]
+                .is_null()
+        );
+
+        // Removing the authoritative IPv6 projection withdraws the complete
+        // RA/RDNSS and SVI state even while the deprecated sidecar remains.
+        let admin_interface = network_config
+            .admin_interface
+            .as_mut()
+            .expect("fixture should contain an admin interface");
+        admin_interface
+            .addresses
+            .retain(|address| address.address_family != i32::from(rpc::AddressFamily::V6));
+        assert!(
+            super::update_nvue(
+                VpcVirtualizationType::Fnn,
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                },
+                &network_config,
+                &ipv4_only_services,
+                HBNDeviceNames::hbn_23(),
+                None,
+            )
+            .await?
+        );
+        let output = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+        let docs: serde_yaml::Value = serde_yaml::from_str(&output)?;
+        let set = &docs.as_sequence().expect("two YAML documents")[1]["set"];
+        assert!(set["system"]["config"]["snippet"].is_null());
+        assert!(set["interface"]["vlan124"]["ip"]["address"]["2001:db8:200::66/64"].is_null());
+        assert!(set["interface"]["vlan124"]["ip"]["vrr"]["address"]["2001:db8:200::/64"].is_null());
+
+        // Withdrawal removes IPv6 routing and export while preserving IPv4 on the new VLAN.
+        let admin_router = &set["vrf"]["vpc_8888"]["router"];
+        assert!(admin_router["static"]["2001:db8:200::80/128"].is_null());
+        assert!(admin_router["bgp"]["address-family"]["ipv6-unicast"]["network"].is_null());
+        assert!(
+            set["router"]["policy"]["prefix-list"]["ALLOW_TO_UNDERLAY_PREFIX_LIST_IPV6"]["rule"]
+                ["65002"]
+                .is_null()
+        );
+        assert_eq!(
+            admin_router["static"]["10.217.4.70/32"],
+            serde_yaml::from_str::<serde_yaml::Value>(
+                "address-family: ipv4-unicast\nvia:\n  vlan124:\n    type: interface\n"
+            )?
+        );
+        assert_eq!(
+            admin_router["bgp"]["address-family"]["ipv4-unicast"]["network"],
+            serde_yaml::from_str::<serde_yaml::Value>("10.217.4.70/32: {}\n")?
+        );
+        assert!(
+            set["interface"]["pf0hpf_if"]["acl"]["admin_ipv6_host_to_overlay_flood_prevention"]
+                .is_null()
+        );
+        assert!(
+            set["interface"]["pf0hpf_if"]["acl"]["admin_ipv6_overlay_to_host_flood_prevention"]
+                .is_null()
+        );
+        assert!(set["acl"]["admin_ipv6_host_to_overlay_flood_prevention"].is_null());
+        assert!(set["acl"]["admin_ipv6_overlay_to_host_flood_prevention"].is_null());
         Ok(())
     }
 
@@ -2342,6 +3734,7 @@ esac
                 virtualization_type,
                 update_flavor,
                 &network_config,
+                &test_service_addresses(),
                 HBNDeviceNames::hbn_23(),
                 None,
             )
@@ -2382,6 +3775,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2437,6 +3831,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2495,6 +3890,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2562,6 +3958,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2619,6 +4016,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2644,6 +4042,63 @@ esac
             })
             .wrap_err(format!("YAML parser error. output written to {ERR_FILE}"))?;
 
+        Ok(())
+    }
+
+    /// Verifies only Core responses marked authoritative can activate peer VNI
+    /// imports, so an older Core cannot bypass the existing-peering policy.
+    #[tokio::test]
+    async fn peer_vnis_require_an_authoritative_core_marker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (scenario, authoritative) in [
+            // Old Core supplies peer VNIs without proving its policy filtered them.
+            ("legacy Core response", false),
+            // New Core explicitly certifies the list for route-target imports.
+            ("authoritative Core response", true),
+        ] {
+            // Use a populated peer list so absence of an import proves filtering.
+            let mut network_config = netconf(
+                VpcVirtualizationType::Fnn,
+                32,
+                24,
+                false,
+                None,
+                false,
+                false,
+            );
+            assert!(
+                network_config.tenant_interfaces[0]
+                    .vpc_peer_vnis
+                    .contains(&1_025_187)
+            );
+            network_config.vpc_peer_vnis_authoritative = authoritative;
+
+            // Render through the real agent update path into a temporary HBN tree.
+            let td = tempfile::tempdir()?;
+            let hbn_root = td.path();
+            fs::create_dir_all(hbn_root.join("var/support"))?;
+            fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
+            super::update_nvue(
+                VpcVirtualizationType::Fnn,
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                },
+                &network_config,
+                &test_service_addresses(),
+                HBNDeviceNames::hbn_23(),
+                None,
+            )
+            .await?;
+
+            // The route target must appear exactly when Core authorized the list.
+            let startup_yaml = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+            assert_eq!(
+                startup_yaml.contains("11414:1025187: {}"),
+                authoritative,
+                "{scenario}"
+            );
+        }
         Ok(())
     }
 
@@ -2992,6 +4447,8 @@ esac
             quarantine_state: None,
         };
         rpc::ManagedHostNetworkConfigResponse {
+            service_interfaces: vec![],
+            service_vpc_slot_inventory: None,
             asn: 4259912557,
             datacenter_asn: 11414,
             site_global_vpc_vni,
@@ -3063,6 +4520,7 @@ esac
             // yes it's in there twice I dunno either
             dhcp_servers: vec!["10.217.5.197".to_string(), "10.217.5.197".to_string()],
             ntp_servers: vec![],
+            dhcpv6_server_preference: Some(255),
             vni_device: "vxlan48".to_string(),
 
             managed_host_config: Some(netconf),
@@ -3090,6 +4548,8 @@ esac
             route_servers: vec!["172.43.0.1".to_string(), "172.43.0.2".to_string()],
             deny_prefixes: vec!["192.0.2.0/24".into(), "198.51.100.0/24".into()],
             site_fabric_prefixes: vec!["10.217.0.0/16".into()],
+            site_fabric_null_routes: None,
+            vpc_peer_vnis_authoritative: true,
             deprecated_deny_prefixes: vec![],
             enable_dhcp: true,
             vpc_isolation_behavior: rpc::VpcIsolationBehaviorType::VpcIsolationMutual.into(),
@@ -3359,6 +4819,231 @@ esac
         );
     }
 
+    /// Verifies the Core-to-agent response preserves Preference presence and
+    /// rejects values outside the shared DHCP model before either delivery path.
+    #[test]
+    fn dhcpv6_server_preference_validates_network_response() {
+        use carbide_test_support::Outcome::*;
+        use carbide_test_support::scenarios;
+
+        scenarios!(run = |preference| {
+                dhcpv6_server_preference(&rpc::ManagedHostNetworkConfigResponse {
+                    dhcpv6_server_preference: preference,
+                    ..Default::default()
+                })
+                .map_err(drop)
+            };
+            "legacy omission" {
+                // An older Core keeps the option absent instead of acquiring NICo's new default.
+                None => Yields(None),
+            }
+            "configured values" {
+                // Explicit zero remains distinguishable from legacy omission.
+                Some(0) => Yields(Some(0)),
+                // The one-octet maximum survives the widened protobuf field.
+                Some(255) => Yields(Some(255)),
+            }
+            "invalid widened value" {
+                // A corrupt or future value cannot be silently truncated on delivery.
+                Some(256) => Fails,
+            }
+        );
+    }
+
+    /// Verifies tenant RA consumes the family-neutral V6 entry, preserves the
+    /// explicit addressing mode, and never broadens an allocated prefix.
+    #[test]
+    fn tenant_ipv6_router_advertisement_requires_mode_specific_prefix() {
+        use carbide_test_support::value_scenarios;
+
+        let v4 = rpc::InterfaceAddressConfig {
+            address_family: rpc::AddressFamily::V4.into(),
+            ip: "192.0.2.10".to_string(),
+            interface_prefix: "192.0.2.10/32".to_string(),
+            prefix: "192.0.2.0/24".to_string(),
+            ..Default::default()
+        };
+        let resolvers = vec![
+            "2001:db8::53".parse().unwrap(),
+            "2001:db8::54".parse().unwrap(),
+        ];
+
+        value_scenarios!(run = |addresses| {
+                let interface = rpc::FlatInterfaceConfig {
+                    addresses,
+                    ..Default::default()
+                };
+                tenant_ipv6_router_advertisement(&interface, &resolvers).map(|advertisement| {
+                    (
+                        advertisement.mode,
+                        advertisement.prefix,
+                        advertisement.rdnss_servers,
+                    )
+                })
+            };
+            "stateful allocated /127" {
+                // A tenant /128 at the second endpoint selects stateful RA for its /127.
+                vec![v4, rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V6.into(),
+                    ip: "2001:db8::1".to_string(),
+                    interface_prefix: "2001:db8::1/128".to_string(),
+                    prefix: "2001:db8::/127".to_string(),
+                    ..Default::default()
+                }] => Some((
+                    nvue::Ipv6RouterAdvertisementMode::Stateful,
+                    "2001:db8::/127".to_string(),
+                    resolvers.clone(),
+                )),
+            }
+            "explicit SLAAC prefix" {
+                // Prefix-only host configuration selects SLAAC without manufacturing an address.
+                vec![rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V6.into(),
+                    ip: String::new(),
+                    interface_prefix: "2001:db8:1::/64".to_string(),
+                    prefix: "2001:db8:1::/64".to_string(),
+                    ..Default::default()
+                }] => Some((
+                    nvue::Ipv6RouterAdvertisementMode::Slaac,
+                    "2001:db8:1::/64".to_string(),
+                    resolvers.clone(),
+                )),
+            }
+            "invalid or ambiguous mode inputs" {
+                // Routing-only data does not establish either tenant address mode.
+                vec![rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V6.into(),
+                    prefix: "2001:db8:2::/64".to_string(),
+                    ..Default::default()
+                }] => None,
+                // The first /127 address belongs to the DPU interface, not the tenant binding.
+                vec![rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V6.into(),
+                    ip: "2001:db8:3::".to_string(),
+                    interface_prefix: "2001:db8:3::/128".to_string(),
+                    prefix: "2001:db8:3::/127".to_string(),
+                    ..Default::default()
+                }] => None,
+                // A concrete address does not turn a SLAAC-sized prefix into stateful allocation.
+                vec![rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V6.into(),
+                    ip: "2001:db8:4::1".to_string(),
+                    interface_prefix: "2001:db8:4::/64".to_string(),
+                    prefix: "2001:db8:4::/64".to_string(),
+                    ..Default::default()
+                }] => None,
+            }
+        );
+    }
+
+    /// Verifies authoritative prefix normalization, legacy fallback, and the
+    /// malformed-data precedence needed during mixed-version upgrades.
+    #[test]
+    fn ipv6_segment_prefix_falls_back_only_when_authoritative_data_is_absent() {
+        use carbide_test_support::value_scenarios;
+
+        let mut canonical = dual_stack_admin_interface();
+        canonical
+            .addresses
+            .iter_mut()
+            .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))
+            .expect("fixture should contain canonical IPv6")
+            .prefix = "2001:db8:100::70/64".to_string();
+        let mut legacy = canonical.clone();
+        legacy
+            .addresses
+            .retain(|address| address.address_family != i32::from(rpc::AddressFamily::V6));
+        let mut empty_authoritative = canonical.clone();
+        empty_authoritative
+            .addresses
+            .iter_mut()
+            .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))
+            .expect("fixture should contain canonical IPv6")
+            .prefix = String::new();
+        let legacy_prefix = "2001:db8:ffff::/64";
+
+        value_scenarios!(run = |interface: rpc::FlatInterfaceConfig| {
+                ipv6_segment_prefix(&interface, legacy_prefix)
+            };
+            "authoritative segment" {
+                // Host bits in an authoritative prefix are normalized before rendering.
+                canonical => Some("2001:db8:100::/64".to_string()),
+            }
+            "legacy response" {
+                // Only an absent canonical V6 entry permits the sidecar fallback.
+                legacy => Some(legacy_prefix.to_string()),
+            }
+            "empty authoritative segment" {
+                // Present but empty new data must not be reinterpreted as legacy data.
+                empty_authoritative => None,
+            }
+        );
+    }
+
+    /// Verifies admin RA accepts only an FNN VLAN with a contained host `/128`.
+    /// Primary-DPU/admin-mode gating remains at its sole production call site.
+    #[test]
+    #[allow(deprecated)]
+    fn admin_ipv6_router_advertisement_requires_valid_admin_host_projection() {
+        use carbide_test_support::value_scenarios;
+
+        let valid = dual_stack_admin_interface();
+        let mut canonical_only = valid.clone();
+        canonical_only.ipv6_interface_config = None;
+        let mut invalid_host_route = valid.clone();
+        invalid_host_route
+            .addresses
+            .iter_mut()
+            .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))
+            .expect("fixture should contain canonical IPv6")
+            .interface_prefix = "2001:db8:100::/64".to_string();
+        let mut outside_segment = valid.clone();
+        outside_segment
+            .addresses
+            .iter_mut()
+            .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))
+            .expect("fixture should contain canonical IPv6")
+            .prefix = "2001:db8:200::/64".to_string();
+        let resolvers = vec!["2001:db8::53".parse().unwrap()];
+
+        value_scenarios!(run = |(virtualization_type, interface)| {
+                let address = canonical_ipv6_address(&interface)
+                    .expect("test interface should contain canonical IPv6");
+                admin_ipv6_router_advertisement(
+                    virtualization_type,
+                    &interface,
+                    address,
+                    &resolvers,
+                )
+                .map(|advertisement| (
+                    advertisement.prefix,
+                    advertisement.mode,
+                    advertisement.rdnss_servers,
+                ))
+            };
+            "valid FNN admin SVI" {
+                // Canonical host and prefix data alone enable stateful RA on the VLAN.
+                (VpcVirtualizationType::Fnn, canonical_only) => Some((
+                    "2001:db8:100::/64".to_string(),
+                    nvue::Ipv6RouterAdvertisementMode::Stateful,
+                    resolvers.clone(),
+                )),
+            }
+            "non-FNN admin interface" {
+                // ETV has no supported admin VPC SVI RA path.
+                (VpcVirtualizationType::EthernetVirtualizer, valid) => None,
+            }
+            "non-host interface prefix" {
+                // A /64 cannot stand in for the allocated host route.
+                (VpcVirtualizationType::Fnn, invalid_host_route) => None,
+            }
+            "host outside segment" {
+                // An unrelated segment must never be advertised for this host.
+                (VpcVirtualizationType::Fnn, outside_segment) => None,
+            }
+        );
+    }
+
     fn validate_dhcp_config(received: DhcpConfig, expected: DhcpConfig) {
         assert_eq!(received.lease_time_secs, expected.lease_time_secs);
         assert_eq!(received.renewal_time_secs, expected.renewal_time_secs);
@@ -3370,7 +5055,12 @@ esac
             received.carbide_provisioning_server_ipv4,
             expected.carbide_provisioning_server_ipv4
         );
+        assert_eq!(
+            received.carbide_provisioning_server_ipv6,
+            expected.carbide_provisioning_server_ipv6
+        );
         assert_eq!(received.carbide_dhcp_server, expected.carbide_dhcp_server);
+        assert_eq!(received.dhcpv6_server_id, expected.dhcpv6_server_id);
         assert_eq!(
             received.carbide_nameservers_v6,
             expected.carbide_nameservers_v6
@@ -3390,6 +5080,10 @@ esac
         assert_eq!(
             received.dhcpv6_valid_lifetime_secs,
             expected.dhcpv6_valid_lifetime_secs
+        );
+        assert_eq!(
+            received.dhcpv6_server_preference,
+            expected.dhcpv6_server_preference
         );
     }
 
@@ -3461,7 +5155,8 @@ esac
                 rpc::InterfaceAddressConfig {
                     address_family: rpc::AddressFamily::V6.into(),
                     ip: "2001:db8::123".to_string(),
-                    interface_prefix: "2001:db8::/64".to_string(),
+                    interface_prefix: "2001:db8::123/128".to_string(),
+                    prefix: "2001:db8::/64".to_string(),
                     ..Default::default()
                 },
             ],
@@ -3531,7 +5226,13 @@ esac
                 ipv6_interface_config: None,
                 vpc_routing_profile: None,
                 interface_routing_profile: None,
-                addresses: vec![],
+                addresses: vec![rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V6.into(),
+                    ip: "2001:db8:185::1".to_string(),
+                    interface_prefix: "2001:db8:185::1/128".to_string(),
+                    prefix: "2001:db8:185::/127".to_string(),
+                    ..Default::default()
+                }],
             },
         ];
 
@@ -3556,18 +5257,22 @@ esac
             ],
             carbide_nameservers_v6: vec!["2001:db8::53".parse().unwrap()],
             carbide_ntpservers_v6: vec!["2001:db8::123".parse().unwrap()],
-            carbide_provisioning_server_ipv4: Ipv4Addr::from([10, 0, 0, 1]),
+            carbide_provisioning_server_ipv4: Some(Ipv4Addr::from([10, 0, 0, 1])),
+            carbide_provisioning_server_ipv6: Some("2001:db8::80".parse().unwrap()),
             lease_time_secs: 604800,
             renewal_time_secs: 3600,
             rebinding_time_secs: 432000,
             carbide_api_url: None,
-            carbide_dhcp_server: Ipv4Addr::from([10, 217, 5, 39]),
+            carbide_dhcp_server: Some(Ipv4Addr::from([10, 217, 5, 39])),
             dhcpv6_preferred_lifetime_secs: dhcp::DHCPV6_PREFERRED_LIFETIME_SECS,
             dhcpv6_valid_lifetime_secs: dhcp::DHCPV6_VALID_LIFETIME_SECS,
+            dhcpv6_server_preference: Some(0),
             ..Default::default()
         };
 
         let mut network_config = rpc::ManagedHostNetworkConfigResponse {
+            service_interfaces: vec![],
+            service_vpc_slot_inventory: None,
             bgp_leaf_session_password: None,
             site_global_vpc_vni: None,
             asn: 4259912557,
@@ -3604,6 +5309,7 @@ esac
             // yes it's in there twice I dunno either
             dhcp_servers: vec!["10.217.5.197".to_string(), "10.217.5.197".to_string()],
             ntp_servers: vec![],
+            dhcpv6_server_preference: Some(0),
             vni_device: "vxlan48".to_string(),
 
             managed_host_config: Some(netconf),
@@ -3630,6 +5336,8 @@ esac
             route_servers: vec!["172.43.0.1".to_string(), "172.43.0.2".to_string()],
             deny_prefixes: vec!["192.0.2.0/24".into(), "198.51.100.0/24".into()],
             site_fabric_prefixes: vec!["10.217.0.0/16".into()],
+            site_fabric_null_routes: None,
+            vpc_peer_vnis_authoritative: true,
             vpc_isolation_behavior: rpc::VpcIsolationBehaviorType::VpcIsolationMutual.into(),
             deprecated_deny_prefixes: vec![],
             enable_dhcp: true,
@@ -3644,20 +5352,26 @@ esac
             use_admin_network_changed: None,
         };
 
-        let f = tempfile::NamedTempFile::new()?;
+        // Include sibling backup files in the fixture's cleanup on every exit.
+        let directory = tempfile::tempdir()?;
+        let f = tempfile::NamedTempFile::new_in(directory.path())?;
         let fp = FPath(f.path().to_owned());
 
-        let g = tempfile::NamedTempFile::new()?;
+        let g = tempfile::NamedTempFile::new_in(directory.path())?;
         let gp = FPath(PathBuf::from(g.path()));
 
-        let h = tempfile::NamedTempFile::new()?;
+        let h = tempfile::NamedTempFile::new_in(directory.path())?;
         let hp = FPath(PathBuf::from(h.path()));
 
-        let i = tempfile::NamedTempFile::new()?;
+        let i = tempfile::NamedTempFile::new_in(directory.path())?;
         let ip = FPath(PathBuf::from(i.path()));
 
         let service_addrs = ServiceAddresses {
-            pxe_ips: vec![IpAddr::from([10, 0, 0, 1])],
+            pxe_ips: vec![
+                "2001:db8::80".parse().unwrap(),
+                IpAddr::from([10, 0, 0, 1]),
+                "2001:db8::81".parse().unwrap(),
+            ],
             ntpservers: vec![
                 IpAddr::from([127, 0, 0, 1]),
                 IpAddr::from([127, 0, 0, 2]),
@@ -3679,7 +5393,7 @@ esac
         host_config_str =
             dhcp::build_server_host_config(network_config2.clone(), &HBNDeviceNames::pre_23())?;
         assert!(host_config_str.contains("mtu: 1500"));
-        match super::write_dhcp_v4_server_config(
+        match write_dhcp_test_files(
             &fp,
             &super::DhcpServerPaths {
                 server: gp.clone(),
@@ -3691,10 +5405,10 @@ esac
             &HBNDeviceNames::pre_23(),
         ) {
             Err(err) => {
-                panic!("write_dhcp_server error: {err}");
+                panic!("write_dhcp_test_files error: {err}");
             }
             Ok(false) => {
-                panic!("write_dhcp_server says the config didn't change, that's wrong");
+                panic!("write_dhcp_test_files says the config didn't change, that's wrong");
             }
             Ok(true) => {
                 // success
@@ -3708,6 +5422,20 @@ esac
         validate_dhcp_config(dhcp_config_received, dhcp_config);
 
         let dhcp_host_config: HostConfig = serde_yaml::from_str(&super::read_limited(i.path())?)?;
+        assert_eq!(
+            dhcp_host_config
+                .host_ip_addresses
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["vlan1"]
+        );
+        let admin_ipv6 = dhcp_host_config.host_ip_addresses["vlan1"]
+            .ipv6
+            .as_ref()
+            .expect("admin DHCP host entry should contain IPv6");
+        assert_eq!(admin_ipv6.address, Some("2001:db8::123".parse().unwrap()));
+        assert_eq!(admin_ipv6.prefix, "2001:db8::123/128");
         validate_host_config(
             dhcp_host_config,
             HostConfig::try_from(network_config.clone(), "pf0hpf_sf", "pf0vf", "_sf", true)?,
@@ -3730,9 +5458,9 @@ esac
         let service_addrs = ServiceAddresses {
             pxe_ips: vec![IpAddr::from([10, 0, 0, 1])],
             ntpservers: vec![],
-            nameservers: vec![IpAddr::from([10, 1, 1, 1])],
+            nameservers: vec![IpAddr::from([10, 1, 1, 1]), "2001:db8::53".parse().unwrap()],
         };
-        match super::write_dhcp_v4_server_config(
+        match write_dhcp_test_files(
             &fp,
             &super::DhcpServerPaths {
                 server: gp,
@@ -3744,10 +5472,10 @@ esac
             &HBNDeviceNames::pre_23(),
         ) {
             Err(err) => {
-                panic!("write_dhcp_server error: {err}");
+                panic!("write_dhcp_test_files error: {err}");
             }
             Ok(false) => {
-                panic!("write_dhcp_server says the config didn't change, that's wrong");
+                panic!("write_dhcp_test_files says the config didn't change, that's wrong");
             }
             Ok(true) => {
                 // success
@@ -3756,14 +5484,16 @@ esac
         let dhcp_config = DhcpConfig {
             carbide_nameservers: vec![Ipv4Addr::from([10, 1, 1, 1])],
             carbide_ntpservers: vec![],
-            carbide_provisioning_server_ipv4: Ipv4Addr::from([10, 0, 0, 1]),
+            carbide_provisioning_server_ipv4: Some(Ipv4Addr::from([10, 0, 0, 1])),
             lease_time_secs: 604800,
             renewal_time_secs: 3600,
             rebinding_time_secs: 432000,
             carbide_api_url: None,
-            carbide_dhcp_server: Ipv4Addr::from([10, 217, 5, 39]),
+            carbide_dhcp_server: Some(Ipv4Addr::from([10, 217, 5, 39])),
             dhcpv6_preferred_lifetime_secs: dhcp::DHCPV6_PREFERRED_LIFETIME_SECS,
             dhcpv6_valid_lifetime_secs: dhcp::DHCPV6_VALID_LIFETIME_SECS,
+            carbide_nameservers_v6: vec!["2001:db8::53".parse().unwrap()],
+            dhcpv6_server_preference: Some(0),
             ..Default::default()
         };
         let dhcp_contents = super::read_limited(g.path())?;
@@ -3775,6 +5505,17 @@ esac
         validate_dhcp_config(dhcp_config_received, dhcp_config);
 
         let dhcp_host_config: HostConfig = serde_yaml::from_str(&super::read_limited(i.path())?)?;
+        assert!(
+            dhcp_host_config
+                .host_ip_addresses
+                .values()
+                .any(|interface| {
+                    interface.ipv6.as_ref().is_some_and(|ipv6| {
+                        ipv6.address == Some("2001:db8:185::1".parse().unwrap())
+                            && ipv6.prefix == "2001:db8:185::1/128"
+                    })
+                })
+        );
         validate_host_config(
             dhcp_host_config,
             HostConfig::try_from(network_config, "pf0hpf_sf", "pf0vf", "_sf", true)?,
@@ -3783,12 +5524,22 @@ esac
         Ok(())
     }
 
-    // test_dhcp_server_config_errors_without_ipv4_pxe is more or less
-    // a copypasta of other testing above, and its purpose in life is
-    // to make sure we get the [expected] error when passing a list of
-    // IPs to the DHCPv4 config builder, and no IPv4 addresses exist
-    // to build config against. This should really only happen in an
-    // IPv6-only environment, which would be really impressive.
+    fn write_dhcp_test_files(
+        relay: &FPath,
+        server: &super::DhcpServerPaths,
+        config: &rpc::ManagedHostNetworkConfigResponse,
+        addresses: &ServiceAddresses,
+        devices: &HBNDeviceNames,
+    ) -> eyre::Result<bool> {
+        let prepared = super::prepare_dhcp_server_config(config, addresses, devices)?;
+        let files = prepared.files(relay, server, &FPath(relay.with_ext("NVUE")))?;
+        let changed = files.iter().any(|file| file.previous != file.next);
+        for file in files {
+            file.write(file.next.as_deref())?;
+        }
+        Ok(changed)
+    }
+
     #[test]
     fn test_dhcp_server_config_errors_without_ipv4_pxe() -> Result<(), Box<dyn std::error::Error>> {
         let netconf = rpc::ManagedHostNetworkConfig {
@@ -3797,6 +5548,8 @@ esac
             quarantine_state: None,
         };
         let network_config = rpc::ManagedHostNetworkConfigResponse {
+            service_interfaces: vec![],
+            service_vpc_slot_inventory: None,
             bgp_leaf_session_password: None,
             site_global_vpc_vni: None,
             asn: 4259912557,
@@ -3808,6 +5561,7 @@ esac
             routing_profile: None,
             dhcp_servers: vec![],
             ntp_servers: vec![],
+            dhcpv6_server_preference: Some(255),
             vni_device: "vxlan48".to_string(),
             managed_host_config: Some(netconf),
             managed_host_config_version: "V1-T1".to_string(),
@@ -3824,6 +5578,8 @@ esac
             route_servers: vec![],
             deny_prefixes: vec![],
             site_fabric_prefixes: vec![],
+            site_fabric_null_routes: None,
+            vpc_peer_vnis_authoritative: false,
             vpc_isolation_behavior: rpc::VpcIsolationBehaviorType::VpcIsolationMutual.into(),
             deprecated_deny_prefixes: vec![],
             enable_dhcp: true,
@@ -3838,16 +5594,17 @@ esac
             use_admin_network_changed: None,
         };
 
-        let f = tempfile::NamedTempFile::new()?;
+        let directory = tempfile::tempdir()?;
+        let f = tempfile::NamedTempFile::new_in(directory.path())?;
         let fp = FPath(PathBuf::from(f.path()));
 
-        let g = tempfile::NamedTempFile::new()?;
+        let g = tempfile::NamedTempFile::new_in(directory.path())?;
         let gp = FPath(PathBuf::from(g.path()));
 
-        let h = tempfile::NamedTempFile::new()?;
+        let h = tempfile::NamedTempFile::new_in(directory.path())?;
         let hp = FPath(PathBuf::from(h.path()));
 
-        let i = tempfile::NamedTempFile::new()?;
+        let i = tempfile::NamedTempFile::new_in(directory.path())?;
         let ip = FPath(PathBuf::from(i.path()));
 
         let service_addrs = ServiceAddresses {
@@ -3856,7 +5613,7 @@ esac
             nameservers: vec![IpAddr::from([10, 1, 1, 1])],
         };
 
-        let result = super::write_dhcp_v4_server_config(
+        let result = write_dhcp_test_files(
             &fp,
             &super::DhcpServerPaths {
                 server: gp,
@@ -3870,9 +5627,9 @@ esac
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("IPv4 PXE/UEFI HTTP boot address"),
-            "Expected error about missing IPv4, got: {err_msg}"
+        assert_eq!(
+            err_msg,
+            "DHCPv4 server config requires an IPv4 PXE/UEFI HTTP boot address, but none found in [fd00::1]"
         );
 
         Ok(())
@@ -3972,6 +5729,8 @@ esac
                 ..Default::default()
             };
             let network_config = rpc::ManagedHostNetworkConfigResponse {
+                service_interfaces: vec![],
+                service_vpc_slot_inventory: None,
                 use_admin_network,
                 admin_interface: use_admin_network.then_some(iface.clone()),
                 tenant_interfaces: (!use_admin_network)

@@ -65,7 +65,7 @@ pub async fn handle_ready(
             "Switch maintenance requested; transitioning to Maintenance"
         );
         return Ok(StateHandlerOutcome::transition(
-            SwitchControllerState::maintenance_for_operation(req.operation),
+            SwitchControllerState::maintenance_for_request(req.clone()),
         ));
     }
 

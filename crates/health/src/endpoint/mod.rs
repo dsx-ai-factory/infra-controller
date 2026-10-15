@@ -21,8 +21,9 @@ mod sources;
 
 pub use cluster::ClusterEndpointSource;
 pub use model::{
-    BmcAddr, BmcCredentials, BmcEndpoint, EndpointMetadata, EndpointSource, MachineData,
-    PowerShelfData, SharedSystemUuid, SwitchData, SwitchEndpointRole,
+    BmcAddr, BmcCredentials, BmcEndpoint, ComponentInventory, EndpointMetadata, EndpointSnapshot,
+    EndpointSource, InventorySnapshot, MachineData, PowerShelfData, RackInventory,
+    SharedSystemUuid, SwitchData, SwitchEndpointRole,
 };
 pub use sources::{CompositeEndpointSource, StaticEndpointSource};
 
@@ -79,7 +80,7 @@ pub(crate) mod test_support {
             BmcAddr {
                 ip: "10.0.0.1".parse().unwrap(),
                 port: Some(443),
-                mac,
+                mac: Some(mac),
             },
             BmcCredentials::UsernamePassword {
                 username: "admin".to_string(),
@@ -143,12 +144,12 @@ mod tests {
         let addr_http = BmcAddr {
             ip: "10.0.0.1".parse().expect("valid ip"),
             port: Some(80),
-            mac: mac("00:11:22:33:44:55"),
+            mac: Some(mac("00:11:22:33:44:55")),
         };
         let addr_https = BmcAddr {
             ip: "10.0.0.2".parse().expect("valid ip"),
             port: Some(443),
-            mac: mac("aa:bb:cc:dd:ee:ff"),
+            mac: Some(mac("aa:bb:cc:dd:ee:ff")),
         };
 
         let url_http = addr_http.to_url().expect("url should build");

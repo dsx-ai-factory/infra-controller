@@ -23,6 +23,7 @@ use ::rpc::errors::RpcDataConversionError;
 use carbide_ib_fabric::errors::IbError;
 use carbide_redfish::libredfish::RedfishClientCreationError;
 use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
+use carbide_resource_pool::ResourcePoolRegistryError;
 use carbide_site_explorer::EndpointExplorationServiceError;
 use carbide_uuid::machine::{InvalidMachineType, MachineId};
 use config_version::ConfigVersionParseError;
@@ -30,6 +31,7 @@ use db::credential_rotation::CredentialRotationType;
 use db::ip_allocator::DhcpError;
 use db::machine_interface_address::AddressAlreadyInUseError;
 use db::resource_pool::ResourcePoolDatabaseError;
+use db::resource_pool::binding::BindingError;
 use db::{AnnotatedSqlxError, DatabaseError};
 use librms::RackManagerError;
 use mac_address::MacAddress;
@@ -207,6 +209,19 @@ pub enum CarbideError {
     #[error("tenant SitePrefix quota reached: {used} of {limit} retained SitePrefixes are in use")]
     TenantSitePrefixQuotaExceeded { used: u32, limit: u32 },
 
+    /// New tenant SitePrefixes are blocked by the site's legacy isolation input budget.
+    #[error(
+        "SitePrefix isolation rule limit reached: rules in use {used}, after creation {requested}, limit {limit}"
+    )]
+    SitePrefixIsolationLimitExceeded {
+        /// Number of compacted configured and retained tenant prefixes in the legacy input.
+        used: usize,
+        /// Number of compacted prefixes if the new root were admitted.
+        requested: usize,
+        /// Configured maximum for admitting new tenant roots.
+        limit: u32,
+    },
+
     #[error("host is not available for allocation due to health probe alert")]
     UnhealthyHost,
 
@@ -302,6 +317,16 @@ impl From<ModelError> for CarbideError {
             ModelError::HardwareInfo(e) => Self::HardwareInfoError(e),
             ModelError::InvalidArgument(e) => Self::InvalidArgument(e),
             ModelError::InvalidMachindId(e) => Self::InvalidArgument(e),
+        }
+    }
+}
+
+impl From<ResourcePoolRegistryError> for CarbideError {
+    fn from(error: ResourcePoolRegistryError) -> Self {
+        match error {
+            ResourcePoolRegistryError::Database(error)
+            | ResourcePoolRegistryError::Binding(BindingError::Database(error)) => error.into(),
+            error => Self::FailedPrecondition(error.to_string()),
         }
     }
 }
@@ -457,9 +482,9 @@ impl OperatorError for CarbideError {
             CarbideError::ClientCertificateMissingInformation(_) => ErrorCode::nico(Api, 401),
             CarbideError::PermissionDeniedError(_) => ErrorCode::nico(Api, 403),
             CarbideError::NotFoundError { .. } => ErrorCode::nico(Api, 404),
-            CarbideError::AlreadyFoundError { .. } | CarbideError::AlreadyInProgress(_) => {
-                ErrorCode::nico(Api, 409)
-            }
+            CarbideError::AlreadyFoundError { .. }
+            | CarbideError::AlreadyInProgress(_)
+            | CarbideError::ExpectedHostDuplicateMacAddress(_) => ErrorCode::nico(Api, 409),
             CarbideError::MaintenanceMode
             | CarbideError::UnhealthyHost
             | CarbideError::ConcurrentModificationError(_, _)
@@ -468,6 +493,7 @@ impl OperatorError for CarbideError {
             | CarbideError::AddressAlreadyInUse(_) => ErrorCode::nico(Api, 412),
             CarbideError::ResourceExhausted(_)
             | CarbideError::TenantSitePrefixQuotaExceeded { .. }
+            | CarbideError::SitePrefixIsolationLimitExceeded { .. }
             | CarbideError::DhcpError(_) => ErrorCode::nico(Api, 429),
             CarbideError::UnavailableError(_) => ErrorCode::nico(Api, 503),
             CarbideError::RedfishError(error) if is_dpu_bios_attributes_not_ready(error) => {
@@ -499,6 +525,10 @@ impl OperatorError for CarbideError {
             CarbideError::TenantSitePrefixQuotaExceeded { .. } => Some(
                 "Review the tenant's retained SitePrefixes; complete removal of an unneeded prefix \
                  or increase max_site_prefixes_per_tenant if additional roots are intended.",
+            ),
+            CarbideError::SitePrefixIsolationLimitExceeded { .. } => Some(
+                "Review the configured and retained tenant SitePrefixes and max_site_prefix_isolation_rules; \
+                 existing protection is retained until prefixes can be safely removed.",
             ),
             _ => None,
         }
@@ -548,7 +578,8 @@ impl From<CarbideError> for tonic::Status {
             e @ CarbideError::BmcMacIpMismatch { .. } => Status::invalid_argument(e.to_string()),
             CarbideError::UnhealthyHost => Status::failed_precondition(error.to_string()),
             CarbideError::ResourceExhausted(kind) => Status::resource_exhausted(kind),
-            error @ CarbideError::TenantSitePrefixQuotaExceeded { .. } => {
+            error @ (CarbideError::TenantSitePrefixQuotaExceeded { .. }
+            | CarbideError::SitePrefixIsolationLimitExceeded { .. }) => {
                 Status::resource_exhausted(error.to_string())
             }
             error @ CarbideError::ConcurrentModificationError(_, _) => {
@@ -556,6 +587,9 @@ impl From<CarbideError> for tonic::Status {
             }
             error @ CarbideError::FailedPrecondition(_) => {
                 Status::failed_precondition(error.to_string())
+            }
+            error @ CarbideError::ExpectedHostDuplicateMacAddress(_) => {
+                Status::already_exists(error.to_string())
             }
             error @ CarbideError::ExpectedSwitchDuplicateNvosMacAddress(_) => {
                 Status::failed_precondition(error.to_string())
@@ -758,7 +792,7 @@ fn test_permission_denied_error_maps_to_permission_denied_status() {
 #[test]
 fn test_address_already_in_use_maps_to_failed_precondition_status() {
     use std::str::FromStr;
-    let err = CarbideError::AddressAlreadyInUse(AddressAlreadyInUseError(
+    let err = CarbideError::AddressAlreadyInUse(AddressAlreadyInUseError::active(
         "10.0.0.1".parse().unwrap(),
         MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap(),
         uuid::Uuid::new_v4().into(),

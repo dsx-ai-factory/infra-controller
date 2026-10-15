@@ -18,6 +18,7 @@
 //use crate::tests::common;
 //use crate::tests::common::api_fixtures::TestEnvOverrides;
 use ::rpc::forge as rpc;
+use config_version::ConfigVersion;
 use rpc::TenantState;
 use rpc::forge_server::Forge;
 
@@ -203,6 +204,7 @@ async fn test_update_nvl_logical_partition(pool: sqlx::PgPool) {
     assert_eq!(partition_list.partitions.len(), 1);
 
     let partition = partition_list.partitions[0].clone();
+    let old_version: ConfigVersion = partition.config_version.parse().unwrap();
 
     let config = rpc::NvLinkLogicalPartitionConfig {
         metadata: Some(rpc::Metadata {
@@ -246,8 +248,69 @@ async fn test_update_nvl_logical_partition(pool: sqlx::PgPool) {
 
     let clone3 = partition_list.partitions[0].clone();
     assert_eq!(id, clone3.id.unwrap());
+    let new_version: ConfigVersion = clone3.config_version.parse().unwrap();
+    assert_eq!(new_version.version_nr(), old_version.version_nr() + 1);
     assert_eq!(
         "new_partition3".to_string(),
         clone3.config.unwrap().metadata.unwrap().name
     );
+}
+
+#[crate::sqlx_test]
+async fn test_update_nvl_logical_partition_rejects_reused_version(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let NvlLogicalPartitionFixture {
+        id,
+        logical_partition: partition,
+    } = create_nvl_logical_partition(&env, "partition".to_string()).await;
+
+    let mut config = partition.config.unwrap();
+    config.metadata.as_mut().unwrap().name = "accepted".to_string();
+    let mut request = rpc::NvLinkLogicalPartitionUpdateRequest {
+        id: Some(id),
+        config: Some(config.clone()),
+        if_version_match: Some(partition.config_version.clone()),
+    };
+    env.api
+        .update_nv_link_logical_partition(tonic::Request::new(request.clone()))
+        .await
+        .expect("the current version must allow the metadata update");
+
+    request
+        .config
+        .as_mut()
+        .unwrap()
+        .metadata
+        .as_mut()
+        .unwrap()
+        .name = "rejected".to_string();
+    let error = env
+        .api
+        .update_nv_link_logical_partition(tonic::Request::new(request))
+        .await
+        .expect_err("the previous version must not allow another metadata update");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        crate::CarbideError::ConcurrentModificationError(
+            "LogicalPartition",
+            partition.config_version,
+        )
+        .to_string()
+    );
+
+    let persisted = env
+        .api
+        .find_nv_link_logical_partitions_by_ids(tonic::Request::new(
+            rpc::NvLinkLogicalPartitionsByIdsRequest {
+                partition_ids: vec![id],
+                include_history: false,
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .partitions
+        .remove(0);
+    assert_eq!(persisted.config, Some(config));
 }

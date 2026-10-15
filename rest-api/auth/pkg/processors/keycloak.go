@@ -4,7 +4,6 @@
 package processors
 
 import (
-	"context"
 	"net/http"
 	"strings"
 
@@ -83,8 +82,10 @@ func (h *KeycloakProcessor) ProcessToken(c echo.Context, tokenStr string, jwksCo
 	isServiceAccount := claims.GetClientId() != "" && jwksConfig.ServiceAccount
 	config.SetIsServiceAccountInContext(c, isServiceAccount)
 
+	ctx := c.Request().Context()
+
 	userDAO := cdbm.NewUserDAO(h.dbSession)
-	dbUser, _, err := userDAO.GetOrCreate(context.Background(), nil, cdbm.UserGetOrCreateInput{
+	dbUser, _, err := userDAO.GetOrCreate(ctx, nil, cdbm.UserGetOrCreateInput{
 		AuxiliaryID: &auxId,
 	})
 	if err != nil {
@@ -99,7 +100,7 @@ func (h *KeycloakProcessor) ProcessToken(c echo.Context, tokenStr string, jwksCo
 	}
 
 	if updatedUser != nil {
-		dbUser, err = userDAO.Update(context.Background(), nil, cdbm.UserUpdateInput{
+		dbUser, err = userDAO.Update(ctx, nil, cdbm.UserUpdateInput{
 			UserID:    dbUser.ID,
 			Email:     &email,
 			FirstName: &firstName,

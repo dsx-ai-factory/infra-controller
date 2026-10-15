@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	provisioningv1 "github.com/nvidia/doca-platform/api/provisioning/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -14,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -129,6 +131,28 @@ func conditionsByType(t *testing.T, d *unstructured.Unstructured) map[string]map
 		out[typ] = c
 	}
 	return out
+}
+
+func TestDwellForPhase(t *testing.T) {
+	const phase, install = 3 * time.Second, 2 * time.Minute
+	for _, tc := range []struct {
+		name      string
+		osInstall time.Duration
+		phase     provisioningv1.DPUPhase
+		want      time.Duration
+	}{
+		{"OS Installing uses its own dwell when set", install, provisioningv1.DPUOSInstalling, install},
+		{"OS Installing falls back to the phase dwell when unset", 0, provisioningv1.DPUOSInstalling, phase},
+		{"config phases keep the phase dwell", install, provisioningv1.DPUConfig, phase},
+		{"the phase after OS Installing keeps the phase dwell", install, provisioningv1.DPUClusterConfig, phase},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &DPUDeviceReconciler{PhaseDwell: phase, OSInstallDwell: tc.osInstall}
+			if got := r.dwellFor(tc.phase); got != tc.want {
+				t.Fatalf("dwellFor(%s) = %v, want %v", tc.phase, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestSelectDeployment(t *testing.T) {
@@ -291,6 +315,103 @@ func newDevice() *provisioningv1.DPUDevice {
 			},
 		},
 		Spec: provisioningv1.DPUDeviceSpec{SerialNumber: "SN1"},
+	}
+}
+
+func TestEnsureDPUDecodesHostBMCIPLabels(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		label   string
+		address string
+	}{
+		{name: "IPv4", label: "192.0.2.10", address: "192.0.2.10"},
+		{name: "IPv6 leading zero groups", label: "0000-0000-0000-0000-0000-0000-0000-0001", address: "::1"},
+		{name: "IPv6 trailing zero groups", label: "2001-0db8-0000-0000-0000-0000-0000-0000", address: "2001:db8::"},
+		{name: "invalid address", label: "not-an-ip"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			device := newDevice()
+			device.Labels[carbide.LabelHostBMCIP] = tc.label
+			r := newReconciler(t, device)
+			_, err := r.ensureDPU(context.Background(), device, carbide.DPUName("a", "d1"), carbide.DPUNodeName("a"))
+			if tc.address == "" {
+				if err == nil || errors.Is(err, errDeviceNotReady) {
+					t.Fatalf("ensureDPU error = %v, want a non-pending parse error", err)
+				}
+				var dpus provisioningv1.DPUList
+				if err := r.List(context.Background(), &dpus); err != nil {
+					t.Fatal(err)
+				}
+				if len(dpus.Items) != 0 {
+					t.Fatal("created a DPU with an invalid BMC address")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var dpu provisioningv1.DPU
+			err = r.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: carbide.DPUName("a", "d1")}, &dpu)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if dpu.Spec.BMCIP != tc.address {
+				t.Fatalf("DPU.spec.bmcIP = %q, want %q", dpu.Spec.BMCIP, tc.address)
+			}
+			if dpu.Labels[carbide.LabelHostBMCIP] != tc.label {
+				t.Fatalf("host BMC IP label = %q, want %q", dpu.Labels[carbide.LabelHostBMCIP], tc.label)
+			}
+			if errs := validation.IsValidLabelValue(dpu.Labels[carbide.LabelHostBMCIP]); len(errs) != 0 {
+				t.Fatalf("invalid Kubernetes label: %v", errs)
+			}
+		})
+	}
+}
+
+func TestEnsureDPURepairsEncodedHostBMCIP(t *testing.T) {
+	nodeName := carbide.DPUNodeName("a")
+	dpuName := carbide.DPUName("a", "d1")
+	device := newDevice()
+	device.Labels[carbide.LabelHostBMCIP] = "2001-0db8-0000-0000-0000-0000-0000-0001"
+	existing := &provisioningv1.DPU{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace, Name: dpuName,
+			Labels: map[string]string{carbide.LabelHostBMCIP: device.Labels[carbide.LabelHostBMCIP]},
+		},
+		Spec: provisioningv1.DPUSpec{
+			DPUNodeName: nodeName, DPUDeviceName: device.Name, SerialNumber: "SN1",
+			DPUFlavor: "gb200-flavor", BFB: "bf-bundle",
+			BMCIP: device.Labels[carbide.LabelHostBMCIP],
+		},
+	}
+	dep := newDeployment(t, "dep", testSelector, map[string]interface{}{"bfb": "bf-bundle", "flavor": "gb200-flavor"})
+	r := newReconciler(t, newNode(nodeName, testNodeLabels), device, dep, existing)
+	ctx := context.Background()
+	if _, err := r.ensureDPU(ctx, device, dpuName, nodeName); err != nil {
+		t.Fatal(err)
+	}
+	key := types.NamespacedName{Namespace: testNamespace, Name: dpuName}
+	var repaired provisioningv1.DPU
+	if err := r.Get(ctx, key, &repaired); err != nil {
+		t.Fatal(err)
+	}
+	if repaired.Spec.BMCIP != "2001:db8::1" {
+		t.Fatalf("DPU.spec.bmcIP = %q, want 2001:db8::1", repaired.Spec.BMCIP)
+	}
+	if repaired.Labels[carbide.LabelHostBMCIP] != device.Labels[carbide.LabelHostBMCIP] ||
+		repaired.Labels[carbide.LabelControlledDev] != "true" ||
+		repaired.Labels[carbide.LabelOwnedByDPUDeployment] != testNamespace+"_dep" {
+		t.Fatalf("unexpected DPU labels after BMC address repair: %v", repaired.Labels)
+	}
+	if _, err := r.ensureDPU(ctx, device, dpuName, nodeName); err != nil {
+		t.Fatal(err)
+	}
+	var again provisioningv1.DPU
+	if err := r.Get(ctx, key, &again); err != nil {
+		t.Fatal(err)
+	}
+	if again.ResourceVersion != repaired.ResourceVersion {
+		t.Fatalf("second call rewrote the DPU: resourceVersion %s -> %s", repaired.ResourceVersion, again.ResourceVersion)
 	}
 }
 

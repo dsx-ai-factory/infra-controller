@@ -19,6 +19,7 @@ import (
 // fakeReader is an in-memory StatusReader for tests. It is goroutine-safe
 // so a test can mutate state from another goroutine while the gate polls.
 type fakeReader struct {
+	*MemReader
 	mu       sync.Mutex
 	statuses map[string]*types.ComponentOperationStatus
 	hosts    map[string][]string
@@ -27,8 +28,9 @@ type fakeReader struct {
 
 func newFakeReader() *fakeReader {
 	return &fakeReader{
-		statuses: map[string]*types.ComponentOperationStatus{},
-		hosts:    map[string][]string{},
+		MemReader: NewMemReader(),
+		statuses:  map[string]*types.ComponentOperationStatus{},
+		hosts:     map[string][]string{},
 	}
 }
 

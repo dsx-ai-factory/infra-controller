@@ -6,6 +6,7 @@ metadata:
   namespace: {{ include "nico-hardware-health.namespace" . }}
   labels:
     {{- include "nico-hardware-health.labels" . | nindent 4 }}
+    app.kubernetes.io/metrics: {{ include "nico-hardware-health.name" . }}
     app: {{ include "nico-hardware-health.name" . }}
     prometheus: nico-monitoring
 spec:

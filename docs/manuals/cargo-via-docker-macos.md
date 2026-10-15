@@ -288,7 +288,10 @@ cargo make build-cargo-docker-image
 Or manually:
 
 ```bash
-docker build -f dev/docker/Dockerfile.build-container-x86_64 -t nico-build-x86_64 dev/docker
+KEA_VERSION=$(cat dev/docker/kea.version)
+docker build --build-arg KEA_VERSION="${KEA_VERSION}" \
+  -f dev/docker/Dockerfile.build-container-x86_64 \
+  -t nico-build-x86_64 dev/docker
 ```
 
 On Apple Silicon this runs under emulation and can take a long time; step 7 (installing cargo tools) alone often takes 45+ minutes.

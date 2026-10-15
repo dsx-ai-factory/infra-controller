@@ -66,7 +66,6 @@ func (o *VpcRoutingProfileOverrides) GetRouteTargetImports() []VpcRouteTarget {
 
 // GetRouteTargetImportsOk returns a tuple with the RouteTargetImports field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcRoutingProfileOverrides) GetRouteTargetImportsOk() ([]VpcRouteTarget, bool) {
 	if o == nil || IsNil(o.RouteTargetImports) {
 		return nil, false
@@ -99,7 +98,6 @@ func (o *VpcRoutingProfileOverrides) GetRouteTargetsOnExports() []VpcRouteTarget
 
 // GetRouteTargetsOnExportsOk returns a tuple with the RouteTargetsOnExports field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcRoutingProfileOverrides) GetRouteTargetsOnExportsOk() ([]VpcRouteTarget, bool) {
 	if o == nil || IsNil(o.RouteTargetsOnExports) {
 		return nil, false
@@ -261,7 +259,6 @@ func (o *VpcRoutingProfileOverrides) GetAcceptedLeaksFromUnderlay() []string {
 
 // GetAcceptedLeaksFromUnderlayOk returns a tuple with the AcceptedLeaksFromUnderlay field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcRoutingProfileOverrides) GetAcceptedLeaksFromUnderlayOk() ([]string, bool) {
 	if o == nil || IsNil(o.AcceptedLeaksFromUnderlay) {
 		return nil, false
@@ -294,7 +291,6 @@ func (o *VpcRoutingProfileOverrides) GetAllowedAnycastPrefixes() []string {
 
 // GetAllowedAnycastPrefixesOk returns a tuple with the AllowedAnycastPrefixes field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcRoutingProfileOverrides) GetAllowedAnycastPrefixesOk() ([]string, bool) {
 	if o == nil || IsNil(o.AllowedAnycastPrefixes) {
 		return nil, false

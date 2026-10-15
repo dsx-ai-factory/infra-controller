@@ -8,6 +8,7 @@ metadata:
     app: {{ include "nico-pxe.name" . }}
     app.kubernetes.io/metrics: {{ include "nico-pxe.name" . }}
 spec:
+  ipFamilyPolicy: PreferDualStack
   selector:
     {{- include "nico-pxe.selectorLabels" . | nindent 4 }}
   ports:

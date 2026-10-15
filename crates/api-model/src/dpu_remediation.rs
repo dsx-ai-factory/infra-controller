@@ -136,7 +136,9 @@ pub struct NewAppliedRemediation {
     pub status: HashMap<String, String>,
 }
 
-#[derive(Clone, Debug)]
+/// `AppliedRemediation` records one DPU remediation attempt in `applied_dpu_remediations`.
+#[derive(Clone, Debug, carbide_macros::DbTable)]
+#[db_table(name = "applied_dpu_remediations")]
 pub struct AppliedRemediation {
     pub id: RemediationId,
     pub dpu_machine_id: DpuMachineId,

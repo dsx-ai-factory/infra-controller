@@ -64,6 +64,10 @@ type manageInventoryImpl[K any, R any, P any] struct {
 	internalFindIDs        func(context.Context, *cClient.CoreGrpcClient) ([]K, error)
 	internalFindByIDs      func(context.Context, *cClient.CoreGrpcClient, []K) ([]R, error)
 	internalPagedInventory func([]K, []R, *pagedInventoryInput) P
+	// itemIDsOnEveryPage keeps the reported ID list on every page for a resource whose Cloud
+	// consumer may still read it outside the deletion sweep. Only SSH Key Group sets it, and
+	// only until every Cloud worker requires a populated list before sweeping.
+	itemIDsOnEveryPage bool
 	// A resource-specific publisher owns completion and cancellation for both
 	// inventory pages and status messages. Unset callers keep the shared publisher.
 	internalPublish func(ctx context.Context, workflowID, workflowName string, page P) error
@@ -411,7 +415,12 @@ func (col *inventoryCollector[K, R, P]) buildInventoryPage(ctx context.Context, 
 	remainingItems := input.totalItems - col.itemsMissing - col.itemsPublished - pageItems
 	input.totalPages = input.pageNumber + ceilDiv(remainingItems, col.cloudPageSize)
 
-	page := col.impl.internalPagedInventory(col.allIDs, items, input)
+	reportedIDs := col.allIDs
+	if !col.impl.itemIDsOnEveryPage {
+		reportedIDs = itemIDsForPage(input.pageNumber, input.totalPages, col.allIDs)
+	}
+
+	page := col.impl.internalPagedInventory(reportedIDs, items, input)
 
 	// Handle any requested post processing
 	if col.impl.internalPagedInventoryPostProcess != nil {
@@ -470,6 +479,17 @@ func (col *inventoryCollector[K, R, P]) execute(ctx context.Context, page P) err
 		TaskQueue: col.impl.config.TemporalPublishQueue,
 	}, col.workflowName, col.impl.config.SiteID, page)
 	return err
+}
+
+// itemIDsForPage returns the reported ID list for the page that carries it and nothing for the
+// rest. Cloud reads the list only where it runs its deletion sweep, on the page reporting itself
+// last, so sending it earlier repeats the whole Site once per page: at 1,664 Machines a page
+// spends more on IDs than on the 25 Machines it exists to deliver.
+func itemIDsForPage[T any](pageNumber, totalPages int, allItemIDs []T) []T {
+	if pageNumber != totalPages {
+		return nil
+	}
+	return allItemIDs
 }
 
 // ceilDiv divides and rounds up, reporting zero for a non-positive dividend or divisor.

@@ -6,8 +6,11 @@ package model
 import (
 	"encoding/json"
 	"errors"
+	"regexp"
+	"strings"
 	"time"
 
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 )
@@ -285,4 +288,88 @@ func (resp *APIOpenIDConfiguration) FromResponseProto(proto *corev1.OpenIdConfig
 // APITenantIdentityJWKS is the .well-known/jwks.json response body.
 type APITenantIdentityJWKS struct {
 	Keys []json.RawMessage `json:"keys"`
+}
+
+var tenantIdentityReencryptOrgRegex = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// APITenantIdentityReencryptSecretsRequest is the POST /tenant-identity/re-encrypt body.
+// Both fields are optional: omitting organizationId or setting it to null targets
+// all orgs; dryRun validates without writing.
+type APITenantIdentityReencryptSecretsRequest struct {
+	OrganizationID *string `json:"organizationId"`
+	DryRun         bool    `json:"dryRun"`
+}
+
+// Validate accepts an omitted/null scope or a non-empty Core tenant organization
+// identifier (ASCII letters, digits, underscores, and hyphens). Blank scopes are
+// rejected instead of broadening a single-org request to all organizations. The
+// scope is matched case-insensitively, so the handler lowercases it before the
+// Tenant lookup and validates that the organization has access to the Site.
+func (req APITenantIdentityReencryptSecretsRequest) Validate() error {
+	return validation.ValidateStruct(&req,
+		validation.Field(&req.OrganizationID,
+			validation.NilOrNotEmpty.Error("organizationId must not be empty"),
+			validation.Match(tenantIdentityReencryptOrgRegex).Error("organizationId must contain only ASCII letters, digits, underscores, and hyphens")),
+	)
+}
+
+// NormalizeOrganizationID lowercases a supplied scope. Tenant.Org and Core's
+// tenant_identity_config.organization_id are both written from the lowercased URL
+// org, so a mixed-case scope would otherwise match neither.
+func (req *APITenantIdentityReencryptSecretsRequest) NormalizeOrganizationID() {
+	if req.OrganizationID == nil {
+		return
+	}
+	req.OrganizationID = cutil.GetPtr(strings.ToLower(*req.OrganizationID))
+}
+
+// ToProto converts the request to its gRPC form. organizationId comes from the body
+// (not the path), so no org argument is taken.
+func (req APITenantIdentityReencryptSecretsRequest) ToProto() *corev1.ReencryptTenantIdentitySecretsRequest {
+	return &corev1.ReencryptTenantIdentitySecretsRequest{
+		OrganizationId: req.OrganizationID,
+		DryRun:         req.DryRun,
+	}
+}
+
+// APITenantIdentityReencryptFailure describes one per-field re-wrap failure.
+type APITenantIdentityReencryptFailure struct {
+	OrganizationID string `json:"organizationId"`
+	Field          string `json:"field"`
+	Error          string `json:"error"`
+}
+
+// APITenantIdentityReencryptSecretsResponse is the POST /tenant-identity/re-encrypt response body.
+type APITenantIdentityReencryptSecretsResponse struct {
+	RowsExamined           int                                 `json:"rowsExamined"`
+	RowsUpdated            int                                 `json:"rowsUpdated"`
+	RowsSkippedAllOnTarget int                                 `json:"rowsSkippedAllOnTarget"`
+	FieldsReencrypted      int                                 `json:"fieldsReencrypted"`
+	FieldsSkippedOnTarget  int                                 `json:"fieldsSkippedOnTarget"`
+	RowsFailed             int                                 `json:"rowsFailed"`
+	Failures               []APITenantIdentityReencryptFailure `json:"failures"`
+	CurrentEncryptionKeyID string                              `json:"currentEncryptionKeyId"`
+}
+
+// FromProto populates the response from the gRPC reply.
+func (resp *APITenantIdentityReencryptSecretsResponse) FromProto(proto *corev1.ReencryptTenantIdentitySecretsResponse) {
+	if proto == nil {
+		return
+	}
+	resp.RowsExamined = int(proto.GetRowsExamined())
+	resp.RowsUpdated = int(proto.GetRowsUpdated())
+	resp.RowsSkippedAllOnTarget = int(proto.GetRowsSkippedAllOnTarget())
+	resp.FieldsReencrypted = int(proto.GetFieldsReencrypted())
+	resp.FieldsSkippedOnTarget = int(proto.GetFieldsSkippedOnTarget())
+	resp.RowsFailed = int(proto.GetRowsFailed())
+	resp.CurrentEncryptionKeyID = proto.GetCurrentEncryptionKeyId()
+	failures := proto.GetFailures()
+	resp.Failures = make([]APITenantIdentityReencryptFailure, 0, len(failures))
+	for _, f := range failures {
+		resp.Failures = append(resp.Failures, APITenantIdentityReencryptFailure{
+			OrganizationID: f.GetOrganizationId(),
+			Field:          f.GetField(),
+			Error:          f.GetError(),
+		})
+	}
 }

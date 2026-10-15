@@ -15,21 +15,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -42,8 +27,23 @@ import (
 	tp "go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/proto"
 
-	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
+
 	oteltrace "go.opentelemetry.io/otel/trace"
+
+	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 )
 
 func testVPCInitDB(t *testing.T) *cdb.Session {
@@ -581,7 +581,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 	tst3.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 	routingProfileOverrides := &model.APIVpcRoutingProfileOverrides{
 		RouteTargetImports:           &model.APIVpcRouteTargets{{ASN: 64512, VNI: 559}},
 		LeakDefaultRouteFromUnderlay: cutil.GetPtr(false),
@@ -596,6 +596,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 		verifyChildSpanner bool
 		expectNoMutation   bool
 		expectRolledBack   bool
+		omitRoutingProfile bool
 	}{
 		{
 			name: "test VPC create API endpoint rejects power resource group when DPS power management is disabled",
@@ -618,8 +619,9 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			wantErr:          false,
 			expectNoMutation: true,
 		},
+		// The create path must accept and retain the highest 24-bit requested VNI.
 		{
-			name: "test VPC create API endpoint success",
+			name: "test VPC create API endpoint accepts maximum explicit VNI",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -633,7 +635,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
 					SlaacEnabled:              cutil.GetPtr(true),
 					NetworkSecurityGroupID:    &nsgTenant1Site1.ID,
-					Vni:                       cutil.GetPtr(555),
+					Vni:                       cutil.GetPtr(16777215),
 					Labels: map[string]string{
 						"vpc-dpu-zone": "east1",
 						"vpc-gpu-zone": "west1",
@@ -683,7 +685,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			verifyChildSpanner: true,
 		},
 		{
-			name: "test VPC create API endpoint returns Core-resolved routing profile",
+			name: "test VPC create API endpoint inherits Core-resolved routing profile when omitted",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -709,6 +711,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
+			omitRoutingProfile: true,
 		},
 		{
 			name: "test VPC create API endpoint rolls back when Core-resolved routing profile cannot be persisted",
@@ -973,6 +976,27 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
+		},
+		{
+			name: "test VPC create API endpoint rejects empty routing profile before dispatch",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:                      "Test VPC empty routing profile",
+					SiteID:                    st1.ID.String(),
+					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
+					RoutingProfile:            cutil.GetPtr(""),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu,
+				respCode:    http.StatusBadRequest,
+				respMessage: "`routingProfile` must not be empty",
+			},
+			expectNoMutation: true,
 		},
 		{
 			name: "test VPC create API endpoint accepts site-configured routing profile",
@@ -1481,7 +1505,16 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 				cfg:       tt.fields.cfg,
 			}
 
-			jsonData, _ := json.Marshal(tt.args.reqData)
+			jsonData, err := json.Marshal(tt.args.reqData)
+			require.NoError(t, err)
+			if tt.omitRoutingProfile {
+				var requestBody map[string]json.RawMessage
+				err = json.Unmarshal(jsonData, &requestBody)
+				require.NoError(t, err)
+				delete(requestBody, "routingProfile")
+				jsonData, err = json.Marshal(requestBody)
+				require.NoError(t, err)
+			}
 
 			// Setup echo server/context
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(jsonData)))
@@ -1493,7 +1526,6 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -1613,6 +1645,12 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			persistedVpc, gerr := cdbm.NewVpcDAO(tt.fields.dbSession).GetByID(ctx, nil, uuid.MustParse(rst.ID), nil)
 			require.NoError(t, gerr)
 			assert.Equal(t, expectedSlaacEnabled, persistedVpc.SlaacEnabled)
+			if tt.args.reqData.Vni != nil {
+				require.NotNil(t, persistedVpc.Vni)
+				assert.Equal(t, *tt.args.reqData.Vni, *persistedVpc.Vni)
+			} else {
+				assert.Nil(t, persistedVpc.Vni)
+			}
 			require.NotNil(t, persistedVpc.NetworkVirtualizationType)
 			assert.Equal(t, expectedVirtualizationType, *persistedVpc.NetworkVirtualizationType)
 			if expectedRoutingProfile != nil {
@@ -1632,6 +1670,13 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 
 			assert.True(t, tsc.AssertCalled(t, "ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"), "CreateVPCV2", mock.MatchedBy(func(req *corev1.VpcCreationRequest) bool {
 				if req == nil {
+					return false
+				}
+				if tt.args.reqData.Vni != nil {
+					if req.Vni == nil || *req.Vni != uint32(*tt.args.reqData.Vni) {
+						return false
+					}
+				} else if req.Vni != nil {
 					return false
 				}
 				if !proto.Equal(req.RoutingProfileOverrides, tt.args.reqData.RoutingProfileOverrides.ToDB().ToProto()) {
@@ -1803,7 +1848,7 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 	updateRoutingProfileOverrides := &model.APIVpcRoutingProfileOverrides{
 		RouteTargetsOnExports:         &model.APIVpcRouteTargets{{ASN: 64513, VNI: 61}},
 		TenantLeakCommunitiesAccepted: cutil.GetPtr(true),
@@ -2299,7 +2344,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqVPCID)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -2525,7 +2569,7 @@ func TestUpdateVirtualizationVPCHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock per-Site client for st3
 	tsc := &tmocks.Client{}
@@ -2776,7 +2820,6 @@ func TestUpdateVirtualizationVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqVPCID)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := uvvh.Handle(ec); (err != nil) != tt.wantErr {
@@ -2880,7 +2923,7 @@ func TestGetVPCHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                             string
@@ -3084,7 +3127,6 @@ func TestGetVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqVPCID)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -3261,7 +3303,7 @@ func TestGetAllVPCHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                             string
@@ -3782,7 +3824,6 @@ func TestGetAllVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org)
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := csh.Handle(ec)
@@ -3871,7 +3912,7 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 	dbSession := testSiteInitDB(t)
 	defer dbSession.Close()
 
-	testVPCSetupSchema(t, dbSession)
+	common.TestSetupSchema(t, dbSession)
 
 	ipOrg := "test-provider-org"
 	ipOrgRoles := []string{authz.ProviderAdminRole}
@@ -3911,6 +3952,7 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 
 	vpc3 := testVPCBuildVPC(t, dbSession, "test-vpc-3", ip, tn1, st, cutil.GetPtr(cdbm.VpcFNN), nil, map[string]string{"zone": "east1"}, cdbm.VpcStatusReady, tnu1)
 	assert.NotNil(t, vpc3)
+	vpcWithPeering := testVPCBuildVPC(t, dbSession, "test-vpc-with-peering", ip, tn1, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu1)
 
 	os := common.TestBuildOperatingSystem(t, dbSession, "test-os", tn1, cdbm.OperatingSystemStatusReady, tnu1)
 	assert.NotNil(t, os)
@@ -3980,6 +4022,15 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 
 	tscWithNICoNotFound.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
+	peeringPrecondition := fmt.Sprintf("VPC `%s` still has peerings; delete its peerings and wait for them to disappear before deleting the VPC", vpcWithPeering.ID)
+	peeringWorkflowRun := &tmocks.WorkflowRun{}
+	peeringWorkflowRun.On("GetID").Return("workflow-with-peering-precondition")
+	peeringWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(tp.NewNonRetryableApplicationError(peeringPrecondition, swe.ErrTypeNICoFailedPrecondition, errors.New(peeringPrecondition))).Once()
+	peeringSiteClient := &tmocks.Client{}
+	peeringSiteClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, "DeleteVPCV2", mock.Anything).Return(peeringWorkflowRun, nil).Once()
+	scpWithPeering := sc.NewClientPool(tcfg)
+	scpWithPeering.IDClientMap[st.ID.String()] = peeringSiteClient
+
 	// Prepare client pool for sync calls
 	// to site(s).
 
@@ -4002,7 +4053,7 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 		"DeleteVPCV2", mock.Anything).Return(wrun, nil)
 
 	// OTEL Spanner configurations
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -4010,7 +4061,26 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 		args               args
 		wantErr            bool
 		verifyChildSpanner bool
+		responseContains   string
+		expectedVpcStatus  string
 	}{
+		{
+			name: "VPC peering precondition reaches the caller without marking the VPC Deleting",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scpWithPeering,
+				cfg:       cfg,
+			},
+			args: args{
+				reqVPC:   vpcWithPeering.ID.String(),
+				reqOrg:   tnOrg1,
+				reqUser:  tnu1,
+				respCode: http.StatusPreconditionFailed,
+			},
+			responseContains:  peeringPrecondition,
+			expectedVpcStatus: cdbm.VpcStatusReady,
+		},
 		{
 			name: "test VPC delete API endpoint success",
 			fields: fields{
@@ -4194,7 +4264,6 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqVPC)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -4206,6 +4275,14 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.args.respCode, rec.Code)
+			if tt.responseContains != "" {
+				assert.Contains(t, rec.Body.String(), tt.responseContains)
+			}
+			if tt.expectedVpcStatus != "" {
+				vpc, err := cdbm.NewVpcDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqVPC), nil)
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectedVpcStatus, vpc.Status)
+			}
 			if tt.args.respCode != http.StatusAccepted {
 				return
 			}
@@ -4224,6 +4301,8 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 			}
 		})
 	}
+	peeringSiteClient.AssertExpectations(t)
+	peeringWorkflowRun.AssertExpectations(t)
 }
 
 func TestNewCreateVPCHandler(t *testing.T) {
@@ -4256,11 +4335,10 @@ func TestNewCreateVPCHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: CreateVPCHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				scp:        scp,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -4302,11 +4380,10 @@ func TestNewUpdateVPCHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: UpdateVPCHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				scp:        scp,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -4343,10 +4420,9 @@ func TestNewGetVPCHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetVPCHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -4384,10 +4460,9 @@ func TestNewGetAllVPCHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetAllVPCHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -4430,11 +4505,10 @@ func TestNewDeleteVPCHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: DeleteVPCHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				scp:        scp,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+				scp:       scp,
 			},
 		},
 	}

@@ -18,7 +18,6 @@ use std::net::IpAddr;
 
 use carbide_uuid::domain::DomainId;
 use dns_record::SoaRecord;
-use ipnetwork::IpNetwork;
 use sqlx::postgres::PgRow;
 use sqlx::{Error, FromRow, Row};
 
@@ -112,13 +111,12 @@ pub async fn find_record(
     // The dns_records view does not filter on the owning domain's lifecycle,
     // so join it here: a record whose zone is soft-deleted is not served, even
     // when a live parent zone would otherwise hold the name.
-    // TODO: Configurable defaults for TTL
     let query = r#"
     SELECT
      dr.q_name,
      dr.resource_record,
      dr.domain_id,
-     COALESCE(dr.ttl, 300) as ttl,
+     COALESCE(d.default_ttl, 300) as ttl,
      COALESCE(dr.q_type, CASE WHEN family(dr.resource_record) = 6 THEN 'AAAA' ELSE 'A' END) as q_type
      FROM dns_records dr
      JOIN domains d ON d.id = dr.domain_id
@@ -156,7 +154,7 @@ impl<'r> FromRow<'r, PgRow> for DbPtrRecord {
 /// sources, each mirroring its forward counterpart so a forward A/AAAA record and
 /// its PTR round-trip:
 /// - a machine interface that holds the address -- the `dns_records_shortname_combined`
-///   primary/BMC arm, with `COALESCE(meta.ttl, 300)` to match the forward TTL;
+///   primary/BMC arm, carrying the zone's default TTL like its forward record;
 /// - an overlay instance allocated the address -- read straight from the
 ///   `dns_records_instance` forward view by IP, so forward and reverse share one
 ///   definition; that view already carries the stored hostname and excludes
@@ -197,19 +195,18 @@ pub async fn find_ptr_record(
         FROM (
             SELECT
                 concat(mi.hostname, '.', d.name, '.') AS ptr_content,
-                COALESCE(meta.ttl, 300) AS ttl,
+                COALESCE(d.default_ttl, 300) AS ttl,
                 d.id AS domain_id
             FROM machine_interface_addresses mia
             JOIN machine_interfaces mi ON mi.id = mia.interface_id
             JOIN domains d ON d.id = mi.domain_id
-            LEFT JOIN dns_record_metadata meta ON meta.id = mi.id
             WHERE mia.address = $1::inet
               AND (mi.primary_interface = TRUE OR mi.interface_type = 'Bmc')
               AND d.deleted IS NULL
             UNION ALL
             SELECT
                 instance_records.q_name AS ptr_content,
-                COALESCE(instance_records.ttl, 300) AS ttl,
+                COALESCE(d.default_ttl, 300) AS ttl,
                 instance_records.domain_id
             FROM dns_records_instance instance_records
             JOIN domains d ON d.id = instance_records.domain_id
@@ -264,54 +261,12 @@ pub async fn any_record_below(txn: impl DbReader<'_>, name: &str) -> Result<bool
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-/// True when any address inside `prefix` has a PTR that would be published.
-///
-/// The two arms are the `ptr_candidates` arms of [`find_ptr_record`] with
-/// `<<=` in place of `=`: a primary or BMC machine interface with a live
-/// domain, or an instance address the `dns_records_instance` view publishes.
-/// An address whose only owner cannot publish a name does not count, so a
-/// reverse name exists exactly when some PTR exists at or below it. Used to
-/// tell an empty non-terminal in a reverse zone (NODATA) from a name with
-/// nothing under it (NXDOMAIN).
-///
-/// An address with two publishable owners does count, even though
-/// [`find_ptr_record`] withholds its answer. The name then classifies as
-/// NODATA: the site has PTR data for it and declines to choose. NXDOMAIN would
-/// deny the whole subtree, and under RFC 8020 a resolver may stop asking about
-/// names below it for the negative TTL.
-pub async fn any_ptr_published_within(
-    txn: impl DbReader<'_>,
-    prefix: IpNetwork,
-) -> Result<bool, DatabaseError> {
-    let query = r#"
-    SELECT EXISTS (
-        SELECT 1
-        FROM machine_interface_addresses mia
-        JOIN machine_interfaces mi ON mi.id = mia.interface_id
-        JOIN domains d ON d.id = mi.domain_id
-        WHERE mia.address <<= $1::inet
-          AND (mi.primary_interface = TRUE OR mi.interface_type = 'Bmc')
-          AND d.deleted IS NULL
-    ) OR EXISTS (
-        SELECT 1
-        FROM dns_records_instance instance_records
-        JOIN domains d ON d.id = instance_records.domain_id
-        WHERE instance_records.resource_record <<= $1::inet
-          AND d.deleted IS NULL
-    )"#;
-    sqlx::query_scalar::<_, bool>(query)
-        .bind(prefix.to_string())
-        .fetch_one(txn)
-        .await
-        .map_err(|e| DatabaseError::query(query, e))
-}
-
 pub async fn get_all_records_all_domains(
     txn: impl DbReader<'_>,
 ) -> Result<Vec<DbResourceRecord>, DatabaseError> {
     let query = r#"
         SELECT dr.q_name, dr.resource_record, dr.domain_id,
-               COALESCE(dr.ttl, 300) as ttl,
+               COALESCE(d.default_ttl, 300) as ttl,
                COALESCE(dr.q_type, CASE WHEN family(dr.resource_record) = 6 THEN 'AAAA' ELSE 'A' END) as q_type
         FROM dns_records dr
         JOIN domains d ON d.id = dr.domain_id
@@ -332,7 +287,7 @@ pub async fn get_all_records(
     let domain_name = crate::dns::normalize_domain(query_name);
     let query = r#"
         SELECT dr.q_name, dr.resource_record, dr.domain_id,
-               COALESCE(dr.ttl, 300) as ttl,
+               COALESCE(d.default_ttl, 300) as ttl,
                COALESCE(dr.q_type, CASE WHEN family(dr.resource_record) = 6 THEN 'AAAA' ELSE 'A' END) as q_type
         FROM dns_records dr
         JOIN domains d ON d.id = dr.domain_id
@@ -351,7 +306,7 @@ mod tests {
     use carbide_uuid::instance::InstanceId;
     use carbide_uuid::network::NetworkSegmentId;
     use carbide_uuid::vpc::VpcId;
-    use model::dns::NewDomain;
+    use model::dns::{NewDomain, ZoneTtl};
 
     use super::find_record;
     use crate::dns::domain;
@@ -569,6 +524,68 @@ mod tests {
         }
     }
 
+    // A zone's default TTL reaches the records it publishes: forward names,
+    // PTRs, and listings. A zone without one uses 300, and setting one on an
+    // existing zone takes effect on the next answer.
+    #[crate::sqlx_test]
+    async fn zone_default_ttl_applies_to_served_records(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.expect("begin fixture transaction");
+        let (instance, segment, vpc) =
+            seed_instance_segment(txn.as_mut(), "ttl", "ttl.example.com", "tenant").await;
+        add_address(
+            txn.as_mut(),
+            instance,
+            segment,
+            vpc,
+            "10.7.7.7",
+            "10.7.7.0/24",
+        )
+        .await;
+        let address: std::net::IpAddr = "10.7.7.7".parse().expect("fixture IP");
+        let name = "10-7-7-7.ttl.example.com.";
+
+        let records = find_record(txn.as_mut(), name)
+            .await
+            .expect("lookup with site default");
+        assert_eq!(records[0].ttl, 300, "no zone default falls back to 300");
+
+        let zone = domain::find_by_name(txn.as_mut(), "ttl.example.com")
+            .await
+            .expect("find zone")
+            .into_iter()
+            .next()
+            .expect("fixture zone exists");
+        domain::update(
+            &model::dns::Domain {
+                default_ttl: Some(ZoneTtl::try_from(900).expect("in range")),
+                ..zone
+            },
+            txn.as_mut(),
+        )
+        .await
+        .expect("set the zone default");
+
+        let records = find_record(txn.as_mut(), name)
+            .await
+            .expect("lookup after setting the default");
+        assert_eq!(
+            records[0].ttl, 900,
+            "forward record carries the zone default"
+        );
+        let ptrs = super::find_ptr_record(txn.as_mut(), address)
+            .await
+            .expect("PTR lookup");
+        assert_eq!(ptrs[0].ttl, 900, "PTR carries the zone default");
+        assert_eq!(
+            super::get_all_records(txn.as_mut(), "ttl.example.com")
+                .await
+                .expect("list zone")[0]
+                .ttl,
+            900,
+            "listing carries the zone default"
+        );
+    }
+
     #[crate::sqlx_test]
     async fn duplicate_overlay_addresses_have_no_reverse_ptr(pool: sqlx::PgPool) {
         // An address shared by two VPCs has two valid names. Until the request
@@ -704,83 +721,6 @@ mod tests {
         assert!(
             ptrs.is_empty(),
             "a non-publishing machine owner still makes an unscoped PTR answer ambiguous"
-        );
-    }
-
-    #[crate::sqlx_test]
-    async fn reverse_existence_follows_publishable_ptrs_not_owners(pool: sqlx::PgPool) {
-        // The prefix probe and find_ptr_record must agree on what counts: an
-        // owner that cannot publish a name must not make a reverse name exist.
-        let mut txn = pool.begin().await.unwrap();
-        let (instance_id, segment_id, vpc_id) =
-            seed_instance_segment(txn.as_mut(), "existence", "tenant.example.com", "tenant").await;
-        let prefix: ipnetwork::IpNetwork = "10.1.2.0/24".parse().unwrap();
-
-        assert!(
-            !super::any_ptr_published_within(txn.as_mut(), prefix)
-                .await
-                .unwrap(),
-            "no addresses at all"
-        );
-
-        // A Data interface owns an address but publishes no PTR.
-        let interface_id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO machine_interfaces (
-                 segment_id, mac_address, primary_interface, hostname, interface_type
-             )
-             VALUES ($1, '02:00:00:00:38:91', false, 'data-only', 'Data')
-             RETURNING id",
-        )
-        .bind(segment_id)
-        .fetch_one(txn.as_mut())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO machine_interface_addresses (interface_id, address)
-             VALUES ($1, '10.1.2.7'::inet)",
-        )
-        .bind(interface_id)
-        .execute(txn.as_mut())
-        .await
-        .unwrap();
-        // An instance address with no hostname owns an address but publishes nothing.
-        sqlx::query(
-            "INSERT INTO instance_addresses (instance_id, address, segment_id, prefix, vpc_id)
-             VALUES ($1::uuid, '10.1.2.8'::inet, $2::uuid, '10.1.2.0/24'::cidr, $3::uuid)",
-        )
-        .bind(instance_id)
-        .bind(segment_id)
-        .bind(vpc_id)
-        .execute(txn.as_mut())
-        .await
-        .unwrap();
-        assert!(
-            !super::any_ptr_published_within(txn.as_mut(), prefix)
-                .await
-                .unwrap(),
-            "owners without a publishable name do not make the range exist"
-        );
-
-        add_address(
-            txn.as_mut(),
-            instance_id,
-            segment_id,
-            vpc_id,
-            "10.1.2.3",
-            "10.1.2.0/24",
-        )
-        .await;
-        assert!(
-            super::any_ptr_published_within(txn.as_mut(), prefix)
-                .await
-                .unwrap(),
-            "a published instance PTR makes the range exist"
-        );
-        assert!(
-            !super::any_ptr_published_within(txn.as_mut(), "10.1.3.0/24".parse().unwrap())
-                .await
-                .unwrap(),
-            "a neighbouring range is unaffected"
         );
     }
 

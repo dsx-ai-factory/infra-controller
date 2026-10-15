@@ -28,6 +28,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 
 	sshKeyGroupWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/sshkeygroup"
@@ -37,19 +38,17 @@ import (
 
 // CreateSSHKeyHandler is the API Handler for creating new SSHKey
 type CreateSSHKeyHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewCreateSSHKeyHandler initializes and returns a new handler for creating SSH Key
 func NewCreateSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) CreateSSHKeyHandler {
 	return CreateSSHKeyHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -65,7 +64,7 @@ func NewCreateSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Success 201 {object} model.APISSHKey
 // @Router /v2/org/{org}/nico/sshkey [post]
 func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "Create", c, cskh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -118,7 +117,7 @@ func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error validating SSH Key creation request data", verr)
 	}
 
-	cskh.tracerSpan.SetAttribute(handlerSpan, attribute.String("name", apiRequest.Name), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("name", apiRequest.Name))
 
 	// check for name uniqueness for the tenant, ie, tenant cannot have another SSH Key with same name at the site
 	skDAO := cdbm.NewSSHKeyDAO(cskh.dbSession)
@@ -148,7 +147,7 @@ func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
 
 	if apiRequest.SSHKeyGroupID != nil {
 		skgID := *apiRequest.SSHKeyGroupID
-		cskh.tracerSpan.SetAttribute(handlerSpan, attribute.String("sshKeyGroupID", skgID), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("sshKeyGroupID", skgID))
 
 		var serr error
 		dbskg, serr = common.GetSSHKeyGroupFromIDString(ctx, nil, skgID, cskh.dbSession, nil)
@@ -327,19 +326,17 @@ func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
 
 // UpdateSSHKeyHandler is the API Handler for updating a SSH Key
 type UpdateSSHKeyHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewUpdateSSHKeyHandler initializes and returns a new handler for updating SSH Key
 func NewUpdateSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateSSHKeyHandler {
 	return UpdateSSHKeyHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -356,7 +353,7 @@ func NewUpdateSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Success 200 {object} model.APISSHKey
 // @Router /v2/org/{org}/nico/sshkey/{id} [patch]
 func (uskh UpdateSSHKeyHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "Update", c, uskh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -385,7 +382,7 @@ func (uskh UpdateSSHKeyHandler) Handle(c echo.Context) error {
 	// Get SSH Key ID from URL param
 	sshKeyStrID := c.Param("id")
 
-	uskh.tracerSpan.SetAttribute(handlerSpan, attribute.String("sshkey_id", sshKeyStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("sshkey_id", sshKeyStrID))
 
 	sshKeyID, err := uuid.Parse(sshKeyStrID)
 	if err != nil {
@@ -503,19 +500,17 @@ func (uskh UpdateSSHKeyHandler) Handle(c echo.Context) error {
 
 // GetSSHKeyHandler is the API Handler for getting an SSH Key
 type GetSSHKeyHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetSSHKeyHandler initializes and returns a new handler for getting SSH Key
 func NewGetSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetSSHKeyHandler {
 	return GetSSHKeyHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -532,7 +527,7 @@ func NewGetSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *
 // @Success 200 {object} model.APISSHKey
 // @Router /v2/org/{org}/nico/sshkey/{id} [get]
 func (gskh GetSSHKeyHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "Get", c, gskh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -561,7 +556,7 @@ func (gskh GetSSHKeyHandler) Handle(c echo.Context) error {
 	// Get  ID from URL param
 	sshKeyStrID := c.Param("id")
 
-	gskh.tracerSpan.SetAttribute(handlerSpan, attribute.String("sshkey_id", sshKeyStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("sshkey_id", sshKeyStrID))
 
 	sshKeyID, err := uuid.Parse(sshKeyStrID)
 	if err != nil {
@@ -625,19 +620,17 @@ func (gskh GetSSHKeyHandler) Handle(c echo.Context) error {
 
 // GetAllSSHKeyHandler is the API Handler for retrieving all SSH Keys
 type GetAllSSHKeyHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllSSHKeyHandler initializes and returns a new handler for retreiving all SSH Keys
 func NewGetAllSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllSSHKeyHandler {
 	return GetAllSSHKeyHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -658,7 +651,7 @@ func NewGetAllSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Success 200 {array} []model.APISSHKey
 // @Router /v2/org/{org}/nico/sshkey [get]
 func (gaskh GetAllSSHKeyHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "GetAll", c, gaskh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -741,7 +734,7 @@ func (gaskh GetAllSSHKeyHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gaskh.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get all SSH Keys by Tenant
@@ -800,19 +793,17 @@ func (gaskh GetAllSSHKeyHandler) Handle(c echo.Context) error {
 
 // DeleteSSHKeyHandler is the API Handler for deleting an SSH Key
 type DeleteSSHKeyHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewDeleteSSHKeyHandler initializes and returns a new handler for deleting a SSH Key
 func NewDeleteSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) DeleteSSHKeyHandler {
 	return DeleteSSHKeyHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -828,7 +819,7 @@ func NewDeleteSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Success 202
 // @Router /v2/org/{org}/nico/sshkey/{id} [delete]
 func (dskh DeleteSSHKeyHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "Delete", c, dskh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKey", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -871,7 +862,7 @@ func (dskh DeleteSSHKeyHandler) Handle(c echo.Context) error {
 	// Get ID from URL param
 	sshKeyStrID := c.Param("id")
 
-	dskh.tracerSpan.SetAttribute(handlerSpan, attribute.String("sshkey_id", sshKeyStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("sshkey_id", sshKeyStrID))
 
 	sshKeyID, err := uuid.Parse(sshKeyStrID)
 	if err != nil {

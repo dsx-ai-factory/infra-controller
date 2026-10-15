@@ -9,7 +9,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes"
 	"github.com/rs/zerolog"
-	"go.uber.org/atomic"
 )
 
 // Elektra is the main struct for the Elektra plugin
@@ -18,10 +17,9 @@ type Elektra struct {
 	// All information is contained in this structure
 	Managers *managertypes.Managers
 	Conf     *conftypes.Config
-	// HealthStatus current health state
-	HealthStatus atomic.Uint64
-	Version      string
-	Log          zerolog.Logger
+
+	Version string
+	Log     zerolog.Logger
 }
 
 // NewElektraTypes - create new Elektra Type

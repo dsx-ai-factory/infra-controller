@@ -346,10 +346,10 @@ fn down_blame_to_state(raw: &str) -> &'static str {
     }
 }
 
-fn required_port_num(sample_labels: &HashMap<String, String>) -> Option<&str> {
+fn required_port_num<'a>(sample_labels: &HashMap<&str, &'a str>) -> Option<&'a str> {
     sample_labels
         .get("Port_Number")
-        .map(String::as_str)
+        .copied()
         .filter(|port_num| !port_num.is_empty())
 }
 
@@ -358,47 +358,24 @@ fn lookup_nmxt_label(key: &str) -> Option<&'static NmxtLabel> {
     NMXT_LABEL_MAP.iter().find(|l| l.source == key)
 }
 
-#[derive(Debug, Clone)]
-struct NmxtMetricSample {
-    name: String,
-    labels: HashMap<String, String>,
-    value: f64,
-}
+/// Parses one line into a reusable lookup borrowing only fields used by emission.
+/// Clearing the lookup also prevents malformed lines from reusing previous labels.
+fn parse_prometheus_line<'a>(
+    line: &'a str,
+    labels: &mut HashMap<&'a str, &'a str>,
+) -> Option<(&'a str, f64)> {
+    labels.clear();
 
-fn parse_prometheus_metrics(body: &str) -> Vec<NmxtMetricSample> {
-    let mut samples = Vec::new();
-
-    for line in body.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        if let Some(sample) = parse_prometheus_line(line) {
-            samples.push(sample);
-        }
-    }
-
-    samples
-}
-
-fn parse_prometheus_line(line: &str) -> Option<NmxtMetricSample> {
     let (name_part, rest) = if let Some(brace_pos) = line.find('{') {
         let name = &line[..brace_pos];
         let rest = &line[brace_pos..];
         (name, rest)
     } else {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let name = parts[0];
-            let value = parts[1].parse::<f64>().ok()?;
-            return Some(NmxtMetricSample {
-                name: name.to_string(),
-                labels: HashMap::new(),
-                value,
-            });
-        }
-        return None;
+        let mut parts = line.split_whitespace();
+        let name = parts.next()?;
+        let value = parts.next()?.parse::<f64>().ok()?;
+
+        return Some((name, value));
     };
 
     let close_brace = rest.find('}')?;
@@ -407,33 +384,30 @@ fn parse_prometheus_line(line: &str) -> Option<NmxtMetricSample> {
     let value_str = value_part.split_whitespace().next()?;
     let value = value_str.parse::<f64>().ok()?;
 
-    let mut labels = HashMap::new();
     for label_pair in labels_str.split(',') {
         let label_pair = label_pair.trim();
         if let Some(eq_pos) = label_pair.find('=') {
             let key = label_pair[..eq_pos].trim();
             let val = label_pair[eq_pos + 1..].trim().trim_matches('"');
-            labels.insert(key.to_string(), val.to_string());
+            if matches!(key, "Module_Temperature" | "down_blame")
+                || NMXT_LABEL_MAP.iter().any(|label| label.source == key)
+            {
+                labels.insert(key, val);
+            }
         }
     }
 
-    Some(NmxtMetricSample {
-        name: name_part.to_string(),
-        labels,
-        value,
-    })
+    Some((name_part, value))
 }
 
 async fn scrape_switch_nmxt_metrics(
     http_client: &reqwest::Client,
-    switch_ip: &str,
-    tls_enabled: bool,
-) -> Result<Vec<NmxtMetricSample>, HealthError> {
-    let url = nmxt_endpoint_url(switch_ip, tls_enabled);
-
-    let response = http_client.get(&url).send().await.map_err(|e| {
-        HealthError::GenericError(format!("HTTP request failed for {}: {}", switch_ip, e))
-    })?;
+    url: &str,
+) -> Result<bytes::Bytes, HealthError> {
+    let response =
+        http_client.get(url).send().await.map_err(|e| {
+            HealthError::GenericError(format!("HTTP request failed for {url}: {e}"))
+        })?;
 
     if !response.status().is_success() {
         return Err(HealthError::GenericError(format!(
@@ -443,23 +417,17 @@ async fn scrape_switch_nmxt_metrics(
         )));
     }
 
-    let body = response.text().await.map_err(|e| {
-        HealthError::GenericError(format!(
-            "Failed to read response body from {}: {}",
-            switch_ip, e
-        ))
-    })?;
-
-    Ok(parse_prometheus_metrics(&body))
+    response.bytes().await.map_err(|e| {
+        HealthError::GenericError(format!("Failed to read response body from {url}: {e}"))
+    })
 }
 
 async fn scrape_switch_nmxt_metrics_tls(
     http_client: &crate::tls::MtlsHttpClient,
-    switch_ip: &str,
+    url: &str,
     request_timeout: std::time::Duration,
-) -> Result<Vec<NmxtMetricSample>, HealthError> {
-    let url = nmxt_endpoint_url(switch_ip, true);
-    let url = Url::parse(&url)
+) -> Result<bytes::Bytes, HealthError> {
+    let url = Url::parse(url)
         .map_err(|e| HealthError::GenericError(format!("{url}: invalid NMX-T URL: {e}")))?;
 
     let response = http_client
@@ -474,11 +442,7 @@ async fn scrape_switch_nmxt_metrics_tls(
         )));
     }
 
-    let body = std::str::from_utf8(&response.body).map_err(|e| {
-        HealthError::GenericError(format!("Failed to read response body from {}: {}", url, e))
-    })?;
-
-    Ok(parse_prometheus_metrics(body))
+    Ok(response.body)
 }
 
 fn nmxt_endpoint_url(switch_ip: &str, tls_enabled: bool) -> String {
@@ -503,6 +467,10 @@ pub struct NmxtCollector {
     request_timeout: std::time::Duration,
     event_context: EventContext,
     data_sink: Option<Arc<dyn DataSink>>,
+
+    // Local HTTP tests use an assigned port without changing production URLs.
+    #[cfg(test)]
+    http_url_override: Option<String>,
 }
 
 enum NmxtHttpClient {
@@ -548,6 +516,8 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for NmxtCollector {
             request_timeout,
             event_context,
             data_sink: config.data_sink,
+            #[cfg(test)]
+            http_url_override: None,
         })
     }
 
@@ -579,33 +549,39 @@ impl NmxtCollector {
     /// Builds label set for one `switch_nmxt` series
     fn build_labels(
         &self,
-        sample_labels: &HashMap<String, String>,
+        sample_labels: &HashMap<&str, &str>,
     ) -> Vec<(Cow<'static, str>, String)> {
         let mut labels: Vec<(Cow<'static, str>, String)> = Vec::with_capacity(NMXT_LABEL_MAP.len());
 
         for label in NMXT_LABEL_MAP {
             if let Some(value) = sample_labels.get(label.source) {
-                labels.push((Cow::Borrowed(label.canonical), value.clone()));
+                labels.push((Cow::Borrowed(label.canonical), (*value).to_string()));
             }
         }
 
         labels
     }
 
-    fn emit_metric_collection(&self, metrics: Vec<NmxtMetricSample>) {
+    /// Emits a completed scrape without retaining an owned copy of every row.
+    fn emit_metric_collection(&self, body: &str) {
         self.emit_event(CollectorEvent::MetricCollectionStart);
 
         // Ports already emitted a cable temperature this iteration (one series per port).
-        let mut cable_temp_ports: HashSet<String> = HashSet::new();
+        let mut cable_temp_ports: HashSet<&str> = HashSet::new();
         // Ports already emitted a down_blame StateSet this iteration (one set per port).
-        let mut down_blame_ports: HashSet<String> = HashSet::new();
+        let mut down_blame_ports: HashSet<&str> = HashSet::new();
+        let mut sample_labels = HashMap::with_capacity(NMXT_LABEL_MAP.len() + 2);
 
-        for sample in metrics {
-            let NmxtMetricSample {
-                name,
-                labels: sample_labels,
-                value,
-            } = sample;
+        for line in body.lines() {
+            let line = line.trim();
+
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let Some((name, value)) = parse_prometheus_line(line, &mut sample_labels) else {
+                continue;
+            };
 
             // `Module_Temperature` rides as a label on lines whose map entry may not be
             // collected. Emit before the map check, once per port.
@@ -616,7 +592,8 @@ impl NmxtCollector {
                 let Some(port_num) = required_port_num(&sample_labels) else {
                     continue;
                 };
-                if cable_temp_ports.insert(port_num.to_string()) {
+
+                if cable_temp_ports.insert(port_num) {
                     let labels = self.build_labels(&sample_labels);
                     self.emit_event(CollectorEvent::Metric(
                         MetricSample {
@@ -638,7 +615,8 @@ impl NmxtCollector {
                 let Some(port_num) = required_port_num(&sample_labels) else {
                     continue;
                 };
-                if down_blame_ports.insert(port_num.to_string()) {
+
+                if down_blame_ports.insert(port_num) {
                     let current = down_blame_to_state(raw);
                     let base_labels = self.build_labels(&sample_labels);
                     for state in DOWN_BLAME_STATES {
@@ -660,7 +638,7 @@ impl NmxtCollector {
                 }
             }
 
-            let Some(metric) = lookup_nmxt_metric(&name) else {
+            let Some(metric) = lookup_nmxt_metric(name) else {
                 continue;
             };
             let (metric_type, unit) = (metric.metric_type, metric.unit);
@@ -697,19 +675,38 @@ impl NmxtCollector {
     async fn scrape_iteration(&mut self) -> Result<(), HealthError> {
         let switch_connect_host = self.endpoint.switch_connect_host_for_uri().to_string();
 
-        let metrics = match &mut self.http_client {
+        match &mut self.http_client {
             NmxtHttpClient::Legacy(client) => {
-                scrape_switch_nmxt_metrics(client, &switch_connect_host, false).await?
+                let url = nmxt_endpoint_url(&switch_connect_host, false);
+                #[cfg(test)]
+                let url = self.http_url_override.clone().unwrap_or(url);
+
+                let body = scrape_switch_nmxt_metrics(client, &url).await?;
+
+                // Borrow valid UTF-8 to avoid copying the full response, while
+                // preserving replacement characters for invalid UTF-8.
+                let body = String::from_utf8_lossy(&body);
+
+                self.emit_metric_collection(&body);
             }
             NmxtHttpClient::Tls { provider } => {
                 let client = provider.client().await?;
 
-                scrape_switch_nmxt_metrics_tls(&client, &switch_connect_host, self.request_timeout)
-                    .await?
-            }
-        };
+                let url = nmxt_endpoint_url(&switch_connect_host, true);
 
-        self.emit_metric_collection(metrics);
+                let body =
+                    scrape_switch_nmxt_metrics_tls(&client, &url, self.request_timeout).await?;
+
+                let body = std::str::from_utf8(&body).map_err(|e| {
+                    HealthError::GenericError(format!(
+                        "Failed to read response body from {url}: {e}"
+                    ))
+                })?;
+
+                self.emit_metric_collection(body);
+            }
+        }
+
         Ok(())
     }
 }
@@ -822,11 +819,167 @@ mod tests {
             request_timeout: std::time::Duration::from_secs(30),
             event_context: EventContext::from_endpoint(endpoint.as_ref(), "nmxt"),
             data_sink: Some(sink.clone()),
+            http_url_override: None,
         };
 
-        collector.emit_metric_collection(parse_prometheus_metrics(body));
+        collector.emit_metric_collection(body);
 
         sink.events.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn failed_http_scrapes_preserve_snapshot_and_recover()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        use axum::body::{Body, Bytes};
+        use axum::routing::get;
+        use futures::{StreamExt, stream};
+
+        use crate::metrics::MetricsManager;
+        use crate::sink::{CompositeDataSink, PrometheusSink};
+
+        let mode = Arc::new(AtomicUsize::new(0));
+        let route_mode = mode.clone();
+
+        let router = axum::Router::new().route(
+            NMXT_ENDPOINT,
+            get(move || {
+                let mode = route_mode.load(Ordering::Relaxed);
+
+                async move {
+                    let prefix = Bytes::from_static(b"Effective_BER{Port_Number=\"2\"} 0\n");
+
+                    let body = match mode {
+                        1 => Body::from_stream(stream::iter([
+                            Ok(prefix),
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "interrupted scrape",
+                            )),
+                        ])),
+                        2 => Body::from_stream(
+                            stream::once(async move { Ok::<_, std::io::Error>(prefix) })
+                                .chain(stream::pending()),
+                        ),
+                        3 => Body::from("Effective_BER{Port_Number=\"2\"} 2\n"),
+                        4 => Body::from(Bytes::from_static(
+                            b"Effective_BER{Port_Number=\"2\",Node_GUID=\"node-\xff\"} 3\n",
+                        )),
+                        _ => Body::from(prefix),
+                    };
+
+                    axum::response::Response::new(body)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+        let listen_addr = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let manager = Arc::new(MetricsManager::new("test")?);
+        let prometheus = Arc::new(PrometheusSink::new(manager.clone(), "test")?);
+        let capture = Arc::new(CapturingSink::default());
+
+        let sink = Arc::new(CompositeDataSink::new(
+            vec![prometheus, capture.clone()],
+            manager.clone(),
+        ));
+
+        let mut endpoint = test_endpoint(mac("00:11:22:33:44:55"));
+        endpoint.addr.ip = "127.0.0.1".parse()?;
+        let endpoint = Arc::new(endpoint);
+
+        let mut collector = NmxtCollector {
+            endpoint: endpoint.clone(),
+            http_client: NmxtHttpClient::Legacy(
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .timeout(Duration::from_millis(100))
+                    .build()?,
+            ),
+            request_timeout: Duration::from_millis(100),
+            event_context: EventContext::from_endpoint(endpoint.as_ref(), "nmxt"),
+            data_sink: Some(sink),
+            http_url_override: Some(format!("http://{listen_addr}{NMXT_ENDPOINT}")),
+        };
+
+        collector.scrape_iteration().await?;
+        let initial = manager.export_telemetry()?;
+
+        assert!(initial.contains("test_switch_nmxt_effective_ber_ratio"));
+        assert_eq!(capture.events.lock().unwrap().len(), 3);
+
+        for failure_mode in [1, 2] {
+            mode.store(failure_mode, Ordering::Relaxed);
+
+            let result = collector.scrape_iteration().await;
+
+            assert!(result.is_err(), "failure mode {failure_mode}");
+
+            assert_eq!(capture.events.lock().unwrap().len(), 3);
+            assert_eq!(manager.export_telemetry()?, initial);
+        }
+
+        mode.store(3, Ordering::Relaxed);
+        collector.scrape_iteration().await?;
+
+        assert_eq!(capture.events.lock().unwrap().len(), 6);
+
+        assert!(
+            capture
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, ObservedEvent::Metric(metric) if metric.value == 2.0))
+        );
+
+        assert_ne!(manager.export_telemetry()?, initial);
+
+        capture.events.lock().unwrap().clear();
+        mode.store(4, Ordering::Relaxed);
+        collector.scrape_iteration().await?;
+
+        assert_eq!(
+            *capture.events.lock().unwrap(),
+            observed_collection(vec![observed_metric(
+                "effective_ber:2",
+                "effective_ber",
+                "ratio",
+                3.0,
+                &[("node_guid", "node-\u{fffd}"), ("port_num", "2")],
+            )])
+        );
+
+        server.abort();
+        let _ = server.await;
+
+        Ok(())
+    }
+
+    #[test]
+    fn borrowed_label_lookup_does_not_reuse_previous_line() {
+        let mut labels = HashMap::new();
+
+        assert!(
+            parse_prometheus_line(
+                r#"Effective_BER{Port_Number="2",unknown="ignored"} 1"#,
+                &mut labels
+            )
+            .is_some()
+        );
+
+        assert_eq!(labels, HashMap::from([("Port_Number", "2")]));
+        assert!(parse_prometheus_line("malformed", &mut labels).is_none());
+        assert!(labels.is_empty());
+
+        assert_eq!(
+            parse_prometheus_line("Effective_BER 0", &mut labels),
+            Some(("Effective_BER", 0.0))
+        );
+
+        assert!(labels.is_empty());
     }
 
     #[test]
@@ -860,25 +1013,24 @@ mod tests {
     #[test]
     fn test_parse_prometheus_line_with_labels() {
         let line = r#"Effective_BER{Port_Number="2", Node_GUID="0x8e2161c8803caf64"} 1.5e-254"#;
-        let sample = parse_prometheus_line(line).unwrap();
+        let mut labels = HashMap::new();
+        let (name, value) = parse_prometheus_line(line, &mut labels).unwrap();
 
-        assert_eq!(sample.name, "Effective_BER");
-        assert_eq!(sample.labels.get("Port_Number"), Some(&"2".to_string()));
-        assert_eq!(
-            sample.labels.get("Node_GUID"),
-            Some(&"0x8e2161c8803caf64".to_string())
-        );
-        assert_eq!(sample.value, 1.5e-254);
+        assert_eq!(name, "Effective_BER");
+        assert_eq!(labels.get("Port_Number"), Some(&"2"));
+        assert_eq!(labels.get("Node_GUID"), Some(&"0x8e2161c8803caf64"));
+        assert_eq!(value, 1.5e-254);
     }
 
     #[test]
     fn test_parse_prometheus_line_no_labels() {
         let line = "simple_metric 42.5 1234567890";
-        let sample = parse_prometheus_line(line).unwrap();
+        let mut labels = HashMap::new();
+        let (name, value) = parse_prometheus_line(line, &mut labels).unwrap();
 
-        assert_eq!(sample.name, "simple_metric");
-        assert!(sample.labels.is_empty());
-        assert_eq!(sample.value, 42.5);
+        assert_eq!(name, "simple_metric");
+        assert!(labels.is_empty());
+        assert_eq!(value, 42.5);
     }
 
     #[test]
@@ -892,8 +1044,11 @@ Symbol_Errors{Port_Number="1"} 0
 Link_Down{Port_Number="1"} 5
 "#;
 
-        let samples = parse_prometheus_metrics(body);
-        assert_eq!(samples.len(), 4);
+        let events = collect_metric_events(body);
+
+        assert_eq!(events.len(), 6);
+        assert!(matches!(events.first(), Some(ObservedEvent::Start)));
+        assert!(matches!(events.last(), Some(ObservedEvent::End)));
     }
 
     #[test]
@@ -902,11 +1057,13 @@ Link_Down{Port_Number="1"} 5
         assert_eq!(required_port_num(&missing), None);
 
         let mut empty = HashMap::new();
-        empty.insert("Port_Number".to_string(), String::new());
+        empty.insert("Port_Number", "");
+
         assert_eq!(required_port_num(&empty), None);
 
         let mut present = HashMap::new();
-        present.insert("Port_Number".to_string(), "11".to_string());
+        present.insert("Port_Number", "11");
+
         assert_eq!(required_port_num(&present), Some("11"));
     }
 
@@ -1072,14 +1229,19 @@ Link_Down{Port_Number="1"} 5
     // End-to-end: a live family line yields one canonical key and re-exported allowlisted labels.
     #[test]
     fn test_label_map_reexports_identity_dims_from_live_series() {
-        let sample = parse_prometheus_line(SAMPLE_LID_LINE).expect("parse lid line");
-        assert_eq!(sample.name, "lid");
+        let mut labels = HashMap::new();
+
+        let (name, _) =
+            parse_prometheus_line(SAMPLE_LID_LINE, &mut labels).expect("parse lid line");
+
+        assert_eq!(name, "lid");
 
         // Resolve canonical labels exactly as build_labels would (allowlist-gated).
         let mut canonical = HashMap::new();
+
         for label in NMXT_LABEL_MAP {
-            if let Some(value) = sample.labels.get(label.source) {
-                canonical.insert(label.canonical, value.clone());
+            if let Some(value) = labels.get(label.source) {
+                canonical.insert(label.canonical, (*value).to_string());
             }
         }
 
@@ -1107,9 +1269,9 @@ Link_Down{Port_Number="1"} 5
         assert_eq!(canonical.get("cable_part_number"), Some(&"NA".to_string()));
         // Module_Temperature is no longer a re-exported label; it becomes a numeric metric.
         assert!(!canonical.contains_key("cable_temp"));
+
         assert_eq!(
-            sample
-                .labels
+            labels
                 .get("Module_Temperature")
                 .and_then(|raw| cable_temp_to_celsius(raw)),
             Some(0.0)

@@ -20,6 +20,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedmachine"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedpowershelf"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedrack"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedrackgroup"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedswitch"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/flowgrpc"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/infinibandpartition"
@@ -72,6 +73,7 @@ func NewAPIHandlers() {
 		ExpectedMachine:        &expectedmachine.API{},
 		ExpectedPowerShelf:     &expectedpowershelf.API{},
 		ExpectedRack:           &expectedrack.API{},
+		ExpectedRackGroup:      &expectedrackgroup.API{},
 		ExpectedSwitch:         &expectedswitch.API{},
 		SKU:                    &sku.API{},
 		DpuExtensionService:    &dpuextensionservice.API{},
@@ -119,6 +121,7 @@ func (Managers *Manager) NewInstance() {
 	Managers.ExpectedMachine()
 	Managers.ExpectedPowerShelf()
 	Managers.ExpectedRack()
+	Managers.ExpectedRackGroup()
 	Managers.ExpectedSwitch()
 	Managers.SKU()
 	Managers.DpuExtensionService()
@@ -149,9 +152,8 @@ func (Managers *Manager) Init() {
 			Help:      "health status of the Site Agent",
 		},
 			func() float64 {
-				return float64(ManagerAccess.Data.EB.HealthStatus.Load())
+				return float64(computils.SiteHealth(ManagerAccess.Data.EB))
 			}))
-	ManagerAccess.Data.EB.HealthStatus.Store(uint64(computils.CompUnhealthy))
 
 	Managers.Orchestrator().Init()
 	Managers.Site().Init()
@@ -171,6 +173,7 @@ func (Managers *Manager) Init() {
 	Managers.ExpectedMachine().Init()
 	Managers.ExpectedPowerShelf().Init()
 	Managers.ExpectedRack().Init()
+	Managers.ExpectedRackGroup().Init()
 	Managers.ExpectedSwitch().Init()
 	Managers.SKU().Init()
 	Managers.DpuExtensionService().Init()
@@ -189,13 +192,22 @@ func (Managers *Manager) Start() {
 	Managers.CoreGrpc().Start()
 	Managers.Bootstrap().Start()
 	Managers.Orchestrator().Start()
+	// Checks begin once Core gRPC and Temporal have made their first connection attempt.
+	go StartHealthChecker()
 	Managers.FlowGrpc().Start()
+}
+
+func newMetricsServeMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", promhttp.Handler())
+	return mux
 }
 
 // StartMetricServer - Start serving Metric Server
 func StartMetricServer() {
 	log.Info().Msgf("Beginning to serve on port %v", ManagerAccess.Conf.EB.MetricsPort)
-	http.Handle("/metrics", promhttp.Handler())
 	port := ":" + ManagerAccess.Conf.EB.MetricsPort
-	http.ListenAndServe(port, nil)
+	mux := newMetricsServeMux()
+	err := http.ListenAndServe(port, mux)
+	log.Error().Err(err).Msg("Managers: metrics server stopped")
 }

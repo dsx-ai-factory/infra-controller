@@ -65,7 +65,11 @@ The switch state handler passes:
   when deciding whether certificate configuration can run.
 - `services` from `SwitchStateHandlerServices.switch_mtls_services`, sourced
   from `[switch_state_controller].switch_mtls_services` in site config. When
-  omitted or empty, all four service values are used.
+  omitted or empty, the default list contains all four service values. The
+  switch state handler excludes `scale_up_fabric_manager` and
+  `scale_up_fabric_telemetry` when the switch is not designated primary. If no
+  services remain, bring-up advances without an RMS certificate job and switch
+  certificate maintenance returns to Ready.
 
 ### Direct ComponentConfigureSwitchCertificate RPC
 
@@ -83,13 +87,21 @@ uses the state-controller behavior described above.
 ### Service list configuration
 
 `[switch_state_controller].switch_mtls_services` controls certificate bindings
-for both switch state-controller and direct RPC operations. A non-empty list
-replaces the default. Omission or an empty list uses all four values below.
+for both switch state-controller and direct RPC operations. Rack
+`ConfigureNmxCluster` uses the effective service list for primary nmx-telemetry
+and only explicitly listed gNMI for the rack-wide batch. A non-empty list
+replaces the switch/direct default. Omission or an empty list uses all four
+values for switch/direct operations and primary nmx-telemetry, but not rack-wide
+gNMI. The switch state controller omits primary-only cluster applications on
+non-primary switches.
 
 `[rack_state_controller].nmx_cluster_switch_mtls_services` is deprecated. The
-field remains accepted and ignored. Rack `ConfigureNmxCluster` maintenance
-uses fixed `nvue_api` and `scale_up_fabric_manager` bindings so the certificate
-batch updates both NVUE and NMX-C, and passes `domain_name = None`.
+field remains accepted and ignored. Before RMS V2, rack
+`ConfigureNmxCluster` always binds `nvue_api` on every switch and also binds the
+explicitly configured telemetry interface. RMS V2 then selects the primary,
+binds NMX-C to the current NVUE material, and reconciles the fabric. NICo
+follows V2 with a primary-only `scale_up_fabric_telemetry` request when selected
+by the effective service list. Both NICo certificate requests pass `domain_name = None`.
 
 The complete rack skip, retry, restart, polling, success, and error transition
 contract is defined under
@@ -102,8 +114,8 @@ contract is defined under
 | `scale_up_fabric_manager` | Scale-up fabric manager service |
 | `scale_up_fabric_telemetry_interface` | Scale-up fabric telemetry interface service |
 
-Service selection requests certificate bindings; it does not enable the
-underlying service. The target switch build must support each selected binding.
+Cluster application bindings can enable cluster state on the target switch.
+The target switch build must support each selected binding.
 
 | Condition | Behavior |
 |-----------|----------|

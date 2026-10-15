@@ -43,6 +43,7 @@ nv-redfish = { workspace = true, features = [
   "bios",
   "boot-options",
   "chassis",
+  "component-integrity",
   "computer-systems",
   "ethernet-interfaces",
   "host-interfaces",
@@ -53,6 +54,7 @@ nv-redfish = { workspace = true, features = [
   "pcie-devices",
   "ports",
   "power-supplies",
+  "processors",
   "update-service",
   "secure-boot",
   "oem-nvidia",
@@ -78,6 +80,7 @@ default = []
 test-support = ["dep:bmc-mock"]
 
 [dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
 axum = { workspace = true }
 bmc-mock = { path = "../bmc-mock" }
 # Self dev-dependency so the crate's own integration tests get the test-support

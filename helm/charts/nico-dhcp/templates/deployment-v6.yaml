@@ -1,0 +1,91 @@
+{{- $dhcp := default (dict) .Values.dhcp -}}
+{{- if $dhcp.v6Enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nico-dhcp.name" . }}6
+  namespace: {{ include "nico-dhcp.namespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "nico-dhcp.name" . }}6
+    app.kubernetes.io/component: dhcp
+  annotations:
+    configmap.reloader.stakater.com/reload: '{{ include "nico-dhcp.name" . }}6-config'
+spec:
+  replicas: 1
+  # Pod-local memfiles do not support concurrent active writers.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "nico-dhcp.name" . }}6
+      app.kubernetes.io/component: dhcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "nico-dhcp.name" . }}6
+        app.kubernetes.io/component: dhcp
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-v6.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "nico-dhcp.name" . }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ include "nico-dhcp.name" . }}6
+          image: "{{ include "nico-dhcp.image" . }}"
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          command:
+            - sh
+            - -ec
+            - |
+              mkdir -p /var/run/kea /var/lib/kea
+              # Interface-only Kea selectors bind link-local sockets; relay VIPs need the pod's routable IPv6.
+              address="$(ip -6 -o addr show dev "$DHCP_INTERFACE" scope global | awk '{split($4, address, "/"); print address[1]; exit}')"
+              test -n "$address" || { echo "DHCPv6 requires a routable IPv6 address on $DHCP_INTERFACE" >&2; exit 1; }
+              sed "s/__NICO_DHCPV6_ADDRESS__/$address/g" /tmp/kea_config6.json > /var/run/kea/kea_config6.json
+              exec /sbin/kea-dhcp6 -c /var/run/kea/kea_config6.json
+          env:
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            - name: DHCP_INTERFACE
+              value: {{ default "eth0" $dhcp.interface | quote }}
+          ports:
+            - name: dhcp6
+              containerPort: 547
+              protocol: UDP
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+          startupProbe:
+            exec:
+              command: ['sh', '-ec', 'ss -H -6 -lun "sport = :547" | grep -q .']
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command: ['sh', '-ec', 'ss -H -6 -lun "sport = :547" | grep -q . && curl --noproxy "*" -fsS --max-time 2 http://[::1]:{{ .Values.metrics.port }}/ready']
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            periodSeconds: 10
+          volumeMounts:
+            - name: spiffe
+              mountPath: /var/run/secrets/spiffe.io
+              readOnly: true
+            - name: config
+              mountPath: /tmp
+              readOnly: true
+      volumes:
+        - name: spiffe
+          secret:
+            secretName: {{ include "nico-dhcp.name" . }}-certificate
+        - name: config
+          configMap:
+            name: {{ include "nico-dhcp.name" . }}6-config
+{{- end }}

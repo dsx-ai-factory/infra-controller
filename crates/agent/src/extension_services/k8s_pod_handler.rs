@@ -1387,8 +1387,6 @@ mod tests {
         DpuExtensionServiceObservabilityConfigTypePrometheus,
     };
 
-    const OBVS_ERR_FILE: &str = "/tmp/extensions_service_observability.err";
-
     const OBVS_GOLDEN_FILE_CONTENTS: &str =
         include_str!("../../templates/tests/dpu_extension_service_observability.expected");
 
@@ -1786,7 +1784,7 @@ spec:
                     name: None,
                     config: DpuExtensionServiceObservabilityConfigType::Prometheus(
                         DpuExtensionServiceObservabilityConfigTypePrometheus {
-                            endpoint: "https://localhost:9999".to_string(),
+                            endpoint: "[::1]:9999".to_string(),
                             scrape_interval_seconds: 1,
                         },
                     ),
@@ -1795,7 +1793,7 @@ spec:
                     name: None,
                     config: DpuExtensionServiceObservabilityConfigType::Prometheus(
                         DpuExtensionServiceObservabilityConfigTypePrometheus {
-                            endpoint: "https://localhost:9999".to_string(),
+                            endpoint: "[::1]:9999".to_string(),
                             scrape_interval_seconds: 1,
                         },
                     ),
@@ -1830,8 +1828,12 @@ spec:
 
         let _yaml_obj: serde_yaml::Value = serde_yaml::from_str(&content)
             .inspect_err(|_| {
-                std::fs::write(OBVS_ERR_FILE, content.clone()).unwrap();
-                println!("YAML parser error. Output written to {OBVS_ERR_FILE}");
+                let error_file = std::env::temp_dir().join("extensions_service_observability.err");
+                std::fs::write(&error_file, content.clone()).unwrap();
+                println!(
+                    "YAML parser error. Output written to {}",
+                    error_file.display()
+                );
             })
             .unwrap();
 

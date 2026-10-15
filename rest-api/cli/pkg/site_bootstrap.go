@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math/big"
 	"net/http"
+	"net/netip"
 	"os"
 	"reflect"
 	"regexp"
@@ -666,7 +668,7 @@ func (bootstrap *siteBootstrap) discoverExistingResource(api bootstrapResourceAP
 				if matchErr != nil {
 					return nil, matchErr
 				}
-				if !bootstrapValueMatches(match, response) {
+				if !bootstrapValueMatches(match, api.normalizePrefix(response)) {
 					return nil, fmt.Errorf("%w: existing %s %q does not match the manifest selector", errBootstrapDrift, api.displayName, alias)
 				}
 			}
@@ -706,7 +708,7 @@ func (bootstrap *siteBootstrap) resolveExistingResourceMatch(api bootstrapResour
 	if !ok {
 		return nil, fmt.Errorf("resolving %s %q match: %w: expected an object", api.displayName, alias, errInvalidBootstrapResource)
 	}
-	return match, nil
+	return api.normalizePrefix(match), nil
 }
 
 func (api bootstrapResourceAPI) organization(manifest *sitePrerequisiteManifest) string {
@@ -781,7 +783,7 @@ func (api bootstrapResourceAPI) findMatching(client *Client, match map[string]an
 			return nil, false, err
 		}
 		for _, item := range items {
-			if bootstrapValueMatches(match, item) {
+			if bootstrapValueMatches(match, api.normalizePrefix(item)) {
 				matches = append(matches, item)
 			}
 		}
@@ -817,11 +819,43 @@ func (api bootstrapResourceAPI) queryFromMatch(match map[string]any) map[string]
 }
 
 func (api bootstrapResourceAPI) verify(alias string, request, actual map[string]any) error {
-	differences := bootstrapSubsetDifferences(request, actual, "")
+	differences := bootstrapSubsetDifferences(api.normalizePrefix(request), api.normalizePrefix(actual), "")
 	if len(differences) == 0 {
 		return nil
 	}
 	return fmt.Errorf("%w: existing %s %q does not match the manifest request: %s", errBootstrapDrift, api.displayName, alias, strings.Join(differences, "; "))
+}
+
+// normalizePrefix compares address text in the format returned by the API
+// without rewriting the manifest.
+func (api bootstrapResourceAPI) normalizePrefix(resource map[string]any) map[string]any {
+	prefix, ok := resource["prefix"].(string)
+	if !ok {
+		return resource
+	}
+
+	var normalized string
+	switch api.category {
+	case "vpcPrefixes":
+		parsed, err := netip.ParsePrefix(prefix)
+		if err != nil {
+			return resource
+		}
+		// Keep host bits: the API rejects unaligned prefixes instead of masking them.
+		normalized = parsed.String()
+	case "siteIpBlocks":
+		parsed, err := netip.ParseAddr(prefix)
+		if err != nil {
+			return resource
+		}
+		normalized = parsed.String()
+	default:
+		return resource
+	}
+
+	fields := maps.Clone(resource)
+	fields["prefix"] = normalized
+	return fields
 }
 
 func sortedBootstrapAliases[T any](resources map[string]T) []string {

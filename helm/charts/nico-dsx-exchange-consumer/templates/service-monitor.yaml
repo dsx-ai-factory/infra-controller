@@ -6,6 +6,7 @@ metadata:
   namespace: {{ include "nico-dsx-exchange-consumer.namespace" . }}
   labels:
     {{- include "nico-dsx-exchange-consumer.labels" . | nindent 4 }}
+    app.kubernetes.io/metrics: {{ include "nico-dsx-exchange-consumer.name" . }}
     app: {{ include "nico-dsx-exchange-consumer.name" . }}
     prometheus: nico-monitoring
 spec:

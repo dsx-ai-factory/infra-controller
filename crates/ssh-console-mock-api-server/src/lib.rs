@@ -46,7 +46,6 @@ pub struct MockHost {
     pub bmc_password: String,
 }
 
-#[allow(deprecated)]
 impl From<MockHost> for forge::Machine {
     fn from(value: MockHost) -> Self {
         let discovery_info = Some(machine_discovery::DiscoveryInfo {
@@ -58,9 +57,6 @@ impl From<MockHost> for forge::Machine {
         });
         Self {
             id: Some(value.machine_id),
-            // Deprecated flat field kept for backwards-compat with callers that haven't
-            // migrated to status.discovery_info yet.
-            discovery_info: discovery_info.clone(),
             status: Some(forge::MachineStatus {
                 discovery_info,
                 ..Default::default()

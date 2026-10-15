@@ -18,11 +18,14 @@
 mod bluefield3_explore;
 mod bluefield4_explore;
 mod common;
+mod component_integrity_explore;
 mod dell_poweredge_r750_explore;
 mod dgx_gb300_explore;
 mod generic_supermicro_explore;
 mod lenovo_gb300_explore;
 mod network_adapter_port_explore;
 mod powershelf_explore;
+mod secure_boot_explore;
 mod supermicro_gb300_explore;
 mod vera_rubin_explore;
+mod wiwynn_gb200_explore;

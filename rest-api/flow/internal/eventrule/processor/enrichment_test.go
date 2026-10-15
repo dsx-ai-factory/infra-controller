@@ -151,11 +151,12 @@ func TestEnrichClassifiesFailures(t *testing.T) {
 
 func TestEnrichRackUsesResolvedResourceAsRack(t *testing.T) {
 	rackID := uuid.New()
+	inventory := &processorInventory{
+		rack: rack.New(deviceinfo.DeviceInfo{ID: rackID}, location.Location{}),
+	}
 	processor := newTestProcessor(
 		t,
-		&processorInventory{
-			rack: rack.New(deviceinfo.DeviceInfo{ID: rackID}, location.Location{}),
-		},
+		inventory,
 		nil,
 	)
 
@@ -169,6 +170,11 @@ func TestEnrichRackUsesResolvedResourceAsRack(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, rackID, result.ID)
 	require.Equal(t, rackID, result.RackID)
+	require.Equal(
+		t,
+		identifier.Identifier{ExternalID: "rack-1"},
+		inventory.rackRef,
+	)
 }
 
 func validEnvelope(resource eventrule.Resource) eventrule.Envelope {
@@ -183,6 +189,7 @@ type processorInventory struct {
 	component  *component.Component
 	components []*component.Component
 	rack       *rack.Rack
+	rackRef    identifier.Identifier
 	err        error
 }
 
@@ -201,9 +208,10 @@ func (f *processorInventory) GetComponentsByExternalIDs(
 }
 
 func (f *processorInventory) GetRackByIdentifier(
-	context.Context,
-	identifier.Identifier,
-	bool,
+	_ context.Context,
+	reference identifier.Identifier,
+	_ bool,
 ) (*rack.Rack, error) {
+	f.rackRef = reference
 	return f.rack, f.err
 }

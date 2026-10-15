@@ -28,7 +28,7 @@ type BatchUpdateRackPowerStateRequest struct {
 	SiteId string `json:"siteId"`
 	// Filter that selects Racks whose power state should be updated
 	Filter *RackFilter `json:"filter,omitempty"`
-	// Target power state
+	// Target power state. Exact lowercase forms are also accepted for compatibility.
 	State string `json:"state"`
 	// Optional Operation Rule UUID. When set, pins every task spawned by this batch to the named rule and overrides Flow's default rule resolution.
 	RuleId *string `json:"ruleId,omitempty"`

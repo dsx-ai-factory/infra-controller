@@ -229,21 +229,21 @@ pub(crate) async fn handle_bom_validation_requested(
                 .map(Some);
         } else {
             // Case 1.2: Cannot find a matching SKU
-            tracing::info!(
-                machine_id=%mh_snapshot.host_snapshot.id,
-                "Cannot find a matching SKU for machine"
-            );
-
             if should_ignore_unassigned_machine(host_handler_params) {
                 // Case 1.2.1: Allow allocation without an assigned SKU
-                tracing::info!(
+                // The machine stays Ready and repeats this check on every pass.
+                tracing::debug!(
                     machine_id=%mh_snapshot.host_snapshot.id,
-                    "ignore_unassigned_machines is true, staying in Ready state"
+                    "No matching SKU, but ignore_unassigned_machines is true, staying in Ready state"
                 );
                 txn.commit().await?;
                 return Ok(None);
             } else {
                 // Case 1.2.2: Block allocation, wait for SKU assignment
+                tracing::info!(
+                    machine_id=%mh_snapshot.host_snapshot.id,
+                    "Cannot find a matching SKU for machine"
+                );
                 return advance_to_waiting_for_sku_assignment(
                     txn,
                     mh_snapshot,

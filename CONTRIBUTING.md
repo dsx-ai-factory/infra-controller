@@ -2,7 +2,12 @@
 
 Thank you for your interest in contributing to NVIDIA Infra Controller!
 
-We welcome contributions of all sizes — from fixing a typo in the docs to adding a new API endpoint. Whether you're a first-time contributor or a seasoned open-source developer, there's a place for you here.
+We welcome contributions of all sizes — from fixing a typo in the docs to
+adding a new API endpoint. Whether you're a first-time contributor or a
+seasoned open-source developer, there's a place for you here.
+
+All project participants are expected to follow the
+[code of conduct](CODE_OF_CONDUCT.md).
 
 > The software is provided "as is" without warranties of any kind. Features,
 > APIs, and configurations may change in future releases. For production
@@ -10,18 +15,42 @@ We welcome contributions of all sizes — from fixing a typo in the docs to addi
 
 ## Table of Contents
 
+- [Contributions and Planning](#contributions-and-planning)
 - [Developer Certificate of Origin (DCO)](#developer-certificate-of-origin-dco)
 - [Cryptographic Commit Signatures](#cryptographic-commit-signatures)
 - [Fork and Setup](#fork-and-setup)
-- [Contribution Process](#contribution-process)
+- [Secret Scanning](#secret-scanning)
+- [Pull Request Process](#pull-request-process)
 - [Engineering Guidelines](#engineering-guidelines)
 - [Pull Request Guidelines](#pull-request-guidelines)
+- [Pull Request Lifecycle and Stale PR Policy](#pull-request-lifecycle-and-stale-pr-policy)
+
+## Contributions and Planning
+
+For substantial changes:
+
+- If you've encountered a problem or limitation that isn't already tracked,
+  open an issue describing it, your proposed approach, and that you'd like to
+  implement a solution.
+- If you'd like to work on an existing, unassigned issue, comment there with
+  your proposed approach and say you'd like to take it on.
+
+In either case, wait for maintainer feedback on the scope before investing
+significant effort.
+
+Small, self-contained fixes (such as typos, documentation corrections, and
+simple bug fixes) can be submitted as pull requests without opening an issue
+first.
 
 ## Developer Certificate of Origin (DCO)
 
-NVIDIA Infra Controller requires the Developer Certificate of Origin (DCO) process to be followed for all contributions.
+NVIDIA Infra Controller requires the Developer Certificate of Origin (DCO)
+process to be followed for all contributions.
 
-The DCO is a lightweight way for contributors to certify that they wrote or otherwise have the right to submit the code they are contributing. The full text of the DCO can be found at [developercertificate.org](https://developercertificate.org/):
+The DCO is a lightweight way for contributors to certify that they wrote or
+otherwise have the right to submit the code they are contributing. The full
+text of the DCO can be found at
+[developercertificate.org](https://developercertificate.org/):
 
 ```text
 Developer Certificate of Origin
@@ -62,13 +91,17 @@ By making a contribution to this project, I certify that:
 
 ### Signing Off Your Commits
 
-To sign off on a commit for DCO compliance, you must add a `Signed-off-by` line to your commit message. This is done by using the `-s` or `--signoff` flag when committing:
+To sign off on a commit for DCO compliance, you must add a `Signed-off-by` line
+to your commit message. This is done by using the `-s` or `--signoff` flag when
+committing:
 
 ```bash
 git commit -s -S -m "Your commit message"
 ```
 
-The `-s` flag adds the DCO sign-off trailer. The `-S` flag cryptographically signs the commit, which is also required for this repository. See [Cryptographic Commit Signatures](#cryptographic-commit-signatures) for details.
+The `-s` flag adds the DCO sign-off trailer. The `-S` flag cryptographically
+signs the commit, which is also required for this repository. See
+[Cryptographic Commit Signatures](#cryptographic-commit-signatures) for details.
 
 **Tip:** You can create a Git alias to always sign off and cryptographically sign:
 
@@ -104,15 +137,21 @@ Or to sign off all commits in a branch:
 git rebase --signoff --gpg-sign origin/main
 ```
 
-If your Git configuration already has `commit.gpgsign` enabled, Git signs rewritten commits automatically. Otherwise, use `--gpg-sign` when rebasing to ensure rewritten commits keep the cryptographic signature required by branch protection.
+If your Git configuration already has `commit.gpgsign` enabled, Git signs
+rewritten commits automatically. Otherwise, use `--gpg-sign` when rebasing to
+ensure rewritten commits keep the cryptographic signature required by branch
+protection.
 
 ### DCO Enforcement
 
-All pull requests are automatically checked for DCO compliance via DCO bot. Pull requests with commits missing a DCO sign-off cannot be merged until all commits are properly signed off.
+All pull requests are automatically checked for DCO compliance via DCO bot.
+Pull requests with commits missing a DCO sign-off cannot be merged until all
+commits are properly signed off.
 
 ## Cryptographic Commit Signatures
 
-The `main` branch requires cryptographically signed commits. This is separate from the DCO sign-off:
+The `main` branch requires cryptographically signed commits. This is separate
+from the DCO sign-off:
 
 - `-s` or `--signoff` adds the `Signed-off-by` DCO trailer to the commit message.
 - `-S` cryptographically signs the commit with your configured GPG or SSH signing key.
@@ -123,9 +162,11 @@ Every commit in a pull request must include both. For new commits, use both flag
 git commit -s -S -m "Your commit message"
 ```
 
-Before contributing, configure Git and GitHub to use a verified signing key. If your key is configured correctly, GitHub will mark commits as verified.
+Before contributing, configure Git and GitHub to use a verified signing key. If
+your key is configured correctly, GitHub will mark commits as verified.
 
-To fix the most recent commit if it is missing either the DCO sign-off or cryptographic signature:
+To fix the most recent commit if it is missing either the DCO sign-off or
+cryptographic signature:
 
 ```bash
 git commit --amend -s -S --no-edit
@@ -133,11 +174,14 @@ git commit --amend -s -S --no-edit
 
 ## Fork and Setup
 
-Developers must first fork the upstream [Infra Controller repository](https://github.com/dsx-ai-factory/infra-controller).
+Developers must first fork the upstream
+[Infra Controller repository](https://github.com/dsx-ai-factory/infra-controller).
 
 ### 1. Fork the Repository
 
-1. Navigate to the [Infra Controller repository](https://github.com/dsx-ai-factory/infra-controller) on GitHub.
+1. Navigate to the
+   [Infra Controller repository](https://github.com/dsx-ai-factory/infra-controller)
+   on GitHub.
 2. Click the **Fork** button in the upper right corner.
 3. Select your GitHub account as the destination.
 
@@ -189,7 +233,26 @@ Use descriptive branch names like:
 - `fix/resolve-dhcp-issue`
 - `docs/update-readme`
 
-## Contribution Process
+## Secret Scanning
+
+Credentials are the one class of mistake that a later commit cannot take back, so this repository scans for them locally as well as in CI.
+The [`.pre-commit-config.yaml`](.pre-commit-config.yaml) at the repository root declares a single hook, `secret-scan-trufflehog`, from [`NVIDIA/security-workflows`](https://github.com/NVIDIA/security-workflows).
+
+It checks your staged files at `git commit` time:
+
+```bash
+pip install pre-commit   # or: brew install pre-commit
+pre-commit install
+```
+
+The hook installs its own pinned TruffleHog build into an isolated environment on first run, so there is no scanner to install separately, on Linux, macOS, or Windows.
+
+When the hook reports a finding, treat the credential as compromised — remove it *and* rotate it, because deleting the line leaves the value in your local history.
+
+This check is advisory and skippable (`git commit --no-verify`).
+The authoritative check is the Pulse secret scan in [`.github/workflows/security-suite.yml`](.github/workflows/security-suite.yml), which runs server-side on pushes to `main` and to the `pull-request/[0-9]+` mirror of your pull request, and fails on verified secrets.
+
+## Pull Request Process
 
 1. **Fork the repository** and create your branch from `main`.
 2. **Make your changes** following our coding guidelines.
@@ -265,19 +328,139 @@ for the requested behavior.
 - Keep OpenAPI specs, protobufs, database migrations, Helm manifests, generated
   code, and documentation in sync with the behavior they describe.
 
+#### Local CI Verification
+
+Contributors can run the primary verification command locally for the core Rust
+CI workflow:
+
+```bash
+cargo make pre-commit-verify
+```
+
+This command combines the workspace verification checks with the release build
+and Core service test suite. It requires the developer setup described in the
+[development guide](docs/development.md#local-environment-prep), including a
+working PostgreSQL test environment.
+
+When the complete flow is not practical, run the lighter workspace verification
+flow if your environment supports it:
+
+```bash
+cargo make pre-commit-verify-workspace
+```
+
+This skips the release build and test suite, but still requires the lint,
+formatting, dependency-policy, and REST protobuf generation tools. Run the
+focused checks relevant to your change and document any verification limitations
+in the pull request.
+
 ## Pull Request Guidelines
 
 - Provide a clear description of the problem and solution.
 - Reference any related issues.
 - Keep pull requests focused on a single change.
+- Open the PR as a **draft** if it is not yet ready for review. Drafts are
+  exempt from the stale PR policy described below.
 - Be responsive to feedback and code review comments.
 - Ensure all CI checks pass before requesting review.
+- The pull request description is what ends-up in the final immutable git
+  message, it needs to be as concise as possible.
+- Do not put test results or irrelevant details into the pull request
+  description, add them as comments if you really feel the need to explain how
+  it was tested.
+
+### AI Submitted Pull requests
+
+The AI agent must use the .github/PULL_REQUEST_TEMPLATE.md file and adhere to
+the structure.
+
+The human submitter must proofread the pull request text before submitting, the
+human is accountable for the pull-request description, comments, and code
+that's being assisted with AI.
+
+Do not submit AI slop in pull requests or in comments.  A human is reviewing
+your submission, treat their time with respect.
+
+### Pull request review
+
+A maintainer should provide an initial review within five business days of a
+pull request being marked ready for review. If that time passes without a review
+or update, comment on the pull request to request an update from a maintainer.
+
+## Pull Request Lifecycle and Stale PR Policy
+
+To keep the review queue healthy and make sure good work does not get lost,
+open pull requests are actively managed with automation. This section explains
+what to expect as an author or reviewer.
+
+### Review expectations
+
+- **Reviewers** aim to give a first response within a few business days. As
+  noted in the project status above, review timelines may vary while the
+  project is experimental — if you are waiting on a maintainer, that is on us,
+  not you. A polite ping in the PR after a week of silence is always welcome.
+- **Authors** are expected to respond to review feedback within about a week.
+  If you are blocked or busy, a one-line comment ("back on this next week")
+  resets the clock and keeps reviewers aligned.
+- If a PR is waiting on an external dependency, a design decision, or another
+  team, say so explicitly in the PR and apply the appropriate exemption label
+  below.
+
+### How the stale policy works
+
+Open pull requests are managed by automation with the following rules:
+
+1. **After 30 days of inactivity**, the PR is labeled `stale` and receives a
+   comment explaining what happens next.
+2. **After 7 more days of inactivity** (37 days total), the PR is
+   automatically closed.
+3. **Any activity resets the clock.** A comment, commit, rebase, or review
+   all count as activity and remove the `stale` label.
+
+The policy applies to author inactivity. If a PR is stalled because it is
+waiting on maintainer review, comment to that effect — that activity both
+resets the timer and surfaces the PR back to the review queue.
+
+### Being closed for staleness is not a rejection
+
+If your PR is closed for inactivity, the work is still welcome. To continue:
+
+1. Sync your fork and rebase your branch on the latest `main`. If you rewrite
+   commits, remember that every commit must carry both the DCO sign-off and a
+   cryptographic signature — see
+   [Signing Off Multiple Commits](#signing-off-multiple-commits).
+2. Reopen the PR (or open a fresh one referencing the old PR number).
+3. Comment so a reviewer knows it is active again.
+
+Closing a PR does not delete your branch — because contributions come from
+forks, your work remains on your fork and nothing is lost.
+
+### Exemptions
+
+Some PRs are intentionally long-lived. Add one of these labels to exempt a PR
+from stale automation:
+
+| Label | Use for |
+| --- | --- |
+| `keep-open` | Long-running work that is still active |
+| `blocked-external` | Waiting on an upstream fix, dependency, or third party |
+| `needs-design` | Waiting on a design decision or roadmap alignment |
+| `security` | Sensitive changes handled on a separate track |
+| `tracking-issue` | Associated with a tracking issue spanning multiple PRs |
+
+Draft PRs are also exempt. If a PR carries an exemption label, its description
+or a recent comment should explain why and who is responsible for moving it
+forward.
+
+### Keeping your PR mergeable
+
+- Rebase or merge `upstream/main` regularly, especially if your PR touches
+  high-churn areas. The longer a PR sits, the more expensive conflict
+  resolution becomes.
+- Keep CI green. A PR with failing checks is unlikely to get review attention
+  and will still age under the stale policy.
 
 ## Build Guide
 
 For pinned dependency updates, image testing, and build optimization trade-offs, see the
 [Build Guide](docs/development/build-guide.md).
-
-## Questions?
-
-If you have questions about contributing, please open an issue for discussion.

@@ -148,7 +148,7 @@ spec:
                 description: |-
                   Select the DPU with specific labels
 
-                  Deprecated: This field is deprecated and will be removed with v26.7.0. Use DPUDeviceSelector instead.
+                  Deprecated: This field is deprecated and will be removed with v27.1.0. Use DPUDeviceSelector instead.
                 type: object
               dpuTemplate:
                 description: Object that describes the DPU that will be created if
@@ -375,7 +375,7 @@ spec:
                         description: |-
                           MaxUnavailable is the maximum number of DPUs that can be unavailable during the update.
 
-                          Deprecated: This field is deprecated and will be removed with v26.7.0.
+                          Deprecated: This field is deprecated and will be removed with v27.1.0.
                         x-kubernetes-int-or-string: true
                     type: object
                   type:

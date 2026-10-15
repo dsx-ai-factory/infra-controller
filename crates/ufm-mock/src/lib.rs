@@ -22,8 +22,11 @@ mod inventory;
 mod metrics;
 mod reconcile;
 mod state;
+mod tls;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub use auth::{UFM_MOCK_AUTH_TOKEN_ENV, UfmAuthToken};
 use axum::Router;
@@ -37,6 +40,7 @@ pub use inventory::{
     InventoryPort, InventoryProvider, InventorySnapshot, MachineId, MatId,
 };
 use opentelemetry::metrics::Meter;
+use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -107,4 +111,52 @@ impl UfmMock {
         self.metrics.record_reconciliation(outcome.metric_label());
         Ok(())
     }
+}
+
+/// Serves `router` on `address`, over TLS when `tls` is set, until `cancellation` fires.
+///
+/// Shared by the standalone binary and the machine-a-tron protocol gateway so both listeners
+/// load PEM material, follow rotated PEM files, and drain connections the same way.
+pub async fn serve(
+    address: SocketAddr,
+    tls: Option<TlsConfig>,
+    router: Router,
+    cancellation: CancellationToken,
+) -> eyre::Result<()> {
+    let listener = TcpListener::bind(address).await?;
+    serve_with_listener(listener, tls, router, cancellation).await
+}
+
+/// Serves `router` on an already bound listener, with the same TLS and shutdown behavior as [`serve`].
+/// The listener remains bound until the server stops; its address determines the serving endpoint.
+pub async fn serve_with_listener(
+    listener: TcpListener,
+    tls: Option<TlsConfig>,
+    router: Router,
+    cancellation: CancellationToken,
+) -> eyre::Result<()> {
+    match tls {
+        Some(tls) => {
+            let tls = tls::ReloadableTls::load(tls).await?;
+            let config = tls.config();
+            tokio::spawn(tls.watch(cancellation.child_token()));
+            let handle = axum_server::Handle::new();
+            let shutdown_handle = handle.clone();
+            tokio::spawn(async move {
+                cancellation.cancelled().await;
+                shutdown_handle.graceful_shutdown(Some(Duration::from_secs(10)));
+            });
+
+            axum_server::from_tcp_rustls(listener.into_std()?, config)?
+                .handle(handle)
+                .serve(router.into_make_service())
+                .await?;
+        }
+        None => {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(cancellation.cancelled_owned())
+                .await?;
+        }
+    }
+    Ok(())
 }

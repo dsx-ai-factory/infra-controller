@@ -52,6 +52,25 @@ fn dpf_error(error: DpfError) -> StateHandlerError {
     ExternalServiceError::with_source("dpf", "", error.to_string(), "dpf_error", error).into()
 }
 
+enum DpfResourceRegistrationError {
+    CredentialUnavailable(String),
+    Fatal(StateHandlerError),
+}
+
+impl From<StateHandlerError> for DpfResourceRegistrationError {
+    fn from(error: StateHandlerError) -> Self {
+        Self::Fatal(error)
+    }
+}
+
+fn classify_dpf_registration_error(error: DpfError) -> DpfResourceRegistrationError {
+    if error.is_bmc_password_source_unavailable() {
+        DpfResourceRegistrationError::CredentialUnavailable(error.to_string())
+    } else {
+        DpfResourceRegistrationError::Fatal(dpf_error(error))
+    }
+}
+
 fn bmc_ip(machine: &Machine<impl MachineIdSubtypeTrait>) -> Result<IpAddr, StateHandlerError> {
     machine.status.bmc_info.ip.ok_or_else(|| {
         StateHandlerError::GenericError(eyre::eyre!("BMC IP is not set for machine {}", machine.id))
@@ -396,7 +415,7 @@ async fn create_and_register_dpudevices_and_dpunode(
     state: &ManagedHostStateSnapshot,
     dpf_sdk: &dyn DpfOperations,
     deployment_type: DpuDeploymentType,
-) -> Result<(), StateHandlerError> {
+) -> Result<(), DpfResourceRegistrationError> {
     let primary_dpu_id = state
         .host_snapshot
         .status
@@ -418,7 +437,8 @@ async fn create_and_register_dpudevices_and_dpunode(
         return Err(StateHandlerError::InvalidState(format!(
             "dual DPU systems with Astra NICs are not supported (host {})",
             state.host_snapshot.id
-        )));
+        ))
+        .into());
     }
 
     tracing::info!(host = %state.host_snapshot.id, num_astra_nics = %astra_nics.len(), "Astra NICs");
@@ -431,7 +451,8 @@ async fn create_and_register_dpudevices_and_dpunode(
         return Err(StateHandlerError::MissingData {
             object_id: state.host_snapshot.id.to_string(),
             missing: "primary_dpu_snapshot",
-        });
+        }
+        .into());
     }
 
     for dpu in &state.dpu_snapshots {
@@ -460,7 +481,7 @@ async fn create_and_register_dpudevices_and_dpunode(
         dpf_sdk
             .register_dpu_device(device_info, astra_underlay_nics.clone())
             .await
-            .map_err(dpf_error)?;
+            .map_err(classify_dpf_registration_error)?;
     }
 
     let device_ids: Vec<String> = state
@@ -477,7 +498,7 @@ async fn create_and_register_dpudevices_and_dpunode(
     dpf_sdk
         .register_dpu_node(node_info)
         .await
-        .map_err(dpf_error)?;
+        .map_err(classify_dpf_registration_error)?;
 
     Ok(())
 }
@@ -575,10 +596,16 @@ async fn handle_dpf_provisioning(
     dpf_sdk: &dyn DpfOperations,
     deployment_type: DpuDeploymentType,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    if let Err(err) =
-        create_and_register_dpudevices_and_dpunode(state, dpf_sdk, deployment_type).await
-    {
-        return Ok(dpf_cr_creation_failed(state, &err));
+    match create_and_register_dpudevices_and_dpunode(state, dpf_sdk, deployment_type).await {
+        Ok(()) => {}
+        Err(DpfResourceRegistrationError::CredentialUnavailable(error)) => {
+            return Ok(StateHandlerOutcome::wait(format!(
+                "waiting for the site-wide BMC credential before DPF registration: {error}"
+            )));
+        }
+        Err(DpfResourceRegistrationError::Fatal(error)) => {
+            return Ok(dpf_cr_creation_failed(state, &error));
+        }
     }
 
     let next =
@@ -970,10 +997,16 @@ async fn handle_dpf_reprovisioning(
             machine_id = %state.host_snapshot.id,
             "DPUDevice/DPUNode CRs do not exist, creating them before reprovisioning"
         );
-        if let Err(err) =
-            create_and_register_dpudevices_and_dpunode(state, dpf_sdk, deployment_type).await
-        {
-            return Ok(dpf_cr_creation_failed(state, &err));
+        match create_and_register_dpudevices_and_dpunode(state, dpf_sdk, deployment_type).await {
+            Ok(()) => {}
+            Err(DpfResourceRegistrationError::CredentialUnavailable(error)) => {
+                return Ok(StateHandlerOutcome::wait(format!(
+                    "waiting for the site-wide BMC credential before DPF registration: {error}"
+                )));
+            }
+            Err(DpfResourceRegistrationError::Fatal(error)) => {
+                return Ok(dpf_cr_creation_failed(state, &error));
+            }
         }
         let next = transition_all_dpus_to_dpf_state(
             DpfState::WaitingForReady { phase_detail: None },

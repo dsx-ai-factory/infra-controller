@@ -20,7 +20,9 @@ use clap::{ArgGroup, Parser};
 use mac_address::MacAddress;
 
 #[derive(Parser, Debug)]
-#[command(after_long_help = "\
+#[command(
+    long_about = "Delete a machine interface.\n\nExactly one deletion selector must be specified: INTERFACE_ID or --mac-address. Providing both selectors is rejected.",
+    after_long_help = "\
 EXAMPLES:
 
 Delete a machine interface by ID (redeploy kea afterward):
@@ -30,7 +32,8 @@ Delete a leftover interface when you only have the BMC MAC (e.g. a replacement h
 whose ingestion is blocked by a stale interface record):
     $ nico-admin-cli machine-interfaces delete --mac-address 00:11:22:33:44:55
 
-")]
+"
+)]
 #[clap(group(
     ArgGroup::new("interface_selector")
         .required(true)

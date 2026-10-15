@@ -17,11 +17,12 @@
 
 use rpc::forge::ExpectedSwitchRequest;
 
-use super::args::Args;
 use crate::rpc::ApiClient;
 
-pub(super) async fn delete(data: Args, api_client: &ApiClient) -> color_eyre::Result<()> {
-    let req: ExpectedSwitchRequest = data.try_into()?;
-    api_client.0.delete_expected_switch(req).await?;
+pub(super) async fn delete(
+    request: ExpectedSwitchRequest,
+    api_client: &ApiClient,
+) -> color_eyre::Result<()> {
+    api_client.0.delete_expected_switch(request).await?;
     Ok(())
 }

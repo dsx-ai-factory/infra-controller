@@ -19,7 +19,7 @@ use std::fmt::Display;
 
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
-use carbide_uuid::rack::{RackId, RackProfileId};
+use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
@@ -66,6 +66,8 @@ pub const LABEL_LOCATION_POSITION: &str = "location.position";
 pub struct Rack {
     pub id: RackId,
     pub rack_profile_id: Option<RackProfileId>,
+    /// External group identity copied from the expected rack at discovery.
+    pub rack_group_id: Option<RackGroupId>,
     pub config: RackConfig,
     pub controller_state: Versioned<RackState>,
     pub controller_state_outcome: Option<PersistentStateHandlerOutcome>,
@@ -333,6 +335,7 @@ pub enum SwitchNvosUpdateState {
 #[derive(Clone, Debug, Default)]
 pub struct RackSearchFilter {
     pub label: Option<crate::metadata::LabelFilter>,
+    pub deleted: crate::DeletedFilter,
 }
 
 pub fn derive_rack_aggregate_health(sources: &HealthReportSources) -> health_report::HealthReport {
@@ -376,6 +379,7 @@ impl<'r> FromRow<'r, PgRow> for Rack {
         Ok(Rack {
             id: row.try_get("id")?,
             rack_profile_id: row.try_get("rack_profile_id")?,
+            rack_group_id: row.try_get("rack_group_id")?,
             config: config.0,
             controller_state: Versioned {
                 value: controller_state.0,
@@ -397,6 +401,19 @@ impl<'r> FromRow<'r, PgRow> for Rack {
 // ============================================================================
 // RACK STATES
 // ============================================================================
+
+/// Determines how a rack can leave [`RackState::Error`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RackErrorRecoveryPolicy {
+    /// The rack returns to Ready after all attached components become Ready.
+    /// Also applies when a persisted Error state has no recovery metadata.
+    #[default]
+    ComponentsReady,
+
+    /// The rack remains in Error until an operator requests rack maintenance.
+    MaintenanceRequestRequired,
+}
 
 /// State of a Rack as tracked by the controller.
 ///
@@ -458,7 +475,14 @@ pub enum RackState {
     },
 
     /// There is error in the Rack; Rack can not be used if it's in error.
-    Error { cause: String },
+    Error {
+        /// Description of the failure that moved the rack to Error.
+        cause: String,
+
+        /// Policy controlling when the rack may leave Error.
+        #[serde(default)]
+        recovery_policy: RackErrorRecoveryPolicy,
+    },
 
     /// Rack is in the process of deleting.
     Deleting,
@@ -518,15 +542,17 @@ impl Display for RackMaintenanceState {
 
 /// Sub-states of `RackMaintenanceState::ConfigureNmxCluster`.
 ///
-/// `Start` rotates every rack switch's NVUE certificate before submitting the
-/// asynchronous RMS ScaleUpFabricManager workflow.
-/// `WaitForSwitchCertificateJob` polls the certificate batch, and
-/// `WaitForScaleUpFabricManagerJob` polls the fabric-manager job.
+/// `Start` rotates switch-local certificates before submitting the asynchronous
+/// RMS ScaleUpFabricManager workflow. `WaitForSwitchCertificateJob`,
+/// `WaitForScaleUpFabricManagerJob`, and the optional telemetry-only
+/// `WaitForPrimarySwitchCertificateJob` persist each asynchronous phase across
+/// controller restarts.
 ///
-/// The remaining variants name sub-states of a workflow this version does not
-/// run. A `controller_state` row can still hold one, so they are decoded to
-/// keep that row from failing the batch queries that load every rack.
-/// Maintenance cannot resume from them.
+/// `ConfigureCertificates`, `DisableScaleUpFabricState`,
+/// `ConfigureScaleUpFabricManager`, and `WaitForFabricStatus` name sub-states of
+/// a workflow this version does not run. A `controller_state` row can still
+/// hold one, so they are decoded to keep that row from failing the batch queries
+/// that load every rack. Maintenance cannot resume from them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfigureNmxClusterState {
     Start,
@@ -539,6 +565,12 @@ pub enum ConfigureNmxClusterState {
 
     WaitForScaleUpFabricManagerJob {
         /// RMS job identifier returned by submission.
+        job_id: String,
+    },
+
+    /// Waits for the configured primary nmx-telemetry binding to complete.
+    WaitForPrimarySwitchCertificateJob {
+        /// Parent RMS job identifier returned by certificate configuration.
         job_id: String,
     },
 
@@ -565,6 +597,9 @@ impl Display for ConfigureNmxClusterState {
             }
             ConfigureNmxClusterState::WaitForScaleUpFabricManagerJob { job_id } => {
                 write!(f, "WaitForScaleUpFabricManagerJob({job_id})")
+            }
+            ConfigureNmxClusterState::WaitForPrimarySwitchCertificateJob { job_id } => {
+                write!(f, "WaitForPrimarySwitchCertificateJob({job_id})")
             }
             ConfigureNmxClusterState::ConfigureCertificates {} => {
                 write!(f, "ConfigureCertificates")
@@ -713,7 +748,7 @@ impl Display for RackState {
             RackState::Maintenance { maintenance_state } => {
                 write!(f, "Maintenance({})", maintenance_state)
             }
-            RackState::Error { cause } => write!(f, "Error({})", cause),
+            RackState::Error { cause, .. } => write!(f, "Error({})", cause),
             RackState::Deleting => write!(f, "Deleting"),
         }
     }
@@ -1023,6 +1058,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rack_error_recovery_policy_decodes_legacy_and_explicit_states() {
+        scenarios!(
+            run = |encoded| serde_json::from_str::<RackState>(encoded).map_err(|error| error.to_string());
+
+            "legacy error retains automatic component recovery" {
+                r#"{"state":"error","cause":"switch failed"}"# => Yields(RackState::Error {
+                    cause: "switch failed".to_string(),
+                    recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
+                }),
+            }
+
+            "maintenance error requires a new request" {
+                r#"{"state":"error","cause":"maintenance failed","recovery_policy":"maintenance_request_required"}"# => Yields(RackState::Error {
+                    cause: "maintenance failed".to_string(),
+                    recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+                }),
+            }
+        );
+    }
+
     // ── MaintenanceScope ────────────────────────────────────────────────
 
     #[test]
@@ -1225,6 +1281,7 @@ mod tests {
         Rack {
             id: RackId::default(),
             rack_profile_id: None,
+            rack_group_id: None,
             config: RackConfig {
                 maintenance_requested,
                 ..Default::default()
@@ -1270,6 +1327,7 @@ mod tests {
                 (
                     RackState::Error {
                         cause: "something broke".into(),
+                        recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
                     },
                     None,
                 ) => Yields(()),

@@ -27,7 +27,7 @@ use common::api_fixtures::TestEnv;
 use db::{self};
 use ipnetwork::IpNetwork;
 use mac_address::MacAddress;
-use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::hardware_info::HardwareInfo;
 use model::machine::ManagedHostStateSnapshot;
 use model::machine_boot_interface::MachineBootInterfaceTarget;
@@ -672,10 +672,6 @@ async fn test_get_machine_position_info(pool: PgPool) -> Result<(), Box<dyn std:
         revision_id: Some(3),
         ..Default::default()
     }];
-    report.physical_slot_number = Some(5);
-    report.compute_tray_index = Some(2);
-    report.topology_id = Some(10);
-    report.revision_id = Some(3);
     assert_eq!(
         db::explored_endpoints::try_update(
             bmc_ip,
@@ -888,6 +884,7 @@ async fn test_manual_refreshes_reject_site_explorer_suppressed_bmc(
             bmc_mac_address: bmc_interface.mac_address,
             reason: "manual refresh rejection test".to_string(),
             subsystem: BmcSuppressionSubsystem::SiteExplorer,
+            source: BmcSuppressionSource::Decommissioning,
         },
     )
     .await?;

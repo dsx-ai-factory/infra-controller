@@ -6,6 +6,8 @@ package paginator
 import (
 	"context"
 	"errors"
+	"regexp"
+	"strings"
 
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/uptrace/bun"
@@ -43,6 +45,27 @@ var (
 type OrderBy struct {
 	Field string
 	Order string
+}
+
+var apiOrderByPattern = regexp.MustCompile(`^[A-Z0-9_]+_(ASC|DESC)$`)
+
+// FromAPIRequest parses a FIELD_ASC or FIELD_DESC value, preserving underscores
+// in field names. Allowed fields are validated separately by the caller.
+// Invalid input leaves the receiver unchanged.
+func (ob *OrderBy) FromAPIRequest(value string) error {
+	if !apiOrderByPattern.MatchString(value) {
+		return ErrInvalidOrderBy
+	}
+	separator := strings.LastIndexByte(value, '_')
+	ob.Field = strings.ToLower(value[:separator])
+	ob.Order = value[separator+1:]
+	return nil
+}
+
+// ToAPIRequest formats an order as FIELD_ASC or FIELD_DESC. The receiver must
+// contain a valid field and direction.
+func (ob OrderBy) ToAPIRequest() string {
+	return strings.ToUpper(ob.Field) + "_" + ob.Order
 }
 
 type PageInput struct {

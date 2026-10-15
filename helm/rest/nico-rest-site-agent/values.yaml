@@ -24,8 +24,30 @@ image:
 
 service:
   type: ClusterIP
+  # Also sets ESA_PORT, the port the Site Agent serves its status page and probes on.
   port: 8080
+  # Also sets METRICS_PORT.
   metricsPort: 2112
+
+# Defaults for the Site Agent probes. A Site can override any field, or set `enabled: false`
+# to drop a probe (a null set in a parent chart never reaches this chart). Both target the
+# `http` container port, which follows `service.port`. An image that doesn't serve `/healthz`
+# and `/readyz` fails both, so a Site pinned to one should disable them. A failed `/healthz`
+# restarts the Site Agent, so liveness waits for a minute of failures. A failed `/readyz`
+# only marks it NotReady.
+readinessProbe:
+  enabled: true
+  httpGet:
+    path: /readyz
+    port: http
+  periodSeconds: 10
+
+livenessProbe:
+  enabled: true
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 30
 
 resources:
   requests:
@@ -79,8 +101,6 @@ bootstrap:
     tlsSecret: site-manager-tls
 
 envConfig:
-  ESA_PORT: "8080"
-  METRICS_PORT: "2112"
   DEV_MODE: "true"
   ENABLE_DEBUG: "true"
   ENABLE_TLS: "true"

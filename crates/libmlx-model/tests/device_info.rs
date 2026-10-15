@@ -59,6 +59,8 @@ fn field_value_cases() {
                 => "1.0.0".to_string(),
             FieldCase { fixture: Fixture::Complete, field: "base_mac" }
                 => "B8:3F:D2:12:34:56".to_string(),
+            FieldCase { fixture: Fixture::Complete, field: "base_guid" }
+                => "b83fd20300123456".to_string(),
             FieldCase { fixture: Fixture::Complete, field: "status" }
                 => "--".to_string(),
         }
@@ -86,6 +88,8 @@ fn field_value_cases() {
                 => "--".to_string(),
             FieldCase { fixture: Fixture::Partial, field: "base_mac" }
                 => "--".to_string(),
+            FieldCase { fixture: Fixture::Partial, field: "base_guid" }
+                => "--".to_string(),
             FieldCase { fixture: Fixture::Partial, field: "status" }
                 => "Failed to open device".to_string(),
         }
@@ -104,6 +108,7 @@ fn all_fields_are_in_display_order() {
         [
             "pci_name",
             "base_mac",
+            "base_guid",
             "psid",
             "device_type",
             "part_number",

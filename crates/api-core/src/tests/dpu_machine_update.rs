@@ -163,7 +163,11 @@ async fn test_find_available_outdated_dpus_with_unhealthy(
         .await
         .expect("Failed to create transaction");
 
-    db::machine::update_network_status_observation(&mut txn, &dpu_machine_id, &machine_obs).await?;
+    assert_eq!(
+        db::machine::update_network_status_observation(&mut txn, &dpu_machine_id, &machine_obs)
+            .await?,
+        db::ConditionalWrite::Applied(())
+    );
     db::machine::update_dpu_agent_health_report(&mut txn, &dpu_machine_id, &health_report).await?;
 
     txn.commit().await.unwrap();

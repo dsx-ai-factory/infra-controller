@@ -23,6 +23,7 @@ SELECT m.* FROM (
     INNER JOIN LATERAL (
         SELECT
         m2.*,
+        COALESCE(nic_firmware.json, '[]') AS nic_firmware_card_selections,
         boot_interface.desired_mac_address AS desired_boot_interface_mac,
         boot_interface.desired_interface_id AS desired_boot_interface_id,
         boot_interface.desired_version AS desired_boot_interface_version,
@@ -38,6 +39,15 @@ SELECT m.* FROM (
         COALESCE(p.json, '[]') AS power_options
         __HISTORY_SELECT__
         FROM machines m2
+        -- Card selections share the host's configuration and edit version.
+        LEFT JOIN LATERAL (
+            SELECT json_agg(json_build_object(
+                'selector', card.selector,
+                'profile_id', card.profile_id
+            ) ORDER BY card.selector) AS json
+            FROM machine_nic_firmware_overrides card
+            WHERE card.machine_id = m2.id
+        ) AS nic_firmware ON true
         LEFT JOIN machine_boot_interfaces boot_interface
         ON boot_interface.machine_id = m2.id
         LEFT JOIN machine_skus sku on m2.hw_sku = sku.id

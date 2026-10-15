@@ -63,11 +63,13 @@ func (t *Task) IsScheduled() bool {
 	return t != nil && t.ExecutionID != ""
 }
 
-// WorkflowComponent holds the minimal component data needed to execute
-// a workflow. All fields are plain JSON-safe types.
+// WorkflowComponent holds the minimal component data needed to execute a
+// workflow, including the management MAC fallback used before ingestion has
+// assigned an external component ID. All fields are plain JSON-safe types.
 type WorkflowComponent struct {
 	Type        devicetypes.ComponentType `json:"type"`
 	ComponentID string                    `json:"component_id"`
+	MACAddress  string                    `json:"mac_address,omitempty"`
 }
 
 // ExecutionInfo contains the information needed to execute a task.

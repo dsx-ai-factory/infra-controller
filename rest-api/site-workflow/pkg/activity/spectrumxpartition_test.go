@@ -128,7 +128,7 @@ func TestManageSpectrumXPartitionInventory_DiscoverSpectrumXPartitionInventory(t
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
 			// Every page carries the full ID set, which is what Cloud compares against
 			// its own rows to find Partitions that disappeared from the Site.
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnFinalPageOnly(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }

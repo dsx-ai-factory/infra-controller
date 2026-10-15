@@ -33,7 +33,8 @@ pub async fn create_and_persist(
     txn: &mut PgConnection,
 ) -> Result<Tenant, DatabaseError> {
     let version = ConfigVersion::initial();
-    let query = "INSERT INTO tenants (organization_id, organization_name, version, routing_profile_type) VALUES ($1, $2, $3, $4) RETURNING *";
+    let query = "INSERT INTO tenants (organization_id, organization_name, version, routing_profile_type) VALUES ($1, $2, $3, $4)
+        RETURNING organization_id, organization_name, version, routing_profile_type";
 
     sqlx::query_as(query)
         .bind(organization_id)
@@ -50,7 +51,10 @@ pub async fn find<S: AsRef<str>>(
     for_update: bool,
     txn: &mut PgConnection,
 ) -> Result<Option<Tenant>, DatabaseError> {
-    let mut query = sqlx::QueryBuilder::new("SELECT * FROM tenants WHERE organization_id = $1");
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT organization_id, organization_name, version, routing_profile_type
+         FROM tenants WHERE organization_id = $1",
+    );
 
     if for_update {
         query.push(" FOR UPDATE ");
@@ -85,7 +89,7 @@ pub async fn update(
                 organization_id=$4
                 AND
                 version=$5
-            RETURNING *";
+            RETURNING organization_id, organization_name, version, routing_profile_type";
 
     sqlx::query_as(query)
         .bind(next_version)
@@ -182,7 +186,8 @@ pub async fn load_by_organization_ids(
     txn: &mut PgConnection,
     organization_ids: &[String],
 ) -> Result<Vec<Tenant>, DatabaseError> {
-    let query = "SELECT * from tenants WHERE organization_id = ANY($1)";
+    let query = "SELECT organization_id, organization_name, version, routing_profile_type
+        from tenants WHERE organization_id = ANY($1)";
     sqlx::query_as(query)
         .bind(organization_ids)
         .fetch_all(txn)
@@ -193,6 +198,84 @@ pub async fn load_by_organization_ids(
 #[cfg(test)]
 mod tests {
     use std::ops::DerefMut;
+
+    use sqlx::Connection;
+
+    use super::*;
+
+    #[crate::sqlx_test]
+    async fn tenant_queries_survive_added_columns(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut api_connection = pool.acquire().await?;
+        exercise_tenant_queries(&mut api_connection).await?;
+        assert!(api_connection.cached_statements_size() > 0);
+
+        // Keep the API connection and its prepared statements while another
+        // connection applies the schema change, just as a migration would.
+        let mut migration = pool.begin().await?;
+        sqlx::raw_sql(
+            "SET LOCAL lock_timeout = '5s';
+             ALTER TABLE tenants ADD COLUMN test_added_column text;",
+        )
+        .execute(&mut *migration)
+        .await?;
+        migration.commit().await?;
+
+        exercise_tenant_queries(&mut api_connection).await?;
+        Ok(())
+    }
+
+    async fn exercise_tenant_queries(
+        connection: &mut PgConnection,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = connection.begin().await?;
+        let metadata = Metadata {
+            name: "projection tenant".to_string(),
+            ..Default::default()
+        };
+        let tenant = create_and_persist(
+            "projection-tenant".to_string(),
+            metadata.clone(),
+            Some("external".to_string()),
+            &mut txn,
+        )
+        .await?;
+        assert_eq!(tenant.organization_id.as_str(), "projection-tenant");
+        assert_eq!(tenant.metadata, metadata);
+        assert_eq!(tenant.routing_profile_type.as_deref(), Some("external"));
+        assert_eq!(tenant.version.version_nr(), 1);
+
+        let metadata = Metadata {
+            name: "renamed tenant".to_string(),
+            ..Default::default()
+        };
+        let updated = update(
+            tenant.organization_id.to_string(),
+            metadata.clone(),
+            tenant.version,
+            Some("internal".to_string()),
+            &mut txn,
+        )
+        .await?;
+        assert_eq!(updated.organization_id, tenant.organization_id);
+        assert_eq!(updated.metadata, metadata);
+        assert_eq!(updated.routing_profile_type.as_deref(), Some("internal"));
+        assert_eq!(updated.version.version_nr(), 2);
+        assert_eq!(
+            find(updated.organization_id.as_str(), true, &mut txn).await?,
+            Some(updated.clone())
+        );
+        assert_eq!(
+            load_by_organization_ids(&mut txn, &[updated.organization_id.to_string()]).await?,
+            vec![updated]
+        );
+
+        // Roll back the fixture so both passes decode an inserted row.
+        // The connection retains its prepared statements after the rollback.
+        txn.rollback().await?;
+        Ok(())
+    }
 
     #[crate::sqlx_test]
     async fn test_null_organization_name(pool: sqlx::PgPool) {

@@ -346,6 +346,59 @@ labels and collection endpoint.
 
 ## Failures and recovery
 
+### Full-lockdown recovery rollout
+
+Lenovo GB300 BMC updates can leave BIOS USB lockdown open after BMC-only
+locking. Full-policy restoration and its restart are limited to an explored
+BMC report with vendor `LenovoAMI` and model `HG635N_V2`. Missing or unsupported
+identity leaves the host unavailable without issuing this full-policy restart.
+
+New recovery entries are disabled by default. First upgrade **every API and
+controller that reads machine state**, with the new key omitted. Wait until
+all older processes have stopped. Only then enable this SITE setting:
+
+```toml
+[machine_state_controller]
+full_lockdown_recovery_enabled = true
+```
+
+An older binary cannot decode `RestoreFullLockdown`, which can fail a whole
+machine snapshot read. Older readers also ignore recovery metadata on
+`LockHost`, losing its deadline and strict security check. The flag is a
+writer gate, not automatic version negotiation or rollback protection.
+
+Before rolling back to older code:
+
+1. Set the flag to `false` on every writer and drain processes using the old
+   configuration. Supported recovery already in progress continues.
+1. With the supporting binary still running, let recovery finish. Expired or
+   unsupported recovery needs operator repair. Do not erase state to bypass
+   security verification. The following read-only query must return no rows:
+
+   ```sql
+   SELECT id, controller_state
+   FROM machines
+   WHERE controller_state->>'state' = 'bootconfiguring'
+     AND (
+       controller_state->'boot_config_state'->>'state' = 'restorefulllockdown'
+       OR (
+         controller_state->'boot_config_state'->>'state' = 'lockhost'
+         AND controller_state->'boot_config_state'->>'recovery' IS NOT NULL
+       )
+     );
+   ```
+
+1. Stop state writers and recheck before starting old code. Remove the new
+   config key because older configuration readers reject unknown fields.
+   Keep state-history records intact.
+
+Recovery has one persisted 90-minute deadline across all stages. Expiry keeps
+the host unavailable and stops further recovery writes and restarts. Polling
+does not start another policy/reboot cycle. External effects may repeat if a
+state commit fails, so this is not an exactly-once guarantee.
+
+### Firmware execution failures
+
 Transient upload failures and interrupted asynchronous uploads return to
 firmware checking and are attempted again. A failed Scout result, failed local
 script, terminal Redfish task, or firmware that exhausts its activation-reset

@@ -27,8 +27,7 @@ use crate::utils::LOCALHOST_CERTS;
 
 const DOMAIN_NAME: &str = "forge.integrationtest";
 
-/// BMC network used by API integration tests. The `/23` accommodates both 71-BMC rack fixtures
-/// while keeping the SQL allocator's candidate scan bounded.
+/// BMC network used by API integration tests. The `/23` accommodates both rack fixtures.
 pub const TEST_BMC_NETWORK_PREFIX: Ipv4Net = Ipv4Net::new_assert(Ipv4Addr::new(127, 0, 0, 0), 23);
 
 /// DHCP relay address for [`TEST_BMC_NETWORK_PREFIX`].
@@ -43,7 +42,7 @@ pub struct StartArgs {
     pub bmc_proxy: Option<HostPortPair>,
     pub firmware_directory: PathBuf,
     pub cancel_token: CancellationToken,
-    pub ready_channel: Sender<carbide::ApiServerAddresses>,
+    pub ready_channel: Sender<carbide::ApiServerReady>,
     pub credential_config: CredentialConfig,
     pub insecure_discovery: bool,
 }
@@ -103,6 +102,7 @@ pub async fn start(
         bypass_rbac = true
         allow_insecure_discovery = {insecure_discovery}
         scout_boot_interface_correction_enabled = true
+        enable_admin_ui = false
 
         [ib_config]
         max_partition_per_tenant = 31
@@ -201,7 +201,7 @@ pub async fn start(
 
         [site_explorer]
         enabled = true
-        run_interval = "1s"
+        run_interval = "100ms"
         concurrent_explorations = 30
         explorations_per_run = 90
         create_machines = true
@@ -216,8 +216,8 @@ pub async fn start(
         dpu_up_threshold = "31449600s"
 
         [machine_state_controller.controller]
-        iteration_time = "1s"
-        processor_dispatch_interval = "500ms"
+        iteration_time = "100ms"
+        processor_dispatch_interval = "50ms"
         max_object_handling_time = "180s"
         max_concurrency = 10
         metric_emission_interval = "1s"
@@ -227,8 +227,8 @@ pub async fn start(
         network_segment_drain_time = "60s"
 
         [network_segment_state_controller.controller]
-        iteration_time = "2s"
-        processor_dispatch_interval = "500ms"
+        iteration_time = "200ms"
+        processor_dispatch_interval = "50ms"
         max_object_handling_time = "180s"
         max_concurrency = 10
         metric_emission_interval = "1s"
@@ -244,32 +244,32 @@ pub async fn start(
 
         [host_models]
 
-        [rack_profiles.NVL72]
+        [rack_profiles.GB200_NVL72_WIWYNN]
         product_family = "gb200"
 
-        [rack_profiles.NVL72.rack_capabilities.compute]
+        [rack_profiles.GB200_NVL72_WIWYNN.rack_capabilities.compute]
         name = "GB200"
         count = 18
         vendor = "NVIDIA"
 
-        [rack_profiles.NVL72.rack_capabilities.switch]
+        [rack_profiles.GB200_NVL72_WIWYNN.rack_capabilities.switch]
         count = 0
 
-        [rack_profiles.NVL72.rack_capabilities.power_shelf]
+        [rack_profiles.GB200_NVL72_WIWYNN.rack_capabilities.power_shelf]
         count = 0
 
-        [rack_profiles.NVL72_GB300]
+        [rack_profiles.GB300_NVL72_LENOVO]
         product_family = "gb300"
 
-        [rack_profiles.NVL72_GB300.rack_capabilities.compute]
+        [rack_profiles.GB300_NVL72_LENOVO.rack_capabilities.compute]
         name = "GB300"
         count = 18
         vendor = "Lenovo"
 
-        [rack_profiles.NVL72_GB300.rack_capabilities.switch]
+        [rack_profiles.GB300_NVL72_LENOVO.rack_capabilities.switch]
         count = 0
 
-        [rack_profiles.NVL72_GB300.rack_capabilities.power_shelf]
+        [rack_profiles.GB300_NVL72_LENOVO.rack_capabilities.power_shelf]
         count = 0
 
         [firmware_global]
@@ -319,8 +319,6 @@ pub async fn start(
         None,
         credential_config,
         true,
-        // The in-process test server does not serve the admin web UI.
-        None,
         cancel_token,
         ready_channel,
     )

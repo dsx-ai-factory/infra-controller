@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Elasticsearch connection addresses
+templates:
+  - server-configmap.yaml
+  - server-job.yaml
+  - server-deployment.yaml
+set:
+  elasticsearch.external: true
+  elasticsearch.host: "2001:db8::10"
+  elasticsearch.port: "9243"
+  elasticsearch.scheme: https
+  elasticsearch.version: v7
+  elasticsearch.visibilityIndex: temporal_visibility
+tests:
+  - it: brackets IPv6 in configuration and every initialization URL
+    asserts:
+      - matchRegex:
+          path: data["config_template.yaml"]
+          pattern: 'host: "\[2001:db8::10\]:9243"'
+        template: server-configmap.yaml
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'https://\[2001:db8::10\]:9243 '
+        template: server-job.yaml
+        documentSelector:
+          path: spec.template.spec.containers[0].name
+          value: create-elasticsearch-index
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[0]
+          pattern: 'https://\[2001:db8::10\]:9243/_template/temporal_visibility_v1_template'
+        template: server-job.yaml
+        documentSelector:
+          path: spec.template.spec.containers[0].name
+          value: create-elasticsearch-index
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[0]
+          pattern: 'https://\[2001:db8::10\]:9243/temporal_visibility '
+        template: server-job.yaml
+        documentSelector:
+          path: spec.template.spec.containers[0].name
+          value: create-elasticsearch-index
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'https://\[2001:db8::10\]:9243/temporal_visibility '
+        template: server-deployment.yaml
+  - it: keeps already bracketed IPv6 hosts unchanged
+    template: server-configmap.yaml
+    set:
+      elasticsearch.host: "[2001:db8::10]"
+    asserts:
+      - matchRegex:
+          path: data["config_template.yaml"]
+          pattern: 'host: "\[2001:db8::10\]:9243"'
+
+  - it: preserves hostname endpoints
+    template: server-configmap.yaml
+    set:
+      elasticsearch.host: elasticsearch.example.test
+    asserts:
+      - matchRegex:
+          path: data["config_template.yaml"]
+          pattern: 'host: "elasticsearch\.example\.test:9243"'
+
+  - it: preserves IPv4 endpoints
+    template: server-configmap.yaml
+    set:
+      elasticsearch.host: "192.0.2.10"
+    asserts:
+      - matchRegex:
+          path: data["config_template.yaml"]
+          pattern: 'host: "192\.0\.2\.10:9243"'

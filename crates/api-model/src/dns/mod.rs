@@ -24,6 +24,7 @@ pub mod domain_info;
 pub mod metadata;
 pub mod resource_record;
 pub mod snapshot;
+pub mod ttl;
 pub mod zone;
 
 pub use answer::Answer;
@@ -32,12 +33,17 @@ pub use domain_info::DomainInfo;
 pub use metadata::DomainMetadata;
 pub use resource_record::ResourceRecord;
 pub use snapshot::SoaSnapshot;
+pub use ttl::{ZoneTtl, ZoneTtlError};
 pub use zone::{Fqdn, NameError};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Domain {
     pub id: carbide_uuid::domain::DomainId,
     pub name: String,
+    /// Default TTL for the zone's records; `None` means the site default of 300 seconds.
+    pub default_ttl: Option<ZoneTtl>,
+    /// Owning VPC, or `None` for an infrastructure domain. Immutable after creation.
+    pub vpc_id: Option<carbide_uuid::vpc::VpcId>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
     pub deleted: Option<DateTime<Utc>>,
@@ -67,6 +73,10 @@ impl Domain {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NewDomain {
     pub name: String,
+    /// Default TTL for the zone's records; omission means the site default of 300 seconds.
+    pub default_ttl: Option<ZoneTtl>,
+    /// Owning VPC; omission creates an infrastructure domain.
+    pub vpc_id: Option<carbide_uuid::vpc::VpcId>,
     pub soa: Option<SoaSnapshot>,
 }
 
@@ -76,6 +86,8 @@ impl NewDomain {
         let name = name.into();
         Self {
             soa: Some(SoaSnapshot::new(&name)),
+            default_ttl: None,
+            vpc_id: None,
             name,
         }
     }

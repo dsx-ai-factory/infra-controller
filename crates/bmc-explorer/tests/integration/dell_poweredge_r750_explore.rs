@@ -35,6 +35,10 @@ async fn explore_dell_poweredge_r750() {
     assert!(!report.systems.is_empty(), "systems must be present");
     assert_eq!(report.systems[0].serial_console_ssh_port, None);
     assert!(!report.chassis.is_empty(), "chassis must be present");
+    // This iDRAC advertises no ComponentIntegrity collection, which the report
+    // records as absent rather than as one reported empty.
+    assert_eq!(report.component_integrities, None);
+    assert!(!report.component_integrity_unavailable);
     assert!(
         report
             .service

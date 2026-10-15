@@ -104,7 +104,10 @@ async fn admin_chassis_reset_requires_and_preserves_operator_maintenance(
     let machine = host.next_iteration_machine(&env).await;
     assert_eq!(
         machine.current_state(),
-        &ManagedHostState::Maintenance { operation }
+        &ManagedHostState::Maintenance {
+            operation,
+            request: machine.machine_maintenance_requested.clone(),
+        }
     );
     let machine = host.next_iteration_machine(&env).await;
     assert_eq!(machine.current_state(), &ManagedHostState::Ready);

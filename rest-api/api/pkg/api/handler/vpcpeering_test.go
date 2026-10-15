@@ -13,22 +13,25 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
-	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
+	tp "go.temporal.io/sdk/temporal"
+
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
 func TestNewGetVpcPeeringHandler(t *testing.T) {
@@ -42,7 +45,6 @@ func TestNewGetVpcPeeringHandler(t *testing.T) {
 	assert.Equal(t, dbSession, got.dbSession)
 	assert.Equal(t, tc, got.tc)
 	assert.Equal(t, cfg, got.cfg)
-	assert.NotNil(t, got.tracerSpan)
 }
 
 func TestNewDeleteVpcPeeringHandler(t *testing.T) {
@@ -59,8 +61,22 @@ func TestNewDeleteVpcPeeringHandler(t *testing.T) {
 	assert.Equal(t, tc, got.tc)
 	assert.Equal(t, scp, got.scp)
 	assert.Equal(t, cfg, got.cfg)
-	assert.NotNil(t, got.tracerSpan)
 }
+
+type vpcPeeringBeforeReadyHook struct {
+	beforeReady func()
+}
+
+func (hook *vpcPeeringBeforeReadyHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if hook.beforeReady != nil && strings.HasPrefix(event.Query, "UPDATE \"vpc_peering\"") && strings.Contains(event.Query, "status = 'Ready'") {
+		beforeReady := hook.beforeReady
+		hook.beforeReady = nil
+		beforeReady()
+	}
+	return ctx
+}
+
+func (*vpcPeeringBeforeReadyHook) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 	ctx := context.Background()
@@ -139,7 +155,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 	assert.NotNil(t, existingVP)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	mockTC := &tmocks.Client{}
@@ -215,16 +231,30 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		SiteID: st2.ID.String(),
 	}
 	dualRoleProviderBodyBytes, _ := json.Marshal(dualRoleProviderBody)
+	concurrentDeleteBody, err := json.Marshal(model.APIVpcPeeringCreateRequest{
+		Vpc1ID: vpc2.ID.String(),
+		Vpc2ID: vpc3.ID.String(),
+		SiteID: st1.ID.String(),
+	})
+	require.NoError(t, err)
+	removedBeforeReadyBody, err := json.Marshal(model.APIVpcPeeringCreateRequest{
+		Vpc1ID: vpc2.ID.String(),
+		Vpc2ID: vpc4.ID.String(),
+		SiteID: st1.ID.String(),
+	})
+	require.NoError(t, err)
 
 	tests := []struct {
-		name           string
-		reqOrgName     string
-		reqBody        string
-		user           *cdbm.User
-		expectedErr    bool
-		expectedStatus int
-		expectedVpcIDs []string
-		expectedSiteID string
+		name              string
+		reqOrgName        string
+		reqBody           string
+		user              *cdbm.User
+		expectedErr       bool
+		expectedStatus    int
+		expectedVpcIDs    []string
+		expectedSiteID    string
+		deleteBeforeReady bool
+		removeBeforeReady bool
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -354,16 +384,55 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 			expectedVpcIDs: []string{vpc7.ID.String(), vpc8.ID.String()},
 			expectedSiteID: st2.ID.String(),
 		},
+		{
+			name:              "post-create Ready update preserves a committed deletion",
+			reqOrgName:        tnOrg1,
+			reqBody:           string(concurrentDeleteBody),
+			user:              tnu1,
+			expectedStatus:    http.StatusCreated,
+			expectedVpcIDs:    []string{vpc2.ID.String(), vpc3.ID.String()},
+			expectedSiteID:    st1.ID.String(),
+			deleteBeforeReady: true,
+		},
+		{
+			name:              "failed post-create status reload preserves successful creation",
+			reqOrgName:        ipOrg,
+			reqBody:           string(removedBeforeReadyBody),
+			user:              ipu,
+			expectedStatus:    http.StatusCreated,
+			expectedVpcIDs:    []string{vpc2.ID.String(), vpc4.ID.String()},
+			expectedSiteID:    st1.ID.String(),
+			removeBeforeReady: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			var deletedPeeringID uuid.UUID
+			if tt.deleteBeforeReady || tt.removeBeforeReady {
+				// The create transaction has committed before this query. Commit
+				// deletion or removal before letting the Ready writer proceed.
+				dbSession.DB.AddQueryHook(&vpcPeeringBeforeReadyHook{beforeReady: func() {
+					peering := &cdbm.VpcPeering{}
+					err := dbSession.DB.NewSelect().Model(peering).
+						Where("(vpc1_id = ? AND vpc2_id = ?) OR (vpc1_id = ? AND vpc2_id = ?)", tt.expectedVpcIDs[0], tt.expectedVpcIDs[1], tt.expectedVpcIDs[1], tt.expectedVpcIDs[0]).
+						Scan(ctx)
+					require.NoError(t, err)
+					require.Equal(t, cdbm.VpcPeeringStatusConfiguring, peering.Status)
+					deletedPeeringID = peering.ID
+					dao := cdbm.NewVpcPeeringDAO(dbSession)
+					if tt.removeBeforeReady {
+						require.NoError(t, dao.Delete(ctx, nil, peering.ID))
+					} else {
+						require.NoError(t, dao.UpdateStatusByID(ctx, nil, peering.ID, cdbm.VpcPeeringStatusDeleting))
+					}
+				}})
+			}
 			cvph := CreateVpcPeeringHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        common.GetTestConfig(),
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       common.GetTestConfig(),
 			}
 
 			e := echo.New()
@@ -376,8 +445,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := cvph.Handle(ec)
 			require.NoError(t, err)
@@ -392,7 +460,22 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 						(apiVpcPeering.Vpc1ID == tt.expectedVpcIDs[1] && apiVpcPeering.Vpc2ID == tt.expectedVpcIDs[0]),
 					"expected vpc1Id and vpc2Id should match the list of expected VPC IDs")
 				assert.True(t, apiVpcPeering.SiteID == tt.expectedSiteID, "expected siteId should match the expected site ID")
-				assert.Equal(t, cdbm.VpcPeeringStatusReady, apiVpcPeering.Status, "expected status should be Ready")
+				expectedPeeringStatus := cdbm.VpcPeeringStatusReady
+				if tt.removeBeforeReady {
+					require.NotEqual(t, uuid.Nil, deletedPeeringID, "post-create Ready query must run")
+					expectedPeeringStatus = cdbm.VpcPeeringStatusConfiguring
+					_, err := cdbm.NewVpcPeeringDAO(dbSession).GetByID(ctx, nil, deletedPeeringID, nil)
+					assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+				}
+				if tt.deleteBeforeReady {
+					require.NotEqual(t, uuid.Nil, deletedPeeringID, "post-create Ready query must run")
+					expectedPeeringStatus = cdbm.VpcPeeringStatusDeleting
+					peering, err := cdbm.NewVpcPeeringDAO(dbSession).GetByID(ctx, nil, deletedPeeringID, nil)
+					require.NoError(t, err)
+					assert.Equal(t, expectedPeeringStatus, peering.Status)
+					assert.Nil(t, peering.Deleted)
+				}
+				assert.Equal(t, expectedPeeringStatus, apiVpcPeering.Status)
 			}
 		})
 	}
@@ -476,7 +559,7 @@ func TestGetAllVpcPeeringHandler_Handle(t *testing.T) {
 	err := vpPeeringDAO.UpdateStatusByID(ctx, nil, vp12.ID, cdbm.VpcPeeringStatusReady)
 	require.NoError(t, err)
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 	mockTC := &tmocks.Client{}
 	cfg := common.GetTestConfig()
 
@@ -734,10 +817,9 @@ func TestGetAllVpcPeeringHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gavph := GetAllVpcPeeringHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				cfg:       cfg,
 			}
 
 			e := echo.New()
@@ -763,8 +845,7 @@ func TestGetAllVpcPeeringHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gavph.Handle(ec)
 			require.NoError(t, err)
@@ -891,7 +972,7 @@ func TestGetVpcPeeringHandler_Handle(t *testing.T) {
 	vp14 := common.TestBuildVpcPeering(t, dbSession, vpc1.ID, vpc4.ID, st1.ID, &ip.ID, nil, true, ipu.ID)
 	vp56 := common.TestBuildVpcPeering(t, dbSession, vpc5.ID, vpc6.ID, st2.ID, &ip2.ID, nil, true, ipu2.ID)
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 	mockTC := &tmocks.Client{}
 	cfg := common.GetTestConfig()
 
@@ -1094,10 +1175,9 @@ func TestGetVpcPeeringHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gvph := GetVpcPeeringHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				cfg:       cfg,
 			}
 
 			e := echo.New()
@@ -1120,8 +1200,7 @@ func TestGetVpcPeeringHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, tt.peeringID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gvph.Handle(ec)
 			require.NoError(t, err)
@@ -1225,7 +1304,7 @@ func TestDeleteVpcPeeringHandler_Handle(t *testing.T) {
 	vp45 := common.TestBuildVpcPeering(t, dbSession, vpc4.ID, vpc5.ID, st2.ID, nil, &tn2.ID, false, tnu2.ID)
 	vp67 := common.TestBuildVpcPeering(t, dbSession, vpc6.ID, vpc7.ID, st2.ID, nil, &tnProvider.ID, false, ipu2.ID)
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	cfg := common.GetTestConfig()
 
@@ -1243,13 +1322,15 @@ func TestDeleteVpcPeeringHandler_Handle(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		reqOrgName     string
-		peeringID      string
-		user           *cdbm.User
-		expectedStatus int
-		expectDeleted  bool
-		deletedID      uuid.UUID
+		name            string
+		reqOrgName      string
+		peeringID       string
+		user            *cdbm.User
+		expectedStatus  int
+		workflowErr     error
+		statusBefore    string
+		peeringStatus   string
+		expectedMessage string
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -1308,42 +1389,105 @@ func TestDeleteVpcPeeringHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusForbidden,
 		},
 		{
+			name:           "workflow failure preserves the peering status",
+			reqOrgName:     tnOrg1,
+			peeringID:      vp12.ID.String(),
+			user:           tnu1,
+			expectedStatus: http.StatusInternalServerError,
+			workflowErr:    errors.New("Core is unavailable"),
+			peeringStatus:  vp12.Status,
+		},
+		{
+			name:            "NICo precondition failure preserves Ready and asks the caller to retry",
+			reqOrgName:      tnOrg1,
+			peeringID:       vp12.ID.String(),
+			user:            tnu1,
+			expectedStatus:  http.StatusPreconditionFailed,
+			workflowErr:     tp.NewNonRetryableApplicationError("network version changed", swe.ErrTypeNICoFailedPrecondition, nil),
+			statusBefore:    cdbm.VpcPeeringStatusReady,
+			peeringStatus:   cdbm.VpcPeeringStatusReady,
+			expectedMessage: "Site rejected VPC Peering deletion because a precondition was not satisfied. Retry the request; contact support if it continues to fail.",
+		},
+		{
+			name:            "legacy Carbide precondition failure preserves Ready and asks the caller to retry",
+			reqOrgName:      tnOrg1,
+			peeringID:       vp12.ID.String(),
+			user:            tnu1,
+			expectedStatus:  http.StatusPreconditionFailed,
+			workflowErr:     tp.NewNonRetryableApplicationError("network version changed", swe.ErrTypeCarbideFailedPrecondition, nil),
+			statusBefore:    cdbm.VpcPeeringStatusReady,
+			peeringStatus:   cdbm.VpcPeeringStatusReady,
+			expectedMessage: "Site rejected VPC Peering deletion because a precondition was not satisfied. Retry the request; contact support if it continues to fail.",
+		},
+		{
 			name:           "Tenant Admin success when both VPCs belong to tenant",
 			reqOrgName:     tnOrg1,
 			peeringID:      vp12.ID.String(),
 			user:           tnu1,
-			expectedStatus: http.StatusNoContent,
-			expectDeleted:  true,
-			deletedID:      vp12.ID,
+			expectedStatus: http.StatusAccepted,
+			peeringStatus:  cdbm.VpcPeeringStatusDeleting,
+		},
+		{
+			name:           "repeated delete preserves Deleting while Core removes the peering",
+			reqOrgName:     tnOrg1,
+			peeringID:      vp12.ID.String(),
+			user:           tnu1,
+			expectedStatus: http.StatusAccepted,
+			statusBefore:   cdbm.VpcPeeringStatusDeleting,
+			peeringStatus:  cdbm.VpcPeeringStatusDeleting,
+		},
+		{
+			name:           "repeated delete succeeds after Core removal and before inventory catches up",
+			reqOrgName:     tnOrg1,
+			peeringID:      vp12.ID.String(),
+			user:           tnu1,
+			expectedStatus: http.StatusAccepted,
+			workflowErr:    tp.NewNonRetryableApplicationError("VPC Peering not found", swe.ErrTypeNICoObjectNotFound, nil),
+			statusBefore:   cdbm.VpcPeeringStatusDeleting,
+			peeringStatus:  cdbm.VpcPeeringStatusDeleting,
 		},
 		{
 			name:           "Provider Admin success when multi-tenant peering in their site",
 			reqOrgName:     ipOrg,
 			peeringID:      vp23.ID.String(),
 			user:           ipu,
-			expectedStatus: http.StatusNoContent,
-			expectDeleted:  true,
-			deletedID:      vp23.ID,
+			expectedStatus: http.StatusAccepted,
+			peeringStatus:  cdbm.VpcPeeringStatusDeleting,
 		},
 		{
 			name:           "user with both provider and tenant admin roles can delete single-tenant peering via tenant authorization path",
 			reqOrgName:     ipOrg2,
 			peeringID:      vp67.ID.String(),
 			user:           ipu2,
-			expectedStatus: http.StatusNoContent,
-			expectDeleted:  true,
-			deletedID:      vp67.ID,
+			expectedStatus: http.StatusAccepted,
+			peeringStatus:  cdbm.VpcPeeringStatusDeleting,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dvph := DeleteVpcPeeringHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       cfg,
+			}
+			if tt.workflowErr != nil {
+				workflowRun := &tmocks.WorkflowRun{}
+				workflowRun.On("GetID").Return("test-failed-delete-workflow-id")
+				workflowRun.On("Get", mock.Anything, nil).Return(tt.workflowErr)
+				siteClient := &tmocks.Client{}
+				siteClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, "DeleteVpcPeering", mock.Anything).Return(workflowRun, nil)
+				dvph.scp = &sc.ClientPool{IDClientMap: map[string]temporalClient.Client{st1.ID.String(): siteClient}}
+				t.Cleanup(func() {
+					siteClient.AssertExpectations(t)
+					workflowRun.AssertExpectations(t)
+				})
+			}
+			vpDAO := cdbm.NewVpcPeeringDAO(dbSession)
+			if tt.statusBefore != "" {
+				err := vpDAO.UpdateStatusByID(ctx, nil, uuid.MustParse(tt.peeringID), tt.statusBefore)
+				require.NoError(t, err)
 			}
 
 			e := echo.New()
@@ -1355,17 +1499,38 @@ func TestDeleteVpcPeeringHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, tt.peeringID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := dvph.Handle(ec)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.expectedStatus == http.StatusAccepted {
+				assertDeletionAcceptedResponse(t, rec.Body.Bytes())
+			}
+			if tt.expectedMessage != "" {
+				var response sutil.APIError
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, tt.expectedMessage, response.Message)
+				assert.Nil(t, response.Data)
+			}
 
-			if tt.expectDeleted && tt.deletedID != uuid.Nil {
-				vpDAO := cdbm.NewVpcPeeringDAO(dbSession)
-				_, err := vpDAO.GetByID(context.Background(), nil, tt.deletedID, nil)
-				assert.True(t, errors.Is(err, cdb.ErrDoesNotExist), "expected peering to be deleted from DB")
+			if tt.peeringStatus != "" {
+				peering, err := vpDAO.GetByID(ctx, nil, uuid.MustParse(tt.peeringID), nil)
+				require.NoError(t, err)
+				assert.Equal(t, tt.peeringStatus, peering.Status)
+				assert.Nil(t, peering.Deleted)
+
+				getHandler := NewGetVpcPeeringHandler(dbSession, mockTC, cfg)
+				getResponse := httptest.NewRecorder()
+				getContext := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), getResponse)
+				getContext.SetParamNames("orgName", "id")
+				getContext.SetParamValues(tt.reqOrgName, tt.peeringID)
+				getContext.Set("user", tt.user)
+				require.NoError(t, getHandler.Handle(getContext))
+				require.Equal(t, http.StatusOK, getResponse.Code)
+				var response model.APIVpcPeering
+				require.NoError(t, json.Unmarshal(getResponse.Body.Bytes(), &response))
+				assert.Equal(t, tt.peeringStatus, response.Status)
 			}
 		})
 	}

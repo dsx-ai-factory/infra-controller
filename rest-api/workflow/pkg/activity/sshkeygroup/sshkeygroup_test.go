@@ -939,6 +939,7 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 	// Generate data for 34 Subnets reported from Site Agent while Cloud has 38 Subnets
 	pagedSSHKeyGroups := []*cdbm.SSHKeyGroup{}
 	pagedInvSSHKeyGroupIDs := []string{}
+	var pagedUnreportedSkgsa *cdbm.SSHKeyGroupSiteAssociation
 	for i := 0; i < 38; i++ {
 		keyGroup := util.TestBuildSSHKeyGroup(t, dbSession, fmt.Sprintf("test-sshkeygroup-paged-%d", i), tnOrg, cutil.GetPtr("description"), tn.ID, cutil.GetPtr("122346"), cdbm.SSHKeyGroupStatusSynced, tnu.ID)
 		// Update creation timestamp to be earlier than inventory processing interval
@@ -951,6 +952,10 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 		assert.NotNil(t, skgsa)
 		_, err := dbSession.DB.Exec("UPDATE ssh_key_group_site_association SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), skgsa.ID.String())
 		assert.NoError(t, err)
+		// The Site reports only the first 34, so this one is absent from every page.
+		if i == 37 {
+			pagedUnreportedSkgsa = skgsa
+		}
 	}
 
 	pagedCtrlSSHKeyGroups := []*corev1.TenantKeyset{}
@@ -985,18 +990,22 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                string
-		fields              fields
-		args                args
-		syncingKeyset       *cdbm.SSHKeyGroupSiteAssociation
-		outOfSyncKeyset     *cdbm.SSHKeyGroupSiteAssociation
-		deletingKeyset      *cdbm.SSHKeyGroupSiteAssociation
-		errorKeyset         *cdbm.SSHKeyGroupSiteAssociation
-		missingKeyset       *cdbm.SSHKeyGroupSiteAssociation
-		restoredKeyset      *cdbm.SSHKeyGroupSiteAssociation
-		deletedKeyset       *cdbm.SSHKeyGroupSiteAssociation
-		wantErr             bool
-		expectedAssocChange int
+		name            string
+		fields          fields
+		args            args
+		syncingKeyset   *cdbm.SSHKeyGroupSiteAssociation
+		outOfSyncKeyset *cdbm.SSHKeyGroupSiteAssociation
+		deletingKeyset  *cdbm.SSHKeyGroupSiteAssociation
+		errorKeyset     *cdbm.SSHKeyGroupSiteAssociation
+		missingKeyset   *cdbm.SSHKeyGroupSiteAssociation
+		restoredKeyset  *cdbm.SSHKeyGroupSiteAssociation
+		deletedKeyset   *cdbm.SSHKeyGroupSiteAssociation
+		// unreportedKeyset is an association the Site never reports, so whether it ends up
+		// flagged missing is decided purely by whether the page could run the sweep.
+		unreportedKeyset      *cdbm.SSHKeyGroupSiteAssociation
+		wantUnreportedMissing bool
+		wantErr               bool
+		expectedAssocChange   int
 	}{
 		{
 			name: "test SSHKeyGroupinventory processing error, non-existent Site",
@@ -1083,7 +1092,9 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 			expectedAssocChange: 3,
 		},
 		{
-			name: "test paged SSHKeyGroup inventory processing",
+			// An earlier page says nothing about what the Site is missing, even when it
+			// carries the full ID list, so nothing may be marked missing from it.
+			name: "test paged SSHKeyGroup inventory processing, earlier page",
 			fields: fields{
 				dbSession:      dbSession,
 				siteClientPool: tSiteClientPool,
@@ -1104,7 +1115,60 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 					},
 				},
 			},
-			expectedAssocChange: 4,
+			unreportedKeyset:      pagedUnreportedSkgsa,
+			wantUnreportedMissing: false,
+			expectedAssocChange:   0,
+		},
+		{
+			name: "test paged SSHKeyGroup inventory processing, last page",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st2.ID,
+				sshKeyGroupInventory: &corev1.SSHKeyGroupInventory{
+					TenantKeysets: pagedCtrlSSHKeyGroups[30:34],
+					Timestamp:     timestamppb.Now(),
+					InventoryPage: &corev1.InventoryPage{
+						CurrentPage: 4,
+						TotalPages:  4,
+						PageSize:    10,
+						TotalItems:  34,
+						ItemIds:     pagedInvSSHKeyGroupIDs[0:34],
+					},
+				},
+			},
+			unreportedKeyset:      pagedUnreportedSkgsa,
+			wantUnreportedMissing: true,
+			expectedAssocChange:   4,
+		},
+		{
+			// A final page with no list is a Site Agent that sends it elsewhere, which is
+			// not evidence that anything was removed from the Site.
+			name: "test paged SSHKeyGroup inventory processing, last page without item IDs",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st2.ID,
+				sshKeyGroupInventory: &corev1.SSHKeyGroupInventory{
+					TenantKeysets: pagedCtrlSSHKeyGroups[30:34],
+					Timestamp:     timestamppb.Now(),
+					InventoryPage: &corev1.InventoryPage{
+						CurrentPage: 4,
+						TotalPages:  4,
+						PageSize:    10,
+						TotalItems:  34,
+					},
+				},
+			},
+			expectedAssocChange: 0,
 		},
 	}
 	for _, tt := range tests {
@@ -1174,6 +1238,12 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 				restoredKeyset, _ := sshKeyGroupDAO.GetByID(ctx, nil, tt.restoredKeyset.ID, nil)
 				assert.False(t, restoredKeyset.IsMissingOnSite)
 				assert.Equal(t, cdbm.SSHKeyGroupSiteAssociationStatusSynced, restoredKeyset.Status)
+			}
+
+			if tt.unreportedKeyset != nil {
+				unreportedKeyset, derr := sshKeyGroupDAO.GetByID(ctx, nil, tt.unreportedKeyset.ID, nil)
+				assert.NoError(t, derr)
+				assert.Equal(t, tt.wantUnreportedMissing, unreportedKeyset.IsMissingOnSite)
 			}
 
 			if tt.deletedKeyset != nil {

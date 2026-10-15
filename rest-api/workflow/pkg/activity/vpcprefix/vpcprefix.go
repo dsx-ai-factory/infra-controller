@@ -20,6 +20,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
@@ -168,7 +169,7 @@ func (mvp ManageVpcPrefix) UpdateVpcPrefixesInDB(ctx context.Context, siteID uui
 	vpcPrefixesToDelete := []*cdbm.VpcPrefix{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if vpcPrefixInventory.InventoryPage == nil || vpcPrefixInventory.InventoryPage.TotalPages == 0 || (vpcPrefixInventory.InventoryPage.CurrentPage == vpcPrefixInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(vpcPrefixInventory.GetInventoryPage()) {
 		for _, vpcPrefix := range existingVpcPrefixIDMap {
 			found := false
 

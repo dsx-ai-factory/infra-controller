@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use carbide_uuid::DbTable;
 use config_version::ConfigVersion;
 use model::machine_validation::MachineValidationExternalConfig;
 use sqlx::PgConnection;
@@ -25,8 +26,15 @@ pub async fn find_config_by_name(
     txn: impl DbReader<'_>,
     name: &str,
 ) -> DatabaseResult<MachineValidationExternalConfig> {
-    let query = "SELECT * FROM machine_validation_external_config WHERE name=$1";
-    match sqlx::query_as(query).bind(name).fetch_one(txn).await {
+    let query = format!(
+        "SELECT {} FROM machine_validation_external_config WHERE name=$1",
+        MachineValidationExternalConfig::db_table_columns(),
+    );
+    match sqlx::query_as(sqlx::AssertSqlSafe(query))
+        .bind(name)
+        .fetch_one(txn)
+        .await
+    {
         Ok(val) => Ok(val),
         Err(_) => Err(DatabaseError::NotFoundError {
             kind: "machine_validation_external_config",
@@ -89,12 +97,15 @@ pub async fn create_or_update(
 pub async fn find_configs(
     txn: impl DbReader<'_>,
 ) -> DatabaseResult<Vec<MachineValidationExternalConfig>> {
-    let query = "SELECT * FROM machine_validation_external_config";
+    let query = format!(
+        "SELECT {} FROM machine_validation_external_config",
+        MachineValidationExternalConfig::db_table_columns(),
+    );
 
-    let names = sqlx::query_as(query)
+    let names = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+        .map_err(|e| DatabaseError::query(&query, e))?;
     Ok(names)
 }
 
@@ -102,8 +113,15 @@ pub async fn remove_config(
     txn: &mut PgConnection,
     name: &str,
 ) -> DatabaseResult<MachineValidationExternalConfig> {
-    let query = "DELETE FROM machine_validation_external_config WHERE name=$1 RETURNING *";
-    match sqlx::query_as(query).bind(name).fetch_one(txn).await {
+    let query = format!(
+        "DELETE FROM machine_validation_external_config WHERE name=$1 RETURNING {}",
+        MachineValidationExternalConfig::db_table_columns(),
+    );
+    match sqlx::query_as(sqlx::AssertSqlSafe(query))
+        .bind(name)
+        .fetch_one(txn)
+        .await
+    {
         Ok(val) => Ok(val),
         Err(_) => Err(DatabaseError::NotFoundError {
             kind: "machine_validation_external_config",

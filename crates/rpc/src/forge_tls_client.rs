@@ -27,7 +27,7 @@ use forge_tls::dummy_tls_verifier::DummyTlsVerifier;
 use hickory_resolver::config::ResolverConfig;
 use hyper::body::Incoming;
 use hyper_util::client::legacy;
-use hyper_util::rt::{TokioExecutor, TokioTimer};
+use hyper_util::rt::TokioTimer;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore};
 use tonic::body::Body;
@@ -471,6 +471,20 @@ impl<'a> ApiConfig<'a> {
     }
 }
 
+/// Runs hyper's connection tasks outside the caller's span.
+#[derive(Clone, Copy, Debug, Default)]
+struct DetachedExecutor;
+
+impl<F> hyper::rt::Executor<F> for DetachedExecutor
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    fn execute(&self, future: F) {
+        tokio::spawn(future);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ForgeTlsClient<'a> {
     forge_client_config: &'a ForgeClientConfig,
@@ -584,7 +598,7 @@ impl<'a> ForgeTlsClient<'a> {
 
         // ping interval + ping timeout should add up to less than tcp_user_timeout,
         // so that the application gets a chance to fix things before the kernel.
-        let hyper_client = legacy::Client::builder(TokioExecutor::new())
+        let hyper_client = legacy::Client::builder(DetachedExecutor)
             .http2_only(true)
             // Send a PING frame every this
             .http2_keep_alive_interval(Some(Duration::from_secs(10)))
@@ -744,8 +758,10 @@ impl<'a> ForgeTlsClient<'a> {
         http.set_socks5_proxy(self.forge_client_config.socks_proxy.clone());
         http.enforce_http(false);
 
-        // Wait this long for `connect` syscall to return.
-        // Hyper implements this by wrapping the call in `tokio::time::timeout`.
+        // Configure the TCP timeout; ForgeHttpConnector::set_connect_timeout
+        // documents how pending DNS and address families share that budget.
+        // DNS queries and retry backoff have separate limits, so callers needing
+        // an overall deadline must bound the request, as the site probe and DHCP do.
         http.set_connect_timeout(Some(Duration::from_secs(5)));
 
         // Set TCP timeouts. The interactions are non-obvious, but here are the basics:
@@ -807,7 +823,7 @@ impl<'a> ForgeTlsClient<'a> {
 
         // ping interval + ping timeout should add up to less than tcp_user_timeout,
         // so that the application gets a chance to fix things before the kernel.
-        let hyper_client = legacy::Client::builder(TokioExecutor::new())
+        let hyper_client = legacy::Client::builder(DetachedExecutor)
             .http2_only(true)
             // Send a PING frame every this
             .http2_keep_alive_interval(Some(Duration::from_secs(10)))
@@ -955,9 +971,38 @@ mod tests {
 
     use carbide_test_support::value_scenarios;
     use forge_http_connector::connector::ConnectorMetrics;
+    use hyper::rt::Executor as _;
     use hyper_rustls::HttpsConnector;
+    use hyper_util::rt::TokioExecutor;
+    use tracing::Instrument as _;
 
     use super::*;
+
+    /// A connection task spawned while a call's span is current runs outside
+    /// it, where a task spawned in the current span, as hyper-util's
+    /// `TokioExecutor` spawns under its `tracing` feature, runs inside it.
+    #[tokio::test]
+    async fn connection_tasks_run_outside_the_callers_span() {
+        let _subscriber = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let call = tracing::info_span!("call");
+        let span_seen = || {
+            let (seen, seen_in) = tokio::sync::oneshot::channel();
+            let task = async move {
+                seen.send(tracing::Span::current().id()).ok();
+            };
+            (task, seen_in)
+        };
+
+        let (task, seen_in) = span_seen();
+        call.in_scope(|| tokio::spawn(task.in_current_span()));
+        assert_eq!(seen_in.await.unwrap(), call.id(), "spawned in the span");
+
+        // Under `tokio_unstable`, tokio runs each task in a root span of its
+        // own, so a detached task's span is not none, only not the call's.
+        let (task, seen_in) = span_seen();
+        call.in_scope(|| DetachedExecutor.execute(task));
+        assert_ne!(seen_in.await.unwrap(), call.id(), "spawned detached");
+    }
 
     /// A node-token client presents no client certificate, which by itself
     /// drops the channel onto `DummyTlsVerifier`. `require_tls_enforcement`
@@ -1084,33 +1129,11 @@ mod tests {
         }
     }
 
+    /// The Hyper client must honor the connector's retry limit and metrics.
+    /// Use a literal address here; DNS-family retry coverage lives with the resolver.
     #[tokio::test]
-    // test_max_retries builds up an instance of hyper client using
-    // the ForgeHttpConnector, which is the same configuration used
-    // for creating a ForgeTlsClient. In this case, it is NOT
-    // used to create a ForgeTlsClient, but instead is used directly
-    // to make an HTTP call (so we maintain access to the underlying
-    // connector for querying retry count.
     async fn test_max_retries() {
         let max_retries = 3; // 4 total attempts
-
-        // Set up all of the resolver config stuff
-        // to pass to the ForgeHttpConnector.
-        let forge_resolv_config =
-            forge_resolver::resolver::ForgeResolveConf::with_system_resolv_conf().unwrap();
-        let forge_resolver_config = forge_resolver::resolver::into_forge_resolver_config(
-            forge_resolv_config.parsed_configuration(),
-        )
-        .unwrap();
-
-        let resolver_config = ResolverConfig::from_parts(
-            forge_resolver_config.0.domain,
-            forge_resolver_config.0.search_domain,
-            forge_resolver_config.0.inner,
-        );
-
-        let resolver_opts = ForgeResolverOpts::default().timeout(Duration::from_secs(5));
-        let resolver = ForgeResolver::with_config_and_options(resolver_config, resolver_opts);
 
         // Create the ConnectorMetrics instance used for
         // collecting some stats for connections that go
@@ -1120,7 +1143,7 @@ mod tests {
         // Now create the ForgeHttpConnector, setting our
         // test-specific `max_retries` with a 1 second interval,
         // and passing it our Connectormetrics.
-        let mut http = ForgeHttpConnector::new_with_resolver(resolver);
+        let mut http = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
         http.set_connect_retries_max(Some(max_retries));
         http.set_connect_retries_interval(Some(Duration::from_secs(1)));
         http.set_metrics(metrics.clone());
@@ -1150,26 +1173,25 @@ mod tests {
         let hyper_client: legacy::Client<HttpsConnector<ForgeHttpConnector>, Body> =
             legacy::Client::builder(TokioExecutor::new()).build(connector);
 
-        // We're finally here. Fire off an HTTP request. Behind he scenes,
-        // the ForgeHttpConnector is going to attempt to connect, fail, and
-        // subsequently fire off 3 retries. This assumes you don't have
-        // anything listening on :12345. If you do, this test will obviously
-        // fail, because the connection will be successful. :P
-        let uri = "http://localhost:12345".parse::<Uri>().unwrap();
-        let _ = hyper_client.get(uri).await;
-
-        // If you're curious to see what metrics are collected,
-        // uncomment this when you run the test with --nocapture.
-        // println!("{:?}", metrics.lock(unwrapped.attempts_by_addr.get).unwrap());
+        // Reserve the destination without listening so every attempt is refused,
+        // even if another test or service is running on this machine.
+        let reservation = tokio::net::TcpSocket::new_v4().expect("create refused destination");
+        reservation
+            .bind("127.0.0.1:0".parse().expect("loopback address"))
+            .expect("reserve refused destination");
+        let addr = reservation.local_addr().expect("reserved address");
+        let uri = format!("http://{addr}").parse::<Uri>().expect("retry URI");
+        tokio::time::timeout(Duration::from_secs(10), hyper_client.get(uri))
+            .await
+            .expect("HTTP retry request did not finish")
+            .expect_err("reserved destination must refuse connections");
 
         // Make sure attempts, errors, and successes are all as expected.
         assert_eq!(metrics.get_total_attempts(), max_retries + 1);
         assert_eq!(metrics.get_total_errors(), max_retries + 1);
         assert_eq!(metrics.get_total_successes(), 0);
 
-        // And make sure by_addr metrics are working as well. This
-        // assumes localhost resolves to 127.0.0.1.
-        let addr = SocketAddr::from_str("127.0.0.1:12345").unwrap();
+        // And make sure by_addr metrics are working as well.
         let attempts_for_addr = metrics.get_attempts_for_addr(&addr);
         let successes_for_addr = metrics.get_successes_for_addr(&addr);
         let errors_for_addr = metrics.get_errors_for_addr(&addr);

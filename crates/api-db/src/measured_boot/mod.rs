@@ -34,3 +34,6 @@ pub mod machine;
 pub mod profile;
 pub mod report;
 pub mod site;
+
+#[cfg(test)]
+mod test_explicit_columns;

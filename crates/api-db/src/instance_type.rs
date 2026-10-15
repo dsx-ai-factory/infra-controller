@@ -77,7 +77,7 @@ pub async fn create(
             WHERE NOT EXISTS
                 /* There should be a unique constraint on id.  The condition here is just defensive. */
                 (SELECT id FROM instance_types WHERE id=$7::varchar OR (name=$8::varchar AND deleted IS NULL))
-            RETURNING *";
+            RETURNING id, name, labels, description, desired_capabilities, version, created, deleted";
 
     match sqlx::query_as::<Postgres, InstanceType>(query)
         .bind(id)
@@ -136,8 +136,10 @@ pub async fn find_by_ids(
     instance_type_ids: &[InstanceTypeId],
     for_update: bool,
 ) -> Result<Vec<InstanceType>, DatabaseError> {
-    let mut builder =
-        sqlx::QueryBuilder::new("SELECT * from instance_types WHERE deleted is NULL AND");
+    let mut builder = sqlx::QueryBuilder::new(
+        "SELECT id, name, labels, description, desired_capabilities, version, created, deleted
+         from instance_types WHERE deleted is NULL AND",
+    );
 
     builder.push(" id = ANY(");
     builder.push_bind(instance_type_ids);
@@ -183,7 +185,7 @@ pub async fn update(
                 AND deleted IS NULL       /* Also just here to be defensive and for the same reason */
                 AND NOT EXISTS
                     (SELECT id FROM instance_types WHERE id!=$8::varchar AND name=$9::varchar AND deleted IS NULL)
-            RETURNING *";
+            RETURNING id, name, labels, description, desired_capabilities, version, created, deleted";
 
     match sqlx::query_as::<Postgres, InstanceType>(query)
         .bind(&metadata.name)
@@ -243,8 +245,86 @@ mod tests {
     use model::instance_type::InstanceTypeMachineCapabilityFilter;
     use model::machine::capabilities::{MachineCapabilityDeviceType, MachineCapabilityType};
     use model::metadata::Metadata;
+    use sqlx::Connection;
 
     use super::*;
+
+    #[crate::sqlx_test]
+    async fn instance_type_queries_survive_added_columns(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut api_connection = pool.acquire().await?;
+        exercise_instance_type_queries(&mut api_connection).await?;
+        assert!(api_connection.cached_statements_size() > 0);
+
+        // Keep the API connection and its prepared statements while another
+        // connection applies the schema change, just as a migration would.
+        let mut migration = pool.begin().await?;
+        sqlx::raw_sql(
+            "SET LOCAL lock_timeout = '5s';
+             ALTER TABLE instance_types ADD COLUMN test_added_column text;",
+        )
+        .execute(&mut *migration)
+        .await?;
+        migration.commit().await?;
+
+        exercise_instance_type_queries(&mut api_connection).await?;
+        Ok(())
+    }
+
+    async fn exercise_instance_type_queries(
+        connection: &mut PgConnection,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = connection.begin().await?;
+        let id: InstanceTypeId = "projection-instance-type".parse()?;
+        let metadata = Metadata {
+            name: "projection instance type".to_string(),
+            description: "instance type description".to_string(),
+            labels: HashMap::from([("type-label".to_string(), "original".to_string())]),
+        };
+        let capabilities = vec![InstanceTypeMachineCapabilityFilter {
+            capability_type: MachineCapabilityType::Gpu,
+            name: Some("H100".to_string()),
+            frequency: Some("1.8 GHz".to_string()),
+            capacity: Some("80 GiB".to_string()),
+            vendor: Some("nvidia".to_string()),
+            count: Some(8),
+            hardware_revision: Some("revision-1".to_string()),
+            cores: Some(132),
+            threads: Some(264),
+            inactive_devices: Some(vec![2]),
+            device_type: Some(MachineCapabilityDeviceType::Unknown),
+        }];
+        let mut expected = create(&mut txn, &id, &metadata, &capabilities).await?;
+        assert_eq!(expected.id, id);
+        assert_eq!(expected.metadata, metadata);
+        assert_eq!(expected.desired_capabilities, capabilities);
+        assert_eq!(expected.version.version_nr(), 1);
+        assert_eq!(expected.deleted, None);
+        assert!(expected.created > chrono::DateTime::UNIX_EPOCH);
+
+        let metadata = Metadata {
+            name: "renamed instance type".to_string(),
+            description: "updated description".to_string(),
+            labels: HashMap::from([("type-label".to_string(), "updated".to_string())]),
+        };
+        let capabilities = vec![InstanceTypeMachineCapabilityFilter {
+            count: Some(4),
+            ..capabilities[0].clone()
+        }];
+        let updated = update(&mut txn, &id, &metadata, &capabilities, expected.version).await?;
+        assert_eq!(updated.version.version_nr(), 2);
+        expected.version = updated.version;
+        expected.metadata = metadata;
+        expected.desired_capabilities = capabilities;
+        assert_eq!(updated, expected);
+        assert_eq!(find_by_ids(&mut txn, &[id], true).await?, vec![expected]);
+
+        // Roll back the fixture so both passes decode an inserted row.
+        // The connection retains its prepared statements after the rollback.
+        txn.rollback().await?;
+        Ok(())
+    }
 
     #[crate::sqlx_test]
     async fn instance_type_crud(pool: sqlx::PgPool) {

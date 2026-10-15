@@ -24,7 +24,6 @@ use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::machine::{HealthReportTemplates, get_health_report};
 use crate::rpc::ApiClient;
 
-#[allow(deprecated)]
 pub(super) async fn trigger_reprovisioning_set(
     data: ReprovisionSet,
     api_client: &ApiClient,
@@ -40,10 +39,12 @@ pub(super) async fn trigger_reprovisioning_set(
             .next();
 
         if let Some(host_machine) = host_machine
-            && host_machine
-                .health_sources
-                .iter()
-                .any(|or| or.source == "host-update")
+            && host_machine.status.as_ref().is_some_and(|status| {
+                status
+                    .health_sources
+                    .iter()
+                    .any(|origin| origin.source == "host-update")
+            })
         {
             return Err(CarbideCliError::GenericError(format!(
                 "Host machine: {:?} already has a \"host-update\" health report entry.",

@@ -17,7 +17,7 @@
 use ::rpc::forge as rpc;
 use config_version::ConfigVersion;
 use db::resource_pool::ResourcePoolDatabaseError;
-use db::{ObjectColumnFilter, ib_partition};
+use db::{ConditionalWrite, ObjectColumnFilter, ib_partition};
 use model::ib::DEFAULT_IB_FABRIC_NAME;
 use model::ib_partition::{IBPartitionStatus, NewIBPartition, PartitionKey};
 use model::resource_pool;
@@ -113,7 +113,7 @@ pub(crate) async fn update(
     )
     .await?;
 
-    let mut partition = match partitions.len() {
+    let partition = match partitions.len() {
         1 => partitions.remove(0),
         _ => {
             return Err(CarbideError::NotFoundError {
@@ -160,10 +160,26 @@ pub(crate) async fn update(
         }
     }
 
-    // Update the metadata of the partition
-    partition.metadata = metadata.try_into().map_err(CarbideError::from)?;
-
-    let resp = db::ib_partition::update(&partition, &mut txn).await?;
+    let metadata = metadata.try_into().map_err(CarbideError::from)?;
+    let resp = match db::ib_partition::update_metadata(
+        partition.id,
+        partition.version,
+        &metadata,
+        &mut txn,
+    )
+    .await?
+    {
+        ConditionalWrite::Applied(partition) => partition,
+        ConditionalWrite::NotApplied(ib_partition::PartitionNotCurrent) => {
+            // The initial lookup found the partition. Its disappearance or a
+            // changed config version after that read is a concurrent change.
+            return Err(CarbideError::ConcurrentModificationError(
+                "IBPartition",
+                partition.version.to_string(),
+            )
+            .into());
+        }
+    };
     txn.commit().await?;
 
     Ok(Response::new(rpc::IbPartition::try_from(resp)?))

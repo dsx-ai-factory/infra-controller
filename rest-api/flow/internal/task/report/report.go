@@ -77,10 +77,9 @@ type StageRecord struct {
 // and shares its index.
 //
 // Per-component counters describe components of ComponentType targeted
-// by this step in the current task. Pending and processed counts are
-// derivable on the client (Pending = TotalComponents -
-// CompletedComponents - FailedComponents; processed = CompletedComponents
-// + FailedComponents) and are not stored.
+// by this step in the current task. The remainder (TotalComponents -
+// CompletedComponents - FailedComponents) has no reported terminal outcome;
+// it does not imply that those components are still running.
 type StepRecord struct {
 	// ComponentType mirrors operationrules.SequenceStep.ComponentType.
 	ComponentType string `json:"component_type"`
@@ -93,11 +92,10 @@ type StepRecord struct {
 	// this field a client cannot size the work the step performs.
 	TotalComponents int `json:"total_components,omitempty"`
 
-	// CompletedComponents and FailedComponents are reserved on the wire
-	// for a future best-effort activity contract that reports
-	// per-component outcomes. The current fail-fast contract surfaces
-	// only stage-level success or failure, so neither field is written
-	// today and both are omitted from the JSON payload.
+	// CompletedComponents and FailedComponents contain the latest
+	// per-component terminal outcomes reported by actions that expose that
+	// detail. Missing and non-terminal components remain unconfirmed,
+	// including when the step fails or times out.
 	CompletedComponents int `json:"completed_components,omitempty"`
 	FailedComponents    int `json:"failed_components,omitempty"`
 
@@ -256,10 +254,9 @@ func (t *Tracker) CompleteStage(stageNum int, now time.Time) {
 
 // FailStage transitions the stage at stageNum to StatusFailed and
 // propagates the failure to every step still in StatusRunning. The
-// fail-fast activity contract aborts the stage on the first failing
-// child and discards any sibling outcomes, so all running steps are
-// marked StatusFailed with the same Error: their actual results are
-// unobserved and reporting any of them as completed would be a guess.
+// legacy fail-fast path leaves sibling outcomes unobserved, so those
+// steps inherit the stage error. Steps finalized from observed child
+// outcomes retain their own status, error, and completion time.
 //
 // Report.Error is set to the failure summary the first time a stage
 // fails in this report; subsequent FailStage calls leave it unchanged so
@@ -288,6 +285,77 @@ func (t *Tracker) FailStage(stageNum int, stageErr error, now time.Time) {
 	if t.Report.Error == "" {
 		t.Report.Error = msg
 	}
+}
+
+// FinishStep records an observed child workflow outcome without changing its
+// component counters. Already finalized steps retain their original outcome.
+func (t *Tracker) FinishStep(stageNum int, componentType string, stepErr error, now time.Time) {
+	if t == nil || t.Report == nil {
+		return
+	}
+	stage := t.findStage(stageNum)
+	if stage == nil {
+		return
+	}
+	for i := range stage.Steps {
+		step := &stage.Steps[i]
+		if step.ComponentType != componentType || step.Status != StatusRunning {
+			continue
+		}
+		step.Status = StatusCompleted
+		if stepErr != nil {
+			step.Status = StatusFailed
+			step.Error = truncateErr(stepErr)
+		}
+		step.FinishedAt = formatTime(now)
+		return
+	}
+}
+
+// SetStepProgress replaces the terminal component counters for one step.
+// Component types are unique within a stage, so stageNum and componentType
+// identify exactly one StepRecord. Counts outside the step's target total are
+// rejected rather than persisted as an invalid public report.
+func (t *Tracker) SetStepProgress(
+	stageNum int,
+	componentType string,
+	completedComponents int,
+	failedComponents int,
+) error {
+	if t == nil || t.Report == nil {
+		return fmt.Errorf("task report is not initialized")
+	}
+	if completedComponents < 0 || failedComponents < 0 {
+		return fmt.Errorf("component progress counts cannot be negative")
+	}
+
+	stage := t.findStage(stageNum)
+	if stage == nil {
+		return fmt.Errorf("report stage %d not found", stageNum)
+	}
+	for i := range stage.Steps {
+		step := &stage.Steps[i]
+		if step.ComponentType != componentType {
+			continue
+		}
+		if completedComponents+failedComponents > step.TotalComponents {
+			return fmt.Errorf(
+				"terminal component count %d exceeds total %d for %s",
+				completedComponents+failedComponents,
+				step.TotalComponents,
+				componentType,
+			)
+		}
+		step.CompletedComponents = completedComponents
+		step.FailedComponents = failedComponents
+		return nil
+	}
+
+	return fmt.Errorf(
+		"report step for component type %s not found in stage %d",
+		componentType,
+		stageNum,
+	)
 }
 
 func (t *Tracker) findStage(stageNum int) *StageRecord {

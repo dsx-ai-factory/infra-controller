@@ -165,6 +165,13 @@ impl StateControllerIO for SwitchStateControllerIO {
                     }
                     SwitchDecommissioningState::SuppressingNvosDhcp => "suppressing_nvos_dhcp",
                     SwitchDecommissioningState::FactoryResetNvos => "factory_reset_nvos",
+                    SwitchDecommissioningState::WaitingForNvosFactoryReset { .. } => {
+                        "waiting_for_nvos_factory_reset"
+                    }
+                    SwitchDecommissioningState::NvosFactoryResetOutcomeUnknown { .. } => {
+                        "nvos_factory_reset_outcome_unknown"
+                    }
+                    SwitchDecommissioningState::RebootingSwitch => "rebooting_switch",
                     SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement => {
                         "waiting_for_nvos_dhcp_acknowledgement"
                     }
@@ -183,10 +190,11 @@ impl StateControllerIO for SwitchStateControllerIO {
             SwitchControllerState::Maintenance {
                 operation,
                 configure_certificate,
+                ..
             } => {
                 let substate = match operation {
                     SwitchMaintenanceOperation::PowerOn => "power_on",
-                    SwitchMaintenanceOperation::PowerOff => "power_off",
+                    SwitchMaintenanceOperation::PowerOff { .. } => "power_off",
                     SwitchMaintenanceOperation::Reset => "reset",
                     SwitchMaintenanceOperation::ReconfigureCertificate => {
                         return match configure_certificate {

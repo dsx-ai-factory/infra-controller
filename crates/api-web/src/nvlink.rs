@@ -14,10 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// Flat `rpc::forge::Machine` fields are deprecated in favour of `status`/`config`
-// sub-messages, but this module must still read them until the REST API is migrated.
-// See https://github.com/NVIDIA/infra-controller/issues/2793
-#![allow(deprecated)]
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -471,7 +467,7 @@ async fn fetch_logical_partitions(
             }
 
             for m in machines {
-                if let Some(status) = m.nvlink_status_observation {
+                if let Some(status) = m.status.and_then(|status| status.nvlink) {
                     for gpu in &status.gpu_status {
                         if let Some(partition_id) = &gpu.partition_id {
                             member_map.entry(*partition_id).or_default().push(

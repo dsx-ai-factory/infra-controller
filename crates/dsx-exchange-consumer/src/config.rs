@@ -184,14 +184,15 @@ impl Default for CarbideApiConnectionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetricsConfig {
-    /// Metrics listener endpoint.
+    /// Metrics listener endpoint (default `[::]:9009`).
+    /// The default listener falls back to IPv4 when IPv6 socket setup is unavailable.
     pub endpoint: String,
 }
 
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
-            endpoint: "0.0.0.0:9009".to_string(),
+            endpoint: "[::]:9009".to_string(),
         }
     }
 }
@@ -266,7 +267,7 @@ mod tests {
         let config = Config::load(None).expect("should load defaults");
         assert_eq!(config.mqtt.endpoint, "mqtt.forge");
         assert_eq!(config.mqtt.port, 1884);
-        assert_eq!(config.metrics.endpoint, "0.0.0.0:9009");
+        assert_eq!(config.metrics.endpoint, "[::]:9009");
     }
 
     #[test]

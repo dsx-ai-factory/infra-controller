@@ -41,6 +41,11 @@ struct RackRecord {
     state_display: super::StateDisplay,
 }
 
+struct RackSwitchRecord {
+    id: String,
+    is_primary: bool,
+}
+
 impl From<rpc::forge::Rack> for RackRecord {
     fn from(rack: rpc::forge::Rack) -> Self {
         let lifecycle = rack
@@ -63,7 +68,7 @@ struct RackDetail {
     version: String,
     health_detail: super::HealthDetail,
     associated_machines: Vec<String>,
-    associated_switches: Vec<String>,
+    associated_switches: Vec<RackSwitchRecord>,
     associated_power_shelves: Vec<String>,
     metadata_detail: super::MetadataDetail,
     history: StateHistoryTable,
@@ -191,10 +196,10 @@ pub(super) async fn detail(
         }
     };
 
-    let associated_switches = match fetch_switch_ids(&api, &rack_id).await {
-        Ok(ids) => ids,
+    let associated_switches = match fetch_switches(&api, &rack_id).await {
+        Ok(switches) => switches,
         Err(err) => {
-            tracing::error!(error = %err, "fetch_switch_ids");
+            tracing::error!(error = %err, "fetch_switches");
             vec![]
         }
     };
@@ -278,19 +283,48 @@ async fn fetch_machine_ids(api: Arc<Api>, rack_id: RackId) -> Result<Vec<String>
         .collect())
 }
 
-async fn fetch_switch_ids(api: &Api, rack_id: &RackId) -> Result<Vec<String>, tonic::Status> {
+async fn fetch_switches(
+    api: &Api,
+    rack_id: &RackId,
+) -> Result<Vec<RackSwitchRecord>, tonic::Status> {
     let request = tonic::Request::new(rpc::forge::SwitchSearchFilter {
         rack_id: Some(rack_id.clone()),
         ..Default::default()
     });
 
-    Ok(api
-        .find_switch_ids(request)
-        .await?
-        .into_inner()
-        .ids
+    let switch_ids = api.find_switch_ids(request).await?.into_inner().ids;
+
+    if switch_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // find_switches_by_ids rejects a request with more IDs than the server's
+    // configured max_find_by_ids, so page the lookup to that limit. A zero/unset
+    // cap means the server enforces no limit.
+    let max_find_by_ids = api.runtime_config.max_find_by_ids as usize;
+    let chunk_size = if max_find_by_ids == 0 {
+        switch_ids.len()
+    } else {
+        max_find_by_ids
+    };
+
+    let mut switches = Vec::with_capacity(switch_ids.len());
+    for chunk in switch_ids.chunks(chunk_size) {
+        let page = api
+            .find_switches_by_ids(tonic::Request::new(rpc::forge::SwitchesByIdsRequest {
+                switch_ids: chunk.to_vec(),
+            }))
+            .await?
+            .into_inner();
+        switches.extend(page.switches);
+    }
+
+    Ok(switches
         .into_iter()
-        .map(|id| id.to_string())
+        .map(|switch| RackSwitchRecord {
+            id: switch.id.map(|id| id.to_string()).unwrap_or_default(),
+            is_primary: switch.is_primary,
+        })
         .collect())
 }
 

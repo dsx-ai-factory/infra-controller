@@ -16,7 +16,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -117,7 +116,7 @@ func TestNetworkSecurityGroupSQLDAO_Create(t *testing.T) {
 			Protocol:       corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ANY,
 			Action:         corev1.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_DENY,
 			Priority:       55,
-			Ipv6:           false, // We have support for it in ACLs but pretty much nowhere else, so we hide this for now.
+			Ipv6:           false,
 			SrcPortStart:   getIntPtrToUint32Ptr(cutil.GetPtr(55)),
 			SrcPortEnd:     getIntPtrToUint32Ptr(cutil.GetPtr(56)),
 			DstPortStart:   getIntPtrToUint32Ptr(cutil.GetPtr(57)),
@@ -229,8 +228,6 @@ func TestNetworkSecurityGroupSQLDAO_Create(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -312,8 +309,6 @@ func TestNetworkSecurityGroupSQLDAO_GetByID(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -532,8 +527,6 @@ func TestNetworkSecurityGroupSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -681,8 +674,6 @@ func TestNetworkSecurityGroupSQLDAO_Update(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -736,8 +727,6 @@ func TestNetworkSecurityGroupSQLDAO_DeleteByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

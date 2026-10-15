@@ -4,8 +4,6 @@
 package workflow
 
 import (
-	"fmt"
-
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -67,21 +65,6 @@ func (wflow *API) Init() {
 			func() float64 {
 				return float64(ManagerAccess.Data.EB.Managers.Workflow.State.ConnectionSucc.Load())
 			}))
-}
-
-// GetState - handle http request
-func (wflow *API) GetState() []string {
-	wc := ManagerAccess.Conf.EB.Temporal
-	wt := ManagerAccess.Data.EB.Managers.Workflow
-	var strs []string
-	strs = append(strs, fmt.Sprintln("Temporal Host: ", wc.Host, wc.Port))
-	strs = append(strs, fmt.Sprintln("Temporal Connection Attempted: ", wt.State.ConnectionAttempted.Load()))
-	strs = append(strs, fmt.Sprintln("Temporal Connection Succeeded: ", wt.State.ConnectionSucc.Load()))
-	strs = append(strs, fmt.Sprintln("Temporal Status: ", computils.CompStatus(wt.State.HealthStatus.Load()).String()))
-	strs = append(strs, fmt.Sprintln("Temporal Last Error: ", wt.State.Err()))
-	strs = append(strs, fmt.Sprintln("Temporal Connection Time: ", wt.State.ConnectionTime()))
-
-	return strs
 }
 
 // Start the workflow orchestrator

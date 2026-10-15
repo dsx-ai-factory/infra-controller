@@ -88,7 +88,7 @@ spec:
                             description: |-
                               MaxUnavailable is the maximum number of DPUs that can be unavailable during the update.
 
-                              Deprecated: This field is deprecated and will be removed with v26.7.0.
+                              Deprecated: This field is deprecated and will be removed with v27.1.0.
                             x-kubernetes-int-or-string: true
                         type: object
                       type:
@@ -225,7 +225,7 @@ spec:
                           description: |-
                             DPUSelector defines the DPUs that the DPUSet should target
 
-                            Deprecated: This field is deprecated and will be removed with v26.7.0. Use DPUDeviceSelector instead.
+                            Deprecated: This field is deprecated and will be removed with v27.1.0. Use DPUDeviceSelector instead.
                           type: object
                         nameSuffix:
                           description: NameSuffix is the suffix to be added to the
@@ -237,7 +237,7 @@ spec:
                           description: |-
                             NodeSelector defines the nodes that the DPUSet should target
 
-                            Deprecated: This field is deprecated and will be removed with v26.7.0. Use DPUNodeSelector instead.
+                            Deprecated: This field is deprecated and will be removed with v27.1.0. Use DPUNodeSelector instead.
                           properties:
                             matchExpressions:
                               description: matchExpressions is a list of label selector

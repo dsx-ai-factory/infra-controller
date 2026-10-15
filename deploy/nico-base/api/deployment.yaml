@@ -33,6 +33,9 @@ spec:
       annotations:
         kubectl.kubernetes.io/default-container: nico-api
     spec:
+      # Prevent Kubernetes-generated CARBIDE_API_* service variables from
+      # being interpreted as API configuration.
+      enableServiceLinks: false
       # Allow state-controller handlers already in flight to finish. Keep this
       # greater than controller.max_object_handling_time (3 minutes by default).
       terminationGracePeriodSeconds: 240
@@ -158,15 +161,28 @@ spec:
               containerPort: 1079
             - name: metrics
               containerPort: 1080
-            - name: profiler
-              containerPort: 1081
+          # Both probes target port 1080, which only exists when
+          # `metrics_endpoint` is set in carbide-api-config.toml. Removing
+          # that setting leaves the pod permanently un-Ready with no other
+          # indication why.
           livenessProbe:
             failureThreshold: 3
             httpGet:
+              path: /health
               port: 1080
               scheme: HTTP
             initialDelaySeconds: 20
             periodSeconds: 20
+            successThreshold: 1
+            timeoutSeconds: 20
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /ready
+              port: 1080
+              scheme: HTTP
+            initialDelaySeconds: 20
+            periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 20
           volumeMounts:

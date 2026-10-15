@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	"github.com/NVIDIA/infra-controller/rest-api/sdk/standard"
 )
 
 func TestAPITaskStats_FromProto(t *testing.T) {
@@ -267,6 +268,8 @@ func TestNewAPITask_Report(t *testing.T) {
 							"component_type": "Compute",
 							"status": "completed",
 							"total_components": 4,
+							"completed_components": 3,
+							"failed_components": 1,
 							"started_at": "2026-06-08T18:00:00Z",
 							"finished_at": "2026-06-08T18:00:42Z"
 						}
@@ -290,6 +293,8 @@ func TestNewAPITask_Report(t *testing.T) {
 		require.Len(t, result.Report.Stages[0].Steps, 1)
 		assert.Equal(t, "Compute", result.Report.Stages[0].Steps[0].ComponentType)
 		assert.Equal(t, 4, result.Report.Stages[0].Steps[0].TotalComponents)
+		assert.Equal(t, 3, result.Report.Stages[0].Steps[0].SucceededComponents)
+		assert.Equal(t, 1, result.Report.Stages[0].Steps[0].FailedComponents)
 		assert.Equal(t, "2026-06-08T18:00:00Z", result.Report.Stages[0].Steps[0].StartedAt)
 
 		// Round-trip through json.Marshal to verify camelCase keys land on the wire.
@@ -301,8 +306,47 @@ func TestNewAPITask_Report(t *testing.T) {
 		step := stages[0].(map[string]any)["steps"].([]any)[0].(map[string]any)
 		assert.Contains(t, step, "componentType", "must use camelCase on the wire, not component_type")
 		assert.Contains(t, step, "totalComponents")
+		assert.Contains(t, step, "succeededComponents")
+		assert.NotContains(t, step, "completedComponents")
+		assert.Contains(t, step, "failedComponents")
 		assert.Contains(t, step, "startedAt")
 		assert.NotContains(t, step, "component_type")
+	})
+
+	t.Run("report counters are present even for legacy and zero-valued reports", func(t *testing.T) {
+		for _, tc := range []struct {
+			name                     string
+			status                   string
+			fields                   string
+			total, completed, failed float64
+		}{
+			{name: "legacy skipped step", status: "skipped"},
+			{name: "successful poll", status: "completed", fields: `,"total_components":2,"completed_components":2`, total: 2, completed: 2},
+			{name: "failed poll", status: "failed", fields: `,"total_components":2,"failed_components":2`, total: 2, failed: 2},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				task := &flowv1.Task{Report: `{"version":1,"stages":[{"number":1,"steps":[{"component_type":"Compute","status":"` + tc.status + `"` + tc.fields + `}]}]}`}
+				result := NewAPITask(task, WithTaskReport())
+				require.NotNil(t, result.Report)
+				out, err := json.Marshal(result)
+				require.NoError(t, err)
+				var wire map[string]any
+				require.NoError(t, json.Unmarshal(out, &wire))
+				stage := wire["report"].(map[string]any)["stages"].([]any)[0].(map[string]any)
+				step := stage["steps"].([]any)[0].(map[string]any)
+				assert.Equal(t, tc.total, step["totalComponents"])
+				assert.Equal(t, tc.completed, step["succeededComponents"])
+				assert.NotContains(t, step, "completedComponents")
+				assert.Equal(t, tc.failed, step["failedComponents"])
+				stepJSON, err := json.Marshal(step)
+				require.NoError(t, err)
+				var sdkStep standard.TaskReportV1Step
+				require.NoError(t, json.Unmarshal(stepJSON, &sdkStep))
+				assert.Equal(t, int32(tc.total), sdkStep.GetTotalComponents())
+				assert.Equal(t, int32(tc.completed), sdkStep.GetSucceededComponents())
+				assert.Equal(t, int32(tc.failed), sdkStep.GetFailedComponents())
+			})
+		}
 	})
 
 	t.Run("WithTaskReport on empty proto report yields nil", func(t *testing.T) {

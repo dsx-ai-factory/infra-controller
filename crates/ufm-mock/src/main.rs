@@ -93,28 +93,13 @@ async fn main() -> eyre::Result<()> {
         address = %config.listen_address,
         "Starting UFM mock"
     );
-    let server_result = if let Some(tls) = config.tls {
-        let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(tls.cert_path, tls.key_path)
-            .await?;
-        let handle = axum_server::Handle::new();
-        let shutdown_handle = handle.clone();
-        let shutdown = cancellation.clone();
-        tokio::spawn(async move {
-            shutdown.cancelled().await;
-            shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
-        });
-        axum_server::bind_rustls(config.listen_address, tls)
-            .handle(handle)
-            .serve(ufm_mock.router().into_make_service())
-            .await
-            .map_err(eyre::Report::from)
-    } else {
-        let listener = tokio::net::TcpListener::bind(config.listen_address).await?;
-        axum::serve(listener, ufm_mock.router())
-            .with_graceful_shutdown(cancellation.clone().cancelled_owned())
-            .await
-            .map_err(eyre::Report::from)
-    };
+    let server_result = ufm_mock::serve(
+        config.listen_address,
+        config.tls,
+        ufm_mock.router(),
+        cancellation.clone(),
+    )
+    .await;
 
     cancellation.cancel();
     reconciliation.await?;

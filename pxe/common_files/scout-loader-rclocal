@@ -32,6 +32,12 @@ ZSTD_ERR="/tmp/rootfs.zstd.err"
 CPIO_ERR="/tmp/rootfs.cpio.err"
 MOUNT_ERR="/tmp/rootfs.mount.err"
 
+SCOUT_NETWORK_FILE="/run/systemd/network/00-forge-scout-nonpreferred.network"
+NEXTROOT_NETWORK_DIR="/run/nextroot/etc/systemd/network"
+NEXTROOT_NETWORK_FILE="${NEXTROOT_NETWORK_DIR}/00-forge-scout-nonpreferred.network"
+NEXTROOT_CLOUD_CFG_DIR="/run/nextroot/etc/cloud/cloud.cfg.d"
+NEXTROOT_CLOUD_NETWORK_CFG="${NEXTROOT_CLOUD_CFG_DIR}/99-forge-network.cfg"
+
 send_msg() {
 	for dest in ${OUTCONSOLE}
 	do
@@ -243,10 +249,50 @@ then
           sleep 1
       fi
     done
-    
+
+    if [ -s "${SCOUT_NETWORK_FILE}" ]
+    then
+      send_msg "LOADER: Installing Scout network selection in new root"
+      if mkdir -p "${NEXTROOT_NETWORK_DIR}" &&
+         cp "${SCOUT_NETWORK_FILE}" "${NEXTROOT_NETWORK_FILE}.tmp" &&
+         chmod 0644 "${NEXTROOT_NETWORK_FILE}.tmp" &&
+         mv -f "${NEXTROOT_NETWORK_FILE}.tmp" "${NEXTROOT_NETWORK_FILE}"
+      then
+        send_msg "LOADER: Installed Scout network selection in new root"
+      else
+        rm -f "${NEXTROOT_NETWORK_FILE}.tmp"
+        send_msg "LOADER: Failed to install Scout network selection; continuing"
+      fi
+    else
+      send_msg "LOADER: Scout network selection unavailable; continuing"
+    fi
+
+    send_msg "LOADER: Disabling cloud-init network configuration in new root"
+    if mkdir -p "${NEXTROOT_CLOUD_CFG_DIR}" &&
+       printf '%s\n' \
+         'network:' \
+         '  config: disabled' > "${NEXTROOT_CLOUD_NETWORK_CFG}.tmp" &&
+       chmod 0644 "${NEXTROOT_CLOUD_NETWORK_CFG}.tmp" &&
+       mv -f "${NEXTROOT_CLOUD_NETWORK_CFG}.tmp" "${NEXTROOT_CLOUD_NETWORK_CFG}"
+    then
+      send_msg "LOADER: Disabled cloud-init network configuration in new root"
+    else
+      rm -f "${NEXTROOT_CLOUD_NETWORK_CFG}.tmp"
+      send_msg "LOADER: Failed to disable cloud-init network configuration; continuing"
+    fi
+
     send_msg "LOADER: Cleaning up & switching"
     rm -f "${ROOTFS_DIGEST_FILE}" "${ROOTFS_DIGEST_FIFO}" "${ROOTFS_INFO_TMP}"
     # We need this so that subsequent reboots don't call soft-reboot and put us in a loop
     echo "export SYSTEMCTL_SKIP_AUTO_SOFT_REBOOT=1" >>/run/nextroot/etc/environment
+
+    send_msg "LOADER: Closing D-Bus before soft reboot"
+    if systemctl stop dbus.service dbus.socket
+    then
+      send_msg "LOADER: D-Bus socket closed"
+    else
+      send_msg "LOADER: Failed to close D-Bus socket; continuing"
+    fi
+
     systemctl soft-reboot
 fi

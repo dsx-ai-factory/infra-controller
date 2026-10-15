@@ -65,10 +65,11 @@ use std::fmt;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::time::Instant;
+pub mod actor;
 mod ipmi;
 pub mod ipmi_sim;
 pub mod libvirt;
+pub mod persistence;
 pub mod simulated;
 
 mod auth_router;
@@ -84,6 +85,7 @@ pub mod mac_address_pool;
 mod machine_info;
 mod middleware_router;
 mod mock_machine_router;
+mod power_state;
 mod rack_info;
 mod redfish;
 mod sse;
@@ -102,17 +104,20 @@ pub use machine_info::{
     MachineInfo,
 };
 pub use mock_machine_router::{
-    BmcCommand, EventServiceOverride, MachineRouterOptions, SetSystemPowerError,
-    SetSystemPowerResult, machine_router, machine_router_with_injection_store,
+    EventServiceOverride, MachineRouterOptions, machine_router, machine_router_with_injection_store,
 };
+pub use nv_redfish::schema::resource::ResetType as ResourceResetType;
+pub use power_state::validate_power_reset;
 pub use rack_info::RackInfo;
 /// BMC account state and the credential snapshot type used to persist and
 /// restore rotated passwords across a mock rebuild.
-pub use redfish::account_service::{AccountServiceState, BmcAccountCredential};
+pub use redfish::account_service::AccountServiceState;
 pub use redfish::event_service::{
     EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState, EventServiceStats,
 };
-pub use redfish::virtual_media::DeviceConfig as VirtualMediaDeviceConfig;
+pub use redfish::virtual_media::{
+    DeviceConfig as VirtualMediaDeviceConfig, VirtualMediaContents, VirtualMediaUpdate,
+};
 pub use sse::StreamStep;
 
 pub const DUMMY_FACTORY_USERNAME: &str = "root";
@@ -230,54 +235,37 @@ impl HardwareType {
     }
 }
 
-#[derive(Debug, Copy, Clone, Default)]
-pub enum MockPowerState {
-    #[default]
-    On,
-    Off,
-    PowerCycling {
-        since: Instant,
-    },
-}
-
-impl fmt::Display for MockPowerState {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::On => "On".fmt(f),
-            Self::Off => "Off".fmt(f),
-            Self::PowerCycling { since } => write!(f, "PowerCycling {:?}", since.elapsed()),
-        }
-    }
+#[derive(Debug, thiserror::Error)]
+pub enum ActionError {
+    #[error("bad request: {0}")]
+    BadRequest(eyre::Error),
+    #[error("internal error: {0}")]
+    Internal(eyre::Error),
 }
 
 // Simulate a 5-second power cycle
 pub const POWER_CYCLE_DELAY: Duration = Duration::from_secs(5);
 
-pub trait Callbacks: std::fmt::Debug + Send + Sync {
-    fn get_power_state(&self) -> MockPowerState;
-    fn send_power_command(&self, reset_type: SystemPowerControl)
-    -> Result<(), SetSystemPowerError>;
-    fn set_power_state(&self, reset_type: SystemPowerControl) -> Result<(), SetSystemPowerError> {
-        type C = SystemPowerControl;
-        match (reset_type, self.get_power_state()) {
-            (
-                C::GracefulShutdown | C::ForceOff | C::GracefulRestart | C::ForceRestart,
-                MockPowerState::Off,
-            ) => Err(SetSystemPowerError::BadRequest(
-                "bmc-mock: cannot power off machine, it is already off".to_string(),
-            )),
-            (C::On | C::ForceOn, MockPowerState::On) => Err(SetSystemPowerError::BadRequest(
-                "bmc-mock: cannot power on machine, it is already on".to_string(),
-            )),
-            (_, MockPowerState::PowerCycling { since }) if since.elapsed() < POWER_CYCLE_DELAY => {
-                Err(SetSystemPowerError::BadRequest(format!(
-                    "bmc-mock: cannot reset machine, it is in the middle of power cycling since {:?} ago",
-                    since.elapsed()
-                )))
-            }
-            _ => Ok(()),
-        }?;
-        self.send_power_command(reset_type)
+/// Backend operations for one BMC, selected by the router's concrete callback type.
+pub trait Callbacks: Send + Sync + 'static {
+    fn computer_system_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send;
+
+    /// Applies one virtual-media operation before reporting success.
+    ///
+    /// External backends must complete their I/O, then commit the update before
+    /// returning `Ok(())`. On failure, drop it without committing and return an
+    /// error. Actor implementations must transfer the whole update to retain
+    /// serialization and state publication if the requesting future is cancelled.
+    /// Backends without external media effects publish the requested state directly.
+    fn set_virtual_media(
+        &self,
+        update: VirtualMediaUpdate,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send {
+        update.commit();
+        std::future::ready(Ok(()))
     }
 
     fn state_refresh_indication(&self);
@@ -285,49 +273,6 @@ pub trait Callbacks: std::fmt::Debug + Send + Sync {
 
 pub trait HostnameQuerying: std::fmt::Debug + Send + Sync {
     fn get_hostname(&'_ self) -> Cow<'_, str>;
-}
-
-// https://www.dmtf.org/sites/default/files/standards/documents/DSP2046_2023.3.html
-// 6.5.5.1 ResetType
-#[derive(Debug, Deserialize, Serialize, PartialEq, Clone, Copy)]
-pub enum SystemPowerControl {
-    /// Power on a machine
-    On,
-    /// Graceful host shutdown
-    GracefulShutdown,
-    /// Forcefully powers a machine off
-    ForceOff,
-    /// Graceful restart. Asks the OS to restart via ACPI
-    /// - Might restart DPUs if no OS is running
-    /// - Will not apply pending BIOS/UEFI setting changes
-    GracefulRestart,
-    /// Force restart. This is equivalent to pressing the reset button on the front panel.
-    /// - Will not restart DPUs
-    /// - Will apply pending BIOS/UEFI setting changes
-    ForceRestart,
-
-    //
-    // libredfish doesn't support these yet, and not all vendors provide them
-    //
-
-    // Cut then restore the power
-    PowerCycle,
-
-    // Forcefully power a machine on (?)
-    ForceOn,
-
-    // Like it says, pretend the button got pressed
-    PushPowerButton,
-
-    // Non-maskable interrupt then power off
-    Nmi,
-
-    // Write state to disk and power off
-    Suspend,
-
-    // VM / Hypervisor
-    Pause,
-    Resume,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

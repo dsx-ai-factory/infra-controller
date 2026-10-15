@@ -4,8 +4,10 @@
 package tls
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,14 +34,15 @@ type DynTLSCfg struct {
 
 	cachedCert   *tls.Certificate
 	cachedCa     []byte
+	observedCa   []byte // Last client CA contents observed, not the installed trust pool.
 	caCertPool   *x509.CertPool
 	cachedCfg    *tls.Config
 	cacheUpdated bool
 
 	isClient bool
-	err      error
 	ticker   *time.Ticker
 	stop     chan bool
+	stopOnce sync.Once
 	logger   *logrus.Logger
 }
 
@@ -49,15 +52,27 @@ func NewDynTLSCfg(keyPath, certPath, cacertPath string) (*DynTLSCfg, error) {
 		keyPath:    keyPath,
 		certPath:   certPath,
 		cacertPath: cacertPath,
+		logger:     logrus.New(),
 	}
+	d.logger.SetFormatter(&logrus.TextFormatter{
+		FullTimestamp:   true,
+		TimestampFormat: "2006-01-02T15:04:05.999Z07:00",
+		CallerPrettyfier: func(f *runtime.Frame) (string, string) {
+			return "", fmt.Sprintf("%s:%d", filepath.Base(f.File), f.Line)
+		},
+	})
+	d.logger.SetReportCaller(true)
 
 	caCert, err := os.ReadFile(cacertPath)
 	if err != nil {
 		return nil, err
 	}
-	d.caCertPool = x509.NewCertPool()
-	d.caCertPool.AppendCertsFromPEM(caCert)
+	d.caCertPool, err = parseCABundle(caCert, d.logger.WithField("path", cacertPath))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CA certificate %s: %w", cacertPath, err)
+	}
 	d.cachedCa = caCert
+	d.observedCa = caCert
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
 		return nil, err
@@ -67,22 +82,64 @@ func NewDynTLSCfg(keyPath, certPath, cacertPath string) (*DynTLSCfg, error) {
 
 	d.ticker = time.NewTicker(refreshPeriod)
 	d.stop = make(chan bool)
-	d.logger = logrus.New()
-	d.logger.SetFormatter(&logrus.TextFormatter{
-		FullTimestamp:   true,
-		TimestampFormat: "2006-01-02T15:04:05.999Z07:00",
-		CallerPrettyfier: func(f *runtime.Frame) (string, string) {
-			return "", fmt.Sprintf("%s:%d", filepath.Base(f.File), f.Line)
-		},
-	})
-	d.logger.SetReportCaller(true)
 	go d.pollCerts()
 	return d, nil
 }
 
+// parseCABundle preserves AppendCertsFromPEM's tolerance of malformed blocks.
+// Strict validation is diagnostic only; a bundle needs at least one usable certificate.
+func parseCABundle(data []byte, logger logrus.FieldLogger) (*x509.CertPool, error) {
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(data) {
+		return nil, fmt.Errorf("CA bundle contains no usable certificates")
+	}
+	err := validateCABundle(data)
+	if err != nil {
+		logger.Errorf("CA bundle contains malformed certificate blocks; using parseable certificates: %v", err)
+	}
+	return pool, nil
+}
+
+// validateCABundle detects malformed certificate blocks, including those pem.Decode skips.
+func validateCABundle(data []byte) error {
+	marker := []byte("-----BEGIN CERTIFICATE-----")
+	// Count only PEM boundary lines, not marker text in explanatory comments.
+	remaining := 0
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if bytes.Equal(bytes.TrimRight(line, "\r \t"), marker) {
+			remaining++
+		}
+	}
+	for len(data) > 0 {
+		block, rest := pem.Decode(data)
+		if block == nil {
+			break
+		}
+		data = rest
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		remaining--
+		if len(block.Headers) != 0 {
+			return fmt.Errorf("malformed certificate PEM block")
+		}
+		_, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return fmt.Errorf("invalid certificate: %w", err)
+		}
+	}
+	if remaining != 0 {
+		return fmt.Errorf("malformed certificate PEM block")
+	}
+	return nil
+}
+
 // Close stops the poller go routine
 func (d *DynTLSCfg) Close() {
-	close(d.stop)
+	d.stopOnce.Do(func() {
+		d.ticker.Stop()
+		close(d.stop)
+	})
 }
 
 // WithTLSCfg allows a tls config to be passed in
@@ -105,11 +162,6 @@ func (d *DynTLSCfg) ClientCfg() *tls.Config {
 	d.tlsCfg.GetClientCertificate = func(_ *tls.CertificateRequestInfo) (*tls.Certificate, error) {
 		d.Lock()
 		defer d.Unlock()
-		if d.err != nil {
-			d.logger.Errorf("GetClientCertificate: %v", d.err)
-			return nil, d.err
-		}
-
 		return d.cachedCert, nil
 	}
 	return d.tlsCfg
@@ -124,14 +176,11 @@ func (d *DynTLSCfg) ServerCfg() *tls.Config {
 	d.tlsCfg.GetConfigForClient = func(_ *tls.ClientHelloInfo) (*tls.Config, error) {
 		d.Lock()
 		defer d.Unlock()
-		if d.err != nil {
-			return nil, d.err
-		}
-
 		if d.cachedCfg == nil || d.cacheUpdated {
 			d.cachedCfg = d.tlsCfg.Clone()
 			d.cachedCfg.Certificates = []tls.Certificate{*d.cachedCert}
 			d.cachedCfg.RootCAs = d.caCertPool
+			d.cachedCfg.ClientCAs = d.caCertPool
 			d.cacheUpdated = false
 		}
 
@@ -156,22 +205,25 @@ func (d *DynTLSCfg) refresh() {
 	d.Lock()
 	defer d.Unlock()
 
-	// read ca
+	// Keep the last valid trust pool on CA refresh failures. They must not
+	// prevent identity renewal or poison otherwise usable handshake configs.
 	caCert, err := os.ReadFile(d.cacertPath)
 	if err != nil {
-		d.err = err
 		d.logger.Errorf("Failed to read CA certificate from %s - %v", d.cacertPath, err)
-		return
-	}
-
-	if !reflect.DeepEqual(caCert, d.cachedCa) {
-		if d.isClient {
-			// for client config, we don't have a way to update CA
-			// just log a warning
-			d.logger.Warn("CA has changed, clients will likely not work without restart")
+	} else if d.isClient {
+		if !bytes.Equal(caCert, d.observedCa) {
+			if bytes.Equal(caCert, d.cachedCa) {
+				d.logger.Info("CA file matches the installed client trust pool again")
+			} else {
+				d.logger.Warn("CA has changed, clients will likely not work without restart")
+			}
+			d.observedCa = caCert
+		}
+	} else if !bytes.Equal(caCert, d.cachedCa) {
+		caCertPool, err := parseCABundle(caCert, d.logger.WithField("path", d.cacertPath))
+		if err != nil {
+			d.logger.Errorf("Failed to parse CA certificate %s - %v", d.cacertPath, err)
 		} else {
-			caCertPool := x509.NewCertPool()
-			caCertPool.AppendCertsFromPEM(caCert)
 			d.caCertPool = caCertPool
 			d.cachedCa = caCert
 			d.cacheUpdated = true
@@ -179,10 +231,9 @@ func (d *DynTLSCfg) refresh() {
 		}
 	}
 
-	// read cert and key
+	// Keep the last usable identity if files are temporarily missing or mismatched.
 	cert, err := tls.LoadX509KeyPair(d.certPath, d.keyPath)
 	if err != nil {
-		d.err = err
 		d.logger.Errorf("Failed to read certificate and key from %s, %s - %v", d.certPath, d.keyPath, err)
 		return
 	}
@@ -192,11 +243,4 @@ func (d *DynTLSCfg) refresh() {
 		d.cachedCert = &cert
 		d.cacheUpdated = true
 	}
-
-	// A complete refresh succeeded — clear any sticky error from a prior
-	// failed attempt. Without this, a single transient mismatch (e.g. when
-	// cert and key files are updated non-atomically by a k8s secret remount)
-	// would poison the config until the process restarted, even after files
-	// settle into a consistent state.
-	d.err = nil
 }

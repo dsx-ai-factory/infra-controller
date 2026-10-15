@@ -18,6 +18,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -28,19 +29,17 @@ import (
 
 // GetAllFabricHandler is the API Handler for getting all Fabrics
 type GetAllFabricHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllFabricHandler initializes and returns a new handler for getting all Fabrics
 func NewGetAllFabricHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllFabricHandler {
 	return GetAllFabricHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -59,7 +58,7 @@ func NewGetAllFabricHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Success 200 {object} []model.APIFabric
 // @Router /v2/org/{org}/nico/site/{siteId}/fabric [get]
 func (gafh GetAllFabricHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Fabric", "GetAll", c, gafh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Fabric", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -90,7 +89,7 @@ func (gafh GetAllFabricHandler) Handle(c echo.Context) error {
 	// Get Site ID from url
 	stStrID := c.Param("siteId")
 
-	gafh.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", stStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("site_id", stStrID))
 
 	stID, err := uuid.Parse(stStrID)
 	if err != nil {
@@ -136,7 +135,7 @@ func (gafh GetAllFabricHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gafh.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	fbDAO := cdbm.NewFabricDAO(gafh.dbSession)
@@ -199,19 +198,17 @@ func (gafh GetAllFabricHandler) Handle(c echo.Context) error {
 
 // GetFabricHandler is the API Handler for retrieving Fabric
 type GetFabricHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetFabricHandler initializes and returns a new handler to retrieve Fabric
 func NewGetFabricHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetFabricHandler {
 	return GetFabricHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -229,7 +226,7 @@ func NewGetFabricHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *
 // @Success 200 {object} model.APIFabric
 // @Router /v2/org/{org}/nico/site/{siteId}/fabric/{id} [get]
 func (gfh GetFabricHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Fabric", "Get", c, gfh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Fabric", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -253,7 +250,7 @@ func (gfh GetFabricHandler) Handle(c echo.Context) error {
 	// Get Site ID URL param
 	stStrID := c.Param("siteId")
 
-	gfh.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", stStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("site_id", stStrID))
 
 	stID, err := uuid.Parse(stStrID)
 	if err != nil {
@@ -271,7 +268,7 @@ func (gfh GetFabricHandler) Handle(c echo.Context) error {
 	// Get fabric ID from URL param
 	fID := c.Param("id")
 
-	gfh.tracerSpan.SetAttribute(handlerSpan, attribute.String("fabric_id", fID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("fabric_id", fID))
 
 	fbDAO := cdbm.NewFabricDAO(gfh.dbSession)
 	// Check that Fabric exists

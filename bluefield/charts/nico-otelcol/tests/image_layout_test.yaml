@@ -55,7 +55,7 @@ tests:
           path: data["config.yaml"]
           pattern: 'set\(attributes\["systemd\.unit"\], "nico-lldp-sidecar"\)'
 
-  - it: should fall back to /opt/nico when certsDir is cleared
+  - it: should fall back to /opt/forge when certsDir is cleared
     template: daemonset.yaml
     set:
       image:
@@ -67,17 +67,17 @@ tests:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: nico-certs
-            mountPath: /opt/nico
+            mountPath: /opt/forge
             readOnly: true
       - contains:
           path: spec.template.spec.volumes
           content:
             name: nico-certs
             hostPath:
-              path: /opt/nico
+              path: /opt/forge
               type: DirectoryOrCreate
 
-  - it: configmap should embed /opt/nico cert paths and nico_root.pem when cleared
+  - it: configmap should embed /opt/forge cert paths and forge_root.pem when cleared
     template: configmap.yaml
     set:
       image:
@@ -88,10 +88,43 @@ tests:
     asserts:
       - matchRegex:
           path: data["config.yaml"]
-          pattern: 'ca_file:\s*/opt/nico/nico_root\.pem'
+          pattern: 'ca_file:\s*/opt/forge/forge_root\.pem'
       - matchRegex:
           path: data["config.yaml"]
-          pattern: 'cert_file:\s*/opt/nico/machine_cert\.pem'
+          pattern: 'cert_file:\s*/opt/forge/machine_cert\.pem'
       - matchRegex:
           path: data["config.yaml"]
-          pattern: 'key_file:\s*/opt/nico/machine_cert\.key'
+          pattern: 'key_file:\s*/opt/forge/machine_cert\.key'
+
+  - it: preserves custom certificate directory and root CA filename rendering
+    set:
+      certsDir: /custom/certs
+      rootCaFile: site-root.pem
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nico-certs
+            mountPath: /custom/certs
+            readOnly: true
+        template: daemonset.yaml
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-certs
+            hostPath:
+              path: /custom/certs
+              type: DirectoryOrCreate
+        template: daemonset.yaml
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'ca_file:\s*/custom/certs/site-root\.pem'
+        template: configmap.yaml
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'cert_file:\s*/custom/certs/machine_cert\.pem'
+        template: configmap.yaml
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'key_file:\s*/custom/certs/machine_cert\.key'
+        template: configmap.yaml

@@ -33,7 +33,7 @@ use ::rpc::forge::{
 use carbide_secrets::credentials::CredentialReader;
 use carbide_secrets::key_encryption;
 use carbide_utils::none_if_empty::NoneIfEmpty;
-use db::{WithTransaction, tenant, tenant_identity_config};
+use db::{ConditionalWrite, WithTransaction, tenant, tenant_identity_config};
 use model::tenant::identity_config::TenantIdentityCurrentSigningKeySlot;
 use model::tenant::{
     EncryptedSigningPrivateKey, EncryptedTokenDelegationAuthConfig, EncryptionKeyId,
@@ -877,41 +877,43 @@ pub(crate) async fn reencrypt_tenant_identity_secrets(
             continue;
         }
 
-        response.fields_reencrypted += plan.fields_reencrypted;
-        response.fields_skipped_on_target += plan.fields_skipped_on_target;
         if plan.any_change {
-            response.rows_updated += 1;
             if !dry_run {
                 let enc1 = plan.enc1;
                 let enc2 = plan.enc2;
                 let delegation = plan.delegation;
-                let org_id_for_txn = org_id.clone();
-                api.database_connection
+                let write = api
+                    .database_connection
                     .with_txn(|txn| {
                         Box::pin(async move {
-                            tenant_identity_config::find_for_update(&org_id_for_txn, txn)
-                                .await?
-                                .ok_or_else(|| db::DatabaseError::NotFoundError {
-                                    kind: "tenant_identity_config",
-                                    id: org_id_for_txn.as_str().to_string(),
-                                })?;
-                            tenant_identity_config::update_encrypted_fields(
-                                &org_id_for_txn,
-                                enc1,
-                                enc2,
-                                delegation,
-                                txn,
+                            let write = tenant_identity_config::update_encrypted_fields(
+                                &row, enc1, enc2, delegation, txn,
                             )
                             .await?;
-                            tenant::increment_version(org_id_for_txn.as_str(), txn).await?;
-                            Ok::<(), db::DatabaseError>(())
+                            if let ConditionalWrite::Applied(()) = write {
+                                tenant::increment_version(row.organization_id.as_str(), txn)
+                                    .await?;
+                            }
+                            Ok::<_, db::DatabaseError>(write)
                         })
                     })
                     .await??;
+                if let ConditionalWrite::NotApplied(reason) = write {
+                    response.rows_failed += 1;
+                    response.failures.push(ReencryptTenantIdentityFailure {
+                        organization_id: org_id.as_str().to_string(),
+                        field: "tenant_identity_config".to_string(),
+                        error: reason.to_string(),
+                    });
+                    continue;
+                }
             }
+            response.rows_updated += 1;
         } else {
             response.rows_skipped_all_on_target += 1;
         }
+        response.fields_reencrypted += plan.fields_reencrypted;
+        response.fields_skipped_on_target += plan.fields_skipped_on_target;
     }
 
     Ok(Response::new(response))

@@ -220,7 +220,7 @@ func getPagedExpectedMachineInventory(
 			CurrentPage: int32(page),
 			PageSize:    int32(pageSize),
 			TotalItems:  int32(totalCount),
-			ItemIds:     allExpectedMachineIDs,
+			ItemIds:     itemIDsForPage(page, totalPages, allExpectedMachineIDs),
 		},
 	}
 

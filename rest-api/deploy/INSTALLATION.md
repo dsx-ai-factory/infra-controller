@@ -271,6 +271,19 @@ kubectl apply -k deploy/kustomize/base/keycloak -n nico-rest
 | `--tls-port` | `8000` | HTTPS listen port |
 | `--insecure-port` | `8001` | HTTP health port |
 | `--ca-base-dns` | `nico.local` | DNS suffix used in issued certs |
+| `--dns-name` | the Service's four in-cluster names plus `localhost` | SAN stamped on the HTTPS listener's own certificate |
+
+`--dns-name` is repeatable, and the first value supplied replaces the built-in
+default (`credsmgr.csm` and `localhost`, the latter matching site-manager's own
+default `--creds-manager-url`) rather than adding to it. Every hostname a client
+dials over port 8000 has to be listed, because TLS hostname verification
+consults only the certificate's SANs. The manifests pass
+`nico-rest-cert-manager`, `nico-rest-cert-manager.nico-rest`,
+`nico-rest-cert-manager.nico-rest.svc`,
+`nico-rest-cert-manager.nico-rest.svc.cluster.local`, and `localhost`. Deploying
+into a namespace other than `nico-rest` means editing these to match, otherwise
+clients using the namespace-qualified hostname fail verification with
+`no alternative certificate subject name matches target hostname`.
 
 ### Apply
 
@@ -511,10 +524,82 @@ status:
 | Flag | Value | Description |
 |---|---|---|
 | `--listen-port` | `8100` | HTTPS listen port |
-| `--creds-manager-url` | `https://nico-rest-cert-manager.nico-rest:8000` | URL to nico-rest-cert-manager |
+| `--creds-manager-url` | `https://nico-rest-cert-manager.nico-rest:8000` | URL to nico-rest-cert-manager; the hostname must be one of that service's `--dns-name` SANs |
+| `--creds-manager-ca-path` | `/etc/credsmgr-ca/ca.crt` | CA bundle verifying nico-rest-cert-manager (`tls.crt` from `ca-signing-secret`) |
 | `--tls-cert-path` | `/etc/tls/tls.crt` | TLS cert path (from `site-manager-tls` secret) |
 | `--tls-key-path` | `/etc/tls/tls.key` | TLS key path (from `site-manager-tls` secret) |
 | `--namespace` | `nico-rest` | Kubernetes namespace to watch for Site CRs |
+
+Connections to nico-rest-cert-manager are verified, so `--creds-manager-ca-path`
+must point at a readable PEM bundle containing the CA that signed that service's
+listener. Site Manager exits at startup if the file is missing or holds no
+certificates, rather than falling back to an unverified connection.
+
+That bundle is `ca-signing-secret`, the CA nico-rest-cert-manager signs with,
+projected into the pod at `/etc/credsmgr-ca/ca.crt`. Only `tls.crt` is mounted,
+so the signing key stays in the secret. Note that this is deliberately not the
+issuer of Site Manager's own `site-manager-tls` certificate: the two are
+configured independently, and pointing `site-manager-tls` at a different issuer
+would otherwise leave Site Manager trusting a CA that never signed the listener
+it is verifying.
+
+#### Rotating `ca-signing-secret`
+
+Both services read this CA once at startup: nico-rest-cert-manager loads the
+signing key and certificate when it builds its issuer, and Site Manager builds
+its trust pool when it constructs the client. Neither notices the projected file
+changing underneath it, so replacing `ca-signing-secret` takes effect only when
+the pods restart.
+
+While the secret holds a single CA, no restart order avoids an outage, because
+whichever side restarts first disagrees with the other: restart
+nico-rest-cert-manager and it signs with the new CA while Site Manager still
+trusts only the old one; restart Site Manager and it trusts only the new CA
+while the listener is still signed by the old one. Either way `/v1/sitecreds`
+fails with `x509: certificate signed by unknown authority` until both have
+restarted.
+
+To rotate without an outage, have the secret hold both CAs for the duration, so
+that there is a state Site Manager can restart into that trusts the listener
+both before and after the issuer moves:
+
+```bash
+# tls.crt carries the new CA followed by the old one, so Site Manager trusts
+# both, while tls.key is the new CA's key, so the listener is signed by the new.
+# The new CA has to come first: kubectl checks tls.key against the leading
+# certificate and rejects the secret outright if the old one is first.
+cat new-ca.crt old-ca.crt > bundle.crt
+
+# Both namespaces, as in Step 2: nico-rest feeds the two deployments and
+# cert-manager feeds the nico-rest-ca-issuer ClusterIssuer.
+for ns in nico-rest cert-manager; do
+  kubectl create secret tls ca-signing-secret \
+    --cert=bundle.crt --key=new-ca.key \
+    -n "$ns" --dry-run=client -o yaml | kubectl apply -f -
+done
+
+# Site Manager first, and let it finish. It is the side whose trust widens to
+# cover both CAs, so until it has restarted it still trusts only the old one.
+# Restarting the issuer first would move the listener to a CA Site Manager does
+# not yet know, which is the outage this procedure exists to avoid.
+kubectl rollout restart deployment/nico-rest-site-manager -n nico-rest
+kubectl rollout status deployment/nico-rest-site-manager -n nico-rest
+
+kubectl rollout restart deployment/nico-rest-cert-manager -n nico-rest
+kubectl rollout status deployment/nico-rest-cert-manager -n nico-rest
+```
+
+nico-rest-cert-manager signs with the first certificate in `tls.crt`, so it
+picks up the new CA and ignores the trailing old one. `/v1/pki/ca/pem` serves
+the file verbatim, so it returns both certificates while the bundle is in place,
+whereas `/v1/pki/ca` decodes it and returns only the leading one.
+
+Once both have rolled out, re-apply the secret with `new-ca.crt` alone and
+restart both again, in the same order, to drop trust in the old CA.
+Certificates already issued by the old CA stay valid until they expire, so plan
+the second step after the longest `duration` in use. If a short outage is
+acceptable, skip the bundle and restart nico-rest-cert-manager followed by Site
+Manager.
 
 ### Apply
 
@@ -652,9 +737,14 @@ temporal:
     keyPath: /var/secrets/temporal/certs/tls.key
     caPath: /var/secrets/temporal/certs/ca.crt
   encryptionKeyPath: /var/secrets/temporal/encryption-key
+
+siteManager:
+  svcEndpoint: "https://nico-rest-site-manager:8100/v1/site"
 ```
 
 Each deployment sets `TEMPORAL_NAMESPACE` and `TEMPORAL_QUEUE` environment variables that override the config file values at runtime.
+
+The cloud worker uses `siteManager.svcEndpoint` to roll each Site's OTP when its Site Agent Temporal certificate is within `10` days of expiry. If it is empty, the daily rotation run fails without rotating any Site.
 
 ### Secrets mounted at runtime
 
@@ -689,6 +779,10 @@ The site agent bootstrap flow is:
 3. The received certs are written back into the `temporal-client-site-agent-certs` secret.
 4. The agent then connects to Temporal using those certs and starts polling its site-specific namespace and queue.
 
+The StatefulSet probes the agent on port `8080`. The agent checks Temporal and Core gRPC every `30s`, and Flow gRPC too when `FLOW_GRPC_ENABLED` is `true`. `/readyz` reports the latest results, so it succeeds only while its Temporal worker runs and every checked dependency is reachable. The same results back the `nico_rest_site_agent_temporal_connection_status`, `nico_rest_site_agent_carbide_health_status`, `nico_rest_site_agent_flow_grpc_health_status`, and `nico_rest_site_agent_health_status` metrics. `/healthz` fails once a Temporal connection attempt fails or the Temporal SDK stops the worker, and passes while an attempt is still in progress. It also fails once `site-registration` holds a `site-uuid` or `otp` the agent did not apply itself, as after a re-pair, because the agent reads that secret only at startup. Either way Kubernetes restarts the agent after three failed liveness probes, whether or not it is Ready. Until a site is configured below, the agent is not Ready and restarts after each failed connection attempt. So its pod shows `CrashLoopBackOff` between those restarts.
+
+Each agent pod also reports its own bootstrap, Temporal, and Core gRPC state as JSON at `/status`. [Check a Site Agent pod](../../docs/playbooks/stuck_objects/site_controller_health.md#check-a-site-agent-pod) shows how to reach one pod and describes each field.
+
 ### Manifests
 
 | File | Contents |
@@ -716,6 +810,7 @@ The site agent bootstrap flow is:
 | `TEMPORAL_SUBSCRIBE_QUEUE` | `00000000-0000-4000-8000-000000000001` | Per-site Temporal queue — **must match site UUID** |
 | `TEMPORAL_INVENTORY_SCHEDULE` | `@every 3m` | How often the agent reports hardware inventory, as an `@every <duration>` schedule. The agent reports this interval to Cloud as staleness window. A schedule slower than `5m`, or in any other format, is rejected at startup |
 | `TEMPORAL_CERT_PATH` | `/etc/temporal-certs` | Path to mounted Temporal TLS certs |
+| `BOOTSTRAP_SECRET_NAME` | `site-registration` | Name of the registration Secret mounted at `/etc/sitereg`. When Cloud rotates the Temporal certificate, the Site Agent writes the new OTP to this Secret's `otp` key. The binary falls back to `bootstrap-info` when it is unset |
 
 ### Secrets mounted at runtime
 
@@ -757,8 +852,10 @@ kubectl patch configmap nico-rest-site-agent-config -n nico-rest --type='json' -
   {\"op\": \"replace\", \"path\": \"/data/TEMPORAL_SUBSCRIBE_QUEUE\", \"value\": \"site\"}
 ]"
 
-kubectl rollout restart statefulset/nico-rest-site-agent -n nico-rest
+kubectl delete pod -l app=nico-rest-site-agent -n nico-rest
 ```
+
+Deleting the pod applies the new configuration right away. A `kubectl rollout restart` would not, because a StatefulSet only replaces a pod that is Ready.
 
 ### Apply
 
@@ -937,7 +1034,7 @@ curl -s "http://<api-host>:8388/v2/org/<org>/nico/site" \
 
 | Secret | Namespace | Created by | Required by |
 |---|---|---|---|
-| `ca-signing-secret` | `nico-rest` | Operator (Step 2) | `nico-rest-cert-manager`, `nico-rest-ca-issuer` |
+| `ca-signing-secret` | `nico-rest` | Operator (Step 2) | `nico-rest-cert-manager`, `nico-rest-ca-issuer`, `nico-rest-site-manager` (`tls.crt` only) |
 | `image-pull-secret` | `nico-rest` | `base/common/image-pull-secret.yaml` | All workload pods |
 | `db-creds` | `nico-rest` | `base/common/db-creds.yaml` | `nico-rest-db-migration`, `nico-rest-api`, workflow workers |
 | `keycloak-client-secret` | `nico-rest` | `base/common/keycloak-client-secret.yaml` | `nico-rest-api` |

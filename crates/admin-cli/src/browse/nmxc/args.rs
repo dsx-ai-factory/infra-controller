@@ -54,7 +54,9 @@ impl From<NmxcOperationArg> for forgerpc::NmxcBrowseOperation {
 }
 
 #[derive(Parser, Debug)]
-#[command(after_long_help = "\
+#[command(
+    long_about = "Run an NMX-C browse operation via the API server.\n\n--operation is required. Exactly one endpoint selector must be specified: --chassis-serial or --rack-id. Providing both selectors is rejected.",
+    after_long_help = "\
 EXAMPLES:
 
 List the GPUs on a chassis via NMX-C:
@@ -78,7 +80,8 @@ List NMX-C partitions:
 Get NMX-C domain properties:
     $ nico-admin-cli browse nmxc --chassis-serial 1234567890 --operation get-domain-properties
 
-")]
+"
+)]
 pub(crate) struct Args {
     #[clap(
         long,

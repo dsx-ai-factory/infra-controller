@@ -76,6 +76,7 @@ pub use crate::protos::machine_discovery::{
 };
 pub use crate::protos::{agent_local, fmds, health, scout_firmware_upgrade, site_explorer};
 
+pub mod admission_retry;
 pub mod errors;
 pub mod forge_tls_client;
 pub mod libmlx;
@@ -122,6 +123,12 @@ impl forge::BootInterfaceSelectionSource {
 // streaming interfaces are added, we just toss in type defs here, and
 // any users of DynForge don't need to worry about it.
 pub type DynForge = dyn forge::forge_server::Forge<
+        StreamConsoleLogsStream = Pin<
+            Box<
+                dyn Stream<Item = Result<protos::console_log::ConsoleLogLine, tonic::Status>>
+                    + Send,
+            >,
+        >,
         ScoutStreamStream = Pin<
             Box<
                 dyn Stream<Item = Result<forge::ScoutStreamScoutBoundMessage, tonic::Status>>
@@ -930,6 +937,7 @@ impl forge::MachineCapabilityDeviceType {
 
         Ok(Some(match s.to_uppercase().as_str() {
             "DPU" => Self::Dpu as i32,
+            "SPECTRUMX" => Self::SpectrumX as i32,
             "UNKNOWN" => Self::Unknown as i32,
             _ => 0,
         }))
@@ -955,6 +963,7 @@ impl forge::MachineCapabilityDeviceType {
             forge::MachineCapabilityDeviceType::Dpu => "DPU".to_string(),
             forge::MachineCapabilityDeviceType::Unknown => "UNKNOWN".to_string(),
             forge::MachineCapabilityDeviceType::Nvlink => "NVLINK".to_string(),
+            forge::MachineCapabilityDeviceType::SpectrumX => "SpectrumX".to_string(),
         })
     }
 }
@@ -1136,7 +1145,12 @@ mod tests {
 
         assert_eq!(
             service_names,
-            ["FmdsConfigService", "Forge", "NMX_Controller"]
+            [
+                "ConsoleLogService",
+                "FmdsConfigService",
+                "Forge",
+                "NMX_Controller",
+            ]
         );
     }
 
@@ -1204,6 +1218,8 @@ mod tests {
         let domain = Domain {
             id: Some(uuid),
             name: "MyDomain".to_string(),
+            default_ttl: None,
+            vpc_id: None,
             created: Some(ts.into()),
             updated: Some(ts2.into()),
             deleted: None,

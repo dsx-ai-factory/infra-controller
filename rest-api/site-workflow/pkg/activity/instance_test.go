@@ -733,7 +733,7 @@ func TestManageInstanceInventory_DiscoverInstanceInventory(t *testing.T) {
 				assert.Equal(t, wantItems, len(inventory.Instances), "page %d Instance count", i+1)
 				assert.Equal(t, i+1, int(inventory.InventoryPage.CurrentPage))
 				assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-				assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+				assertItemIDsOnFinalPageOnly(t, tc.Calls, tt.args.wantTotalItems)
 
 				if tt.args.wantTotalItems == 0 {
 					// Nothing to page through, so Cloud receives the configured page size and no

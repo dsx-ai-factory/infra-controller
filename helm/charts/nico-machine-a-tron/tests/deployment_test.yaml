@@ -215,7 +215,10 @@ tests:
           value: redfish
       - equal:
           path: spec.template.spec.containers[0].startupProbe.failureThreshold
-          value: 20
+          value: 120
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.periodSeconds
+          value: 30
 
   - it: should fail when startupProbe is explicitly nulled (recreates issue 4298)
     template: deployment.yaml

@@ -377,7 +377,6 @@ impl Querying {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use axum::Router;
     use axum::body::{Body, to_bytes};
@@ -388,8 +387,8 @@ mod tests {
     use super::*;
     use crate::bmc_state::BmcState;
     use crate::redfish::log_service::LogEntryDraft;
-    use crate::test_support::{NoopCallbacks, host_info};
-    use crate::{HardwareType, MachineRouterOptions, machine_router};
+    use crate::test_support::{TestBmcConfig, TestCallbacks, create_test_bmc, host_info};
+    use crate::{HardwareType, MachineRouterOptions};
 
     const SYSTEM: &str = "/redfish/v1/Systems/System.Embedded.1";
     const ENTRIES: &str = "/redfish/v1/Systems/System.Embedded.1/LogServices/EventLog/Entries";
@@ -397,10 +396,10 @@ mod tests {
     /// `Created` of the Dell profile's seeded entry.
     const SEED: &str = "2026-02-12T02:06:58Z";
 
-    fn dell_router() -> (Router, BmcState) {
-        machine_router(
+    fn dell_router() -> (Router, BmcState<TestCallbacks>) {
+        create_test_bmc(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            TestBmcConfig::default(),
             String::new(),
             false,
             MachineRouterOptions::default(),

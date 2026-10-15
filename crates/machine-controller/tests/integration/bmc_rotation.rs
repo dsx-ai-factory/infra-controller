@@ -31,10 +31,10 @@ use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use chrono::{Duration, Utc};
 use db::credential_rotation::{
     CredentialRotationType, device_rotation_status, increment_rotate_attempt,
-    record_device_converged, set_next_target_version,
+    record_device_enrolled, set_next_target_version,
 };
 use mac_address::MacAddress;
-use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::machine::ManagedHostState;
 use model::test_support::ManagedHostConfig;
 
@@ -100,7 +100,7 @@ async fn stage_lagging_bmc(
         .expect("staging the per-device secret should succeed");
     {
         let mut conn = pool.acquire().await?;
-        record_device_converged(&mut conn, host_mac, BMC).await?;
+        record_device_enrolled(&mut conn, host_mac, BMC, Some(0)).await?;
         assert!(
             matches!(
                 set_next_target_version(&mut conn, BMC, 0, serde_json::json!({})).await?,
@@ -484,6 +484,7 @@ async fn rotation_preserves_an_operator_suppression(
             &NewBmcSuppression {
                 bmc_mac_address: host_mac,
                 subsystem: BmcSuppressionSubsystem::SiteExplorer,
+                source: BmcSuppressionSource::Decommissioning,
                 reason: "decommissioning".to_string(),
             },
         )
@@ -510,10 +511,14 @@ async fn rotation_preserves_an_operator_suppression(
             .expect("device rotation row should exist");
         assert!(status.converged, "device should have rotated");
     }
-    let operator =
-        db::bmc_suppression::find(&pool, host_mac, BmcSuppressionSubsystem::SiteExplorer)
-            .await?
-            .expect("operator suppression must survive the rotation");
+    let operator = db::bmc_suppression::find(
+        &pool,
+        host_mac,
+        BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::Decommissioning,
+    )
+    .await?
+    .expect("operator suppression must survive the rotation");
     assert_eq!(
         operator.reason, "decommissioning",
         "the operator's suppression reason must be preserved"

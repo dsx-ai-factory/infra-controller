@@ -1,4 +1,4 @@
-# Configure Firmware Versions <Badge intent="info">v2.1</Badge> <Badge intent="launch" minimal>New</Badge>
+# Configure Firmware Versions <Badge intent="info">v2.1</Badge>
 
 NICo needs a site-specific definition of acceptable firmware before it can
 detect drift or choose an upgrade target. Host firmware and DPU NIC firmware
@@ -249,7 +249,7 @@ contain that script.
 Other host models require their own inventory mapping and Scout script. To add
 support for another model:
 
-- Follow the [contributing guide](../../../CONTRIBUTING.md).
+- Follow the [contributing guide](https://github.com/dsx-ai-factory/infra-controller/blob/main/CONTRIBUTING.md).
 - Add the catalog component regex for `FirmwareComponentType::Cx7` to the
   [host firmware inventory mappings](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/handlers/firmware.rs)
   for the model.
@@ -450,6 +450,7 @@ product_family = "gb200"
 [rack_profiles.NVL72.firmware_object]
 url = "https://firmware.example.com/objects/nvl72.json"
 fetch_timeout = "30s"
+access_token_credential = "nvl72-artifacts"
 
 [rack_profiles.NVL72.rack_capabilities.compute]
 vendor = "NVIDIA"
@@ -473,11 +474,19 @@ restore the desired NVOS admin password on each selected switch before the rack
 leaves the NVOS update phase. Without `firmware_object`, NICo skips both
 automatic update phases. An explicit maintenance request can supply a firmware
 object instead.
-If no firmware object is available while a switch in the maintenance scope is
-already waiting for an NVOS update, the rack transitions to `Error` instead of
-skipping the NVOS phase.
+If no firmware object is available while a selected switch is in
+`WaitingForNVOSUpgrade` for a reprovision request whose initiator is
+`rack-{rack_id}`, the rack transitions to `Error` instead of skipping the NVOS
+phase.
 
 The `url` field identifies the document location. The optional `fetch_timeout`
 field accepts duration strings such as `30s` and `60s` and defaults to `30s`.
 Use seconds for this request timeout, although the parser accepts other
 duration units such as milliseconds (`ms`), minutes (`m`), and hours (`h`).
+The optional `access_token_credential` field names a credential that contains a
+firmware artifact access token. Store the token by running
+`nico-admin-cli credential firmware-access-token set`. NICo reads the credential
+when compute-tray pre-ingestion starts and forwards the token to RMS. The rack
+profile contains no secret. When the field is omitted, NICo sends the RMS
+no-auth sentinel. The rack state-machine firmware path keeps its existing token
+behavior.

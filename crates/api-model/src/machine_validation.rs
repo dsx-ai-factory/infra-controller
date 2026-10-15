@@ -77,9 +77,16 @@ pub struct MachineValidationTestUpdatePayload {
     pub plugin: Option<MachineValidationPlugin>,
 }
 
-/// Immutable executable settings for an OCI Machine Validation plugin.
+/// Immutable executable settings for a Machine Validation plugin.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MachineValidationPlugin {
+    /// Execution type. `container` is the only currently supported value.
+    #[serde(
+        rename = "type",
+        alias = "plugin_type",
+        default = "MachineValidationPlugin::default_type"
+    )]
+    pub plugin_type: String,
     /// OCI image reference pinned to a digest.
     pub image: String,
     /// Executable and arguments invoked without a shell.
@@ -91,6 +98,14 @@ pub struct MachineValidationPlugin {
     /// Requests a writable host-root mount; it additionally needs separate approval
     /// for this verified plugin revision before it can be enabled.
     pub host_access_full: bool,
+}
+
+impl MachineValidationPlugin {
+    pub const CONTAINER_TYPE: &'static str = "container";
+
+    fn default_type() -> String {
+        Self::CONTAINER_TYPE.to_string()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -165,6 +180,24 @@ pub enum MachineValidationAttemptState {
 impl Display for MachineValidationAttemptState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(self, f)
+    }
+}
+
+/// The source stream for a persisted Machine Validation attempt log chunk.
+#[derive(Debug, Clone, PartialEq, Eq, strum_macros::EnumString)]
+pub enum MachineValidationAttemptLogStream {
+    #[strum(serialize = "stdout")]
+    Stdout,
+    #[strum(serialize = "stderr")]
+    Stderr,
+}
+
+impl Display for MachineValidationAttemptLogStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stdout => f.write_str("stdout"),
+            Self::Stderr => f.write_str("stderr"),
+        }
     }
 }
 
@@ -288,7 +321,9 @@ impl<'r> FromRow<'r, PgRow> for MachineValidationRunItem {
     }
 }
 
-#[derive(Debug, Clone)]
+/// `MachineValidationAttempt` stores one execution attempt from `machine_validation_attempts`.
+#[derive(Debug, Clone, carbide_macros::DbTable)]
+#[db_table(name = "machine_validation_attempts")]
 pub struct MachineValidationAttempt {
     pub id: MachineValidationAttemptId,
     pub run_item_id: MachineValidationRunItemId,
@@ -331,7 +366,35 @@ impl<'r> FromRow<'r, PgRow> for MachineValidationAttempt {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, Serialize)]
+/// A bounded, append-only stdout or stderr fragment from a validation attempt.
+#[derive(Debug, Clone, carbide_macros::DbTable)]
+#[db_table(name = "machine_validation_attempt_logs")]
+pub struct MachineValidationAttemptLogChunk {
+    pub attempt_id: MachineValidationAttemptId,
+    pub sequence: i32,
+    pub stream: MachineValidationAttemptLogStream,
+    pub created_at: DateTime<Utc>,
+    pub content: String,
+}
+
+impl<'r> FromRow<'r, PgRow> for MachineValidationAttemptLogChunk {
+    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
+        let stream_raw: String = row.try_get("stream")?;
+
+        Ok(MachineValidationAttemptLogChunk {
+            attempt_id: row.try_get("attempt_id")?,
+            sequence: row.try_get("sequence")?,
+            stream: decode_state(stream_raw, "machine_validation_attempt_logs.stream")?,
+            created_at: row.try_get("created_at")?,
+            content: row.try_get("content")?,
+        })
+    }
+}
+
+/// `MachineValidationExternalConfig` stores a named configuration from
+/// `machine_validation_external_config` for validation tests to use.
+#[derive(Debug, Deserialize, Clone, Serialize, carbide_macros::DbTable)]
+#[db_table(name = "machine_validation_external_config")]
 pub struct MachineValidationExternalConfig {
     pub name: String,
     pub description: String,
@@ -350,7 +413,9 @@ impl<'r> FromRow<'r, PgRow> for MachineValidationExternalConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, Serialize)]
+/// `MachineValidationTest` stores one test-definition revision from `machine_validation_tests`.
+#[derive(Debug, Deserialize, Clone, Serialize, carbide_macros::DbTable)]
+#[db_table(name = "machine_validation_tests")]
 pub struct MachineValidationTest {
     pub test_id: String,
     pub name: String,
@@ -706,5 +771,23 @@ mod tests {
                 } => MachineValidationStatus::default(),
             }
         );
+    }
+
+    #[test]
+    fn plugin_type_defaults_for_older_catalog_revisions() {
+        let plugin: MachineValidationPlugin = serde_json::from_str(
+            r#"{
+                "image":"registry.example.com/plugin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "entrypoint":["/plugin/entrypoint"],
+                "parameters_json":"{}",
+                "privileged":false,
+                "host_access_full":false
+            }"#,
+        )
+        .expect("older plugin revision deserializes");
+
+        assert_eq!(plugin.plugin_type, MachineValidationPlugin::CONTAINER_TYPE);
+        let serialized = serde_json::to_value(plugin).expect("plugin serializes");
+        assert_eq!(serialized["type"], MachineValidationPlugin::CONTAINER_TYPE);
     }
 }

@@ -22,6 +22,7 @@ mod iteration;
 mod reachability;
 mod spawn;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -29,6 +30,7 @@ use carbide_utils::managed_loop::{self, LoopManager};
 pub use context::DiscoveryLoopContext;
 pub(crate) use context::load_nmxc_schema_override;
 pub use iteration::run_discovery_iteration;
+use tokio::sync::Notify;
 
 use crate::HealthError;
 use crate::collectors::{BackoffConfig, ExponentialBackoff};
@@ -51,10 +53,12 @@ pub(crate) trait DiscoveryIteration: Send {
 /// counted by the shared managed-loop event; a failed pass writes that
 /// event's WARN line and schedules a capped exponential backoff instead of
 /// ending the loop, and the next success resets the backoff and returns the
-/// cadence to `interval`.
+/// cadence to `interval`. Collector mode transitions wake the loop before the
+/// scheduled delay expires.
 pub(crate) async fn run_discovery_loop(
     interval: Duration,
     backoff_config: BackoffConfig,
+    collector_transition_notify: Arc<Notify>,
     mut iteration: impl DiscoveryIteration,
 ) {
     let mut backoff = ExponentialBackoff::new(&backoff_config);
@@ -68,7 +72,11 @@ pub(crate) async fn run_discovery_loop(
             }
             Err(_) => backoff.next_delay(),
         };
-        tokio::time::sleep(delay).await;
+
+        tokio::select! {
+            () = tokio::time::sleep(delay) => {}
+            () = collector_transition_notify.notified() => {}
+        }
     }
 }
 
@@ -112,6 +120,7 @@ mod tests {
     async fn discovery_loop_retries_failures_and_resets_backoff() {
         let metrics = MetricsCapture::start();
         let (times_tx, mut times_rx) = tokio::sync::mpsc::unbounded_channel();
+        let collector_transition_notify = Arc::new(Notify::new());
 
         let loop_task = tokio::spawn(run_discovery_loop(
             Duration::from_secs(300),
@@ -119,6 +128,7 @@ mod tests {
                 initial: Duration::from_secs(1),
                 max: Duration::from_secs(8),
             },
+            collector_transition_notify,
             ScriptedIteration {
                 // Two failures (retry, then doubled retry), a success
                 // (normal cadence), then a failure that must retry from the
@@ -170,5 +180,35 @@ mod tests {
             ),
             2.0
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn collector_transition_wakes_discovery_before_the_normal_interval() {
+        let _metrics = MetricsCapture::start();
+        let (times_tx, mut times_rx) = tokio::sync::mpsc::unbounded_channel();
+        let collector_transition_notify = Arc::new(Notify::new());
+
+        let loop_task = tokio::spawn(run_discovery_loop(
+            Duration::from_secs(300),
+            BackoffConfig::default(),
+            collector_transition_notify.clone(),
+            ScriptedIteration {
+                script: vec![true],
+                calls: 0,
+                times: times_tx,
+            },
+        ));
+
+        let first_iteration = times_rx.recv().await.expect("first iteration should run");
+        collector_transition_notify.notify_one();
+
+        let second_iteration = times_rx
+            .recv()
+            .await
+            .expect("transition should wake the next iteration");
+
+        loop_task.abort();
+
+        assert_eq!(second_iteration, first_iteration);
     }
 }

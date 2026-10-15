@@ -14,6 +14,10 @@ global:
     pullPolicy: IfNotPresent
   imagePullSecrets: []
   certificate:
+    ## Use cert-manager for Scout and DPU certificates; the default is Vault.
+    useCertManager: false
+    ## Independently enable UFM issuance after approval policy allows its DNS SANs.
+    useCertManagerUfm: false
     duration: 720h0m0s
     renewBefore: 360h0m0s
     privateKey:
@@ -31,6 +35,16 @@ global:
 
 ## Override the release namespace (defaults to helm install -n <namespace>)
 namespaceOverride: ""
+
+## Used when global.certificate.useCertManager is true. Requests are created
+## in the API namespace using its service account. The issuer must chain to
+## the same site CA already trusted by the API, Scout and DPU agents.
+machineCertificates:
+  issuerRef:
+    name: site-issuer
+    kind: ClusterIssuer
+  ## Issuance deadline in seconds, including request creation; range 1..600.
+  requestTimeoutSecs: 120
 
 ## Legacy name aliases — opt-in ExternalName Services so binaries that
 ## hardcode the pre-rename hostnames (e.g. `carbide-api.forge-system.svc.
@@ -122,28 +136,46 @@ resources:
 ## a positive integer (validated at render).
 fileDescriptorLimit: 65536
 
-## Optional init containers (general-purpose pass-through)
+## Optional general-purpose init containers, run in list order after bootArtifactContainers.
+## Omitted or empty lists add no general-purpose init containers.
+## Quote tags (for example, tag: "1.10") to preserve their exact text.
+## YAML parses unquoted 1.10 as 1.1; unquoted 0 is treated as empty and falls
+## back to image. Use "0" to select the literal tag 0.
+## Set both non-empty `repository` + `tag` to build `image: <repository>:<tag>`;
+## they take precedence over `image`. If either is omitted or empty, supply `image`.
+## Rendering fails if neither form supplies an image; the error identifies the list entry.
+## No repository or tag defaults are inherited from global.image.
+## All other Kubernetes container fields pass through unchanged; mounts are not injected.
 initContainers: []
+# initContainers:
+#   - name: custom-init
+#     repository: <your-registry>/custom-init
+#     tag: "<tag>"
+#     command: ["sh", "-c", "echo initializing"]
 
 ## Boot-artifact init containers
 ## Each entry is rendered as a Kubernetes init container with the boot-artifacts
 ## volume automatically mounted at /forge-boot-artifacts/blobs/internal.
-## Prefer separate `repository` + `tag` fields (they win when set). The combined
-## `image: <ref>:<tag>` form is still honored for backward compatibility.
+## Quote tags (for example, tag: "1.10") to preserve their exact text.
+## YAML parses unquoted 1.10 as 1.1; unquoted 0 is treated as empty and falls
+## back to image. Use "0" to select the literal tag 0.
+## Set both non-empty `repository` + `tag` to override `image`. If either is omitted
+## or empty, supply `image` (a tag or digest reference). No global.image defaults apply.
+## Rendering fails if neither form supplies an image; the error identifies the list entry.
 bootArtifactContainers: []
 # bootArtifactContainers:
 #   - name: boot-artifacts-x86-64
 #     repository: <your-registry>/boot-artifacts-x86_64
-#     tag: latest
+#     tag: "latest"
 #     command: ["sh", "-c", "cp -r /x86_64 /forge-boot-artifacts/blobs/internal"]
 #   - name: boot-artifacts-aarch64
 #     repository: <your-registry>/boot-artifacts-aarch64
-#     tag: latest
+#     tag: "latest"
 #     # NOTE: the aarch64 image ships /aarch64 + /apt (NOT /firmware) — copying a missing dir crash-loops the init.
 #     command: ["sh", "-c", "cp -r /aarch64 /apt /forge-boot-artifacts/blobs/internal"]
 #   - name: machine-validation-config
 #     repository: <your-registry>/machine-validation-config
-#     tag: latest
+#     tag: "latest"
 #     command: ["sh", "-c", "cp -r /machine-validation /forge-boot-artifacts/blobs/internal"]
 
 service:
@@ -169,8 +201,10 @@ service:
       - vpc_prefix
       - spdm_attestation
       - ib_partition
-  profiler:
-    port: 1081
+
+sshConsole:
+  serviceName: nico-ssh-console-rs
+  port: 1079
 
 certificate:
   ## serviceName is used to auto-generate dnsNames and SPIFFE URIs based on global.namespace
@@ -280,14 +314,31 @@ env:
 ##     username: ignored-for-token-or-certificate-auth
 ##     password: bearer-token-or-empty
 ##
-## In the default local_first mode, these entries override matching persistent
-## backend credentials. Set ufmSource to local to require local entries for
-## every configured fabric and disable persistent-backend UFM access.
+## bmc_site_wide_root:
+##   username: root
+##   password: existing-version-0-password
+##
+## In the default local_first modes, these entries override matching persistent
+## backend credentials. Set a source to local to make its local entries
+## authoritative and disable persistent-backend mutation for that credential.
 credentials:
   # local_first preserves environment/file overrides with persistent-backend
   # fallback. backend ignores local UFM entries. local requires every configured
   # fabric in the environment/file sources and rejects backend mutations.
   ufmSource: local_first
+  # Controls only the unversioned (version 0) site-wide BMC root. local_first
+  # reads environment, then file, then falls back to the backend. backend ignores
+  # the local v0 entry. local reads environment, then file, with no backend
+  # fallback and rejects backend v0 mutations. Treat local v0 as
+  # bootstrap/ingestion input; after a device uses it, coordinated rotation
+  # advances to a backend-managed version. With DPF enabled, local mode requires
+  # v0 before Core starts when v0 is current or the target cannot be resolved.
+  # local_first and backend may start empty, but new DPU registration waits for
+  # the shared Secret to be published. The default pinned DPF v26.4.0 does not
+  # support credential rotation; do not rotate while DPF manages a DPU
+  # (NVIDIA/infra-controller#6147).
+  # Versioned roots always use persistent backends.
+  bmcSiteWideRootSource: local_first
   file:
     existingSecret:
       name: ""
@@ -339,7 +390,7 @@ componentManager:
 ## standard rack-management path; set enabled: false on deployments that do
 ## not run RMS.
 ##
-## Qualified NVL72 / NVL72_GB300 rack_profiles always ship in the global toml;
+## Qualified rack_profiles always ship in the global toml;
 ## override OEM vendors (or add test profiles) via site-config merge.
 ##
 ## Enabling BEFORE rack-manager is deployed is safe: the client is constructed
@@ -393,12 +444,27 @@ envFrom:
   nicoWebHostname:
     configMapName: nico-web-api-hostname
 
+# Both probes target port 1080, which only exists when `metrics_endpoint` is
+# set in the API config (see carbide-api-config.toml). Removing that setting
+# leaves the pod permanently un-Ready with no other indication why.
 livenessProbe:
   httpGet:
+    path: /health
     port: 1080
     scheme: HTTP
   initialDelaySeconds: 20
   periodSeconds: 20
+  failureThreshold: 3
+  successThreshold: 1
+  timeoutSeconds: 20
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 1080
+    scheme: HTTP
+  initialDelaySeconds: 20
+  periodSeconds: 10
   failureThreshold: 3
   successThreshold: 1
   timeoutSeconds: 20
@@ -452,6 +518,22 @@ auth:
   ## and passes the default Casbin forge/* rule; internal RBAC still requires ExternalUser
   ## for the ForgeAdminCLI path unless bypass_rbac is enabled.
   adminRootCafilePath: "/etc/forge/carbide-api/site/admin_root_cert_pem"
+
+## Machine state controller. maxConcurrency caps how many machine handlers run
+## at the same time. It must be a positive integer, and the chart default
+## matches the binary default. Raising it shortens the per-machine pipeline,
+## but too high a value slows the whole ingestion through admin segment lock
+## contention, so tune it against measured time to ready.
+machineStateController:
+  maxConcurrency: 10
+
+## API admission control. enabled must be true or false, and the chart default
+## matches the binary default. Keep it enabled on real hardware. Disable it for
+## a simulated fleet whose agents share one client identity, or as a rollback
+## escape hatch. The per-client limits stay at the binary defaults and can be
+## changed with an [api_admission_control] table in siteConfig.nicoApiSiteConfig.
+apiAdmissionControl:
+  enabled: true
 
 ## Config files -- can be overridden with custom content
 configFiles:
@@ -509,7 +591,21 @@ databaseConfig: {}
 externalService:
   enabled: false
   type: LoadBalancer
+  # Empty values keep Kubernetes defaults. Use SingleStack with [IPv6] for an
+  # IPv6-only Service, or RequireDualStack with [IPv4, IPv6] for both families.
+  # PreferDualStack allows fallback on a single-stack cluster. An existing
+  # Service's primary family (the first entry) cannot be changed in place.
+  ipFamilyPolicy: ""
+  ipFamilies: []
+  # External gRPC port. The backend target port stays service.grpc.port, and
+  # clients must use the port set here.
+  port: 443
+  # Local preserves client source IPs. MetalLB only lets Local Services share
+  # an IP with Services that select the same pods.
   externalTrafficPolicy: Local
+  # Annotations are passed through unchanged. To share an IP with another
+  # Service, add your load-balancer controller's sharing annotation here, for
+  # example metallb.universe.tf/allow-shared-ip: "<group>".
   annotations: {}
   # annotations:
   #   metallb.universe.tf/loadBalancerIPs: "10.x.x.x"

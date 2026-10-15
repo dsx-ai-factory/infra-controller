@@ -130,6 +130,10 @@ func runGeneratedTUICommand(s *Session, info appcli.GeneratedCommandInfo, args [
 	if err != nil {
 		return err
 	}
+	flagArgs, err = validateGeneratedSiteSelections(s, info, flagArgs)
+	if err != nil {
+		return err
+	}
 	if generatedCommandSupportsPagination(info) &&
 		!hasGeneratedOption(info, flagArgs, "all", "page-number", "page-size") {
 		flagArgs = append(flagArgs, "--all")
@@ -215,6 +219,7 @@ func resolveGeneratedPathParameters(s *Session, info appcli.GeneratedCommandInfo
 			value = resolved[i]
 		}
 		descriptor := GeneratedPathResourceDescriptor(info.Name, parameter)
+		descriptor.RegisteredSiteOnly = descriptor.ResourceType == "site" && generatedCommandRequiresRegisteredSite(info)
 
 		if value == "" {
 			switch descriptor.ResourceType {
@@ -285,11 +290,13 @@ func addRequiredGeneratedQueryFlags(s *Session, info appcli.GeneratedCommandInfo
 			value = strings.TrimSpace(s.Scope.VpcID)
 		}
 		if value == "" && s.Resolver != nil && s.Resolver.HasFetcher(resourceType) {
-			item, err := s.Resolver.Resolve(
-				context.Background(),
-				resourceType,
-				generatedParameterLabel(parameter.Name),
-			)
+			var item *NamedItem
+			var err error
+			if resourceType == "site" && generatedCommandRequiresRegisteredSite(info) {
+				item, err = promptRegisteredSite(s, context.Background())
+			} else {
+				item, err = s.Resolver.Resolve(context.Background(), resourceType, generatedParameterLabel(parameter.Name))
+			}
 			if err != nil {
 				return nil, err
 			}

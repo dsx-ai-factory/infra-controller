@@ -47,6 +47,14 @@ CreateOrUpdateBmcCredential Create Or Update BMC Credential
 Create or update a site-wide or per-BMC root credential. Equivalent
 to `nico-admin-cli credential add-bmc`.
 
+When `kind` is `SiteWideRoot` and Core uses
+`bmc_site_wide_root_source = "local"`, Core rejects the write with 412;
+before any managed device uses version 0, supply or correct it through
+the configured local environment or credential file. After ingestion,
+leave the local value unchanged and use BMC credential rotation to
+advance to a backend-managed version. This source policy does not block
+`BMCRoot` writes.
+
 User must have authorization role with `PROVIDER_ADMIN` suffix.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
@@ -140,6 +148,17 @@ func (a *BMCCredentialAPIService) CreateOrUpdateBmcCredentialExecute(r ApiCreate
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 412 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

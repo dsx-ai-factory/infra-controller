@@ -1,0 +1,49 @@
+suite: OTLP span export endpoint
+templates:
+  - deployment.yaml
+tests:
+  - it: leaves span export off when no collector endpoint is configured
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+          any: true
+
+  - it: treats an empty endpoint as unconfigured rather than rendering an empty value
+    set:
+      otlpEndpoint: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+          any: true
+
+  - it: exports spans to the configured collector
+    set:
+      otlpEndpoint: http://opentelemetry-collector.otel.svc.cluster.local:4317
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+            value: http://opentelemetry-collector.otel.svc.cluster.local:4317
+
+  # Set span verbosity through env.
+  - it: allows the span level to be raised through env
+    set:
+      otlpEndpoint: http://collector:4317
+      env:
+        NICO_TRACES_SPAN_LEVEL: debug
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_TRACES_SPAN_LEVEL
+            value: debug
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+            value: http://collector:4317

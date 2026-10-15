@@ -312,6 +312,13 @@ fn build_allocated_networks(
     segment_prefix: &Prefix,
     used_ips: &[IpNetwork],
 ) -> DatabaseResult<Vec<IpNetwork>> {
+    // Reject negative stored counts before they become a large iterator limit.
+    let num_reserved = usize::try_from(segment_prefix.num_reserved).map_err(|_| {
+        DatabaseError::internal(format!(
+            "network prefix {} has negative reservation count {}",
+            segment_prefix.id, segment_prefix.num_reserved
+        ))
+    })?;
     let mut allocated_ips: Vec<IpNetwork> = Vec::new();
 
     // First, if the segment prefix has a configured gateway (which comes
@@ -332,11 +339,7 @@ fn build_allocated_networks(
     // If the first address also happens to be the gateway address, and
     // the gateway address is set for this network prefix, then it just
     // gets added twice (and will be de-duplicated later).
-    for next_ip in segment_prefix
-        .prefix
-        .iter()
-        .take(segment_prefix.num_reserved as usize)
-    {
+    for next_ip in segment_prefix.prefix.iter().take(num_reserved) {
         let next_net = IpNetwork::new(next_ip, next_ip.address_family().interface_prefix_len())?;
         allocated_ips.push(next_net);
     }
@@ -480,6 +483,7 @@ fn build_candidate_subnet(
 // that prefix, and the size of the next prefix you would
 // like to allocate. It then finds the next valid subnet
 // of the provided prefix length that can be allocated.
+// An IPv6 /128 can also return its single host address.
 //
 // Note that this will fill in fragmentation. For example,
 // if you allocate some /32, such that a /30 needs to skip
@@ -492,6 +496,14 @@ fn next_available_prefix(
     prefix_length: u8,
     allocated_networks: Vec<IpNetwork>,
 ) -> DatabaseResult<Option<IpNetwork>> {
+    // Check the single IPv6 host address directly so an exhausted /128
+    // doesn't advance past `u128::MAX`.
+    if network_segment.prefix() == 128 && prefix_length == 128 {
+        let is_allocated = allocated_networks
+            .iter()
+            .any(|allocated| allocated.contains(network_segment.network()));
+        return Ok((!is_allocated).then_some(network_segment));
+    }
     if prefix_length <= network_segment.prefix() {
         return Err(DatabaseError::internal(format!(
             "requested prefix length ({}) must be greater than the network segment prefix length ({})",
@@ -535,6 +547,23 @@ mod tests {
     use carbide_test_support::{Case, check_cases, value_scenarios};
 
     use super::*;
+
+    #[test]
+    fn test_build_allocated_networks_rejects_negative_reservations() {
+        let prefix = Prefix {
+            id: uuid::uuid!("91609f10-c91d-470d-a260-6293ea0c1200").into(),
+            prefix: "2001:db8::/126".parse().unwrap(),
+            gateway: None,
+            num_reserved: -1,
+        };
+        let error = build_allocated_networks(&prefix, &[]).unwrap_err();
+        assert!(matches!(
+            error,
+            DatabaseError::Internal { message }
+                if message.contains(&prefix.id.to_string())
+                    && message.contains("negative reservation count -1")
+        ));
+    }
 
     #[test]
     fn test_ip_allocation() {
@@ -949,6 +978,21 @@ mod tests {
         ];
         let next_prefix = next_available_prefix(cidr, prefix_length, allocated_cidrs).unwrap();
         assert!(next_prefix.is_some_and(|prefix| prefix.to_string() == "2012:db9:0:2::/64"));
+    }
+
+    #[test]
+    fn test_ipv6_single_address_candidate() {
+        let network: IpNetwork = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128"
+            .parse()
+            .unwrap();
+        value_scenarios!(run = |allocated: Vec<IpNetwork>| {
+            next_available_prefix(network, 128, allocated).unwrap()
+        };
+            "single address at the IPv6 upper bound" {
+                vec![] => Some(network),
+                vec![network] => None,
+            }
+        );
     }
 
     #[test]

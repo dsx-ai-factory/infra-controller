@@ -53,6 +53,7 @@ func newMockTargetFetcher() *mockTargetFetcher {
 func (m *mockTargetFetcher) GetRacksForNVLDomain(
 	_ context.Context,
 	id identifier.Identifier,
+	_ bool,
 ) ([]*rack.Rack, error) {
 	if m.getDomainErr != nil {
 		return nil, m.getDomainErr

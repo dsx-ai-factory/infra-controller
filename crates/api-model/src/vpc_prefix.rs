@@ -79,6 +79,9 @@ pub struct VpcPrefix {
     pub id: VpcPrefixId,
     pub site_prefix_id: Option<SitePrefixId>,
     pub vpc_id: VpcId,
+    /// Persisted overlap scope. `None` remains globally exclusive even if the
+    /// VPC's current routing policy would permit a new scoped prefix.
+    pub overlap_vpc_id: Option<VpcId>,
     pub config: VpcPrefixConfig,
     pub metadata: Metadata,
     pub status: VpcPrefixStatus,
@@ -134,6 +137,7 @@ impl<'r> sqlx::FromRow<'r, PgRow> for VpcPrefix {
                 labels: labels.0,
             },
             vpc_id,
+            overlap_vpc_id: row.try_get("overlap_vpc_id")?,
             status: VpcPrefixStatus {
                 controller_state: Versioned::new(
                     controller_state.0,
@@ -173,6 +177,9 @@ pub struct NewVpcPrefix {
     pub id: VpcPrefixId,
     pub site_prefix_id: Option<SitePrefixId>,
     pub vpc_id: VpcId,
+    /// VPC scope selected by Core after checking tenant-prefix eligibility.
+    /// `None` keeps the prefix globally exclusive; API requests cannot set this field.
+    pub overlap_vpc_id: Option<VpcId>,
     pub config: VpcPrefixConfig,
     pub metadata: Metadata,
 }

@@ -64,6 +64,34 @@ func TestNewConfig(t *testing.T) {
 	}
 }
 
+func TestConfig_GetAPIPort(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(c *Config)
+		want      int
+	}{
+		{
+			name:      "unset falls back to the default",
+			configure: func(c *Config) {},
+			want:      8388,
+		},
+		{
+			name:      "override is honored",
+			configure: func(c *Config) { c.v.Set(ConfigAPIPort, 18388) },
+			want:      18388,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewConfig()
+			tt.configure(c)
+			defer c.v.Set(ConfigAPIPort, 8388)
+
+			assert.Equal(t, tt.want, c.GetAPIPort())
+		})
+	}
+}
+
 func TestConfig_GetIssuersConfig(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -421,3 +449,30 @@ site:
 		})
 	}
 }
+
+// TestConfig_GetTracingServiceName proves the binary supplies a service name
+// when the config omits or empties it, so an export never lacks service.name.
+func TestConfig_GetTracingServiceName(t *testing.T) {
+	tcs := []struct {
+		descr      string
+		configured *string
+		want       string
+	}{
+		{descr: "binary default when omitted", want: DefaultTracingServiceName},
+		{descr: "binary default when explicitly empty", configured: new(string), want: DefaultTracingServiceName},
+		{descr: "configured name wins", configured: ptr("custom-api"), want: "custom-api"},
+	}
+
+	for _, tc := range tcs {
+		t.Run(tc.descr, func(t *testing.T) {
+			v := viper.New()
+			if tc.configured != nil {
+				v.Set(ConfigTracingServiceName, *tc.configured)
+			}
+			cfg := &Config{v: v}
+			assert.Equal(t, tc.want, cfg.GetTracingServiceName())
+		})
+	}
+}
+
+func ptr(s string) *string { return &s }

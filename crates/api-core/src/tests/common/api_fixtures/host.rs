@@ -181,6 +181,8 @@ pub(in crate::tests) async fn host_uefi_setup(env: &TestEnv, host_machine_id: Ho
                         machine_state: UefiSetup {
                             uefi_setup_info: UefiSetupInfo {
                                 uefi_password_jid: None,
+                                credential_version: (state != UefiSetupState::SetUefiPassword)
+                                    .then_some(0),
                                 uefi_setup_state: state.clone(),
                             },
                         },

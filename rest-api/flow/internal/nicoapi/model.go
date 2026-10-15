@@ -6,6 +6,7 @@ package nicoapi
 import (
 	"time"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -33,8 +34,59 @@ type MachineDetail struct {
 	AssociatedDpuMachineIDs []string
 	UpdateComplete          bool
 	HealthStatus            string
+	Health                  *types.HealthReport
 	LastObservationTime     *time.Time
 	FirmwareAutoupdate      *bool
+}
+
+// ComponentRuntimeStatus contains the Core runtime fields Flow mirrors for a
+// switch or power shelf during inventory sync.
+type ComponentRuntimeStatus struct {
+	ControllerState string
+	Health          *types.HealthReport
+}
+
+func healthReportFromPb(report *corev1.HealthReport) *types.HealthReport {
+	if report == nil {
+		return nil
+	}
+	result := &types.HealthReport{
+		Source:      report.GetSource(),
+		TriggeredBy: report.TriggeredBy,
+		Successes:   make([]types.HealthProbeSuccess, 0, len(report.GetSuccesses())),
+		Alerts:      make([]types.HealthProbeAlert, 0, len(report.GetAlerts())),
+	}
+	if report.GetObservedAt() != nil {
+		observedAt := report.GetObservedAt().AsTime()
+		result.ObservedAt = &observedAt
+	}
+	for _, success := range report.GetSuccesses() {
+		if success == nil {
+			continue
+		}
+		result.Successes = append(result.Successes, types.HealthProbeSuccess{
+			ID:     success.GetId(),
+			Target: success.Target,
+		})
+	}
+	for _, alert := range report.GetAlerts() {
+		if alert == nil {
+			continue
+		}
+		converted := types.HealthProbeAlert{
+			ID:              alert.GetId(),
+			Target:          alert.Target,
+			Message:         alert.GetMessage(),
+			TenantMessage:   alert.TenantMessage,
+			Classifications: append([]string(nil), alert.GetClassifications()...),
+		}
+		if alert.GetInAlertSince() != nil {
+			inAlertSince := alert.GetInAlertSince().AsTime()
+			converted.InAlertSince = &inAlertSince
+		}
+		result.Alerts = append(result.Alerts, converted)
+	}
+	return result
 }
 
 // MachinePosition represents machine position information from NICo
@@ -89,6 +141,7 @@ func machineDetailFromPb(machine *corev1.Machine) MachineDetail {
 
 	// Health status - derived from alerts
 	if status.GetHealth() != nil {
+		detail.Health = healthReportFromPb(status.GetHealth())
 		if len(status.GetHealth().Alerts) > 0 {
 			detail.HealthStatus = "unhealthy"
 		} else {
@@ -397,6 +450,7 @@ func bringUpStateFromPb(
 type ExpectedRackDetail struct {
 	RackID        string
 	RackProfileID string
+	RackGroupID   string
 	Name          string
 	Description   string
 	Labels        map[string]string
@@ -484,6 +538,7 @@ func metadataToGo(md *corev1.Metadata) (name, description string, labels map[str
 func expectedRackDetailFromPb(er *corev1.ExpectedRack) ExpectedRackDetail {
 	d := ExpectedRackDetail{
 		RackProfileID: er.GetRackProfileId().GetId(),
+		RackGroupID:   er.GetRackGroupId().GetId(),
 	}
 	if er.GetRackId() != nil {
 		d.RackID = er.GetRackId().GetId()

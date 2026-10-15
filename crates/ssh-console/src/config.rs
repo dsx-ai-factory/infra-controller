@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
+use carbide_utils::ListenAddr;
 use carbide_uuid::machine::MachineIdParseError;
 use duration_str::deserialize_duration;
 use forge_tls::client_config::ClientCert;
@@ -36,10 +37,17 @@ use crate::bmc::vendor::{BmcVendor, SshBmcVendor};
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 /// Configuration for ssh-console. Fields are documented as comments in the output of [`Config::into_annotated_config_file`].
 pub struct Config {
+    /// SSH listener; defaults to `*:22`.
     #[serde(default = "Defaults::listen_address")]
-    pub listen_address: SocketAddr,
+    pub listen_address: ListenAddr,
+    /// HTTP metrics listener; defaults to `*:8080`.
     #[serde(default = "Defaults::metrics_address")]
-    pub metrics_address: SocketAddr,
+    pub metrics_address: ListenAddr,
+    /// Private console-log gRPC listener; defaults to `*:1079`.
+    #[serde(default = "Defaults::api_listen_address")]
+    pub api_listen_address: ListenAddr,
+    #[serde(default = "Defaults::api_allowed_client_spiffe_id")]
+    pub api_allowed_client_spiffe_id: String,
     #[serde(
         rename = "carbide_url",
         default = "Defaults::carbide_uri",
@@ -65,6 +73,8 @@ pub struct Config {
     pub override_ipmi_port: Option<u16>,
     #[serde(default)]
     pub insecure_ipmi_ciphers: bool,
+    #[serde(default = "Defaults::ipmitool_path")]
+    pub ipmitool_path: PathBuf,
     #[serde(default)]
     pub force_deactivate_conflicting_ipmi_sol_sessions: bool,
     #[serde(default = "Defaults::root_ca_path")]
@@ -200,6 +210,8 @@ impl Config {
         let Self {
             listen_address,
             metrics_address,
+            api_listen_address,
+            api_allowed_client_spiffe_id,
             authorized_keys_path: _,
             override_bmcs: _,
             host_key_path,
@@ -210,6 +222,7 @@ impl Config {
             override_bmc_ssh_port: _,
             override_ipmi_port: _,
             insecure_ipmi_ciphers,
+            ipmitool_path,
             force_deactivate_conflicting_ipmi_sol_sessions,
             forge_root_ca_path,
             client_cert_path,
@@ -235,6 +248,7 @@ impl Config {
         let carbide_uri = carbide_uri.to_string();
         let listen_address = listen_address.to_string();
         let metrics_address = metrics_address.to_string();
+        let api_listen_address = api_listen_address.to_string();
         let log_rotate_max_size = log_rotate_max_size
             .format()
             .with_base(size::Base::Base2)
@@ -270,11 +284,20 @@ impl Config {
 ## represent examples for optional configuration which is not part of the default config.
 #####
 
+## Listener addresses accept "*:<port>" or an explicit IP socket address (IPv6 in brackets).
+## "*" tries IPv6 unspecified first, then IPv4 unspecified if binding fails.
+## Ports range from 0 through 65535. Port 0 asks the OS to allocate a port; explicit addresses use only that address and family.
 ## What address to listen on for SSH connections.
 listen_address = {listen_address:?}
 
 ## Address to listen on for prometheus metrics requests (HTTP)
 metrics_address = {metrics_address:?}
+
+## Address for the private console-log gRPC API.
+api_listen_address = {api_listen_address:?}
+
+## The only SPIFFE identity permitted to call the private API.
+api_allowed_client_spiffe_id = {api_allowed_client_spiffe_id:?}
 
 ## Address for carbide-api
 carbide_url = {carbide_uri:?}
@@ -316,6 +339,9 @@ insecure = {insecure}
 
 ## If true, use insecure ciphers when connecting to IPMI, like SHA1. Useful for ipmi_sim.
 insecure_ipmi_ciphers = {insecure_ipmi_ciphers}
+
+## Path to the ipmitool executable.
+ipmitool_path = {ipmitool_path:?}
 
 ## Force-deactivate a conflicting IPMI SOL session before reconnecting. The BMC cannot determine
 ## whether the existing session is stale or belongs to an active operator, so enabling this may
@@ -456,6 +482,8 @@ impl Default for Config {
         Self {
             listen_address: Defaults::listen_address(),
             metrics_address: Defaults::metrics_address(),
+            api_listen_address: Defaults::api_listen_address(),
+            api_allowed_client_spiffe_id: Defaults::api_allowed_client_spiffe_id(),
             host_key_path: Defaults::host_key_path(),
             carbide_uri: Defaults::carbide_uri(),
             forge_root_ca_path: Defaults::root_ca_path(),
@@ -479,6 +507,7 @@ impl Default for Config {
             override_bmcs: None,
             insecure: false,
             insecure_ipmi_ciphers: false,
+            ipmitool_path: Defaults::ipmitool_path(),
             force_deactivate_conflicting_ipmi_sol_sessions: false,
             override_bmc_ssh_host: None,
             admin_certificate_role: None,
@@ -511,20 +540,31 @@ pub enum ConfigError {
 }
 
 impl Defaults {
-    pub fn listen_address() -> SocketAddr {
-        "[::]:22"
-            .parse()
-            .expect("BUG: default listen_address is invalid")
+    /// Default SSH listener on any available address family, port 22.
+    pub fn listen_address() -> ListenAddr {
+        ListenAddr::Any { port: 22 }
     }
 
-    pub fn metrics_address() -> SocketAddr {
-        "[::]:8080"
-            .parse()
-            .expect("BUG: default listen_address is invalid")
+    /// Default HTTP metrics listener on any available address family, port 8080.
+    pub fn metrics_address() -> ListenAddr {
+        ListenAddr::Any { port: 8080 }
+    }
+
+    /// Default private gRPC listener on any available address family, port 1079.
+    pub fn api_listen_address() -> ListenAddr {
+        ListenAddr::Any { port: 1079 }
+    }
+
+    pub fn api_allowed_client_spiffe_id() -> String {
+        "spiffe://nico.local/nico-system/sa/nico-api".to_string()
     }
 
     pub fn host_key_path() -> PathBuf {
         "/etc/ssh/ssh_host_ed25519_key".into()
+    }
+
+    pub fn ipmitool_path() -> PathBuf {
+        "ipmitool".into()
     }
 
     pub fn dpus() -> bool {
@@ -687,6 +727,17 @@ mod tests {
         let default_config = Config::default();
         assert_eq!(empty_config, default_config);
         assert!(!empty_config.force_deactivate_conflicting_ipmi_sol_sessions);
+    }
+
+    #[test]
+    fn legacy_ipv4_ssh_config_defaults_other_listeners_to_any() {
+        let config: Config = toml::from_str(r#"listen_address = "0.0.0.0:22""#).unwrap();
+        assert_eq!(
+            config.listen_address,
+            ListenAddr::Explicit("0.0.0.0:22".parse().unwrap())
+        );
+        assert_eq!(config.api_listen_address, ListenAddr::Any { port: 1079 });
+        assert_eq!(config.metrics_address, ListenAddr::Any { port: 8080 });
     }
 
     #[test]

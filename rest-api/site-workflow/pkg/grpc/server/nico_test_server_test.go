@@ -93,3 +93,58 @@ func TestInvokeInstancePower(t *testing.T) {
 		})
 	}
 }
+
+func TestReencryptTenantIdentitySecrets(t *testing.T) {
+	const orgID = "test-org"
+	server := &NICoServerImpl{
+		identityState: map[string]*identityOrgState{
+			orgID: {slot1: &identityKeyMaterial{}, slot2: &identityKeyMaterial{}, currentSlot: 1},
+		},
+		tokenDelegations:       map[string]*corev1.TokenDelegationResponse{orgID: {}},
+		currentEncryptionKeyID: mockCurrentEncryptionKeyID,
+		reencryptedOrgs:        make(map[string]string),
+	}
+
+	t.Run("nil request", func(t *testing.T) {
+		_, err := server.ReencryptTenantIdentitySecrets(context.Background(), nil)
+		require.Equal(t, codes.InvalidArgument, status.Code(err))
+	})
+
+	t.Run("dry run reports would-change without mutating state", func(t *testing.T) {
+		resp, err := server.ReencryptTenantIdentitySecrets(context.Background(),
+			&corev1.ReencryptTenantIdentitySecretsRequest{DryRun: true})
+		require.NoError(t, err)
+		assert.Equal(t, uint32(1), resp.GetRowsExamined())
+		assert.Equal(t, uint32(1), resp.GetRowsUpdated())
+		assert.Equal(t, uint32(3), resp.GetFieldsReencrypted()) // two signing slots + delegation
+		assert.Equal(t, uint32(0), resp.GetRowsSkippedAllOnTarget())
+		assert.Equal(t, mockCurrentEncryptionKeyID, resp.GetCurrentEncryptionKeyId())
+		assert.Empty(t, server.reencryptedOrgs, "dry run must not stamp org state")
+	})
+
+	t.Run("apply re-wraps and stamps state", func(t *testing.T) {
+		resp, err := server.ReencryptTenantIdentitySecrets(context.Background(),
+			&corev1.ReencryptTenantIdentitySecretsRequest{})
+		require.NoError(t, err)
+		assert.Equal(t, uint32(1), resp.GetRowsUpdated())
+		assert.Equal(t, uint32(3), resp.GetFieldsReencrypted())
+		assert.Equal(t, mockCurrentEncryptionKeyID, server.reencryptedOrgs[orgID])
+	})
+
+	t.Run("second apply is idempotent", func(t *testing.T) {
+		resp, err := server.ReencryptTenantIdentitySecrets(context.Background(),
+			&corev1.ReencryptTenantIdentitySecretsRequest{})
+		require.NoError(t, err)
+		assert.Equal(t, uint32(0), resp.GetRowsUpdated())
+		assert.Equal(t, uint32(1), resp.GetRowsSkippedAllOnTarget())
+		assert.Equal(t, uint32(3), resp.GetFieldsSkippedOnTarget())
+	})
+
+	t.Run("missing org filter returns not found", func(t *testing.T) {
+		resp, err := server.ReencryptTenantIdentitySecrets(context.Background(),
+			&corev1.ReencryptTenantIdentitySecretsRequest{OrganizationId: getStrPtr("other-org")})
+		assert.Nil(t, resp)
+		require.Equal(t, codes.NotFound, status.Code(err))
+		assert.Equal(t, `Identity configuration not found for org "other-org"`, status.Convert(err).Message())
+	})
+}

@@ -48,6 +48,7 @@ type Component struct {
 	ComponentID *string                         `bun:"external_id"`
 	PowerState  *nicoapi.PowerState             `bun:"power_state"`
 	Status      *types.ComponentOperationStatus `bun:"status,type:jsonb,nullzero"`
+	Health      *types.HealthReport             `bun:"health,type:jsonb,nullzero"`
 	// LeakStatus is owned by the leak-detection loop. nullzero so an
 	// insert that leaves it empty falls back to the DB default 'UNKNOWN'
 	// rather than writing an empty string.
@@ -79,7 +80,7 @@ func (cd *Component) Get(
 		)
 	}
 
-	query = query.Relation("BMCs").Relation("Rack")
+	query = query.Relation("BMCs").Relation("Rack").Relation("Rack.NVLDomain")
 
 	if err := query.Scan(ctx); err != nil {
 		return nil, err
@@ -94,6 +95,11 @@ var defaultComponentPagination = dbquery.Pagination{
 	Total:  0,
 }
 
+var defaultComponentOrderBy = []dbquery.OrderBy{
+	{Column: "c.name", Direction: dbquery.OrderAscending},
+	{Column: "c.id", Direction: dbquery.OrderAscending},
+}
+
 func GetAllComponents(ctx context.Context, idb bun.IDB) (ret []Component, err error) {
 	err = idb.NewSelect().Model(&Component{}).Scan(ctx, &ret)
 	return ret, err
@@ -103,7 +109,7 @@ func GetAllComponents(ctx context.Context, idb bun.IDB) (ret []Component, err er
 // component's BMCs relation preloaded (callers rely on this for BMC-MAC-based
 // linking).
 func GetComponentsByType(ctx context.Context, idb bun.IDB, componentType devicetypes.ComponentType) (ret []Component, err error) {
-	err = idb.NewSelect().Model(&ret).Where("c.type = ?", devicetypes.ComponentTypeToString(componentType)).Relation("BMCs").Relation("Rack").Scan(ctx)
+	err = idb.NewSelect().Model(&ret).Where("c.type = ?", devicetypes.ComponentTypeToString(componentType)).Relation("BMCs").Relation("Rack").Relation("Rack.NVLDomain").Scan(ctx)
 	return ret, err
 }
 
@@ -166,14 +172,18 @@ func GetListOfComponents(
 		conf.Filterables = filterables
 	}
 
+	conf.DefaultOrderBy = defaultComponentOrderBy
 	if orderBy != nil {
 		qualifiedOrderBy := *orderBy
 		qualifiedOrderBy.Column = "c." + qualifiedOrderBy.Column
-		conf.DefaultOrderBy = []dbquery.OrderBy{qualifiedOrderBy}
+		conf.DefaultOrderBy = []dbquery.OrderBy{
+			qualifiedOrderBy,
+			{Column: "c.id", Direction: dbquery.OrderAscending},
+		}
 	}
 
-	// Always include BMCs relation
-	conf.Relations = []string{"BMCs", "Rack"}
+	// Include the relations required to convert components into the public model.
+	conf.Relations = []string{"BMCs", "Rack", "Rack.NVLDomain"}
 
 	q, err := dbquery.New(ctx, conf)
 	if err != nil {
@@ -199,7 +209,7 @@ func (cd *Component) GetIncludingDeleted(ctx context.Context, idb bun.IDB) (*Com
 		Where("c.id = ?", cd.ID).
 		WhereAllWithDeleted().
 		Relation("BMCs").
-		Relation("Rack").
+		Relation("Rack").Relation("Rack.NVLDomain").
 		Scan(ctx)
 	if err != nil {
 		return nil, err
@@ -335,6 +345,19 @@ func (cd *Component) SetStatusByComponentID(ctx context.Context, idb bun.IDB) er
 	}
 	_, err := idb.NewUpdate().Model(cd).
 		Set("status = ?", cd.Status).
+		Where("external_id = ?", *cd.ComponentID).
+		Exec(ctx)
+	return err
+}
+
+// SetHealthByComponentID writes the latest aggregate health snapshot for the
+// row identified by external_id.
+func (cd *Component) SetHealthByComponentID(ctx context.Context, idb bun.IDB) error {
+	if cd.ComponentID == nil || *cd.ComponentID == "" {
+		return errors.New("component ID not set")
+	}
+	_, err := idb.NewUpdate().Model(cd).
+		Set("health = ?", cd.Health).
 		Where("external_id = ?", *cd.ComponentID).
 		Exec(ctx)
 	return err

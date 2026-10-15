@@ -6,7 +6,7 @@ package expectedpowershelf
 import (
 	"context"
 	"errors"
-	"reflect"
+	"maps"
 
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/google/uuid"
@@ -33,11 +33,13 @@ type ManageExpectedPowerShelf struct {
 
 // UpdateExpectedPowerShelvesInDB is a Temporal activity that takes a collection of ExpectedPowerShelf data pushed by Site Agent and updates the DB
 // Expected Power Shelf records have two unique values (MAC and UUID). We ignore the MAC value and only rely on the UUID for uniqueness.
-// NICo is the source of truth: out of the race-condition window we make the DB match NICo exactly.
+// Core supplies inventory values; omitted names, descriptions, and rack IDs
+// preserve the existing Cloud values.
+// Only successful inventory is reconciled; failed or unsupported statuses are skipped.
 // The reconciliation logic is as follows:
 // - UUID existing in NICo but not in DB: create record in DB
 // - UUID existing in both NICo and DB with differences: update record in DB
-// - UUID existing in DB but not in NICo: delete record in DB
+// - UUID existing in DB but not in NICo: delete the stale record if it has not changed since the initial read
 func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.Context, siteID uuid.UUID, expectedPowerShelfInventory *corev1.ExpectedPowerShelfInventory) error {
 	logger := log.With().Str("Activity", "UpdateExpectedPowerShelvesInDB").Str("Site ID", siteID.String()).Logger()
 
@@ -50,6 +52,12 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 
 	if expectedPowerShelfInventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
 		logger.Warn().Msg("received failed inventory status from Site Agent, skipping inventory processing")
+		return nil
+	}
+
+	if expectedPowerShelfInventory.InventoryStatus != corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS {
+		logger.Warn().Str("inventory_status", expectedPowerShelfInventory.InventoryStatus.String()).
+			Msg("received unsupported inventory status, skipping inventory processing")
 		return nil
 	}
 
@@ -121,6 +129,8 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 		}
 		reportedIDs[epsID] = true
 
+		// Keep reserved labels in `Labels` so they cannot overwrite Cloud's
+		// dedicated manufacturer, model, or placement columns.
 		reported := &cdbm.ExpectedPowerShelf{}
 		reported.FromProto(reps)
 
@@ -133,6 +143,9 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 				BmcMacAddress:        reported.BmcMacAddress,
 				ShelfSerialNumber:    reported.ShelfSerialNumber,
 				BmcIpAddress:         reported.BmcIpAddress,
+				RackID:               reported.RackID,
+				Name:                 reported.Name,
+				Description:          reported.Description,
 				Labels:               reported.Labels,
 				CreatedBy:            siteID, /* This would normally be a user ID, but that isn't something NICo provides */
 			})
@@ -151,24 +164,42 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 			continue
 		}
 
-		// update if any field differs
+		// Labels are replaced as a whole, including when Core reports none.
+		if reported.Labels == nil {
+			reported.Labels = cdbm.Labels{}
+		}
+
+		// Omitted optional fields preserve Cloud values, which may predate their
+		// storage in Core. Compare only fields that Update will actually write.
 		if cur.BmcMacAddress != reported.BmcMacAddress ||
 			cur.ShelfSerialNumber != reported.ShelfSerialNumber ||
-			!util.PtrsEqual(cur.BmcIpAddress, reported.BmcIpAddress) ||
-			!reflect.DeepEqual(cur.Labels, reported.Labels) {
-			// nil labels in nico can mean we need to clear out existing labels in DB
-			// but a nil value will not trigger an update in the DAO layer. We could use `Clear` but an empty map
-			// will save a call to the DB.
-			labels := reported.Labels
-			if cur.Labels != nil && labels == nil {
-				labels = map[string]string{}
-			}
-			_, uerr := epsDAO.Update(ctx, nil, cdbm.ExpectedPowerShelfUpdateInput{
-				ExpectedPowerShelfID: cur.ID,
-				BmcMacAddress:        &reported.BmcMacAddress,
-				ShelfSerialNumber:    &reported.ShelfSerialNumber,
-				BmcIpAddress:         reported.BmcIpAddress,
-				Labels:               labels,
+			(reported.BmcIpAddress != nil && !util.PtrsEqual(cur.BmcIpAddress, reported.BmcIpAddress)) ||
+			(reported.RackID != nil && !util.PtrsEqual(cur.RackID, reported.RackID)) ||
+			(reported.Name != nil && !util.PtrsEqual(cur.Name, reported.Name)) ||
+			(reported.Description != nil && !util.PtrsEqual(cur.Description, reported.Description)) ||
+			!maps.Equal(cur.Labels, reported.Labels) {
+			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
+				// Lock and re-read before writing so an API change after the
+				// initial inventory lookup isn't overwritten by this snapshot.
+				locked, err := epsDAO.Get(ctx, tx, cur.ID, nil, true)
+				if err != nil {
+					return err
+				}
+				if !locked.Updated.Equal(cur.Updated) {
+					return nil
+				}
+
+				_, uerr := epsDAO.Update(ctx, tx, cdbm.ExpectedPowerShelfUpdateInput{
+					ExpectedPowerShelfID: cur.ID,
+					BmcMacAddress:        &reported.BmcMacAddress,
+					ShelfSerialNumber:    &reported.ShelfSerialNumber,
+					BmcIpAddress:         reported.BmcIpAddress,
+					RackID:               reported.RackID,
+					Name:                 reported.Name,
+					Description:          reported.Description,
+					Labels:               reported.Labels,
+				})
+				return uerr
 			})
 			if uerr != nil {
 				logger.Error().Err(uerr).Str("ExpectedPowerShelfID", cur.ID.String()).Msg("failed to update ExpectedPowerShelf in DB")
@@ -176,10 +207,10 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 		}
 	}
 
-	// Delete any Expected Power Shelf present in DB not present in NICo.
-	// We only act if this is the last page (or paging disabled) and outside race window.
-	// The source of truth for NICo is reportedIDs.
-	if expectedPowerShelfInventory.InventoryPage == nil || expectedPowerShelfInventory.InventoryPage.TotalPages == 0 || (expectedPowerShelfInventory.InventoryPage.CurrentPage == expectedPowerShelfInventory.InventoryPage.TotalPages) {
+	// Delete stale records missing from `reportedIDs` only after the final page
+	// (or when paging is disabled). Matching the saved `Updated` timestamp in
+	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
+	if util.ShouldReconcileDeletions(expectedPowerShelfInventory.GetInventoryPage()) {
 		for _, eps := range existingExpectedPowerShelves {
 			if _, keep := reportedIDs[eps.ID]; keep {
 				continue
@@ -188,11 +219,14 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 			if site.IsTimeWithinStaleInventoryThreshold(eps.Updated) {
 				continue
 			}
-			logger.Info().Str("ExpectedPowerShelfID", eps.ID.String()).Msg("deleting ExpectedPowerShelf from DB since it was no longer reported in inventory from Site")
-			if derr := epsDAO.Delete(ctx, nil, eps.ID); derr != nil {
+			deleted, derr := epsDAO.DeleteIfUnchanged(ctx, nil, eps.ID, eps.Updated)
+			if derr != nil {
 				logger.Error().Err(derr).Str("ExpectedPowerShelfID", eps.ID.String()).Msg("failed to delete ExpectedPowerShelf from DB")
+				continue
 			}
-
+			if deleted {
+				logger.Info().Str("ExpectedPowerShelfID", eps.ID.String()).Msg("deleted ExpectedPowerShelf no longer reported in inventory from Site")
+			}
 		}
 	}
 

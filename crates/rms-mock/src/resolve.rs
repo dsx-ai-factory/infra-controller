@@ -37,6 +37,8 @@ use crate::rms;
 pub(crate) struct NodeRef<'a> {
     /// Echoed verbatim: the caller correlates responses by this.
     pub(crate) node_id: &'a str,
+    /// Echoed verbatim; fabric primaries are tracked per rack by this id.
+    pub(crate) rack_id: &'a str,
     pub(crate) node: Option<&'a SimNode>,
 }
 
@@ -64,6 +66,7 @@ pub(crate) fn resolve_nodes<'a>(
         .iter()
         .map(|requested| NodeRef {
             node_id: &requested.node_id,
+            rack_id: &requested.rack_id,
             node: match_node(inventory, requested),
         })
         .collect()

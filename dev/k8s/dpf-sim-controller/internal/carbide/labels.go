@@ -17,8 +17,10 @@ import "strings"
 // from the DPUDevice onto the DPU CR the simulator creates, or NICo cannot map
 // a DPU event back to its machine (reverse lookup in dpf.rs).
 const (
-	LabelDPUMachineID    = "carbide.nvidia.com/dpu-machine-id"
-	LabelControlledDev   = "carbide.nvidia.com/controlled.device" // "true"
+	LabelDPUMachineID  = "carbide.nvidia.com/dpu-machine-id"
+	LabelControlledDev = "carbide.nvidia.com/controlled.device" // "true"
+	// LabelHostBMCIP stores dotted IPv4 or eight four-digit IPv6 hexadecimal
+	// groups separated by hyphens.
 	LabelHostBMCIP       = "carbide.nvidia.com/host-bmc-ip"
 	LabelIsPrimaryDPU    = "carbide.nvidia.com/is-primary-dpu"
 	LabelControlledNode2 = "carbide.nvidia.com/controlled.node.v2" // on DPUNode

@@ -27,8 +27,10 @@ func TestHandler_SourcesNotReady(t *testing.T) {
 }
 
 func TestHandler_SourcesGolden(t *testing.T) {
-	// The fixture is shared with the Rust gateway client tests; keep the
-	// registry state below in sync with testdata/sources_v1.json.
+	// testdata/sources_v1.json is the cross-language contract fixture: the
+	// Rust gateway's contract tests include the same file and check field
+	// parity (crates/mat-protocol-gateway/tests/integration/source_list_contract.rs).
+	// Keep the registry state below, the fixture and those tests in sync.
 	r := NewRegistry(WithDebounce(0))
 	r.Observe([]Source{
 		{Name: "nico-machine-a-tron-single-bmc-mock", BaseURL: "https://nico-machine-a-tron-single-bmc-mock.nico-system.svc.cluster.local:1266"},

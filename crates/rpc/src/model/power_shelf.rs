@@ -137,6 +137,7 @@ impl TryFrom<PowerShelf> for rpc::PowerShelf {
             bmc_info: src.bmc_info.map(Into::into),
             state_version,
             rack_id: src.rack_id,
+            nvlink_domain_uuid: src.nvlink_domain_uuid,
         })
     }
 }
@@ -187,6 +188,11 @@ mod tests {
             decommission_requested: false,
             bmc_info: None,
             rack_id: None,
+            nvlink_domain_uuid: Some(
+                "9f4b45ec-705a-4af4-89f7-a112bc9c8f4e"
+                    .parse()
+                    .expect("valid NVLink domain UUID"),
+            ),
             power_shelf_maintenance_requested: None,
             power_shelf_reprovisioning_requested: None,
             firmware_upgrade_status: None,
@@ -200,6 +206,12 @@ mod tests {
         assert_eq!(
             rpc_power_shelf.id.unwrap().to_string(),
             power_shelf_id.to_string()
+        );
+        assert_eq!(
+            rpc_power_shelf
+                .nvlink_domain_uuid
+                .map(|domain| domain.to_string()),
+            Some("9f4b45ec-705a-4af4-89f7-a112bc9c8f4e".to_string())
         );
 
         let rpc_config = rpc_power_shelf

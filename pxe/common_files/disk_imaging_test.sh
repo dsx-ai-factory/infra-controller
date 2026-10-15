@@ -44,6 +44,17 @@ assert_eq() {
 	fi
 }
 
+# Verifies authentication config files are owner-only so credentials are not
+# exposed to other local users.
+assert_file_mode_600() {
+	local description=$1
+	local file=$2
+
+	if [ -z "$(find "$file" -maxdepth 0 -perm 600 2>/dev/null)" ]; then
+		fail "$description: $file is not mode 600"
+	fi
+}
+
 assert_log_contains() {
 	local expected=$1
 
@@ -75,6 +86,9 @@ lsblk() {
 			;;
 		MAJ:MIN,TYPE:/dev/targetp2)
 			printf '%s\n' "259:2 part" "259:0 disk"
+			;;
+		MAJ:MIN,TYPE:/dev/targetp16)
+			printf '%s\n' "259:16 part" "259:0 disk"
 			;;
 		MAJ:MIN,TYPE:/dev/otherp1)
 			printf '%s\n' "259:9 part" "259:8 disk"
@@ -214,5 +228,409 @@ if parse_kernel_cmdline_argument \
 fi
 assert_eq "unknown argument leaves image_url unchanged" "unchanged-url" "$image_url"
 assert_eq "unknown argument leaves image_disk unchanged" "unchanged-disk" "$image_disk"
+
+# Validates the explicit-destination curl contract and creates synthetic output
+# only for a valid invocation so pipeline status masking cannot hide a failure.
+curl() {
+	local destination=
+	local destination_count=0
+	local request=
+	local request_count=0
+
+	# Accept the production command's fixed transport options while rejecting
+	# remote naming, malformed operands, and unrelated arguments.
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--retry)
+				if [ "$#" -lt 2 ]; then
+					return 2
+				fi
+				shift 2
+				continue
+				;;
+			--retry-all-errors|-k|-L)
+				shift
+				continue
+				;;
+			-O|--remote-name)
+				return 2
+				;;
+			--output)
+				if [ "$#" -lt 2 ]; then
+					return 2
+				fi
+				shift
+				destination=$1
+				destination_count=$((destination_count + 1))
+				;;
+			http://*|https://*)
+				request=$1
+				request_count=$((request_count + 1))
+				;;
+			*)
+				return 2
+				;;
+		esac
+		shift
+	done
+
+	if [ "$destination_count" -ne 1 ] || [ "$request_count" -ne 1 ]; then
+		return 2
+	fi
+
+	# Publish captures and output only after the complete invocation validates.
+	printf '%s' "$request" >"$temp_dir/curl-request"
+	printf '%s' "$destination" >"$temp_dir/curl-destination"
+	printf '%s\n' "synthetic image content" >"$destination"
+}
+
+# Exercises production filename selection and download wiring in an isolated
+# directory so the test cannot create image files in the repository.
+run_download_tests() (
+	local -a descriptions=()
+	local -a urls=()
+	local -a initial_files=()
+	local -a expected_files=()
+	local actual_request
+	local actual_destination
+	local index
+	local download_dir="$temp_dir/downloads"
+
+	mkdir "$download_dir"
+	cd "$download_dir" || fail "could not enter temporary download directory"
+
+	# A query-free URL retains the path basename used by existing callers.
+	descriptions+=("query-free URL")
+	urls+=("https://images.example/os/image.qcow2")
+	initial_files+=("")
+	expected_files+=("image.qcow2")
+
+	# A simple query remains part of the request but not the local filename.
+	descriptions+=("simple query")
+	urls+=("https://images.example/os/image.qcow2?token=synthetic")
+	initial_files+=("")
+	expected_files+=("image.qcow2")
+
+	# A slash in the query cannot be interpreted as part of the local path.
+	descriptions+=("slash in query")
+	urls+=("https://images.example/os/image.qcow2?token=segment/part")
+	initial_files+=("")
+	expected_files+=("image.qcow2")
+
+	# A distro-selected name remains authoritative for checksum lookup.
+	descriptions+=("preselected distro filename")
+	urls+=("https://images.example/releases/source.img")
+	initial_files+=("checksum-selected.img")
+	expected_files+=("checksum-selected.img")
+
+	for index in "${!urls[@]}"; do
+		echo "download: ${descriptions[$index]}"
+		file=${initial_files[$index]}
+		rm -f "$temp_dir/curl-request" \
+			"$temp_dir/curl-destination"
+
+		# Invoke the production path that selects the filename and calls curl.
+		curl_url "${urls[$index]}"
+		actual_request=$(<"$temp_dir/curl-request")
+		actual_destination=$(<"$temp_dir/curl-destination")
+
+		# The full request and selected destination must agree with the file
+		# subsequently consumed by checksum verification and conversion.
+		assert_eq \
+			"${descriptions[$index]} selected filename" \
+			"${expected_files[$index]}" \
+			"$file"
+		assert_eq \
+			"${descriptions[$index]} request URL" \
+			"${urls[$index]}" \
+			"$actual_request"
+		assert_eq \
+			"${descriptions[$index]} curl destination" \
+			"$file" \
+			"$actual_destination"
+		if [ ! -f "$file" ]; then
+			fail "${descriptions[$index]} did not create [$file]"
+		fi
+		assert_eq \
+			"${descriptions[$index]} downloaded content" \
+			"synthetic image content" \
+			"$(<"$file")"
+		rm -f "$file"
+	done
+)
+
+run_download_tests || exit $?
+
+echo "image auth header construction"
+image_url="https://images.example/image.qcow2"
+
+image_auth_token=""
+image_auth_type=""
+build_image_auth_args
+assert_eq "no-token auth arg count" "0" "${#image_auth[@]}"
+assert_eq "no-token header file" "" "$image_auth_header_file"
+
+image_auth_token="my-token"
+image_auth_type=""
+build_image_auth_args
+assert_eq "default auth type" "Bearer" "$image_auth_type"
+assert_eq "auth arg count" "2" "${#image_auth[@]}"
+assert_eq "auth flag" "-K" "${image_auth[0]}"
+assert_eq "auth config file argument matches the header file" \
+	"$image_auth_header_file" "${image_auth[1]}"
+assert_file_mode_600 "auth header file" "$image_auth_header_file"
+assert_eq "auth header file content" \
+	'header = "Authorization: Bearer my-token"' "$(<"$image_auth_header_file")"
+rm -f "$image_auth_header_file"
+
+image_auth_token="my-token"
+image_auth_type="Basic"
+build_image_auth_args
+assert_eq "explicit auth type is not overridden" "Basic" "$image_auth_type"
+assert_eq "basic auth header file content" \
+	'header = "Authorization: Basic my-token"' "$(<"$image_auth_header_file")"
+rm -f "$image_auth_header_file"
+
+image_auth_type="Token"
+build_image_auth_args
+assert_eq "token auth header file content" \
+	'header = "Authorization: Token my-token"' "$(<"$image_auth_header_file")"
+rm -f "$image_auth_header_file"
+
+echo "image auth header escaping"
+# A token containing curl config-file special characters: a double quote and
+# a backslash. If these are not escaped, the config file either breaks curl's
+# quoted-value parsing or changes the header curl actually sends.
+image_auth_token='weird"token\with-specials'
+image_auth_type="Bearer"
+build_image_auth_args
+assert_eq "escaped header file content" \
+	'header = "Authorization: Bearer weird\"token\\with-specials"' \
+	"$(<"$image_auth_header_file")"
+rm -f "$image_auth_header_file"
+
+echo "image auth header file creation failure"
+# mktemp failing (e.g. a full or read-only /tmp) must stop the download
+# rather than silently falling back to an unauthenticated fetch.
+mktemp() {
+	return 1
+}
+image_auth_token="my-token"
+image_auth_type="Bearer"
+if build_image_auth_args; then
+	fail "build_image_auth_args accepted a failed mktemp"
+fi
+assert_eq "failed mktemp leaves auth empty" "0" "${#image_auth[@]}"
+unset -f mktemp
+
+echo "image auth header file cleanup when a later step fails"
+# mktemp can succeed while chmod or the write still fails (e.g. a quota or a
+# filesystem that rejects the mode change). The partially-created file must
+# not be left behind.
+known_auth_file="$temp_dir/chmod-fail-header"
+mktemp() {
+	: >"$known_auth_file"
+	printf '%s\n' "$known_auth_file"
+}
+chmod() {
+	return 1
+}
+image_auth_token="my-token"
+image_auth_type="Bearer"
+if build_image_auth_args; then
+	fail "build_image_auth_args accepted a failed chmod"
+fi
+assert_eq "chmod failure clears the header file variable" "" "$image_auth_header_file"
+if [ -e "$known_auth_file" ]; then
+	fail "build_image_auth_args left the temp file behind after chmod failed"
+fi
+unset -f chmod
+unset -f mktemp
+
+echo "curl_url forwards the url and the auth config as separate arguments, never the raw token"
+# curl_url pipes through tee, so curl runs in a subshell: capture its
+# arguments via a file rather than a variable, which would not survive
+# back to this shell.
+mock_curl_args_file="$temp_dir/curl_args"
+# Records curl's argument vector outside the pipeline subshell for assertions.
+curl() {
+	printf '%s\n' "$@" >"$mock_curl_args_file"
+	return 0
+}
+# Reloads the recorded argument vector without changing argument boundaries.
+read_mock_curl_args() {
+	mock_curl_args=()
+	while IFS= read -r line; do
+		mock_curl_args+=("$line")
+	done <"$mock_curl_args_file"
+}
+
+file=
+image_url="https://images.example/image.qcow2"
+image_auth=()
+curl_url "$image_url"
+read_mock_curl_args
+assert_eq "unauthenticated curl arg count" "8" "${#mock_curl_args[@]}"
+assert_eq "unauthenticated curl output flag" "--output" "${mock_curl_args[5]}"
+assert_eq "unauthenticated curl output filename" "$file" "${mock_curl_args[6]}"
+assert_eq "unauthenticated curl url is the last argument" "$image_url" "${mock_curl_args[7]}"
+
+file=
+query_marker="synthetic-query-marker"
+image_url="https://images.example/image.qcow2?token=$query_marker"
+image_auth_token="my-token"
+image_auth_type="Bearer"
+build_image_auth_args
+
+# Exercise the production announcement independently of main so no hardware
+# discovery or imaging can run.
+: >"$log_output"
+announcement_stdout=$(announce_image_download)
+assert_eq "download announcement stdout" "Downloading image" "$announcement_stdout"
+case "$announcement_stdout" in
+	*"$query_marker"*) fail "download announcement exposed the URL query on stdout" ;;
+esac
+if grep -Fq -- "$query_marker" "$log_output"; then
+	fail "download announcement exposed the URL query in the imaging log"
+fi
+
+curl_url "$image_url" "${image_auth[@]}"
+read_mock_curl_args
+assert_eq "authenticated query selects the path filename" "image.qcow2" "$file"
+assert_eq "authenticated curl arg count" "10" "${#mock_curl_args[@]}"
+assert_eq "authenticated curl auth flag" "-K" "${mock_curl_args[5]}"
+assert_eq "authenticated curl auth value is the header file, not the token" \
+	"$image_auth_header_file" "${mock_curl_args[6]}"
+assert_eq "authenticated curl output flag" "--output" "${mock_curl_args[7]}"
+assert_eq "authenticated curl output filename" "$file" "${mock_curl_args[8]}"
+assert_eq "authenticated curl url preserves the query" "$image_url" "${mock_curl_args[9]}"
+for arg in "${mock_curl_args[@]}"; do
+	case "$arg" in
+		*my-token*) fail "token leaked into curl's argument list: $arg" ;;
+	esac
+done
+rm -f "$image_auth_header_file"
+
+echo "partition identifier types"
+set_blkid_result 0 "/dev/targetp16" ""
+devices=()
+find_devices_by_identifier PARTUUID boot devices >/dev/null 2>&1 ||
+	fail "PARTUUID lookup was rejected"
+assert_eq "PARTUUID lookup device" "/dev/targetp16" "${devices[0]}"
+if find_devices_by_identifier DEVNAME boot devices >/dev/null 2>&1; then
+	fail "unsupported identifier type was accepted"
+fi
+assert_log_contains "Unsupported block device identifier type: DEVNAME"
+
+fstab="$temp_dir/fstab"
+stderr_file="$temp_dir/stderr"
+image_disk=/dev/target
+bootfs_uuid=
+
+assert_stderr_contains() {
+	local expected=$1
+
+	if ! grep -Fq -- "$expected" "$stderr_file"; then
+		fail "stderr does not contain [$expected]"
+	fi
+}
+
+echo "partition naming"
+assert_eq "nvme partition name" "/dev/nvme0n1p16" "$(partition_on_disk /dev/nvme0n1 16)"
+assert_eq "sd partition name" "/dev/sda2" "$(partition_on_disk /dev/sda 2)"
+
+echo "fstab: dedicated /boot partition"
+printf '%s\n' \
+	'# /etc/fstab: static file system information.' \
+	'' \
+	'LABEL=cloudimg-rootfs	/	ext4	discard,commit=30,errors=remount-ro	0 1' \
+	'LABEL=UEFI	/boot/efi	vfat	umask=0077	0 1' \
+	'#LABEL=OLDBOOT	/boot	ext4	defaults	0 2' \
+	'   LABEL=BOOT	/boot/	ext4	defaults,x-systemd.device-timeout=30	0 2  ' \
+	'none	/tmp	tmpfs	defaults	0 0' >"$fstab"
+set_blkid_result 0 "/dev/targetp16" ""
+resolved=$(resolve_fstab_mount_device /boot /dev/target "$fstab") ||
+	fail "fstab /boot entry was not resolved"
+assert_eq "fstab /boot device" "/dev/targetp16" "$resolved"
+resolve_boot_partition "$fstab" >/dev/null ||
+	fail "resolve_boot_partition failed on a split /boot image"
+assert_eq "split /boot partition" "/dev/targetp16" "$boot_part"
+assert_eq "split /boot source" "fstab" "$boot_part_source"
+assert_log_contains "Resolved /boot from $fstab to /dev/targetp16"
+
+echo "fstab: PARTLABEL source with an escaped space"
+printf '%s\n' 'PARTLABEL=boot\040fs	/boot	ext4	defaults	0 2' >"$fstab"
+set_blkid_result 0 "/dev/targetp16" ""
+resolved=$(resolve_fstab_mount_device /boot /dev/target "$fstab") ||
+	fail "PARTLABEL /boot entry was not resolved"
+assert_eq "PARTLABEL /boot device" "/dev/targetp16" "$resolved"
+
+echo "fstab: /boot on another disk"
+printf '%s\n' 'LABEL=BOOT	/boot	ext4	defaults	0 2' >"$fstab"
+set_blkid_result 0 "/dev/otherp1" ""
+if resolve_boot_partition "$fstab" >/dev/null 2>&1; then
+	fail "off-target /boot was accepted"
+fi
+assert_log_contains \
+	"Device /dev/otherp1 with LABEL=BOOT is not exclusively backed by image disk /dev/target"
+
+echo "fstab: /boot inside the root filesystem"
+printf '%s\n' 'LABEL=cloudimg-rootfs	/	ext4	defaults	0 1' >"$fstab"
+set_blkid_result 2 "" ""
+resolve_boot_partition "$fstab" >/dev/null ||
+	fail "resolve_boot_partition failed on a merged /boot image"
+assert_eq "merged /boot partition" "" "$boot_part"
+assert_eq "merged /boot source" "" "$boot_part_source"
+assert_log_contains "$fstab has no /boot entry"
+
+echo "fstab: device path source"
+printf '%s\n' '/dev/sda2	/boot	ext4	defaults	0 2' >"$fstab"
+set_blkid_result 2 "" ""
+if resolve_boot_partition "$fstab" >/dev/null 2>"$stderr_file"; then
+	fail "device-path /boot source was accepted"
+fi
+assert_eq "device-path partition" "" "$boot_part"
+assert_eq "device-path source" "" "$boot_part_source"
+assert_stderr_contains "names /boot by [/dev/sda2], which cannot be resolved on /dev/target"
+
+echo "fstab: unsupported source"
+printf '%s\n' 'none	/boot	tmpfs	defaults	0 0' >"$fstab"
+set_blkid_result 2 "" ""
+if resolve_boot_partition "$fstab" >/dev/null 2>"$stderr_file"; then
+	fail "unsupported /boot source was accepted"
+fi
+assert_eq "unsupported-source partition" "" "$boot_part"
+assert_stderr_contains "names /boot by [none], which cannot be resolved on /dev/target"
+
+echo "fstab: missing"
+rm -f "$fstab"
+root_dev=/dev/target3
+set_blkid_result 2 "" ""
+resolve_boot_partition "$fstab" >/dev/null ||
+	fail "resolve_boot_partition failed without an fstab"
+assert_eq "missing-fstab fallback" "/dev/target1" "$boot_part"
+assert_eq "missing-fstab source" "default" "$boot_part_source"
+assert_log_contains "No $fstab in the image; defaulting /boot to /dev/target1"
+
+echo "fstab: missing and partition 1 is root"
+root_dev=/dev/target1
+set_blkid_result 2 "" ""
+resolve_boot_partition "$fstab" >/dev/null ||
+	fail "resolve_boot_partition failed without an fstab when partition 1 is root"
+assert_eq "root-on-p1 partition" "" "$boot_part"
+assert_eq "root-on-p1 source" "" "$boot_part_source"
+assert_log_contains "/dev/target1 is the root filesystem; /boot stays on it"
+root_dev=
+
+echo "bootfs_uuid overrides fstab"
+printf '%s\n' 'LABEL=BOOT	/boot	ext4	defaults	0 2' >"$fstab"
+bootfs_uuid=boot-override
+set_blkid_result 0 "/dev/targetp2" ""
+resolve_boot_partition "$fstab" >/dev/null ||
+	fail "bootfs_uuid override failed"
+assert_eq "override partition" "/dev/targetp2" "$boot_part"
+assert_eq "override source" "override" "$boot_part_source"
+assert_log_contains "Resolved /boot from bootfs_uuid=boot-override to /dev/targetp2"
+bootfs_uuid=
 
 echo "disk imaging identifier tests passed"

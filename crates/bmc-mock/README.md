@@ -79,9 +79,14 @@ that contains `PowerState` for power, boot override, BIOS, and VirtualMedia
 requests.
 
 The default libvirt device targets are `sdb` for `Cd` and `sdc` for `ConfigCd`.
-Confirm those targets are unused with `virsh domblklist DOMAIN --details` before
-inserting media. HTTP or HTTPS ISO URLs must be reachable from the host running
-the QEMU process. File paths must exist in that host's filesystem.
+At startup, the backend creates an empty SATA CD-ROM at each configured target,
+marked with a `ua-bmc-mock-vmedia-<device-id>` alias. An existing target must be
+an owned SATA CD-ROM; a foreign device causes startup or media updates to fail.
+Insert, replace, and eject use `update-device` to change media without removing
+the CD-ROM. Updates affect saved configuration and, while the VM is active,
+live configuration as well. Eject leaves an empty drive.
+
+HTTP or HTTPS ISO URLs must be reachable from the host running the QEMU process. File paths must exist in that host's filesystem.
 
 ## Apply boot-order changes with libvirt
 
@@ -120,7 +125,9 @@ MAC addresses will then agree. `--state-backend libvirt --libvirt-domain NAME`
 can be used for a DPU endpoint when a separate DPU VM exists.
 
 The internal backend maintains power state entirely within the process. It does
-not affect the host VM and intentionally does not expose libvirt virtual media.
+not affect the host VM. A DPU using libvirt exposes only `ConfigCd` for
+configuration media; a host using libvirt exposes `Cd` and `ConfigCd`. Internal
+simulation keeps the profile defaults.
 
 ## SSE events
 
@@ -262,3 +269,32 @@ resource that is not a collection is a 400 `QueryNotSupportedOnResource`; a
 cover, is a 400 `QueryParameterValueFormatError`; a negative `$skip` or a
 `$top` below 1 is a 400 `QueryParameterOutOfRange`. Parameters without a `$`
 are ignored.
+
+## Standalone state persistence
+
+Use `--state-file PATH` with the libvirt backend to preserve BMC
+accounts across restarts. Each BMC needs its own file and a single writer; the
+parent directory must exist. Snapshots contain plaintext credentials and are
+atomically replaced with owner-only permissions. Missing files are initialized
+from the profile; corrupt, unsupported, or unreadable state fails startup.
+Internal, archive and IPMI simulation modes do not support this option.
+
+The libvirt application's `state_refresh_indication()` sends a notification
+to the existing libvirt actor. The actor exports current state and writes only when
+it differs from the last saved snapshot. Storage failures are retried without
+rejecting changes already applied in memory. Abrupt termination can lose
+unsaved changes; SIGINT and SIGTERM trigger a final save. There is no periodic
+state polling. Callers changing state through internal APIs must indicate the
+change themselves.
+
+Embedded callers such as machine-a-tron use `BmcState::persisted()` and
+`restore_persisted()` inside their own persistence lifecycle. `snapshot_source()`
+provides weak access without retaining the BMC or depending on its callback
+type. `persistence::atomic_write()` accepts bytes independently of snapshot
+format. The library does not attach file storage or actors to resource state.
+
+Snapshot readers ignore unknown fields so additive changes within a format
+version do not prevent rollback. Missing required fields, invalid account
+identities, and unsupported versions remain errors. MAT snapshots use
+`bmc_state`; the old `bmc_accounts` format is not migrated.
+Start with fresh persisted state when upgrading from that format.

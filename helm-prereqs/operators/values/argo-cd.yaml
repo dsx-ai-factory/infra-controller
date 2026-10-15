@@ -3,7 +3,7 @@
 #
 # DPF prerequisite (installed by default; skip with --skip-dpf).
 # Copied from NVIDIA/doca-platform deploy/helmfiles/values at tag v26.4.0 —
-# keep in sync with NICO_DPF_VERSION when bumping DPF.
+# keep in sync with the helm-prereqs/doca-platform submodule pin when bumping DPF.
 #
 # Chart: argo/argo-cd 9.4.1
 # =============================================================================

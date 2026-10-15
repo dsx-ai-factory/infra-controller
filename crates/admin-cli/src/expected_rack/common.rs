@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct ExpectedRackJson {
     pub(super) rack_id: RackId,
+    #[serde(default)]
     pub(super) rack_profile_id: RackProfileId,
     #[serde(default)]
     pub(super) metadata: Option<rpc::forge::Metadata>,

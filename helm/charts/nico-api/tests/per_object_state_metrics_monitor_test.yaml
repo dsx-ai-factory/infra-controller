@@ -35,6 +35,9 @@ tests:
     asserts:
       - isKind:
           of: ServiceMonitor
+      # The primary IPv6 scrape job does not replace this separate slow endpoint.
+      - notExists:
+          path: metadata.labels["app.kubernetes.io/metrics"]
       - equal:
           path: spec.endpoints[0].interval
           value: 120s

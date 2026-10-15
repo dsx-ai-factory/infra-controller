@@ -17,3 +17,6 @@
 
 pub(super) mod args;
 mod cmds;
+
+#[cfg(test)]
+mod tests;

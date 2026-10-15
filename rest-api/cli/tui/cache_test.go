@@ -12,6 +12,7 @@ func TestInvalidateFiltered_ClearsScopeFilteredTypes(t *testing.T) {
 		"ssh-key-group", "network-security-group",
 		"vpc-prefix", "rack", "expected-machine", "sku",
 		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
+		"dpu-machine", "machine-label-key", "expected-machine-label-key", "spectrumx-partition",
 		"ipxe-template", "rule", "task-run", "vpc-peering", "tray-component",
 	}
 

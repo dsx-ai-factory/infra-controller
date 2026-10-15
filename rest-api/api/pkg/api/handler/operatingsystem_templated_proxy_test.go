@@ -18,7 +18,6 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -29,7 +28,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/trace"
 	enums "go.temporal.io/api/enums/v1"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
@@ -44,7 +42,6 @@ type templatedProxyFixture struct {
 	cfg       *config.Config
 	scp       *sc.ClientPool
 	tc        *tmocks.Client
-	tracer    trace.Tracer
 
 	ipOrg string
 	tnOrg string
@@ -89,7 +86,7 @@ func buildTemplatedProxyFixture(t *testing.T) *templatedProxyFixture {
 	_, err = itsaDAO.Create(ctx, nil, cdbm.IpxeTemplateSiteAssociationCreateInput{IpxeTemplateID: tmpl.ID, SiteID: site.ID})
 	require.NoError(t, err)
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tcfg, _ := cfg.GetTemporalConfig()
 	scp := sc.NewClientPool(tcfg)
@@ -102,7 +99,6 @@ func buildTemplatedProxyFixture(t *testing.T) *templatedProxyFixture {
 		cfg:       cfg,
 		scp:       scp,
 		tc:        &tmocks.Client{},
-		tracer:    tracer,
 		ipOrg:     ipOrg,
 		tnOrg:     tnOrg,
 		ipu:       ipu,
@@ -170,8 +166,7 @@ func (f *templatedProxyFixture) newEchoContextForUser(method, body string, param
 	ec.SetParamNames(names...)
 	ec.SetParamValues(values...)
 	ec.Set("user", user)
-	reqCtx := context.WithValue(f.ctx, otelecho.TracerKey, f.tracer)
-	ec.SetRequest(ec.Request().WithContext(reqCtx))
+	ec.SetRequest(ec.Request().WithContext(f.ctx))
 	return ec, rec
 }
 

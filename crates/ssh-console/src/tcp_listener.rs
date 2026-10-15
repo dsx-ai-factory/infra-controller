@@ -16,16 +16,27 @@
  */
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use carbide_utils::ListenAddr;
 use tokio::net::TcpListener;
 
 const MAX_EPHEMERAL_BIND_ATTEMPTS: usize = 10;
 
-pub(crate) async fn bind(address: SocketAddr) -> io::Result<(TcpListener, SocketAddr)> {
+pub(crate) async fn bind(address: ListenAddr) -> io::Result<(TcpListener, SocketAddr)> {
     let mut attempt = 1;
     loop {
-        match TcpListener::bind(address).await {
+        let result = match address {
+            ListenAddr::Any { port } => {
+                let candidates = [
+                    SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
+                    SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
+                ];
+                TcpListener::bind(&candidates[..]).await
+            }
+            ListenAddr::Explicit(address) => TcpListener::bind(address).await,
+        };
+        match result {
             Ok(listener) => {
                 let effective_address = listener.local_addr()?;
                 return Ok((listener, effective_address));
@@ -46,7 +57,7 @@ pub(crate) async fn bind(address: SocketAddr) -> io::Result<(TcpListener, Socket
     }
 }
 
-fn should_retry(address: SocketAddr, error_kind: io::ErrorKind, attempt: usize) -> bool {
+fn should_retry(address: ListenAddr, error_kind: io::ErrorKind, attempt: usize) -> bool {
     address.port() == 0
         && error_kind == io::ErrorKind::AddrInUse
         && attempt < MAX_EPHEMERAL_BIND_ATTEMPTS
@@ -70,7 +81,7 @@ mod tests {
     #[test]
     fn retries_only_ephemeral_address_conflicts_with_attempts_remaining() {
         value_scenarios!(run = |input: RetryInput| should_retry(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), input.port),
+            ListenAddr::Explicit(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), input.port)),
             input.error_kind,
             input.attempt,
         );
@@ -110,17 +121,30 @@ mod tests {
     #[tokio::test]
     async fn ephemeral_bind_returns_effective_address() {
         let configured_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let (listener, effective_address) = bind(configured_address)
+        let (listener, effective_address) = bind(ListenAddr::Explicit(configured_address))
             .await
             .expect("ephemeral listener should bind");
 
         assert_ne!(effective_address.port(), 0);
+        assert_eq!(effective_address.ip(), configured_address.ip());
         assert_eq!(
             listener
                 .local_addr()
                 .expect("bound listener should have a local address"),
             effective_address
         );
+    }
+
+    #[tokio::test]
+    async fn wildcard_bind_accepts_ipv4_connections() {
+        let (listener, address) = bind(ListenAddr::Any { port: 0 }).await.unwrap();
+        assert!(address.ip().is_unspecified());
+        assert_ne!(address.port(), 0);
+        let client = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, address.port()))
+            .await
+            .expect("wildcard listener should accept IPv4");
+        let (_, peer) = listener.accept().await.unwrap();
+        assert_eq!(peer.port(), client.local_addr().unwrap().port());
     }
 
     #[tokio::test]
@@ -132,7 +156,7 @@ mod tests {
             .local_addr()
             .expect("port reservation should have a local address");
 
-        let error = bind(occupied_address)
+        let error = bind(ListenAddr::Explicit(occupied_address))
             .await
             .expect_err("occupied explicit port should fail");
 

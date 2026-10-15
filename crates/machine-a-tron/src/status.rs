@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use bmc_mock::HardwareType;
+use nv_redfish::schema::resource::PowerState;
 use serde::Serialize;
 use ufm_mock::{EpochId, Generation, InventoryId};
 
@@ -92,7 +93,7 @@ pub struct DeviceStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mat_state: Option<String>,
     pub api_state: String,
-    pub power_state: String,
+    pub power_state: PowerState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -34,6 +34,11 @@ Build ordered list of pod names for consistent MAC address indexing
 {{- $hwMacHostBits := $hwMacRanges.hostBits | default 24 }}
 {{- $hwMacRangeHostBits := $hwMacRanges.rangeHostBits | default 8 }}
 
+{{/* Mock BMC passwords: explicit values win over the site credentials Secret */}}
+{{- $sitePassword := include "nico-machine-a-tron.siteBmcRootPassword" . }}
+{{- $hostPassword := .Values.machineATron.hostBmcPassword | default $sitePassword }}
+{{- $dpuPassword := .Values.machineATron.dpuBmcPassword | default $sitePassword }}
+
 {{- range $podName, $podConfig := .Values.pods }}
 {{/*
 Skip unconfigured pods
@@ -100,11 +105,11 @@ data:
     {{- if $root.Values.machineATron.enableIpmiSimulation }}
     enable_ipmi_simulation = true
     {{- end }}
-    {{- if $root.Values.machineATron.hostBmcPassword }}
-    host_bmc_password = {{ $root.Values.machineATron.hostBmcPassword | quote }}
+    {{- if $hostPassword }}
+    host_bmc_password = {{ $hostPassword | quote }}
     {{- end }}
-    {{- if $root.Values.machineATron.dpuBmcPassword }}
-    dpu_bmc_password = {{ $root.Values.machineATron.dpuBmcPassword | quote }}
+    {{- if $dpuPassword }}
+    dpu_bmc_password = {{ $dpuPassword | quote }}
     {{- end }}
     api_refresh_interval = {{ $root.Values.machineATron.apiRefreshInterval | quote }}
 
@@ -180,7 +185,13 @@ data:
     {{- end }}
 
     {{- $racks := $podConfig.racks | default dict }}
-    {{- $machines := $podConfig.machines | default dict }}
+    {{/* Skip null machine groups so the [machines] fallback below sees an empty table */}}
+    {{- $machines := dict }}
+    {{- range $sectionName, $section := $podConfig.machines | default dict }}
+    {{- if $section }}
+    {{- $_ := set $machines $sectionName $section }}
+    {{- end }}
+    {{- end }}
 
     {{- range $sectionName, $section := $racks }}
 
@@ -201,7 +212,6 @@ data:
     {{- end }}
 
     {{- range $sectionName, $section := $machines }}
-    {{- if $section }}
 
     [machines.{{ $sectionName }}]
     {{- if $section.hwType }}
@@ -236,9 +246,9 @@ data:
     {{- end }}
     {{- end }}
     {{- end }}
-    {{- end }}
 
-    {{- if and (gt (len $racks) 0) (eq (len $machines) 0) }}
+    {{/* machine-a-tron requires a [machines] table at startup */}}
+    {{- if eq (len $machines) 0 }}
     [machines]
     {{- end }}
     {{- end }}

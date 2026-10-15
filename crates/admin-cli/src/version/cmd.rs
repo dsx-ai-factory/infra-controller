@@ -21,6 +21,7 @@ use prettytable::{Cell, Row, Table, row};
 use super::Opts;
 use crate::errors::CarbideCliError;
 use crate::rpc::ApiClient;
+use crate::{async_write, async_writeln};
 
 macro_rules! r {
     ($table: ident, $value:ident, $field_name:ident) => {
@@ -31,57 +32,90 @@ macro_rules! r {
     };
 }
 
+// Add a row directly from a value (not a field within a struct)
+macro_rules! rstr {
+    ($table: ident, $value:ident) => {
+        $table.add_row(Row::new(vec![
+            Cell::new(stringify!($value)),
+            Cell::new(&$value),
+        ]));
+    };
+}
+
 macro_rules! rv {
     ($table: ident, $value:ident, $field_name:ident) => {
         $table.add_row(Row::new(vec![
             Cell::new(stringify!($field_name)),
-            Cell::new(
-                &$value
-                    .$field_name
-                    .chunks(5)
-                    .map(|x| x.join(", "))
-                    .collect::<Vec<String>>()
-                    .join("\n"),
-            ),
+            Cell::new(&format_list(&$value.$field_name)),
         ]));
     };
+}
+
+fn format_list(values: &[String]) -> String {
+    values
+        .chunks(5)
+        .map(|values| values.join(", "))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub(super) async fn handle_show_version(
     opts: &Opts,
     api_client: &ApiClient,
     format: OutputFormat,
+    output: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
 ) -> Result<(), CarbideCliError> {
     let v = api_client.0.version(opts.show_runtime_config).await?;
     if format == OutputFormat::Json {
-        println!("{}", serde_json::to_string(&v)?);
+        async_writeln!(output, "{}", serde_json::to_string(&v)?)?;
         return Ok(());
     }
 
     // Same as running `carbide-api --version`
-    println!(
+    async_writeln!(
+        output,
         "carbide-api:\n\tbuild_version={}, build_date={}, git_sha={}, rust_version={}, build_user={}, build_hostname={}",
-        v.build_version, v.build_date, v.git_sha, v.rust_version, v.build_user, v.build_hostname,
-    );
+        v.build_version,
+        v.build_date,
+        v.git_sha,
+        v.rust_version,
+        v.build_user,
+        v.build_hostname,
+    )?;
     // Same as running `nico-admin-cli --version`
-    println!();
-    println!("nico-admin-cli:\n\t{}", carbide_version::version!());
+    async_writeln!(output)?;
+    async_writeln!(output, "nico-admin-cli:\n\t{}", carbide_version::version!())?;
 
     if opts.show_runtime_config {
         let config = v
             .runtime_config
             .ok_or_else(|| CarbideCliError::GenericError("Config not found.".to_owned()))?;
 
-        println!();
-        println!("Runtime Config:");
+        async_writeln!(output)?;
+        async_writeln!(output, "Runtime Config:")?;
 
         let mut table = Table::new();
+
+        let describe_duration_ms = |ms| match ms {
+            0 => "<unknown>".to_string(),
+            // this is probably always going to be configured in seconds, but just in case...
+            ms if ms % 1000 != 0 => format!("{}ms", ms),
+            _ => format!("{}s", ms / 1000),
+        };
+
+        let database_pool_acquire_timeout =
+            describe_duration_ms(config.database_pool_acquire_timeout_ms);
+        let database_pool_idle_timeout = describe_duration_ms(config.database_pool_idle_timeout_ms);
+        let database_pool_max_lifetime = describe_duration_ms(config.database_pool_max_lifetime_ms);
 
         table.set_titles(row!["Property", "Value"]);
         r!(table, config, listen);
         r!(table, config, metrics_endpoint);
         r!(table, config, database_url);
         r!(table, config, max_database_connections);
+        rstr!(table, database_pool_acquire_timeout);
+        rstr!(table, database_pool_idle_timeout);
+        rstr!(table, database_pool_max_lifetime);
         r!(table, config, enable_route_servers);
         r!(table, config, asn);
         rv!(table, config, dhcp_servers);
@@ -89,6 +123,14 @@ pub(super) async fn handle_show_version(
         r!(table, config, enable_route_servers);
         rv!(table, config, deny_prefixes);
         rv!(table, config, site_fabric_prefixes);
+        let site_fabric_null_routes = match config.site_fabric_null_routes.as_ref() {
+            Some(prefixes) => format_list(&prefixes.items),
+            None => "Unsupported".to_string(),
+        };
+        table.add_row(Row::new(vec![
+            Cell::new("site_fabric_null_routes"),
+            Cell::new(&site_fabric_null_routes),
+        ]));
         rv!(table, config, networks);
         r!(table, config, dpu_ipmi_tool_impl);
         r!(table, config, dpu_ipmi_reboot_attempt);
@@ -147,7 +189,7 @@ pub(super) async fn handle_show_version(
         r!(table, config, compile_time_docker_version);
         r!(table, config, restart_ovs_on_use_admin_network_change);
 
-        _ = table.print_tty(true);
+        async_write!(output, "{table}")?;
     }
 
     Ok(())

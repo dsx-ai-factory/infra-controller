@@ -17,14 +17,18 @@
 
 //! Per-subsystem suppression requests for BMC MAC addresses.
 
+use carbide_uuid::DbTable;
 use mac_address::MacAddress;
-use model::bmc_suppression::{BmcSuppression, BmcSuppressionSubsystem, NewBmcSuppression};
+use model::allocation_type::AllocationType;
+use model::bmc_suppression::{
+    BmcSuppression, BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression,
+};
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
-/// Inserts or updates a suppression request.
+/// Inserts or updates a suppression request for this source.
 ///
 /// Repeated requests preserve the original request and acknowledgement
 /// timestamps so retries do not restart an acknowledged handoff.
@@ -32,108 +36,117 @@ pub async fn upsert(
     txn: &mut PgConnection,
     input: &NewBmcSuppression,
 ) -> DatabaseResult<BmcSuppression> {
-    const QUERY: &str = "INSERT INTO bmc_suppressions (
+    let query = format!(
+        "INSERT INTO bmc_suppressions (
         bmc_mac_address,
         subsystem,
+        source,
         reason
-    ) VALUES ($1, $2, $3)
-    ON CONFLICT (bmc_mac_address, subsystem) DO UPDATE SET
+    ) VALUES ($1, $2, $3, $4)
+    ON CONFLICT (bmc_mac_address, subsystem, source) DO UPDATE SET
         reason = EXCLUDED.reason
-    RETURNING
-        bmc_mac_address,
-        subsystem,
-        reason,
-        requested_at,
-        acknowledged_at";
+    RETURNING {}",
+        BmcSuppression::db_table_columns(),
+    );
 
-    sqlx::query_as(QUERY)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(input.bmc_mac_address)
         .bind(input.subsystem)
+        .bind(input.source)
         .bind(&input.reason)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
-}
-
-/// Ensures a suppression request exists for the MAC without clobbering an
-/// existing one.
-///
-/// Unlike [`upsert`], a conflicting row is preserved verbatim -- including its
-/// `reason`, `requested_at`, and `acknowledged_at` -- so a rotation-owned
-/// request never overwrites (and can never later delete) an operator's
-/// decommissioning request for the same BMC. When no row exists, one is
-/// inserted with the supplied reason.
-pub async fn ensure_present(
-    txn: &mut PgConnection,
-    input: &NewBmcSuppression,
-) -> DatabaseResult<BmcSuppression> {
-    const QUERY: &str = "INSERT INTO bmc_suppressions (
-        bmc_mac_address,
-        subsystem,
-        reason
-    ) VALUES ($1, $2, $3)
-    ON CONFLICT (bmc_mac_address, subsystem) DO UPDATE SET
-        reason = bmc_suppressions.reason
-    RETURNING
-        bmc_mac_address,
-        subsystem,
-        reason,
-        requested_at,
-        acknowledged_at";
-
-    sqlx::query_as(QUERY)
-        .bind(input.bmc_mac_address)
-        .bind(input.subsystem)
-        .bind(&input.reason)
-        .fetch_one(txn)
-        .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Returns the suppression rows for the selected BMC MAC addresses in
-/// `subsystem`. Missing MACs are simply absent from the result.
+/// `subsystem` owned by `source`. Missing MACs are simply absent from the
+/// result.
 pub async fn find_many(
     db: impl DbReader<'_>,
     bmc_mac_addresses: &[MacAddress],
     subsystem: BmcSuppressionSubsystem,
+    source: BmcSuppressionSource,
 ) -> DatabaseResult<Vec<BmcSuppression>> {
-    const QUERY: &str = "SELECT
-        bmc_mac_address,
-        subsystem,
-        reason,
-        requested_at,
-        acknowledged_at
+    let query = format!(
+        "SELECT {}
     FROM bmc_suppressions
-    WHERE bmc_mac_address = ANY($1) AND subsystem = $2
-    ORDER BY bmc_mac_address";
+    WHERE bmc_mac_address = ANY($1) AND subsystem = $2 AND source = $3
+    ORDER BY bmc_mac_address",
+        BmcSuppression::db_table_columns(),
+    );
 
-    sqlx::query_as(QUERY)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(bmc_mac_addresses)
         .bind(subsystem)
+        .bind(source)
         .fetch_all(db)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
-/// Returns an active suppression request, if one exists.
+/// Returns an active suppression request for this source, if one exists.
 pub async fn find(
     db: impl DbReader<'_>,
     bmc_mac_address: MacAddress,
     subsystem: BmcSuppressionSubsystem,
+    source: BmcSuppressionSource,
 ) -> DatabaseResult<Option<BmcSuppression>> {
-    const QUERY: &str = "SELECT
-        bmc_mac_address,
-        subsystem,
-        reason,
-        requested_at,
-        acknowledged_at
+    let query = format!(
+        "SELECT {}
     FROM bmc_suppressions
-    WHERE bmc_mac_address = $1 AND subsystem = $2";
+    WHERE bmc_mac_address = $1 AND subsystem = $2 AND source = $3",
+        BmcSuppression::db_table_columns(),
+    );
 
-    sqlx::query_as(QUERY)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(bmc_mac_address)
         .bind(subsystem)
+        .bind(source)
         .fetch_optional(db)
+        .await
+        .map_err(|e| DatabaseError::query(&query, e))
+}
+
+/// Returns whether decommissioning still needs a DHCP suppression acknowledgement.
+///
+/// A recorded DHCP acknowledgement for decommissioning satisfies the wait.
+/// Otherwise, skip it only when the MAC has at least one interface, every
+/// interface has a current static allocation, and none of its addresses fall
+/// within a configured network prefix. NICo cannot rely on seeing DHCP for
+/// these external addresses.
+///
+/// Check the addresses themselves: assigning another address family can move
+/// a managed reservation onto `static-assignments`, and older external
+/// allocations can remain on ordinary segments.
+pub async fn is_dhcp_acknowledgement_pending(
+    db: impl DbReader<'_>,
+    mac_address: MacAddress,
+) -> DatabaseResult<bool> {
+    const QUERY: &str = r"
+        SELECT NOT EXISTS (
+            SELECT 1 FROM bmc_suppressions
+            WHERE bmc_mac_address = $1 AND subsystem = $2 AND source = $3
+                AND acknowledged_at IS NOT NULL
+        ) AND NOT COALESCE((
+            SELECT bool_and(EXISTS (
+                SELECT 1 FROM machine_interface_addresses address
+                WHERE address.interface_id = interface.id AND address.allocation_type = $4
+            ) AND NOT EXISTS (
+                SELECT 1 FROM machine_interface_addresses address
+                JOIN network_prefixes prefix ON address.address <<= prefix.prefix
+                WHERE address.interface_id = interface.id
+            ))
+            FROM machine_interfaces interface
+            WHERE interface.mac_address = $1
+        ), false)";
+
+    sqlx::query_scalar(QUERY)
+        .bind(mac_address)
+        .bind(BmcSuppressionSubsystem::Dhcp)
+        .bind(BmcSuppressionSource::Decommissioning)
+        .bind(AllocationType::Static)
+        .fetch_one(db)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))
 }
@@ -143,37 +156,40 @@ pub async fn find_all_by_subsystem(
     db: impl DbReader<'_>,
     subsystem: BmcSuppressionSubsystem,
 ) -> DatabaseResult<Vec<BmcSuppression>> {
-    const QUERY: &str = "SELECT
-        bmc_mac_address,
-        subsystem,
-        reason,
-        requested_at,
-        acknowledged_at
+    let query = format!(
+        "SELECT {}
     FROM bmc_suppressions
     WHERE subsystem = $1
-    ORDER BY bmc_mac_address";
+    ORDER BY bmc_mac_address, source",
+        BmcSuppression::db_table_columns(),
+    );
 
-    sqlx::query_as(QUERY)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(subsystem)
         .fetch_all(db)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Acknowledges pending suppression requests for the selected BMC MAC addresses.
 ///
-/// Returns the BMC MAC addresses acknowledged by this call.
+/// Every source for those MACs is acknowledged. Returns the BMC MAC addresses
+/// that had at least one unacknowledged row.
 pub async fn acknowledge_unacknowledged(
     txn: &mut PgConnection,
     bmc_mac_addresses: &[MacAddress],
     subsystem: BmcSuppressionSubsystem,
 ) -> DatabaseResult<Vec<MacAddress>> {
-    const QUERY: &str = "UPDATE bmc_suppressions
+    const QUERY: &str = "WITH updated AS (
+        UPDATE bmc_suppressions
         SET acknowledged_at = statement_timestamp()
         WHERE bmc_mac_address = ANY($1)
             AND subsystem = $2
             AND acknowledged_at IS NULL
-        RETURNING bmc_mac_address";
+        RETURNING bmc_mac_address
+    )
+    SELECT DISTINCT bmc_mac_address FROM updated
+    ORDER BY bmc_mac_address";
 
     sqlx::query_scalar(QUERY)
         .bind(bmc_mac_addresses)
@@ -183,7 +199,7 @@ pub async fn acknowledge_unacknowledged(
         .map_err(|e| DatabaseError::query(QUERY, e))
 }
 
-/// Returns whether a BMC MAC is suppressed for `subsystem`.
+/// Returns whether a BMC MAC is suppressed for `subsystem` by any source.
 pub async fn is_suppressed(
     db: impl DbReader<'_>,
     bmc_mac_address: MacAddress,
@@ -203,11 +219,12 @@ pub async fn is_suppressed(
         .map_err(|e| DatabaseError::query(QUERY, e))
 }
 
-/// Records that `subsystem` has observed and applied a suppression request.
+/// Records that `subsystem` has observed and applied suppression requests.
 ///
-/// The lookup and timestamp write are atomic. The return value is `true` when
-/// suppression is active and `false` when no matching request exists. Repeated
-/// acknowledgements preserve the first timestamp.
+/// Every source for this MAC is acknowledged. The lookup and timestamp write
+/// are atomic. The return value is `true` when at least one row exists and
+/// `false` when no matching request exists. Repeated acknowledgements preserve
+/// the first timestamp.
 pub async fn acknowledge(
     txn: &mut PgConnection,
     bmc_mac_address: MacAddress,
@@ -226,27 +243,29 @@ pub async fn acknowledge(
         .map_err(|e| DatabaseError::query(QUERY, e))
 }
 
-/// Deletes one subsystem's suppression request for a BMC MAC.
+/// Deletes one source's suppression request for a BMC MAC.
 ///
 /// Returns `true` when a row was removed.
 pub async fn delete(
     txn: &mut PgConnection,
     bmc_mac_address: MacAddress,
     subsystem: BmcSuppressionSubsystem,
+    source: BmcSuppressionSource,
 ) -> DatabaseResult<bool> {
     const QUERY: &str = "DELETE FROM bmc_suppressions
-        WHERE bmc_mac_address = $1 AND subsystem = $2";
+        WHERE bmc_mac_address = $1 AND subsystem = $2 AND source = $3";
 
     sqlx::query(QUERY)
         .bind(bmc_mac_address)
         .bind(subsystem)
+        .bind(source)
         .execute(txn)
         .await
         .map(|result| result.rows_affected() > 0)
         .map_err(|e| DatabaseError::query(QUERY, e))
 }
 
-/// Deletes a subsystem's suppression requests for a set of BMC MACs.
+/// Deletes every source's suppression requests for a set of BMC MACs.
 ///
 /// Returns the number of rows removed.
 pub async fn delete_many(
@@ -266,26 +285,22 @@ pub async fn delete_many(
         .map_err(|e| DatabaseError::query(QUERY, e))
 }
 
-/// Deletes a subsystem's suppression requests for a set of BMC MACs, but only
-/// rows whose `reason` matches.
+/// Deletes suppression requests owned by `source` for a set of BMC MACs.
 ///
-/// Scoping the delete by reason lets an automated owner (e.g. BMC credential
-/// rotation) clean up exactly the rows it created without removing a request
-/// another owner (e.g. an operator decommissioning) may hold for the same BMC.
 /// Returns the number of rows removed.
-pub async fn delete_many_with_reason(
+pub async fn delete_many_for_source(
     txn: &mut PgConnection,
     bmc_mac_addresses: &[MacAddress],
     subsystem: BmcSuppressionSubsystem,
-    reason: &str,
+    source: BmcSuppressionSource,
 ) -> DatabaseResult<u64> {
     const QUERY: &str = "DELETE FROM bmc_suppressions
-        WHERE bmc_mac_address = ANY($1) AND subsystem = $2 AND reason = $3";
+        WHERE bmc_mac_address = ANY($1) AND subsystem = $2 AND source = $3";
 
     sqlx::query(QUERY)
         .bind(bmc_mac_addresses)
         .bind(subsystem)
-        .bind(reason)
+        .bind(source)
         .execute(txn)
         .await
         .map(|result| result.rows_affected())
@@ -294,16 +309,25 @@ pub async fn delete_many_with_reason(
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::assert_outcome;
     use mac_address::MacAddress;
-    use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
+    use model::allocation_type::AllocationType;
+    use model::bmc_suppression::{
+        BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression,
+    };
 
     use super::{
-        acknowledge, acknowledge_unacknowledged, delete, delete_many, delete_many_with_reason,
-        ensure_present, find, find_all_by_subsystem, find_many, is_suppressed, upsert,
+        acknowledge, acknowledge_unacknowledged, delete, delete_many, delete_many_for_source, find,
+        find_all_by_subsystem, find_many, is_suppressed, upsert,
     };
 
     const SITE_EXPLORER: BmcSuppressionSubsystem = BmcSuppressionSubsystem::SiteExplorer;
     const DHCP: BmcSuppressionSubsystem = BmcSuppressionSubsystem::Dhcp;
+    const DECOMMISSIONING: BmcSuppressionSource = BmcSuppressionSource::Decommissioning;
+    const ROTATION: BmcSuppressionSource = BmcSuppressionSource::BmcCredentialRotation;
+    const SOURCE_MIGRATION: &str =
+        include_str!("../migrations/20260909213700_bmc_suppressions_source.sql");
 
     fn mac(last: u8) -> MacAddress {
         MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, last])
@@ -317,7 +341,240 @@ mod tests {
         NewBmcSuppression {
             bmc_mac_address: mac(last),
             subsystem,
+            source: DECOMMISSIONING,
             reason: reason.to_string(),
+        }
+    }
+
+    #[crate::sqlx_test]
+    async fn dhcp_wait_uses_current_interface_assignments(pool: sqlx::PgPool) {
+        struct Interface<'a> {
+            segment: uuid::Uuid,
+            addresses: &'a [(std::net::IpAddr, AllocationType)],
+            has_dhcp_history: bool,
+        }
+
+        let mut txn = pool.begin().await.unwrap();
+        let mut segments = Vec::new();
+        for name in [
+            "dhcp-wait-test",
+            crate::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME,
+        ] {
+            let id: uuid::Uuid = sqlx::query_scalar(
+                "INSERT INTO network_segments (name, version, network_segment_type)
+                 VALUES ($1, 'V1-T0', 'underlay') RETURNING id",
+            )
+            .bind(name)
+            .fetch_one(txn.as_mut())
+            .await
+            .unwrap();
+            segments.push(id);
+        }
+        let [managed, external]: [uuid::Uuid; 2] = segments.try_into().unwrap();
+        sqlx::query(
+            "INSERT INTO network_prefixes (segment_id, prefix)
+             VALUES ($1, '192.0.2.0/24'), ($1, '2001:db8::/64')",
+        )
+        .bind(managed)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+
+        // Expected inventory alone must not exempt a managed reservation.
+        // Legacy external assignments can also exist on ordinary segments.
+        sqlx::query(
+            "INSERT INTO expected_machines
+                (serial_number, bmc_mac_address, bmc_username, bmc_password, bmc_ip_address)
+             VALUES
+                ('managed-reservation', '02:00:00:00:00:01', 'root', 'password', '192.0.2.2'),
+                ('legacy-external', '02:00:00:00:00:06', 'root', 'password', '198.51.100.12')",
+        )
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+
+        for (scenario, last, interfaces, pending) in [
+            (
+                "managed reservation before its first DHCP request",
+                1,
+                &[Interface {
+                    segment: managed,
+                    addresses: &[("192.0.2.2".parse().unwrap(), AllocationType::Static)],
+                    has_dhcp_history: false,
+                }][..],
+                true,
+            ),
+            (
+                "external assignment with old DHCP history and no expected inventory",
+                2,
+                &[Interface {
+                    segment: external,
+                    addresses: &[("198.51.100.4".parse().unwrap(), AllocationType::Static)],
+                    has_dhcp_history: true,
+                }][..],
+                false,
+            ),
+            (
+                "removed external assignment awaiting DHCP reconciliation",
+                3,
+                &[Interface {
+                    segment: external,
+                    addresses: &[],
+                    has_dhcp_history: false,
+                }][..],
+                true,
+            ),
+            (
+                "external and managed interfaces sharing a MAC",
+                4,
+                &[
+                    Interface {
+                        segment: external,
+                        addresses: &[("198.51.100.8".parse().unwrap(), AllocationType::Static)],
+                        has_dhcp_history: false,
+                    },
+                    Interface {
+                        segment: managed,
+                        addresses: &[("192.0.2.9".parse().unwrap(), AllocationType::Static)],
+                        has_dhcp_history: false,
+                    },
+                ][..],
+                true,
+            ),
+            (
+                "removed external assignment with retained DHCP outside managed prefixes",
+                5,
+                &[Interface {
+                    segment: external,
+                    addresses: &[("198.51.100.10".parse().unwrap(), AllocationType::Dhcp)],
+                    has_dhcp_history: true,
+                }][..],
+                true,
+            ),
+            (
+                "legacy external assignment on an ordinary segment",
+                6,
+                &[Interface {
+                    segment: managed,
+                    addresses: &[("198.51.100.12".parse().unwrap(), AllocationType::Static)],
+                    has_dhcp_history: false,
+                }][..],
+                false,
+            ),
+            (
+                "external static IPv4 with managed DHCP IPv6 on one interface",
+                7,
+                &[Interface {
+                    segment: external,
+                    addresses: &[
+                        ("198.51.100.14".parse().unwrap(), AllocationType::Static),
+                        ("2001:db8::10".parse().unwrap(), AllocationType::Dhcp),
+                    ],
+                    has_dhcp_history: true,
+                }][..],
+                true,
+            ),
+            (
+                "external and addressless interfaces sharing a MAC",
+                8,
+                &[
+                    Interface {
+                        segment: external,
+                        addresses: &[("198.51.100.16".parse().unwrap(), AllocationType::Static)],
+                        has_dhcp_history: false,
+                    },
+                    Interface {
+                        segment: managed,
+                        addresses: &[],
+                        has_dhcp_history: false,
+                    },
+                ][..],
+                true,
+            ),
+        ] {
+            upsert(txn.as_mut(), &upsert_input(last, DHCP, scenario))
+                .await
+                .unwrap();
+            for interface in interfaces {
+                let interface_id = sqlx::query_scalar(
+                    "INSERT INTO machine_interfaces
+                        (segment_id, mac_address, primary_interface, hostname, last_dhcp)
+                     VALUES ($1, $2, false, 'dhcp-wait-test',
+                        CASE WHEN $3 THEN now() ELSE NULL END)
+                     RETURNING id",
+                )
+                .bind(interface.segment)
+                .bind(mac(last))
+                .bind(interface.has_dhcp_history)
+                .fetch_one(txn.as_mut())
+                .await
+                .unwrap();
+                for &(address, allocation_type) in interface.addresses {
+                    crate::machine_interface_address::insert(
+                        txn.as_mut(),
+                        interface_id,
+                        address,
+                        allocation_type,
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+            assert_outcome(
+                super::is_dhcp_acknowledgement_pending(txn.as_mut(), mac(last))
+                    .await
+                    .map_err(|error| error.to_string()),
+                Yields(pending),
+                scenario,
+            );
+        }
+    }
+
+    #[crate::sqlx_test]
+    async fn dhcp_wait_uses_decommissioning_acknowledgement(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        for (scenario, last, subsystem, source, acknowledged, pending) in [
+            (
+                "unacknowledged request",
+                1,
+                DHCP,
+                DECOMMISSIONING,
+                false,
+                true,
+            ),
+            (
+                "acknowledged request",
+                2,
+                DHCP,
+                DECOMMISSIONING,
+                true,
+                false,
+            ),
+            (
+                "other subsystem",
+                3,
+                SITE_EXPLORER,
+                DECOMMISSIONING,
+                true,
+                true,
+            ),
+            ("other source", 4, DHCP, ROTATION, true, true),
+        ] {
+            let mut input = upsert_input(last, subsystem, scenario);
+            input.source = source;
+            upsert(txn.as_mut(), &input).await.unwrap();
+            if acknowledged {
+                acknowledge(txn.as_mut(), mac(last), subsystem)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                super::is_dhcp_acknowledgement_pending(txn.as_mut(), mac(last))
+                    .await
+                    .unwrap(),
+                pending,
+                "{scenario}",
+            );
         }
     }
 
@@ -368,6 +625,52 @@ mod tests {
     }
 
     #[crate::sqlx_test]
+    async fn sources_are_independent(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+
+        upsert(
+            txn.as_mut(),
+            &upsert_input(1, SITE_EXPLORER, "decommissioning"),
+        )
+        .await
+        .unwrap();
+        upsert(
+            txn.as_mut(),
+            &NewBmcSuppression {
+                bmc_mac_address: mac(1),
+                subsystem: SITE_EXPLORER,
+                source: ROTATION,
+                reason: "bmc_credential_rotation".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            is_suppressed(txn.as_mut(), mac(1), SITE_EXPLORER)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            delete_many_for_source(txn.as_mut(), &[mac(1)], SITE_EXPLORER, ROTATION)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            find(txn.as_mut(), mac(1), SITE_EXPLORER, DECOMMISSIONING)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            is_suppressed(txn.as_mut(), mac(1), SITE_EXPLORER)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[crate::sqlx_test]
     async fn acknowledgements_are_scoped_to_subsystem(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.unwrap();
 
@@ -387,7 +690,7 @@ mod tests {
                     .unwrap()
             );
             assert!(
-                find(txn.as_mut(), mac(last), other_subsystem)
+                find(txn.as_mut(), mac(last), other_subsystem, DECOMMISSIONING)
                     .await
                     .unwrap()
                     .is_none()
@@ -398,7 +701,7 @@ mod tests {
                     .unwrap()
             );
             assert!(
-                find(txn.as_mut(), mac(last), subsystem)
+                find(txn.as_mut(), mac(last), subsystem, DECOMMISSIONING)
                     .await
                     .unwrap()
                     .unwrap()
@@ -411,7 +714,24 @@ mod tests {
     #[crate::sqlx_test]
     async fn acknowledge_unacknowledged_is_batched_and_idempotent(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.unwrap();
-        for (last, subsystem) in [(1, SITE_EXPLORER), (2, DHCP), (3, SITE_EXPLORER)] {
+        upsert(
+            txn.as_mut(),
+            &upsert_input(1, SITE_EXPLORER, "decommissioning"),
+        )
+        .await
+        .unwrap();
+        upsert(
+            txn.as_mut(),
+            &NewBmcSuppression {
+                bmc_mac_address: mac(1),
+                subsystem: SITE_EXPLORER,
+                source: ROTATION,
+                reason: "bmc_credential_rotation".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        for (last, subsystem) in [(2, DHCP), (3, SITE_EXPLORER)] {
             upsert(
                 txn.as_mut(),
                 &upsert_input(last, subsystem, "decommissioning"),
@@ -428,7 +748,7 @@ mod tests {
         assert!(acknowledged.contains(&mac(1)));
         assert!(acknowledged.contains(&mac(3)));
         assert!(
-            find(txn.as_mut(), mac(1), SITE_EXPLORER)
+            find(txn.as_mut(), mac(1), SITE_EXPLORER, DECOMMISSIONING)
                 .await
                 .unwrap()
                 .unwrap()
@@ -436,7 +756,15 @@ mod tests {
                 .is_some()
         );
         assert!(
-            find(txn.as_mut(), mac(2), DHCP)
+            find(txn.as_mut(), mac(1), SITE_EXPLORER, ROTATION)
+                .await
+                .unwrap()
+                .unwrap()
+                .acknowledged_at
+                .is_some()
+        );
+        assert!(
+            find(txn.as_mut(), mac(2), DHCP, DECOMMISSIONING)
                 .await
                 .unwrap()
                 .unwrap()
@@ -466,7 +794,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        let initial = find(txn.as_mut(), mac(1), SITE_EXPLORER)
+        let initial = find(txn.as_mut(), mac(1), SITE_EXPLORER, DECOMMISSIONING)
             .await
             .unwrap()
             .unwrap();
@@ -476,7 +804,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        let repeated = find(txn.as_mut(), mac(1), SITE_EXPLORER)
+        let repeated = find(txn.as_mut(), mac(1), SITE_EXPLORER, DECOMMISSIONING)
             .await
             .unwrap()
             .unwrap();
@@ -488,10 +816,18 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(retried.bmc_mac_address, mac(1));
+        assert_eq!(retried.subsystem, SITE_EXPLORER);
+        assert_eq!(retried.source, DECOMMISSIONING);
+        assert_eq!(retried.reason, "decommissioning retry");
         assert_eq!(retried.requested_at, initial.requested_at);
         assert_eq!(retried.acknowledged_at, initial.acknowledged_at);
 
-        assert!(delete(txn.as_mut(), mac(1), SITE_EXPLORER).await.unwrap());
+        assert!(
+            delete(txn.as_mut(), mac(1), SITE_EXPLORER, DECOMMISSIONING)
+                .await
+                .unwrap()
+        );
         let recreated = upsert(
             txn.as_mut(),
             &upsert_input(1, SITE_EXPLORER, "new decommissioning request"),
@@ -499,49 +835,6 @@ mod tests {
         .await
         .unwrap();
         assert!(recreated.acknowledged_at.is_none());
-    }
-
-    #[crate::sqlx_test]
-    async fn ensure_present_preserves_an_existing_request(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
-
-        // An operator decommissioning request already exists and is acknowledged.
-        upsert(
-            txn.as_mut(),
-            &upsert_input(1, SITE_EXPLORER, "decommissioning"),
-        )
-        .await
-        .unwrap();
-        assert!(
-            acknowledge(txn.as_mut(), mac(1), SITE_EXPLORER)
-                .await
-                .unwrap()
-        );
-        let operator = find(txn.as_mut(), mac(1), SITE_EXPLORER)
-            .await
-            .unwrap()
-            .unwrap();
-
-        // A rotation-owned ensure must not clobber reason or acknowledgement.
-        let ensured = ensure_present(
-            txn.as_mut(),
-            &upsert_input(1, SITE_EXPLORER, "bmc_credential_rotation"),
-        )
-        .await
-        .unwrap();
-        assert_eq!(ensured, operator);
-        assert_eq!(ensured.reason, "decommissioning");
-        assert!(ensured.acknowledged_at.is_some());
-
-        // When absent, ensure_present inserts with the supplied reason.
-        let created = ensure_present(
-            txn.as_mut(),
-            &upsert_input(2, SITE_EXPLORER, "bmc_credential_rotation"),
-        )
-        .await
-        .unwrap();
-        assert_eq!(created.reason, "bmc_credential_rotation");
-        assert!(created.acknowledged_at.is_none());
     }
 
     #[crate::sqlx_test]
@@ -553,9 +846,14 @@ mod tests {
                 .unwrap();
         }
 
-        let found = find_many(txn.as_mut(), &[mac(1), mac(2), mac(3)], SITE_EXPLORER)
-            .await
-            .unwrap();
+        let found = find_many(
+            txn.as_mut(),
+            &[mac(1), mac(2), mac(3)],
+            SITE_EXPLORER,
+            DECOMMISSIONING,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             found
                 .iter()
@@ -564,51 +862,6 @@ mod tests {
             vec![mac(1), mac(2)],
         );
         assert!(found.iter().all(|s| s.acknowledged_at.is_none()));
-    }
-
-    #[crate::sqlx_test]
-    async fn delete_many_with_reason_only_removes_matching_rows(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
-
-        // mac(1): operator-owned; mac(2) and mac(3): rotation-owned.
-        upsert(
-            txn.as_mut(),
-            &upsert_input(1, SITE_EXPLORER, "decommissioning"),
-        )
-        .await
-        .unwrap();
-        for last in [2, 3] {
-            ensure_present(
-                txn.as_mut(),
-                &upsert_input(last, SITE_EXPLORER, "bmc_credential_rotation"),
-            )
-            .await
-            .unwrap();
-        }
-
-        let removed = delete_many_with_reason(
-            txn.as_mut(),
-            &[mac(1), mac(2), mac(3)],
-            SITE_EXPLORER,
-            "bmc_credential_rotation",
-        )
-        .await
-        .unwrap();
-        assert_eq!(removed, 2);
-
-        // Operator request survives; rotation requests are gone.
-        assert!(
-            find(txn.as_mut(), mac(1), SITE_EXPLORER)
-                .await
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            find_many(txn.as_mut(), &[mac(2), mac(3)], SITE_EXPLORER)
-                .await
-                .unwrap()
-                .is_empty()
-        );
     }
 
     #[crate::sqlx_test]
@@ -626,9 +879,22 @@ mod tests {
             }
         }
 
-        assert!(delete(txn.as_mut(), mac(1), SITE_EXPLORER).await.unwrap());
-        assert!(!delete(txn.as_mut(), mac(1), SITE_EXPLORER).await.unwrap());
-        assert!(find(txn.as_mut(), mac(1), DHCP).await.unwrap().is_some());
+        assert!(
+            delete(txn.as_mut(), mac(1), SITE_EXPLORER, DECOMMISSIONING)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !delete(txn.as_mut(), mac(1), SITE_EXPLORER, DECOMMISSIONING)
+                .await
+                .unwrap()
+        );
+        assert!(
+            find(txn.as_mut(), mac(1), DHCP, DECOMMISSIONING)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         assert_eq!(
             delete_many(txn.as_mut(), &[mac(2), mac(3), mac(4)], SITE_EXPLORER)
@@ -637,11 +903,116 @@ mod tests {
             2
         );
         assert!(
-            find(txn.as_mut(), mac(2), SITE_EXPLORER)
+            find(txn.as_mut(), mac(2), SITE_EXPLORER, DECOMMISSIONING)
                 .await
                 .unwrap()
                 .is_none()
         );
-        assert!(find(txn.as_mut(), mac(2), DHCP).await.unwrap().is_some());
+        assert!(
+            find(txn.as_mut(), mac(2), DHCP, DECOMMISSIONING)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    // sqlx_test applies every migration on an empty table, which never runs
+    // the reason backfill. Rewind to the pre-source schema first.
+    #[crate::sqlx_test]
+    async fn source_migration_backfills_from_reason_and_requires_source(pool: sqlx::PgPool) {
+        sqlx::raw_sql(
+            "ALTER TABLE bmc_suppressions
+                 DROP CONSTRAINT bmc_suppressions_pkey;
+             ALTER TABLE bmc_suppressions
+                 DROP CONSTRAINT bmc_suppressions_source_check;
+             ALTER TABLE bmc_suppressions
+                 DROP COLUMN source;
+             ALTER TABLE bmc_suppressions
+                 ADD CONSTRAINT bmc_suppressions_pkey
+                     PRIMARY KEY (bmc_mac_address, subsystem);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO bmc_suppressions (bmc_mac_address, subsystem, reason)
+             VALUES
+                ($1, 'site_explorer', 'bmc_credential_rotation'),
+                ($2, 'site_explorer', 'factory_reset_bmc'),
+                ($3, 'site_explorer', 'managed host x is being decommissioned')",
+        )
+        .bind(mac(1))
+        .bind(mac(2))
+        .bind(mac(3))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(SOURCE_MIGRATION)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let rows: Vec<(MacAddress, BmcSuppressionSource)> = sqlx::query_as(
+            "SELECT bmc_mac_address, source FROM bmc_suppressions
+             ORDER BY bmc_mac_address",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (mac(1), ROTATION),
+                (mac(2), BmcSuppressionSource::FactoryResetBmc),
+                (mac(3), DECOMMISSIONING),
+            ]
+        );
+
+        let (is_nullable, column_default): (String, Option<String>) = sqlx::query_as(
+            "SELECT is_nullable, column_default
+             FROM information_schema.columns
+             WHERE table_name = 'bmc_suppressions' AND column_name = 'source'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(is_nullable, "NO");
+        assert_eq!(column_default, None);
+
+        sqlx::query(
+            "INSERT INTO bmc_suppressions (bmc_mac_address, subsystem, reason)
+             VALUES ($1, 'site_explorer', 'omitted source')",
+        )
+        .bind(mac(4))
+        .execute(&pool)
+        .await
+        .unwrap_err();
+
+        let mut txn = pool.begin().await.unwrap();
+        upsert(
+            txn.as_mut(),
+            &NewBmcSuppression {
+                bmc_mac_address: mac(3),
+                subsystem: SITE_EXPLORER,
+                source: ROTATION,
+                reason: "bmc_credential_rotation".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            find(txn.as_mut(), mac(3), SITE_EXPLORER, DECOMMISSIONING)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            find(txn.as_mut(), mac(3), SITE_EXPLORER, ROTATION)
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 }

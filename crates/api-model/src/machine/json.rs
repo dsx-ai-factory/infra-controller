@@ -35,18 +35,20 @@ use crate::machine::infiniband::MachineInfinibandStatusObservation;
 use crate::machine::network::{MachineNetworkStatusObservation, ManagedHostNetworkConfig};
 use crate::machine::nvlink::MachineNvLinkStatusObservation;
 use crate::machine::spx::MachineSpxStatusObservation;
+use crate::machine::status::MlxDeviceObservation;
 use crate::machine::topology::MachineTopology;
 use crate::machine::{
     AnyMachine, Dpf, DpuMachine, FailureDetails, HostMachine, HostProfile, HostReprovisionRequest,
     MachineConfig, MachineInterfaceSnapshot, MachineLastRebootRequested, MachineMaintenanceRequest,
-    MachineStatus, ManagedHostState, PredictedHostMachine, ReprovisionRequest, StableHostMachine,
-    UpgradeDecision,
+    MachineStatus, ManagedHostState, PredictedHostMachine, ReprovisionRequest, ResetRequest,
+    StableHostMachine, UpgradeDecision,
 };
 use crate::machine_boot_interface::{
     BootInterfaceSelection, BootInterfaceSelectionSource, BootInterfaceStatusObservation,
     MachineBootInterfaceTarget, canonical_redfish_boot_interface_id,
 };
 use crate::metadata::Metadata;
+use crate::nic_firmware::{NicFirmwareCardSelection, NicFirmwareProfileId};
 use crate::power_manager::PowerOptions;
 use crate::rack::RackFirmwareUpgradeStatus;
 use crate::sku::SkuStatus;
@@ -70,6 +72,8 @@ pub struct MachineSnapshotPgJson {
     pub infiniband_status_observation: Option<MachineInfinibandStatusObservation>,
     pub nvlink_status_observation: Option<MachineNvLinkStatusObservation>,
     pub spx_status_observation: Option<MachineSpxStatusObservation>,
+    /// Latest complete MLX collection stored on the machine, if one exists.
+    pub mlx_device_observation: Option<MlxDeviceObservation>,
     #[serde(default)]
     pub extension_service_status_observations: InstanceExtensionServiceStatusObservationByType,
     pub controller_state_version: String,
@@ -83,6 +87,7 @@ pub struct MachineSnapshotPgJson {
     pub failure_details: FailureDetails,
     pub reprovisioning_requested: Option<ReprovisionRequest>,
     pub host_reprovisioning_requested: Option<HostReprovisionRequest>,
+    pub reset_requested: Option<ResetRequest>,
     pub machine_maintenance_requested: Option<MachineMaintenanceRequest>,
     #[serde(default)]
     pub decommission_requested: bool,
@@ -100,6 +105,12 @@ pub struct MachineSnapshotPgJson {
     pub cleanup_machine_validation_id: Option<MachineValidationId>,
     pub dpu_agent_upgrade_requested: Option<UpgradeDecision>,
     pub firmware_autoupdate: Option<bool>,
+    /// Optional machine-wide NIC firmware profile reference.
+    pub nic_firmware_profile_id: Option<NicFirmwareProfileId>,
+    /// Card selections; DPU snapshot projections and older fixtures omit this
+    /// field. An omitted field decodes as an empty list.
+    #[serde(default)]
+    pub nic_firmware_card_selections: Vec<NicFirmwareCardSelection>,
     pub health_reports: Option<HealthReportSources>,
     pub on_demand_machine_validation_id: Option<MachineValidationId>,
     pub on_demand_machine_validation_request: Option<bool>,
@@ -342,6 +353,8 @@ impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
             rack_id: value.rack_id,
             config: MachineConfig {
                 firmware_autoupdate: value.firmware_autoupdate,
+                nic_firmware_profile_id: value.nic_firmware_profile_id,
+                nic_firmware_card_selections: value.nic_firmware_card_selections,
                 instance_type_id: value.instance_type_id,
                 dpf: value.dpf,
                 hw_sku: value.hw_sku,
@@ -370,6 +383,7 @@ impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
                 infiniband_status_observation: value.infiniband_status_observation,
                 nvlink_status_observation: value.nvlink_status_observation,
                 spx_status_observation: value.spx_status_observation,
+                mlx_device_observation: value.mlx_device_observation,
                 extension_service_status_observations: value.extension_service_status_observations,
                 slot_number: value.slot_number,
                 tray_index: value.tray_index,
@@ -378,6 +392,7 @@ impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
             health_reports,
             reprovision_requested: value.reprovisioning_requested,
             host_reprovision_requested: value.host_reprovisioning_requested,
+            reset_requested: value.reset_requested,
             dpu_agent_upgrade_requested: value.dpu_agent_upgrade_requested,
             controller_state_outcome: value.controller_state_outcome,
             bios_password_set_time: value.bios_password_set_time,
@@ -425,10 +440,59 @@ delegate_try_from_machine_snapshot_pg_json_impl!(StableHostMachine);
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::{Fails, Yields};
-    use carbide_test_support::{Case, check_cases};
+    use carbide_test_support::{Case, Check, check_cases, check_values};
 
     use super::*;
     use crate::machine_boot_interface::MachineBootInterface;
+    use crate::nic_firmware::NicFirmwareCardSelector;
+    use crate::test_support::machine_snapshot::{host_machine_id, machine_snapshot_pg_json};
+
+    /// DPU snapshot projections and older fixtures omit the card collection.
+    /// Omission must decode as empty, while host selections reach machine config.
+    #[test]
+    fn nic_firmware_card_selections_decode_from_omitted_and_populated_fields() {
+        let card_selection = NicFirmwareCardSelection {
+            selector: NicFirmwareCardSelector::Guid("opaque-Base_Guid".into()),
+            profile_id: "operator-profile".parse().unwrap(),
+        };
+        check_values(
+            [
+                Check {
+                    scenario: "omitted projection field means no card selections",
+                    input: None,
+                    expect: vec![],
+                },
+                Check {
+                    scenario: "stored card selection reaches machine configuration",
+                    input: Some(vec![card_selection.clone()]),
+                    expect: vec![card_selection],
+                },
+            ],
+            |card_selections| {
+                let mut json = serde_json::to_value(machine_snapshot_pg_json(host_machine_id()))
+                    .expect("serialize machine snapshot");
+                let fields = json.as_object_mut().expect("snapshot is an object");
+                match card_selections {
+                    Some(card_selections) => {
+                        fields.insert(
+                            "nic_firmware_card_selections".into(),
+                            serde_json::to_value(card_selections)
+                                .expect("serialize card selections"),
+                        );
+                    }
+                    None => {
+                        fields.remove("nic_firmware_card_selections");
+                    }
+                }
+                let snapshot: MachineSnapshotPgJson =
+                    serde_json::from_value(json).expect("deserialize machine snapshot");
+                AnyMachine::try_from(snapshot)
+                    .expect("convert machine snapshot")
+                    .config
+                    .nic_firmware_card_selections
+            },
+        );
+    }
 
     #[derive(Debug)]
     struct Input {

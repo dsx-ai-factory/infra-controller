@@ -165,6 +165,10 @@ func (m *Manager) PowerControl(
 	target common.Target,
 	info operations.PowerControlTaskInfo,
 ) error {
+	if target.UsesMACAddresses() {
+		return fmt.Errorf("MAC-address targets are not supported by the nicolegacy compute manager")
+	}
+
 	log.Debug().Msgf(
 		"compute power control %s op %s activity received",
 		target.String(),
@@ -184,7 +188,7 @@ func (m *Manager) PowerControl(
 	// as ready, or returns an error at the deadline. The operator may set
 	// OverrideReadinessCheck to bypass this gate for supervised
 	// maintenance; the bypass is logged inside ensureMachinesOperable.
-	if err := m.ensureMachinesOperable(ctx, target.ComponentIDs, types.OperationTypePowerControl, info.OverrideReadinessCheck); err != nil {
+	if err := m.ensureMachinesOperable(ctx, target.Identifiers, types.OperationTypePowerControl, info.OverrideReadinessCheck); err != nil {
 		return fmt.Errorf("refused: %w", err)
 	}
 
@@ -245,7 +249,7 @@ func (m *Manager) PowerControl(
 		}
 	}()
 
-	for i, componentID := range target.ComponentIDs {
+	for i, componentID := range target.Identifiers {
 		// Place a health-report override so NICo marks the machine as
 		// under maintenance for the duration of the power operation.
 		if err := m.nicoClient.InsertHealthReportOverride(
@@ -280,7 +284,7 @@ func (m *Manager) PowerControl(
 		}
 
 		// Stagger calls to avoid overwhelming the power delivery system
-		if m.powerDelay > 0 && i < len(target.ComponentIDs)-1 {
+		if m.powerDelay > 0 && i < len(target.Identifiers)-1 {
 			time.Sleep(m.powerDelay)
 		}
 	}
@@ -296,6 +300,10 @@ func (m *Manager) GetPowerStatus(
 	ctx context.Context,
 	target common.Target,
 ) (map[string]operations.PowerStatus, error) {
+	if target.UsesMACAddresses() {
+		return nil, fmt.Errorf("MAC-address targets are not supported by the nicolegacy compute manager")
+	}
+
 	log.Debug().Msgf(
 		"compute get power status %s activity received",
 		target.String(),
@@ -309,7 +317,7 @@ func (m *Manager) GetPowerStatus(
 		return nil, fmt.Errorf("target is invalid: %w", err)
 	}
 
-	powerStates, err := m.nicoClient.GetPowerStates(ctx, target.ComponentIDs)
+	powerStates, err := m.nicoClient.GetPowerStates(ctx, target.Identifiers)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get power states: %w", err)
 	}
@@ -356,10 +364,23 @@ func nicoPowerStateToOperationsPowerStatus(state nicoapi.PowerState) operations.
 // nicolegacy path inherits the same `version` semantics as compute/nico:
 // info.TargetVersion is ignored on the DPU branch because Core's
 // reprovisioning state machine does not accept a per-request version.
+//
+// The legacy firmware APIs cannot select compute-tray sub-targets or override
+// version checks. Requests using either option are rejected before readiness
+// checks or external calls so the manager never broadens the requested update.
 func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, info operations.FirmwareControlTaskInfo) error {
+	if target.UsesMACAddresses() {
+		return fmt.Errorf("MAC-address targets are not supported by the nicolegacy compute manager")
+	}
+
 	if info.AccessToken != "" {
 		return fmt.Errorf("firmware authentication data is not supported by the nicolegacy compute manager")
 	}
+
+	if err := m.ValidateFirmwareControl(info); err != nil {
+		return err
+	}
+	_, hasDpu := firmwarecomponents.SplitNICoComputeTraySubTargets(info.SubTargets)
 
 	log.Debug().
 		Str("components", target.String()).
@@ -380,22 +401,19 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 	// operator may set OverrideReadinessCheck to bypass this gate for
 	// supervised maintenance; the bypass is logged inside
 	// ensureMachinesOperable.
-	if err := m.ensureMachinesOperable(ctx, target.ComponentIDs, types.OperationTypeFirmwareControl, info.OverrideReadinessCheck); err != nil {
+	if err := m.ensureMachinesOperable(ctx, target.Identifiers, types.OperationTypeFirmwareControl, info.OverrideReadinessCheck); err != nil {
 		return fmt.Errorf("refused: %w", err)
 	}
 
-	computeTraySubs, hasDpu := firmwarecomponents.SplitNICoComputeTraySubTargets(info.SubTargets)
-
-	dpuOnly := hasDpu && len(info.SubTargets) > 0 && len(computeTraySubs) == 0
-	if !dpuOnly {
-		if err := m.scheduleComputeTrayFirmware(ctx, target, info, computeTraySubs); err != nil {
+	if !hasDpu {
+		if err := m.scheduleComputeTrayFirmware(ctx, target, info); err != nil {
 			return err
 		}
 	}
 
 	if hasDpu {
 		if err := dpureprov.ReprovisionHosts(
-			ctx, m.nicoClient, target.ComponentIDs,
+			ctx, m.nicoClient, target.Identifiers,
 			true, // update_firmware: tenant-driven DPU reprov always rolls firmware
 			m.dpuReprovOpts,
 		); err != nil {
@@ -406,25 +424,28 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 	return nil
 }
 
-// scheduleComputeTrayFirmware is the legacy compute-tray-internal
-// firmware scheduling path extracted from FirmwareControl so the DPU
-// branch can skip it when the request is DPU-only. Behaviour for
-// compute-tray sub-targets is unchanged: SetFirmwareUpdateTimeWindow +
-// SetMachineAutoUpdate do not expose per-sub-target selection, so we
-// log the requested subset and apply the whole bundle.
+// ValidateFirmwareControl rejects options that the legacy machine-centric
+// firmware APIs cannot enforce. It performs no readiness checks or RPCs.
+func (m *Manager) ValidateFirmwareControl(info operations.FirmwareControlTaskInfo) error {
+	computeTraySubs, _ := firmwarecomponents.SplitNICoComputeTraySubTargets(info.SubTargets)
+	if len(computeTraySubs) > 0 {
+		return fmt.Errorf("compute firmware sub-target selection is not supported by the nicolegacy compute manager")
+	}
+	if info.OverrideVersionCheck {
+		return fmt.Errorf("firmware version-check override is not supported by the nicolegacy compute manager")
+	}
+
+	return nil
+}
+
+// scheduleComputeTrayFirmware is the legacy compute-tray-internal firmware
+// scheduling path extracted from FirmwareControl so the DPU branch can skip it
+// when the request is DPU-only.
 func (m *Manager) scheduleComputeTrayFirmware(
 	ctx context.Context,
 	target common.Target,
 	info operations.FirmwareControlTaskInfo,
-	computeTraySubs []string,
 ) error {
-	if len(computeTraySubs) > 0 {
-		log.Warn().
-			Str("components", target.String()).
-			Strs("sub_targets", computeTraySubs).
-			Msg("compute firmware sub-target selection is not yet honored on nicolegacy; whole bundle will be applied")
-	}
-
 	desiredEntries, err := m.nicoClient.GetDesiredFirmwareVersions(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to query desired firmware versions: %w", err)
@@ -446,7 +467,7 @@ func (m *Manager) scheduleComputeTrayFirmware(
 	}
 
 	machinesByID := make(map[string]nicoapi.MachineDetail)
-	machines, err := m.nicoClient.FindMachinesByIds(ctx, target.ComponentIDs)
+	machines, err := m.nicoClient.FindMachinesByIds(ctx, target.Identifiers)
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to check machines, proceeding with schedule")
 	} else {
@@ -472,7 +493,7 @@ func (m *Manager) scheduleComputeTrayFirmware(
 				Msg("Idempotent check: desired entry")
 		}
 
-		if allFirmwareUpToDate(target.ComponentIDs, actualFirmware, targetFirmware, desiredEntries) {
+		if allFirmwareUpToDate(target.Identifiers, actualFirmware, targetFirmware, desiredEntries) {
 			log.Info().
 				Str("components", target.String()).
 				Msg("All firmware already at desired version, skipping schedule")
@@ -498,7 +519,7 @@ func (m *Manager) scheduleComputeTrayFirmware(
 	}
 
 	var autoUpdateErrors []string
-	for _, machineID := range target.ComponentIDs {
+	for _, machineID := range target.Identifiers {
 		if machine, ok := machinesByID[machineID]; ok && machine.FirmwareAutoupdate != nil && *machine.FirmwareAutoupdate {
 			log.Debug().Str("machine_id", machineID).Msg("firmware_autoupdate already enabled, skipping SetMachineAutoUpdate")
 			continue
@@ -514,7 +535,7 @@ func (m *Manager) scheduleComputeTrayFirmware(
 		return fmt.Errorf("failed to enable auto-update for %d machine(s): %v", len(autoUpdateErrors), autoUpdateErrors)
 	}
 
-	if err := m.nicoClient.SetFirmwareUpdateTimeWindow(ctx, target.ComponentIDs, startTime, endTime); err != nil {
+	if err := m.nicoClient.SetFirmwareUpdateTimeWindow(ctx, target.Identifiers, startTime, endTime); err != nil {
 		return fmt.Errorf("failed to schedule firmware update for compute: %w", err)
 	}
 
@@ -695,7 +716,7 @@ func (m *Manager) GetFirmwareStatus(ctx context.Context, target common.Target) (
 		return nil, fmt.Errorf("nico client is not configured")
 	}
 
-	machines, err := m.nicoClient.FindMachinesByIds(ctx, target.ComponentIDs)
+	machines, err := m.nicoClient.FindMachinesByIds(ctx, target.Identifiers)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query machines: %w", err)
 	}
@@ -722,8 +743,8 @@ func (m *Manager) GetFirmwareStatus(ctx context.Context, target common.Target) (
 		machineByID[machine.MachineID] = machine
 	}
 
-	result := make(map[string]operations.FirmwareUpdateStatus, len(target.ComponentIDs))
-	for _, id := range target.ComponentIDs {
+	result := make(map[string]operations.FirmwareUpdateStatus, len(target.Identifiers))
+	for _, id := range target.Identifiers {
 		machine, ok := machineByID[id]
 		if !ok {
 			log.Warn().Str("machine_id", id).Msg("machine not found in NICo")
@@ -841,11 +862,11 @@ func (m *Manager) BringUpControl(
 	// OverrideReadinessCheck propagates from the parent BringUp request
 	// when the operator elects to bypass; the bypass is logged inside
 	// ensureMachinesOperable.
-	if err := m.ensureMachinesOperable(ctx, target.ComponentIDs, types.OperationTypePowerControl, info.OverrideReadinessCheck); err != nil {
+	if err := m.ensureMachinesOperable(ctx, target.Identifiers, types.OperationTypePowerControl, info.OverrideReadinessCheck); err != nil {
 		return fmt.Errorf("refused: %w", err)
 	}
 
-	for _, componentID := range target.ComponentIDs {
+	for _, componentID := range target.Identifiers {
 		if err := m.nicoClient.AllowIngestionAndPowerOn(
 			ctx, componentID, "",
 		); err != nil {
@@ -882,9 +903,9 @@ func (m *Manager) GetBringUpStatus(
 
 	result := make(
 		map[string]operations.MachineBringUpState,
-		len(target.ComponentIDs),
+		len(target.Identifiers),
 	)
-	for _, componentID := range target.ComponentIDs {
+	for _, componentID := range target.Identifiers {
 		state, err := m.nicoClient.DetermineMachineIngestionState(
 			ctx, componentID, "",
 		)

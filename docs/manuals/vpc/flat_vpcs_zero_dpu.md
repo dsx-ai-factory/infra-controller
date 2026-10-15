@@ -27,8 +27,8 @@ VPCs, and how a tenant then creates Flat VPCs and instances on them.
   (ETV / FNN) model that Flat VPCs deliberately do **not** use
 - [Network Security Groups](../networking/network_security_groups.md) — the L3/L4
   rule filter that a Flat VPC can still carry
-- [VPC Peering](vpc_peering_management.md) — Flat VPCs may peer with ETV, FNN,
-  and other Flat VPCs
+- [VPC Peering](vpc_peering_management.md) — Flat VPCs can peer with FNN
+  and other Flat VPCs.
 
 ---
 

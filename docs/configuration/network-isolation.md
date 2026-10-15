@@ -5,9 +5,11 @@ NICo enforces separation between tenants across all network planes. This isolati
 ## Ethernet (North-South)
 
 BlueField DPUs running HBN (Host-Based Networking with Containerized Cumulus) enforce L3 VXLAN/EVPN boundaries. Each VPC gets its own VRF (Virtual Routing and Forwarding instance) on every DPU that hosts an instance in that VPC. Traffic between VPCs is isolated at the network layer without requiring any leaf switch configuration changes.
+Floating blackhole routes for `site_fabric_null_routes` are installed, and authorized route imports, such as compatible VPC peer routes, take precedence only when they are at least as specific as the applicable blackhole.
 
 Key properties:
 - Per-VPC VRF with dedicated VNI (VXLAN Network Identifier) from the site's VNI pool
+- Null-routes prevent unauthorized upstream-VRF hairpinning
 - Route targets control which VRFs can exchange routes
 - `deny_prefixes` ACLs block tenant traffic from reaching management networks
 - Network Security Groups provide per-subnet firewall rules

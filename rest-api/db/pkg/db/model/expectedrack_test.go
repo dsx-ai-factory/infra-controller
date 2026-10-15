@@ -7,14 +7,15 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 )
@@ -131,6 +132,51 @@ func testExpectedRackSetupSchema(t *testing.T, dbSession *db.Session) {
 	assert.Nil(t, err)
 	_, err = dbSession.DB.Exec("ALTER TABLE expected_rack ADD CONSTRAINT expected_rack_rack_id_site_id_key UNIQUE (rack_id, site_id) DEFERRABLE INITIALLY DEFERRED")
 	assert.Nil(t, err)
+}
+
+func TestExpectedRackDAO_UpdateMultiple(t *testing.T) {
+	ctx := context.Background()
+	session := testInitDB(t)
+	defer session.Close()
+	testExpectedRackSetupSchema(t, session)
+	user := TestBuildUser(t, session, "group-user", "group-org", []string{"admin"})
+	provider := TestBuildInfrastructureProvider(t, session, "group-provider", "group-org", user)
+	site := TestBuildSite(t, session, provider, "group-site", user)
+	dao := NewExpectedRackDAO(session)
+	for _, tc := range []struct {
+		name  string
+		group *string
+	}{
+		{name: "supplied", group: new("new-group")},
+		{name: "omitted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ids := []uuid.UUID{uuid.New(), uuid.New()}
+			_, err := dao.CreateMultiple(ctx, nil, []ExpectedRackCreateInput{
+				{ExpectedRackID: ids[0], SiteID: site.ID, RackID: tc.name + "-a", RackProfileID: "profile", RackGroupID: new("old-group"), CreatedBy: user.ID},
+				{ExpectedRackID: ids[1], SiteID: site.ID, RackID: tc.name + "-b", RackProfileID: "profile", RackGroupID: new("preserve-group"), CreatedBy: user.ID},
+			})
+			if !assert.NoError(t, err) {
+				return
+			}
+			rows, err := dao.UpdateMultiple(ctx, nil, []ExpectedRackUpdateInput{
+				{ExpectedRackID: ids[0], RackGroupID: tc.group}, {ExpectedRackID: ids[1]},
+			})
+			if !assert.NoError(t, err) || !assert.Len(t, rows, 2) {
+				return
+			}
+			want := "old-group"
+			if tc.group != nil {
+				want = *tc.group
+			}
+			assert.Equal(t, &want, rows[0].RackGroupID)
+			assert.Equal(t, new("preserve-group"), rows[1].RackGroupID)
+			stored, err := dao.Get(ctx, nil, ids[1], nil, false)
+			if assert.NoError(t, err) {
+				assert.Equal(t, new("preserve-group"), stored.RackGroupID)
+			}
+		})
+	}
 }
 
 func TestExpectedRackDAO_Create(t *testing.T) {
@@ -264,8 +310,6 @@ func TestExpectedRackDAO_Create(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 
 				if err != nil {
@@ -396,8 +440,6 @@ func TestExpectedRackDAO_Get(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -599,8 +641,6 @@ func TestExpectedRackDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -730,8 +770,6 @@ func TestExpectedRackDAO_Update(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -754,6 +792,79 @@ func TestExpectedRackDAO_Update_NotFound(t *testing.T) {
 		Name:           cutil.GetPtr("Should not exist"),
 	})
 	assert.Error(t, err)
+}
+
+func TestExpectedRackSQLDAO_DeleteIfUnchanged(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedRackSetupSchema(t, dbSession)
+
+	existing, _, _, _ := testExpectedRackDAOCreateExpectedRacks(ctx, t, dbSession)
+	dao := NewExpectedRackDAO(dbSession)
+	unchanged, err := dao.Get(ctx, nil, existing[0].ID, nil, false)
+	require.NoError(t, err)
+	beforeUpdate, err := dao.Get(ctx, nil, existing[1].ID, nil, false)
+	require.NoError(t, err)
+	afterUpdate, err := dao.Update(ctx, nil, ExpectedRackUpdateInput{
+		ExpectedRackID: beforeUpdate.ID,
+		Name:           cutil.GetPtr("API-name"),
+	})
+	require.NoError(t, err)
+	require.True(t, afterUpdate.Updated.After(beforeUpdate.Updated))
+	other, err := dao.Get(ctx, nil, existing[2].ID, nil, false)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		id          uuid.UUID
+		updated     time.Time
+		wantDeleted bool
+		want        *ExpectedRack
+	}{
+		{
+			name:        "matching version deletes the row",
+			id:          unchanged.ID,
+			updated:     unchanged.Updated,
+			wantDeleted: true,
+		},
+		{
+			name:    "changed version preserves the row",
+			id:      beforeUpdate.ID,
+			updated: beforeUpdate.Updated,
+			want:    afterUpdate,
+		},
+		{
+			name:    "future timestamp preserves the older stored row",
+			id:      other.ID,
+			updated: other.Updated.Add(time.Second),
+			want:    other,
+		},
+		{
+			name:    "absent row preserves another row with the same timestamp",
+			id:      uuid.New(),
+			updated: other.Updated,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			deleted, err := dao.DeleteIfUnchanged(ctx, nil, tc.id, tc.updated)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantDeleted, deleted)
+
+			stored, err := dao.Get(ctx, nil, tc.id, nil, false)
+			if tc.want == nil {
+				assert.ErrorIs(t, err, db.ErrDoesNotExist)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, stored)
+		})
+	}
+
+	stored, err := dao.Get(ctx, nil, other.ID, nil, false)
+	require.NoError(t, err)
+	assert.Equal(t, other, stored)
 }
 
 func TestExpectedRackDAO_Delete(t *testing.T) {
@@ -804,8 +915,6 @@ func TestExpectedRackDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

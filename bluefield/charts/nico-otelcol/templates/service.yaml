@@ -5,6 +5,7 @@ metadata:
   labels:
     {{- include "nico-otelcol.labels" . | nindent 4 }}
 spec:
+  ipFamilyPolicy: PreferDualStack
   type: ClusterIP
   internalTrafficPolicy: Local
   selector:

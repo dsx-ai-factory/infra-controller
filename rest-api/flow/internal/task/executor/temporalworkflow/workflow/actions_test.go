@@ -8,8 +8,41 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 )
+
+func TestActionBatchCount(t *testing.T) {
+	tests := []struct {
+		name   string
+		action string
+		want   int
+	}{
+		{
+			name:   "component action is partitioned",
+			action: operationrules.ActionGetPowerStatus,
+			want:   3,
+		},
+		{
+			name:   "step-wide action executes once",
+			action: operationrules.ActionVerifyReachability,
+			want:   1,
+		},
+		{
+			name:   "group validation executes once",
+			action: operationrules.ActionVerifyFirmwareConsistency,
+			want:   1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, actionBatchCount(
+				operationrules.ActionConfig{Name: tc.action}, 2, 5,
+			))
+		})
+	}
+}
 
 // TestExtractOverrideReadinessCheck covers every branch of the
 // extractOverrideReadinessCheck helper. The helper bridges the parent /

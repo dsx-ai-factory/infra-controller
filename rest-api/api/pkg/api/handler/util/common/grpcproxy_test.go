@@ -6,7 +6,6 @@ package common
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -29,8 +28,8 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
-// newProxyEchoContext returns a context for the helpers that render their own
-// response, along with the recorder holding what they wrote.
+// newProxyEchoContext returns a context and recorder for helpers whose HTTP
+// boundary behavior is under test.
 func newProxyEchoContext() (echo.Context, *httptest.ResponseRecorder) {
 	recorder := httptest.NewRecorder()
 	return echo.New().NewContext(httptest.NewRequest(http.MethodPost, "/", nil), recorder), recorder
@@ -169,24 +168,23 @@ func TestExecuteGRPCProxyClassifiesLostResults(t *testing.T) {
 				return
 			}
 			require.NotNil(t, err.Data)
-			cause, ok := err.Data.(error)
-			require.True(t, ok, "Data is %T", err.Data)
-			assert.Contains(t, cause.Error(), tc.expectedCause)
+			assert.Contains(t, err.Data.Error(), tc.expectedCause)
 		})
 	}
 }
 
-// TestProxyFlowGRPCSeparatesDiagnosisFromResponseData keeps the diagnosis in
-// the log and out of the body: an error placed in the response serializes to an
-// empty object, which tells a client nothing and contradicts the null the
-// schema documents.
-func TestProxyFlowGRPCSeparatesDiagnosisFromResponseData(t *testing.T) {
+// TestProxyFlowGRPCReturnsAPIError keeps HTTP response ownership at the
+// handler boundary while retaining the internal diagnosis for logging.
+func TestProxyFlowGRPCReturnsAPIError(t *testing.T) {
 	cases := []struct {
 		name         string
 		getErr       error
 		expectedCode int
 		expectedLog  string
 	}{
+		{
+			name: "flow succeeds",
+		},
 		{
 			// Flow's own rejection arrives with no separate cause, so the
 			// message is the only diagnosis there is.
@@ -206,24 +204,25 @@ func TestProxyFlowGRPCSeparatesDiagnosisFromResponseData(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			temporalClient, _ := newProxyClient(tc.getErr, nil)
-			echoCtx, recorder := newProxyEchoContext()
 			var logs bytes.Buffer
 
-			err := ProxyFlowGRPC(
-				context.Background(), echoCtx, zerolog.New(&logs), temporalClient,
+			apiErr := ProxyFlowGRPC(
+				context.Background(), zerolog.New(&logs), temporalClient,
 				"/v1.Flow/GetRackInfoByID",
 				&emptypb.Empty{}, nil,
 				"rack-get-1", temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 			)
 
-			require.NoError(t, err)
-			assert.Equal(t, tc.expectedCode, recorder.Code)
-			assert.Contains(t, logs.String(), tc.expectedLog)
+			if tc.getErr == nil {
+				assert.Nil(t, apiErr)
+				assert.Empty(t, logs.String())
+				return
+			}
 
-			var body map[string]any
-			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
-			require.Contains(t, body, "data")
-			assert.Nil(t, body["data"], "data must be null, got %#v", body["data"])
+			require.NotNil(t, apiErr)
+			assert.Equal(t, tc.expectedCode, apiErr.Code)
+			assert.Contains(t, apiErr.Diagnosis().Error(), tc.expectedLog)
+			assert.Contains(t, logs.String(), tc.expectedLog)
 		})
 	}
 }

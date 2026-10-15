@@ -23,31 +23,41 @@ You should check both the expected machines DB and the credential store (the sit
 If there is an existing data in expected machines for the machine, you can either update the password
 in expected machines or change the password on the Host BMC to match.
 
-1. Use `nico-admin-cli` to check if there is an existing entry for the host BMC:
+Replace the example MAC address, serial number, and credentials with values for your machine.
+
+1. List expected machines and find the host BMC MAC address:
 
     ```bash
-    nico-admin-cli expected-machine show |grep <Host BMC IP Address|Host BMC MAC Address>
+    nico-admin-cli expected-machine show
     ```
 
 2. If an entry exists for the machine, display the details using `nico-admin-cli`:
 
     ```bash
-    nico-admin-cli expected-machine show <Host BMC MAC address>
+    nico-admin-cli expected-machine show 00:11:22:33:44:55
     ```
 
-3. To update an existing expected machines data:
+3. Correct the BMC password for an existing expected machine:
 
     ```bash
-    nico-admin-cli expected-machine add --bmc-mac-address <BMC MAC Address> --bmc-username <BMC Username> --bmc-password <BMC Password --chassis-serial-number <Chassis Serial Number>
+    nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 \
+      --bmc-password 'mynewpassword'
     ```
 
-   > **Note**: If you only need to update the BMC password, you just need to supply the BMC MAC Address and BMC Password
+   The patch preserves the stored username and other omitted fields. To correct only the
+   username, supply `--bmc-username admin` instead. You can supply both flags to change both values.
+   For additional options, refer to the
+   [expected-machine patch reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/expected-machine/expected-machine-patch.md).
 
-4. To add a new machine to the expected machines DB:
+4. If no entry exists, add a new expected machine:
 
     ```bash
-    nico-admin-cli expected-machine update --bmc-mac-address <BMC_MAC_ADDRESS> <--bmc-username <BMC_USERNAME> --bmc-password <BMC_PASSWORD> --chassis-serial-number <CHASSIS_SERIAL_NUMBER>
+    nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 \
+      --bmc-username admin --bmc-password 'mypassword' --chassis-serial-number SERIAL-001
     ```
+
+   For additional options, refer to the
+   [expected-machine add reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/expected-machine/expected-machine-add.md).
 
 ### Checking site vault data
 

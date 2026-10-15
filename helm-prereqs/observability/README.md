@@ -8,7 +8,7 @@ An optional, self-contained monitoring stack for any cluster installed with `hel
 ```text
                      ┌───────────────────────────── monitoring ns ─────────────────────────────┐
  NICo /metrics ──────► Prometheus (kube-prometheus-stack, release `obs`) ◄── ServiceMonitors    │
- (carbide_*)         │        │                                                                 │
+ hw /telemetry ──────►        │                                                                 │
                      │        ▼                                                                 │
                      │     Grafana ── datasources: Prometheus, Loki, Tempo; dashboard sidecar   │
                      └────────▲───────────────────────▲─────────────────────────────────────────┘
@@ -22,7 +22,7 @@ An optional, self-contained monitoring stack for any cluster installed with `hel
 
 | Signal | Source | Store | How |
 |---|---|---|---|
-| Metrics | every NICo service's `/metrics` (`carbide_*`) | Prometheus | the NICo charts' ServiceMonitors — auto-enabled in the setup.sh flow, see [Scraping the NICo metrics](#scraping-the-nico-metrics) |
+| Metrics | every NICo service's `/metrics` and hardware-health `/telemetry` (`carbide_*`) | Prometheus | the NICo charts' ServiceMonitors — auto-enabled in the setup.sh flow, see [Scraping the NICo metrics](#scraping-the-nico-metrics) |
 | Metrics | nodes, cadvisor, kube-state | Prometheus | kube-prometheus-stack defaults |
 | Logs | ALL pod stdout (nico-\*, nico-rest, flow, temporal, vault, CP static pods, …) | Loki | otel-agent DaemonSet tails `/var/log/pods/*` |
 | Traces | NICo OTLP spans (opt-in, see [Enabling traces](#enabling-traces)) | Tempo | services → otel-agent `:4317` → Tempo |
@@ -77,34 +77,54 @@ kubectl -n monitoring port-forward svc/obs-grafana 3000:80   # -> http://localho
 | `OTEL_RECEIVER_VIP` | *(required if `WITH_DPU`)* | MetalLB VIP the DPUs dial |
 | `OTEL_RECEIVER_DNS` | `otel-receiver.forge` | SAN on the gateway cert = the name DPUs dial |
 | `SITE_CA_ISSUER` | `site-issuer` | ClusterIssuer for the gateway cert — **must be the CA the DPUs trust** |
-| `NICO_SERVICEMONITORS` | `hint` (standalone), `true` (from setup.sh) | `true` = enable the NICo charts' ServiceMonitors via a release upgrade with this tree's chart; `hint` = print the enable command instead; `false` = skip (see [Scraping the NICo metrics](#scraping-the-nico-metrics)) |
+| `NICO_SERVICEMONITORS` | `hint` (standalone or setup without a Core install), `true` (setup after installing Core) | `true` = apply the NICo metrics overlay via a release upgrade with this tree's chart; `hint` = print the command instead; `false` = skip (see [Scraping the NICo metrics](#scraping-the-nico-metrics)) |
 | `NICO_RELEASE` / `NICO_NS` | `nico` / `nico-system` | NICo Core release name / namespace |
 | `LOKI_CHART_VER` `TEMPO_CHART_VER` `OTEL_CHART_VER` `KPS_CHART_VER` | see [pins](#components-and-pins) | chart version overrides |
 
 Per-site values are applied as `helm --set-string` overrides — the `values-*.yaml` files keep
 validated defaults and never need editing for a new site.
 
+Within `setup.sh`, `NICO_SERVICEMONITORS=true` is honored only after that run successfully
+installs Core. If Core is skipped or declined, setup forces the safe `hint` behavior. To
+deliberately reconcile an existing release, run the standalone installer with the override.
+
 ## Scraping the NICo metrics
 
 The NICo subcharts ship ServiceMonitor templates but **default them off**, and the standard
 deploy values do not enable them — a fresh site exposes `carbide_*` metrics that nothing
-scrapes. In the `setup.sh --with-observability` flow **the installer closes this
-automatically**: Core was just installed from the same tree, so it safely applies the bundled
-`values-nico-servicemonitors.yaml` overlay to the release (`--reuse-values`; adds monitor
-objects only, no pod changes). Prometheus discovers them cluster-wide within a scrape interval
-(`*SelectorNilUsesHelmValues: false` — no labels to coordinate).
+scrapes. In the `setup.sh --with-observability` flow, when Core was successfully installed in
+the same run, the installer safely applies the bundled `values-nico-servicemonitors.yaml`
+overlay to the release (`--reuse-values`; for hardware-health, this enables its Prometheus sink
+and both monitor endpoints). Prometheus discovers the resulting monitors cluster-wide within a
+scrape interval (`*SelectorNilUsesHelmValues: false` — no labels to coordinate).
 
-Running **standalone** the default is `hint`: upgrading a release with a chart tree that may
-differ from what is deployed could apply more than the monitors, so the installer prints the
-enable command instead. Apply it with the chart ref your site was actually installed from:
+Hardware health serves both paths on port `9009`: `/metrics` contains service-owned metrics,
+including the optional BMC request-latency histogram, while `/telemetry` contains the original
+per-hardware samples. The latter is high-cardinality; size Prometheus retention and scrape
+capacity accordingly.
+
+An enabled hardware-health OTLP target remains an analyzer input and does not replace either
+direct scrape.
+
+Running **standalone**, using `--skip-core`, or declining the Core install uses `hint`: upgrading
+an existing release with a chart tree that may differ from what is deployed could apply more
+than the monitors, so the installer prints the enable command instead. Apply it with the chart
+ref your site was actually installed from:
 
 ```bash
 helm upgrade nico <your-chart-ref> -n nico-system --reuse-values \
     -f helm-prereqs/observability/values-nico-servicemonitors.yaml
 ```
 
-(or re-run with `NICO_SERVICEMONITORS=true` when this checkout matches the deployed chart).
-If Core is not installed at all (infra-only cluster), the step defers with the same hint.
+(or run `NICO_SERVICEMONITORS=true helm-prereqs/observability/install-observability.sh` when this
+checkout matches the deployed chart). If Core is not installed at all (infra-only cluster), the
+step defers with the same hint.
+
+### IPv6 NICo metrics
+
+The bundled monitoring stack keeps IPv4 discovery by default. For a collector that must scrape NICo over IPv6, use the [IPv6 scrape discovery recipe](../../docs/observability/metrics.md#opt-in-ipv6-scrape-discovery). Upgrade the NICo chart before applying its optional `values-nico-ipv6-scraping.yaml` overlay, so primary ServiceMonitors carry the label used to exclude overlapping jobs. Also upgrade or configure DSX, hardware-health, and PXE to accept IPv6 metrics connections. A chart-only upgrade preserves an older pinned image's IPv4 listener defaults. Before switching, confirm that every selected pod's `/metrics` endpoint responds over its IPv6 address from the collector's network. The overlay works with the pinned stack and adds EndpointSlice read permissions. It covers primary metrics; optional telemetry and per-object monitors keep their existing discovery. Unbound requires its IPv6 enablement before this switch.
+
+If the DPU gateway is installed, follow the recipe's gateway upgrade and apply `otel-collector-gateway-metrics.yaml` before switching Prometheus. The bundled gateway values enable its wildcard metrics listener. Existing installations that bind only the primary pod address need the endpoint update. The separate dual-stack metrics Service enables IPv6 EndpointSlice discovery. The gateway pod still needs a reachable IPv6 address. Its OTLP receiver and LoadBalancer retain their settings. Reapply the Prometheus overlay after rerunning the installer.
 
 ## Enabling traces
 
@@ -121,7 +141,7 @@ or set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://otel-agent.otel.svc.cluster.lo
 the chart's generic `extraEnv:` (the env var wins over the config key — but it sets ONLY the
 endpoint; `enabled` must come from the TOML, or at runtime without a pod roll:
 `nico-admin-cli set tracing-enabled true`). Details, verified from `crates/api/src/logging.rs`
-+ `crates/api-core/src/cfg/file.rs` (see also `docs/observability/tracing.md`):
+and `crates/api-core/src/cfg/file.rs` (see also `docs/observability/tracing.md`):
 
 - transport is OTLP **gRPC, plaintext only** — never point nico-api at `:4318` or an `https://`
   endpoint; keep the hop in-cluster (the collector is the TLS boundary);
@@ -179,8 +199,9 @@ kubectl -n loki get pods && kubectl -n tempo get pods && kubectl -n otel get pod
 kubectl -n loki exec sts/loki -- wget -qO- \
   'http://localhost:3100/loki/api/v1/query?query=count_over_time({forge_site="<site>"}[5m])' | head -c 400
 
-# NICo metrics scraped (after enabling ServiceMonitors): Grafana -> Explore -> Prometheus ->
-#   up{job=~"nico-.*"}     and     carbide_api_ready
+# NICo hardware-health metrics scraped: Grafana -> Explore -> Prometheus ->
+#   carbide_hardware_health_bmc_latency_ms_count
+#   carbide_hardware_health_hw_metric_capacity_utilization_percent
 
 # traces (after enabling span export): Grafana -> Explore -> Tempo -> search service carbide-api
 ```
@@ -239,9 +260,11 @@ directories are only reclaimed when the PV is deleted through the provisioner.
 | `values-loki.yaml` | Loki single-binary + retention/compactor config |
 | `values-tempo.yaml` | Tempo monolithic + OTLP ingest |
 | `values-otel-collector-agent.yaml` | DaemonSet: pod logs → Loki, OTLP spans → Tempo |
-| `values-otel-collector-gateway.yaml` | optional DPU OTLP/mTLS gateway |
+| `values-otel-collector-gateway.yaml` | optional DPU OTLP/mTLS gateway with a wildcard metrics listener using its configured container port |
+| `otel-collector-gateway-metrics.yaml` | optional metrics-only gateway Service for IPv6 discovery |
 | `values-kube-prometheus-stack.yaml` | Prometheus + Grafana + datasources + sidecar |
 | `values-nico-servicemonitors.yaml` | Core overlay: turn on the NICo ServiceMonitors |
+| `values-nico-ipv6-scraping.yaml` | optional Prometheus overlay: IPv6 EndpointSlice discovery for primary NICo and gateway metrics |
 | `otel-receiver-certificate.yaml` | gateway server cert (WITH_DPU; issuer/SAN rewritten by the script) |
 | `dashboards/` | drop-in Grafana dashboards (auto-loaded); ships `nico-core-health.json` |
 

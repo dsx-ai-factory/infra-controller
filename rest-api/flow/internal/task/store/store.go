@@ -58,6 +58,13 @@ type Store interface {
 	// for the requested racks.
 	ListNonTerminalTasksForRacks(ctx context.Context, rackIDs []uuid.UUID) ([]*taskdef.Task, error)
 
+	// LatestLeakageShutdownTaskStatuses returns the newest leakage-triggered
+	// forced-shutdown Task status for each requested component that has one.
+	LatestLeakageShutdownTaskStatuses(
+		ctx context.Context,
+		componentIDs []uuid.UUID,
+	) (map[uuid.UUID]taskcommon.TaskStatus, error)
+
 	// UpdateScheduledTask updates task scheduling information (execution ID, executor type).
 	UpdateScheduledTask(ctx context.Context, task *taskdef.Task) error
 

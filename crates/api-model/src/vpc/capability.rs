@@ -739,14 +739,21 @@ mod tests {
 
     #[test]
     fn etv_cannot_peer_with_fnn() {
-        assert!(
-            !VpcVirtualizationType::EthernetVirtualizer.can_peer_with(VpcVirtualizationType::Fnn)
-        );
-        assert!(matches!(
-            VpcVirtualizationType::EthernetVirtualizer
-                .ensure_can_peer_with(VpcVirtualizationType::Fnn),
-            Err(VpcCapabilityError::PeeringIncompatible { .. })
-        ));
+        for etv in [
+            VpcVirtualizationType::EthernetVirtualizer,
+            VpcVirtualizationType::EthernetVirtualizerWithNvue,
+        ] {
+            for (a, b) in [
+                (etv, VpcVirtualizationType::Fnn),
+                (VpcVirtualizationType::Fnn, etv),
+            ] {
+                assert!(!a.can_peer_with(b));
+                assert!(matches!(
+                    a.ensure_can_peer_with(b),
+                    Err(VpcCapabilityError::PeeringIncompatible { .. })
+                ));
+            }
+        }
     }
 
     #[test]

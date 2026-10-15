@@ -18,6 +18,9 @@
 use std::collections::HashMap;
 
 use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_resource_pool::{
+    ResourcePoolRegistry, ResourcePoolRegistryError, ResourcePoolWithBackend,
+};
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::vpc::VpcId;
 use db::dns::domain;
@@ -42,8 +45,10 @@ use crate::api::Api;
 const STATIC_ASSIGNMENTS_IPV4_PREFIX: &str = "169.254.254.254/32";
 const STATIC_ASSIGNMENTS_IPV6_PREFIX: &str = "100::/128";
 
-/// Create a Domain if we don't already have one.
-/// Returns true if we created an entry in the db (we had no domains yet), false otherwise.
+/// Creates the configured initial domain when the `domains` table is empty.
+///
+/// Returns `true` only if this call inserts the domain. Existing rows, even
+/// deleted ones, return `false`.
 pub(crate) async fn create_initial_domain(
     db_pool: sqlx::pool::Pool<Postgres>,
     domain_name: &str,
@@ -52,9 +57,11 @@ pub(crate) async fn create_initial_domain(
     let domains = domain::find_by(&mut txn, ObjectColumnFilter::<domain::IdColumn>::All).await?;
     if domains.is_empty() {
         let domain = NewDomain::new(domain_name);
-        db::dns::domain::persist_first(&domain, &mut txn).await?;
+        let created = db::dns::domain::persist_first(&domain, &mut txn)
+            .await?
+            .is_some();
         txn.commit().await?;
-        Ok(true)
+        Ok(created)
     } else {
         let names: Vec<String> = domains.into_iter().map(|d| d.name).collect();
         if !names.iter().any(|n| n == domain_name) {
@@ -75,10 +82,11 @@ enum InitialNetworkDomainSelection {
     Ambiguous(Vec<String>),
 }
 
-/// Select the forward domain used by configured initial network segments.
+/// Select the infrastructure forward domain used by configured initial network segments.
 ///
-/// Reverse-DNS zones share the domains table and must not make a sole forward
-/// domain appear ambiguous.
+/// Reverse-DNS and VPC-owned domains cannot be used for these segments.
+/// Exclude them before checking for multiple candidates so adding one cannot
+/// make the infrastructure domain selection ambiguous.
 fn select_initial_network_domain(
     domains: &[Domain],
     configured_domain_name: Option<&str>,
@@ -87,7 +95,8 @@ fn select_initial_network_domain(
         .iter()
         .filter(|domain| {
             let name = domain.name.trim_end_matches('.');
-            !matches!(name, "in-addr.arpa" | "ip6.arpa")
+            domain.vpc_id.is_none()
+                && !matches!(name, "in-addr.arpa" | "ip6.arpa")
                 && db::dns::normalize_reverse_zone_name(name).is_none()
         })
         .collect_vec();
@@ -121,6 +130,7 @@ pub(crate) async fn create_initial_networks(
     networks: &HashMap<String, NetworkDefinition>,
 ) -> Result<(), CarbideError> {
     let mut txn = Transaction::begin(db_pool).await?;
+    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
     let domains = db::dns::domain::find_by(
         &mut txn,
         ObjectColumnFilter::<db::dns::domain::IdColumn>::All,
@@ -213,6 +223,8 @@ pub(crate) async fn create_initial_networks(
     }
     db::dns::ensure_reverse_zones(&reverse_zone_prefixes, &mut txn).await?;
 
+    crate::handlers::tenant_prefix_overlap::validate_retained_state_in_transaction(api, &mut txn)
+        .await?;
     txn.commit().await?;
     Ok(())
 }
@@ -237,6 +249,7 @@ pub(crate) async fn create_initial_vpcs(
     db_pool: &Pool<Postgres>,
     vpcs: &HashMap<String, VpcDefinition>,
     vni_pool: &ResourcePool<i32>,
+    resource_pool_registry: &ResourcePoolRegistry,
 ) -> Result<(), CarbideError> {
     // Retain validation at the mutation boundary as defense in depth. Startup
     // also validates during SeedData resolution, before any reconciliation.
@@ -262,15 +275,29 @@ pub(crate) async fn create_initial_vpcs(
             .unwrap_or(uuid::Uuid::new_v4().into());
         let owner_id = vpc_id.to_string();
 
-        let vni = db::resource_pool::allocate(
-            vni_pool,
-            &mut txn,
-            resource_pool::OwnerType::Vpc,
-            &owner_id,
-            def.vni,
-        )
-        .await
-        .inspect_err(|error| {
+        let allocation = match resource_pool_registry
+            .get_or_load_backend(&mut txn, vni_pool.name())
+            .await
+        {
+            Ok(Some(backend)) => {
+                let selected_pool = ResourcePoolWithBackend::new(vni_pool, backend.as_ref());
+                selected_pool
+                    .backend()
+                    .allocate(
+                        selected_pool.pool(),
+                        &mut txn,
+                        resource_pool::OwnerType::Vpc,
+                        &owner_id,
+                        def.vni,
+                    )
+                    .await
+            }
+            // A pool with neither a binding nor values has nothing to allocate.
+            Ok(None) => Err(resource_pool::ResourcePoolError::Empty.into()),
+            Err(ResourcePoolRegistryError::Database(error)) => Err(error.into()),
+            Err(error) => return Err(error.into()),
+        };
+        let vni = allocation.inspect_err(|error| {
             db::resource_pool::emit_allocation_failure(
                 vni_pool.value_type,
                 &owner_id,
@@ -464,17 +491,15 @@ pub(crate) async fn store_initial_dpu_agent_upgrade_policy(
     Ok(())
 }
 
-pub(crate) async fn create_admin_vpc(
-    db_pool: &Pool<Postgres>,
-    vpc_vni: Option<u32>,
-) -> Result<(), CarbideError> {
+pub(crate) async fn create_admin_vpc(api: &Api, vpc_vni: Option<u32>) -> Result<(), CarbideError> {
     let Some(vpc_vni) = vpc_vni else {
         return Err(CarbideError::internal(
             "no VNI is configured for admin VPC".to_string(),
         ));
     };
 
-    let mut txn = Transaction::begin(db_pool).await?;
+    let mut txn = api.txn_begin().await?;
+    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
 
     let configured_vni = vpc_vni as i32;
     let admin_segments = db::network_segment::admin(&mut txn).await?;
@@ -574,6 +599,10 @@ pub(crate) async fn create_admin_vpc(
             }
         }
 
+        crate::handlers::tenant_prefix_overlap::validate_retained_state_in_transaction(
+            api, &mut txn,
+        )
+        .await?;
         txn.commit().await?;
 
         return Ok(());
@@ -613,6 +642,8 @@ pub(crate) async fn create_admin_vpc(
         db::network_segment::set_vpc_id_and_can_stretch(&admin_segment, &mut txn, vpc.id).await?;
     }
 
+    crate::handlers::tenant_prefix_overlap::validate_retained_state_in_transaction(api, &mut txn)
+        .await?;
     txn.commit().await?;
 
     Ok(())
@@ -639,6 +670,8 @@ mod tests {
         Domain {
             id: domain_id(id),
             name: name.to_string(),
+            default_ttl: None,
+            vpc_id: None,
             created: timestamp,
             updated: timestamp,
             deleted: None,
@@ -660,6 +693,20 @@ mod tests {
                         configured_domain_name: None,
                     },
                     expect: InitialNetworkDomainSelection::NoForwardDomain,
+                },
+                Check {
+                    scenario: "a configured VPC domain cannot replace infrastructure scope",
+                    input: DomainSelectionCase {
+                        domains: vec![
+                            domain(1, "site.example"),
+                            Domain {
+                                vpc_id: Some(uuid::Uuid::from_u128(10).into()),
+                                ..domain(2, "vpc.example")
+                            },
+                        ],
+                        configured_domain_name: Some("vpc.example"),
+                    },
+                    expect: InitialNetworkDomainSelection::Selected(domain_id(1)),
                 },
                 Check {
                     scenario: "the configured domain wins among multiple forward domains",

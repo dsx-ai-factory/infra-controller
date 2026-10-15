@@ -6,6 +6,9 @@ package handler
 import (
 	"net/http"
 
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	cauth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
@@ -13,21 +16,17 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
 )
 
 // GetCurrentServiceAccountHandler is the API Handler for getting the current Service Account
 type GetCurrentServiceAccountHandler struct {
-	dbSession  *cdb.Session
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
 }
 
 // NewGetCurrentServiceAccountHandler initializes and returns a new handler for getting the current Service Account
 func NewGetCurrentServiceAccountHandler(dbSession *cdb.Session) GetCurrentServiceAccountHandler {
 	return GetCurrentServiceAccountHandler{
-		dbSession:  dbSession,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }
 
@@ -42,7 +41,7 @@ func NewGetCurrentServiceAccountHandler(dbSession *cdb.Session) GetCurrentServic
 // @Success 200 {object} model.APIServiceAccount
 // @Router /v2/org/{org}/nico/service-account/current [get]
 func (gcsah GetCurrentServiceAccountHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ServiceAccount", "GetCurrent", c, gcsah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ServiceAccount", "GetCurrent", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

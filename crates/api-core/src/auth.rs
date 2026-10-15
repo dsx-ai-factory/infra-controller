@@ -18,8 +18,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use carbide_authn::middleware::{ExternalUserInfo, Principal};
+use carbide_uuid::machine::MachineId;
 
-use crate::CarbideError;
+use crate::{CarbideError, CarbideResult};
 
 mod casbin_engine;
 mod internal_rbac_rules;
@@ -83,6 +84,27 @@ impl From<AuthorizationError> for tonic::Status {
         tracing::info!(error = %e, "Request denied");
         tonic::Status::permission_denied("not authorized")
     }
+}
+
+/// `authenticated_machine_id` reads the machine identity from the request's
+/// `AuthContext`, not its payload. Returns `None` when no machine identity is
+/// available and `PermissionDeniedError` when the identity is malformed.
+/// Callers that require a machine identity must reject `None`.
+pub(crate) fn authenticated_machine_id<T>(
+    request: &tonic::Request<T>,
+) -> CarbideResult<Option<MachineId>> {
+    request
+        .extensions()
+        .get::<AuthContext>()
+        .and_then(AuthContext::get_spiffe_machine_id)
+        .map(|machine_id| {
+            machine_id.parse().map_err(|error| {
+                CarbideError::PermissionDeniedError(format!(
+                    "invalid authenticated machine identity: {error}"
+                ))
+            })
+        })
+        .transpose()
 }
 
 pub(crate) fn external_user_info<T>(

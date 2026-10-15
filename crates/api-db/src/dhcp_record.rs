@@ -16,6 +16,7 @@
  */
 
 use carbide_network::ip::IpAddressFamily;
+use carbide_uuid::DbTable;
 use carbide_uuid::network::NetworkSegmentId;
 use chrono::{DateTime, Utc};
 use mac_address::MacAddress;
@@ -35,14 +36,18 @@ pub async fn find_by_mac_address(
     segment_id: &NetworkSegmentId,
     address_family: IpAddressFamily,
 ) -> Result<Option<DhcpRecord>, DatabaseError> {
-    let query = "SELECT * FROM machine_dhcp_records WHERE mac_address = $1::macaddr AND segment_id = $2::uuid AND family(address) = $3";
-    sqlx::query_as(query)
+    let query = format!(
+        "SELECT {} FROM machine_dhcp_records
+        WHERE mac_address = $1::macaddr AND segment_id = $2::uuid AND family(address) = $3",
+        DhcpRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(mac_address)
         .bind(segment_id)
         .bind(address_family.pg_family())
         .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Return the global DHCP record invalidation timestamp.

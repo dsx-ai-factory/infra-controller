@@ -18,7 +18,11 @@ apiVersion: v1
 kind: Service
 metadata:
   name: nico-unbound
+  labels:
+    app.kubernetes.io/metrics: nico-unbound
 spec:
+  ipFamilyPolicy: SingleStack
+  ipFamilies: [IPv4]
   selector:
     app.kubernetes.io/instance: nico-unbound
     app.kubernetes.io/name: unbound
@@ -32,6 +36,6 @@ spec:
       protocol: TCP
       name: dns-tcp
     - port: 9167
-      protocol: TCP
       targetPort: metrics
+      protocol: TCP
       name: unbound-metrics

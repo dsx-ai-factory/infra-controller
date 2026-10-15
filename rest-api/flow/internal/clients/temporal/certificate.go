@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"path/filepath"
 
+	dynamictls "github.com/NVIDIA/infra-controller/rest-api/common/pkg/tls"
 	pkgcerts "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/certs"
 )
 
@@ -16,14 +17,14 @@ const (
 	clientKeyFileName         = "tls.key"
 )
 
-func buildTLSConfig(c Config) (*tls.Config, error) {
+func buildTLSConfig(c Config) (*tls.Config, *dynamictls.DynTLSCfg, error) {
 	if !c.EnableTLS {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	return pkgcerts.Config{
 		CACert:  filepath.Join(c.Endpoint.CACertificatePath, caCertificateFileName),
 		TLSCert: filepath.Join(c.Endpoint.CACertificatePath, clientCertificateFileName),
 		TLSKey:  filepath.Join(c.Endpoint.CACertificatePath, clientKeyFileName),
-	}.TLSConfig(c.ServerName)
+	}.DynamicTLSConfig(c.ServerName)
 }

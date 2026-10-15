@@ -76,6 +76,7 @@ pub fn instance_status_from_config_and_observation(
     network_config: Versioned<&InstanceNetworkConfig>,
     ib_config: Versioned<&InstanceInfinibandConfig>,
     extension_services_config: Versioned<&InstanceExtensionServicesConfig>,
+    attached_dpus: &[DpuMachineId],
     nvlink_config: Versioned<&InstanceNvLinkConfig>,
     spx_config: Versioned<&InstanceSpxConfig>,
     observations: &InstanceStatusObservations,
@@ -125,6 +126,8 @@ pub fn instance_status_from_config_and_observation(
     let extension_services =
         model::instance::status::extension_service::InstanceExtensionServicesStatus::from_config_and_type_observations(
             &used_dpu_ids,
+            attached_dpus,
+            primary_dpu_machine_id,
             extension_services_config,
             &observations.extension_services,
             delete_requested,
@@ -276,6 +279,7 @@ mod tests {
             Versioned::new(&config.network, version),
             Versioned::new(&config.infiniband, version),
             Versioned::new(&config.extension_services, version),
+            &[],
             Versioned::new(&config.nvlink, version),
             Versioned::new(&config.spxconfig, version),
             &InstanceStatusObservations {

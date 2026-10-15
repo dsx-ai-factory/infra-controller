@@ -31,9 +31,8 @@ pub(crate) struct Metrics {
 }
 
 pub(crate) fn setup_metrics(spancount_reader: Option<SpanCountReader>) -> eyre::Result<Metrics> {
-    // This sets the global meter provider
-    // Note: This configures metrics bucket between 5.0 and 10000.0, which are best suited
-    // for tracking milliseconds
+    // Histograms without a matching view use OpenTelemetry's default boundaries.
+    // Unit-specific and count-oriented histograms register explicit views below.
     // See https://github.com/open-telemetry/opentelemetry-rust/blob/495330f63576cfaec2d48946928f3dc3332ba058/opentelemetry-sdk/src/metrics/reader.rs#L155-L158
     use opentelemetry::KeyValue;
 
@@ -52,6 +51,8 @@ pub(crate) fn setup_metrics(spancount_reader: Option<SpanCountReader>) -> eyre::
     let meter_provider = opentelemetry_sdk::metrics::MeterProviderBuilder::default()
         .with_reader(exporter)
         .with_resource(service_telemetry_attributes)
+        .with_view(admission_duration_histogram_view()?)
+        .with_view(time_in_state_histogram_view()?)
         .with_view(retry_histogram_view("*_attempts_*")?)
         .with_view(retry_histogram_view("*_retries_*")?)
         .with_view(ApiMetricsEmitter::machine_reboot_duration_view()?)
@@ -76,6 +77,38 @@ pub(crate) fn setup_metrics(spancount_reader: Option<SpanCountReader>) -> eyre::
         meter,
         _meter_provider: meter_provider,
     })
+}
+
+fn admission_duration_histogram_view() -> carbide_metrics_utils::Result<OtelView> {
+    carbide_metrics_utils::new_view(
+        "carbide_api_admission_*_duration",
+        Some(opentelemetry_sdk::metrics::InstrumentKind::Histogram),
+        opentelemetry_sdk::metrics::Aggregation::ExplicitBucketHistogram {
+            boundaries: vec![
+                0.0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5,
+                10.0,
+            ],
+            record_min_max: true,
+        },
+    )
+}
+
+/// Configures a View for the state controllers' `*_time_in_state` histograms, which
+/// record seconds. Objects can wait hours or days in one state, beyond the last default
+/// boundary of 10000. The default boundaries are kept so existing `le` series remain,
+/// with larger ones appended up to 7 days.
+fn time_in_state_histogram_view() -> carbide_metrics_utils::Result<OtelView> {
+    carbide_metrics_utils::new_view(
+        "carbide_*_time_in_state",
+        Some(opentelemetry_sdk::metrics::InstrumentKind::Histogram),
+        opentelemetry_sdk::metrics::Aggregation::ExplicitBucketHistogram {
+            boundaries: vec![
+                0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0,
+                5000.0, 7500.0, 10000.0, 14400.0, 28800.0, 86400.0, 259200.0, 604800.0,
+            ],
+            record_min_max: true,
+        },
+    )
 }
 
 /// Configures a View for Histograms that describe retries or attempts for operations
@@ -112,6 +145,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use carbide_test_support::{Check, check_values};
     use opentelemetry::KeyValue;
     use prometheus::{Encoder, TextEncoder};
 
@@ -131,6 +165,7 @@ mod tests {
             .unwrap();
         let provider = opentelemetry_sdk::metrics::MeterProviderBuilder::default()
             .with_reader(exporter)
+            .with_view(admission_duration_histogram_view().unwrap())
             .with_view(retry_histogram_view("*_attempts_*").unwrap())
             .with_view(retry_histogram_view("*_retries_*").unwrap())
             .with_view(ApiMetricsEmitter::machine_reboot_duration_view().unwrap())
@@ -189,5 +224,137 @@ mod tests {
                 assert!(!encoded.contains(r#"mygauge{error="ErrC",state="mystate"} 1"#));
             }
         }
+    }
+
+    #[test]
+    fn admission_duration_histograms_use_seconds_buckets() {
+        let expected_buckets = [
+            (0.0, 0),
+            (0.005, 0),
+            (0.01, 0),
+            (0.025, 1),
+            (0.05, 1),
+            (0.075, 1),
+            (0.1, 1),
+            (0.25, 1),
+            (0.5, 1),
+            (0.75, 1),
+            (1.0, 1),
+            (2.5, 1),
+            (5.0, 1),
+            (7.5, 1),
+            (10.0, 1),
+            (f64::INFINITY, 1),
+        ];
+        check_values(
+            [
+                "carbide_api_admission_handler_execution_duration",
+                "carbide_api_admission_pending_wait_duration",
+            ]
+            .map(|name| Check {
+                scenario: name,
+                input: name,
+                expect: expected_buckets.to_vec(),
+            }),
+            |name| {
+                let registry = prometheus::Registry::new();
+                let exporter = opentelemetry_prometheus::exporter()
+                    .with_registry(registry.clone())
+                    .without_scope_info()
+                    .without_target_info()
+                    .build()
+                    .unwrap();
+                let provider = opentelemetry_sdk::metrics::MeterProviderBuilder::default()
+                    .with_reader(exporter)
+                    .with_view(admission_duration_histogram_view().unwrap())
+                    .build();
+                provider
+                    .meter("test")
+                    .f64_histogram(name)
+                    .with_unit("s")
+                    .build()
+                    .record(0.020, &[]);
+
+                let families = registry.gather();
+                let exported_name = format!("{name}_seconds");
+                let family = families
+                    .iter()
+                    .find(|family| family.name() == exported_name)
+                    .unwrap_or_else(|| panic!("{name}: missing {exported_name} histogram"));
+                assert_eq!(
+                    family.get_field_type(),
+                    prometheus::proto::MetricType::HISTOGRAM,
+                    "{name}: metric type"
+                );
+                assert_eq!(family.get_metric().len(), 1, "{name}: series count");
+                let histogram = family.get_metric()[0].get_histogram();
+                assert_eq!(histogram.get_sample_count(), 1, "{name}: sample count");
+                assert!(
+                    (histogram.get_sample_sum() - 0.020).abs() < 1e-12,
+                    "{name}: expected sum 0.020 seconds, got {}",
+                    histogram.get_sample_sum()
+                );
+                assert!(
+                    histogram
+                        .get_bucket()
+                        .iter()
+                        .all(|bucket| bucket.upper_bound() != 25.0),
+                    "{name}: unexpected finite 25-second bucket"
+                );
+
+                // The exporter gathers finite buckets; TextEncoder adds +Inf from the count.
+                let mut buffer = vec![];
+                TextEncoder::new().encode(&families, &mut buffer).unwrap();
+                let encoded = String::from_utf8(buffer).unwrap();
+                let infinity_sample = format!("{exported_name}_bucket{{le=\"+Inf\"}}");
+                let infinity_counts: Vec<u64> = encoded
+                    .lines()
+                    .filter_map(|line| {
+                        let (sample, value) = line.split_once(' ')?;
+                        (sample == infinity_sample).then(|| value.parse().unwrap())
+                    })
+                    .collect();
+                assert_eq!(infinity_counts.len(), 1, "{name}: +Inf bucket count");
+
+                histogram
+                    .get_bucket()
+                    .iter()
+                    .map(|bucket| (bucket.upper_bound(), bucket.cumulative_count()))
+                    .chain([(f64::INFINITY, infinity_counts[0])])
+                    .collect::<Vec<_>>()
+            },
+        );
+    }
+
+    #[test]
+    fn time_in_state_histograms_resolve_multi_day_dwells() {
+        let registry = prometheus::Registry::new();
+        let exporter = opentelemetry_prometheus::exporter()
+            .with_registry(registry.clone())
+            .without_scope_info()
+            .without_target_info()
+            .build()
+            .unwrap();
+        let provider = opentelemetry_sdk::metrics::MeterProviderBuilder::default()
+            .with_reader(exporter)
+            .with_view(time_in_state_histogram_view().unwrap())
+            .build();
+        // Two days, past the last default boundary of 10000.
+        provider
+            .meter("test")
+            .f64_histogram("carbide_machines_time_in_state")
+            .with_unit("s")
+            .build()
+            .record(172800.0, &[]);
+
+        let mut buffer = vec![];
+        TextEncoder::new()
+            .encode(&registry.gather(), &mut buffer)
+            .unwrap();
+        let encoded = String::from_utf8(buffer).unwrap();
+
+        assert!(encoded.contains("carbide_machines_time_in_state_seconds_bucket{le=\"10000\"} 0"));
+        assert!(encoded.contains("carbide_machines_time_in_state_seconds_bucket{le=\"86400\"} 0"));
+        assert!(encoded.contains("carbide_machines_time_in_state_seconds_bucket{le=\"259200\"} 1"));
     }
 }

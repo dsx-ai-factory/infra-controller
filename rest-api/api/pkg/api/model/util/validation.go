@@ -6,6 +6,7 @@ package util
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"reflect"
 	"regexp"
@@ -80,6 +81,29 @@ func ValidateDiskImagePath(value interface{}) error {
 		return errInvalidDiskImagePath
 	}
 
+	return nil
+}
+
+// ValidateExpectedBmcIPAddress rejects addresses that cannot identify one BMC.
+// Other syntactically valid addresses retain the existing API behavior.
+func ValidateExpectedBmcIPAddress(value interface{}) error {
+	var address string
+	switch ip := value.(type) {
+	case string:
+		address = ip
+	case *string:
+		if ip == nil {
+			return nil
+		}
+		address = *ip
+	default:
+		return errors.New("BmcIpAddress must be a valid IPv4 or IPv6 address that is not unspecified, multicast, or limited broadcast")
+	}
+
+	parsed := net.ParseIP(address)
+	if parsed == nil || parsed.IsUnspecified() || parsed.IsMulticast() || parsed.Equal(net.IPv4bcast) {
+		return errors.New("BmcIpAddress must be a valid IPv4 or IPv6 address that is not unspecified, multicast, or limited broadcast")
+	}
 	return nil
 }
 

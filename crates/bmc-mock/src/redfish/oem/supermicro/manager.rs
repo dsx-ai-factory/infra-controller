@@ -26,7 +26,7 @@ use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch};
-use crate::{http, redfish};
+use crate::{Callbacks, http, redfish};
 
 #[derive(Clone)]
 pub(crate) struct SupermicroState {
@@ -100,19 +100,19 @@ pub(in crate::redfish) fn manager_oem_patch(manager_id: &str) -> serde_json::Val
     })
 }
 
-pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
     r.route(
         "/redfish/v1/Managers/{manager_id}/Oem/Supermicro/KCSInterface",
-        get(get_kcs_interface).patch(patch_kcs_interface),
+        get(get_kcs_interface::<C>).patch(patch_kcs_interface::<C>),
     )
     .route(
         "/redfish/v1/Managers/{manager_id}/Oem/Supermicro/SysLockdown",
-        get(get_sys_lockdown).patch(patch_sys_lockdown),
+        get(get_sys_lockdown::<C>).patch(patch_sys_lockdown::<C>),
     )
 }
 
-async fn get_kcs_interface(
-    State(state): State<BmcState>,
+async fn get_kcs_interface<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(manager_id): Path<String>,
 ) -> Response {
     let redfish::oem::State::Supermicro(supermicro) = state.oem_state else {
@@ -126,8 +126,8 @@ async fn get_kcs_interface(
         .into_ok_response()
 }
 
-async fn patch_kcs_interface(
-    State(state): State<BmcState>,
+async fn patch_kcs_interface<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(manager_id): Path<String>,
     Json(patch): Json<serde_json::Value>,
 ) -> Response {
@@ -141,8 +141,8 @@ async fn patch_kcs_interface(
     http::ok_no_content()
 }
 
-async fn get_sys_lockdown(
-    State(state): State<BmcState>,
+async fn get_sys_lockdown<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(manager_id): Path<String>,
 ) -> Response {
     let redfish::oem::State::Supermicro(supermicro) = state.oem_state else {
@@ -156,8 +156,8 @@ async fn get_sys_lockdown(
         .into_ok_response()
 }
 
-async fn patch_sys_lockdown(
-    State(state): State<BmcState>,
+async fn patch_sys_lockdown<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(manager_id): Path<String>,
     Json(patch): Json<serde_json::Value>,
 ) -> Response {

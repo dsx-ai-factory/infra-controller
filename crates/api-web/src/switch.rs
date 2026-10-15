@@ -148,13 +148,82 @@ struct SwitchDetail {
     power_state: Option<String>,
     health_status: Option<String>,
     bmc_info: Option<rpc::forge::BmcInfo>,
-    nvos_info: Option<rpc::forge::SwitchNvosInfo>,
+    nvos_ports: Vec<SwitchNvosPortRecord>,
     metadata_detail: super::MetadataDetail,
     health_detail: super::HealthDetail,
     history: StateHistoryTable,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct SwitchNvosPortRecord {
+    mac: String,
+    service_port: Option<u32>,
+    addresses: Vec<SwitchNvosAddressRecord>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct SwitchNvosAddressRecord {
+    address_family: String,
+    address: String,
+}
+
+impl From<&rpc::forge::SwitchNvosPortInfo> for SwitchNvosPortRecord {
+    fn from(info: &rpc::forge::SwitchNvosPortInfo) -> Self {
+        Self {
+            mac: info.mac.clone().unwrap_or_else(|| "N/A".to_string()),
+            service_port: info.service_port,
+            addresses: info
+                .addresses
+                .iter()
+                .map(|address| SwitchNvosAddressRecord {
+                    address_family: match rpc::forge::AddressFamily::try_from(
+                        address.address_family,
+                    ) {
+                        Ok(rpc::forge::AddressFamily::V4) => "IPv4",
+                        Ok(rpc::forge::AddressFamily::V6) => "IPv6",
+                        _ => "Unknown",
+                    }
+                    .to_string(),
+                    address: address.address.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+#[allow(deprecated)]
+fn switch_nvos_port_records(
+    nvos_ports: &[rpc::forge::SwitchNvosPortInfo],
+    legacy_nvos_info: Option<&rpc::forge::SwitchNvosInfo>,
+) -> Vec<SwitchNvosPortRecord> {
+    if !nvos_ports.is_empty() {
+        return nvos_ports.iter().map(Into::into).collect();
+    }
+
+    legacy_nvos_info
+        .map(|info| SwitchNvosPortRecord {
+            mac: info.mac.clone().unwrap_or_else(|| "N/A".to_string()),
+            service_port: info.port,
+            addresses: info
+                .ip
+                .as_ref()
+                .map(|address| SwitchNvosAddressRecord {
+                    address_family: address
+                        .parse::<std::net::IpAddr>()
+                        .map(|address| if address.is_ipv4() { "IPv4" } else { "IPv6" })
+                        .unwrap_or("Unknown")
+                        .to_string(),
+                    address: address.clone(),
+                })
+                .into_iter()
+                .collect(),
+        })
+        .into_iter()
+        .collect()
+}
+
 impl SwitchDetail {
+    #[allow(deprecated)]
     fn new(switch: rpc::forge::Switch, history: StateHistoryTable) -> Self {
         let id = switch
             .id
@@ -163,6 +232,12 @@ impl SwitchDetail {
             .unwrap_or_default();
         let config = switch.config.unwrap_or_default();
         let status = switch.status.as_ref();
+        let nvos_ports = switch_nvos_port_records(
+            status
+                .map(|status| status.nvos_ports.as_slice())
+                .unwrap_or_default(),
+            switch.nvos_info.as_ref(),
+        );
         let lifecycle = status.and_then(|s| s.lifecycle.clone()).unwrap_or_default();
         let power_state = status.and_then(|s| s.power_state.clone());
         let health_status = status.and_then(|s| s.health_status.clone());
@@ -197,7 +272,7 @@ impl SwitchDetail {
             power_state,
             health_status,
             bmc_info: switch.bmc_info,
-            nvos_info: switch.nvos_info,
+            nvos_ports,
             metadata_detail,
             health_detail,
             history,
@@ -269,3 +344,66 @@ async fn fetch_switch(api: &Api, switch_id: &str) -> Result<Option<rpc::forge::S
 
 impl super::Base for SwitchShow {}
 impl super::Base for SwitchDetail {}
+
+#[cfg(test)]
+mod tests {
+    use rpc::forge;
+
+    use super::switch_nvos_port_records;
+
+    fn address(address_family: forge::AddressFamily, address: &str) -> forge::IpAddress {
+        forge::IpAddress {
+            address_family: address_family.into(),
+            address: address.to_string(),
+        }
+    }
+
+    #[test]
+    fn converts_every_nvos_port_and_address() {
+        let ports = vec![
+            forge::SwitchNvosPortInfo {
+                mac: Some("44:44:33:33:01:00".to_string()),
+                service_port: Some(8443),
+                addresses: vec![
+                    address(forge::AddressFamily::V4, "10.2.14.52"),
+                    address(forge::AddressFamily::V6, "2001:db8::10"),
+                ],
+            },
+            forge::SwitchNvosPortInfo {
+                mac: Some("44:44:33:33:01:01".to_string()),
+                service_port: None,
+                addresses: vec![address(forge::AddressFamily::V4, "10.2.14.53")],
+            },
+        ];
+
+        let records = switch_nvos_port_records(&ports, None);
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].mac, "44:44:33:33:01:00");
+        assert_eq!(records[0].service_port, Some(8443));
+        assert_eq!(records[0].addresses[0].address_family, "IPv4");
+        assert_eq!(records[0].addresses[0].address, "10.2.14.52");
+        assert_eq!(records[0].addresses[1].address_family, "IPv6");
+        assert_eq!(records[0].addresses[1].address, "2001:db8::10");
+        assert_eq!(records[1].mac, "44:44:33:33:01:01");
+        assert_eq!(records[1].addresses[0].address, "10.2.14.53");
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn falls_back_to_legacy_nvos_info() {
+        let legacy = forge::SwitchNvosInfo {
+            ip: Some("2001:db8::10".to_string()),
+            mac: Some("44:44:33:33:01:00".to_string()),
+            port: Some(8443),
+        };
+
+        let records = switch_nvos_port_records(&[], Some(&legacy));
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].mac, "44:44:33:33:01:00");
+        assert_eq!(records[0].service_port, Some(8443));
+        assert_eq!(records[0].addresses[0].address_family, "IPv6");
+        assert_eq!(records[0].addresses[0].address, "2001:db8::10");
+    }
+}

@@ -22,6 +22,7 @@ mod gpu_inventory;
 pub(crate) mod inventory;
 mod leak_detector;
 mod logs;
+mod manager;
 mod nmxc;
 mod nmxc_schema_override;
 mod nmxt;
@@ -39,18 +40,19 @@ pub use firmware::{FirmwareCollector, FirmwareCollectorConfig};
 pub use gpu_inventory::{GpuInventoryCollector, GpuInventoryCollectorConfig};
 pub(crate) use inventory::SharedInventory;
 pub use leak_detector::{LeakDetectorCollector, LeakDetectorCollectorConfig};
-pub(crate) use logs::auto::{AutoFailureBudget, BudgetDecision, FailureKind};
+pub(crate) use logs::auto::{AutoFailureBudget, BudgetDecision, FailureKind, SseCursorSink};
 pub use logs::{
     DowngradeEvent, DowngradeReason, LogDowngradeRegistry, LogsCollector, LogsCollectorConfig,
     SseLogCollector, SseLogCollectorConfig,
 };
+pub use manager::{ManagerCollector, ManagerCollectorConfig};
 pub use nmxc::{NmxcCollector, NmxcCollectorConfig};
 pub(crate) use nmxc_schema_override::{
     NmxcSchemaOverride, NmxcSchemaOverrideCollector, NmxcSchemaOverrideCollectorConfig,
 };
 pub(crate) use nmxt::NMXT_PORT;
 pub use nmxt::{NmxtCollector, NmxtCollectorConfig};
-pub(crate) use nvue::gnmi::subscriber::spawn_gnmi_collector;
+pub(crate) use nvue::gnmi::subscriber::{GnmiRetainedCache, spawn_gnmi_collector};
 pub use nvue::rest::collector::{NvueRestCollector, NvueRestCollectorConfig};
 pub(crate) use reachability::{
     COLLECTOR_TYPE as REACHABILITY_COLLECTOR_TYPE, ReachabilityCollector,

@@ -246,6 +246,7 @@ struct InstanceInterface {
     segment_id: String,
     mac_address: String,
     addresses: String,
+    prefixes: String,
     gateways: String,
     vpc_id: String,
     vpc_name: String,
@@ -583,6 +584,7 @@ async fn get_interfaces_for_instance_detail(
                     .unwrap_or_default(),
                 mac_address,
                 addresses: status.addresses.join(", "),
+                prefixes: status.prefixes.join(", "),
                 gateways: status.gateways.join(", "),
                 vpc_id: vpc
                     .and_then(|vpc| vpc.id)
@@ -703,6 +705,7 @@ mod tests {
                         forgerpc::InstanceInterfaceStatus {
                             mac_address: Some("02:00:00:00:00:01".to_string()),
                             addresses: vec!["192.0.2.10".to_string(), "2001:db8::10".to_string()],
+                            prefixes: vec!["192.0.2.0/24".to_string(), "2001:db8::/64".to_string()],
                             gateways: vec![
                                 "192.0.2.1/24".to_string(),
                                 "2001:db8::1/64".to_string(),
@@ -718,6 +721,11 @@ mod tests {
                             vpc_id: Some(vpc_id),
                             ..Default::default()
                         },
+                        forgerpc::InstanceInterfaceStatus {
+                            prefixes: vec!["2001:db8:1::/64".to_string()],
+                            vpc_id: Some(vpc_id),
+                            ..Default::default()
+                        },
                     ],
                     ..Default::default()
                 }),
@@ -728,12 +736,13 @@ mod tests {
 
         let interfaces = get_interfaces_for_instance_detail(test_harness.api(), &instance).await?;
 
-        assert_eq!(interfaces.len(), 2);
+        assert_eq!(interfaces.len(), 3);
         let physical_interface = &interfaces[0];
         assert_eq!(physical_interface.function_type, "Physical");
         assert!(physical_interface.segment_id.is_empty());
         assert_eq!(physical_interface.mac_address, "02:00:00:00:00:01");
         assert_eq!(physical_interface.addresses, "192.0.2.10, 2001:db8::10");
+        assert_eq!(physical_interface.prefixes, "192.0.2.0/24, 2001:db8::/64");
         assert_eq!(physical_interface.gateways, "192.0.2.1/24, 2001:db8::1/64");
         assert_eq!(physical_interface.vpc_id, vpc_id.to_string());
         assert_eq!(physical_interface.vpc_name, "auto network instance detail");
@@ -744,6 +753,7 @@ mod tests {
         assert!(virtual_interface.segment_id.is_empty());
         assert_eq!(virtual_interface.mac_address, "02:00:00:00:00:02");
         assert_eq!(virtual_interface.addresses, "2001:db8::20");
+        assert!(virtual_interface.prefixes.is_empty());
         assert_eq!(virtual_interface.gateways, "2001:db8::1/64");
         assert_eq!(virtual_interface.vpc_id, vpc_id.to_string());
         assert_eq!(virtual_interface.vpc_name, "auto network instance detail");
@@ -753,6 +763,10 @@ mod tests {
         let html = detail.render()?;
         assert!(html.contains("192.0.2.10, 2001:db8::10"));
         assert!(html.contains("2001:db8::20"));
+        assert!(html.contains("<th>IP Prefixes</th><td>192.0.2.0/24, 2001:db8::/64</td>"));
+        assert!(html.contains("<th>IP Prefixes</th><td></td>"));
+        assert!(html.contains("<th>IP Prefixes</th><td>2001:db8:1::/64</td>"));
+        assert!(html.contains("<th>IP Addresses</th><td></td>"));
         assert!(html.contains(&format!("/admin/vpc/{vpc_id}")));
         assert!(!html.contains("href=\"/admin/network-segment/\""));
 

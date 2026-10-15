@@ -10,10 +10,10 @@ tests:
         tag: test
     asserts:
       - equal:
-          path: spec.template.spec.containers[1].name
+          path: spec.template.spec.containers[2].name
           value: node-exporter
       - equal:
-          path: spec.template.spec.containers[1].image
+          path: spec.template.spec.containers[2].image
           value: quay.io/prometheus/node-exporter:v1.9.1
 
   - it: should bind node-exporter to loopback on the configured port
@@ -24,16 +24,16 @@ tests:
         tag: test
     asserts:
       - contains:
-          path: spec.template.spec.containers[1].args
+          path: spec.template.spec.containers[2].args
           content: --web.listen-address=127.0.0.1:9200
       - contains:
-          path: spec.template.spec.containers[1].args
+          path: spec.template.spec.containers[2].args
           content: --path.procfs=/host/proc
       - contains:
-          path: spec.template.spec.containers[1].args
+          path: spec.template.spec.containers[2].args
           content: --path.sysfs=/host/sys
       - contains:
-          path: spec.template.spec.containers[1].args
+          path: spec.template.spec.containers[2].args
           content: --path.rootfs=/host/root
 
   - it: should honor a custom node-exporter port and image
@@ -50,13 +50,13 @@ tests:
         port: 19200
     asserts:
       - equal:
-          path: spec.template.spec.containers[1].image
+          path: spec.template.spec.containers[2].image
           value: mirror.example.com/node-exporter:v1.2.3
       - equal:
-          path: spec.template.spec.containers[1].imagePullPolicy
+          path: spec.template.spec.containers[2].imagePullPolicy
           value: Always
       - contains:
-          path: spec.template.spec.containers[1].args
+          path: spec.template.spec.containers[2].args
           content: --web.listen-address=127.0.0.1:19200
 
   - it: should run node-exporter unprivileged as non-root
@@ -67,13 +67,13 @@ tests:
         tag: test
     asserts:
       - equal:
-          path: spec.template.spec.containers[1].securityContext.runAsNonRoot
+          path: spec.template.spec.containers[2].securityContext.runAsNonRoot
           value: true
       - equal:
-          path: spec.template.spec.containers[1].securityContext.readOnlyRootFilesystem
+          path: spec.template.spec.containers[2].securityContext.readOnlyRootFilesystem
           value: true
       - equal:
-          path: spec.template.spec.containers[1].securityContext.allowPrivilegeEscalation
+          path: spec.template.spec.containers[2].securityContext.allowPrivilegeEscalation
           value: false
 
   - it: should read-only mount host /proc, /sys and / for node-exporter
@@ -84,19 +84,19 @@ tests:
         tag: test
     asserts:
       - contains:
-          path: spec.template.spec.containers[1].volumeMounts
+          path: spec.template.spec.containers[2].volumeMounts
           content:
             name: host-proc
             mountPath: /host/proc
             readOnly: true
       - contains:
-          path: spec.template.spec.containers[1].volumeMounts
+          path: spec.template.spec.containers[2].volumeMounts
           content:
             name: host-sys
             mountPath: /host/sys
             readOnly: true
       - contains:
-          path: spec.template.spec.containers[1].volumeMounts
+          path: spec.template.spec.containers[2].volumeMounts
           content:
             name: host-root
             mountPath: /host/root
@@ -129,7 +129,7 @@ tests:
         tag: test
     asserts:
       - isNull:
-          path: spec.template.spec.containers[1].resources
+          path: spec.template.spec.containers[2].resources
 
   - it: should render node-exporter resources when set
     template: daemonset.yaml
@@ -145,8 +145,8 @@ tests:
             cpu: 50m
     asserts:
       - equal:
-          path: spec.template.spec.containers[1].resources.limits.memory
+          path: spec.template.spec.containers[2].resources.limits.memory
           value: 64Mi
       - equal:
-          path: spec.template.spec.containers[1].resources.requests.cpu
+          path: spec.template.spec.containers[2].resources.requests.cpu
           value: 50m

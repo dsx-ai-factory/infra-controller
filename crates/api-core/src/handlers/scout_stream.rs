@@ -18,7 +18,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use ::rpc::protos::forge as rpc;
+use ::rpc::protos::{forge as rpc, mlx_device};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -45,6 +45,7 @@ pub(crate) async fn scout_stream(
 ) -> Result<Response<ScoutStreamType>, Status> {
     log_request_data(&request);
 
+    let authenticated_machine_id = crate::auth::authenticated_machine_id(&request)?;
     let mut stream = request.into_inner();
 
     let init_message = receive_initial_message(stream.message(), SCOUT_STREAM_INIT_TIMEOUT).await?;
@@ -63,6 +64,13 @@ pub(crate) async fn scout_stream(
             .into());
         }
     };
+
+    if authenticated_machine_id.is_some_and(|authenticated| authenticated != machine_id) {
+        return Err(CarbideError::PermissionDeniedError(
+            "ScoutStream init machine ID does not match the authenticated source".into(),
+        )
+        .into());
+    }
 
     tracing::info!(
         machine_id = %machine_id,
@@ -84,8 +92,33 @@ pub(crate) async fn scout_stream(
     // And now spawn a task to forward agent messages through
     // the connection registry.
     let registry_clone = api.scout_stream_registry.clone();
+    let pool = api.database_connection.clone();
     tokio::spawn(async move {
         while let Ok(Some(message)) = stream.message().await {
+            // This is an observation from the authenticated host, not proof
+            // that an outstanding request or firmware operation completed.
+            // Unbound simulator connections retain their existing behavior.
+            if let Some(authenticated) = authenticated_machine_id
+                && let Some(
+                    rpc::scout_stream_api_bound_message::Payload::MlxDeviceInfoReportResponse(
+                        mlx_device::MlxDeviceInfoReportResponse {
+                            reply:
+                                Some(mlx_device::mlx_device_info_report_response::Reply::DeviceReport(
+                                    report,
+                                )),
+                        },
+                    ),
+                ) = message.payload.as_ref()
+                && let Err(error) =
+                    super::mlx_device_report::persist(&pool, authenticated, report).await
+            {
+                tracing::warn!(
+                    machine_id = %authenticated,
+                    observed_at = ?report.timestamp,
+                    error = %error,
+                    "Failed to retain MLX observation; forwarding Scout response"
+                );
+            }
             if agent_tx.send(message).await.is_err() {
                 tracing::error!("failed to forward message received from scout agent");
                 break;
@@ -265,8 +298,26 @@ mod tests {
     use crate::cfg::file::ApiAdmissionControlConfig;
     use crate::tests::create_test_env;
 
-    #[crate::sqlx_test]
-    async fn stalled_initial_message_times_out_and_releases_admission_capacity(pool: sqlx::PgPool) {
+    #[test]
+    fn stalled_initial_message_times_out_and_releases_admission_capacity() {
+        let mut args = sqlx::testing::TestArgs::new(concat!(
+            module_path!(),
+            "::stalled_initial_message_times_out_and_releases_admission_capacity"
+        ));
+        args.fixtures(Box::leak(Box::new(vec![])));
+        let test_fn: fn(sqlx::PgPool) -> _ = stalled_initial_message_test_body;
+        // The unoptimized generated Forge dispatcher alone consumes nearly 2 MiB
+        // of stack as RPCs are added. Keep the real router test on a dedicated
+        // stack without changing production runtime settings or test assertions.
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || sqlx_testing::TestFn::run_test(test_fn, args))
+            .expect("spawn scout stream router test")
+            .join()
+            .expect("scout stream router test panicked");
+    }
+
+    async fn stalled_initial_message_test_body(pool: sqlx::PgPool) {
         let env = create_test_env(pool).await;
         let mut join_set = JoinSet::new();
         let controller = ApiAdmissionControl::from_config(

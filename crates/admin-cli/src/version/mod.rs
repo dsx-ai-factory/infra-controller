@@ -17,6 +17,8 @@
 
 mod args;
 mod cmd;
+#[cfg(test)]
+mod tests;
 
 // Export so the CLI builder can just pull in version::Opts.
 // This is different than others that pull in Cmd, since
@@ -31,7 +33,13 @@ use crate::errors::CarbideCliResult;
 
 impl Run for Opts {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        cmd::handle_show_version(&self, &ctx.api_client, ctx.config.format).await
+        cmd::handle_show_version(
+            &self,
+            &ctx.api_client,
+            ctx.config.format,
+            &mut ctx.output_file,
+        )
+        .await
     }
 }
 

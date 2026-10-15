@@ -100,7 +100,7 @@ stateDiagram-v2
         R_Ready --> R_Error : child device failure detected
         R_Maintenance --> R_Error : timeout or failure
         R_Validating --> R_Error : validation failure
-        R_Error --> R_Ready : all child devices healthy again
+        R_Error --> R_Ready : component failure and all child devices healthy
         R_Error --> R_Maintenance : on-demand maintenance requested
         R_Ready --> R_Deleting : marked for deletion
         R_Deleting --> [*] : final delete
@@ -149,7 +149,7 @@ stateDiagram-v2
     Ready --> Discovering : topology_changed
     Ready --> Error : child device in error/failed state
 
-    Error --> Ready : all child devices healthy again
+    Error --> Ready : component failure and all child devices healthy
     Error --> Maintenance : maintenance_requested
 
     Ready --> Deleting : marked for deletion
@@ -183,7 +183,8 @@ The rack waits until all child devices reach ready before starting the first mai
 FirmwareUpgrade(Start -> WaitForComplete)
   -> NVOSUpdate(Start -> WaitForComplete)
   -> ConfigureNmxCluster(Start -> WaitForSwitchCertificateJob
-                               -> WaitForScaleUpFabricManagerJob)
+                               -> WaitForScaleUpFabricManagerJob
+                               -> WaitForPrimarySwitchCertificateJob (optional telemetry))
   -> PowerSequence (optional)
   -> Completed
   -> Validating(Pending)
@@ -198,7 +199,7 @@ of skipping the NVOS phase.
 |-----------|-------------|
 | **FirmwareUpgrade** | Rack-level RMS firmware upgrade for scoped machines and switches. Sets per-device `firmware_upgrade_status` and drives switch `ReProvisioning::WaitingForRackFirmwareUpgrade` / machine `HostReprovision`. |
 | **NVOSUpdate** | NVOS image update and NVOS admin password recovery for scoped switches. Sets `nvos_update_status` and drives switch `ReProvisioning::WaitingForNVOSUpgrade`. |
-| **ConfigureNmxCluster** | Rotates every rack switch's NVUE certificate in one RMS batch, then submits the asynchronous RMS ScaleUpFabricManager job. See sub-states below. |
+| **ConfigureNmxCluster** | Rotates switch-local certificates on every rack switch, submits the asynchronous RMS ScaleUpFabricManager job, then optionally binds nmx-telemetry on the selected primary. RMS V2 binds NMX-C. See sub-states below. |
 | **PowerSequence** | Optional power-on/off/reset sequencing for scoped devices. |
 | **Completed** | All requested maintenance activities finished; rack advances to validation. |
 
@@ -216,16 +217,27 @@ stateDiagram-v2
     WaitForSwitchCertificateJob --> NextActivity : V2 has no switches requested or discovered
     WaitForSwitchCertificateJob --> Error : certificate failed, job missing, or V2 validation failed
     WaitForScaleUpFabricManagerJob --> WaitForScaleUpFabricManagerJob : pending, poll or verification retry, restart, or V2 resubmission
-    WaitForScaleUpFabricManagerJob --> NextActivity : V2 complete and observed primary persisted
+    WaitForScaleUpFabricManagerJob --> NextActivity : V2 complete; primary persisted; telemetry not selected
+    WaitForScaleUpFabricManagerJob --> WaitForPrimarySwitchCertificateJob : V2 complete; primary persisted; telemetry batch accepted
+    WaitForScaleUpFabricManagerJob --> WaitForScaleUpFabricManagerJob : telemetry request rejected before dispatch
     WaitForScaleUpFabricManagerJob --> Error : V2 failed or returned invalid state, Component Manager is absent, polling is unsupported, or terminal verification failed
+    WaitForScaleUpFabricManagerJob --> Error : telemetry submission outcome is ambiguous or failed after dispatch
+    WaitForPrimarySwitchCertificateJob --> WaitForPrimarySwitchCertificateJob : running, poll error, or restart
+    WaitForPrimarySwitchCertificateJob --> NextActivity : primary certificate job complete
+    WaitForPrimarySwitchCertificateJob --> Error : certificate failed or job missing
 ```
 
 `Start` submits one `ConfigureSwitchCertificate` request containing every rack
-switch and fixed `nvue_api` and `scale_up_fabric_manager` bindings. The parent
-RMS job ID is persisted while the rack polls the complete batch. After
-completion, the rack submits the RMS ScaleUpFabricManager job. RMS selects the
-primary and reconciles the existing V2 fabric workflow. NICo persists the
-observed primary after the job completes.
+switch. The request always binds `nvue_api` and also binds the explicitly configured gNMI
+telemetry interface. After that job completes, the rack submits the unchanged
+RMS ScaleUpFabricManager V2 request. RMS selects the primary and reconciles the
+fabric and binds NMX-C to the current NVUE material. NICo persists the observed
+primary. When `scale_up_fabric_telemetry` is in the effective service list, NICo
+submits a certificate request for that primary. Each submitted parent
+RMS job ID is persisted while NICo polls the corresponding operation.
+The RMS V2 deployment must rebind NMX-C on every run, including when its
+existing Hello check succeeds; otherwise a rotation can leave NMX-C on the old
+certificate.
 
 | Current sub-state | Condition | Result |
 |-------------------|-----------|--------|
@@ -241,7 +253,10 @@ observed primary after the job completes.
 | `WaitForSwitchCertificateJob` | Certificate job is `Completed` | Submit RMS V2. Retryable inventory or submission errors retain the certificate wait state; skip and terminal conditions match the `Start` outcomes above. A successful submission persists `WaitForScaleUpFabricManagerJob`. |
 | `WaitForScaleUpFabricManagerJob` | Job is pending, polling or observed-status verification fails, or a restart occurs | Retain the V2 job ID and retry. If RMS no longer has the job, resubmit the idempotent V2 desired state. |
 | `WaitForScaleUpFabricManagerJob` | Job fails, has an invalid state, or a terminal validation error occurs | Transition to `Error`. |
-| `WaitForScaleUpFabricManagerJob` | Job completes and the RMS-selected primary and Fabric Manager status are persisted | Continue to the next requested maintenance activity. |
+| `WaitForScaleUpFabricManagerJob` | Job completes and the RMS-selected primary and Fabric Manager status are persisted | Continue to the next activity if nmx-telemetry is absent from the effective service list. Otherwise submit its primary-only certificate batch. A rejection proven to occur before dispatch retains the V2 wait state for retry. An ambiguous or post-dispatch submission error transitions to `Error`. A successful submission persists `WaitForPrimarySwitchCertificateJob`. |
+| `WaitForPrimarySwitchCertificateJob` | Component Manager is absent, polling fails, or the job is `Started` or `InProgress` | Retain the same parent job ID and poll again. |
+| `WaitForPrimarySwitchCertificateJob` | RMS cannot find the job, or the job is `Failed` | Transition to `Error` without resubmitting the certificate operation. |
+| `WaitForPrimarySwitchCertificateJob` | Job is `Completed` | Continue to the next requested maintenance activity. |
 
 #### Validating (R_Validating)
 
@@ -266,8 +281,10 @@ The rack is fully operational. While ready, it monitors child health and accepts
 
 - **Entry:** From `Maintenance`, `Validating`, or `Ready` on failure.
 - **Exit:**
-  - To **Ready** when all child devices are healthy again.
+  - To **Ready** when a component-origin error is marked for automatic recovery and all child devices are healthy again.
   - To **Maintenance** when on-demand maintenance is requested from error state.
+
+Maintenance-origin errors remain in **Error** until a new maintenance request is submitted. Errors without recovery metadata retain automatic component-readiness recovery.
 
 #### Deleting (R_Deleting)
 

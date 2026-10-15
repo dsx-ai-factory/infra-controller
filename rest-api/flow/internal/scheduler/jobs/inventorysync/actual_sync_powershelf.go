@@ -107,10 +107,19 @@ func syncPowershelfStatuses(
 	if len(ids) == 0 {
 		return
 	}
-	statesByID, err := nicoClient.FindPowerShelfControllerStates(ctx, ids)
+	runtimeByID, err := nicoClient.FindPowerShelfRuntimeStatuses(ctx, ids)
 	if err != nil {
-		log.Error().Msgf("Unable to retrieve power-shelf controller_states from NICo: %v", err)
+		log.Error().Msgf("Unable to retrieve power-shelf runtime status from NICo: %v", err)
 		return
 	}
+	statesByID := make(map[string]string, len(runtimeByID))
+	healthByID := make(map[string]*types.HealthReport, len(runtimeByID))
+	for id, runtime := range runtimeByID {
+		if runtime.ControllerState != "" {
+			statesByID[id] = runtime.ControllerState
+		}
+		healthByID[id] = runtime.Health
+	}
 	persistComponentOperationStatuses(ctx, pool, types.ComponentTypePowerShelf, statesByID, componentsByShelfID)
+	persistComponentHealthSnapshots(ctx, pool, healthByID, componentsByShelfID)
 }

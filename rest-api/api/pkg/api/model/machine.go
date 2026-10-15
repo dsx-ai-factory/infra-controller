@@ -352,7 +352,9 @@ type APIMachine struct {
 	Labels APILabels `json:"labels"`
 	// Status represents the status of the machine
 	Status string `json:"status"`
-	// IsUsableByTenant indicates whether the machine is usable by or currently in use by a tenant.
+	// IsUsableByTenant indicates whether the machine is usable by or currently in use
+	// by a tenant. It does not indicate that a Machine is available for Instance
+	// creation.
 	IsUsableByTenant bool `json:"isUsableByTenant"`
 	// StatusHistory is the history of statuses for the Machine
 	StatusHistory []APIStatusDetail `json:"statusHistory"`
@@ -600,6 +602,12 @@ func NewAPIMachine(dbm *cdbm.Machine, dbmcs []cdbm.MachineCapability, dbmis []cd
 		apim.InstanceType = NewAPIInstanceTypeSummary(dbm.InstanceType)
 	}
 
+	// Machine and Instance reads may straddle a committed allocation. Never
+	// expose Ready alongside an assignment, including rows awaiting inventory.
+	if dbm.IsAssigned || dbins != nil {
+		apim.Status = dbm.StatusForAssignment(true)
+	}
+
 	if dbins != nil {
 		apim.InstanceID = cutil.GetPtr(dbins.ID.String())
 		apim.Instance = NewAPIInstanceSummary(dbins)
@@ -627,8 +635,6 @@ func NewAPIMachine(dbm *cdbm.Machine, dbmcs []cdbm.MachineCapability, dbmis []cd
 		if machine := dbm.Metadata.Machine; machine != nil {
 			if status := machine.GetStatus(); status != nil && status.LastScoutObservedVersion != nil {
 				apim.ScoutVersion = status.LastScoutObservedVersion
-			} else {
-				apim.ScoutVersion = machine.LastScoutObservedVersion
 			}
 		}
 		for _, dpuID := range dbm.Metadata.GetStatus().GetAssociatedDpuMachineIds() {

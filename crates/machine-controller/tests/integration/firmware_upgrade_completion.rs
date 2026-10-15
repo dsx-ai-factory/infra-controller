@@ -440,3 +440,132 @@ async fn failed_firmware_upgrade_retries_until_the_budget_is_exhausted(pool: PgP
     assert_eq!(*retry_count, MAX_FIRMWARE_UPGRADE_RETRIES);
     assert_eq!(metrics.counter_delta(RETRIES_TOTAL, &[]), 1.0);
 }
+
+/// A cold artifact cache defers the upload. The controller must retain the
+/// original request across subsequent checks instead of requiring the update
+/// manager to issue another request five minutes later.
+#[sqlx_test]
+async fn cold_firmware_download_preserves_request_until_check_completes(pool: PgPool) {
+    let cache = tempfile::tempdir().unwrap();
+    let TestContext { mut env, mh } = TestContext::init_with_runtime(pool, |config| {
+        config.firmware_global.firmware_download_cache_directory = cache.path().to_owned();
+        // Isolate this BMC check from the default fixture's outdated UEFI
+        // catalog. Runtime overrides merge with static components rather than
+        // replacing them, so merely specifying ordering=[bmc] is insufficient.
+        config.host_models.clear();
+        config.firmware_global.firmware_directory = cache.path().to_owned();
+    })
+    .await;
+    // The builder stops at discovery. Establish verified boot intent and
+    // Ready state so handling reaches the firmware request gate.
+    mh.advance_to_converged_ready().await;
+    assert_eq!(
+        mh.host.machine().await.current_state(),
+        &ManagedHostState::Ready
+    );
+
+    // Keep a local listener open without answering TLS. This deterministically
+    // holds the background download pending, with no external network service.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("https://{}/firmware.bin", listener.local_addr().unwrap());
+    let mut config: model::firmware::HostFirmwareConfig = serde_json::from_value(
+        serde_json::json!({
+            "vendor": "Dell",
+            "model": "PowerEdge R750",
+            "ordering": ["bmc"],
+            "components": {"bmc": {
+                "current_version_reported_as": "^Installed-__iDRACz$",
+                "known_firmware": [{
+                    "version": "99.5361.1",
+                    "default": true,
+                    "files": [{"url": url, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}]
+                }]
+            }}
+        }),
+    ).unwrap();
+    let mut txn = env.test_harness.db_txn().await;
+    db::host_firmware_config::upsert(&mut txn, &config)
+        .await
+        .unwrap();
+    db::host_machine_update::trigger_host_reprovisioning_request(
+        &mut txn,
+        "Automated",
+        &mh.host.id,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    let requested_at = mh
+        .host
+        .machine()
+        .await
+        .host_reprovision_requested
+        .unwrap()
+        .requested_at;
+
+    for _ in 0..2 {
+        env.run_single_iteration().await;
+        let machine = mh.host.machine().await;
+        assert_eq!(machine.current_state(), &ManagedHostState::Ready);
+        assert_eq!(
+            machine
+                .host_reprovision_requested
+                .as_ref()
+                .map(|request| request.requested_at),
+            Some(requested_at),
+            "deferred download must retain the original request",
+        );
+    }
+    // The download really was attempted, rather than an unrelated Ready guard
+    // bypassing the firmware check.
+    let (_connection, _) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+
+    // An explicit completed check still clears the request. Use the fixture's
+    // installed version so this tests completion without a simulated flash.
+    config
+        .components
+        .get_mut(&FirmwareComponentType::Bmc)
+        .unwrap()
+        .known_firmware[0]
+        .version = "5.10.20".to_string();
+    let mut txn = env.test_harness.db_txn().await;
+    db::host_firmware_config::upsert(&mut txn, &config)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    env.run_single_iteration().await;
+    let machine = mh.host.machine().await;
+    assert!(machine.host_reprovision_requested.is_none());
+    assert!(
+        matches!(
+            machine.current_state(),
+            ManagedHostState::HostInit {
+                machine_state: model::machine::MachineState::WaitingForLockdown { .. },
+            }
+        ),
+        "completed firmware check must hand the unlocked fixture back to lockdown"
+    );
+
+    // A host that is already locked down completes directly into Ready and
+    // must also clear its request, without entering the lockdown handoff.
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Enabled);
+    mh.advance_to_converged_ready().await;
+    let mut txn = env.test_harness.db_txn().await;
+    db::host_machine_update::trigger_host_reprovisioning_request(
+        &mut txn,
+        "Automated",
+        &mh.host.id,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    env.run_single_iteration().await;
+    let machine = mh.host.machine().await;
+    assert_eq!(machine.current_state(), &ManagedHostState::Ready);
+    assert!(machine.host_reprovision_requested.is_none());
+}

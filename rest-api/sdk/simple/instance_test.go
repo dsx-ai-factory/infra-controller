@@ -214,6 +214,19 @@ func TestInstanceManager_GetInstances(t *testing.T) {
 			},
 		},
 		{
+			name:         "all VPCs omits the default VPC",
+			defaultVpcID: "vpc-1",
+			filter: &InstanceFilter{
+				IPAddress: &ipAddress,
+				AllVPCs:   true,
+			},
+			wantQuery: url.Values{
+				"ipAddress":  {ipAddress},
+				"pageNumber": {"1"},
+				"siteId":     {"site-1"},
+			},
+		},
+		{
 			name:         "query composes with filters and pagination",
 			defaultVpcID: "vpc-1",
 			filter: &InstanceFilter{

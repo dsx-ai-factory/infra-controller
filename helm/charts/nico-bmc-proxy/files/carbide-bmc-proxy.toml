@@ -3,6 +3,9 @@ metrics_endpoint = "[::]:1080"
 database_url = "postgres://replaced-by-env-var"
 allowed_principals = ["spiffe-service-id/{{ .Values.auth.apiPrincipal }}", "spiffe-service-id/nv-dps"]
 
+[redirects]
+mode = "follow_same_origin"
+
 [tls]
 identity_pemfile_path = "/var/run/secrets/spiffe.io/tls.crt"
 identity_keyfile_path = "/var/run/secrets/spiffe.io/tls.key"

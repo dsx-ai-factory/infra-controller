@@ -12,40 +12,44 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
-use crate::BmcState;
 use crate::redfish::event_service::{EventServiceError, enabled};
 use crate::sse::StreamStep;
+use crate::{BmcState, Callbacks};
 
-pub(super) fn add_routes(router: Router<BmcState>) -> Router<BmcState> {
+pub(super) fn add_routes<C: Callbacks>(router: Router<BmcState<C>>) -> Router<BmcState<C>> {
     router
-        .route("/Mock/EventService/events", post(publish))
-        .route("/Mock/EventService/stats", get(stats))
-        .route("/Mock/EventService/close", post(close))
+        .route("/Mock/EventService/events", post(publish::<C>))
+        .route("/Mock/EventService/stats", get(stats::<C>))
+        .route("/Mock/EventService/close", post(close::<C>))
         .route(
             "/Mock/EventService/scripts",
-            post(script).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+            post(script::<C>).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
 }
 
-async fn publish(
-    State(state): State<BmcState>,
+async fn publish<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Json(payload): Json<Value>,
 ) -> Result<Response, EventServiceError> {
     let id = enabled(&state)?.publish(payload)?;
     Ok(Json(json!({"id": id})).into_response())
 }
 
-async fn stats(State(state): State<BmcState>) -> Result<Response, EventServiceError> {
+async fn stats<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+) -> Result<Response, EventServiceError> {
     Ok(Json(enabled(&state)?.stats()).into_response())
 }
 
-async fn close(State(state): State<BmcState>) -> Result<Response, EventServiceError> {
+async fn close<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+) -> Result<Response, EventServiceError> {
     enabled(&state)?.close_subscribers();
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-async fn script(
-    State(state): State<BmcState>,
+async fn script<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Json(steps): Json<Vec<StreamStep>>,
 ) -> Result<Response, EventServiceError> {
     enabled(&state)?.queue_script(steps)?;

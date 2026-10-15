@@ -16,26 +16,35 @@
  */
 use std::net::IpAddr;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::vpc::VpcId;
+use model::resource_pool::OwnerType;
 use model::vpc::VpcDpuLoopback;
 use sqlx::PgConnection;
 
-use crate::DatabaseError;
+use crate::resource_pool::ResourcePoolAllocationNotOwned;
+use crate::{ConditionalWrite, DatabaseError};
+
+#[cfg(test)]
+mod test_explicit_columns;
 
 pub async fn persist(
     value: VpcDpuLoopback,
     txn: &mut PgConnection,
 ) -> Result<VpcDpuLoopback, DatabaseError> {
-    let query = "INSERT INTO vpc_dpu_loopbacks (dpu_id, vpc_id, loopback_ip)
-                           VALUES ($1, $2, $3) RETURNING *";
-    sqlx::query_as(query)
+    let query = format!(
+        "INSERT INTO vpc_dpu_loopbacks (dpu_id, vpc_id, loopback_ip)
+                           VALUES ($1, $2, $3) RETURNING {}",
+        VpcDpuLoopback::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(value.dpu_id)
         .bind(value.vpc_id)
         .bind(value.loopback_ip)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 pub async fn delete_and_deallocate(
@@ -72,7 +81,8 @@ pub async fn delete_and_deallocate(
         }
     };
 
-    query.push("  RETURNING * ");
+    query.push("  RETURNING ");
+    query.push(VpcDpuLoopback::db_table_columns());
 
     let deleted_loopbacks: Vec<VpcDpuLoopback> = query
         .build_query_as()
@@ -81,13 +91,19 @@ pub async fn delete_and_deallocate(
         .map_err(|e| DatabaseError::query(query.sql(), e))?;
 
     for value in deleted_loopbacks {
-        // We deleted a IP from vpc_dpu_loopback table. Deallocate this IP from common pool.
-        crate::resource_pool::release(
+        // The deleted loopback needs no release if its IP is free or reassigned.
+        match crate::resource_pool::release(
             &common_pools.ethernet.pool_vpc_dpu_loopback_ip,
             txn,
             value.loopback_ip,
+            OwnerType::Machine,
+            &value.dpu_id.to_string(),
         )
-        .await?;
+        .await?
+        {
+            ConditionalWrite::Applied(())
+            | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+        }
     }
 
     Ok(())
@@ -109,7 +125,8 @@ pub async fn delete_and_deallocate_for_vpcs(
     query.push_bind(dpu_id);
     query.push(" AND vpc_id = ANY(");
     query.push_bind(vpc_ids);
-    query.push(") RETURNING *");
+    query.push(") RETURNING ");
+    query.push(VpcDpuLoopback::db_table_columns());
 
     let deleted_loopbacks: Vec<VpcDpuLoopback> = query
         .build_query_as()
@@ -118,13 +135,19 @@ pub async fn delete_and_deallocate_for_vpcs(
         .map_err(|e| DatabaseError::query(query.sql(), e))?;
 
     for value in deleted_loopbacks {
-        // Return each deleted loopback IP to the shared VPC loopback pool.
-        crate::resource_pool::release(
+        // The deleted loopback needs no release if its IP is free or reassigned.
+        match crate::resource_pool::release(
             &common_pools.ethernet.pool_vpc_dpu_loopback_ip,
             txn,
             value.loopback_ip,
+            OwnerType::Machine,
+            &value.dpu_id.to_string(),
         )
-        .await?;
+        .await?
+        {
+            ConditionalWrite::Applied(())
+            | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+        }
     }
 
     Ok(())
@@ -135,14 +158,17 @@ pub async fn find(
     dpu_id: &DpuMachineId,
     vpc_id: &VpcId,
 ) -> Result<Option<VpcDpuLoopback>, DatabaseError> {
-    let query = "SELECT * from vpc_dpu_loopbacks WHERE dpu_id=$1 AND vpc_id=$2";
+    let query = format!(
+        "SELECT {} from vpc_dpu_loopbacks WHERE dpu_id=$1 AND vpc_id=$2",
+        VpcDpuLoopback::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(dpu_id)
         .bind(vpc_id)
         .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Allocate loopback ip for a vpc and dpu if not allocated yet.

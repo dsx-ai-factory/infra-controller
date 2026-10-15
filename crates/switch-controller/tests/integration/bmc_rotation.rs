@@ -28,8 +28,7 @@ use carbide_secrets::credentials::{
 use carbide_switch_controller::context::SwitchStateHandlerServices;
 use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
 use db::credential_rotation::{
-    CredentialRotationType, device_rotation_status, record_device_converged,
-    set_next_target_version,
+    CredentialRotationType, device_rotation_status, record_device_enrolled, set_next_target_version,
 };
 use db::switch as db_switch;
 use mac_address::MacAddress;
@@ -154,7 +153,7 @@ async fn switch_store_persist_failure_holds_in_rotating_bmc_until_reconciled(
         .expect("staging the per-device secret should succeed");
     {
         let mut conn = pool.acquire().await?;
-        record_device_converged(&mut conn, bmc_mac, BMC).await?;
+        record_device_enrolled(&mut conn, bmc_mac, BMC, Some(0)).await?;
         assert!(
             matches!(
                 set_next_target_version(&mut conn, BMC, 0, serde_json::json!({})).await?,

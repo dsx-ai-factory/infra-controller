@@ -32,8 +32,9 @@ use crate::bmc::{
 };
 use crate::config::{StaticBmcEndpoint, StaticSwitchEndpointRole};
 use crate::endpoint::{
-    BmcAddr, BmcCredentials, BmcEndpoint, BoxFuture, EndpointMetadata, EndpointSource, MachineData,
-    PowerShelfData, SharedSystemUuid, SwitchData, SwitchEndpointRole,
+    BmcAddr, BmcCredentials, BmcEndpoint, BoxFuture, EndpointMetadata, EndpointSnapshot,
+    EndpointSource, InventorySnapshot, MachineData, PowerShelfData, SharedSystemUuid, SwitchData,
+    SwitchEndpointRole,
 };
 use crate::metrics::BmcLatencyMetrics;
 
@@ -123,8 +124,18 @@ impl StaticEndpointSource {
                     }
                 });
                 let serial = power_shelf.serial.clone();
+                let nvlink_domain_uuid = parse_static_nvlink_domain_uuid(
+                    power_shelf.nvlink_domain_uuid.as_deref(),
+                    "power_shelf",
+                    cfg.rack_id.as_deref(),
+                )
+                .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil());
 
-                Some(EndpointMetadata::PowerShelf(PowerShelfData { id, serial }))
+                Some(EndpointMetadata::PowerShelf(PowerShelfData {
+                    id,
+                    serial,
+                    nvlink_domain_uuid,
+                }))
             } else if let Some(switch) = &cfg.switch {
                 let id = switch.id.as_ref().and_then(|id| match id.parse() {
                     Ok(id) => Some(id),
@@ -160,8 +171,9 @@ impl StaticEndpointSource {
                 let nmxt_enabled = switch.nmxt_enabled.unwrap_or(switch.is_primary);
 
                 Some(EndpointMetadata::Switch(SwitchData {
+                    log_checkpoint_identity: None,
                     id,
-                    serial,
+                    serial: Some(serial),
                     slot_number: switch.slot_number,
                     tray_index: switch.tray_index,
                     nvlink_domain_uuid,
@@ -214,7 +226,7 @@ impl StaticEndpointSource {
             let addr = BmcAddr {
                 ip: cfg.ip,
                 port: cfg.port,
-                mac,
+                mac: Some(mac),
             };
             let credentials = BmcCredentials::UsernamePassword {
                 username: cfg.username.clone(),
@@ -295,6 +307,48 @@ impl EndpointSource for CompositeEndpointSource {
             Ok(all)
         })
     }
+
+    fn fetch_snapshot<'a>(&'a self) -> BoxFuture<'a, Result<EndpointSnapshot, HealthError>> {
+        Box::pin(async move {
+            let mut endpoints = Vec::new();
+            let mut components = Vec::new();
+            let mut racks = Vec::new();
+            let mut authoritative_source_found = false;
+            let mut inventory_error = None;
+
+            for source in &self.sources {
+                let snapshot = source.fetch_snapshot().await?;
+                endpoints.extend(snapshot.endpoints);
+
+                match snapshot.inventory {
+                    Ok(Some(mut snapshot)) => {
+                        authoritative_source_found = true;
+                        racks.append(&mut snapshot.racks);
+                        components.append(&mut snapshot.components);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        authoritative_source_found = true;
+                        if inventory_error.is_none() {
+                            inventory_error = Some(error);
+                        }
+                    }
+                }
+            }
+
+            let inventory =
+                match inventory_error {
+                    Some(error) => Err(error),
+                    None => Ok(authoritative_source_found
+                        .then_some(InventorySnapshot { racks, components })),
+                };
+
+            Ok(EndpointSnapshot {
+                endpoints,
+                inventory,
+            })
+        })
+    }
 }
 
 #[cfg(test)]
@@ -308,6 +362,7 @@ mod tests {
         StaticBmcEndpoint, StaticMachineEndpoint, StaticPowerShelfEndpoint, StaticSwitchEndpoint,
         StaticSwitchEndpointRole,
     };
+    use crate::endpoint::ComponentInventory;
 
     fn reqwest() -> ReqwestClient {
         ReqwestClient::with_params(ReqwestClientParams::new().accept_invalid_certs(true))
@@ -371,7 +426,7 @@ mod tests {
         assert_eq!(endpoints.len(), 1);
         assert_eq!(
             endpoints[0].addr.mac,
-            MacAddress::from_str("00:11:22:33:44:55").unwrap()
+            Some(MacAddress::from_str("00:11:22:33:44:55").unwrap())
         );
     }
 
@@ -410,7 +465,7 @@ mod tests {
         match &endpoints[0].metadata {
             Some(EndpointMetadata::Switch(s)) => {
                 assert_eq!(s.id, Some(switch_id));
-                assert_eq!(s.serial, "SN-001");
+                assert_eq!(s.serial.as_deref(), Some("SN-001"));
                 assert_eq!(s.slot_number, Some(7));
                 assert_eq!(s.tray_index, Some(3));
                 assert_eq!(s.nvlink_domain_uuid, Some(nvlink_domain_uuid));
@@ -474,6 +529,7 @@ mod tests {
     #[tokio::test]
     async fn test_static_endpoint_with_power_shelf_metadata() {
         let power_shelf_id = test_power_shelf_id("power-shelf-a");
+        let domain_uuid = NvLinkDomainId::new();
         let configs = vec![StaticBmcEndpoint {
             ip: ip("10.0.2.1"),
             port: Some(443),
@@ -484,6 +540,7 @@ mod tests {
             power_shelf: Some(StaticPowerShelfEndpoint {
                 id: Some(power_shelf_id.to_string()),
                 serial: Some("PS-001".to_string()),
+                nvlink_domain_uuid: Some(domain_uuid.to_string()),
             }),
             switch: None,
             rack_id: None,
@@ -498,6 +555,7 @@ mod tests {
             Some(EndpointMetadata::PowerShelf(power_shelf)) => {
                 assert_eq!(power_shelf.id, Some(power_shelf_id));
                 assert_eq!(power_shelf.serial.as_deref(), Some("PS-001"));
+                assert_eq!(power_shelf.nvlink_domain_uuid, Some(domain_uuid));
             }
             other => panic!("expected PowerShelf metadata, got {other:?}"),
         }
@@ -516,6 +574,7 @@ mod tests {
             power_shelf: Some(StaticPowerShelfEndpoint {
                 id: Some(power_shelf_id.to_string()),
                 serial: None,
+                nvlink_domain_uuid: Some(NvLinkDomainId::nil().to_string()),
             }),
             switch: None,
             rack_id: None,
@@ -530,6 +589,7 @@ mod tests {
             Some(EndpointMetadata::PowerShelf(power_shelf)) => {
                 assert_eq!(power_shelf.id, Some(power_shelf_id));
                 assert_eq!(power_shelf.serial, None);
+                assert_eq!(power_shelf.nvlink_domain_uuid, None);
             }
             other => panic!("expected PowerShelf metadata, got {other:?}"),
         }
@@ -661,6 +721,39 @@ mod tests {
         }
     }
 
+    struct AuthoritativeSource {
+        endpoints: Vec<Arc<BmcEndpoint>>,
+        components: Vec<ComponentInventory>,
+        inventory_fails: bool,
+    }
+
+    impl EndpointSource for AuthoritativeSource {
+        fn fetch_bmc_hosts<'a>(
+            &'a self,
+        ) -> BoxFuture<'a, Result<Vec<Arc<BmcEndpoint>>, HealthError>> {
+            Box::pin(async move { Ok(self.endpoints.clone()) })
+        }
+
+        fn fetch_snapshot<'a>(&'a self) -> BoxFuture<'a, Result<EndpointSnapshot, HealthError>> {
+            Box::pin(async move {
+                let inventory = if self.inventory_fails {
+                    Err(HealthError::GenericError(
+                        "simulated inventory failure".to_string(),
+                    ))
+                } else {
+                    Ok(Some(InventorySnapshot {
+                        racks: Vec::new(),
+                        components: self.components.clone(),
+                    }))
+                };
+                Ok(EndpointSnapshot {
+                    endpoints: self.endpoints.clone(),
+                    inventory,
+                })
+            })
+        }
+    }
+
     #[tokio::test]
     async fn test_composite_endpoint_source_propagates_errors() {
         let endpoints = vec![super::super::test_support::test_endpoint(
@@ -673,5 +766,57 @@ mod tests {
         let result = composite.fetch_bmc_hosts().await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn composite_inventory_excludes_auxiliary_endpoints() {
+        let authoritative_endpoint = Arc::new(super::super::test_support::test_endpoint(
+            MacAddress::from_str("00:11:22:33:44:55").unwrap(),
+        ));
+        let auxiliary_endpoint = Arc::new(super::super::test_support::test_endpoint(
+            MacAddress::from_str("00:11:22:33:44:66").unwrap(),
+        ));
+        let component = ComponentInventory {
+            rack_id: RackId::new("RACK_1"),
+            metadata: EndpointMetadata::PowerShelf(PowerShelfData {
+                id: Some(test_power_shelf_id("power-shelf-a")),
+                serial: None,
+                nvlink_domain_uuid: None,
+            }),
+            bmc_mac: Some(MacAddress::from_str("00:11:22:33:44:55").unwrap()),
+        };
+        let authoritative = Arc::new(AuthoritativeSource {
+            endpoints: vec![authoritative_endpoint.clone()],
+            components: vec![component.clone()],
+            inventory_fails: false,
+        });
+        let auxiliary = Arc::new(StaticEndpointSource::new(vec![
+            auxiliary_endpoint.as_ref().clone(),
+        ]));
+        let composite = CompositeEndpointSource::new(vec![authoritative, auxiliary]);
+
+        let snapshot = composite.fetch_snapshot().await.unwrap();
+        let inventory = snapshot.inventory.unwrap().unwrap();
+
+        assert_eq!(snapshot.endpoints.len(), 2);
+        assert_eq!(inventory.components, vec![component]);
+    }
+
+    #[tokio::test]
+    async fn composite_preserves_endpoints_when_inventory_is_incomplete() {
+        let endpoint = Arc::new(super::super::test_support::test_endpoint(
+            MacAddress::from_str("00:11:22:33:44:55").unwrap(),
+        ));
+        let authoritative = Arc::new(AuthoritativeSource {
+            endpoints: vec![endpoint],
+            components: Vec::new(),
+            inventory_fails: true,
+        });
+        let composite = CompositeEndpointSource::new(vec![authoritative]);
+
+        let snapshot = composite.fetch_snapshot().await.unwrap();
+
+        assert_eq!(snapshot.endpoints.len(), 1);
+        assert!(snapshot.inventory.is_err());
     }
 }

@@ -36,6 +36,7 @@ erDiagram
         character_varying maintenance_reference
         timestamp_with_time_zone maintenance_start_time
         jsonb reprovisioning_requested
+        jsonb reset_requested
         jsonb dpu_agent_upgrade_requested
     }
 

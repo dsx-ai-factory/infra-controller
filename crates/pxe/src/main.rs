@@ -19,8 +19,8 @@
 use std::fmt::Debug;
 use std::net::SocketAddr;
 
+use axum::Router;
 use axum::middleware::{map_request, map_response};
-use axum::{Router, ServiceExt};
 use axum_client_ip::ClientIpSource;
 use axum_template::engine::Engine;
 use carbide_utils::SCOUT_FIRMWARE_SCRIPTS_DIR;
@@ -30,9 +30,9 @@ use tera::Tera;
 use tower_http::services::ServeDir;
 use tower_layer::Layer;
 use tracing::level_filters::LevelFilter;
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer as _};
 
 mod common;
 mod config;
@@ -41,6 +41,7 @@ mod metrics;
 mod middleware;
 mod routes;
 mod rpc_error;
+mod server;
 
 /// The URL prefix the static-file directory is served under. Anything building
 /// a URL into that directory composes it from this, so the path served and the
@@ -66,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    setup_tracing()?;
+    let tracing = setup_tracing()?;
 
     let static_path = std::path::Path::new(&opts.static_dir);
     if !&static_path.exists() {
@@ -145,30 +146,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let request_normalizing_middleware = map_request(middleware::normalize_url);
     let final_app = request_normalizing_middleware.layer(app); // this one has to wrap all the others for the map_request to be able to affect routing
 
-    let listener = tokio::net::TcpListener::bind(socket_addr)
+    let listener = metrics_endpoint::bind_tcp_listener(socket_addr)
         .await
         .map_err(|err| {
             tracing::error!(error = %err, "unable to bind tcp listener");
             err
         })?;
 
-    axum::serve(
+    tracing::info!(
+        listen_address = %socket_addr,
+        header_read_timeout_seconds = server::HEADER_READ_TIMEOUT.as_secs(),
+        "serving http"
+    );
+    server::serve(
         listener,
-        final_app.into_make_service_with_connect_info::<SocketAddr>(),
+        final_app,
+        server::HEADER_READ_TIMEOUT,
+        shutdown_signal(),
     )
     .await?;
+
+    // Flush completed spans after the connection drain finishes or times out.
+    tracing.shutdown().await;
 
     Ok(())
 }
 
-/// Installs the tracing subscriber that emits logs in the fleet's logfmt
-/// format, tagged with the `nico-pxe` component, plus the log-events counting
-/// layer that feeds the fleet-standard `carbide_log_events_total` counter.
-/// Matches the other carbide binaries: an `INFO` default with the usual
-/// dependency caps, overridable via `RUST_LOG`. The counter is bound to the
-/// meter by `log_events::register` in `main`, once the provider exists.
-fn setup_tracing() -> Result<(), Box<dyn std::error::Error>> {
-    let env_filter = EnvFilter::builder()
+/// Waits for SIGTERM signal
+async fn shutdown_signal() {
+    let mut terminate =
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(error) => {
+                // SIGTERM ends the process without connections draining
+                tracing::warn!(%error, "failed to register SIGTERM handler");
+                return std::future::pending().await;
+            }
+        };
+
+    terminate.recv().await;
+    tracing::info!("shutdown signal received, draining in-flight requests");
+}
+
+/// Installs the tracing subscriber: logfmt logs, the `carbide_log_events_total`
+/// counter and OTLP span export. Log levels default to `INFO` and follow
+/// `RUST_LOG`. `main` shuts down the returned value to send the last spans.
+fn setup_tracing() -> Result<carbide_instrument::otlp_tracing::Tracing, Box<dyn std::error::Error>>
+{
+    let log_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy()
         .add_directive("hyper=warn".parse()?)
@@ -177,19 +202,24 @@ fn setup_tracing() -> Result<(), Box<dyn std::error::Error>> {
         .add_directive("rustls=warn".parse()?)
         .add_directive("tokio_util::codec=warn".parse()?);
 
-    // Counts every log line into carbide_log_events_total from startup; the
-    // counts are exposed once main() installs the meter provider. The env
-    // filter sits on the registry as a global filter so the counting layer and
-    // the logfmt output see exactly the same events.
+    // Filter each log layer separately so RUST_LOG does not limit span export.
+    let (span_layer, tracing) = carbide_instrument::otlp_tracing::setup(
+        carbide_instrument::otlp_tracing::Config::new("nico-pxe"),
+    );
+
+    // Counts log lines from startup. `main` binds the counter to the meter later.
     let log_events = carbide_instrument::LogEventsMetric::new("nico-pxe");
     tracing_subscriber::registry()
-        .with(log_events.layer())
+        .with(log_events.layer().with_filter(log_filter.clone()))
+        .with(span_layer)
         .with(
             logfmt::layer()
-                .with_event_fields([logfmt::EventField::with_default("component", "nico-pxe")]),
+                .with_event_fields([logfmt::EventField::with_default("component", "nico-pxe")])
+                .with_filter(log_filter),
         )
-        .with(env_filter)
         .try_init()?;
 
-    Ok(())
+    tracing.report();
+
+    Ok(tracing)
 }

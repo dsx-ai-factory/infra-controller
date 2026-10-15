@@ -68,6 +68,7 @@ impl TryFrom<rpc::forge::VpcPrefixCreationRequest> for NewVpcPrefix {
             config,
             metadata,
             vpc_id,
+            overlap_vpc_id: None,
         })
     }
 }
@@ -221,6 +222,7 @@ mod tests {
             id: VpcPrefixId::new(),
             site_prefix_id: Some(SitePrefixId::new()),
             vpc_id: VpcId::new(),
+            overlap_vpc_id: None,
             config: VpcPrefixConfig {
                 prefix: "10.0.0.0/24".parse().unwrap(),
             },

@@ -539,6 +539,7 @@ func (apd *APIDpuMachine) FromProto(protoDpuMachine *corev1.DpuMachine, ctx APID
 		}
 	}
 
+	apd.Health = nil
 	if protoMachineStatus.GetHealth() != nil {
 		apd.Health = &APIMachineHealth{}
 		apd.Health.FromProto(protoMachineStatus.GetHealth())

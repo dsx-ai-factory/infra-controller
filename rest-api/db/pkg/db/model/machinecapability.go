@@ -13,16 +13,18 @@ import (
 	"strings"
 	"time"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/otel/attribute"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	"github.com/uptrace/bun"
 
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -52,11 +54,14 @@ const (
 type MachineCapabilityDeviceType string
 
 // MachineCapabilityDeviceType values. Stored as plain strings in the DB
-// column `machine_capability.device_type`.
+// column `machine_capability.device_type`. The SpectrumX value describes
+// DPA-interface attachment-selector inventory, not site enablement or full
+// reference-architecture readiness.
 const (
-	MachineCapabilityDeviceTypeDPU     MachineCapabilityDeviceType = "DPU"
-	MachineCapabilityDeviceTypeNVLink  MachineCapabilityDeviceType = "NVLink"
-	MachineCapabilityDeviceTypeUnknown MachineCapabilityDeviceType = "Unknown"
+	MachineCapabilityDeviceTypeDPU       MachineCapabilityDeviceType = "DPU"
+	MachineCapabilityDeviceTypeNVLink    MachineCapabilityDeviceType = "NVLink"
+	MachineCapabilityDeviceTypeSpectrumX MachineCapabilityDeviceType = "SpectrumX"
+	MachineCapabilityDeviceTypeUnknown   MachineCapabilityDeviceType = "Unknown"
 )
 
 const (
@@ -65,6 +70,10 @@ const (
 
 	// MachineCapabilityOrderByDefault default field to be used for ordering when none specified
 	MachineCapabilityOrderByDefault = "created"
+
+	// MachineCapabilityDistinctOrderByDefault is the default field used when
+	// ordering the distinct capabilities returned by the REST list endpoint.
+	MachineCapabilityDistinctOrderByDefault = "type"
 )
 
 var (
@@ -83,10 +92,15 @@ var (
 	// MachineCapabilityOrderByFields is a list of valid order by fields for the MachineCapability model
 	MachineCapabilityOrderByFields = []string{"type", "created", "updated"}
 
+	// MachineCapabilityDistinctOrderByFields is the list of fields exposed for
+	// ordering distinct Machine Capabilities.
+	MachineCapabilityDistinctOrderByFields = []string{"type"}
+
 	// MachineCapabilityDeviceTypeChoiceMap is a map of valid MachineCapability device types
 	MachineCapabilityDeviceTypeChoiceMap = map[MachineCapabilityDeviceType]bool{
-		MachineCapabilityDeviceTypeDPU:    true,
-		MachineCapabilityDeviceTypeNVLink: true,
+		MachineCapabilityDeviceTypeDPU:       true,
+		MachineCapabilityDeviceTypeNVLink:    true,
+		MachineCapabilityDeviceTypeSpectrumX: true,
 	}
 )
 
@@ -150,20 +164,30 @@ func (d MachineCapabilityDeviceType) ToProto() corev1.MachineCapabilityDeviceTyp
 		return corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU
 	case MachineCapabilityDeviceTypeNVLink:
 		return corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK
+	case MachineCapabilityDeviceTypeSpectrumX:
+		return corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X
 	}
 	log.Warn().Str("DeviceType", string(d)).Msg("unsupported MachineCapabilityDeviceType requested")
 	return corev1.MachineCapabilityDeviceType(0)
 }
 
 // FromProto populates the receiver from a workflow proto enum,
-// mirroring `(MachineCapabilityDeviceType).ToProto`. An unknown proto
-// enum leaves the receiver as the empty string with a warning logged.
+// mirroring `(MachineCapabilityDeviceType).ToProto`. The `UNKNOWN`
+// sentinel is the enum's defined "unspecified" value, so it leaves the
+// receiver as the empty string without a warning, exactly as an omitted
+// field does. An unrecognized proto enum also leaves the receiver empty,
+// but logs a warning so schema drift is surfaced.
 func (d *MachineCapabilityDeviceType) FromProto(p corev1.MachineCapabilityDeviceType) {
 	switch p {
+	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN:
+		// Defined sentinel for "unspecified": empty without a warning.
+		*d = ""
 	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU:
 		*d = MachineCapabilityDeviceTypeDPU
 	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK:
 		*d = MachineCapabilityDeviceTypeNVLink
+	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X:
+		*d = MachineCapabilityDeviceTypeSpectrumX
 	default:
 		log.Warn().Str("DeviceType", p.String()).Msg("unsupported MachineCapabilityDeviceType requested")
 		*d = ""
@@ -380,7 +404,7 @@ func (mc *MachineCapability) FromProto(attrs *corev1.InstanceTypeMachineCapabili
 // run `Validate` afterwards to reject unknown CapabilityType enums
 // (which `FromProto` leaves as the empty Type), missing Names, and
 // cross-field combinations the wire shape can't represent — DeviceType
-// must pair with Network (DPU) or GPU (NVLink), and InactiveDevices is
+// must pair with Network (DPU or SpectrumX) or GPU (NVLink), and InactiveDevices is
 // only valid on InfiniBand. These mirror the API-side
 // `(APIMachineCapability).Validate` rules so the workflow-inventory
 // path and the API path enforce the same invariants.
@@ -417,7 +441,7 @@ func (mc *MachineCapability) validateNameWhitespace(value interface{}) error {
 }
 
 // validateDeviceType enforces the Type/DeviceType compatibility rules:
-// Network capabilities require DPU, GPU capabilities require NVLink,
+// Network capabilities require DPU or SpectrumX, GPU capabilities require NVLink,
 // every other Type must not carry a DeviceType. A nil DeviceType is
 // always allowed.
 func (mc *MachineCapability) validateDeviceType(value interface{}) error {
@@ -427,7 +451,7 @@ func (mc *MachineCapability) validateDeviceType(value interface{}) error {
 	}
 	switch mc.Type {
 	case MachineCapabilityTypeNetwork:
-		if *dt != MachineCapabilityDeviceTypeDPU {
+		if *dt != MachineCapabilityDeviceTypeDPU && *dt != MachineCapabilityDeviceTypeSpectrumX {
 			return fmt.Errorf("Unsupported Device Type specified for Network Capability %s", *dt)
 		}
 	case MachineCapabilityTypeGPU:
@@ -453,14 +477,24 @@ func (mc *MachineCapability) validateInactiveDevices(value interface{}) error {
 	return nil
 }
 
-// MapKey returns the canonical `Type-Name` string used as a map key
-// when callers need to dedupe or look up capabilities by their
-// `(Type, Name)` pair (e.g. cloud↔site diffing during instance-type
-// sync, instance-type update planning). Centralizing the format here
-// avoids drift across the call sites and keeps the typed-string cast
-// in one place.
+// MachineCapabilityMapKey returns the canonical identity key for a capability.
+// Device type is part of the identity so a generic network capability and an
+// SpectrumX capability can share the same hardware description without colliding.
+// The capability name is length-prefixed because names may contain colons; a
+// delimiter-only encoding would otherwise make a typed capability ambiguous
+// with a generic capability whose name ends in the device type. Nil and empty
+// device types intentionally have the same identity.
+func MachineCapabilityMapKey(capabilityType MachineCapabilityType, name string, deviceType *MachineCapabilityDeviceType) string {
+	key := fmt.Sprintf("%s:%d:%s", capabilityType, len(name), name)
+	if deviceType == nil || *deviceType == "" {
+		return key
+	}
+	return fmt.Sprintf("%s:%s", key, *deviceType)
+}
+
+// MapKey returns the canonical `(Type, Name, DeviceType)` identity key.
 func (mc *MachineCapability) MapKey() string {
-	return string(mc.Type) + "-" + mc.Name
+	return MachineCapabilityMapKey(mc.Type, mc.Name, mc.DeviceType)
 }
 
 // GetStrInfo returns the string value of the given key in the Info map
@@ -573,7 +607,6 @@ type MachineCapabilityDAO interface {
 type MachineCapabilitySQLDAO struct {
 	dbSession *db.Session
 	MachineCapabilityDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new MachineCapability from the given parameters
@@ -582,14 +615,11 @@ type MachineCapabilitySQLDAO struct {
 // this library call happens within a transaction
 func (mcd MachineCapabilitySQLDAO) Create(
 	ctx context.Context, tx *db.Tx,
-	input MachineCapabilityCreateInput) (*MachineCapability, error) {
+	input MachineCapabilityCreateInput) (_ *MachineCapability, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, MachineCapabilityDAOSpan := mcd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineCapabilityDAO.Create")
-	if MachineCapabilityDAOSpan != nil {
-		defer MachineCapabilityDAOSpan.End()
-
-		mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "name", input.Name)
-	}
+	ctx, MachineCapabilityDAOSpan := cotel.StartSpan(ctx, "MachineCapabilityDAO.Create")
+	defer func() { cotel.EndSpan(MachineCapabilityDAOSpan, retErr) }()
+	cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("name", input.Name))
 
 	if len(strings.TrimSpace(string(input.Type))) == 0 {
 		return nil, errors.New("capabilityType is empty")
@@ -636,14 +666,11 @@ func (mcd MachineCapabilitySQLDAO) Create(
 
 // GetByID returns a MachineCapability by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (mcd MachineCapabilitySQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*MachineCapability, error) {
+func (mcd MachineCapabilitySQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *MachineCapability, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, MachineCapabilityDAOSpan := mcd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineCapabilityDAO.GetByID")
-	if MachineCapabilityDAOSpan != nil {
-		defer MachineCapabilityDAOSpan.End()
-
-		mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "id", id.String())
-	}
+	ctx, MachineCapabilityDAOSpan := cotel.StartSpan(ctx, "MachineCapabilityDAO.GetByID")
+	defer func() { cotel.EndSpan(MachineCapabilityDAOSpan, retErr) }()
+	cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("id", id.String()))
 
 	m := &MachineCapability{}
 
@@ -679,12 +706,10 @@ func (mcd MachineCapabilitySQLDAO) GetAll(
 	deviceType *string,
 	inactiveDevices []int,
 	includeRelations []string,
-	offset *int, limit *int, orderBy *paginator.OrderBy) ([]MachineCapability, int, error) {
+	offset *int, limit *int, orderBy *paginator.OrderBy) (_ []MachineCapability, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, MachineCapabilityDAOSpan := mcd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineCapabilityDAO.GetAll")
-	if MachineCapabilityDAOSpan != nil {
-		defer MachineCapabilityDAOSpan.End()
-	}
+	ctx, MachineCapabilityDAOSpan := cotel.StartSpan(ctx, "MachineCapabilityDAO.GetAll")
+	defer func() { cotel.EndSpan(MachineCapabilityDAOSpan, retErr) }()
 
 	mcs := []MachineCapability{}
 
@@ -695,10 +720,6 @@ func (mcd MachineCapabilitySQLDAO) GetAll(
 		} else {
 			query = query.Where("mc.machine_id IN (?)", bun.In(machineIDs))
 		}
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "machine_ids", machineIDs)
-		}
 	}
 	if instanceTypeIDs != nil {
 		if len(machineIDs) == 1 {
@@ -706,66 +727,36 @@ func (mcd MachineCapabilitySQLDAO) GetAll(
 		} else {
 			query = query.Where("mc.instance_type_id IN (?)", bun.In(instanceTypeIDs))
 		}
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "instance_type_ids", instanceTypeIDs)
-		}
 	}
 	if capabilityType != nil {
 		query = query.Where("mc.type = ?", *capabilityType)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "type", *capabilityType)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("type", *capabilityType))
 	}
 	if name != nil {
 		query = query.Where("mc.name = ?", *name)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "name", *name)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("name", *name))
 	}
 	if frequency != nil {
 		query = query.Where("mc.frequency = ?", *frequency)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "frequency", *frequency)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("frequency", *frequency))
 	}
 	if capacity != nil {
 		query = query.Where("mc.capacity = ?", *capacity)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "capacity", *capacity)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("capacity", *capacity))
 	}
 	if vendor != nil {
 		query = query.Where("mc.vendor = ?", *vendor)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "vendor", *vendor)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("vendor", *vendor))
 	}
 	if count != nil {
 		query = query.Where("mc.count = ?", *count)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "count", *count)
-		}
 	}
 	if deviceType != nil {
 		query = query.Where("mc.device_type = ?", *deviceType)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "device_type", *deviceType)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("device_type", *deviceType))
 	}
 	if inactiveDevices != nil {
 		query = query.Where("mc.inactive_devices = ?", inactiveDevices)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "inactive_devices", inactiveDevices)
-		}
 	}
 
 	for _, relation := range includeRelations {
@@ -804,12 +795,10 @@ type GPUSiteStat struct {
 // GetGPUStatsBySite aggregates GPU capabilities in the database, grouped by site
 // and GPU name, instead of loading every machine and capability row into the
 // application. It mirrors the aggregation approach of MachineSQLDAO.GetCountByStatus.
-func (mcd MachineCapabilitySQLDAO) GetGPUStatsBySite(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, siteID *uuid.UUID) ([]GPUSiteStat, error) {
+func (mcd MachineCapabilitySQLDAO) GetGPUStatsBySite(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, siteID *uuid.UUID) (_ []GPUSiteStat, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, MachineCapabilityDAOSpan := mcd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineCapabilityDAO.GetGPUStatsBySite")
-	if MachineCapabilityDAOSpan != nil {
-		defer MachineCapabilityDAOSpan.End()
-	}
+	ctx, MachineCapabilityDAOSpan := cotel.StartSpan(ctx, "MachineCapabilityDAO.GetGPUStatsBySite")
+	defer func() { cotel.EndSpan(MachineCapabilityDAOSpan, retErr) }()
 
 	stats := []GPUSiteStat{}
 
@@ -825,17 +814,11 @@ func (mcd MachineCapabilitySQLDAO) GetGPUStatsBySite(ctx context.Context, tx *db
 
 	if infrastructureProviderID != nil {
 		query = query.Where("m.infrastructure_provider_id = ?", *infrastructureProviderID)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "infrastructure_provider_id", infrastructureProviderID.String())
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("infrastructure_provider_id", infrastructureProviderID.String()))
 	}
 	if siteID != nil {
 		query = query.Where("m.site_id = ?", *siteID)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "site_id", siteID.String())
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("site_id", siteID.String()))
 	}
 
 	err := query.Scan(ctx, &stats)
@@ -859,102 +842,74 @@ func (mcd MachineCapabilitySQLDAO) GetAllDistinct(
 	count *int,
 	deviceType *string,
 	inactiveDevices []int,
-	offset *int, limit *int, orderBy *paginator.OrderBy) ([]MachineCapability, int, error) {
+	offset *int, limit *int, orderBy *paginator.OrderBy) (_ []MachineCapability, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, MachineCapabilityDAOSpan := mcd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineCapabilityDAO.GetAllDistinct")
-	if MachineCapabilityDAOSpan != nil {
-		defer MachineCapabilityDAOSpan.End()
-	}
+	ctx, MachineCapabilityDAOSpan := cotel.StartSpan(ctx, "MachineCapabilityDAO.GetAllDistinct")
+	defer func() { cotel.EndSpan(MachineCapabilityDAOSpan, retErr) }()
 
 	mcs := []MachineCapability{}
 
-	query := db.GetIDB(tx, mcd.dbSession).NewSelect().Model(&mcs).ColumnExpr("DISTINCT ON (mc.type, mc.name, mc.frequency, mc.capacity, mc.vendor, mc.count, mc.device_type, mc.inactive_devices) mc.*")
+	query := db.GetIDB(tx, mcd.dbSession).NewSelect().Model(&mcs).ColumnExpr("DISTINCT ON (mc.type, mc.name, mc.frequency, mc.capacity, mc.vendor, mc.count, mc.device_type, mc.inactive_devices) ?TableColumns")
 	if machineIDs != nil {
 		if len(machineIDs) == 1 {
 			query = query.Where("mc.machine_id = ?", machineIDs[0])
 		} else {
 			query = query.Where("mc.machine_id IN (?)", bun.In(machineIDs))
 		}
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "machine_ids", machineIDs)
-		}
 	}
 	if instanceTypeID != nil {
 		query = query.Where("mc.instance_type_id = ?", *instanceTypeID)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "instance_type_id", instanceTypeID.String())
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("instance_type_id", instanceTypeID.String()))
 	}
 	if capabilityType != nil {
 		query = query.Where("mc.type = ?", *capabilityType)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "type", *capabilityType)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("type", *capabilityType))
 	}
 	if name != nil {
 		query = query.Where("mc.name = ?", *name)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "name", *name)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("name", *name))
 	}
 	if frequency != nil {
 		query = query.Where("mc.frequency = ?", *frequency)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "frequency", *frequency)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("frequency", *frequency))
 	}
 	if capacity != nil {
 		query = query.Where("mc.capacity = ?", *capacity)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "capacity", *capacity)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("capacity", *capacity))
 	}
 	if vendor != nil {
 		query = query.Where("mc.vendor = ?", *vendor)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "vendor", *vendor)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("vendor", *vendor))
 	}
 	if count != nil {
 		query = query.Where("mc.count = ?", *count)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "count", *count)
-		}
 	}
 	if deviceType != nil {
 		query = query.Where("mc.device_type = ?", *deviceType)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "device_type", *deviceType)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("device_type", *deviceType))
 	}
 	if inactiveDevices != nil {
 		query = query.Where("mc.inactive_devices = ?", inactiveDevices)
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "inactive_devices", inactiveDevices)
-		}
 	}
 
-	paginator, err := paginator.NewPaginator(ctx, query, offset, limit, orderBy, MachineCapabilityOrderByFields)
+	if orderBy == nil {
+		orderBy = paginator.NewDefaultOrderBy(MachineCapabilityDistinctOrderByDefault)
+	}
+	dbPaginator, err := paginator.NewPaginator(ctx, query, offset, limit, orderBy, MachineCapabilityDistinctOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+	// DISTINCT ON requires the distinct fields to be the leftmost ordering
+	// expressions. The remaining capability key and ID make every page stable
+	// when multiple capabilities share the same type.
+	dbPaginator.Query = dbPaginator.Query.OrderExpr("mc.name ASC, mc.frequency ASC, mc.capacity ASC, mc.vendor ASC, mc.count ASC, mc.device_type ASC, mc.inactive_devices ASC, mc.id ASC")
+
+	err = dbPaginator.Query.Limit(dbPaginator.Limit).Offset(dbPaginator.Offset).Scan(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	err = paginator.Query.Limit(paginator.Limit).Offset(paginator.Offset).Scan(ctx)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return mcs, paginator.Total, nil
+	return mcs, dbPaginator.Total, nil
 }
 
 // Update updates specified fields of an existing MachineCapability
@@ -963,12 +918,10 @@ func (mcd MachineCapabilitySQLDAO) GetAllDistinct(
 // this library call happens within a transaction
 func (mcd MachineCapabilitySQLDAO) Update(
 	ctx context.Context, tx *db.Tx,
-	input MachineCapabilityUpdateInput) (*MachineCapability, error) {
+	input MachineCapabilityUpdateInput) (_ *MachineCapability, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, MachineCapabilityDAOSpan := mcd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineCapabilityDAO.Update")
-	if MachineCapabilityDAOSpan != nil {
-		defer MachineCapabilityDAOSpan.End()
-	}
+	ctx, MachineCapabilityDAOSpan := cotel.StartSpan(ctx, "MachineCapabilityDAO.Update")
+	defer func() { cotel.EndSpan(MachineCapabilityDAOSpan, retErr) }()
 
 	m := &MachineCapability{
 		ID: input.ID,
@@ -979,18 +932,11 @@ func (mcd MachineCapabilitySQLDAO) Update(
 	if input.MachineID != nil {
 		m.MachineID = input.MachineID
 		updatedFields = append(updatedFields, "machine_id")
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "machine_id", input.MachineID)
-		}
 	}
 	if input.InstanceTypeID != nil {
 		m.InstanceTypeID = input.InstanceTypeID
 		updatedFields = append(updatedFields, "instance_type_id")
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "instance_type_id", input.InstanceTypeID.String())
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("instance_type_id", input.InstanceTypeID.String()))
 	}
 	if input.Type != nil {
 		if len(strings.TrimSpace(string(*input.Type))) == 0 {
@@ -1001,102 +947,60 @@ func (mcd MachineCapabilitySQLDAO) Update(
 		}
 		m.Type = *input.Type
 		updatedFields = append(updatedFields, "type")
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "type", *input.Type)
-		}
 	}
 	if input.Name != nil {
 		m.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "name", *input.Name)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("name", *input.Name))
 	}
 	if input.Frequency != nil {
 		m.Frequency = input.Frequency
 		updatedFields = append(updatedFields, "frequency")
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "frequency", *input.Frequency)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("frequency", *input.Frequency))
 	}
 	if input.Capacity != nil {
 		m.Capacity = input.Capacity
 		updatedFields = append(updatedFields, "capacity")
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "capacity", *input.Capacity)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("capacity", *input.Capacity))
 	}
 	if input.Vendor != nil {
 		m.Vendor = input.Vendor
 		updatedFields = append(updatedFields, "vendor")
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "vendor", *input.Vendor)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("vendor", *input.Vendor))
 	}
 	if input.Count != nil {
 		m.Count = input.Count
 		updatedFields = append(updatedFields, "count")
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "count", *input.Count)
-		}
 	}
 	if input.DeviceType != nil {
 		m.DeviceType = input.DeviceType
 		updatedFields = append(updatedFields, "device_type")
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "device_type", *input.DeviceType)
-		}
 	}
 	if input.Threads != nil {
 		m.Threads = input.Threads
 		updatedFields = append(updatedFields, "threads")
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "threads", *input.Threads)
-		}
 	}
 
 	if input.Cores != nil {
 		m.Cores = input.Cores
 		updatedFields = append(updatedFields, "cores")
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "cores", *input.Cores)
-		}
 	}
 
 	if input.HardwareRevision != nil {
 		m.HardwareRevision = input.HardwareRevision
 		updatedFields = append(updatedFields, "hardware_revision")
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "hardware_revision", *input.HardwareRevision)
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("hardware_revision", *input.HardwareRevision))
 	}
 
 	if input.Index != nil {
 		m.Index = *input.Index
 		updatedFields = append(updatedFields, "index")
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "index", *input.Index)
-		}
 	}
 
 	if input.InactiveDevices != nil {
 		m.InactiveDevices = input.InactiveDevices
 		updatedFields = append(updatedFields, "inactive_devices")
-
-		if MachineCapabilityDAOSpan != nil {
-			mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "inactive_devices", fmt.Sprintf("%v", input.InactiveDevices))
-		}
+		cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("inactive_devices", fmt.Sprintf("%v", input.InactiveDevices)))
 	}
 
 	if input.Info != nil {
@@ -1127,14 +1031,11 @@ func (mcd MachineCapabilitySQLDAO) Update(
 func (mcd MachineCapabilitySQLDAO) ClearFromParams(
 	ctx context.Context, tx *db.Tx,
 	id uuid.UUID,
-	machineID, instanceTypeID, frequency, capacity, vendor, info bool) (*MachineCapability, error) {
+	machineID, instanceTypeID, frequency, capacity, vendor, info bool) (_ *MachineCapability, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, MachineCapabilityDAOSpan := mcd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineCapabilityDAO.ClearFromParams")
-	if MachineCapabilityDAOSpan != nil {
-		defer MachineCapabilityDAOSpan.End()
-
-		mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "id", id.String())
-	}
+	ctx, MachineCapabilityDAOSpan := cotel.StartSpan(ctx, "MachineCapabilityDAO.ClearFromParams")
+	defer func() { cotel.EndSpan(MachineCapabilityDAOSpan, retErr) }()
+	cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("id", id.String()))
 
 	m := &MachineCapability{
 		ID: id,
@@ -1189,14 +1090,11 @@ func (mcd MachineCapabilitySQLDAO) ClearFromParams(
 // DeleteByID deletes an MachineCapability by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (mcd MachineCapabilitySQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID, purge bool) error {
+func (mcd MachineCapabilitySQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID, purge bool) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, MachineCapabilityDAOSpan := mcd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineCapabilityDAO.DeleteByID")
-	if MachineCapabilityDAOSpan != nil {
-		defer MachineCapabilityDAOSpan.End()
-
-		mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "id", id.String())
-	}
+	ctx, MachineCapabilityDAOSpan := cotel.StartSpan(ctx, "MachineCapabilityDAO.DeleteByID")
+	defer func() { cotel.EndSpan(MachineCapabilityDAOSpan, retErr) }()
+	cotel.SetAttribute(MachineCapabilityDAOSpan, attribute.String("id", id.String()))
 
 	mc := &MachineCapability{
 		ID: id,
@@ -1219,7 +1117,6 @@ func (mcd MachineCapabilitySQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id
 // NewMachineCapabilityDAO returns a new MachineCapabilityDAO
 func NewMachineCapabilityDAO(dbSession *db.Session) MachineCapabilityDAO {
 	return &MachineCapabilitySQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

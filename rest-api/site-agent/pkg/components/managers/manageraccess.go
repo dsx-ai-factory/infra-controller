@@ -10,6 +10,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedmachine"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedpowershelf"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedrack"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedrackgroup"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedswitch"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/flowgrpc"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/infinibandpartition"
@@ -151,6 +152,11 @@ func (m *Manager) ExpectedPowerShelf() *expectedpowershelf.API {
 // ExpectedRack - Add ExpectedRack Manager instance here
 func (m *Manager) ExpectedRack() *expectedrack.API {
 	return expectedrack.NewExpectedRackManager(m.Data.EB, m.API, m.Conf)
+}
+
+// ExpectedRackGroup - Add ExpectedRackGroup Manager instance here
+func (m *Manager) ExpectedRackGroup() *expectedrackgroup.API {
+	return expectedrackgroup.NewExpectedRackGroupManager(m.Data.EB, m.API, m.Conf)
 }
 
 // ExpectedSwitch - Add ExpectedSwitch Manager instance here

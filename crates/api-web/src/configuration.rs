@@ -767,6 +767,11 @@ fn markdown_lite(text: &str) -> String {
 
 #[cfg(test)]
 mod configuration_tests {
+    use carbide_api_core::cfg::resource_pool::{ResourcePoolBackendConfig, ResourcePoolTlsConfig};
+    use model::resource_pool::define::{
+        Range, ResourcePoolConfig, ResourcePoolDef, ResourcePoolType,
+    };
+
     use super::*;
 
     /// The shared compile-checked fixture with every `Option` section
@@ -962,17 +967,49 @@ mod configuration_tests {
 
     #[test]
     fn builds_page_with_overrides() {
-        let effective = serde_json::json!({
-            "listen": "[::]:1079",
-            "asn": 65001,
-            "mlx-config-profiles": { "profileA": {} },
-            "tls": { "root_cafile_path": "/etc/ca.crt" },
-        });
+        let mut config = carbide_api_core::test_support::default_config::fully_populated();
+        config.asn = 65001;
+        config.mlxconfig_profiles = Some(HashMap::new());
+        config.tls.as_mut().unwrap().root_cafile_path = "/etc/ca.crt".to_string();
+        config.resource_pool_backends = HashMap::from([
+            ("local".to_string(), ResourcePoolBackendConfig::Integrated),
+            (
+                "remote".to_string(),
+                ResourcePoolBackendConfig::Grpc {
+                    endpoint: "https://allocator.example".parse().unwrap(),
+                    tls: Some(ResourcePoolTlsConfig {
+                        ca_cert_file: None,
+                        client_cert_file: Some("/etc/allocator/client.crt".into()),
+                        client_key_file: Some("/etc/allocator/client.key".into()),
+                    }),
+                },
+            ),
+        ]);
+        config.pools = Some(HashMap::from([(
+            "vpc-vni".to_string(),
+            ResourcePoolConfig {
+                definition: ResourcePoolDef {
+                    pool_type: ResourcePoolType::Integer,
+                    ranges: vec![Range {
+                        start: "10000".to_string(),
+                        end: "19999".to_string(),
+                        auto_assign: true,
+                    }],
+                    prefix: None,
+                    delegate_prefix_len: None,
+                },
+                backend: Some("local".to_string()),
+                remote_pool: Some("vpc-vni".to_string()),
+            },
+        )]));
+        config.ib_fabrics.get_mut("default").unwrap().backend = Some("local".to_string());
+        let effective = serde_json::to_value(config.redacted()).expect("config serializes");
         let mut explicit = BTreeMap::new();
         explicit.insert("asn".to_string(), "site.toml".to_string());
+        explicit.insert("mlx-config-profiles".to_string(), "base.toml".to_string());
         explicit.insert(
-            "mlx-config-profiles.profileA".to_string(),
-            "base.toml".to_string(),
+            "resource_pool_backends.local".to_string(),
+            "site.toml".to_string(),
         );
         explicit.insert("tls.root_cafile_path".to_string(), "base.toml".to_string());
 
@@ -999,6 +1036,39 @@ mod configuration_tests {
         assert!(asn.overridden);
         assert_eq!(asn.source, "site.toml");
         assert!(asn.value.to_html().contains("65001"));
+
+        let backends = rows
+            .iter()
+            .find(|r| r.path == "resource_pool_backends")
+            .expect("backend map is included in the configuration page");
+        assert!(backends.overridden);
+        assert_eq!(backends.source, "site.toml");
+        let backend_html = backends.value.to_html();
+        for expected in [
+            "local",
+            "integrated",
+            "remote",
+            "grpc",
+            "https://allocator.example/",
+            "/etc/allocator/client.crt",
+            "/etc/allocator/client.key",
+            "&#34;ca_cert_file&#34;: null",
+        ] {
+            assert!(
+                backend_html.contains(expected),
+                "missing backend value: {expected}"
+            );
+        }
+
+        let pools = rows.iter().find(|r| r.path == "pools").unwrap();
+        let pool_html = pools.value.to_html();
+        assert!(pool_html.contains("&#34;backend&#34;: &#34;local&#34;"));
+        assert!(pool_html.contains("&#34;remote_pool&#34;: &#34;vpc-vni&#34;"));
+
+        let fabrics = rows.iter().find(|r| r.path == "ib_fabrics").unwrap();
+        let fabric_html = fabrics.value.to_html();
+        assert!(fabric_html.contains("&#34;backend&#34;: &#34;local&#34;"));
+        assert!(fabric_html.contains("&#34;remote_pool&#34;: null"));
 
         let listen = rows.iter().find(|r| r.path == "listen").unwrap();
         assert!(!listen.overridden);

@@ -26,9 +26,9 @@ var _ MappedNullable = &BatchUpdateNVLinkDomainPowerStateRequest{}
 type BatchUpdateNVLinkDomainPowerStateRequest struct {
 	// ID of the Site
 	SiteId string `json:"siteId"`
-	// UUIDs of the NVLink Domains to power control. IDs must be unique after UUID normalization (case-insensitive).
+	// Nonblank, case-sensitive IDs of the NVLink Domains to power control. Exact duplicate IDs are rejected.
 	DomainIds []string `json:"domainIds"`
-	// Target power state
+	// Target power state. Exact lowercase forms are also accepted for compatibility.
 	State string `json:"state"`
 	// Optional Operation Rule UUID. When set, pins every task spawned by this operation to the named rule and overrides Flow's default rule resolution.
 	RuleId *string `json:"ruleId,omitempty"`

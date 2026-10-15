@@ -28,9 +28,9 @@ type ExpectedSwitchCreateRequest struct {
 	SiteId string `json:"siteId"`
 	// MAC address of the Expected Switch's BMC (Baseboard Management Controller)
 	BmcMacAddress string `json:"bmcMacAddress" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
-	// Username for accessing the Expected Switch's BMC
+	// Username for accessing the Expected Switch's BMC (no API length limit; the BMC's username policy still applies)
 	DefaultBmcUsername NullableString `json:"defaultBmcUsername,omitempty"`
-	// Password for accessing the Expected Switch's BMC
+	// Password for accessing the Expected Switch's BMC (up to 255 characters; the BMC's password policy still applies)
 	DefaultBmcPassword NullableString `json:"defaultBmcPassword,omitempty"`
 	// Serial number of the Expected Switch
 	SwitchSerialNumber string `json:"switchSerialNumber"`
@@ -42,7 +42,7 @@ type ExpectedSwitchCreateRequest struct {
 	NvosMacAddresses []string `json:"nvosMacAddresses,omitempty"`
 	// Optional rack identifier for this component
 	RackId NullableString `json:"rackId,omitempty"`
-	// Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+	// Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
 	BmcIpAddress NullableString `json:"bmcIpAddress,omitempty"`
 	// Display name for this component
 	Name NullableString `json:"name,omitempty"`
@@ -756,7 +756,7 @@ func (o *ExpectedSwitchCreateRequest) GetLabels() map[string]string {
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, nil otherwise
+// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *ExpectedSwitchCreateRequest) GetLabelsOk() (map[string]string, bool) {
 	if o == nil || IsNil(o.Labels) {

@@ -89,7 +89,8 @@ use carbide_redfish::nv_redfish::{BmcError, NvRedfishClientPool, RedfishBmc};
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
-use db::bmc_redfish_session;
+use db::ConditionalWrite;
+use db::bmc_redfish_session::{self, SessionNotOwned};
 use mac_address::MacAddress;
 use model::bmc_redfish_session::StoredSession;
 use nv_redfish::Error as NvError;
@@ -352,16 +353,15 @@ pub(crate) trait BmcSessionStore: Send + Sync {
         session_odata_id: &str,
     ) -> Result<(), BmcSessionError>;
 
-    /// Deletes one session row, scoped to its owner, returning whether a row
-    /// was removed. `false` means an [`BmcSessionStore::insert`] takeover of
-    /// a reused `@odata.id` got there first: the row -- and the session it
-    /// now describes -- belong to another identity.
+    /// `delete_session` removes one session row only if it belongs to this owner.
+    /// A missing or differently owned row returns `NotApplied`; the caller must
+    /// leave the remote session alone.
     async fn delete_session(
         &self,
         spiffe_service_id: &str,
         bmc_mac: MacAddress,
         session_odata_id: &str,
-    ) -> Result<bool, BmcSessionError>;
+    ) -> Result<ConditionalWrite<(), SessionNotOwned>, BmcSessionError>;
 
     async fn delete_by_mac(&self, bmc_mac: MacAddress) -> Result<(), BmcSessionError>;
 }
@@ -415,7 +415,7 @@ impl BmcSessionStore for PgBmcSessionStore {
         spiffe_service_id: &str,
         bmc_mac: MacAddress,
         session_odata_id: &str,
-    ) -> Result<bool, BmcSessionError> {
+    ) -> Result<ConditionalWrite<(), SessionNotOwned>, BmcSessionError> {
         let mut conn = self
             .pool
             .acquire()
@@ -647,18 +647,16 @@ impl BmcSessionManager {
         for row in excess {
             let session_id = ODataId::from(row.session_odata_id);
 
-            // Claim the row before touching the BMC. If the delete removed
-            // nothing, a concurrent mint took the row over after the BMC
-            // reused this @odata.id -- the session behind it is the new
-            // owner's live one and must not be revoked. (The old session is
-            // dead regardless: the BMC only reuses an id it has released.)
+            // Delete the owned row before deleting the session on the BMC. If the
+            // row is missing or belongs to another caller, skip the remote DELETE.
+            // When the BMC reuses `@odata.id`, the old session is already gone.
             match self
                 .store
                 .delete_session(spiffe_service_id, bmc_mac, &session_id.to_string())
                 .await
             {
-                Ok(true) => {}
-                Ok(false) => continue,
+                Ok(ConditionalWrite::Applied(())) => {}
+                Ok(ConditionalWrite::NotApplied(SessionNotOwned)) => continue,
                 Err(err) => {
                     carbide_instrument::emit(BmcSessionCleanupFailed {
                         operation: BmcSessionCleanupOperation::DeleteSessionRows,
@@ -920,6 +918,8 @@ mod tests {
     };
     use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_test_support::{Check, check_values, value_scenarios};
+    use db::ConditionalWrite;
+    use db::bmc_redfish_session::SessionNotOwned;
     use mac_address::MacAddress;
     use sqlx::types::chrono::Utc;
     use tokio::sync::Mutex;
@@ -999,7 +999,7 @@ mod tests {
             spiffe_service_id: &str,
             bmc_mac: MacAddress,
             session_odata_id: &str,
-        ) -> Result<bool, BmcSessionError> {
+        ) -> Result<ConditionalWrite<(), SessionNotOwned>, BmcSessionError> {
             let mut rows = self.rows.lock().await;
             let before = rows.len();
             rows.retain(|row| {
@@ -1007,7 +1007,11 @@ mod tests {
                     || row.bmc_mac_address != bmc_mac
                     || row.session_odata_id != session_odata_id
             });
-            Ok(rows.len() < before)
+            Ok(if rows.len() < before {
+                ConditionalWrite::Applied(())
+            } else {
+                ConditionalWrite::NotApplied(SessionNotOwned)
+            })
         }
 
         async fn delete_by_mac(&self, bmc_mac: MacAddress) -> Result<(), BmcSessionError> {
@@ -1045,8 +1049,8 @@ mod tests {
             _spiffe_service_id: &str,
             _bmc_mac: MacAddress,
             _session_odata_id: &str,
-        ) -> Result<bool, BmcSessionError> {
-            Ok(true)
+        ) -> Result<ConditionalWrite<(), SessionNotOwned>, BmcSessionError> {
+            Ok(ConditionalWrite::Applied(()))
         }
 
         async fn delete_by_mac(&self, _bmc_mac: MacAddress) -> Result<(), BmcSessionError> {
@@ -1327,10 +1331,13 @@ mod tests {
         store.insert("svc", bmc_mac, "/sessions/v1").await.unwrap();
         store.insert("svc", bmc_mac, "/sessions/v2").await.unwrap();
 
-        store
-            .delete_session("svc", bmc_mac, "/sessions/v1")
-            .await
-            .expect("in-memory delete never fails");
+        assert_eq!(
+            store
+                .delete_session("svc", bmc_mac, "/sessions/v1")
+                .await
+                .expect("in-memory delete never fails"),
+            ConditionalWrite::Applied(())
+        );
 
         let rows = store
             .find_by_owner("svc", bmc_mac)

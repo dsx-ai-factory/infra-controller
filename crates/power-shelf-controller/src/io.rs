@@ -157,10 +157,12 @@ impl StateControllerIO for PowerShelfStateControllerIO {
             PowerShelfControllerState::Configuring => ("configuring", ""),
             PowerShelfControllerState::Ready => ("ready", ""),
             PowerShelfControllerState::RotatingBmc { .. } => ("rotatingbmc", ""),
-            PowerShelfControllerState::Maintenance { operation } => {
+            PowerShelfControllerState::Maintenance { operation, .. } => {
                 let op = match operation {
                     model::power_shelf::PowerShelfMaintenanceOperation::PowerOn => "power_on",
-                    model::power_shelf::PowerShelfMaintenanceOperation::PowerOff => "power_off",
+                    model::power_shelf::PowerShelfMaintenanceOperation::PowerOff { .. } => {
+                        "power_off"
+                    }
                 };
                 ("maintenance", op)
             }

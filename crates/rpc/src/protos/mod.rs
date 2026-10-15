@@ -27,6 +27,12 @@ pub mod common {
 
 #[allow(non_snake_case, unknown_lints, clippy::all)]
 #[rustfmt::skip]
+pub mod console_log {
+    include!(concat!(env!("OUT_DIR"), "/console_log.rs"));
+}
+
+#[allow(non_snake_case, unknown_lints, clippy::all)]
+#[rustfmt::skip]
 pub mod scout_firmware_upgrade {
     include!(concat!(env!("OUT_DIR"), "/scout_firmware_upgrade.rs"));
 }

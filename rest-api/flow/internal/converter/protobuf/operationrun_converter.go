@@ -532,6 +532,10 @@ func upgradeFirmwareOperationFrom(
 	if upgrade == nil {
 		return nil, fmt.Errorf("upgrade_firmware operation is required")
 	}
+	ruleID, err := OptionalUUIDFrom(upgrade.GetRuleId())
+	if err != nil {
+		return nil, fmt.Errorf("invalid upgrade_firmware.rule_id: %w", err)
+	}
 
 	var targetSpec *operation.TargetSpec
 	if upgrade.GetTargetSpec() != nil {
@@ -547,9 +551,12 @@ func upgradeFirmwareOperationFrom(
 	info := &operations.FirmwareControlTaskInfo{
 		Operation:              operations.FirmwareOperationUpgrade,
 		TargetVersion:          upgrade.GetTargetVersion(),
-		RuleID:                 UUIDStringFrom(upgrade.GetRuleId()),
 		SubTargets:             append([]string(nil), upgrade.GetSubTargets()...),
 		OverrideReadinessCheck: upgrade.GetOverrideReadinessCheck(),
+		OverrideVersionCheck:   upgrade.GetOverrideVersionCheck(),
+	}
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
 	}
 	if upgrade.GetStartTime() != nil {
 		info.StartTime = upgrade.GetStartTime().AsTime().Unix()
@@ -960,6 +967,7 @@ func operationTo(
 			RuleId:                 optionalUUIDStringTo(info.RuleID),
 			SubTargets:             append([]string(nil), info.SubTargets...),
 			OverrideReadinessCheck: info.OverrideReadinessCheck,
+			OverrideVersionCheck:   info.OverrideVersionCheck,
 		}
 		if info.TargetVersion != "" {
 			targetVersion := info.TargetVersion

@@ -80,7 +80,7 @@ func TestAPINetworkSecurityGroupRuleConversions(t *testing.T) {
 										Protocol:       p,
 										Action:         a,
 										Priority:       55,
-										Ipv6:           false, // We have support for it in ACLs but pretty much nowhere else, so we hide this for now.
+										Ipv6:           false,
 										SrcPortStart:   sps,
 										SrcPortEnd:     spe,
 										DstPortStart:   dps,
@@ -94,6 +94,8 @@ func TestAPINetworkSecurityGroupRuleConversions(t *testing.T) {
 
 								if d != corev1.NetworkSecurityGroupRuleDirection_NSG_RULE_DIRECTION_INVALID &&
 									p != corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_INVALID &&
+									// These fixture prefixes are IPv4, so ICMP6 is invalid.
+									p != corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ICMP6 &&
 									a != corev1.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_INVALID &&
 									// src/dst start and end pairs are mutually required.
 									// Either start and end or both nil or neither is allowed to be nil.
@@ -130,6 +132,7 @@ func TestAPINetworkSecurityGroupRuleConversions(t *testing.T) {
 		apiRule := NewAPINetworkSecurityGroupRule(rule.NetworkSecurityGroupRuleAttributes)
 
 		assert.NotNil(t, apiRule, "expected non-nil API rule for valid proto attrs")
+		require.NoError(t, apiRule.Validate())
 
 		newAttrs := apiRule.ToProto()
 
@@ -208,6 +211,46 @@ func TestAPINetworkSecurityGroupRuleConversions(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestAPINetworkSecurityGroupRule_Validate(t *testing.T) {
+	tests := []struct {
+		name        string
+		source      string
+		destination string
+		protocol    string
+		wantIPv6    bool
+		wantError   string
+	}{
+		{name: "IPv6 TCP", source: "2001:db8:1::/64", destination: "2001:db8:2::/64", protocol: "TCP", wantIPv6: true},
+		{name: "IPv6 ICMP6 with normalized casing", source: "::/0", destination: "2001:db8::/64", protocol: "icmp6", wantIPv6: true},
+		{name: "IPv4-mapped IPv6 stays IPv6", source: "::ffff:192.0.2.0/120", destination: "::ffff:198.51.100.0/120", protocol: "TCP", wantIPv6: true},
+		{name: "mixed prefix families", source: "192.0.2.0/24", destination: "2001:db8::/64", protocol: "TCP", wantError: "rules: source and destination prefixes must use the same IP version."},
+		{name: "ICMP with IPv6", source: "::/0", destination: "2001:db8::/64", protocol: "ICMP", wantError: "rules: protocol `ICMP` cannot be used with IPv6 prefixes."},
+		{name: "ICMP6 with IPv4", source: "0.0.0.0/0", destination: "192.0.2.0/24", protocol: "ICMP6", wantError: "rules: protocol `ICMP6` cannot be used with IPv4 prefixes."},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rule := APINetworkSecurityGroupRule{
+				Direction:         APINetworkSecurityGroupRuleDirectionIngress,
+				Action:            APINetworkSecurityGroupRuleActionPermit,
+				Protocol:          test.protocol,
+				SourcePrefix:      &test.source,
+				DestinationPrefix: &test.destination,
+			}
+			err := rule.Validate()
+			if test.wantError != "" {
+				require.EqualError(t, err, test.wantError)
+				return
+			}
+			require.NoError(t, err)
+			attrs := rule.ToProto()
+			assert.Equal(t, test.wantIPv6, attrs.Ipv6)
+			assert.Equal(t, test.source, attrs.GetSrcPrefix())
+			assert.Equal(t, test.destination, attrs.GetDstPrefix())
+			assert.Equal(t, rule, *NewAPINetworkSecurityGroupRule(attrs))
+		})
 	}
 }
 
@@ -493,6 +536,13 @@ func TestAPINetworkSecurityGroupCreateRequest_ToProto(t *testing.T) {
 				SourcePrefix:      cutil.GetPtr("0.0.0.0/0"),
 				DestinationPrefix: cutil.GetPtr("1.1.1.1/0"),
 			},
+			{
+				Direction:         APINetworkSecurityGroupRuleDirectionIngress,
+				Protocol:          APINetworkSecurityGroupRuleProtocolTcp,
+				Action:            APINetworkSecurityGroupRuleActionPermit,
+				SourcePrefix:      cutil.GetPtr("2001:db8:1::/64"),
+				DestinationPrefix: cutil.GetPtr("2001:db8:2::/64"),
+			},
 		},
 		Labels: map[string]string{"env": "test"},
 	}
@@ -519,7 +569,9 @@ func TestAPINetworkSecurityGroupCreateRequest_ToProto(t *testing.T) {
 	assert.Equal(t, *req.Description, got.Metadata.Description)
 	require.NotNil(t, got.NetworkSecurityGroupAttributes)
 	assert.Equal(t, req.StatefulEgress, got.NetworkSecurityGroupAttributes.StatefulEgress)
-	assert.Equal(t, 1, len(got.NetworkSecurityGroupAttributes.Rules))
+	require.Len(t, got.NetworkSecurityGroupAttributes.Rules, 2)
+	assert.False(t, got.NetworkSecurityGroupAttributes.Rules[0].Ipv6)
+	assert.True(t, got.NetworkSecurityGroupAttributes.Rules[1].Ipv6)
 }
 
 func TestAPINetworkSecurityGroupUpdateRequest_ToProto(t *testing.T) {

@@ -52,9 +52,9 @@ pub(crate) enum Cmd {
     #[clap(about = "Check lockdown status")]
     LockdownStatus(lockdown_status::Args),
     #[clap(
-        about = "Set a BMC's root password out-of-band (for fleet rotation use `credential rotate`)"
+        about = "Set the root password of a BMC out-of-band (for fleet rotation use `credential rotate`)"
     )]
     SetRootPassword(set_root_password::Args),
-    #[clap(about = "Resolve a BMC's Redfish vendor")]
+    #[clap(about = "Resolve the Redfish vendor for a BMC")]
     ProbeVendor(probe_vendor::Args),
 }

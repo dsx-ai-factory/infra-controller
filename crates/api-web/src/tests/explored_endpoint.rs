@@ -89,6 +89,57 @@ async fn configure_default(env: &TestEnv, credential_type: RpcCredentialType) {
 }
 
 #[crate::sqlx_test]
+async fn test_endpoint_detail_matches_ip_addresses(pool: sqlx::PgPool) {
+    let env = TestEnv::new(pool).await;
+    let app = make_test_app(&env.test_harness);
+    let mut txn = env.api().database_connection.begin().await.unwrap();
+    for address in ["192.0.2.10", "2001:db8::abcd"] {
+        db::explored_endpoints::insert(
+            address.parse().unwrap(),
+            &Default::default(),
+            false,
+            &mut txn,
+        )
+        .await
+        .unwrap();
+    }
+    txn.commit().await.unwrap();
+
+    for (selector, expected_address) in [
+        ("2001:db8::abcd", Some("2001:db8::abcd")),
+        ("2001:0DB8:0:0:0:0:0:ABCD", Some("2001:db8::abcd")),
+        ("2001:0db8:0:0:0:0:0:abcd.json", Some("2001:db8::abcd")),
+        ("192.0.2.10.json", Some("192.0.2.10")),
+        ("2001:db8::ffff", None),
+        ("not-an-ip", None),
+    ] {
+        let uri = format!("/admin/explored-endpoint/{selector}");
+        let response = app
+            .clone()
+            .oneshot(web_request_builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let Some(expected_address) = expected_address else {
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "GET {uri}");
+            continue;
+        };
+        assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        if selector.ends_with(".json") {
+            let endpoint: rpc::site_explorer::ExploredEndpoint =
+                serde_json::from_slice(&body).unwrap();
+            assert_eq!(endpoint.address, expected_address, "GET {uri}");
+        } else {
+            let body = std::str::from_utf8(&body).unwrap();
+            assert!(
+                body.contains(&format!("<h1>Endpoint {expected_address}</h1>")),
+                "GET {uri}"
+            );
+        }
+    }
+}
+
+#[crate::sqlx_test]
 async fn test_site_explorer_run_status_banner(pool: sqlx::PgPool) {
     let env = TestEnv::new(pool).await;
     let app = make_test_app(&env.test_harness);

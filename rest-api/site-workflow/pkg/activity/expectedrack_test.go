@@ -60,7 +60,7 @@ func TestManageExpectedRack_CreateExpectedRackOnSite(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "test create expected rack fail on missing rack_profile_id",
+			name: "create without caller profile",
 			fields: fields{
 				coreGrpcAtomicClient: coreGrpcAtomicClient,
 			},
@@ -68,10 +68,10 @@ func TestManageExpectedRack_CreateExpectedRackOnSite(t *testing.T) {
 				ctx: context.Background(),
 				request: &corev1.ExpectedRack{
 					RackId:        &corev1.RackId{Id: "test-rack-002"},
-					RackProfileId: &corev1.RackProfileId{Id: ""},
+					RackProfileId: nil,
 				},
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name: "test create expected rack fail on missing request",
@@ -146,7 +146,7 @@ func TestManageExpectedRack_UpdateExpectedRackOnSite(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "test update expected rack fail on missing rack_profile_id",
+			name: "update without caller profile",
 			fields: fields{
 				coreGrpcAtomicClient: coreGrpcAtomicClient,
 			},
@@ -154,10 +154,10 @@ func TestManageExpectedRack_UpdateExpectedRackOnSite(t *testing.T) {
 				ctx: context.Background(),
 				request: &corev1.ExpectedRack{
 					RackId:        &corev1.RackId{Id: "test-update-rack-002"},
-					RackProfileId: &corev1.RackProfileId{Id: ""},
+					RackProfileId: nil,
 				},
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name: "test update expected rack fail on missing request",

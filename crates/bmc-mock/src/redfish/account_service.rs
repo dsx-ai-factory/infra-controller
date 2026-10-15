@@ -16,6 +16,7 @@
  */
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -25,11 +26,12 @@ use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
 use futures::future::BoxFuture;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::JsonExt;
-use crate::{http, redfish};
+use crate::{Callbacks, http, redfish};
 
 pub(crate) fn resource() -> redfish::Resource<'static> {
     redfish::Resource {
@@ -40,15 +42,15 @@ pub(crate) fn resource() -> redfish::Resource<'static> {
     }
 }
 
-pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
     r.route(&resource().odata_id, get(get_root).patch(patch_root))
         .route(
             &ACCOUNTS_COLLECTION_RESOURCE.odata_id,
-            get(get_accounts).post(create_account),
+            get(get_accounts::<C>).post(create_account),
         )
         .route(
             format!("{}/{{account_id}}", ACCOUNTS_COLLECTION_RESOURCE.odata_id).as_str(),
-            get(get_account).patch(patch_account),
+            get(get_account::<C>).patch(patch_account::<C>),
         )
 }
 
@@ -63,6 +65,7 @@ const ADMINISTRATOR_ROLE_ID: &str = "Administrator";
 pub struct AccountServiceState {
     accounts: Mutex<Vec<Account>>,
     password_updater: Mutex<Option<Weak<dyn PasswordUpdater>>>,
+    update_lock: tokio::sync::Mutex<()>,
 }
 
 pub(crate) trait PasswordUpdater: Send + Sync {
@@ -74,65 +77,26 @@ pub(crate) trait PasswordUpdater: Send + Sync {
     ) -> BoxFuture<'a, Result<(), String>>;
 }
 
-/// A snapshot of one BMC account's current password, suitable for durable
-/// persistence and later restoration after a mock rebuild.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct BmcAccountCredential {
-    /// Redfish account id this credential belongs to.
-    pub account_id: String,
-    /// Account username, used together with `account_id` to match this
-    /// credential back onto an account during `restore_credentials`.
-    pub username: String,
-    /// The account's current password. Sensitive: this snapshot is written
-    /// to disk as plaintext for restoration after a mock rebuild.
-    pub password: String,
-}
-
 impl AccountServiceState {
     pub(crate) fn new(factory_default_account: Account) -> Self {
         Self {
             accounts: Mutex::new(vec![factory_default_account]),
             password_updater: Mutex::new(None),
+            update_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    pub(crate) fn persisted_accounts(&self) -> Vec<PersistedAccount> {
+        self.accounts().into_iter().map(Into::into).collect()
+    }
+
+    pub(crate) fn restore_accounts(&self, accounts: &[PersistedAccount]) {
+        *self.accounts.lock().expect("mutex poisoned") =
+            accounts.iter().cloned().map(Into::into).collect();
     }
 
     pub(crate) fn set_password_updater(&self, updater: &Arc<dyn PasswordUpdater>) {
         *self.password_updater.lock().expect("mutex poisoned") = Some(Arc::downgrade(updater));
-    }
-
-    /// Exports the current password of every account for durable persistence.
-    pub fn export_credentials(&self) -> Vec<BmcAccountCredential> {
-        self.accounts
-            .lock()
-            .expect("mutex poisoned")
-            .iter()
-            .map(|account| BmcAccountCredential {
-                account_id: account.id.clone(),
-                username: account.username.clone(),
-                password: account.password.clone(),
-            })
-            .collect()
-    }
-
-    /// Restores previously exported passwords onto matching accounts. Accounts
-    /// are matched by id and username; the factory-default password recorded at
-    /// construction is left untouched so factory-default detection still works.
-    /// Credentials that don't match any current account (e.g. from an
-    /// old/stale snapshot) are silently ignored.
-    pub fn restore_credentials(&self, credentials: &[BmcAccountCredential]) {
-        let mut accounts = self.accounts.lock().expect("mutex poisoned");
-        for credential in credentials {
-            if let Some(account) = accounts.iter_mut().find(|account| {
-                account.id == credential.account_id && account.username == credential.username
-            }) {
-                account.password = credential.password.clone();
-            } else {
-                tracing::warn!(
-                    account_id = %credential.account_id,
-                    "BMC credential snapshot did not match a current account"
-                );
-            }
-        }
     }
 
     pub(crate) fn accounts(&self) -> Vec<Account> {
@@ -178,6 +142,7 @@ impl AccountServiceState {
         account_id: &str,
         password: impl Into<String>,
     ) -> Result<bool, String> {
+        let _update = self.update_lock.lock().await;
         let password = password.into();
         let account = self.find(account_id);
         let Some(account) = account else {
@@ -227,6 +192,60 @@ pub(crate) struct Account {
     password: String,
     factory_default_password: String,
     role_id: String,
+}
+
+/// Full account state, including the baseline used to detect factory-default credentials.
+/// Credentials are plaintext; callers must not log serialized snapshots.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PersistedAccount {
+    id: String,
+    username: String,
+    password: String,
+    factory_default_password: String,
+    role_id: String,
+}
+
+impl From<Account> for PersistedAccount {
+    fn from(a: Account) -> Self {
+        Self {
+            id: a.id,
+            username: a.username,
+            password: a.password,
+            factory_default_password: a.factory_default_password,
+            role_id: a.role_id,
+        }
+    }
+}
+
+impl From<PersistedAccount> for Account {
+    fn from(a: PersistedAccount) -> Self {
+        Self {
+            id: a.id,
+            username: a.username,
+            password: a.password,
+            factory_default_password: a.factory_default_password,
+            role_id: a.role_id,
+        }
+    }
+}
+
+impl PersistedAccount {
+    pub(crate) fn validate_all(accounts: &[Self]) -> Result<(), &'static str> {
+        if accounts.is_empty() {
+            return Err("empty account list");
+        }
+        let mut ids = HashSet::new();
+        let mut names = HashSet::new();
+        for account in accounts {
+            if account.id.is_empty() || account.username.is_empty() || account.role_id.is_empty() {
+                return Err("empty account identity or role");
+            }
+            if !ids.insert(&account.id) || !names.insert(&account.username) {
+                return Err("duplicate account ID or username");
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Account {
@@ -292,7 +311,7 @@ fn account_resource(id: impl Display) -> redfish::Resource<'static> {
     }
 }
 
-async fn get_accounts(State(state): State<BmcState>) -> Response {
+async fn get_accounts<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     let members = state
         .account_service_state
         .accounts()
@@ -308,8 +327,8 @@ async fn create_account() -> Response {
     json!({}).into_ok_response()
 }
 
-async fn patch_account(
-    State(state): State<BmcState>,
+async fn patch_account<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(account_id): Path<String>,
     Json(patch_account): Json<serde_json::Value>,
 ) -> Response {
@@ -335,136 +354,13 @@ async fn patch_account(
     }
 }
 
-async fn get_account(State(state): State<BmcState>, Path(account_id): Path<String>) -> Response {
+async fn get_account<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(account_id): Path<String>,
+) -> Response {
     state
         .account_service_state
         .find(&account_id)
         .map(|account| account.to_json().into_ok_response())
         .unwrap_or_else(http::not_found)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use futures::future::BoxFuture;
-
-    use super::{Account, AccountServiceState, PasswordUpdater};
-
-    struct TestPasswordUpdater {
-        result: Result<(), String>,
-    }
-
-    impl PasswordUpdater for TestPasswordUpdater {
-        fn update_password<'a>(
-            &'a self,
-            _username: &'a str,
-            _current_password: &'a str,
-            _new_password: &'a str,
-        ) -> BoxFuture<'a, Result<(), String>> {
-            let result = self.result.clone();
-            Box::pin(async move { result })
-        }
-    }
-
-    fn state_with_updater(
-        result: Result<(), String>,
-    ) -> (AccountServiceState, Arc<dyn PasswordUpdater>) {
-        let state = AccountServiceState::new(Account::administrator("1", "root", "old-password"));
-        let updater: Arc<dyn PasswordUpdater> = Arc::new(TestPasswordUpdater { result });
-        state.set_password_updater(&updater);
-        (state, updater)
-    }
-
-    #[tokio::test]
-    async fn update_password_commits_after_ipmi_update_succeeds() {
-        let (state, _updater) = state_with_updater(Ok(()));
-
-        assert_eq!(state.update_password("1", "new-password").await, Ok(true));
-        assert!(state.is_authorized("root", "new-password"));
-    }
-
-    #[tokio::test]
-    async fn rotated_password_survives_bmc_rebuild() {
-        // Regression test for issue #5966: machine-a-tron loses rotated BMC
-        // passwords on pod restart because AccountServiceState is in-memory only.
-        let (state, _updater) = state_with_updater(Ok(()));
-        assert_eq!(
-            state.update_password("1", "rotated-password").await,
-            Ok(true)
-        );
-        assert!(state.is_authorized("root", "rotated-password"));
-
-        // The credentials exported on each password change are persisted in
-        // the machine-a-tron device snapshot.
-        let exported = state.export_credentials();
-
-        // Simulate a machine-a-tron pod restart: run_bmc_mock rebuilds every
-        // BMC from its factory-default configuration, then restores the
-        // snapshot-saved credentials.
-        let restarted =
-            AccountServiceState::new(Account::administrator("1", "root", "old-password"));
-        restarted.restore_credentials(&exported);
-
-        assert!(
-            restarted.is_authorized("root", "rotated-password"),
-            "rotated password must survive a BMC mock rebuild (issue #5966)"
-        );
-        assert!(
-            !restarted.is_authorized("root", "old-password"),
-            "factory-default password must stay rejected after rotation (issue #5966)"
-        );
-    }
-
-    #[tokio::test]
-    async fn restore_credentials_preserves_factory_default_detection() {
-        let (state, _updater) = state_with_updater(Ok(()));
-        assert_eq!(
-            state.update_password("1", "rotated-password").await,
-            Ok(true)
-        );
-        let exported = state.export_credentials();
-
-        let restarted =
-            AccountServiceState::new(Account::administrator("1", "root", "old-password"));
-        restarted.restore_credentials(&exported);
-
-        // The restored password is not the factory default, and the factory
-        // default recorded at construction must remain intact underneath.
-        assert!(!restarted.is_factory_default_password("root", "rotated-password"));
-        assert!(!restarted.is_factory_default_password("root", "old-password"));
-
-        // A never-rotated export restores onto a fresh state as still-factory.
-        let untouched =
-            AccountServiceState::new(Account::administrator("1", "root", "old-password"));
-        let untouched_export = untouched.export_credentials();
-        let restored_untouched =
-            AccountServiceState::new(Account::administrator("1", "root", "old-password"));
-        restored_untouched.restore_credentials(&untouched_export);
-        assert!(restored_untouched.is_factory_default_password("root", "old-password"));
-    }
-
-    #[tokio::test]
-    async fn restore_credentials_ignores_unknown_accounts() {
-        let state = AccountServiceState::new(Account::administrator("1", "root", "old-password"));
-        state.restore_credentials(&[super::BmcAccountCredential {
-            account_id: "2".to_string(),
-            username: "other".to_string(),
-            password: "whatever".to_string(),
-        }]);
-        assert!(state.is_authorized("root", "old-password"));
-        assert!(!state.is_authorized("other", "whatever"));
-    }
-
-    #[tokio::test]
-    async fn update_password_preserves_redfish_password_when_ipmi_update_fails() {
-        let (state, _updater) = state_with_updater(Err("IPMI update failed".to_string()));
-
-        assert_eq!(
-            state.update_password("1", "new-password").await,
-            Err("IPMI update failed".to_string())
-        );
-        assert!(state.is_authorized("root", "old-password"));
-        assert!(!state.is_authorized("root", "new-password"));
-    }
 }

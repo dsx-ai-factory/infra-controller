@@ -495,7 +495,7 @@ func (o *EndpointExplorationReport) GetFirmwareVersions() map[string]string {
 	return o.FirmwareVersions
 }
 
-// GetFirmwareVersionsOk returns a tuple with the FirmwareVersions field value if set, nil otherwise
+// GetFirmwareVersionsOk returns a tuple with the FirmwareVersions field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *EndpointExplorationReport) GetFirmwareVersionsOk() (map[string]string, bool) {
 	if o == nil || IsNil(o.FirmwareVersions) {

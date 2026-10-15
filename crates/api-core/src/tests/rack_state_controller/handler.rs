@@ -29,6 +29,7 @@ use carbide_secrets::credentials::{
 use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
 use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
+use component_manager::config::SwitchMtlsService;
 use component_manager::mock::MockNvSwitchManager;
 use db::db_read::DbReader;
 use db::{
@@ -43,8 +44,9 @@ use model::rack::{
     ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceStatus,
     FirmwareUpgradeJob, FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope,
     NvosPasswordUpdateState, NvosUpdateJob, NvosUpdateState, NvosUpdateSwitchStatus, Rack,
-    RackConfig, RackFirmwareUpgradeState, RackFirmwareUpgradeStatus, RackMaintenanceState,
-    RackPowerState, RackState, RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
+    RackConfig, RackErrorRecoveryPolicy, RackFirmwareUpgradeState, RackFirmwareUpgradeStatus,
+    RackMaintenanceState, RackPowerState, RackState, RackValidationState, SwitchNvosUpdateState,
+    SwitchNvosUpdateStatus,
 };
 use model::rack_type::{
     RackCapabilitiesSet, RackCapabilityCompute, RackCapabilityPowerShelf, RackCapabilitySwitch,
@@ -503,6 +505,7 @@ async fn create_ready_rack_with_switches(
 async fn create_expected_rack(pool: &sqlx::PgPool, rack_id: &RackId, rack_profile_id: &str) {
     let mut txn = pool.acquire().await.unwrap();
     let er = ExpectedRack {
+        rack_group_id: None,
         rack_id: rack_id.clone(),
         rack_profile_id: RackProfileId::new(rack_profile_id),
         ..Default::default()
@@ -1230,6 +1233,7 @@ async fn test_error_state_does_nothing(
 
     let error_state = RackState::Error {
         cause: "test error".to_string(),
+        recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
     };
     let outcome = handler
         .handle_object_state(&rack_id, &mut rack, &error_state, &mut ctx)
@@ -1475,6 +1479,7 @@ async fn test_ingestion_transitions_to_firmware_upgrade_and_submits_rack_profile
         .unwrap()
         .firmware_object = Some(RackFirmwareObjectConfig {
         url: url::Url::parse(FIRMWARE_OBJECT_URL).unwrap(),
+        access_token_credential: None,
         fetch_timeout: std::time::Duration::from_secs(17),
     });
 
@@ -1748,7 +1753,7 @@ async fn test_firmware_upgrade_start_rejects_desired_off_machine_before_rms_subm
     }
 
     let StateHandlerOutcome::Transition {
-        next_state: RackState::Error { cause },
+        next_state: RackState::Error { cause, .. },
         ..
     } = outcome
     else {
@@ -1804,6 +1809,7 @@ async fn test_firmware_upgrade_start_submits_json_and_deletes_access_token(
         .unwrap()
         .firmware_object = Some(RackFirmwareObjectConfig {
         url: url::Url::parse("https://firmware.example.invalid/sot/nvl72.json").unwrap(),
+        access_token_credential: None,
         fetch_timeout: std::time::Duration::from_secs(11),
     });
 
@@ -2125,7 +2131,7 @@ async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
         .await?;
 
     let StateHandlerOutcome::Transition {
-        next_state: RackState::Error { cause },
+        next_state: RackState::Error { cause, .. },
         ..
     } = &outcome
     else {
@@ -2325,7 +2331,7 @@ async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state(
         .handle_object_state(&rack_id, &mut rack, &maintenance_state, &mut ctx)
         .await?;
     let StateHandlerOutcome::Transition {
-        next_state: RackState::Error { cause },
+        next_state: RackState::Error { cause, .. },
         ..
     } = &outcome
     else {
@@ -2739,8 +2745,34 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
 /// verifies that the rack keeps waiting while any tracked machine is still in
 /// WaitingForRackFirmwareUpgrade, then errors only after every machine has left
 /// that wait state and at least one failed.
-#[crate::sqlx_test]
-async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error(
+///
+/// Expanded by hand instead of using `#[crate::sqlx_test]` so the body runs on
+/// a thread with a larger stack. This is the widest future in the crate's
+/// suite and does not fit the default one. Same shape as the measurement test
+/// in `tests::instance`.
+#[test]
+fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error() {
+    let mut args = ::sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error"
+    ));
+    args.fixtures(Box::leak(Box::new(vec![])));
+
+    let test_fn: fn(sqlx::PgPool) -> _ =
+        test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error_body;
+
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            sqlx_testing::TestFn::run_test(test_fn, args)
+                .expect("firmware upgrade wait-for-complete test failed")
+        })
+        .expect("failed to spawn the firmware upgrade test thread")
+        .join()
+        .expect("firmware upgrade test thread panicked");
+}
+
+async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error_body(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(
@@ -3152,6 +3184,7 @@ async fn test_firmware_completion_enters_profile_driven_nvos_for_default_scope(
 
     profile.firmware_object = Some(RackFirmwareObjectConfig {
         url: url::Url::parse("https://firmware.example.invalid/sot/nvl72.json")?,
+        access_token_credential: None,
         fetch_timeout: std::time::Duration::from_secs(30),
     });
 
@@ -3297,6 +3330,7 @@ async fn test_profile_driven_nvos_start_retries_fetch_and_uses_noauth(
 
     profile.firmware_object = Some(RackFirmwareObjectConfig {
         url: url::Url::parse(FIRMWARE_OBJECT_URL)?,
+        access_token_credential: None,
         fetch_timeout: std::time::Duration::from_secs(19),
     });
 
@@ -3641,7 +3675,7 @@ async fn test_profile_sot_removal_errors_when_switch_waits_for_nvos(
 
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
-    let RackState::Error { cause } = rack.controller_state.value else {
+    let RackState::Error { cause, .. } = rack.controller_state.value else {
         panic!("missing profile SOT should fail an enrolled NVOS phase");
     };
 
@@ -3939,7 +3973,7 @@ async fn test_nvos_update_recovery_moves_to_error_when_profile_is_missing(
 
     assert!(rack.config.maintenance_requested.is_none());
 
-    let RackState::Error { cause } = &rack.controller_state.value else {
+    let RackState::Error { cause, .. } = &rack.controller_state.value else {
         panic!("missing profile should fail NVOS password recovery");
     };
 
@@ -4336,7 +4370,7 @@ async fn test_nvos_update_failed_password_recovery_enters_error_without_resubmis
 
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
-    let RackState::Error { cause } = rack.controller_state.value else {
+    let RackState::Error { cause, .. } = rack.controller_state.value else {
         panic!("failed NVOS password recovery should transition the rack to Error");
     };
 
@@ -4356,6 +4390,7 @@ async fn queue_configure_nmx_cluster_v2_success(
     secondary_switch_id: SwitchId,
     primary_switch_id: SwitchId,
     topology_type: &str,
+    primary_telemetry_configured: bool,
 ) {
     env.rms_sim
         .queue_configure_scale_up_fabric_manager_v2_response(Ok(
@@ -4376,6 +4411,21 @@ async fn queue_configure_nmx_cluster_v2_success(
         }))
         .await;
 
+    if primary_telemetry_configured {
+        env.rms_sim
+            .queue_configure_switch_certificate_response(Ok(
+                rms::ConfigureSwitchCertificateResponse {
+                    response: Some(rms::NodeBatchResponse {
+                        status: rms::ReturnCode::Success as i32,
+                        job_id: "configure-primary-switch-certificate-job".to_string(),
+                        ..Default::default()
+                    }),
+                    jobs: Vec::new(),
+                },
+            ))
+            .await;
+    }
+
     env.rms_sim
         .queue_get_configure_switch_certificate_job_status_response(Ok(
             rms::GetConfigureSwitchCertificateJobStatusResponse {
@@ -4385,6 +4435,18 @@ async fn queue_configure_nmx_cluster_v2_success(
             },
         ))
         .await;
+
+    if primary_telemetry_configured {
+        env.rms_sim
+            .queue_get_configure_switch_certificate_job_status_response(Ok(
+                rms::GetConfigureSwitchCertificateJobStatusResponse {
+                    status: rms::ReturnCode::Success as i32,
+                    state: "completed".to_string(),
+                    ..Default::default()
+                },
+            ))
+            .await;
+    }
 
     env.rms_sim
         .queue_get_job_status_response(Ok(rms::GetJobStatusResponse {
@@ -4508,6 +4570,7 @@ async fn create_configure_nmx_cluster_test_rack(
 async fn run_configure_nmx_cluster_v2_workflow(
     env: &TestEnv,
     rack_id: &RackId,
+    primary_telemetry_configured: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     env.run_rack_controller_iteration().await;
 
@@ -4530,6 +4593,24 @@ async fn run_configure_nmx_cluster_v2_workflow(
     ));
 
     env.run_rack_controller_iteration().await;
+
+    if primary_telemetry_configured {
+        let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
+
+        assert!(matches!(
+            rack.controller_state.value,
+            RackState::Maintenance {
+                maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+                    configure_nmx_cluster:
+                        ConfigureNmxClusterState::WaitForPrimarySwitchCertificateJob {
+                            ref job_id,
+                        },
+                },
+            } if job_id == "configure-primary-switch-certificate-job"
+        ));
+
+        env.run_rack_controller_iteration().await;
+    }
 
     let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
 
@@ -4587,28 +4668,39 @@ async fn assert_configure_nmx_cluster_v2_results(
         .submitted_configure_switch_certificate_requests()
         .await;
 
-    let [certificate_request] = certificate_requests.as_slice() else {
-        return Err(eyre::eyre!("expected exactly one certificate request").into());
+    let [rack_certificate_request, primary_certificate_request] = certificate_requests.as_slice()
+    else {
+        return Err(eyre::eyre!("expected exactly two certificate requests").into());
     };
 
     assert_eq!(
-        certificate_request.services,
+        rack_certificate_request.services,
         vec![
             rms::SwitchService::NvueApi as i32,
-            rms::SwitchService::ScaleUpFabricManager as i32,
+            rms::SwitchService::ScaleUpFabricTelemetryInterface as i32,
         ]
     );
 
-    assert_node_set_contains_switches(certificate_request.nodes.as_ref(), switch_ids);
+    assert_node_set_contains_switches(rack_certificate_request.nodes.as_ref(), switch_ids);
 
     assert!(
-        certificate_request
+        rack_certificate_request
             .nodes
             .as_ref()
             .expect("certificate request should include nodes")
             .nodes
             .iter()
             .all(|node| node.bmc_endpoint.is_none())
+    );
+
+    assert_eq!(
+        primary_certificate_request.services,
+        vec![rms::SwitchService::ScaleUpFabricTelemetry as i32]
+    );
+
+    assert_node_set_contains_switches(
+        primary_certificate_request.nodes.as_ref(),
+        &[primary_switch_id],
     );
 
     assert!(
@@ -4718,6 +4810,7 @@ async fn test_configure_nmx_cluster_v1_config_rotates_certificates_through_v2_wo
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = config_with_nmx_cluster_profile();
     config.rms.scale_up_fabric_manager_api_version = ScaleUpFabricManagerApiVersion::V1;
+    config.switch_state_controller.switch_mtls_services = SwitchMtlsService::default_services();
 
     let (env, rack_id, switch_ids) = create_configure_nmx_cluster_test_rack(
         &pool,
@@ -4746,10 +4839,11 @@ async fn test_configure_nmx_cluster_v1_config_rotates_certificates_through_v2_wo
         secondary_switch_id,
         primary_switch_id,
         &topology_type,
+        true,
     )
     .await;
 
-    run_configure_nmx_cluster_v2_workflow(&env, &rack_id).await?;
+    run_configure_nmx_cluster_v2_workflow(&env, &rack_id, true).await?;
 
     assert_configure_nmx_cluster_v2_results(
         &env,
@@ -4760,6 +4854,271 @@ async fn test_configure_nmx_cluster_v1_config_rotates_certificates_through_v2_wo
         &topology_type,
     )
     .await
+}
+
+#[crate::sqlx_test]
+async fn test_configure_nmx_cluster_requires_primary_nvos_credentials_for_telemetry_after_v2(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = config_with_nmx_cluster_profile();
+    config.switch_state_controller.switch_mtls_services =
+        vec![SwitchMtlsService::ScaleUpFabricTelemetry];
+
+    let (env, rack_id, switch_ids) = create_configure_nmx_cluster_test_rack(
+        &pool,
+        TestEnvOverrides {
+            config: Some(config),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    let [secondary_switch_id, primary_switch_id] = switch_ids.as_slice() else {
+        return Err(eyre::eyre!("expected exactly two switch fixtures").into());
+    };
+
+    let topology_type = RackHardwareTopology::Gb200Nvl72r1C2g4Topology.to_string();
+
+    queue_configure_nmx_cluster_v2_success(
+        &env,
+        &switch_ids,
+        *secondary_switch_id,
+        *primary_switch_id,
+        &topology_type,
+        true,
+    )
+    .await;
+
+    env.run_rack_controller_iteration().await;
+    assert_persisted_switch_certificate_job(&env, &rack_id).await;
+
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+                configure_nmx_cluster: ConfigureNmxClusterState::WaitForScaleUpFabricManagerJob { .. },
+            },
+        }
+    ));
+
+    let mut txn = pool.acquire().await?;
+
+    let primary_switch = db_switch::find_by_id(&mut txn, primary_switch_id)
+        .await?
+        .ok_or_else(|| eyre::eyre!("expected primary switch {}", primary_switch_id))?;
+
+    let bmc_mac_address = primary_switch.bmc_mac_address.ok_or_else(|| {
+        eyre::eyre!(
+            "expected primary switch {} to have a BMC MAC",
+            primary_switch_id
+        )
+    })?;
+
+    drop(txn);
+
+    env.api
+        .credential_manager
+        .delete_credentials(&CredentialKey::SwitchNvosAdmin { bmc_mac_address })
+        .await
+        .map_err(eyre::Report::from)?;
+
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Error { ref cause, .. }
+            if cause.contains(&format!("switch {primary_switch_id} is missing NVOS credentials"))
+    ));
+
+    let certificate_requests = env
+        .rms_sim
+        .submitted_configure_switch_certificate_requests()
+        .await;
+
+    assert_eq!(certificate_requests.len(), 1);
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_configure_nmx_cluster_default_binds_primary_telemetry_after_v2(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = config_with_nmx_cluster_profile();
+
+    config
+        .rack_state_controller
+        .nmx_cluster_switch_mtls_services = vec![
+        SwitchMtlsService::ScaleUpFabricTelemetry,
+        SwitchMtlsService::ScaleUpFabricTelemetryInterface,
+    ];
+
+    let (env, rack_id, switch_ids) = create_configure_nmx_cluster_test_rack(
+        &pool,
+        TestEnvOverrides {
+            config: Some(config),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    let [secondary_switch_id, primary_switch_id] = switch_ids.as_slice() else {
+        return Err(eyre::eyre!("expected exactly two switch fixtures").into());
+    };
+
+    let topology_type = RackHardwareTopology::Gb200Nvl72r1C2g4Topology.to_string();
+
+    queue_configure_nmx_cluster_v2_success(
+        &env,
+        &switch_ids,
+        *secondary_switch_id,
+        *primary_switch_id,
+        &topology_type,
+        true,
+    )
+    .await;
+
+    run_configure_nmx_cluster_v2_workflow(&env, &rack_id, true).await?;
+
+    let certificate_requests = env
+        .rms_sim
+        .submitted_configure_switch_certificate_requests()
+        .await;
+
+    let [rack_certificate_request, primary_certificate_request] = certificate_requests.as_slice()
+    else {
+        return Err(eyre::eyre!("expected exactly two certificate requests").into());
+    };
+
+    assert_eq!(
+        rack_certificate_request.services,
+        vec![rms::SwitchService::NvueApi as i32]
+    );
+
+    assert!(rack_certificate_request.test_hello);
+
+    assert_eq!(
+        primary_certificate_request.services,
+        vec![rms::SwitchService::ScaleUpFabricTelemetry as i32]
+    );
+
+    assert!(!primary_certificate_request.test_hello);
+
+    assert_node_set_contains_switches(
+        primary_certificate_request.nodes.as_ref(),
+        &[*primary_switch_id],
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_configure_nmx_cluster_failed_v2_job_requires_new_maintenance_request(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (env, rack_id, _) =
+        create_configure_nmx_cluster_test_rack(&pool, TestEnvOverrides::default()).await?;
+
+    env.rms_sim
+        .queue_configure_switch_certificate_response(Ok(rms::ConfigureSwitchCertificateResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "configure-switch-certificate-job".to_string(),
+                ..Default::default()
+            }),
+            jobs: Vec::new(),
+        }))
+        .await;
+
+    env.rms_sim
+        .queue_get_configure_switch_certificate_job_status_response(Ok(
+            rms::GetConfigureSwitchCertificateJobStatusResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "configure-switch-certificate-job".to_string(),
+                state: "completed".to_string(),
+                ..Default::default()
+            },
+        ))
+        .await;
+
+    env.rms_sim
+        .queue_configure_scale_up_fabric_manager_v2_response(Ok(
+            rms_v2::ConfigureScaleUpFabricManagerResponse {
+                job_id: "failed-fabric-job".to_string(),
+            },
+        ))
+        .await;
+
+    env.rms_sim
+        .queue_get_job_status_response(Ok(rms::GetJobStatusResponse {
+            job_states: vec![rms::JobStatus {
+                job_id: "failed-fabric-job".to_string(),
+                execution_state: rms::JobExecutionState::Failed as i32,
+                error_message: "nmx-controller failed to start".to_string(),
+                ..Default::default()
+            }],
+        }))
+        .await;
+
+    env.run_rack_controller_iteration().await;
+    env.run_rack_controller_iteration().await;
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(rack.config.maintenance_requested.is_none());
+
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Error {
+            ref cause,
+            recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+        } if cause == "ConfigureScaleUpFabricManager job failed-fabric-job failed: nmx-controller failed to start"
+    ));
+
+    assert_eq!(
+        env.rms_sim
+            .submitted_configure_switch_certificate_requests()
+            .await
+            .len(),
+        1
+    );
+
+    assert_eq!(
+        env.rms_sim
+            .submitted_configure_scale_up_fabric_manager_v2_requests()
+            .await
+            .len(),
+        1
+    );
+
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Error {
+            recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+            ..
+        }
+    ));
+
+    assert_eq!(
+        env.rms_sim
+            .submitted_configure_scale_up_fabric_manager_v2_requests()
+            .await
+            .len(),
+        1
+    );
+
+    Ok(())
 }
 
 #[crate::sqlx_test]
@@ -4787,12 +5146,25 @@ async fn test_configure_nmx_cluster_partial_certificate_submission_does_not_retr
 
     assert!(matches!(
         rack.controller_state.value,
-        RackState::Error { ref cause }
+        RackState::Error {
+            ref cause,
+            recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+        }
             if cause.contains("certificate batch rejected")
                 && cause.contains("partial-certificate-job")
     ));
 
     env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Error {
+            recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+            ..
+        }
+    ));
 
     assert_eq!(
         env.rms_sim
@@ -4938,7 +5310,7 @@ async fn test_configure_nmx_cluster_stops_when_certificate_job_is_missing(
 
     assert!(matches!(
         rack.controller_state.value,
-        RackState::Error { ref cause }
+        RackState::Error { ref cause, .. }
             if cause.contains("configure-switch-certificate-job")
                 && cause.contains("job not found")
     ));
@@ -5018,7 +5390,7 @@ async fn test_configure_nmx_cluster_waits_for_certificate_job_and_stops_on_failu
 
     assert!(matches!(
         rack.controller_state.value,
-        RackState::Error { ref cause } if cause.contains("certificate install failed")
+        RackState::Error { ref cause, .. } if cause.contains("certificate install failed")
     ));
 
     assert!(
@@ -5079,7 +5451,7 @@ async fn test_configure_nmx_cluster_requires_nvos_credentials_before_rotation(
 
     assert!(matches!(
         rack.controller_state.value,
-        RackState::Error { ref cause } if cause.contains("missing NVOS credentials")
+        RackState::Error { ref cause, .. } if cause.contains("missing NVOS credentials")
     ));
 
     assert!(
@@ -5093,35 +5465,32 @@ async fn test_configure_nmx_cluster_requires_nvos_credentials_before_rotation(
 }
 
 #[crate::sqlx_test]
-async fn test_configure_nmx_cluster_rejects_ambiguous_nvos_endpoints_before_rotation(
+async fn test_configure_nmx_cluster_dual_port_certificates_match_v2_endpoints(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (env, rack_id, switch_ids) =
         create_configure_nmx_cluster_test_rack(&pool, TestEnvOverrides::default()).await?;
 
-    let switch_id = switch_ids
-        .first()
-        .ok_or_else(|| eyre::eyre!("expected at least one switch fixture"))?;
+    let [secondary_switch_id, primary_switch_id] = switch_ids.as_slice() else {
+        return Err(eyre::eyre!("expected exactly two switch fixtures").into());
+    };
 
     let mut txn = pool.begin().await?;
 
-    let switch = db_switch::find_by_id(txn.as_mut(), switch_id)
+    let expected = db_switch::find_switch_endpoints_by_ids(txn.as_mut(), &[*primary_switch_id])
         .await?
-        .ok_or_else(|| eyre::eyre!("expected switch {}", switch_id))?;
-
-    let bmc_mac_address = switch
-        .bmc_mac_address
-        .ok_or_else(|| eyre::eyre!("expected switch {} to have a BMC MAC", switch_id))?;
+        .pop()
+        .expect("seeded switch endpoint");
 
     let extra_nvos_mac = EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL.allocate();
 
     sqlx::query(
         "UPDATE expected_switches
-         SET nvos_mac_addresses = array_append(nvos_mac_addresses, $1)
+         SET nvos_mac_addresses = array_prepend($1, nvos_mac_addresses)
          WHERE bmc_mac_address = $2",
     )
     .bind(extra_nvos_mac)
-    .bind(bmc_mac_address)
+    .bind(expected.bmc_mac)
     .execute(txn.as_mut())
     .await?;
 
@@ -5139,15 +5508,118 @@ async fn test_configure_nmx_cluster_rejects_ambiguous_nvos_endpoints_before_rota
 
     txn.commit().await?;
 
+    let topology_type = RackHardwareTopology::Gb200Nvl72r1C2g4Topology.to_string();
+
+    queue_configure_nmx_cluster_v2_success(
+        &env,
+        &switch_ids,
+        *secondary_switch_id,
+        *primary_switch_id,
+        &topology_type,
+        true,
+    )
+    .await;
+
+    run_configure_nmx_cluster_v2_workflow(&env, &rack_id, true).await?;
+
+    let certificate_requests = env
+        .rms_sim
+        .submitted_configure_switch_certificate_requests()
+        .await;
+
+    let fabric_requests = env
+        .rms_sim
+        .submitted_configure_scale_up_fabric_manager_v2_requests()
+        .await;
+
+    assert_eq!(certificate_requests.len(), 2);
+    assert_eq!(fabric_requests.len(), 1);
+
+    assert_node_set_contains_switches(certificate_requests[0].nodes.as_ref(), &switch_ids);
+
+    assert_node_set_contains_switches(
+        certificate_requests[1].nodes.as_ref(),
+        &[*primary_switch_id],
+    );
+
+    assert_node_set_contains_switches(fabric_requests[0].nodes.as_ref(), &switch_ids);
+
+    let fabric_nodes = &fabric_requests[0].nodes.as_ref().expect("V2 nodes").nodes;
+
+    for node in certificate_requests.iter().flat_map(|request| {
+        request
+            .nodes
+            .as_ref()
+            .expect("certificate nodes")
+            .nodes
+            .iter()
+    }) {
+        let certificate_interface = node
+            .host_endpoint
+            .as_ref()
+            .and_then(|endpoint| endpoint.interface.as_ref())
+            .expect("certificate NVOS interface");
+
+        let fabric_node = fabric_nodes
+            .iter()
+            .find(|candidate| candidate.node_id == node.node_id)
+            .expect("matching V2 node");
+
+        let fabric_interface = fabric_node
+            .host_endpoint
+            .as_ref()
+            .and_then(|endpoint| endpoint.interface.as_ref())
+            .expect("V2 NVOS interface");
+
+        assert_eq!(certificate_interface, fabric_interface);
+
+        if node.node_id == primary_switch_id.to_string() {
+            assert_eq!(
+                certificate_interface.mac_address,
+                expected.nvos_mac.expect("seeded NVOS MAC").to_string()
+            );
+
+            assert_eq!(
+                certificate_interface.ip_address,
+                expected.nvos_ip.expect("seeded NVOS IP").to_string()
+            );
+
+            assert_eq!(certificate_interface.host_name, expected.nvos_hostname);
+        }
+    }
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_configure_nmx_cluster_requires_usable_nvos_endpoint_before_rotation(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (env, rack_id, switch_ids) =
+        create_configure_nmx_cluster_test_rack(&pool, TestEnvOverrides::default()).await?;
+
+    let mut txn = pool.begin().await?;
+
+    sqlx::query(
+        "DELETE FROM machine_interface_addresses WHERE interface_id IN (
+        SELECT mi.id FROM machine_interfaces mi
+        JOIN expected_switches es ON mi.mac_address = ANY(es.nvos_mac_addresses)
+        JOIN switches s ON s.bmc_mac_address = es.bmc_mac_address WHERE s.id = $1)",
+    )
+    .bind(switch_ids[0])
+    .execute(txn.as_mut())
+    .await?;
+
+    txn.commit().await?;
     env.run_rack_controller_iteration().await;
 
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
-    assert!(matches!(
-        rack.controller_state.value,
-        RackState::Error { ref cause }
-            if cause.contains("multiple usable NVOS endpoints")
-    ));
+    assert!(matches!(rack.controller_state.value, RackState::Error {
+        ref cause, recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+    } if cause.contains("no usable NVOS endpoint")));
+
+    assert!(rack.config.maintenance_requested.is_none());
 
     assert!(
         env.rms_sim
@@ -5234,13 +5706,7 @@ async fn test_configure_nmx_cluster_certificate_submission_does_not_require_bmc_
 
     assert_node_set_contains_switches(request.nodes.as_ref(), &switch_ids);
 
-    assert_eq!(
-        request.services,
-        vec![
-            rms::SwitchService::NvueApi as i32,
-            rms::SwitchService::ScaleUpFabricManager as i32,
-        ]
-    );
+    assert_eq!(request.services, vec![rms::SwitchService::NvueApi as i32]);
 
     assert!(
         request
@@ -5315,7 +5781,7 @@ async fn test_configure_nmx_cluster_unknown_profile_stops_before_certificate_sub
 
     assert!(matches!(
         rack.controller_state.value,
-        RackState::Error { ref cause } if cause.contains("rack profile is missing or unknown")
+        RackState::Error { ref cause, .. } if cause.contains("rack profile is missing or unknown")
     ));
 
     assert!(
@@ -5390,7 +5856,7 @@ async fn test_configure_nmx_cluster_retired_sub_state_transitions_to_error(
         panic!("expected a transition out of a retired sub-state");
     };
 
-    let RackState::Error { cause } = &next_state else {
+    let RackState::Error { cause, .. } = &next_state else {
         panic!("expected Error, got {next_state:?}");
     };
 
@@ -5721,7 +6187,10 @@ async fn test_ready_with_failed_switch_transitions_to_error(
 
     match outcome {
         StateHandlerOutcome::Transition { next_state, .. } => match next_state {
-            RackState::Error { cause } => {
+            RackState::Error {
+                cause,
+                recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
+            } => {
                 assert!(
                     cause.contains("switch"),
                     "Error cause should mention failing switch, got: {}",
@@ -5797,7 +6266,10 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
 
     match outcome {
         StateHandlerOutcome::Transition { next_state, .. } => match next_state {
-            RackState::Error { cause } => {
+            RackState::Error {
+                cause,
+                recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
+            } => {
                 assert!(
                     cause.contains("power shelf"),
                     "Error cause should mention failing power shelf, got: {}",
@@ -5877,6 +6349,7 @@ async fn test_error_recovers_to_ready_when_all_components_ready(
         &rack_id,
         RackState::Error {
             cause: "synthetic prior failure".to_string(),
+            recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
         },
     )
     .await?;
@@ -5936,6 +6409,7 @@ async fn test_error_stays_in_error_when_components_not_all_ready(
         &rack_id,
         RackState::Error {
             cause: "synthetic prior failure".to_string(),
+            recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
         },
     )
     .await?;

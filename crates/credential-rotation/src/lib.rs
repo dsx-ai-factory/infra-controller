@@ -1460,7 +1460,7 @@ mod tests {
     use chrono::{Duration, Utc};
     use db::credential_rotation::{
         CredentialRotationType, DeviceRotationStatus, device_rotation_status,
-        increment_rotate_attempt, mark_device_rotating_to_version, record_device_converged,
+        increment_rotate_attempt, mark_device_rotating_to_version, record_device_enrolled,
         set_next_target_version,
     };
     use libredfish::model::service_root::RedfishVendor;
@@ -1526,7 +1526,7 @@ mod tests {
     /// the site-wide BMC target `steps` times so the device lags by `steps`.
     async fn seed_device_behind_target(pool: &PgPool, steps: i32) {
         let mut conn = pool.acquire().await.unwrap();
-        record_device_converged(&mut conn, test_mac(), BMC)
+        record_device_enrolled(&mut conn, test_mac(), BMC, Some(0))
             .await
             .unwrap();
         for expected in 0..steps {
@@ -2093,8 +2093,32 @@ mod tests {
     }
 
     #[carbide_macros::sqlx_test]
-    async fn rotate_bmc_converges_and_persists_new_secret(pool: PgPool) {
-        seed_device_behind_target(&pool, 1).await;
+    async fn retained_bmc_credentials_rotate_and_record_the_applied_version(pool: PgPool) {
+        let gate = RotationGate::with_ttl_and_family(StdDuration::ZERO, BMC);
+        {
+            let mut conn = pool.acquire().await.unwrap();
+            record_device_enrolled(&mut conn, test_mac(), BMC, None)
+                .await
+                .unwrap();
+        }
+        assert!(
+            !gate.rotation_needed(&pool, test_mac()).await.unwrap(),
+            "target 0 does not request passive rotation"
+        );
+        {
+            let mut conn = pool.acquire().await.unwrap();
+            assert!(matches!(
+                set_next_target_version(&mut conn, BMC, 0, serde_json::json!({}))
+                    .await
+                    .unwrap(),
+                ConditionalWrite::Applied(_)
+            ));
+        }
+        assert!(
+            gate.rotation_needed(&pool, test_mac()).await.unwrap(),
+            "an unknown site version remains eligible when a target is published"
+        );
+        assert_eq!(status_of(&pool).await.current_version, None);
         let cm = TestCredentialManager::default();
         cm.set_credentials(&per_device_key(), &creds("root", "old"))
             .await
@@ -2607,7 +2631,7 @@ mod tests {
     /// the device lags by `steps`.
     async fn seed_dpu_service_behind_target(pool: &PgPool, steps: i32) {
         let mut conn = pool.acquire().await.unwrap();
-        record_device_converged(&mut conn, test_mac(), DPU_BMC_SERVICE)
+        record_device_enrolled(&mut conn, test_mac(), DPU_BMC_SERVICE, Some(0))
             .await
             .unwrap();
         for expected in 0..steps {

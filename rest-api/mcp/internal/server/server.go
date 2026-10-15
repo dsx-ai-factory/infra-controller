@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -253,22 +254,38 @@ func registerGET(server *mcp.Server, path string, item *openapi3.PathItem, opts 
 	})
 }
 
-// sameOriginRedirectPolicy preserves net/http's redirect limit while refusing
-// to send an MCP request to a different origin.
+// sameOriginRedirectPolicy preserves net/http's redirect limit and the original
+// Authorization header while refusing requests to a different origin.
 func sameOriginRedirectPolicy(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("stopped after 10 redirects")
 	}
-	if len(via) == 0 || sameOrigin(via[0].URL, req.URL) {
+	if len(via) == 0 {
 		return nil
 	}
-	return errors.New("refusing cross-origin redirect")
+	if !sameOrigin(via[0].URL, req.URL) {
+		return errors.New("refusing cross-origin redirect")
+	}
+	// net/http can strip Authorization before this callback when the host's
+	// spelling changes, including IPv6 notation or DNS name case. Restore it
+	// only after checking the origin.
+	authorization := via[0].Header.Get("Authorization")
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
+	return nil
 }
 
 func sameOrigin(a, b *url.URL) bool {
-	return strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectivePort(a) == effectivePort(b)
+	if !strings.EqualFold(a.Scheme, b.Scheme) || effectivePort(a) != effectivePort(b) {
+		return false
+	}
+	aIP, aErr := netip.ParseAddr(a.Hostname())
+	bIP, bErr := netip.ParseAddr(b.Hostname())
+	if aErr == nil && bErr == nil {
+		return aIP == bIP
+	}
+	return strings.EqualFold(a.Hostname(), b.Hostname())
 }
 
 func effectivePort(u *url.URL) string {

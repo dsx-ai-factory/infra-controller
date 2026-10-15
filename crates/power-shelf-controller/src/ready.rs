@@ -76,6 +76,7 @@ pub async fn handle_ready(
         return Ok(StateHandlerOutcome::transition(
             PowerShelfControllerState::Maintenance {
                 operation: req.operation,
+                request: Some(req.clone()),
             },
         ));
     }
@@ -226,6 +227,7 @@ async fn poll_power_state(
 
     match interpret_power_state_poll(results) {
         PowerStatePollOutcome::Observed(observed_power_state) => {
+            let observed_power_state = observed_power_state.to_string().to_lowercase();
             tracing::info!(
                 power_shelf_id = %power_shelf_id,
                 rack_id = %rack_id_str,

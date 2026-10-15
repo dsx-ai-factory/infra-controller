@@ -5,8 +5,10 @@ package handler
 
 import (
 	"encoding/json"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -31,6 +33,29 @@ func testFlowProxyReply(t *testing.T, run *tmocks.WorkflowRun, msg proto.Message
 	run.Mock.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 		args.Get(1).(*grpcproxy.Response).ResponseJSON = responseJSON
 	}).Return(nil)
+}
+
+func testFlowProxyFailure(run *tmocks.WorkflowRun, resultErr error) {
+	run.Mock.On("Get", mock.Anything, mock.Anything).Return(resultErr)
+}
+
+func assertSingleFlowProxyErrorResponse(
+	t *testing.T,
+	ec echo.Context,
+	recorder *httptest.ResponseRecorder,
+	handlerErr error,
+	resultErr error,
+) {
+	t.Helper()
+
+	require.NoError(t, handlerErr)
+	assert.Equal(t, recorder.Code, ec.Response().Status)
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response), "response must contain exactly one JSON value")
+	assert.Equal(t, resultErr.Error(), response["message"])
+	assert.Contains(t, response, "data")
+	assert.Nil(t, response["data"])
+	assert.NotContains(t, response, "taskIds")
 }
 
 // testFlowProxyDispatch mocks the Flow proxy workflow start, asserting that the

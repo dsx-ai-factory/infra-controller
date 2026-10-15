@@ -23,7 +23,7 @@ use ::db::{DatabaseError, Transaction};
 use config_version::Versioned;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use opentelemetry::KeyValue;
-use opentelemetry::metrics::{Counter, Histogram, Meter};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use rand::RngExt;
 use sqlx_query_tracing::SqlxQueryDataAggregation;
 use tokio::task::{JoinError, JoinSet};
@@ -44,6 +44,9 @@ use crate::state_handler::{
     FromStateHandlerResult, StateHandler, StateHandlerContext, StateHandlerContextObjects,
     StateHandlerError, StateHandlerOutcome,
 };
+
+#[cfg(test)]
+mod tests;
 
 /// The `missing` token used when an object's state row is gone from the
 /// database; the per-object metrics clear path matches on it.
@@ -373,20 +376,29 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
                     count
                 }
                 Err(_) => {
-                    tracing::error!(
-                        in_flight_task_count = self.object_tasks.len(),
-                        "Timed out waiting for state controller object handling tasks to complete"
+                    // If we timed out after `max_duration`, it means tasks are still running. This
+                    // isn't an error unless these tasks exceed the max object wait time, which is
+                    // logged elsewhere. `max_duration` might be the controller iteration time,
+                    // which is shorter than the max object wait time and is not an error to exceed.
+                    let in_flight_task_count = self.object_tasks.len();
+                    tracing::info!(
+                        in_flight_task_count,
+                        "{in_flight_task_count} tasks still running after iteration"
                     );
                     0
                 }
             };
 
-        if total_completions > 0
-            && let Some(emitter) = &self.metric_emitter
-        {
+        if let Some(emitter) = &self.metric_emitter {
+            if total_completions > 0 {
+                emitter
+                    .completed_tasks_counter
+                    .add(total_completions as u64, &[]);
+            }
+
             emitter
-                .completed_tasks_counter
-                .add(total_completions as u64, &[]);
+                .running_tasks_gauge
+                .record(self.object_tasks.len() as u64, &[]);
         }
 
         total_completions
@@ -399,13 +411,16 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
     ) -> Result<usize, IterationError> {
         // Determine how many new objects can still be processed and dequeue that amount
         let capacity = self.remaining_capacity();
-        let objects = if capacity > 0 {
-            // Acquire new object handling tasks
-            // If processing of an object was already start by another state controller
-            // but not committed, it can be acquired after a certain amount of time.
-            // The time is higher than the task handling timeout on each state controller.
-            // This guarantees that the task is no longer processed by the original owner.
-            let capacity = capacity.min(u32::MAX as usize) as u32;
+        if capacity == 0 {
+            return Ok(0);
+        }
+
+        // PostgreSQL starts the reservation clock at transaction start. Claiming,
+        // dispatching, and handling must share a deadline that starts earlier,
+        // so a delayed claim cannot outlive the reservation and start new work.
+        let deadline = tokio::time::Instant::now() + self.iteration_config.max_object_handling_time;
+        let capacity = capacity.min(u32::MAX as usize) as u32;
+        let objects = tokio::time::timeout_at(deadline, async {
             let mut txn = self.pool.begin().await?;
             let queued = db::acquire_queued_objects(
                 &mut txn,
@@ -416,10 +431,17 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
             )
             .await?;
             txn.commit().await?;
-            queued
-        } else {
-            Vec::new()
-        };
+            Ok::<_, IterationError>(queued)
+        })
+        .await
+        .map_err(|_| IterationError::QueueClaimTimeout)??;
+
+        // A ready future can win over Tokio's timeout even after its deadline.
+        // Leave any committed reservation for expiry rather than dispatching it
+        // or deleting work whose ownership may already have changed.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(IterationError::QueueClaimTimeout);
+        }
 
         let objects: Vec<IO::ObjectId> = objects
             .into_iter()
@@ -441,7 +463,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
 
         // Send off the new objects for processing
         for object_id in objects {
-            self.dispatch_object_handling_task(object_id);
+            self.dispatch_object_handling_task(object_id, deadline);
         }
 
         if let Some(emitter) = &self.metric_emitter
@@ -456,13 +478,16 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
     }
 
     // Executes the state handling function for all objects for a single queued object
-    fn dispatch_object_handling_task(&mut self, object_id: IO::ObjectId) {
+    fn dispatch_object_handling_task(
+        &mut self,
+        object_id: IO::ObjectId,
+        deadline: tokio::time::Instant,
+    ) {
         let cloned_object_id = object_id.clone();
         let pool = self.pool.clone();
         let services = self.handler_services.as_ref().clone();
         let io = self.io.clone();
         let handler = self.state_handler.clone();
-        let max_object_handling_time = self.iteration_config.max_object_handling_time;
         let metrics_emitter = self.metric_holder.emitter.clone();
         let state_change_emitter = self.state_change_emitter.clone();
         let per_object_state = self.per_object_state.clone();
@@ -477,7 +502,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
                         services,
                         io,
                         handler,
-                        max_object_handling_time,
+                        deadline,
                         metrics_emitter,
                         state_change_emitter,
                         per_object_state,
@@ -612,6 +637,8 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum IterationError {
+    #[error("queue claim exceeded the object handling deadline")]
+    QueueClaimTimeout,
     #[error("unable to perform database transaction: {0}")]
     TransactionError(#[from] sqlx::Error),
     #[error("unable to perform database transaction: {0}")]
@@ -636,7 +663,7 @@ async fn process_object<IO: StateControllerIO>(
                 ObjectId = IO::ObjectId,
             >,
     >,
-    max_object_handling_time: std::time::Duration,
+    deadline: tokio::time::Instant,
     metrics_emitter: Option<Arc<StateProcessorMetricEmitter<IO>>>,
     state_change_emitter: Arc<StateChangeEmitter<IO::ObjectId, IO::ControllerState>>,
     per_object_state: Option<PerObjectStateRecorder>,
@@ -651,7 +678,15 @@ async fn process_object<IO: StateControllerIO>(
     let result: Result<
         Result<StateHandlerOutcome<_>, StateHandlerError>,
         tokio::time::error::Elapsed,
-    > = tokio::time::timeout(max_object_handling_time, async {
+    > = tokio::time::timeout_at(deadline, async {
+        // Task scheduling consumes the same budget as the claim. Do not even
+        // load a snapshot if the task first runs after that budget is gone.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(StateHandlerError::Timeout {
+                object_id: object_id.to_string(),
+                state: String::new(),
+            });
+        }
         let mut txn = pool.begin().await?;
         let mut snapshot = io
             .load_object_state(&mut txn, &object_id)
@@ -916,6 +951,8 @@ pub(super) struct ProcessorMetricsEmitter {
     completed_tasks_counter: Counter<u64>,
     requeued_tasks_counter: Counter<u64>,
     errored_tasks_counter: Counter<u64>,
+    /// How many tasks are currently running in the queue
+    running_tasks_gauge: Gauge<u64>,
     db: sqlx_query_tracing::DatabaseMetricEmitters,
 }
 
@@ -926,7 +963,7 @@ impl ProcessorMetricsEmitter {
         let iteration_latency = meter
             .f64_histogram(format!("{object_type}_iteration_latency"))
             .with_description(format!(
-                "The elapsed time in the last state processor iteration to handle objects of type {object_type}"
+                "Elapsed time of each completed state processor iteration for objects of type {object_type}"
             ))
             .with_unit("ms")
             .build();
@@ -959,6 +996,13 @@ impl ProcessorMetricsEmitter {
             ))
             .build();
 
+        let running_tasks_gauge = meter
+            .u64_gauge(format!("{object_type}_object_tasks_running"))
+            .with_description(format!(
+                "Number of object handling tasks currently running of type {object_type}"
+            ))
+            .build();
+
         Self {
             iteration_latency,
             db,
@@ -966,6 +1010,7 @@ impl ProcessorMetricsEmitter {
             completed_tasks_counter,
             requeued_tasks_counter,
             errored_tasks_counter,
+            running_tasks_gauge,
         }
     }
 

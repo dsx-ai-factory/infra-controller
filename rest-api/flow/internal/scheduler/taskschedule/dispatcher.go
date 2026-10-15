@@ -396,9 +396,15 @@ func (d *Dispatcher) submitScopeTasks(
 	// Pre-parse the rule ID once rather than per-scope.
 	var ruleID *uuid.UUID
 	if opts.RuleID != "" {
-		if id, err := uuid.Parse(opts.RuleID); err == nil {
-			ruleID = &id
+		id, err := uuid.Parse(opts.RuleID)
+		if err != nil || id == uuid.Nil {
+			return nil, nil, fmt.Errorf(
+				"task schedule %s has invalid rule_id %q",
+				ts.ID,
+				opts.RuleID,
+			)
 		}
+		ruleID = &id
 	}
 
 	desc := fmt.Sprintf("%s — %s", ts.Name, now.UTC().Format(time.RFC3339))

@@ -173,7 +173,6 @@ func (o *CredentialRotationStatus) GetQuarantinedDeviceMacs() []string {
 
 // GetQuarantinedDeviceMacsOk returns a tuple with the QuarantinedDeviceMacs field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *CredentialRotationStatus) GetQuarantinedDeviceMacsOk() ([]string, bool) {
 	if o == nil || IsNil(o.QuarantinedDeviceMacs) {
 		return nil, false

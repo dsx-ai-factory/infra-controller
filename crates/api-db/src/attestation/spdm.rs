@@ -27,6 +27,9 @@ use sqlx::{PgConnection, Row};
 
 use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult};
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 pub async fn insert_device_attestations(
     txn: &mut PgConnection,
     machine_id: &MachineId,
@@ -411,9 +414,12 @@ pub async fn list_all_attestation_statuses(
 
 /// Aggregates the latest attestation for each device on a machine.
 /// Unfinished devices take precedence, followed by failure, cancellation, and all-passed.
+/// `device_ids` limits the aggregate to the selected devices; `None` includes all devices.
+/// Returns not found when no attestation matches the machine and device selection.
 pub async fn list_single_machine_attestation_status(
     txn: &mut PgConnection,
     machine_id: &MachineId,
+    device_ids: Option<&[String]>,
 ) -> Result<SpdmAttestationStatus, DatabaseError> {
     let query = r#"
         WITH latest_device_attestations AS (
@@ -423,6 +429,7 @@ pub async fn list_single_machine_attestation_status(
                 state
             FROM spdm_machine_devices_attestation
             WHERE machine_id = $1
+                AND ($2::text[] IS NULL OR device_id = ANY($2))
             ORDER BY machine_id, device_id, started_at DESC, job_id DESC
         )
         SELECT
@@ -442,6 +449,7 @@ pub async fn list_single_machine_attestation_status(
 
     let status = sqlx::query_scalar::<_, String>(query)
         .bind(machine_id)
+        .bind(device_ids)
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -565,7 +573,11 @@ pub async fn load_snapshot_for_machine_and_device_id(
 ) -> Result<SpdmDeviceAttestation, DatabaseError> {
     let query = r#"
         SELECT
-            mda.*,
+            mda.machine_id, mda.device_id, mda.nonce, mda.state,
+            mda.metadata, mda.ca_certificate_link, mda.ca_certificate,
+            mda.evidence_target, mda.evidence, mda.state_version,
+            mda.state_outcome, mda.completed_at, mda.started_at, mda.cancelled_at,
+            mda.job_id, mda.evidence_collection_locked,
             jsonb_strip_nulls(
                 COALESCE(mt.topology->'bmc_info', '{}'::jsonb) ||
                 jsonb_build_object(
@@ -808,9 +820,10 @@ mod tests {
                 let job_status = get_attestation_job_status(&mut txn, &job_id)
                     .await
                     .map_err(|e| e.to_string())?;
-                let machine_status = list_single_machine_attestation_status(&mut txn, &machine_id)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                let machine_status =
+                    list_single_machine_attestation_status(&mut txn, &machine_id, None)
+                        .await
+                        .map_err(|e| e.to_string())?;
                 let mut list_selectors_match = [false; 4];
                 for (index, selector) in [
                     SpdmAttestationStatus::InProgress,

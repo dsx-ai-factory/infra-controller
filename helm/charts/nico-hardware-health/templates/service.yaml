@@ -8,6 +8,7 @@ metadata:
     app: {{ include "nico-hardware-health.name" . }}
     app.kubernetes.io/metrics: {{ include "nico-hardware-health.name" . }}
 spec:
+  ipFamilyPolicy: PreferDualStack
   selector:
     {{- include "nico-hardware-health.selectorLabels" . | nindent 4 }}
   ports:

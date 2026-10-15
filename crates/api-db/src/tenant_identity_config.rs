@@ -18,6 +18,7 @@
 //! Tenant identity config for SPIFFE JWT-SVID machine identity.
 //! Stores per-org identity config and signing keys in `tenant_identity_config` table.
 
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::{HostOrDpuId, MachineId};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use model::tenant::identity_config::SigningKeyPublicV1;
@@ -30,22 +31,7 @@ use sqlx::PgConnection;
 use sqlx::types::Json;
 
 use crate::db_read::DbReader;
-use crate::{DatabaseError, DatabaseResult};
-
-/// Explicit column list for [`TenantIdentityConfig`] queries. Avoid `SELECT *` so schema migrations
-/// (e.g. dropped columns) do not invalidate cached prepared statements on live connections.
-const TENANT_IDENTITY_CONFIG_COLUMNS: &str = "\
-    organization_id, issuer, default_audience, allowed_audiences, \
-    token_ttl_sec, subject_prefix, enabled, created_at, updated_at, \
-    encrypted_signing_key_1, encrypted_signing_key_2, \
-    signing_key_public_1, signing_key_public_2, \
-    current_signing_key_slot, non_active_slot_expires_at, \
-    token_endpoint, auth_method, encrypted_auth_method_config, \
-    subject_token_audience, token_delegation_created_at";
-
-fn tenant_identity_config_returning() -> String {
-    format!("RETURNING {TENANT_IDENTITY_CONFIG_COLUMNS}")
-}
+use crate::{ConditionalWrite, DatabaseError, DatabaseResult};
 
 /// After `non_active_slot_expires_at`, clears the non-current slot (public + private ciphertext).
 pub async fn gc_expired_non_active_signing_key(
@@ -271,8 +257,8 @@ pub async fn set(
             signing_key_public_2 = EXCLUDED.signing_key_public_2,
             current_signing_key_slot = EXCLUDED.current_signing_key_slot,
             non_active_slot_expires_at = EXCLUDED.non_active_slot_expires_at
-        {}"#,
-        tenant_identity_config_returning(),
+        RETURNING {}"#,
+        TenantIdentityConfig::db_table_columns(),
     );
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(org_id.as_str())
@@ -301,7 +287,8 @@ where
     for<'db> &'db mut DB: DbReader<'db>,
 {
     let query = format!(
-        "SELECT {TENANT_IDENTITY_CONFIG_COLUMNS} FROM tenant_identity_config WHERE organization_id = $1"
+        "SELECT {} FROM tenant_identity_config WHERE organization_id = $1",
+        TenantIdentityConfig::db_table_columns(),
     );
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(org_id.as_str())
@@ -385,8 +372,8 @@ pub async fn set_token_delegation(
             subject_token_audience = $5, updated_at = NOW(),
             token_delegation_created_at = COALESCE(token_delegation_created_at, NOW())
         WHERE organization_id = $1
-        {}"#,
-        tenant_identity_config_returning(),
+        RETURNING {}"#,
+        TenantIdentityConfig::db_table_columns(),
     );
     let row = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(org_id.as_str())
@@ -424,8 +411,8 @@ pub async fn delete_token_delegation(
         SET token_endpoint = NULL, auth_method = NULL, encrypted_auth_method_config = NULL,
             subject_token_audience = NULL, token_delegation_created_at = NULL, updated_at = NOW()
         WHERE organization_id = $1
-        {}"#,
-        tenant_identity_config_returning(),
+        RETURNING {}"#,
+        TenantIdentityConfig::db_table_columns(),
     );
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(org_id.as_str())
@@ -460,12 +447,13 @@ where
 }
 
 /// Loads a row for update during master-key re-wrap.
-pub async fn find_for_update(
+async fn find_for_update(
     org_id: &TenantOrganizationId,
     txn: &mut PgConnection,
 ) -> DatabaseResult<Option<TenantIdentityConfig>> {
     let query = format!(
-        "SELECT {TENANT_IDENTITY_CONFIG_COLUMNS} FROM tenant_identity_config WHERE organization_id = $1 FOR UPDATE"
+        "SELECT {} FROM tenant_identity_config WHERE organization_id = $1 FOR UPDATE",
+        TenantIdentityConfig::db_table_columns(),
     );
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(org_id.as_str())
@@ -474,14 +462,45 @@ pub async fn find_for_update(
         .map_err(|e| DatabaseError::query("SELECT tenant_identity_config FOR UPDATE", e))
 }
 
-/// Updates encrypted signing-key and token-delegation ciphertext columns only.
+/// `ReencryptionNotApplied` explains why prepared ciphertext was not saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ReencryptionNotApplied {
+    /// The source configuration was deleted before the write.
+    #[error("tenant identity configuration no longer exists")]
+    ConfigNotFound,
+    /// The signing keys or delegation changed after preparation began.
+    #[error("tenant identity signing keys or delegation changed; retry re-encryption")]
+    SourceChanged,
+}
+
+/// `update_encrypted_fields` saves prepared ciphertext only when all three
+/// ciphertext columns still match `expected`, including absent values.
+/// Returns `Applied(())`, or `NotApplied` with `ConfigNotFound` for a removed
+/// configuration and `SourceChanged` for changed ciphertext. Database failures
+/// remain errors. The row stays locked until the caller's transaction ends;
+/// remote key access belongs before it.
 pub async fn update_encrypted_fields(
-    org_id: &TenantOrganizationId,
+    expected: &TenantIdentityConfig,
     enc1: Option<EncryptedSigningPrivateKey>,
     enc2: Option<EncryptedSigningPrivateKey>,
     delegation: Option<EncryptedTokenDelegationAuthConfig>,
     txn: &mut PgConnection,
-) -> DatabaseResult<()> {
+) -> DatabaseResult<ConditionalWrite<(), ReencryptionNotApplied>> {
+    let Some(current) = find_for_update(&expected.organization_id, txn).await? else {
+        return Ok(ConditionalWrite::NotApplied(
+            ReencryptionNotApplied::ConfigNotFound,
+        ));
+    };
+    // The plan writes all three ciphertexts, including values already on the
+    // target key. Reject if any source changed while the plan was prepared.
+    if current.encrypted_signing_key_1 != expected.encrypted_signing_key_1
+        || current.encrypted_signing_key_2 != expected.encrypted_signing_key_2
+        || current.encrypted_auth_method_config != expected.encrypted_auth_method_config
+    {
+        return Ok(ConditionalWrite::NotApplied(
+            ReencryptionNotApplied::SourceChanged,
+        ));
+    }
     sqlx::query(
         r#"
         UPDATE tenant_identity_config
@@ -492,14 +511,14 @@ pub async fn update_encrypted_fields(
         WHERE organization_id = $1
         "#,
     )
-    .bind(org_id.as_str())
+    .bind(expected.organization_id.as_str())
     .bind(enc1)
     .bind(enc2)
     .bind(delegation)
     .execute(txn)
     .await
     .map_err(|e| DatabaseError::query("UPDATE tenant_identity_config encrypted fields", e))?;
-    Ok(())
+    Ok(ConditionalWrite::Applied(()))
 }
 
 #[cfg(test)]
@@ -659,6 +678,10 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
     #[crate::sqlx_test]
     async fn test_token_delegation_set_get_delete(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.unwrap();
+        let created_at: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
+            .fetch_one(txn.as_mut())
+            .await
+            .unwrap();
         let org_id = test_org_id();
         ensure_tenant(&mut txn, &org_id).await;
 
@@ -707,6 +730,10 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             cfg.subject_token_audience.as_deref(),
             Some("https://api.example.com")
         );
+        assert_eq!(cfg.encrypted_auth_method_config.as_ref(), Some(&enc));
+        assert_eq!(cfg.token_delegation_created_at, Some(created_at));
+        assert_eq!(cfg.created_at, created_at);
+        assert_eq!(cfg.updated_at, created_at);
 
         let cleared = delete_token_delegation(&org_id, &mut txn)
             .await
@@ -714,6 +741,9 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             .unwrap();
         assert!(cleared.token_endpoint.is_none());
         assert!(cleared.auth_method.is_none());
+        assert!(cleared.encrypted_auth_method_config.is_none());
+        assert!(cleared.subject_token_audience.is_none());
+        assert!(cleared.token_delegation_created_at.is_none());
     }
 
     #[crate::sqlx_test]

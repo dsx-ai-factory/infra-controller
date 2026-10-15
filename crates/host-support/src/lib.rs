@@ -32,6 +32,10 @@ pub mod dpa_cmds;
 pub mod hardware_enumeration;
 #[cfg(feature = "linux-build")]
 pub mod lldp_collector;
+#[cfg(feature = "linux-build")]
+pub mod lldp_collector_task;
+#[cfg(feature = "linux-build")]
+pub mod lldp_snapshot_cache;
 pub mod registration;
 
 static LOG_SETUP: Once = Once::new();

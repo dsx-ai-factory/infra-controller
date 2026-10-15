@@ -119,13 +119,9 @@ pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
         .await
         .expect("Failed to trigger SPDM attestation")
         .into_inner();
-    let result = res
-        .result
-        .expect("supported devices should produce an attestation result");
-    assert_eq!(3, result.devices_under_attestation);
+    assert_eq!(3, res.devices_under_attestation);
     let operator_job_id = uuid::Uuid::try_from(
-        result
-            .job_id
+        res.job_id
             .expect("supported devices should produce an attestation job ID"),
     )
     .expect("attestation job ID should be a UUID");
@@ -241,7 +237,7 @@ async fn fetch_machine_attestation_status(
 ) -> Result<model::attestation::spdm::SpdmAttestationStatus, tonic::Status> {
     let mut txn = env.db_txn().await;
     Ok(
-        db::attestation::spdm::list_single_machine_attestation_status(&mut txn, &machine_id)
+        db::attestation::spdm::list_single_machine_attestation_status(&mut txn, &machine_id, None)
             .await?,
     )
 }

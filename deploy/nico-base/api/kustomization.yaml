@@ -29,7 +29,6 @@ resources:
   - certificate.yaml
   - deployment.yaml
   - metrics-service.yaml
-  - profiler-service.yaml
   - role.yaml
   - rolebinding.yaml
   - service-account.yaml
@@ -46,4 +45,3 @@ configMapGenerator:
 
 generatorOptions:
   disableNameSuffixHash: true
-

@@ -10,11 +10,14 @@ import (
 	"context"
 	"time"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // Client allow us to have both a real implemenation and a mock implementation for unit tests which can be switched transparently
 type Client interface {
+	// Close releases the connection and certificate watcher after callers stop using the client.
+	Close() error
 	Version(ctx context.Context) (string, error)
 	GetMachines(ctx context.Context) ([]MachineDetail, error)
 	GetLeakingMachineIds(ctx context.Context) ([]string, error)
@@ -55,6 +58,9 @@ type Client interface {
 	// core (e.g. `{"state":"ready"}`); decoding is the caller's job. Switches
 	// for which Core returns no controller_state are omitted from the result.
 	FindSwitchControllerStates(ctx context.Context, switchIds []string) (map[string]string, error)
+	// FindSwitchRuntimeStatuses returns controller state and aggregate health
+	// from one FindSwitchesByIds snapshot.
+	FindSwitchRuntimeStatuses(ctx context.Context, switchIds []string) (map[string]ComponentRuntimeStatus, error)
 
 	// FindSwitchNvosIPs returns the resolved NVOS host IP for each switch,
 	// keyed by Core SwitchId. Core populates nvos_info only once both the NVOS
@@ -71,6 +77,14 @@ type Client interface {
 	// FindPowerShelfControllerStates is the power-shelf equivalent of
 	// FindSwitchControllerStates.
 	FindPowerShelfControllerStates(ctx context.Context, shelfIds []string) (map[string]string, error)
+	// FindPowerShelfRuntimeStatuses is the power-shelf equivalent of
+	// FindSwitchRuntimeStatuses.
+	FindPowerShelfRuntimeStatuses(ctx context.Context, shelfIds []string) (map[string]ComponentRuntimeStatus, error)
+
+	// FindRackHealthReports returns Core aggregate health keyed by rack ID.
+	FindRackHealthReports(ctx context.Context, rackIds []string) (map[string]*types.HealthReport, error)
+	// FindRackGroupIDs returns persisted group identities from actual Core racks.
+	FindRackGroupIDs(ctx context.Context, rackIDs []string) (map[string]string, error)
 
 	// GetSwitches returns a complete snapshot of active Core switches with the
 	// runtime ID and BMC MAC needed for actual-inventory reconciliation.
@@ -264,12 +278,15 @@ type Client interface {
 	SetSwitchRackID(switchID, rackID string)
 	SetPowerShelfRackID(shelfID, rackID string)
 	SetSwitchControllerState(switchID, state string)
+	SetSwitchHealth(switchID string, health *types.HealthReport)
 	SetSwitchNvosIP(switchID, ip string)
 	SetObservedNVLinkDomainMemberships(memberships []NVLinkDomainMembership)
 	SetPowerShelfControllerState(shelfID, state string)
+	SetPowerShelfHealth(shelfID string, health *types.HealthReport)
 	SetObservedSwitches(devices []ObservedControllerDevice)
 	SetObservedPowerShelves(devices []ObservedControllerDevice)
 	SetRackHostMachineIDs(rackID string, machineIDs []string)
+	SetRackHealth(rackID string, health *types.HealthReport)
 	AddExpectedRackDetail(detail ExpectedRackDetail)
 	AddExpectedMachineDetail(detail ExpectedMachineDetail)
 	AddExpectedSwitchDetail(detail ExpectedSwitchDetail)

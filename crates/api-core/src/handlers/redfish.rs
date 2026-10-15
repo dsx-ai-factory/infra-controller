@@ -22,13 +22,16 @@ use arc_swap::ArcSwap;
 use carbide_instrument::emit;
 use carbide_secrets::credentials::CredentialReader;
 use carbide_utils::HostPortPair;
-use carbide_utils::redfish::{format_forwarded_host_parameter, parse_uri_host_ip};
+use carbide_utils::redfish::{
+    format_forwarded_host_parameter, log_redfish_http_error, parse_uri_host_ip,
+    redact_redfish_response_body, redfish_basic_authorization_context,
+};
 use chrono::{DateTime, Local};
 use db::redfish_actions::{
-    approve_request, delete_request, fetch_request, find_serials, insert_request, list_requests,
-    set_applied, update_response,
+    ActionNotClaimed, ApprovalNotRecorded, approve_request, delete_request, fetch_request,
+    find_serials, insert_request, list_requests, set_applied, update_response,
 };
-use db::{Transaction, TransactionVending};
+use db::{ConditionalWrite, Transaction, TransactionVending};
 use http::header::CONTENT_TYPE;
 use http::uri::Authority;
 use http::{HeaderMap, HeaderValue, Uri};
@@ -66,6 +69,9 @@ struct RedfishActionResultPersistenceFailed {
     error: String,
 }
 
+/// Performs a Core-mediated Redfish GET, diagnoses upstream HTTP 4xx/5xx responses,
+/// and redacts known direct-authentication credentials from readable error bodies
+/// while preserving the existing browse-response and RPC-error contracts.
 pub(crate) async fn redfish_browse(
     api: &crate::api::Api,
     request: tonic::Request<::rpc::forge::RedfishBrowseRequest>,
@@ -73,7 +79,8 @@ pub(crate) async fn redfish_browse(
     log_request_data(&request);
 
     let request = request.into_inner();
-    let uri: http::Uri = match request.uri.clone().parse() {
+    let requested_uri = request.uri;
+    let uri: http::Uri = match requested_uri.parse() {
         Ok(uri) => uri,
         Err(err) => {
             return Err(CarbideError::internal(format!("parsing uri failed: {err}")).into());
@@ -109,11 +116,45 @@ pub(crate) async fn redfish_browse(
         .collect::<HashMap<String, String>>();
 
     let status = response.status();
-    let text = response.text().await.map_err(|e| {
-        CarbideError::internal(format!(
-            "error reading response body: {e}, status: {status}"
-        ))
-    })?;
+    let is_http_error = status.is_client_error() || status.is_server_error();
+    let text = match response.text().await {
+        Ok(text) => text,
+        Err(e) => {
+            // The known status remains useful even when no untrusted body can
+            // be read; the shared logger supplies its safe fallback message.
+            if is_http_error {
+                log_redfish_http_error(
+                    "redfish",
+                    "redfish_browse",
+                    &requested_uri,
+                    status.as_u16(),
+                    "",
+                    std::iter::empty(),
+                );
+            }
+            return Err(CarbideError::internal(format!(
+                "error reading response body: {e}, status: {status}"
+            ))
+            .into());
+        }
+    };
+
+    // Keep readable HTTP failures in the browse response contract while
+    // preventing a directly contacted BMC from echoing reusable credentials.
+    let text = if is_http_error {
+        let sensitive_values = auth.http_error_sensitive_values();
+        log_redfish_http_error(
+            "redfish",
+            "redfish_browse",
+            &requested_uri,
+            status.as_u16(),
+            &text,
+            sensitive_values.iter().map(String::as_str),
+        );
+        redact_redfish_response_body(&text, sensitive_values.iter().map(String::as_str))
+    } else {
+        text
+    };
 
     Ok(tonic::Response::new(::rpc::forge::RedfishBrowseResponse {
         text,
@@ -192,11 +233,16 @@ pub(crate) async fn redfish_approve_action(
         );
     }
 
-    let is_approved = approve_request(approver, request, &mut txn).await?;
-    if !is_approved {
-        return Err(
-            CarbideError::InvalidArgument("user already approved request".to_owned()).into(),
-        );
+    match approve_request(approver, request, &mut txn).await? {
+        ConditionalWrite::Applied(()) => {}
+        ConditionalWrite::NotApplied(ApprovalNotRecorded) => {
+            // Another request can record this user's approval or cancel the
+            // action after our read.
+            return Err(CarbideError::InvalidArgument(
+                "request no longer exists or user already approved it".to_owned(),
+            )
+            .into());
+        }
     }
     txn.commit().await?;
 
@@ -230,9 +276,15 @@ pub(crate) async fn redfish_apply_action(
 
     let ip_to_serial = find_serials(&action_request.machine_ips, &mut txn).await?;
 
-    let is_applied = set_applied(applier, request, &mut txn).await?;
-    if !is_applied {
-        return Err(CarbideError::InvalidArgument("request was already applied".to_owned()).into());
+    match set_applied(applier, request, &mut txn).await? {
+        ConditionalWrite::Applied(()) => {}
+        ConditionalWrite::NotApplied(ActionNotClaimed) => {
+            // Another request can apply or cancel the action after our read.
+            return Err(CarbideError::InvalidArgument(
+                "request no longer exists or was already applied".to_owned(),
+            )
+            .into());
+        }
     }
 
     let mut uris: Vec<(Uri, usize)> = Vec::with_capacity(action_request.machine_ips.len());
@@ -260,6 +312,10 @@ pub(crate) async fn redfish_apply_action(
             ));
         }
     }
+
+    // A failed claim commit must not leave requests running against the BMC.
+    // Commit the claim and serial-mismatch results before starting any POST task.
+    txn.commit().await?;
 
     for (uri, index) in uris {
         // Spawn off the task to send the request, open a transaction, and store the result.
@@ -299,8 +355,6 @@ pub(crate) async fn redfish_apply_action(
             }
         });
     }
-
-    txn.commit().await?;
 
     Ok(tonic::Response::new(
         ::rpc::forge::RedfishApplyActionResponse {},
@@ -487,6 +541,21 @@ enum PassthroughAuth {
 }
 
 impl PassthroughAuth {
+    /// Returns reusable Basic-auth credential forms only when Core owns them.
+    ///
+    /// The core-proxy path deliberately returns no context because the proxy,
+    /// rather than this handler, owns and applies the upstream credentials.
+    fn http_error_sensitive_values(&self) -> Vec<String> {
+        match self {
+            Self::BmcBasic(metadata) => {
+                let (_, sensitive_values) =
+                    redfish_basic_authorization_context(&metadata.user, Some(&metadata.password));
+                sensitive_values
+            }
+            Self::CoreProxy => Vec::new(),
+        }
+    }
+
     fn apply(
         &self,
         request: reqwest_middleware::RequestBuilder,

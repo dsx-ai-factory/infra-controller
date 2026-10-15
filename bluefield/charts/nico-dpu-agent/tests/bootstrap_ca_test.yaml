@@ -124,6 +124,38 @@ tests:
                 - key: ca.crt
                   path: ca.pem
 
+  - it: uses the shared certificate directory in mounted mode when certsDir is empty
+    set:
+      certsDir: ""
+      bootstrapCa:
+        source: mounted
+        object:
+          kind: Secret
+          name: site-bootstrap-ca
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].args
+          value:
+            - init-container
+            - --bootstrap-ca-source=mounted
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: nico-certs
+            mountPath: /opt/forge
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nico-certs
+            mountPath: /opt/forge
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-certs
+            hostPath:
+              path: /opt/forge
+              type: DirectoryOrCreate
+
   - it: rejects an unknown source
     set:
       bootstrapCa:

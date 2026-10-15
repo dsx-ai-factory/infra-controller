@@ -36,21 +36,25 @@ struct DevicesXml {
 
 // DeviceXml represents a single device entry from
 // mlxfwmanager XML output.
+// Missing hardware facts use the same empty-to-None conversion as MFT's
+// placeholders. The PCI locator and device type remain required.
 #[derive(Debug, Deserialize)]
 struct DeviceXml {
     #[serde(rename = "@pciName")]
     pci_name: String,
     #[serde(rename = "@type")]
     device_type: String,
-    #[serde(rename = "@psid")]
+    #[serde(rename = "@psid", default)]
     psid: String,
-    #[serde(rename = "@partNumber")]
+    #[serde(rename = "@partNumber", default)]
     part_number: String,
-    #[serde(rename = "Versions")]
+    #[serde(rename = "Versions", default)]
     versions: VersionsXml,
-    #[serde(rename = "MACs")]
+    #[serde(rename = "MACs", default)]
     macs: MacsXml,
-    #[serde(rename = "Description")]
+    #[serde(rename = "GUIDs", default)]
+    guids: GuidsXml,
+    #[serde(rename = "Description", default)]
     description: String,
     #[serde(rename = "Status", default)]
     status: String,
@@ -58,7 +62,7 @@ struct DeviceXml {
 
 // VersionsXml represents the version information section
 // from mlxfwmanager XML.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct VersionsXml {
     #[serde(rename = "FW", default)]
     fw: Option<VersionXml>,
@@ -72,22 +76,25 @@ struct VersionsXml {
     uefi_virtio_net: Option<VersionXml>,
 }
 
-// VersionXml represents current and available version
-// information for a component.
+// VersionXml reads the installed version; available image versions are unused.
 #[derive(Debug, Deserialize)]
 struct VersionXml {
-    #[serde(rename = "@current")]
+    #[serde(rename = "@current", default)]
     current: String,
-    #[serde(rename = "@available")]
-    _available: String,
 }
 
 // MacsXml represents MAC address information from
 // mlxfwmanager XML.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct MacsXml {
-    #[serde(rename = "@Base_Mac")]
+    #[serde(rename = "@Base_Mac", default)]
     base_mac: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GuidsXml {
+    #[serde(rename = "@Base_Guid", default)]
+    base_guid: String,
 }
 
 // discover_devices finds all devices using mlxfwmanager.
@@ -192,8 +199,9 @@ pub fn discover_devices_with_filters(filter: DeviceFilter) -> Result<Vec<MlxDevi
     Ok(filtered_devices)
 }
 
-// parse_mlxfwmanager_xml converts XML output from mlxfwmanager
-// into device info structs.
+/// Parses MFT device XML, retaining devices with missing optional hardware facts.
+/// Missing facts and MFT placeholders become `None`. Malformed XML, missing
+/// `pciName` or `type` attributes, and reports without device entries are errors.
 pub fn parse_mlxfwmanager_xml(xml_content: &str) -> Result<Vec<MlxDeviceInfo>, String> {
     let devices_xml: DevicesXml =
         from_str(xml_content).map_err(|e| format!("Failed to parse mlxfwmanager XML: {e}"))?;
@@ -240,6 +248,7 @@ pub fn parse_mlxfwmanager_xml(xml_content: &str) -> Result<Vec<MlxDeviceInfo>, S
                 .as_ref()
                 .and_then(|virtio_net| parse_optional_xml_field(&virtio_net.current)),
             base_mac,
+            base_guid: parse_optional_xml_field(&device_xml.guids.base_guid),
         };
         devices.push(device_info);
     }

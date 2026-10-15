@@ -1,0 +1,97 @@
+suite: general-purpose init container images
+templates:
+  - deployment.yaml
+tests:
+  - it: should build split images, override combined images, and preserve container settings
+    set:
+      initContainers:
+        - name: split-image
+          repository: registry.example.com/custom-init
+          tag: v1.2.3
+        - name: overridden-image
+          repository: registry.example.com/custom-init
+          tag: v2.0.0
+          image: legacy.example.com/ignored:old
+          imagePullPolicy: Always
+          command: ["sh", "-c"]
+          args: ["echo initializing"]
+          env:
+            - name: MODE
+              value: setup
+          securityContext:
+            runAsUser: 1000
+          resources:
+            requests:
+              memory: 64Mi
+          volumeMounts:
+            - name: custom-volume
+              mountPath: /custom
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers
+          value:
+            - name: split-image
+              image: registry.example.com/custom-init:v1.2.3
+            - name: overridden-image
+              image: registry.example.com/custom-init:v2.0.0
+              imagePullPolicy: Always
+              command: ["sh", "-c"]
+              args: ["echo initializing"]
+              env:
+                - name: MODE
+                  value: setup
+              securityContext:
+                runAsUser: 1000
+              resources:
+                requests:
+                  memory: 64Mi
+              volumeMounts:
+                - name: custom-volume
+                  mountPath: /custom
+
+  - it: should preserve combined images when either split field is missing or empty
+    set:
+      global.image.repository: registry.example.com/main
+      global.image.tag: main-tag
+      initContainers:
+        - name: image-only
+          image: registry.example.com/custom-init@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        - name: repository-only
+          repository: registry.example.com/ignored
+          image: registry.example.com/custom-init:original
+        - name: tag-only
+          tag: ignored
+          image: registry.example.com/custom-init:original
+        - name: empty-tag
+          repository: registry.example.com/ignored
+          tag: ""
+          image: registry.example.com/custom-init:original
+        - name: empty-repository
+          repository: ""
+          tag: ignored
+          image: registry.example.com/custom-init:original
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers
+          value:
+            - name: image-only
+              image: registry.example.com/custom-init@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+            - name: repository-only
+              image: registry.example.com/custom-init:original
+            - name: tag-only
+              image: registry.example.com/custom-init:original
+            - name: empty-tag
+              image: registry.example.com/custom-init:original
+            - name: empty-repository
+              image: registry.example.com/custom-init:original
+
+  - it: should reject a repository-only entry without a fallback image
+    set:
+      initContainers:
+        - name: valid-init
+          image: registry.example.com/custom-init:original
+        - name: missing-tag
+          repository: registry.example.com/custom-init
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-pxe.initContainers[1] requires either non-empty repository and tag or a non-empty image"

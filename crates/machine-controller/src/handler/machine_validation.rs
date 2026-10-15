@@ -16,6 +16,8 @@
  */
 use carbide_uuid::machine_validation::MachineValidationId;
 use chrono::Utc;
+use db::ConditionalWrite;
+use db::machine_validation::ValidationNotActive;
 use libredfish::{EnabledDisabled, RedfishError, SystemPowerControl};
 use model::machine::{
     FailureCause, FailureDetails, FailureSource, MachineState, MachineValidatingState,
@@ -125,7 +127,7 @@ async fn handle_validation_boot_config_stage(
             )
             .await?;
 
-            if !completed {
+            if let ConditionalWrite::NotApplied(ValidationNotActive) = completed {
                 tracing::info!(
                     %machine_id,
                     machine_validation_id = %validation_id,
@@ -165,7 +167,7 @@ async fn skip_machine_validation(
         },
     )
     .await?;
-    if !completed {
+    if let ConditionalWrite::NotApplied(ValidationNotActive) = completed {
         tracing::info!(
             %machine_id,
             machine_validation_id = %validation_id,

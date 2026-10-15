@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::net::{SocketAddr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -23,6 +23,8 @@ use eyre::Context;
 use tokio::io::AsyncBufReadExt;
 use tokio::process;
 use tokio::sync::oneshot;
+
+use crate::utils::LOCALHOST_CERTS;
 
 const ROOT_TOKEN: &str = "Root Token";
 const VAULT_CACERT_ENV_STRING: &str = "$ export VAULT_CACERT";
@@ -39,26 +41,40 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug)]
 pub struct Vault {
-    /// The address vault bound. [`start`] chooses it -- retrying across ports
+    /// The address vault bound. [`start_on`] chooses it -- retrying across ports
     /// until one sticks -- so callers read it back here instead of picking it.
     pub addr: SocketAddr,
     pub process: process::Child,
     pub token: String,
+    /// CA certificate path for `addr`: Vault's dev CA for IPv4, repository CA for IPv6.
     pub ca_cert: String,
     _tls_dir: tempfile::TempDir,
 }
 
-/// Start a vault dev server on a free local port and wait until it is ready.
+/// Start a vault dev server on a free IPv4 loopback port and wait until it is ready.
+pub async fn start() -> Result<Vault, eyre::Report> {
+    start_on(Ipv4Addr::LOCALHOST.into()).await
+}
+
+/// `start_on` starts a Vault dev server on a free port of `bind_ip` and waits
+/// for its token and CA certificate. The address must be locally bindable.
+/// Use `127.0.0.1` or `::1` for verified TLS.
 ///
 /// vault binds the listen port itself but cannot be asked to pick a free one
 /// and report it back, so we allocate a port and hand it over. The port can be
 /// claimed in the gap between allocate_port releasing it and vault binding it,
 /// so a failed attempt retries on a fresh port. The bound address is returned
 /// on the [`Vault`].
-pub async fn start() -> Result<Vault, eyre::Report> {
+///
+/// # Errors
+///
+/// Returns an error if a local listen address cannot be obtained, or startup retries are
+/// exhausted because prerequisites are missing, TLS setup or process spawning
+/// fails, or Vault does not report readiness or provide its CA certificate.
+pub async fn start_on(bind_ip: IpAddr) -> Result<Vault, eyre::Report> {
     let mut last_err = None;
     for attempt in 1..=MAX_START_ATTEMPTS {
-        let addr = allocate_port();
+        let addr = allocate_port(bind_ip)?;
         match try_start(addr).await {
             Ok(vault) => return Ok(vault),
             Err(e) => {
@@ -79,15 +95,17 @@ pub async fn start() -> Result<Vault, eyre::Report> {
 
 /// Pick a free local port by binding to port 0 and releasing it immediately.
 /// The port is free when this returns, so the caller must claim it promptly;
-/// [`start`] retries if it loses the race.
-fn allocate_port() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind to free port");
-    listener.local_addr().expect("local addr")
+/// [`start_on`] retries if it loses the race.
+fn allocate_port(bind_ip: IpAddr) -> Result<SocketAddr, eyre::Report> {
+    let listener = TcpListener::bind((bind_ip, 0)).context("binding free vault port")?;
+    listener
+        .local_addr()
+        .context("reading vault listener address")
 }
 
 /// Spawn vault on `addr` and wait for it to report a token and CA cert. Errors
 /// if vault exits (e.g. the port was taken) or does not report readiness within
-/// [`STARTUP_TIMEOUT`], so [`start`] can retry on a fresh port.
+/// [`STARTUP_TIMEOUT`], so [`start_on`] can retry on a fresh port.
 async fn try_start(addr: SocketAddr) -> Result<Vault, eyre::Report> {
     let bins = crate::utils::find_prerequisites()?;
 
@@ -102,21 +120,46 @@ async fn try_start(addr: SocketAddr) -> Result<Vault, eyre::Report> {
         .tempdir_in(tls_root)
         .context("creating vault TLS directory")?;
 
-    let mut process =
-        tokio::process::Command::new(bins.get("vault").expect("vault command not found in PATH"))
-            .arg("server")
-            .arg("-dev-tls")
-            .arg(format!("-dev-tls-cert-dir={}", tls_dir.path().display()))
-            .arg("-dev-no-store-token")
-            .arg(format!("-dev-listen-address={addr}"))
-            .env_remove("VAULT_ADDR")
-            .env_remove("VAULT_CLIENT_KEY")
-            .env_remove("VAULT_CLIENT_CERT")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+    let mut command =
+        tokio::process::Command::new(bins.get("vault").expect("vault command not found in PATH"));
+    command
+        .arg("server")
+        .arg("-dev-tls")
+        .arg(format!("-dev-tls-cert-dir={}", tls_dir.path().display()))
+        .arg("-dev-no-store-token");
+    if addr.is_ipv6() {
+        // CI pins Vault 1.14.1, whose dev certificate does not cover `::1`.
+        // Keep its dev listener on an unused IPv4 port and add our IPv6
+        // listener with the repository certificate, which covers `::1`.
+        let config_path = tls_dir.path().join("listener.json");
+        let config = serde_json::json!({
+            "api_addr": format!("https://{addr}"),
+            "listener": {
+                "tcp": {
+                    "address": addr.to_string(),
+                    "tls_cert_file": LOCALHOST_CERTS.server_cert,
+                    "tls_key_file": LOCALHOST_CERTS.server_key,
+                },
+            },
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&config)?)
+            .context("writing IPv6 vault listener configuration")?;
+        command
+            .arg("-dev-listen-address=127.0.0.1:0")
+            .arg("-config")
+            .arg(config_path);
+    } else {
+        command.arg(format!("-dev-listen-address={addr}"));
+    }
+    let mut process = command
+        .env_remove("VAULT_ADDR")
+        .env_remove("VAULT_CLIENT_KEY")
+        .env_remove("VAULT_CLIENT_CERT")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
 
     let stdout = tokio::io::BufReader::new(process.stdout.take().unwrap());
     let stderr = tokio::io::BufReader::new(process.stderr.take().unwrap());
@@ -175,6 +218,11 @@ async fn try_start(addr: SocketAddr) -> Result<Vault, eyre::Report> {
     let (token, ca_cert) = tokio::time::timeout(STARTUP_TIMEOUT, ready)
         .await
         .context("timed out waiting for vault to report readiness")??;
+    let ca_cert = if addr.is_ipv6() {
+        LOCALHOST_CERTS.ca_cert.display().to_string()
+    } else {
+        ca_cert
+    };
 
     // Vault announces the cert path in its stdout log before it finishes writing the
     // file to disk. Poll until the file is present so callers can use it immediately.

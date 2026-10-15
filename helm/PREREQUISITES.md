@@ -324,6 +324,10 @@ gate, leaving the Casbin decision as the effective authorization result. Trust
 only a dedicated admin-client intermediate and issuance profile whose entire
 issuance population is intended to cross this admin trust boundary.
 
+For client-certificate issuance and installation, protected CLI verification,
+renewal, CA overlap, recovery, and the existing revocation support boundary,
+see [NICo mTLS and authorization](../docs/manuals/nico-api-auth.md).
+
 ---
 
 ## 7. Network Requirements

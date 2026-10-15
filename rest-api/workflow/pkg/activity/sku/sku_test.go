@@ -5,12 +5,15 @@ package sku
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -21,6 +24,7 @@ import (
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -38,7 +42,26 @@ func ageSku(ctx context.Context, t *testing.T, dbSession *cdb.Session, id string
 	require.NoError(t, err)
 }
 
-func TestManageSku_Reconcile_CreateUpdateDelete(t *testing.T) {
+func TestManageSku_UpdateSkusInDB(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "reconcile create update delete", run: testManageSkuReconcileCreateUpdateDelete},
+		{name: "nil components clears existing", run: testManageSkuNilComponentsClearsExisting},
+		{name: "failed inventory skips reconciliation", run: testManageSkuInventoryStatusFailedSkipsReconciliation},
+		{name: "paged deletion", run: testManageSkuPagedDeletion},
+		{name: "update respects freshness", run: testManageSkuUpdateRespectsStaleInventoryThreshold},
+		{name: "deletion respects freshness", run: testManageSkuDeletionRespectsStaleInventoryThreshold},
+		{name: "edit committed before deletion survives", run: testManageSkuEditBeforeDeletionSurvives},
+		{name: "delete error allows other deletions and a later retry", run: testManageSkuDeleteErrorContinuesAndRetries},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, tc.run)
+	}
+}
+
+func testManageSkuReconcileCreateUpdateDelete(t *testing.T) {
 	ctx := context.Background()
 	_ = config.GetTestConfig()
 
@@ -86,6 +109,7 @@ func TestManageSku_Reconcile_CreateUpdateDelete(t *testing.T) {
 		Description:   &description2,
 		Created:       timestamppb.New(created2),
 		SchemaVersion: 5,
+		DeviceType:    cutil.GetPtr("gpu-server"),
 		Components:    &corev1.SkuComponents{},
 	}}}
 	assert.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inv2))
@@ -97,22 +121,38 @@ func TestManageSku_Reconcile_CreateUpdateDelete(t *testing.T) {
 	assert.Equal(t, uint32(5), skus[0].SchemaVersion)
 	assert.True(t, created2.Round(time.Microsecond).Equal(skus[0].Created))
 
-	// 3) Missing source timestamp preserves the stored creation time.
+	// 3) Equal inventory must not renew the freshness window. Missing Created
+	// keeps Core's creation time; missing components and associations are empty.
 	ageSku(ctx, t, dbSession, id1)
-	invWithoutCreated := &corev1.SkuInventory{Skus: []*corev1.Sku{{
-		Id:            id1,
-		Description:   &description2,
-		SchemaVersion: 5,
-		Components:    &corev1.SkuComponents{},
-	}}}
-	assert.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, invWithoutCreated))
-	skus, total, err = ssd.GetAll(ctx, nil, cdbm.SkuFilterInput{SiteIDs: []uuid.UUID{site.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(100)})
-	assert.NoError(t, err)
-	assert.Equal(t, 1, total)
-	assert.True(t, created2.Round(time.Microsecond).Equal(skus[0].Created))
+	beforeNoChange, err := ssd.Get(ctx, nil, id1)
+	require.NoError(t, err)
+	require.NotNil(t, beforeNoChange.DeviceType)
+	require.False(t, site.IsTimeWithinStaleInventoryThreshold(beforeNoChange.Updated))
+	for _, tc := range []struct {
+		name       string
+		deviceType *string
+	}{
+		{name: "equal device type", deviceType: cutil.GetPtr(*beforeNoChange.DeviceType)},
+		{name: "omitted device type", deviceType: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.deviceType != nil {
+				require.NotSame(t, beforeNoChange.DeviceType, tc.deviceType)
+			}
+			invWithoutCreated := &corev1.SkuInventory{Skus: []*corev1.Sku{{
+				Id:            id1,
+				Description:   &description2,
+				SchemaVersion: 5,
+				DeviceType:    tc.deviceType,
+			}}}
+			require.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, invWithoutCreated))
+			stored, err := ssd.Get(ctx, nil, id1)
+			require.NoError(t, err)
+			assert.Equal(t, beforeNoChange, stored, "unchanged inventory must preserve values and Updated")
+		})
+	}
 
-	// 4) Delete: send empty inventory, final page implied
-	ageSku(ctx, t, dbSession, id1)
+	// 4) The unchanged row remains eligible for deletion without aging it again.
 	inv3 := &corev1.SkuInventory{Skus: []*corev1.Sku{}}
 	assert.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inv3))
 
@@ -121,7 +161,7 @@ func TestManageSku_Reconcile_CreateUpdateDelete(t *testing.T) {
 	assert.Equal(t, 0, total)
 }
 
-func TestManageSku_NilComponents_ClearsExisting(t *testing.T) {
+func testManageSkuNilComponentsClearsExisting(t *testing.T) {
 	ctx := context.Background()
 	_ = config.GetTestConfig()
 
@@ -135,11 +175,20 @@ func TestManageSku_NilComponents_ClearsExisting(t *testing.T) {
 	ip := cwu.TestBuildInfrastructureProvider(t, dbSession, "test-provider", ipOrg, ipu)
 	site := cwu.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, nil, ipu)
 
-	// Seed a SKU with non-nil Components. Age it so the update runs, since the seeded value
-	// would otherwise satisfy the assertion below without the clear ever happening.
+	// Seed populated components so keeping the existing value cannot pass as a clear.
 	id := "sku-clear"
-	_, err := dbSession.DB.NewInsert().Model(&cdbm.SKU{ID: id, SiteID: site.ID, Components: &cdbm.SkuComponents{SkuComponents: &corev1.SkuComponents{}}}).Exec(ctx)
-	assert.NoError(t, err)
+	_, err := dbSession.DB.NewInsert().Model(&cdbm.SKU{
+		ID: id, SiteID: site.ID,
+		Components: &cdbm.SkuComponents{SkuComponents: &corev1.SkuComponents{
+			Chassis: &corev1.SkuComponentChassis{Model: "DGX"},
+		}},
+	}).Exec(ctx)
+	require.NoError(t, err)
+	ssd := cdbm.NewSkuDAO(dbSession)
+	beforeClear, err := ssd.Get(ctx, nil, id)
+	require.NoError(t, err)
+	require.NotNil(t, beforeClear.Components)
+	require.Equal(t, "DGX", beforeClear.Components.GetChassis().GetModel())
 	ageSku(ctx, t, dbSession, id)
 
 	ms := NewManageSku(dbSession, cwu.TestTemporalSiteClientPool(t))
@@ -152,15 +201,13 @@ func TestManageSku_NilComponents_ClearsExisting(t *testing.T) {
 	}
 	assert.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inv))
 
-	ssd := cdbm.NewSkuDAO(dbSession)
 	got, gerr := ssd.Get(ctx, nil, id)
-	assert.NoError(t, gerr)
-	if got.Components == nil || got.Components.SkuComponents == nil {
-		t.Fatalf("expected Components to be a non-nil empty wrapper after clear, got %+v", got.Components)
-	}
+	require.NoError(t, gerr)
+	require.NotNil(t, got.Components)
+	assert.True(t, proto.Equal(&corev1.SkuComponents{}, got.Components.SkuComponents))
 }
 
-func TestManageSku_InventoryStatusFailed_Skip(t *testing.T) {
+func testManageSkuInventoryStatusFailedSkipsReconciliation(t *testing.T) {
 	ctx := context.Background()
 	_ = config.GetTestConfig()
 
@@ -195,7 +242,7 @@ func TestManageSku_InventoryStatusFailed_Skip(t *testing.T) {
 	assert.Equal(t, 1, total)
 }
 
-func TestManageSku_PagedDeletion(t *testing.T) {
+func testManageSkuPagedDeletion(t *testing.T) {
 	ctx := context.Background()
 	_ = config.GetTestConfig()
 
@@ -233,6 +280,11 @@ func TestManageSku_PagedDeletion(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, 3, total)
 
+	// The first-page row must survive because of ItemIds, not the freshness guard.
+	firstPageRow, err := ssd.Get(ctx, nil, seed[0])
+	require.NoError(t, err)
+	require.False(t, site.IsTimeWithinStaleInventoryThreshold(firstPageRow.Updated))
+
 	// Last page: report only second ID, third should be deleted
 	inv2 := &corev1.SkuInventory{
 		Skus:            []*corev1.Sku{{Id: seed[1]}},
@@ -254,11 +306,12 @@ func TestManageSku_PagedDeletion(t *testing.T) {
 	assert.False(t, found[seed[2]])
 }
 
-func TestManageSku_UpdateRespectsStaleInventoryThreshold(t *testing.T) {
+func testManageSkuUpdateRespectsStaleInventoryThreshold(t *testing.T) {
 	testCases := []struct {
 		name            string
 		writtenAgo      time.Duration
 		wantDescription string
+		wantUpdated     bool
 	}{
 		{
 			// The API can write a SKU, so a row written after the Site collected this inventory
@@ -271,6 +324,7 @@ func TestManageSku_UpdateRespectsStaleInventoryThreshold(t *testing.T) {
 			name:            "a SKU untouched for longer than the interval takes the reported values",
 			writtenAgo:      2 * cutil.DefaultInventoryReceiptInterval,
 			wantDescription: "reported by the Site",
+			wantUpdated:     true,
 		},
 	}
 
@@ -305,6 +359,9 @@ func TestManageSku_UpdateRespectsStaleInventoryThreshold(t *testing.T) {
 				Exec(ctx)
 			require.NoError(t, err)
 
+			ssd := cdbm.NewSkuDAO(dbSession)
+			beforeInventory, err := ssd.Get(ctx, nil, id)
+			require.NoError(t, err)
 			ms := NewManageSku(dbSession, cwu.TestTemporalSiteClientPool(t))
 
 			// The Site reports a competing description for the same SKU.
@@ -319,15 +376,19 @@ func TestManageSku_UpdateRespectsStaleInventoryThreshold(t *testing.T) {
 			}
 			require.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inv))
 
-			ssd := cdbm.NewSkuDAO(dbSession)
 			got, gerr := ssd.Get(ctx, nil, id)
 			require.NoError(t, gerr)
 			assert.Equal(t, tc.wantDescription, got.Description)
+			if tc.wantUpdated {
+				assert.True(t, got.Updated.After(beforeInventory.Updated))
+			} else {
+				assert.Equal(t, beforeInventory.Updated, got.Updated)
+			}
 		})
 	}
 }
 
-func TestManageSku_DeletionRespectsStaleInventoryThreshold(t *testing.T) {
+func testManageSkuDeletionRespectsStaleInventoryThreshold(t *testing.T) {
 	testCases := []struct {
 		name       string
 		writtenAgo time.Duration
@@ -435,4 +496,135 @@ func TestManageSku_DeletionRespectsStaleInventoryThreshold(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Run the competing write immediately before the SQL DELETE, after any reads
+// reconciliation might use to decide whether the row is still eligible.
+type testSkuBeforeDeleteHook struct {
+	rowID        string
+	beforeDelete func()
+	fired        bool
+	err          error
+}
+
+func (h *testSkuBeforeDeleteHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !h.fired && event.Operation() == "DELETE" && strings.Contains(event.Query, `FROM "sku"`) && strings.Contains(event.Query, h.rowID) {
+		h.fired = true
+		if h.beforeDelete != nil {
+			h.beforeDelete()
+		}
+	}
+	return ctx
+}
+
+func (h *testSkuBeforeDeleteHook) AfterQuery(ctx context.Context, event *bun.QueryEvent) {
+	if event.Operation() == "DELETE" && strings.Contains(event.Query, `FROM "sku"`) && strings.Contains(event.Query, h.rowID) {
+		h.err = event.Err
+	}
+}
+
+func testManageSkuEditBeforeDeletionSurvives(t *testing.T) {
+	ctx := context.Background()
+	_ = config.GetTestConfig()
+	dbSession := cwu.TestInitDB(t)
+	defer dbSession.Close()
+	cwu.TestSetupSchema(t, dbSession)
+
+	ipOrg := "test-ip-org"
+	ipu := cwu.TestBuildUser(t, dbSession, uuid.NewString(), []string{ipOrg}, []string{"FORGE_PROVIDER_ADMIN"})
+	ip := cwu.TestBuildInfrastructureProvider(t, dbSession, "test-provider", ipOrg, ipu)
+	site := cwu.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, nil, ipu)
+	dao := cdbm.NewSkuDAO(dbSession)
+	row, err := dao.Create(ctx, nil, cdbm.SkuCreateInput{SkuID: "sku-concurrent", SiteID: site.ID})
+	require.NoError(t, err)
+	companion, err := dao.Create(ctx, nil, cdbm.SkuCreateInput{SkuID: "sku-unchanged", SiteID: site.ID})
+	require.NoError(t, err)
+	ageSku(ctx, t, dbSession, row.ID)
+	ageSku(ctx, t, dbSession, companion.ID)
+	beforeRead, err := dao.Get(ctx, nil, row.ID)
+	require.NoError(t, err)
+	require.False(t, site.IsTimeWithinStaleInventoryThreshold(beforeRead.Updated))
+
+	var newer *cdbm.SKU
+	var writeErr error
+	hook := &testSkuBeforeDeleteHook{rowID: row.ID, beforeDelete: func() {
+		newer, writeErr = dao.Update(ctx, nil, cdbm.SkuUpdateInput{
+			SkuID:       row.ID,
+			Description: cutil.GetPtr("set through the API"),
+		})
+	}}
+	dbSession.DB.AddQueryHook(hook)
+	inventory := &corev1.SkuInventory{InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS}
+	ms := NewManageSku(dbSession, cwu.TestTemporalSiteClientPool(t))
+	require.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inventory))
+	require.True(t, hook.fired)
+	require.NoError(t, hook.err)
+	require.NoError(t, writeErr)
+	require.NotNil(t, newer)
+	require.True(t, newer.Updated.After(beforeRead.Updated))
+	stored, err := dao.Get(ctx, nil, row.ID)
+	require.NoError(t, err)
+	assert.Equal(t, newer, stored, "the API description and Updated must survive")
+	_, err = dao.Get(ctx, nil, companion.ID)
+	require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+}
+
+func testManageSkuDeleteErrorContinuesAndRetries(t *testing.T) {
+	ctx := context.Background()
+	_ = config.GetTestConfig()
+	dbSession := cwu.TestInitDB(t)
+	defer dbSession.Close()
+	cwu.TestSetupSchema(t, dbSession)
+
+	ipOrg := "test-ip-org"
+	ipu := cwu.TestBuildUser(t, dbSession, uuid.NewString(), []string{ipOrg}, []string{"FORGE_PROVIDER_ADMIN"})
+	ip := cwu.TestBuildInfrastructureProvider(t, dbSession, "test-provider", ipOrg, ipu)
+	site := cwu.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, nil, ipu)
+	dao := cdbm.NewSkuDAO(dbSession)
+	row, err := dao.Create(ctx, nil, cdbm.SkuCreateInput{SkuID: "sku-failed-delete", SiteID: site.ID})
+	require.NoError(t, err)
+	companion, err := dao.Create(ctx, nil, cdbm.SkuCreateInput{SkuID: "sku-continue-delete", SiteID: site.ID})
+	require.NoError(t, err)
+	ageSku(ctx, t, dbSession, row.ID)
+	ageSku(ctx, t, dbSession, companion.ID)
+	// `GetAll` orders by `Created`, so process the failing row first.
+	_, err = dbSession.DB.NewUpdate().Model((*cdbm.SKU)(nil)).
+		Set("created = ?", companion.Created.Add(-time.Hour)).Where("id = ?", row.ID).Exec(ctx)
+	require.NoError(t, err)
+	rows, _, err := dao.GetAll(ctx, nil, cdbm.SkuFilterInput{SiteIDs: []uuid.UUID{site.ID}}, cdbp.PageInput{})
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	require.Equal(t, row.ID, rows[0].ID)
+	require.Equal(t, companion.ID, rows[1].ID)
+
+	_, err = dbSession.DB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION fail_sku_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected database failure'; END $$`)
+	require.NoError(t, err)
+	defer func() {
+		_, cleanupErr := dbSession.DB.ExecContext(ctx, "DROP FUNCTION fail_sku_delete() CASCADE")
+		require.NoError(t, cleanupErr)
+	}()
+	_, err = dbSession.DB.ExecContext(ctx, fmt.Sprintf("CREATE TRIGGER fail_delete BEFORE DELETE ON sku FOR EACH ROW WHEN (OLD.id = '%s') EXECUTE FUNCTION fail_sku_delete()", row.ID))
+	require.NoError(t, err)
+	deleted, err := dao.DeleteIfUnchanged(ctx, nil, row.ID, rows[0].Updated)
+	require.False(t, deleted)
+	require.ErrorContains(t, err, "injected database failure")
+	hook := &testSkuBeforeDeleteHook{rowID: row.ID}
+	dbSession.DB.AddQueryHook(hook)
+	inventory := &corev1.SkuInventory{InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS}
+	ms := NewManageSku(dbSession, cwu.TestTemporalSiteClientPool(t))
+	require.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inventory))
+	require.True(t, hook.fired)
+	require.ErrorContains(t, hook.err, "injected database failure")
+	stored, err := dao.Get(ctx, nil, row.ID)
+	require.NoError(t, err)
+	assert.Equal(t, &rows[0], stored)
+	_, err = dao.Get(ctx, nil, companion.ID)
+	require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+
+	// A later inventory retries the row once the database accepts writes.
+	_, err = dbSession.DB.ExecContext(ctx, "DROP TRIGGER fail_delete ON sku")
+	require.NoError(t, err)
+	require.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inventory))
+	_, err = dao.Get(ctx, nil, row.ID)
+	require.ErrorIs(t, err, cdb.ErrDoesNotExist)
 }

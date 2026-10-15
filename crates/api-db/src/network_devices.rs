@@ -16,6 +16,7 @@
  */
 use std::ops::DerefMut;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::MachineId;
 use itertools::Itertools;
 use model::hardware_info::LldpSwitchData;
@@ -26,6 +27,9 @@ use sqlx::{PgConnection, PgTransaction};
 
 use super::{DatabaseError, ObjectFilter};
 use crate::db_read::DbReader;
+
+#[cfg(test)]
+mod test_explicit_columns;
 
 pub struct NetworkDeviceSearchConfig {
     include_dpus: bool,
@@ -61,7 +65,10 @@ pub async fn find<DB>(
 where
     for<'db> &'db mut DB: DbReader<'db>,
 {
-    let mut query = sqlx::QueryBuilder::new("SELECT * FROM network_devices l");
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT l.id, l.name, l.description, l.ip_addresses, l.device_type, l.discovered_via
+         FROM network_devices l",
+    );
 
     let mut devices: Vec<NetworkDevice> = match filter {
         ObjectFilter::All => query
@@ -106,7 +113,9 @@ async fn create(
     txn: &mut PgConnection,
     data: &LldpSwitchData,
 ) -> Result<NetworkDevice, DatabaseError> {
-    let query = "INSERT INTO network_devices(id, name, description, ip_addresses) VALUES($1, $2, $3, $4::inet[]) RETURNING *";
+    let query = "INSERT INTO network_devices(id, name, description, ip_addresses)
+                 VALUES($1, $2, $3, $4::inet[])
+                 RETURNING id, name, description, ip_addresses, device_type, discovered_via";
 
     sqlx::query_as(query)
         .bind(&data.id)
@@ -151,7 +160,9 @@ pub async fn lock_network_device_table(txn: &mut PgTransaction<'_>) -> Result<()
 /// delete port_to_network_device_map call.
 pub async fn cleanup_unused_switches(txn: &mut PgTransaction<'_>) -> Result<(), DatabaseError> {
     lock_network_device_table(txn).await?;
-    let query = "DELETE FROM network_devices WHERE id NOT IN (SELECT network_device_id FROM port_to_network_device_map) RETURNING *";
+    let query = "DELETE FROM network_devices
+                 WHERE id NOT IN (SELECT network_device_id FROM port_to_network_device_map)
+                 RETURNING id, name, description, ip_addresses, device_type, discovered_via";
 
     let result = sqlx::query_as::<_, NetworkDevice>(query)
         .fetch_all(txn.deref_mut())
@@ -190,23 +201,26 @@ pub mod dpu_to_network_device_map {
         network_device_id: &str,
     ) -> Result<DpuToNetworkDeviceMap, DatabaseError> {
         // Update the association if already exists, else just insert into table.
-        let query = r#"INSERT INTO port_to_network_device_map(dpu_id, local_port, remote_port, network_device_id)
+        let query = format!(
+            r#"INSERT INTO port_to_network_device_map(dpu_id, local_port, remote_port, network_device_id)
                          VALUES($1, $2::dpu_local_ports, $3, $4)
                          ON CONFLICT ON CONSTRAINT network_device_dpu_associations_primary
                          DO UPDATE SET
                             network_device_id=EXCLUDED.network_device_id,
                             local_port=EXCLUDED.local_port,
                             remote_port=EXCLUDED.remote_port
-                       RETURNING *"#;
+                       RETURNING {}"#,
+            DpuToNetworkDeviceMap::db_table_columns(),
+        );
 
-        sqlx::query_as(query)
+        sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
             .bind(dpu_id)
             .bind(local_port)
             .bind(remote_port)
             .bind(network_device_id)
             .fetch_one(txn)
             .await
-            .map_err(|e| DatabaseError::query(query, e))
+            .map_err(|e| DatabaseError::query(&query, e))
     }
 
     pub async fn delete(
@@ -265,9 +279,12 @@ pub mod dpu_to_network_device_map {
         txn: impl DbReader<'_>,
         device_id: &str,
     ) -> Result<Vec<DpuToNetworkDeviceMap>, DatabaseError> {
-        let base_query = "SELECT * FROM port_to_network_device_map l WHERE network_device_id=$1";
+        let base_query = format!(
+            "SELECT {} FROM port_to_network_device_map WHERE network_device_id=$1",
+            DpuToNetworkDeviceMap::db_table_columns(),
+        );
 
-        sqlx::query_as(base_query)
+        sqlx::query_as(sqlx::AssertSqlSafe(base_query.as_str()))
             .bind(device_id)
             .fetch_all(txn)
             .await
@@ -278,9 +295,12 @@ pub mod dpu_to_network_device_map {
         txn: impl DbReader<'_>,
         dpu_ids: &[MachineId],
     ) -> Result<Vec<DpuToNetworkDeviceMap>, DatabaseError> {
-        let base_query = "SELECT * FROM port_to_network_device_map l WHERE dpu_id=ANY($1)";
+        let base_query = format!(
+            "SELECT {} FROM port_to_network_device_map WHERE dpu_id=ANY($1)",
+            DpuToNetworkDeviceMap::db_table_columns(),
+        );
 
-        sqlx::query_as(base_query)
+        sqlx::query_as(sqlx::AssertSqlSafe(base_query.as_str()))
             .bind(dpu_ids)
             .fetch_all(txn)
             .await

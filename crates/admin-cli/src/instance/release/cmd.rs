@@ -18,11 +18,12 @@
 use std::future::Future;
 use std::time::Duration;
 
+use ::rpc::admission_retry::resolve_backoff_delay;
 use ::rpc::forge::{BatchInstanceReleaseResponse, InstanceReleaseRequest};
 use carbide_uuid::instance::InstanceId;
 
 use super::args::Args;
-use crate::admission_retry::{resolve_backoff_delay, retry_on_admission_exhaustion};
+use crate::admission_retry::retry_on_admission_exhaustion;
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
@@ -44,7 +45,7 @@ const MAX_PREFLIGHT_LOOKUP_ATTEMPTS: usize = 8;
 /// Runs the single batch-release call, retrying only `RESOURCE_EXHAUSTED`
 /// admission rejections of the call itself by honoring the server's advertised
 /// `grpc-retry-pushback-ms` backoff (parsed via
-/// [`crate::admission_retry::resolve_backoff_delay`], the same logic every
+/// [`resolve_backoff_delay`], the same logic every
 /// other admission-retry loop in this crate uses). Retries are bounded by
 /// attempt count and cumulative backoff; any other error surfaces immediately
 /// so real failures are not masked.
@@ -246,10 +247,10 @@ fn summarize_release_response(
 mod tests {
     use std::cell::Cell;
 
+    use ::rpc::admission_retry::ADMISSION_RETRY_PUSHBACK_HEADER;
     use tonic::metadata::MetadataValue;
 
     use super::*;
-    use crate::admission_retry::ADMISSION_RETRY_PUSHBACK_HEADER;
 
     fn exhausted(pushback_millis: u64) -> tonic::Status {
         let mut status = tonic::Status::resource_exhausted("API admission capacity exhausted");
@@ -330,7 +331,7 @@ mod tests {
     }
 
     // Pushback-parsing (`PushbackAdvice`/`admission_retry_delay`/`resolve_backoff_delay`) is
-    // covered by `crate::admission_retry`'s own tests now that this module delegates to it --
+    // covered by `rpc::admission_retry`'s own tests now that this module delegates to it --
     // no need to duplicate that coverage here.
 
     #[tokio::test(start_paused = true)]

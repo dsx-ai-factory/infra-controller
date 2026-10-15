@@ -25,6 +25,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use librms::protos::rack_manager::PowerOperation;
 use mac_address::MacAddress;
 
 /// Hardware state, as seen by the mock's host.
@@ -38,6 +39,37 @@ pub trait RmsInventory: Send + Sync + 'static {
     /// host free to hold its devices behind whatever lock it likes without
     /// that lock being held across the `.await` of an RPC.
     fn nodes(&self) -> Arc<[SimNode]>;
+
+    /// The power of the device whose BMC has this MAC, read live rather than
+    /// carried in [`SimNode`]. An `Err` carries the host's reason and becomes
+    /// a per-node failure.
+    fn power_state(&self, bmc_mac: MacAddress) -> eyre::Result<SimPowerState>;
+
+    /// Change the power of the device whose BMC has this MAC under the same
+    /// rules as a Redfish request. An `Err` carries the host's reason and
+    /// becomes a per-node failure.
+    fn set_power(&self, bmc_mac: MacAddress, op: PowerOperation) -> eyre::Result<()>;
+}
+
+/// A device's power as the host reports it; the proto has no intermediate
+/// state, so a device mid-cycle reads as off.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SimPowerState {
+    /// The device is on.
+    On,
+    /// The device is off, or mid power cycle: the RMS API has no state in
+    /// between.
+    Off,
+}
+
+impl SimPowerState {
+    /// The spelling the proto documents for `pstate`.
+    pub(crate) fn as_pstate(self) -> &'static str {
+        match self {
+            Self::On => "ON",
+            Self::Off => "OFF",
+        }
+    }
 }
 
 /// What a device is. RMS treats the three kinds differently, and some

@@ -1,0 +1,102 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nico-dhcp6
+  namespace: nico-system
+  labels:
+    app.kubernetes.io/name: nico-dhcp6
+    app.kubernetes.io/component: dhcp
+  annotations:
+    configmap.reloader.stakater.com/reload: 'nico-dhcp6-config'
+spec:
+  replicas: 1
+  # Pod-local memfiles do not support concurrent active writers.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nico-dhcp6
+      app.kubernetes.io/component: dhcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nico-dhcp6
+        app.kubernetes.io/component: dhcp
+    spec:
+      # This root component is outside the child overlay's imagepullsecret patch.
+      imagePullSecrets:
+        - name: imagepullsecret
+      containers:
+        - name: nico-dhcp6
+          image: yourdockerregistry.com/path/to/nico-core:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -ec
+            - |
+              mkdir -p /var/run/kea /var/lib/kea
+              # Interface-only Kea selectors bind link-local sockets; relay VIPs need the pod's routable IPv6.
+              address="$(ip -6 -o addr show dev "$DHCP_INTERFACE" scope global | awk '{split($4, address, "/"); print address[1]; exit}')"
+              test -n "$address" || { echo "DHCPv6 requires a routable IPv6 address on $DHCP_INTERFACE" >&2; exit 1; }
+              sed "s/__NICO_DHCPV6_ADDRESS__/$address/g" /tmp/kea_config6.json > /var/run/kea/kea_config6.json
+              exec /sbin/kea-dhcp6 -c /var/run/kea/kea_config6.json
+          env:
+            - name: FORGE_ROOT_CAFILE_PATH
+              value: /var/run/secrets/spiffe.io/ca.crt
+            - name: FORGE_CLIENT_CERT_PATH
+              value: /var/run/secrets/spiffe.io/tls.crt
+            - name: FORGE_CLIENT_KEY_PATH
+              value: /var/run/secrets/spiffe.io/tls.key
+            - name: DHCP_INTERFACE
+              value: eth0
+          ports:
+            - name: dhcp6
+              containerPort: 547
+              protocol: UDP
+            - name: metrics
+              containerPort: 1089
+          startupProbe:
+            exec:
+              command: ['sh', '-ec', 'ss -H -6 -lun "sport = :547" | grep -q .']
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command: ['sh', '-ec', 'ss -H -6 -lun "sport = :547" | grep -q . && curl --noproxy "*" -fsS --max-time 2 http://[::1]:1089/ready']
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            periodSeconds: 10
+          volumeMounts:
+            - name: spiffe
+              mountPath: /var/run/secrets/spiffe.io
+              readOnly: true
+            - name: config
+              mountPath: /tmp
+              readOnly: true
+      volumes:
+        - name: spiffe
+          secret:
+            secretName: nico-dhcp-certificate
+        - name: config
+          configMap:
+            name: nico-dhcp6-config

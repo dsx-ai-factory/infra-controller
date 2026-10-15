@@ -69,6 +69,64 @@ pub struct EventContext {
 }
 
 impl EventContext {
+    /// The labels identifying where a series comes from, as every metric
+    /// export puts them on each series: the endpoint, the collector, and the
+    /// machine, switch, or power shelf and its placement when known.
+    pub(crate) fn series_labels(&self) -> Vec<(Cow<'static, str>, String)> {
+        let mut labels = vec![
+            (
+                Cow::Borrowed("endpoint_key"),
+                self.endpoint_key().to_string(),
+            ),
+            // An empty value means this inventory endpoint has no MAC address.
+            (
+                Cow::Borrowed("endpoint_mac"),
+                self.addr.mac.map(|mac| mac.to_string()).unwrap_or_default(),
+            ),
+            (Cow::Borrowed("endpoint_ip"), self.addr.ip.to_string()),
+            (
+                Cow::Borrowed("collector_type"),
+                self.collector_type.to_string(),
+            ),
+        ];
+
+        if let Some(machine_id) = self.machine_id() {
+            labels.push((Cow::Borrowed("machine_id"), machine_id.to_string()));
+        }
+        if let Some(system_uuid) = self.system_uuid() {
+            labels.push((Cow::Borrowed("system_uuid"), system_uuid.to_string()));
+        }
+        if let Some(switch_id) = self.switch_id() {
+            labels.push((Cow::Borrowed("switch_id"), switch_id.to_string()));
+        }
+        if let Some(power_shelf_id) = self.power_shelf_id() {
+            labels.push((Cow::Borrowed("power_shelf_id"), power_shelf_id.to_string()));
+        }
+        if let Some(serial) = self.serial_number() {
+            labels.push((Cow::Borrowed("serial_number"), serial.to_string()));
+        }
+        if let Some(rack_id) = self.rack_id() {
+            labels.push((Cow::Borrowed("rack_id"), rack_id.to_string()));
+        }
+        if let Some(slot) = self.slot_number() {
+            labels.push((Cow::Borrowed("machine_slot_number"), slot.to_string()));
+        }
+        if let Some(tray) = self.tray_index() {
+            labels.push((Cow::Borrowed("machine_tray_index"), tray.to_string()));
+        }
+        if let Some(domain) = self.nvlink_domain_uuid() {
+            labels.push((Cow::Borrowed("nvlink_domain_uuid"), domain.to_string()));
+        }
+        if let Some(slot) = self.switch_slot_number() {
+            labels.push((Cow::Borrowed("switch_slot_number"), slot.to_string()));
+        }
+        if let Some(tray) = self.switch_tray_index() {
+            labels.push((Cow::Borrowed("switch_tray_index"), tray.to_string()));
+        }
+
+        labels
+    }
+
     pub fn from_endpoint(endpoint: &BmcEndpoint, collector_type: &'static str) -> Self {
         Self {
             endpoint_key: endpoint.key(),
@@ -121,7 +179,7 @@ impl EventContext {
             .and_then(|machine| machine.driver_version.as_deref())
     }
 
-    /// Returns the PHR component category for endpoints with typed metadata.
+    /// Returns the component category for endpoints with typed metadata.
     pub fn component_type(&self) -> Option<&'static str> {
         self.metadata.as_ref().map(EndpointMetadata::component_type)
     }
@@ -143,7 +201,8 @@ impl EventContext {
         match &self.metadata {
             Some(EndpointMetadata::Machine(machine)) => machine.nvlink_domain_uuid,
             Some(EndpointMetadata::Switch(switch)) => switch.nvlink_domain_uuid,
-            _ => None,
+            Some(EndpointMetadata::PowerShelf(power_shelf)) => power_shelf.nvlink_domain_uuid,
+            None => None,
         }
     }
 
@@ -156,7 +215,7 @@ impl EventContext {
 
     pub fn switch_serial(&self) -> Option<&str> {
         match &self.metadata {
-            Some(EndpointMetadata::Switch(switch)) => Some(switch.serial.as_str()),
+            Some(EndpointMetadata::Switch(switch)) => switch.serial.as_deref(),
             _ => None,
         }
     }
@@ -416,10 +475,26 @@ pub struct FirmwareInfo {
     pub attributes: Vec<MetricLabel>,
 }
 
+/// Placement of the sensor behind a sensor probe result.
+///
+/// Lets a consumer attribute a reading to its power supply without parsing
+/// the sensor name. Each field is present only when the sensor carries it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SensorAttribution {
+    /// Redfish `PowerSupply` `Id` the sensor belongs to. `None` when the sensor
+    /// is not related to a power supply.
+    pub powersupply_id: Option<String>,
+    /// Sensor `PhysicalContext` in snake case, for example `power_supply`.
+    /// `None` for probes that are not sensors.
+    pub physical_context: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct HealthReportSuccess {
     pub probe_id: Probe,
     pub target: Option<String>,
+    /// Sensor placement; `None` for probes that are not sensor readings.
+    pub attribution: Option<SensorAttribution>,
 }
 
 #[derive(Clone, Debug)]
@@ -428,6 +503,8 @@ pub struct HealthReportAlert {
     pub target: Option<String>,
     pub message: String,
     pub classifications: Vec<Classification>,
+    /// Sensor placement; `None` for probes that are not sensor readings.
+    pub attribution: Option<SensorAttribution>,
 }
 
 #[derive(Clone, Debug)]
@@ -524,6 +601,10 @@ pub enum Classification {
     PreventAllocations,
     Leak,
     LeakDetector,
+    /// Identifies a derived active tray-level leak.
+    TrayLeak,
+    /// Identifies a derived active rack-level leak.
+    RackLeak,
 }
 
 impl Classification {
@@ -537,6 +618,8 @@ impl Classification {
             Self::PreventAllocations => "PreventAllocations",
             Self::Leak => "Leak",
             Self::LeakDetector => "LeakDetector",
+            Self::TrayLeak => "TrayLeak",
+            Self::RackLeak => "RackLeak",
         }
     }
 }
@@ -679,6 +762,8 @@ mod tests {
     enum AlertCase {
         WithTarget,
         Intrusion,
+        TrayLeak,
+        RackLeak,
         WithoutClassifications,
     }
 
@@ -731,7 +816,7 @@ mod tests {
         BmcAddr {
             ip: IpAddr::from_str("10.0.0.1").expect("valid IP"),
             port: Some(443),
-            mac: MacAddress::from_str("00:11:22:33:44:55").expect("valid MAC"),
+            mac: Some(MacAddress::from_str("00:11:22:33:44:55").expect("valid MAC")),
         }
     }
 
@@ -748,8 +833,9 @@ mod tests {
                 driver_version: Some("570.82".to_string()),
             })),
             ContextKind::Switch => Some(EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: Some(switch_id()),
-                serial: "SW-001".to_string(),
+                serial: Some("SW-001".to_string()),
                 slot_number: Some(9),
                 tray_index: Some(4),
                 nvlink_domain_uuid: Some(nvlink_domain_id()),
@@ -761,6 +847,7 @@ mod tests {
             ContextKind::PowerShelf => Some(EndpointMetadata::PowerShelf(PowerShelfData {
                 id: Some(power_shelf_id()),
                 serial: Some("PS-001".to_string()),
+                nvlink_domain_uuid: None,
             })),
         };
 
@@ -834,12 +921,14 @@ mod tests {
     fn convert_alert(case: AlertCase) -> AlertSummary {
         let alert = match case {
             AlertCase::WithTarget => HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::Sensor,
                 target: Some("fan0".to_string()),
                 message: "fan warning".to_string(),
                 classifications: vec![Classification::SensorWarning, Classification::SensorFailure],
             },
             AlertCase::Intrusion => HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::IntrusionSensorTriggered,
                 target: Some("HostBMC".to_string()),
                 message: "Physical Chassis Intrusion Alert".to_string(),
@@ -848,7 +937,30 @@ mod tests {
                     Classification::PreventAllocations,
                 ],
             },
+            AlertCase::TrayLeak => HealthReportAlert {
+                attribution: None,
+                probe_id: Probe::LeakDetection,
+                target: None,
+                message: "tray leak".to_string(),
+                classifications: vec![
+                    Classification::TrayLeak,
+                    Classification::SensorCritical,
+                    Classification::PreventAllocations,
+                ],
+            },
+            AlertCase::RackLeak => HealthReportAlert {
+                attribution: None,
+                probe_id: Probe::LeakDetection,
+                target: None,
+                message: "rack leak".to_string(),
+                classifications: vec![
+                    Classification::RackLeak,
+                    Classification::SensorCritical,
+                    Classification::PreventAllocations,
+                ],
+            },
             AlertCase::WithoutClassifications => HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::LeakDetection,
                 target: None,
                 message: "rack leak".to_string(),
@@ -872,10 +984,12 @@ mod tests {
             },
             observed_at: Some(observed_at),
             successes: vec![HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::LeakDetection,
                 target: Some("tray-1".to_string()),
             }],
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::Sensor,
                 target: Some("temp0".to_string()),
                 message: "temperature critical".to_string(),
@@ -1103,6 +1217,20 @@ mod tests {
                 },
             }
 
+            "tray leak" {
+                Classification::TrayLeak => ClassificationSummary {
+                    as_str: "TrayLeak",
+                    health_report_classification: "TrayLeak".to_string(),
+                },
+            }
+
+            "rack leak" {
+                Classification::RackLeak => ClassificationSummary {
+                    as_str: "RackLeak",
+                    health_report_classification: "RackLeak".to_string(),
+                },
+            }
+
         );
     }
 
@@ -1126,6 +1254,7 @@ mod tests {
                     target: Some(HealthReportTarget::Machine),
                     observed_at: None,
                     successes: vec![HealthReportSuccess {
+                        attribution: None,
                         probe_id: Probe::Sensor,
                         target: None,
                     }],
@@ -1140,6 +1269,7 @@ mod tests {
                     observed_at: None,
                     successes: vec![],
                     alerts: vec![HealthReportAlert {
+                        attribution: None,
                         probe_id: Probe::Sensor,
                         target: None,
                         message: "alert".to_string(),
@@ -1159,6 +1289,7 @@ mod tests {
             };
             "success with target" {
                 HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::Sensor,
                     target: Some("fan0".to_string()),
                 } => ("BmcSensor".to_string(), Some("fan0".to_string())),
@@ -1166,6 +1297,7 @@ mod tests {
 
             "success without target" {
                 HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::LeakDetection,
                     target: None,
                 } => ("BmcLeakDetection".to_string(), None),
@@ -1200,6 +1332,38 @@ mod tests {
                     tenant_message: None,
                     in_alert_since: false,
                     classifications: vec![
+                        "SensorCritical".to_string(),
+                        "PreventAllocations".to_string(),
+                        "Hardware".to_string(),
+                    ],
+                },
+            }
+
+            "tray leak alert" {
+                AlertCase::TrayLeak => AlertSummary {
+                    id: "BmcLeakDetection".to_string(),
+                    target: None,
+                    message: "tray leak".to_string(),
+                    tenant_message: None,
+                    in_alert_since: false,
+                    classifications: vec![
+                        "TrayLeak".to_string(),
+                        "SensorCritical".to_string(),
+                        "PreventAllocations".to_string(),
+                        "Hardware".to_string(),
+                    ],
+                },
+            }
+
+            "rack leak alert" {
+                AlertCase::RackLeak => AlertSummary {
+                    id: "BmcLeakDetection".to_string(),
+                    target: None,
+                    message: "rack leak".to_string(),
+                    tenant_message: None,
+                    in_alert_since: false,
+                    classifications: vec![
+                        "RackLeak".to_string(),
                         "SensorCritical".to_string(),
                         "PreventAllocations".to_string(),
                         "Hardware".to_string(),

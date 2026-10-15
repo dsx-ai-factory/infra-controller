@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -66,6 +66,11 @@ struct RedfishSimState {
     /// preserves the normal successful behavior; `Some(false)` models a BMC
     /// accepting the write without applying the requested policy.
     lockdown_bmc_applies: Option<bool>,
+    next_lockdown_status_error: Option<RedfishError>,
+    /// Fail one power-state read without changing the host's actual power.
+    next_power_state_error: Option<String>,
+    /// Fail the next matching power action before changing the host's power.
+    next_power_action_error: Option<(SystemPowerControl, String)>,
     job_state_sequence: VecDeque<JobState>,
     /// Offset (in seconds) applied to the BMC `DateTime` returned by
     /// `get_manager`, relative to the controller's `Utc::now()`. Defaults to 0
@@ -90,6 +95,10 @@ struct RedfishSimState {
     /// When set, overrides the `Product` field returned by `get_service_root`.
     /// Tests use this to model a specific DPU generation.
     service_root_product: Option<String>,
+    systems_collection_uri: Option<String>,
+    resources: HashMap<String, String>,
+    resource_requests: Vec<String>,
+    resource_failures: HashSet<String>,
     /// When set, overrides the `Manufacturer` returned by `get_chassis`, so
     /// tests can drive `probe_bmc_vendor`'s Lite-On/Delta chassis fallback.
     chassis_manufacturer: Option<String>,
@@ -99,9 +108,11 @@ struct RedfishSimState {
     machine_setup_status_targets: HashMap<String, Vec<Option<RedfishSimBootInterfaceRef>>>,
     /// Opt-in authentication enforcement. Off by default so existing tests
     /// (which pass arbitrary or anonymous credentials) are undisturbed. When on,
-    /// `get_accounts` returns `401` unless the client was created with a
-    /// `Direct` credential whose password matches the seeded `users` entry, so
-    /// credential-probe paths (e.g. `bmc_credentials_valid`) can be exercised.
+    /// `get_accounts`, `change_password`, `change_password_by_id`,
+    /// `get_systems`, and `get_power_state` return `401` unless the client was
+    /// created with a `Direct` credential whose password matches the seeded
+    /// `users` entry. This makes credential selection and rejection observable
+    /// in callers such as `bmc_credentials_valid`.
     enforce_auth: bool,
     auth_attempts: Vec<RedfishSimAuthAttempt>,
     /// When set, `get_accounts` fails with a non-authentication transport error
@@ -137,6 +148,11 @@ struct RedfishSimState {
     /// override replaces the default body, so `create_client_error` cannot
     /// reach it).
     uefi_setup_client_creation_error: Option<String>,
+    /// Observe and pause one UEFI setup call while a test changes the site target.
+    uefi_setup_pause: Option<(
+        tokio::sync::oneshot::Sender<Credentials>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
     /// BIOS attribute map returned by `bios()` when set; the sim's `bios()`
     /// is otherwise unimplemented. Lets unit tests drive the default
     /// `BmcCredentialOps::uefi_setup` DPU body past its attribute probe.
@@ -321,8 +337,9 @@ impl RedfishSim {
             .unwrap_or_default()
     }
 
-    /// Model a BMC that exposes no `ComponentIntegrity` collection, so nothing
-    /// is eligible for SPDM attestation.
+    /// Model a BMC whose `ComponentIntegrity` collection is empty, so nothing
+    /// is eligible for SPDM attestation. The service root still advertises the
+    /// collection.
     pub fn set_no_component_integrities(&self, no_component_integrities: bool) {
         self.state.lock().unwrap().no_component_integrities = no_component_integrities;
     }
@@ -414,6 +431,33 @@ impl RedfishSim {
         self.state.lock().unwrap().lockdown_bmc_applies = Some(applies);
     }
 
+    /// Fail one lockdown observation without changing the actual policy.
+    pub fn fail_next_lockdown_status(&self, error: RedfishError) {
+        self.state.lock().unwrap().next_lockdown_status_error = Some(error);
+    }
+
+    /// Set one simulated host's power state, as a BMC would report it; the
+    /// host entry is created if no client has touched it yet.
+    pub fn set_power_state(&self, host: &str, power: PowerState) {
+        self.state
+            .lock()
+            .unwrap()
+            .hosts
+            .entry(host.to_string())
+            .or_default()
+            .power = power;
+    }
+
+    /// Inject a transient error into the next power-state read only.
+    pub fn fail_next_power_state_read(&self, error: &str) {
+        self.state.lock().unwrap().next_power_state_error = Some(error.to_string());
+    }
+
+    /// Fail the next matching power action, recording the attempt but applying no change.
+    pub fn fail_next_power_action(&self, action: SystemPowerControl, error: &str) {
+        self.state.lock().unwrap().next_power_action_error = Some((action, error.to_string()));
+    }
+
     /// Set the offset (in seconds) applied to the BMC `DateTime` returned by
     /// `get_manager`, relative to the controller clock. Use a value larger than
     /// the time-sync threshold to simulate an out-of-sync BMC clock.
@@ -462,8 +506,9 @@ impl RedfishSim {
     }
 
     /// Enable opt-in authentication enforcement (see [`RedfishSimState::enforce_auth`]):
-    /// once on, `get_accounts` authorizes against the seeded `users` map, so
-    /// credential-probe paths can distinguish valid from rejected credentials.
+    /// `get_accounts`, `change_password`, `change_password_by_id`,
+    /// `get_systems`, and `get_power_state` authorize against the seeded `users`
+    /// map, so callers can distinguish valid from rejected credentials.
     pub fn set_enforce_auth(&self, enforce: bool) {
         self.state.lock().unwrap().enforce_auth = enforce;
     }
@@ -524,6 +569,49 @@ impl RedfishSim {
     /// [`Self::set_uefi_setup_client_creation_error`].
     pub fn clear_uefi_setup_client_creation_error(&self) {
         self.state.lock().unwrap().uefi_setup_client_creation_error = None;
+    }
+
+    /// Pause the next successful UEFI setup call. The receiver reports the
+    /// credential sent to the device; sending on the returned sender (or
+    /// dropping it) allows setup to complete. Later calls are not paused.
+    pub fn pause_next_uefi_setup(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<Credentials>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (started, credentials) = tokio::sync::oneshot::channel();
+        let (resume, paused) = tokio::sync::oneshot::channel();
+        self.state.lock().unwrap().uefi_setup_pause = Some((started, paused));
+        (credentials, resume)
+    }
+
+    /// Sets the Systems collection link advertised by the simulated service root.
+    pub fn set_systems_collection_uri(&self, uri: impl Into<String>) {
+        self.state.lock().unwrap().systems_collection_uri = Some(uri.into());
+    }
+
+    /// Supplies the body returned by generic resource reads at the given URI.
+    pub fn set_resource(&self, uri: impl Into<String>, body: serde_json::Value) {
+        self.state
+            .lock()
+            .unwrap()
+            .resources
+            .insert(uri.into(), body.to_string());
+    }
+
+    /// Makes generic reads of the given URI fail with a simulated transport error.
+    pub fn fail_resource(&self, uri: impl Into<String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .resource_failures
+            .insert(uri.into());
+    }
+
+    /// Returns the URIs requested through the generic resource API, in call order.
+    pub fn resource_requests(&self) -> Vec<String> {
+        self.state.lock().unwrap().resource_requests.clone()
     }
 
     /// Set the BIOS attribute map returned by the sim client's `bios()`,
@@ -635,6 +723,8 @@ impl From<libredfish::BootInterfaceRef<'_>> for RedfishSimBootInterfaceRef {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedfishSimAction {
     Power(libredfish::SystemPowerControl),
+    /// A power request rejected before its effect was applied.
+    PowerFailed(libredfish::SystemPowerControl),
     BmcReset(Option<ManagerResetType>),
     /// Records a Redfish `Chassis.Reset` call with its target and reset type.
     ChassisReset {
@@ -752,7 +842,14 @@ impl Redfish for RedfishSimClient {
     fn get_power_state<'a>(
         &'a self,
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::PowerState, RedfishError>> {
-        Box::pin(async move { Ok(self.state.lock().unwrap().hosts[&self._host].power) })
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            self.authorize(&mut state, "Systems/System.Embedded.1")?;
+            if let Some(error) = state.next_power_state_error.take() {
+                return Err(RedfishError::GenericError { error });
+            }
+            Ok(state.hosts[&self._host].power)
+        })
     }
 
     fn get_power_metrics<'a>(
@@ -772,6 +869,20 @@ impl Redfish for RedfishSimClient {
                 _ => PowerState::On,
             };
             let mut state = self.state.lock().unwrap();
+            if state
+                .next_power_action_error
+                .as_ref()
+                .is_some_and(|(failed_action, _)| *failed_action == action)
+            {
+                let (_, error) = state.next_power_action_error.take().unwrap();
+                state
+                    .hosts
+                    .get_mut(&self._host)
+                    .unwrap()
+                    .actions
+                    .push(RedfishSimAction::PowerFailed(action));
+                return Err(RedfishError::GenericError { error });
+            }
             let host_state = state.hosts.get_mut(&self._host).unwrap();
             host_state.power = power_state;
             host_state.actions.push(RedfishSimAction::Power(action));
@@ -908,7 +1019,10 @@ impl Redfish for RedfishSimClient {
         &'a self,
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::Status, RedfishError>> {
         Box::pin(async move {
-            let state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap();
+            if let Some(error) = state.next_lockdown_status_error.take() {
+                return Err(error);
+            }
             Ok(libredfish::Status::build_fake(
                 state.hosts[&self._host].lockdown,
             ))
@@ -1383,6 +1497,10 @@ impl Redfish for RedfishSimClient {
                 })
                 .collect::<Vec<_>>();
             Ok(libredfish::model::ComputerSystem {
+                odata: libredfish::model::OData {
+                    odata_id: format!("/redfish/v1/Systems/{id}"),
+                    ..Default::default()
+                },
                 id,
                 links: (!chassis.is_empty()).then_some(
                     libredfish::model::system::ComputerSystemLinks {
@@ -1615,6 +1733,7 @@ impl Redfish for RedfishSimClient {
             Ok(ServiceRoot {
                 vendor: Some(vendor),
                 product: Some(product),
+                systems: state.systems_collection_uri.clone().map(ODataId::from),
                 component_integrity: Some(ODataId {
                     odata_id: "Valid Data".to_string(),
                 }),
@@ -1878,25 +1997,56 @@ impl Redfish for RedfishSimClient {
 
     fn get_collection<'a>(
         &'a self,
-        _id: ODataId,
+        id: ODataId,
     ) -> libredfish::RedfishFuture<'a, Result<Collection, RedfishError>> {
         Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            state.resource_requests.push(id.odata_id.clone());
+            if state.resource_failures.contains(&id.odata_id) {
+                return Err(RedfishError::GenericError {
+                    error: format!("resource {} is unavailable", id.odata_id),
+                });
+            }
+            let body = match state.resources.get(&id.odata_id) {
+                Some(body) => serde_json::from_str(body).map_err(|source| {
+                    RedfishError::JsonDeserializeError {
+                        url: id.odata_id.clone(),
+                        body: body.clone(),
+                        source,
+                    }
+                })?,
+                None => HashMap::new(),
+            };
             Ok(Collection {
-                url: String::new(),
-                body: HashMap::new(),
+                url: id.odata_id,
+                body,
             })
         })
     }
 
     fn get_resource<'a>(
         &'a self,
-        _id: ODataId,
+        id: ODataId,
     ) -> libredfish::RedfishFuture<'a, Result<Resource, RedfishError>> {
         Box::pin(async move {
-            Ok(Resource {
-                url: String::new(),
-                raw: Default::default(),
-            })
+            let mut state = self.state.lock().unwrap();
+            state.resource_requests.push(id.odata_id.clone());
+            if state.resource_failures.contains(&id.odata_id) {
+                return Err(RedfishError::GenericError {
+                    error: format!("resource {} is unavailable", id.odata_id),
+                });
+            }
+            match state.resources.get(&id.odata_id) {
+                Some(body) => Ok(Resource {
+                    url: id.odata_id,
+                    raw: serde_json::value::RawValue::from_string(body.clone())
+                        .expect("configured resource is valid JSON"),
+                }),
+                None => Ok(Resource {
+                    url: String::new(),
+                    raw: Default::default(),
+                }),
+            }
         })
     }
 
@@ -2195,11 +2345,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/ERoT_BMC_0/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2208,7 +2358,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/ERoT_BMC_0/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/ERoT_BMC_0/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/ERoT_BMC_0/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2229,11 +2379,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/HGX_IRoT_GPU_0/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2242,7 +2392,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_0/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_0/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_0/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2263,11 +2413,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/HGX_IRoT_GPU_1/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2276,7 +2426,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2297,11 +2447,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/HGX_IRoT_GPU_2/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2310,7 +2460,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_2/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_2/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_2/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2321,6 +2471,11 @@ impl Redfish for RedfishSimClient {
                         },
                     ),
                 },
+                // The next two repeat an ID a member above already used, which
+                // real Redfish forbids within a collection. They are here so a
+                // caller that skipped the eligibility rules would collide on
+                // the ID rather than quietly attest the wrong entry: one is
+                // TPM rather than SPDM, the other is disabled.
                 ComponentIntegrity {
                     component_integrity_enabled: true,
                     component_integrity_type: "TPM".to_string(),
@@ -2331,11 +2486,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/HGX_IRoT_GPU_1/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2344,7 +2499,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2365,11 +2520,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/HGX_IRoT_GPU_1/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2378,41 +2533,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string(),
-                                target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
-                            },
-                        ),
-                    }),
-                    links: Some(
-                        libredfish::model::component_integrity::ComponentsProtectedLinks {
-                            components_protected: vec![ODataId{ odata_id: "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_1".to_string() }]
-                        },
-                    ),
-                },
-                ComponentIntegrity {
-                    component_integrity_enabled: true,
-                    component_integrity_type: "SPDM".to_string(),
-                    component_integrity_type_version: "0.1.0".to_string(),
-                    id: "HGX_IRoT_GPU_1".to_string(),
-                    name: "SPDM Integrity for HGX_IRoT_GPU_1".to_string(),
-                    target_component_uri: Some("/redfish/v1/Chassis/HGX_IRoT_GPU_1".to_string()),
-                    spdm: Some(libredfish::model::component_integrity::SPDMData {
-                        identity_authentication:
-                            libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
-                                    odata_id:
-                                        "/redfish/v1/Chassis/HGX_IRoT_GPU_1/Certificates/CertChain"
-                                            .to_string(),
-                                },
-                            } },
-                        requester: ODataId {
-                            odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
-                        },
-                    }),
-                    actions: Some(libredfish::model::component_integrity::SPDMActions {
-                        get_signed_measurements: Some(
-                            libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2425,7 +2546,7 @@ impl Redfish for RedfishSimClient {
                 },
                 ],
                 name: "ComponentIntegrities".to_string(),
-                count: 7,
+                count: 6,
             })
         })
     }
@@ -2633,18 +2754,27 @@ impl super::BmcCredentialOps for RedfishSim {
         &self,
         _access: &carbide_utils::redfish::BmcAccessInfo,
         dpu: bool,
-        _sitewide_uefi_credentials: carbide_secrets::credentials::Credentials,
+        sitewide_uefi_credentials: carbide_secrets::credentials::Credentials,
     ) -> Result<Option<String>, super::CredentialOpError> {
-        let mut state = self.state.lock().unwrap();
-        // Fail before recording the action: the op never reached the device.
-        if let Some(error) = state.uefi_setup_client_creation_error.clone() {
-            return Err(super::CredentialOpError::ClientCreation(
-                RedfishClientCreationError::RedfishError(RedfishError::GenericError { error }),
-            ));
+        let pause = {
+            let mut state = self.state.lock().unwrap();
+            // Fail before recording the action: the op never reached the device.
+            if let Some(error) = state.uefi_setup_client_creation_error.clone() {
+                return Err(super::CredentialOpError::ClientCreation(
+                    RedfishClientCreationError::RedfishError(RedfishError::GenericError { error }),
+                ));
+            }
+            state
+                .platform_actions
+                .push(RedfishSimPlatformAction::UefiSetup { dpu });
+            state.uefi_setup_pause.take()
+        };
+        if let Some((started, resume)) = pause {
+            started
+                .send(sitewide_uefi_credentials)
+                .expect("setup observer dropped");
+            resume.await.ok();
         }
-        state
-            .platform_actions
-            .push(RedfishSimPlatformAction::UefiSetup { dpu });
         Ok(None)
     }
 }

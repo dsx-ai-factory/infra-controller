@@ -158,6 +158,9 @@ func (i *ipamer) DeletePrefix(ctx context.Context, cidr string) (*Prefix, error)
 	if p.hasIPs() {
 		return nil, fmt.Errorf("prefix %s has ips, delete prefix not possible", p.Cidr)
 	}
+	if p.acquiredPrefixes() > 0 {
+		return nil, fmt.Errorf("prefix %s has allocated child prefixes, delete prefix not possible", p.Cidr)
+	}
 	prefix, err := i.storage.DeletePrefix(ctx, *p, i.namespace)
 	if err != nil {
 		return nil, fmt.Errorf("delete prefix:%s %w", cidr, err)
@@ -184,7 +187,7 @@ func (i *ipamer) AcquireSpecificChildPrefix(ctx context.Context, parentCidr, chi
 	})
 }
 
-// acquireChildPrefixInternal will return a Prefix with a smaller length from the given Prefix.
+// acquireChildPrefixInternal reserves a subnet within an existing prefix.
 func (i *ipamer) acquireChildPrefixInternal(ctx context.Context, parentCidr, childCidr string, length int) (*Prefix, error) {
 	specificChildRequest := childCidr != ""
 	var childprefix netip.Prefix
@@ -201,6 +204,9 @@ func (i *ipamer) acquireChildPrefixInternal(ctx context.Context, parentCidr, chi
 		if err != nil {
 			return nil, err
 		}
+		// The containing prefix tracks reserved subnets by CIDR. Use the network
+		// CIDR so release updates the same entry in `availableChildPrefixes`.
+		childprefix = childprefix.Masked()
 		length = childprefix.Bits()
 	}
 	if ipprefix.Bits() >= length {
@@ -405,7 +411,12 @@ func (i *ipamer) acquireSpecificIPInternal(ctx context.Context, prefixCidr, spec
 	}
 
 	iprange := netipx.RangeOfPrefix(ipnet)
-	for ip := iprange.From(); ipnet.Contains(ip); ip = ip.Next() {
+	startIP := iprange.From()
+	if specificIP != "" {
+		// Start at the validated address instead of walking a potentially huge IPv6 range.
+		startIP = specificIPnet
+	}
+	for ip := startIP; ipnet.Contains(ip); ip = ip.Next() {
 		ipstring := ip.String()
 		_, ok := prefix.ips[ipstring]
 		if ok {
@@ -451,12 +462,27 @@ func (i *ipamer) releaseIPFromPrefixInternal(ctx context.Context, prefixCidr, ip
 	if prefix == nil {
 		return fmt.Errorf("%w: unable to find prefix for cidr:%s", ErrNotFound, prefixCidr)
 	}
-	_, ok := prefix.ips[ip]
+	// Acquisition keys allocations by the canonical address string.
+	address, err := netip.ParseAddr(ip)
+	key := ip
+	if err == nil {
+		key = address.String()
+	}
+	_, ok := prefix.ips[key]
 	if !ok {
 		return fmt.Errorf("%w: unable to release ip:%s because it is not allocated in prefix:%s", ErrNotFound, ip, prefixCidr)
 	}
-	delete(prefix.ips, ip)
-	_, err := i.storage.UpdatePrefix(ctx, *prefix, i.namespace)
+	ipnet, err := netip.ParsePrefix(prefix.Cidr)
+	if err != nil {
+		return err
+	}
+	// Keep reservations stored so they cannot be reassigned and `hasIPs` stays accurate.
+	iprange := netipx.RangeOfPrefix(ipnet)
+	if address == iprange.From() || (address.Is4() && address == iprange.To()) {
+		return fmt.Errorf("unable to release ip:%s because it is reserved in prefix:%s", key, prefix.Cidr)
+	}
+	delete(prefix.ips, key)
+	_, err = i.storage.UpdatePrefix(ctx, *prefix, i.namespace)
 	if err != nil {
 		return fmt.Errorf("unable to release ip %v:%w", ip, err)
 	}

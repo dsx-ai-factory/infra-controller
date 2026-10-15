@@ -15,7 +15,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -71,7 +70,7 @@ func TestCreateTenantHandler_Handle(t *testing.T) {
 	tnu1 := common.TestBuildUser(t, dbSession, uuid.NewString(), tnOrg, tnRoles)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type fields struct {
 		dbSession *cdb.Session
@@ -122,7 +121,6 @@ func TestCreateTenantHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org)
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := ctnh.Handle(ec)
@@ -164,7 +162,7 @@ func TestGetCurrentTenantHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type fields struct {
 		dbSession *cdb.Session
@@ -243,7 +241,6 @@ func TestGetCurrentTenantHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org)
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gctnh := GetCurrentTenantHandler{
@@ -408,7 +405,7 @@ func TestGetCurrentTenantStatsHandler_Handle(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -471,7 +468,6 @@ func TestGetCurrentTenantStatsHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqCurrTenant.Org)
 			ec.Set("user", tt.reqCurrentUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gctnsh := GetCurrentTenantStatsHandler{
@@ -551,7 +547,7 @@ func TestUpdateTenantHandler_Handle(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name           string
@@ -592,7 +588,6 @@ func TestUpdateTenantHandler_Handle(t *testing.T) {
 			ec.SetParamNames("orgName")
 			ec.SetParamValues(tt.args.org)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := ucth.Handle(ec)

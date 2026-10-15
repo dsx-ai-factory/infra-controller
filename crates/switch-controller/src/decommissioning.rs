@@ -20,9 +20,11 @@
 use carbide_redfish::libredfish::RedfishAuth;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialWriter};
 use carbide_uuid::switch::SwitchId;
+use component_manager::error::ComponentManagerError;
+use component_manager::nv_switch_manager::SwitchFactoryResetState;
 use libredfish::model::service_root::RedfishVendor;
 use mac_address::MacAddress;
-use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::switch::{Switch, SwitchControllerState, SwitchDecommissioningState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -60,6 +62,7 @@ async fn suppress_dhcp(
         &NewBmcSuppression {
             bmc_mac_address: mac_address,
             subsystem: BmcSuppressionSubsystem::Dhcp,
+            source: BmcSuppressionSource::Decommissioning,
             reason: format!(
                 "managed switch {switch_id} is being decommissioned; suppressing {interface} DHCP"
             ),
@@ -77,19 +80,6 @@ async fn suppress_dhcp(
     Ok(txn)
 }
 
-async fn dhcp_suppression_acknowledged(
-    mac_address: MacAddress,
-    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
-) -> Result<bool, StateHandlerError> {
-    Ok(db::bmc_suppression::find(
-        &ctx.services.db_pool,
-        mac_address,
-        BmcSuppressionSubsystem::Dhcp,
-    )
-    .await?
-    .is_some_and(|suppression| suppression.acknowledged_at.is_some()))
-}
-
 pub(super) async fn handle_decommissioning(
     switch_id: &SwitchId,
     switch: &Switch,
@@ -105,6 +95,17 @@ pub(super) async fn handle_decommissioning(
         }
         SwitchDecommissioningState::FactoryResetNvos => {
             handle_factory_reset_nvos(switch_id, ctx).await
+        }
+        SwitchDecommissioningState::WaitingForNvosFactoryReset { job_id } => {
+            handle_waiting_for_nvos_factory_reset(job_id, ctx).await
+        }
+        SwitchDecommissioningState::NvosFactoryResetOutcomeUnknown { error } => {
+            Err(StateHandlerError::ManualInterventionRequired(format!(
+                "NVOS factory reset requires operator recovery: {error}"
+            )))
+        }
+        SwitchDecommissioningState::RebootingSwitch => {
+            handle_rebooting_switch(switch_id, switch, ctx).await
         }
         SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement => {
             handle_waiting_for_nvos_dhcp_acknowledgement(switch_id, ctx).await
@@ -142,6 +143,7 @@ async fn handle_suppressing_site_explorer(
         &NewBmcSuppression {
             bmc_mac_address: bmc_mac,
             subsystem: BmcSuppressionSubsystem::SiteExplorer,
+            source: BmcSuppressionSource::Decommissioning,
             reason: format!("managed switch {switch_id} is being decommissioned"),
         },
     )
@@ -149,7 +151,7 @@ async fn handle_suppressing_site_explorer(
 
     let outcome = if suppression.acknowledged_at.is_some() {
         StateHandlerOutcome::transition(decommissioning(
-            SwitchDecommissioningState::SuppressingNvosDhcp,
+            SwitchDecommissioningState::FactoryResetNvos,
         ))
     } else {
         StateHandlerOutcome::wait(
@@ -171,7 +173,7 @@ async fn handle_suppressing_nvos_dhcp(
     .await?;
     let txn = suppress_dhcp(switch_id, endpoint.nvos_mac, "NVOS", ctx).await?;
     Ok(StateHandlerOutcome::transition(decommissioning(
-        SwitchDecommissioningState::FactoryResetNvos,
+        SwitchDecommissioningState::RebootingSwitch,
     ))
     .with_txn(txn))
 }
@@ -192,12 +194,82 @@ async fn handle_factory_reset_nvos(
         &ctx.services.credential_manager,
     )
     .await?;
-    let tls_server_domain = endpoint.nvos_host_name.clone();
-    component_manager
+    let job_id = match component_manager
         .nv_switch
-        .batch_reset_switch_factory_default(&[endpoint], tls_server_domain.as_deref())
+        .batch_reset_switch_factory_default(&[endpoint], None)
         .await
-        .map_err(|error| external_error("failed to submit NVOS factory reset", error))?;
+    {
+        Ok(job_id) => job_id,
+        Err(ComponentManagerError::OperationOutcomeUnknown(error)) => {
+            return Ok(StateHandlerOutcome::transition(decommissioning(
+                SwitchDecommissioningState::NvosFactoryResetOutcomeUnknown { error },
+            )));
+        }
+        Err(error) => return Err(external_error("failed to submit NVOS factory reset", error)),
+    };
+    Ok(StateHandlerOutcome::transition(decommissioning(
+        SwitchDecommissioningState::WaitingForNvosFactoryReset { job_id },
+    )))
+}
+
+async fn handle_waiting_for_nvos_factory_reset(
+    job_id: &str,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
+    let component_manager = ctx.services.component_manager.as_ref().ok_or_else(|| {
+        StateHandlerError::InvalidState("missing RMS component manager".to_string())
+    })?;
+    let status = component_manager
+        .nv_switch
+        .get_switch_factory_reset_job_status(job_id)
+        .await
+        .map_err(|error| external_error("failed to poll NVOS factory reset", error))?;
+    match status.state {
+        SwitchFactoryResetState::Pending => Ok(StateHandlerOutcome::wait(
+            "waiting for NVOS factory reset completion".to_string(),
+        )),
+        SwitchFactoryResetState::Completed => Ok(StateHandlerOutcome::transition(decommissioning(
+            SwitchDecommissioningState::SuppressingNvosDhcp,
+        ))),
+        SwitchFactoryResetState::Failed => {
+            Err(StateHandlerError::ManualInterventionRequired(format!(
+                "NVOS factory reset failed: {}",
+                status.error.unwrap_or_default()
+            )))
+        }
+    }
+}
+
+async fn handle_rebooting_switch(
+    switch_id: &SwitchId,
+    switch: &Switch,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
+    let bmc_info = switch
+        .bmc_info
+        .as_ref()
+        .ok_or_else(|| missing_data(switch_id, "bmc_info"))?;
+    let bmc_ip_address = bmc_info
+        .ip
+        .ok_or_else(|| missing_data(switch_id, "bmc_ip"))?;
+    let bmc_mac_address = bmc_info
+        .mac
+        .ok_or_else(|| missing_data(switch_id, "bmc_mac"))?;
+    let redfish_client = ctx
+        .services
+        .redfish_client_pool
+        .create_client(
+            &bmc_ip_address.to_string(),
+            bmc_info.port,
+            RedfishAuth::for_bmc_mac(bmc_mac_address),
+            Some(RedfishVendor::NvidiaGBSwitch),
+        )
+        .await
+        .map_err(|error| external_error("failed to create switch BMC Redfish client", error))?;
+    redfish_client
+        .power(libredfish::SystemPowerControl::ForceRestart)
+        .await
+        .map_err(|error| external_error("failed to reboot switch", error))?;
     Ok(StateHandlerOutcome::transition(decommissioning(
         SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement,
     )))
@@ -217,7 +289,8 @@ async fn handle_waiting_for_nvos_dhcp_acknowledgement(
         .next()
         .and_then(|row| row.nvos_mac)
         .ok_or_else(|| missing_data(switch_id, "nvos_mac"))?;
-    if !dhcp_suppression_acknowledged(nvos_mac, ctx).await? {
+    if db::bmc_suppression::is_dhcp_acknowledgement_pending(&ctx.services.db_pool, nvos_mac).await?
+    {
         return Ok(StateHandlerOutcome::wait(
             "waiting for NVOS DHCP suppression acknowledgement".to_string(),
         ));
@@ -294,7 +367,9 @@ async fn handle_waiting_for_bmc_dhcp_acknowledgement(
         .and_then(|bmc_info| bmc_info.mac)
         .or(switch.bmc_mac_address)
         .ok_or_else(|| missing_data(switch_id, "bmc_mac"))?;
-    if !dhcp_suppression_acknowledged(bmc_mac_address, ctx).await? {
+    if db::bmc_suppression::is_dhcp_acknowledgement_pending(&ctx.services.db_pool, bmc_mac_address)
+        .await?
+    {
         return Ok(StateHandlerOutcome::wait(
             "waiting for BMC DHCP suppression acknowledgement".to_string(),
         ));

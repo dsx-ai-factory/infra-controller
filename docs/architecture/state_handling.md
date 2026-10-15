@@ -74,7 +74,8 @@ instance. The
 lists all scheduling settings and defaults. Controllers receive work through three paths:
 
 - **Periodic enqueue:** Each controller periodically enqueues its resources according to `iteration_time`.
-- **Transition enqueue:** After a committed transition, finalization schedules an immediate requeue.
+- **Transition or invalidation enqueue:** After a committed transition or an invalidated iteration, finalization
+  schedules an immediate requeue.
 - **Explicit enqueue:** Other control-plane components can request an earlier run through the
   [`Enqueuer`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/state-controller/src/controller/enqueuer.rs).
 
@@ -104,20 +105,26 @@ requires. Common guards include:
 - Another guard with equivalent protection
 
 The processor cannot detect a stale write when an implementation ignores `old_version` and reports success. Check the
-concrete implementation before relying on stale-write rejection. The machine and SPDM controller implementations do
-not apply an `old_version` guard.
+concrete implementation before relying on stale-write rejection.
 
-When persistence reports a conflict, the processor leaves controller state and history unchanged. It logs the conflict,
-tracks it in memory, and schedules a requeue to load the winning state. Handlers and persistence logic must remain safe
-when work is retried or another processor takes over a stale claim.
+For example, the [machine controller's database write](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-db/src/machine.rs)
+updates the host only when its controller-state version still matches, then updates its attached DPUs. The
+[SPDM controller's database write](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-db/src/attestation/spdm.rs)
+guards the attestation device's state version. Both store `new_version` only when the stored version matches
+`old_version`. A missing target or version mismatch returns `ConditionalWrite::NotApplied(ControllerStateNotCurrent)`.
+
+A rejected state write invalidates the iteration, whether the target is missing, its version changed, or another
+persistence condition is unmet. The processor schedules a requeue to load fresh state. Handlers and persistence logic
+must remain safe when work is retried or another processor takes over a stale claim.
 
 ### Handle Each Outcome
 
 Here, *handler-owned writes* means database writes queued through the handler context or returned in the outcome's
 transaction.
 
-The processor applies all queued handler-owned writes in one transaction. If one write fails, the transaction rolls
-back and the outcome becomes a handler error.
+The processor applies all queued handler-owned writes in one transaction. An operational write failure rolls back the
+transaction and becomes a handler error. A propagated `StateHandlerError::IterationInvalidated` instead follows the
+invalidation path below.
 
 `StateHandlerOutcome` controls persistence and later scheduling:
 
@@ -131,15 +138,17 @@ back and the outcome becomes a handler error.
 - **`Deleted`:** Commits handler-owned database work and skips outcome persistence. Finalization removes the queue
   claim. The per-object state series is also cleared after processing a deleted or missing object.
 
-A rejected transition has an important consequence. Controller state and history remain unchanged, but the
-`Transition` outcome and handler-owned writes can still commit. The processor logs the conflict, tracks it in memory,
-and schedules an immediate requeue. It does not persist a distinct conflict outcome.
+A rejected final state write invalidates the iteration. The processor rolls back the transaction, including
+handler-owned writes, and does not persist state, history, or an outcome from that iteration. The same rule applies when
+a handler or queued write propagates `StateHandlerError::IterationInvalidated` from
+[`CheckApplied::check_applied`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/state-controller/src/conditional_write.rs).
+
+Invalidation is not an operational failure. The processor logs it at info level, tracks it in memory, and schedules an
+immediate requeue without recording a transition or error outcome. A new controller pass loads fresh state;
+`CheckApplied` does not retry the rejected write against the old snapshot.
 
 Outcome persistence and queue finalization use separate transactions. If the process stops between them, the queue
 claim remains until finalization succeeds or another processor reclaims the stale claim.
-
-Any handler-owned write that survives a conflict must be correct without the transition. Otherwise, protect it with
-the same ownership or version guard.
 
 ### Record Errors and Diagnose Retries
 
@@ -147,8 +156,8 @@ Failures alter normal outcome handling as follows:
 
 - **SLA overrun:** A successful `Wait` or `DoNothing` result becomes an SLA error after the resource exceeds its
   state-specific SLA. Successful handler-owned writes still commit.
-- **Handler error:** Controller state remains unchanged. The processor discards queued handler writes and tries to
-  persist an error outcome in a new transaction.
+- **Operational handler error:** Controller state remains unchanged. The processor discards queued handler writes and
+  tries to persist an error outcome in a new transaction.
 - **Load error or missing object:** Processing stops before the handler runs. The processor records the error in logs
   and configured metrics but does not persist an outcome.
 - **Timeout or persistence failure:** An outcome record is not guaranteed. Logs and configured metrics still report the
@@ -162,7 +171,7 @@ Persistence and handler timeouts can also roll back an uncommitted transition, i
 and handler-owned writes. The next run observes the previous durable state and must recover from that fact.
 
 During an orderly shutdown, the processor stops claiming new queue rows. It waits for already-claimed handlers, which
-remain bounded by `max_object_handling_time`, then finalizes their queue rows and transition requeues. Unclaimed rows
+remain bounded by `max_object_handling_time`, then finalizes their queue rows and any scheduled requeues. Unclaimed rows
 stay queued. A process crash skips this drain, so another processor must reclaim stale claims.
 
 For machines, the admin command-line interface (CLI) exposes persisted state history for diagnosing transitions and

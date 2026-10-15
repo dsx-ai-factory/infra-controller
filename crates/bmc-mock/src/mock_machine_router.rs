@@ -17,15 +17,14 @@
 use std::sync::Arc;
 
 use axum::Router;
-use tokio::sync::oneshot;
 
 use crate::auth_router::Authorizer;
 use crate::bmc_state::BmcState;
 use crate::injection::InjectionStore;
 use crate::redfish::manager::ManagerState;
 use crate::{
-    Callbacks, EventServiceConfig, HardwareType, MachineInfo, SystemPowerControl,
-    VirtualMediaDeviceConfig, auth_router, middleware_router, redfish,
+    Callbacks, EventServiceConfig, HardwareType, MachineInfo, VirtualMediaDeviceConfig,
+    auth_router, middleware_router, redfish,
 };
 
 /// Caller control over the hardware profile's EventService.
@@ -56,25 +55,12 @@ pub struct MachineRouterOptions {
     /// An enabled event service still closes streams and clears history on reset;
     /// with both features disabled, resets remain no-ops.
     pub bmc_reset_duration: Option<std::time::Duration>,
-}
-
-#[derive(Debug)]
-pub enum BmcCommand {
-    SetSystemPower {
-        request: SystemPowerControl,
-        reply: Option<oneshot::Sender<SetSystemPowerResult>>,
-    },
-    StateRefreshIndication,
-}
-
-pub type SetSystemPowerResult = Result<(), SetSystemPowerError>;
-
-#[derive(Debug, thiserror::Error)]
-pub enum SetSystemPowerError {
-    #[error("mock BMC reported bad request when setting system power: {0}")]
-    BadRequest(String),
-    #[error("mock BMC failed to send power command: {0}")]
-    CommandSendError(String),
+    /// How long a firmware upload's Redfish task stays `Running` before it
+    /// reports `Completed` (per-platform, from the machine's resolved
+    /// `LifecycleTimings::firmware_upgrade`). `None` keeps the update
+    /// service's built-in 2 s. The jitter added on top is capped at the
+    /// duration, so a zero duration completes tasks immediately.
+    pub firmware_upgrade_duration: Option<std::time::Duration>,
 }
 
 trait AddRoutes {
@@ -83,7 +69,7 @@ trait AddRoutes {
         Self: Sized;
 }
 
-impl AddRoutes for Router<BmcState> {
+impl<S: Clone + Send + Sync + 'static> AddRoutes for Router<S> {
     fn add_routes(self, f: impl FnOnce(Self) -> Self) -> Self {
         f(self)
     }
@@ -91,13 +77,13 @@ impl AddRoutes for Router<BmcState> {
 
 /// Return an axum::Router that mocks various redfish calls to match
 /// the provided MachineInfo.
-pub fn machine_router(
+pub fn machine_router<C: Callbacks>(
     machine_info: &MachineInfo,
-    callbacks: Arc<dyn Callbacks>,
+    callbacks: Arc<C>,
     mat_host_id: String,
     redfish_auth: bool,
     options: MachineRouterOptions,
-) -> (Router, BmcState) {
+) -> (Router, BmcState<C>) {
     machine_router_inner(
         machine_info,
         callbacks,
@@ -110,14 +96,14 @@ pub fn machine_router(
 }
 
 /// Return a machine router backed by a caller-provided injection store.
-pub fn machine_router_with_injection_store(
+pub fn machine_router_with_injection_store<C: Callbacks>(
     machine_info: &MachineInfo,
-    callbacks: Arc<dyn Callbacks>,
+    callbacks: Arc<C>,
     mat_host_id: String,
     redfish_auth: bool,
     injection: Arc<InjectionStore>,
     options: MachineRouterOptions,
-) -> (Router, BmcState) {
+) -> (Router, BmcState<C>) {
     machine_router_inner(
         machine_info,
         callbacks,
@@ -129,18 +115,23 @@ pub fn machine_router_with_injection_store(
     )
 }
 
-fn machine_router_inner(
+fn machine_router_inner<C: Callbacks>(
     machine_info: &MachineInfo,
-    callbacks: Arc<dyn Callbacks>,
+    callbacks: Arc<C>,
     mat_host_id: String,
     redfish_auth: bool,
     injection: Arc<InjectionStore>,
     options: MachineRouterOptions,
     profile_event_service: Option<EventServiceConfig>,
-) -> (Router, BmcState) {
+) -> (Router, BmcState<C>) {
     let system_config = machine_info.system_config(callbacks.clone());
     let chassis_config = machine_info.chassis_config();
-    let update_service_config = machine_info.update_service_config();
+    let mut update_service_config = machine_info.update_service_config();
+    if let Some(delay) = options.firmware_upgrade_duration {
+        update_service_config.task_completion_delay = delay;
+        update_service_config.task_completion_jitter =
+            crate::redfish::update_service::DEFAULT_TASK_COMPLETION_JITTER.min(delay);
+    }
     let bmc_vendor = machine_info.bmc_vendor();
     let bmc_product = machine_info.bmc_product();
     let bmc_redfish_version = machine_info.bmc_redfish_version();
@@ -161,15 +152,14 @@ fn machine_router_inner(
             }
         })
         .add_routes(crate::redfish::chassis::add_routes)
+        .add_routes(crate::redfish::component_integrity::add_routes)
         .add_routes(crate::redfish::manager::add_routes)
         .add_routes(crate::redfish::update_service::add_routes)
         .add_routes(crate::redfish::task_service::add_routes)
         .add_routes(crate::redfish::telemetry_service::add_routes)
         .add_routes(crate::redfish::account_service::add_routes)
         .add_routes(crate::redfish::session_service::add_routes)
-        .add_routes(|routes| crate::redfish::computer_system::add_routes(routes, bmc_vendor))
-        .add_routes(crate::redfish::virtual_media::add_routes)
-        .add_routes(crate::ipmi::add_routes);
+        .add_routes(crate::redfish::virtual_media::add_routes);
     let router = match machine_info {
         MachineInfo::Dpu(_) => {
             router.add_routes(crate::redfish::oem::nvidia::bluefield::add_routes)
@@ -218,6 +208,7 @@ fn machine_router_inner(
         availability: availability.clone(),
         callbacks: Some(callbacks.clone()),
         exposes_computer_systems: machine_info.exposes_computer_systems(),
+        component_integrities: machine_info.component_integrity_config(),
     };
     let account_service_state = state.account_service_state.clone();
     let session_service_state = state.session_service_state.clone();
@@ -229,6 +220,8 @@ fn machine_router_inner(
         )
     );
     let router = router
+        .add_routes(|router| crate::redfish::computer_system::add_routes(router, bmc_vendor))
+        .add_routes(crate::ipmi::add_routes)
         .with_state(state.clone())
         .merge(crate::injection::management_router(injection.clone()));
     let router = ([
@@ -273,7 +266,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::test_support::{NoopCallbacks, host_info};
+    use crate::test_support::{TestCallbacks, host_info};
 
     #[tokio::test]
     async fn omitted_event_service_has_no_discovery_or_routes() {
@@ -293,7 +286,7 @@ mod tests {
         for (scenario, profile, event_service) in disabled {
             let (router, state) = machine_router_inner(
                 &host_info(crate::HardwareType::DellPowerEdgeR750),
-                Arc::new(NoopCallbacks),
+                Arc::new(TestCallbacks::default()),
                 "disabled-event-service".into(),
                 false,
                 Arc::new(InjectionStore::new()),

@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use std::collections::BTreeSet;
+use std::ops::RangeInclusive;
 
 use crate::ip::prefix::{IpPrefix, Ipv4Prefix, Ipv6Prefix, ToPrefix};
 
@@ -22,6 +23,10 @@ use crate::ip::prefix::{IpPrefix, Ipv4Prefix, Ipv6Prefix, ToPrefix};
 /// internally is represented as a set of prefixes that cover the included
 /// address space.
 pub struct IpSet {
+    // Anything updating this set must maintain these invariants:
+    // 1. The prefixes are disjoint (not overlapping)
+    // 2. No adjacent sibling prefixes exist; these must be stored as their
+    //    equivalent parent.
     included_prefixes: BTreeSet<IpPrefix>,
 }
 
@@ -55,7 +60,7 @@ impl IpSet {
         // about to insert.
         while let Some(subprefix) = self
             .included_prefixes
-            .range(prefix..=prefix.get_last_subprefix())
+            .range(subprefix_range(prefix))
             .find_map(|p| prefix.contains(p).then_some(*p))
         {
             self.included_prefixes.remove(&subprefix);
@@ -82,6 +87,16 @@ impl IpSet {
         let container = match self.get_containing_prefix(prefix) {
             Some(included) => included,
             None => {
+                // If we didn't find a containing prefix to work on, the other
+                // possibility we need to account for is one or more smaller
+                // prefixes that are contained by the prefix we're removing.
+                while let Some(subprefix) = self
+                    .included_prefixes
+                    .range(subprefix_range(*prefix))
+                    .find_map(|included| prefix.contains(included).then_some(*included))
+                {
+                    self.included_prefixes.remove(&subprefix);
+                }
                 return;
             }
         };
@@ -140,6 +155,15 @@ impl IpSet {
             included_prefixes: BTreeSet::new(),
         }
     }
+}
+
+// Return a range that spans all of the possible subprefixes this prefix
+// could contain.
+//
+// This functionality relies on the specific Ord implementation of
+// `IpPrefix`.
+fn subprefix_range(prefix: IpPrefix) -> RangeInclusive<IpPrefix> {
+    prefix..=prefix.get_last_subprefix()
 }
 
 impl From<IpPrefix> for IpSet {
@@ -387,92 +411,108 @@ mod tests {
     }
 
     #[test]
-    fn removing_fragments_the_containing_prefix() {
-        // The original `test_remove`: removing the last /32 from a /24 leaves a
-        // descending staircase of fragments; removing it again is a no-op.
-        let mut ipset = IpSet::new_empty();
-        ipset.add(pfx("10.0.0.0/24"));
-        let last_addr = pfx("10.0.0.255/32");
-        ipset.remove(&last_addr);
-        ipset.remove(&last_addr);
-        let expected = pfxs(&[
-            "10.0.0.0/25",
-            "10.0.0.128/26",
-            "10.0.0.192/27",
-            "10.0.0.224/28",
-            "10.0.0.240/29",
-            "10.0.0.248/30",
-            "10.0.0.252/31",
-            "10.0.0.254/32",
-        ]);
-        assert_eq!(ipset.get_prefixes(), expected);
-    }
-
-    #[test]
     fn remove_outcomes() {
-        // Each row starts from a set built from the first slice, removes the
-        // second prefix, then dumps the resulting aggregate prefixes.
+        // Each row starts from a set built from the first slice, removes each
+        // requested prefix in order, then checks the final aggregate prefixes.
         struct Case {
             scenario: &'static str,
             start: &'static [&'static str],
-            remove: &'static str,
-            expect: Vec<String>,
+            remove: &'static [&'static str],
+            expect: &'static [&'static str],
         }
         let cases = [
             Case {
                 scenario: "removing a member empties the set",
                 start: &["10.0.0.0/24"],
-                remove: "10.0.0.0/24",
-                expect: vec![],
+                remove: &["10.0.0.0/24"],
+                expect: &[],
             },
             Case {
                 scenario: "removing something absent is a no-op",
                 start: &["10.0.0.0/24"],
-                remove: "192.168.0.0/24",
-                expect: vec!["10.0.0.0/24".to_string()],
+                remove: &["192.168.0.0/24"],
+                expect: &["10.0.0.0/24"],
             },
             Case {
                 scenario: "removing from the empty set is a no-op",
                 start: &[],
-                remove: "10.0.0.0/24",
-                expect: vec![],
+                remove: &["10.0.0.0/24"],
+                expect: &[],
             },
             Case {
                 scenario: "removing a half leaves the other half",
                 start: &["10.0.0.0/23"],
-                remove: "10.0.0.0/24",
-                expect: vec!["10.0.1.0/24".to_string()],
+                remove: &["10.0.0.0/24"],
+                expect: &["10.0.1.0/24"],
             },
             Case {
                 scenario: "removing the high half leaves the low half",
                 start: &["10.0.0.0/23"],
-                remove: "10.0.1.0/24",
-                expect: vec!["10.0.0.0/24".to_string()],
+                remove: &["10.0.1.0/24"],
+                expect: &["10.0.0.0/24"],
+            },
+            Case {
+                scenario: "removing the last address leaves a staircase of fragments",
+                start: &["10.0.0.0/24"],
+                remove: &["10.0.0.255/32"],
+                expect: &[
+                    "10.0.0.0/25",
+                    "10.0.0.128/26",
+                    "10.0.0.192/27",
+                    "10.0.0.224/28",
+                    "10.0.0.240/29",
+                    "10.0.0.248/30",
+                    "10.0.0.252/31",
+                    "10.0.0.254/32",
+                ],
             },
             Case {
                 scenario: "removing one member leaves disjoint others untouched",
                 start: &["10.0.0.0/24", "192.168.0.0/24"],
-                remove: "10.0.0.0/24",
-                expect: vec!["192.168.0.0/24".to_string()],
+                remove: &["10.0.0.0/24"],
+                expect: &["192.168.0.0/24"],
             },
             Case {
-                scenario: "removing a v6 member leaves the v4 member",
+                scenario: "a superset removal deletes all of its sparse sub-prefixes",
+                start: &[
+                    "10.0.0.0/24",
+                    "10.0.2.0/24",
+                    "10.0.4.0/24",
+                    "10.0.5.0/24",
+                    "192.168.0.0/16",
+                ],
+                remove: &["10.0.0.0/22"],
+                expect: &["10.0.4.0/23", "192.168.0.0/16"],
+            },
+            Case {
+                scenario: "removing the v6 root leaves the v4 member",
                 start: &["10.0.0.0/8", "2001:db8::/32"],
-                remove: "2001:db8::/32",
-                expect: vec!["10.0.0.0/8".to_string()],
+                remove: &["::/0"],
+                expect: &["10.0.0.0/8"],
+            },
+            Case {
+                scenario: "removing both address family roots empties the set",
+                start: &["10.0.0.0/8", "2001:db8::/32"],
+                remove: &["0.0.0.0/0", "::/0"],
+                expect: &[],
             },
         ];
+
+        fn apply_remove((start, deletions): (&[&str], &[&str])) -> Vec<IpPrefix> {
+            let mut ipset = IpSet::from(pfxs(start));
+            for prefix in deletions {
+                ipset.remove(&pfx(prefix));
+            }
+            ipset.get_prefixes()
+        }
+
         check_values(
-            cases.map(|c| Check {
-                scenario: c.scenario,
-                input: (c.start, c.remove),
-                expect: c.expect,
+            cases.map(|case| Check {
+                scenario: case.scenario,
+                input: (case.start, case.remove),
+                expect: pfxs(case.expect),
             }),
-            |(start, remove)| {
-                let mut ipset = IpSet::from(pfxs(start));
-                ipset.remove(&pfx(remove));
-                ipset.get_prefixes().iter().map(|p| p.to_string()).collect()
-            },
+            apply_remove,
         );
     }
 

@@ -90,7 +90,7 @@ func cmdVPCPeeringCreate(s *Session, args []string) error {
 		return runGeneratedTUICommand(s, info, args)
 	}
 
-	siteID, err := requireSiteScope(s, "VPC peering creation requires a site. Select a site.")
+	siteID, err := requireRegisteredSiteScope(s, "VPC peering creation requires a site. Select a site.")
 	if err != nil {
 		return err
 	}

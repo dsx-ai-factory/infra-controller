@@ -8,6 +8,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
@@ -16,8 +19,11 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/dao"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/leakage"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/errors"
 )
@@ -209,6 +215,89 @@ func (s *PostgresStore) ListNonTerminalTasksForRacks(
 		results = append(results, converted)
 	}
 	return results, nil
+}
+
+// LatestLeakageShutdownTaskStatuses returns one newest leakage-triggered
+// forced-shutdown Task status per requested component. The component predicate
+// uses the existing task attributes GIN index; the lateral expansion identifies
+// which requested component each matching Task targets.
+func (s *PostgresStore) LatestLeakageShutdownTaskStatuses(
+	ctx context.Context,
+	componentIDs []uuid.UUID,
+) (map[uuid.UUID]taskcommon.TaskStatus, error) {
+	statuses := make(map[uuid.UUID]taskcommon.TaskStatus)
+	componentIDs = normalizedUUIDs(componentIDs)
+	if len(componentIDs) == 0 {
+		return statuses, nil
+	}
+
+	type componentTaskStatus struct {
+		ComponentID uuid.UUID             `bun:"component_id"`
+		Status      taskcommon.TaskStatus `bun:"status"`
+	}
+
+	rows := make([]componentTaskStatus, 0, len(componentIDs))
+	err := s.idb(ctx).NewSelect().
+		TableExpr("task AS t").
+		ColumnExpr("DISTINCT ON (target.component_id) target.component_id::uuid AS component_id").
+		ColumnExpr("t.status").
+		Join("JOIN event_action_executions AS eae ON eae.id = t.trigger_id").
+		Join("JOIN events AS e ON e.id = eae.event_id").
+		Join("CROSS JOIN LATERAL jsonb_each(COALESCE(t.attributes->'components_by_type', '{}'::jsonb)) AS target_group(component_type, component_ids)").
+		Join("CROSS JOIN LATERAL jsonb_array_elements_text(target_group.component_ids) AS target(component_id)").
+		Where("t.trigger_type = ?", operation.TriggerTypeEventRuleExecution).
+		Where("e.event_type = ?", leakage.TypeHardwareLeakDetected).
+		Where("t.type = ?", taskcommon.TaskTypePowerControl).
+		Where("t.information->>'operation' = ?", strconv.Itoa(int(operations.PowerOperationForcePowerOff))).
+		Where("target.component_id IN (?)", bun.In(uuidStrings(componentIDs))).
+		Where("?", bun.Safe(taskComponentsAnyPredicate(componentIDs))).
+		OrderExpr("target.component_id, t.created_at DESC, t.id DESC").
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, errors.GRPCErrorInternal(err.Error())
+	}
+	for _, row := range rows {
+		statuses[row.ComponentID] = row.Status
+	}
+
+	return statuses, nil
+}
+
+func normalizedUUIDs(ids []uuid.UUID) []uuid.UUID {
+	unique := make(map[uuid.UUID]struct{}, len(ids))
+	for _, id := range ids {
+		if id != uuid.Nil {
+			unique[id] = struct{}{}
+		}
+	}
+
+	result := make([]uuid.UUID, 0, len(unique))
+	for id := range unique {
+		result = append(result, id)
+	}
+	slices.SortFunc(result, func(a, b uuid.UUID) int {
+		return strings.Compare(a.String(), b.String())
+	})
+	return result
+}
+
+func uuidStrings(ids []uuid.UUID) []string {
+	result := make([]string, len(ids))
+	for i, id := range ids {
+		result[i] = id.String()
+	}
+	return result
+}
+
+func taskComponentsAnyPredicate(ids []uuid.UUID) string {
+	predicates := make([]string, len(ids))
+	for i, id := range ids {
+		predicates[i] = fmt.Sprintf(
+			`t.attributes @? '$.components_by_type.*[*] ? (@ == "%s")'::jsonpath`,
+			id.String(),
+		)
+	}
+	return "(" + strings.Join(predicates, " OR ") + ")"
 }
 
 // UpdateScheduledTask updates task scheduling information.

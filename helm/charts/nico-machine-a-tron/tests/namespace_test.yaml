@@ -57,6 +57,18 @@ tests:
           path: metadata.name
           value: nico-system
 
+  - it: should label the created Namespace for the nico-roots ClusterExternalSecret
+    templates:
+      - namespace.yaml
+    set:
+      global:
+        namespaceOverride: nico-system
+      createNamespace: true
+    asserts:
+      - equal:
+          path: metadata.labels["nico.nvidia.com/managed"]
+          value: "true"
+
   - it: should not create Namespace without override
     templates:
       - namespace.yaml

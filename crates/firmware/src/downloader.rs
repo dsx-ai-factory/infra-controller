@@ -17,7 +17,7 @@
 
 // Coordinates downloading firmware in the background with multiple possible requestors
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -229,6 +229,18 @@ fn fail(outcome: DownloadOutcome) -> impl FnOnce(Report) -> DownloadError {
     move |report| DownloadError { outcome, report }
 }
 
+/// What [`FirmwareDownloader::available`] found for an artifact.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArtifactStatus {
+    Available,
+    Downloading,
+    /// The artifact cannot be made available. URLs in `error` have their query
+    /// strings removed, so it can be shown to operators.
+    Failed {
+        error: String,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub struct FirmwareDownloader {
     // Actual structure wrapped in an Arc so that we can clone the FirmwareDownloader and have the clones all point to one instance.
@@ -238,6 +250,8 @@ pub struct FirmwareDownloader {
 #[derive(Debug)]
 struct FirmwareDownloaderActual {
     downloading: HashSet<String>,
+    // Error of the last failed attempt per file, kept until one caller is told about it.
+    failures: HashMap<String, String>,
     client: Option<Client>,
 }
 
@@ -252,15 +266,18 @@ impl FirmwareDownloader {
         FirmwareDownloader {
             actual: Arc::new(Mutex::new(FirmwareDownloaderActual {
                 downloading: HashSet::new(),
+                failures: HashMap::new(),
                 client: None, // Not created until we actually need it
             })),
         }
     }
 
-    /// available will return true if the given file is present, otherwise it will return false after starting a download in the background.
-    /// Anything trying to check the same file while it is downloading will get the exact same result, but will not start a new download.
+    /// Reports whether the given file is present, starting a background download when it is not.
+    /// Anything checking the same file while it is downloading gets `Downloading` without starting another download.
+    /// A failed download is reported as `Failed` to the next caller only; the check after that starts a new download,
+    /// so a caller retries by calling again.
     /// It verifies the downloaded file against sha256 when a checksum is provided.
-    pub fn available(&self, filename: &Path, url: &str, sha256: &str) -> bool {
+    pub fn available(&self, filename: &Path, url: &str, sha256: &str) -> ArtifactStatus {
         self.available_actual(filename, url, sha256, None)
     }
 
@@ -271,11 +288,11 @@ impl FirmwareDownloader {
         url: &str,
         sha256: &str,
         fake_sleep: Option<Duration>,
-    ) -> bool {
+    ) -> ArtifactStatus {
         match cached_file_status(filename, sha256) {
-            CachedFileStatus::Available => return true,
+            CachedFileStatus::Available => return ArtifactStatus::Available,
             CachedFileStatus::NeedsDownload => {}
-            CachedFileStatus::Unusable => return false,
+            CachedFileStatus::Unusable { error } => return ArtifactStatus::Failed { error },
         }
 
         if url.is_empty() {
@@ -283,7 +300,12 @@ impl FirmwareDownloader {
                 reason: ArtifactUnavailableReason::MissingUrl,
                 firmware_path: format!("{filename:?}"),
             });
-            return false;
+            return ArtifactStatus::Failed {
+                error: format!(
+                    "firmware artifact {} is missing and has no URL",
+                    filename.display()
+                ),
+            };
         }
 
         let filename_string = filename.to_str().unwrap().to_string();
@@ -291,14 +313,18 @@ impl FirmwareDownloader {
         let mut state = self.actual.lock().unwrap();
         if state.downloading.contains(&filename_string) {
             // We are already downloading this
-            return false;
+            return ArtifactStatus::Downloading;
+        }
+
+        if let Some(error) = state.failures.remove(&filename_string) {
+            return ArtifactStatus::Failed { error };
         }
 
         // Slight timing hole, recheck for the file
         match cached_file_status(filename, sha256) {
-            CachedFileStatus::Available => return true,
+            CachedFileStatus::Available => return ArtifactStatus::Available,
             CachedFileStatus::NeedsDownload => {}
-            CachedFileStatus::Unusable => return false,
+            CachedFileStatus::Unusable { error } => return ArtifactStatus::Failed { error },
         }
 
         state.downloading.insert(filename_string.clone());
@@ -313,33 +339,42 @@ impl FirmwareDownloader {
         }
 
         let filename = filename.to_path_buf();
-        let url = url.to_owned();
+        let source_url = url.to_owned();
         let sha256 = sha256.to_owned();
         let client = state.client.clone().unwrap();
         let actual = self.actual.clone();
         tokio::spawn(async move {
             let started = Instant::now();
             let dst_filename = format!("{filename_string}.download");
-            let result =
-                download_and_publish(&filename, &url, &dst_filename, client, fake_sleep, &sha256)
-                    .await;
+            let result = download_and_publish(
+                &filename,
+                &source_url,
+                &dst_filename,
+                client,
+                fake_sleep,
+                &sha256,
+            )
+            .await;
             if result.is_err() {
                 std::fs::remove_file(&dst_filename).ok();
             }
+            let failure = result
+                .err()
+                .map(|failure| (failure.outcome, format!("{:#}", failure.report)));
             let (took, url, filename) = (
                 started.elapsed(),
-                loggable_url(&url),
+                loggable_url(&source_url),
                 filename_string.clone(),
             );
-            emit(match result {
-                Ok(()) => DownloadFinished::Ok {
+            emit(match &failure {
+                None => DownloadFinished::Ok {
                     took,
                     url,
                     filename,
                 },
-                Err(failure) => {
-                    let error = format!("{:#}", failure.report);
-                    match failure.outcome {
+                Some((outcome, error)) => {
+                    let error = error.clone();
+                    match outcome {
                         DownloadOutcome::Ok | DownloadOutcome::Fetch => DownloadFinished::Fetch {
                             took,
                             url,
@@ -376,9 +411,9 @@ impl FirmwareDownloader {
             actual
                 .lock()
                 .unwrap()
-                .clear_download_state(&filename_string);
+                .finish_download(&filename_string, failure.map(|(_, error)| error));
         });
-        false
+        ArtifactStatus::Downloading
     }
 }
 
@@ -410,15 +445,20 @@ async fn download_and_publish(
 }
 
 impl FirmwareDownloaderActual {
-    fn clear_download_state(&mut self, filename: &String) {
+    /// Ends an attempt, keeping its error for the next caller. A new attempt only
+    /// starts after that caller takes the error, so no stale failure can remain.
+    fn finish_download(&mut self, filename: &str, error: Option<String>) {
         self.downloading.remove(filename);
+        if let Some(error) = error {
+            self.failures.insert(filename.to_owned(), error);
+        }
     }
 }
 
 enum CachedFileStatus {
     Available,
     NeedsDownload,
-    Unusable,
+    Unusable { error: String },
 }
 
 fn cached_file_status(filename: &Path, sha256: &str) -> CachedFileStatus {
@@ -443,7 +483,12 @@ fn cached_file_status(filename: &Path, sha256: &str) -> CachedFileStatus {
                     filename: filename.display().to_string(),
                     error: err.to_string(),
                 });
-                return CachedFileStatus::Unusable;
+                return CachedFileStatus::Unusable {
+                    error: format!(
+                        "failed to remove stale cached firmware artifact {}: {err}",
+                        filename.display()
+                    ),
+                };
             }
 
             CachedFileStatus::NeedsDownload
@@ -504,10 +549,13 @@ async fn download(
             });
     }
 
+    // reqwest errors print the full URL, query string included; drop it so a
+    // presigned URL never reaches the logs or the machine's failure reason.
     let res = client
         .get(url)
         .send()
         .await
+        .map_err(reqwest_middleware::Error::without_url)
         .wrap_err(format!(
             "FirmwareDownloader got error trying to download {}",
             loggable_url(url)
@@ -525,8 +573,9 @@ async fn download(
         match segment {
             Err(e) => {
                 return Err(fail(DownloadOutcome::Transfer)(eyre!(
-                    "FirmwareDownloader had problems downloading {}: {e}",
-                    loggable_url(url)
+                    "FirmwareDownloader had problems downloading {}: {}",
+                    loggable_url(url),
+                    e.without_url()
                 )));
             }
             Ok(segment) => {

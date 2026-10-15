@@ -4,6 +4,7 @@
 package model
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -16,15 +17,31 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
+func TestAPIMachineHealthPreservesDeprecatedObservedAt(t *testing.T) {
+	observedAt := "2026-09-28T12:00:00Z"
+	var health APIMachineHealth
+	health.FromDBModel(&cdbm.MachineHealth{ObservedAt: &observedAt})
+
+	encoded, err := json.Marshal(health)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"source":"",
+		"observedAt":"2026-09-28T12:00:00Z",
+		"observed_at":"2026-09-28T12:00:00Z",
+		"successes":[],
+		"alerts":[]
+	}`, string(encoded))
+}
+
 func TestAPIMachineHealthReportEntryRequestValidateAndToProto(t *testing.T) {
 	inAlertSince := "2026-06-24T11:00:00Z"
 	req := APIMachineHealthReportEntryRequest{
 		Source: "overrides.sre",
 		Mode:   MachineHealthReportModeReplace,
-		Successes: []APIMachineHealthProbeSuccess{
+		Successes: []APIHealthProbeSuccess{
 			{ID: "probe.ok", Target: cutil.GetPtr("host")},
 		},
-		Alerts: []APIMachineHealthProbeAlert{
+		Alerts: []APIHealthProbeAlert{
 			{
 				ID:              "probe.alert",
 				Target:          cutil.GetPtr("gpu0"),
@@ -56,6 +73,52 @@ func TestAPIMachineHealthReportEntryRequestValidateAndToProto(t *testing.T) {
 
 	assert.Error(t, (&APIMachineHealthReportEntryRequest{Mode: MachineHealthReportModeMerge}).Validate())
 	assert.Error(t, (&APIMachineHealthReportEntryRequest{Source: "source", Mode: MachineHealthReportMode("merge")}).Validate())
-	assert.Error(t, (&APIMachineHealthReportEntryRequest{Source: "source", Mode: MachineHealthReportModeMerge, Successes: []APIMachineHealthProbeSuccess{{}}}).Validate())
-	assert.Error(t, (&APIMachineHealthReportEntryRequest{Source: "source", Mode: MachineHealthReportModeMerge, Alerts: []APIMachineHealthProbeAlert{{ID: "alert"}}}).Validate())
+	assert.Error(t, (&APIMachineHealthReportEntryRequest{Source: "source", Mode: MachineHealthReportModeMerge, Successes: []APIHealthProbeSuccess{{}}}).Validate())
+	assert.Error(t, (&APIMachineHealthReportEntryRequest{Source: "source", Mode: MachineHealthReportModeMerge, Alerts: []APIHealthProbeAlert{{ID: "alert"}}}).Validate())
+}
+
+func TestAPIRackHealthReportEntryRequest_Validate(t *testing.T) {
+	validReport := APIMachineHealthReportEntryRequest{Source: "overrides.sre", Mode: MachineHealthReportModeMerge}
+	tests := []struct {
+		name    string
+		request APIRackHealthReportEntryRequest
+		wantErr bool
+	}{
+		{name: "valid", request: APIRackHealthReportEntryRequest{SiteID: uuid.NewString(), APIMachineHealthReportEntryRequest: validReport}},
+		{name: "invalid site ID", request: APIRackHealthReportEntryRequest{SiteID: "not-a-uuid", APIMachineHealthReportEntryRequest: validReport}, wantErr: true},
+		{name: "missing report source", request: APIRackHealthReportEntryRequest{SiteID: uuid.NewString(), APIMachineHealthReportEntryRequest: APIMachineHealthReportEntryRequest{Mode: MachineHealthReportModeMerge}}, wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.wantErr {
+				assert.Error(t, test.request.Validate())
+				return
+			}
+			assert.NoError(t, test.request.Validate())
+		})
+	}
+}
+
+func TestAPITrayHealthReportEntryRequest_Validate(t *testing.T) {
+	validReport := APIMachineHealthReportEntryRequest{Source: "overrides.sre", Mode: MachineHealthReportModeMerge}
+	tests := []struct {
+		name    string
+		request APITrayHealthReportEntryRequest
+		wantErr bool
+	}{
+		{name: "valid", request: APITrayHealthReportEntryRequest{SiteID: uuid.NewString(), Type: "PowerShelf", APIMachineHealthReportEntryRequest: validReport}},
+		{name: "missing type", request: APITrayHealthReportEntryRequest{SiteID: uuid.NewString(), APIMachineHealthReportEntryRequest: validReport}, wantErr: true},
+		{name: "unsupported type", request: APITrayHealthReportEntryRequest{SiteID: uuid.NewString(), Type: "CDU", APIMachineHealthReportEntryRequest: validReport}, wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.wantErr {
+				assert.Error(t, test.request.Validate())
+				return
+			}
+			assert.NoError(t, test.request.Validate())
+		})
+	}
 }

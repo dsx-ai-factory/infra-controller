@@ -19,7 +19,6 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	oteltrace "go.opentelemetry.io/otel/trace"
 	temporalEnums "go.temporal.io/api/enums/v1"
 	tmocks "go.temporal.io/sdk/mocks"
 
@@ -27,7 +26,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
@@ -72,7 +70,6 @@ func TestCreateTaskRunHandler_Handle(t *testing.T) {
 	tenantUser := testRackBuildUser(t, dbSession, "tenant-user-run-create", org, []string{authz.TenantAdminRole})
 
 	handler := NewCreateTaskRunHandler(dbSession, nil, scp, cfg)
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	tests := []struct {
 		name           string
@@ -151,8 +148,6 @@ func TestCreateTaskRunHandler_Handle(t *testing.T) {
 			ec.SetParamNames("orgName")
 			ec.SetParamValues(org)
 			ec.Set("user", tt.user)
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			_ = handler.Handle(ec)
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s", rec.Body.String())
@@ -194,7 +189,6 @@ func TestCreateTaskRunHandler_FreshWorkflowIDPerRequest(t *testing.T) {
 	providerUser := testRackBuildUser(t, dbSession, "provider-user-run-create-fresh", org, []string{authz.ProviderAdminRole})
 
 	handler := NewCreateTaskRunHandler(dbSession, nil, scp, cfg)
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	submit := func(t *testing.T) string {
 		t.Helper()
@@ -216,7 +210,6 @@ func TestCreateTaskRunHandler_FreshWorkflowIDPerRequest(t *testing.T) {
 		ec.SetParamNames("orgName")
 		ec.SetParamValues(org)
 		ec.Set("user", providerUser)
-		ec.SetRequest(ec.Request().WithContext(context.WithValue(context.Background(), otelecho.TracerKey, tracer)))
 
 		require.NoError(t, handler.Handle(ec))
 		require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
@@ -246,7 +239,6 @@ func TestGetTaskRunHandler_Handle(t *testing.T) {
 
 	handler := NewGetTaskRunHandler(dbSession, nil, scp, cfg)
 	runID := uuid.New().String()
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	found := &flowv1.OperationRun{
 		Summary: &flowv1.OperationRunSummary{
@@ -334,8 +326,6 @@ func TestGetTaskRunHandler_Handle(t *testing.T) {
 			ec.SetParamNames("orgName", "id")
 			ec.SetParamValues(org, tt.runID)
 			ec.Set("user", tt.user)
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			_ = handler.Handle(ec)
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s", rec.Body.String())
@@ -377,7 +367,6 @@ func TestGetAllTaskRunHandler_Handle(t *testing.T) {
 	tenantUser := testRackBuildUser(t, dbSession, "tenant-user-run-list", org, []string{authz.TenantAdminRole})
 
 	handler := NewGetAllTaskRunHandler(dbSession, nil, scp, cfg)
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	listed := []*flowv1.OperationRunSummary{
 		{
@@ -458,8 +447,6 @@ func TestGetAllTaskRunHandler_Handle(t *testing.T) {
 			ec.SetParamNames("orgName")
 			ec.SetParamValues(org)
 			ec.Set("user", tt.user)
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			_ = handler.Handle(ec)
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s", rec.Body.String())
@@ -502,7 +489,6 @@ func TestGetAllTaskRunTargetHandler_Handle(t *testing.T) {
 
 	handler := NewGetAllTaskRunTargetHandler(dbSession, nil, scp, cfg)
 	runID := uuid.New().String()
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	listed := []*flowv1.OperationRunTarget{
 		{
@@ -585,8 +571,6 @@ func TestGetAllTaskRunTargetHandler_Handle(t *testing.T) {
 			ec.SetParamNames("orgName", "id")
 			ec.SetParamValues(org, tt.runID)
 			ec.Set("user", tt.user)
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			_ = handler.Handle(ec)
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s", rec.Body.String())
@@ -624,7 +608,6 @@ func TestRunLifecycleHandlers_Handle(t *testing.T) {
 	tenantUser := testRackBuildUser(t, dbSession, "tenant-user-run-lifecycle", org, []string{authz.TenantAdminRole})
 
 	runID := uuid.New().String()
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	validBody := func(action string) any {
 		switch action {
@@ -698,8 +681,6 @@ func TestRunLifecycleHandlers_Handle(t *testing.T) {
 				ec.SetParamNames("orgName", "id")
 				ec.SetParamValues(org, tt.runID)
 				ec.Set("user", tt.user)
-				ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-				ec.SetRequest(ec.Request().WithContext(ctx))
 
 				_ = act.handle(ec)
 				require.Equal(t, tt.expectedStatus, rec.Code, "body=%s", rec.Body.String())

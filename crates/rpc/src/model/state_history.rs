@@ -44,16 +44,3 @@ impl From<StateHistoryRecord> for rpc::forge::MachineEvent {
         }
     }
 }
-
-impl From<StateHistoryRecord> for rpc::forge::NetworkSegmentStateHistory {
-    fn from(value: StateHistoryRecord) -> rpc::forge::NetworkSegmentStateHistory {
-        let time = value
-            .time
-            .unwrap_or_else(|| value.state_version.timestamp());
-        rpc::forge::NetworkSegmentStateHistory {
-            state: value.state,
-            version: value.state_version.version_string(),
-            time: Some(time.into()),
-        }
-    }
-}

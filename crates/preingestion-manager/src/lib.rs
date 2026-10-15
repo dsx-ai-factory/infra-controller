@@ -19,6 +19,7 @@ mod bfb_rshim_copier;
 mod config;
 mod errors;
 mod metrics;
+mod rack_firmware;
 
 use std::collections::HashMap;
 use std::default::Default;
@@ -29,10 +30,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carbide_firmware::{
-    FirmwareConfigSnapshot, FirmwareDownloader, ResolvedFirmwareArtifactSource,
+    ArtifactStatus, FirmwareConfigSnapshot, FirmwareDownloader, ResolvedFirmwareArtifactSource,
     resolve_files_firmware_artifact,
 };
 use carbide_instrument::emit;
+use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_redfish::libredfish::conv::IntoLibredfish;
 use carbide_redfish::libredfish::{RedfishClientCreationError, RedfishClientPool};
 use carbide_secrets::credentials::{
@@ -40,6 +42,7 @@ use carbide_secrets::credentials::{
 };
 use carbide_utils::periodic_timer::PeriodicTimer;
 use chrono::{DateTime, Utc};
+use component_manager::compute_tray_manager::ComputeTrayManager;
 pub use config::PreingestionManagerConfig;
 use db::ConditionalWrite::{Applied, NotApplied};
 use db::explored_endpoints::EndpointReportNotCurrent;
@@ -50,6 +53,7 @@ use libredfish::model::task::TaskState;
 use libredfish::model::update_service::TransferProtocolType;
 use libredfish::{PowerState, Redfish, RedfishError, SystemPowerControl};
 use model::firmware::{Firmware, FirmwareComponent, FirmwareComponentType, FirmwareEntry};
+use model::rack_type::RackProfileConfig;
 use model::site_explorer::{
     BlueFieldOperatingMode, ExploredEndpoint, InitialBmcResetPhase, InitialResetPhase,
     PowerDrainState, PreingestionState, TimeSyncResetPhase,
@@ -113,6 +117,14 @@ struct PreingestionManagerStatic {
     bfb_copy_state: Arc<BfbCopyManager>,
     bfb_copy_limiter: Arc<Semaphore>,
     ntp_servers: Vec<Ipv4Addr>,
+    rack_firmware: Option<RackFirmwareDependencies>,
+}
+
+#[derive(Clone)]
+struct RackFirmwareDependencies {
+    rack_profiles: RackProfileConfig,
+    compute_tray: Arc<dyn ComputeTrayManager>,
+    firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher>,
 }
 
 impl PreingestionManager {
@@ -153,11 +165,28 @@ impl PreingestionManager {
                 bfb_copy_state: Default::default(),
                 bfb_copy_limiter: Arc::new(Semaphore::new(config.max_concurrent_bfb_copies)),
                 ntp_servers,
+                rack_firmware: None,
                 config,
             }),
             metric_holder,
             database_connection,
         }
+    }
+
+    /// Enable rack-profile firmware-object handling with an RMS compute-tray backend.
+    pub fn with_rack_firmware(
+        mut self,
+        rack_profiles: RackProfileConfig,
+        compute_tray: Arc<dyn ComputeTrayManager>,
+        firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher>,
+    ) -> Self {
+        Arc::make_mut(&mut self.static_info).rack_firmware = Some(RackFirmwareDependencies {
+            rack_profiles,
+            compute_tray,
+            firmware_object_fetcher,
+        });
+
+        self
     }
 
     pub fn start(
@@ -410,6 +439,10 @@ async fn one_endpoint(
                 .await?;
             false
         }
+        PreingestionState::RackFirmwareUpdateWait { .. } => {
+            static_info.wait_for_rack_firmware(db, endpoint).await?;
+            false
+        }
         PreingestionState::UpgradeFirmwareWait {
             task_id,
             final_version,
@@ -544,6 +577,10 @@ impl PreingestionManagerStatic {
         db: &PgPool,
         endpoint: &ExploredEndpoint,
     ) -> PreingestionManagerResult<bool> {
+        if self.start_rack_firmware(db, endpoint).await? {
+            return Ok(false);
+        }
+
         // First, we need to check if it's appropriate to upgrade at this point or wait until later.
         let fw_info = match self.find_fw_info_for_host(db, endpoint).await? {
             None => {
@@ -618,6 +655,10 @@ impl PreingestionManagerStatic {
         endpoint: &ExploredEndpoint,
         repeat: bool,
     ) -> PreingestionManagerResult<bool> {
+        if self.start_rack_firmware(db, endpoint).await? {
+            return Ok(false);
+        }
+
         if endpoint.waiting_for_explorer_refresh {
             tracing::debug!(
                 bmc_ip_address = %endpoint.address,
@@ -1230,16 +1271,54 @@ impl PreingestionManagerStatic {
                 }
             };
         } else if upgrade_type.is_uefi() {
-            tracing::info!(
-                bmc_ip_address = %endpoint.address,
-                "Firmware upgrade task complete; initiating required reboot"
-            );
+            // UEFI firmware activates on the next host boot. A host that
+            // pre-ingestion found powered off refuses `ForceRestart` (there is
+            // nothing running to restart), so an Off host is powered on
+            // instead. Every other answer, including a failed read, keeps the
+            // `ForceRestart` this step has always issued.
+            let (operation, control, step) = match redfish_client.get_power_state().await {
+                Ok(PowerState::Off) => {
+                    tracing::info!(
+                        bmc_ip_address = %endpoint.address,
+                        "Firmware upgrade task complete; host is off, powering on to activate the new firmware"
+                    );
+                    (
+                        PowerOperation::On,
+                        SystemPowerControl::On,
+                        PowerControlStep::PowerOn,
+                    )
+                }
+                Ok(power_state) => {
+                    tracing::info!(
+                        bmc_ip_address = %endpoint.address,
+                        %power_state,
+                        "Firmware upgrade task complete; initiating required reboot"
+                    );
+                    (
+                        PowerOperation::ForceRestart,
+                        SystemPowerControl::ForceRestart,
+                        PowerControlStep::UefiReboot,
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        bmc_ip_address = %endpoint.address,
+                        error = %e,
+                        "Failed to get power state before activating the new firmware; initiating required reboot"
+                    );
+                    (
+                        PowerOperation::ForceRestart,
+                        SystemPowerControl::ForceRestart,
+                        PowerControlStep::UefiReboot,
+                    )
+                }
+            };
             if instrument_power_op(
-                PowerOperation::ForceRestart,
-                redfish_client.power(SystemPowerControl::ForceRestart),
+                operation,
+                redfish_client.power(control),
                 PowerControlLog::Step {
                     bmc_ip_address: endpoint.address,
-                    step: PowerControlStep::UefiReboot,
+                    step,
                 },
             )
             .await
@@ -1489,6 +1568,26 @@ impl PreingestionManagerStatic {
                     return self
                         .check_firmware_versions_below_preingestion(db, endpoint)
                         .await;
+                }
+                // The reset sequence powers off the host and resets the BMC,
+                // which a power shelf cannot do (its PSUs can't be turned off).
+                // log the error here and wait for an operator to populate the NTP servers on this site.
+                if endpoint.report.is_power_shelf() {
+                    if self.ntp_servers.is_empty() {
+                        // Nothing will converge the clock until an operator
+                        // configures site NTP (we won't power-cycle), so surface
+                        // that while we keep polling.
+                        tracing::warn!(
+                            bmc_ip_address = %endpoint.address,
+                            "Power shelf BMC clock is out of sync and no site NTP servers are configured; it cannot be power-cycled to reset its clock. Holding preingestion until site NTP servers are configured."
+                        );
+                    } else {
+                        tracing::warn!(
+                            bmc_ip_address = %endpoint.address,
+                            "Power shelf BMC clock is out of sync; holding preingestion (no power-cycle) until site NTP converges the clock"
+                        );
+                    }
+                    return Ok(false);
                 }
                 // Time is not in sync, initiate reset sequence
                 tracing::warn!(
@@ -3222,15 +3321,28 @@ impl PreingestionManagerStatic {
         if !is_bfb_artifact(&artifact.local_path) {
             match &artifact.source {
                 ResolvedFirmwareArtifactSource::Remote { url, sha256 } => {
-                    if !self.downloader.available(&artifact.local_path, url, sha256) {
-                        tracing::debug!(
-                            bmc_ip_address = %endpoint_clone.address,
-                            path = %artifact.local_path.display(),
-                            %url,
-                            "Firmware artifact is being downloaded; update deferred"
-                        );
-
-                        return Ok(false);
+                    match self.downloader.available(&artifact.local_path, url, sha256) {
+                        ArtifactStatus::Available => {}
+                        ArtifactStatus::Downloading => {
+                            tracing::debug!(
+                                bmc_ip_address = %endpoint_clone.address,
+                                path = %artifact.local_path.display(),
+                                "Firmware artifact is being downloaded; update deferred"
+                            );
+                            return Ok(false);
+                        }
+                        // PreingestionState::Failed needs a force delete to leave, so a
+                        // download failure stays retryable: the next call to `available`
+                        // starts a new attempt.
+                        ArtifactStatus::Failed { error } => {
+                            tracing::warn!(
+                                bmc_ip_address = %endpoint_clone.address,
+                                path = %artifact.local_path.display(),
+                                %error,
+                                "Firmware artifact download failed; update deferred"
+                            );
+                            return Ok(false);
+                        }
                     }
                 }
                 ResolvedFirmwareArtifactSource::Local => {

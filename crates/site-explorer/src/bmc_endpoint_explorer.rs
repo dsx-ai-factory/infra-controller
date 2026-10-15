@@ -144,8 +144,10 @@ impl BmcEndpointExplorer {
         }
     }
 
-    pub async fn get_sitewide_bmc_password(&self) -> Result<String, EndpointExplorationError> {
-        let version = self.current_sitewide_bmc_version().await?;
+    async fn get_sitewide_bmc_password(
+        &self,
+        version: u32,
+    ) -> Result<String, EndpointExplorationError> {
         let credentials = self
             .bmc_client
             .credential_client
@@ -161,9 +163,9 @@ impl BmcEndpointExplorer {
 
     async fn get_sitewide_dpu_bmc_service_password(
         &self,
+        version: u32,
         create_if_missing: bool,
     ) -> Result<String, EndpointExplorationError> {
-        let version = self.current_sitewide_dpu_bmc_service_version().await?;
         self.bmc_client
             .credential_client
             .get_sitewide_dpu_bmc_service_password(version, create_if_missing)
@@ -180,10 +182,8 @@ impl BmcEndpointExplorer {
     /// A `target_version` of 0 means "no rotation yet" (the legacy unversioned
     /// path). The backfill migration seeds a row at version 0 for every active
     /// credential type, so a *missing* row is a broken/unmigrated database and is
-    /// surfaced as an error rather than silently assuming 0 (matching the write
-    /// path in [`Self::set_bmc_root_credentials`] and the rest of the rotation
-    /// code, which never guess a version). The only 0 fallback is the standalone
-    /// `bmc-explorer-cli` debug tool, which has no database at all.
+    /// surfaced as an error rather than silently assuming 0. Only the standalone
+    /// `bmc-explorer-cli` debug tool falls back to 0; it has no database at all.
     async fn current_sitewide_bmc_version(&self) -> Result<u32, EndpointExplorationError> {
         let Some(database_connection) = &self.database_connection else {
             return Ok(0);
@@ -286,23 +286,19 @@ impl BmcEndpointExplorer {
             .await
     }
 
-    pub async fn set_bmc_root_credentials(
+    async fn set_bmc_root_credentials(
         &self,
         bmc_mac_address: MacAddress,
         credentials: &Credentials,
+        applied_version: Option<u32>,
     ) -> Result<(), EndpointExplorationError> {
         self.bmc_client
             .credential_client
             .set_bmc_root_credentials(bmc_mac_address, credentials)
             .await?;
 
-        // The device is now on the site-wide BMC root (just changed on the
-        // hardware, or validated as already-set on reingest) and its per-device
-        // secret is in Vault. Record bmc convergence at the current site-wide
-        // target version so the rotation engine tracks every host, DPU, switch,
-        // and power shelf from the moment NICo owns its BMC password. Idempotent,
-        // so reexploration of an already-recorded device is a no-op. Skipped only
-        // by the no-database `bmc-explorer-cli` debug tool.
+        // Retained passwords have no proven site version, but still need an
+        // enrollment row so rotation can use their stored per-device password.
         if let Some(database_connection) = &self.database_connection {
             let record_err = |cause: String| EndpointExplorationError::SetCredentials {
                 key: format!("device_credential_rotation/bmc/{bmc_mac_address}"),
@@ -311,10 +307,11 @@ impl BmcEndpointExplorer {
             let mut txn = db::Transaction::begin(database_connection)
                 .await
                 .map_err(|e| record_err(e.to_string()))?;
-            db::credential_rotation::record_device_converged(
+            db::credential_rotation::record_device_enrolled(
                 &mut txn,
                 bmc_mac_address,
                 db::credential_rotation::CredentialRotationType::Bmc,
+                applied_version.map(|version| version as i32),
             )
             .await
             .map_err(|e| record_err(e.to_string()))?;
@@ -330,20 +327,17 @@ impl BmcEndpointExplorer {
         bmc_mac_address: MacAddress,
         root_credentials: &Credentials,
     ) -> Result<(), EndpointExplorationError> {
-        let new_password = self.get_sitewide_dpu_bmc_service_password(true).await?;
+        let version = self.current_sitewide_dpu_bmc_service_version().await?;
+        let new_password = self
+            .get_sitewide_dpu_bmc_service_password(version, true)
+            .await?;
         self.bmc_client
             .redfish_client
             .set_bf4_dpu_service_password(bmc_ip_address, root_credentials.clone(), new_password)
             .await?;
 
-        // The BF4 DPU now carries the site-wide `service` password at the current
-        // target version (the version `get_sitewide_dpu_bmc_service_password` just
-        // read and applied). Record convergence for the `dpu_bmc_service` family
-        // so the rotation engine tracks this DPU from the moment NICo owns the
-        // account -- the "ever-after" enrollment for new BF4 DPUs (already-ingested
-        // ones are enrolled by the seed migration's backfill). Idempotent, so
-        // reexploration is a no-op. Skipped only by the no-database
-        // `bmc-explorer-cli` debug tool.
+        // Record the password we sent, even if a newer target was published
+        // while the BMC was applying it. The no-database debug tool skips this.
         if let Some(database_connection) = &self.database_connection {
             let record_err = |cause: String| EndpointExplorationError::SetCredentials {
                 key: format!("device_credential_rotation/dpu_bmc_service/{bmc_mac_address}"),
@@ -352,10 +346,11 @@ impl BmcEndpointExplorer {
             let mut txn = db::Transaction::begin(database_connection)
                 .await
                 .map_err(|e| record_err(e.to_string()))?;
-            db::credential_rotation::record_device_converged(
+            db::credential_rotation::record_device_enrolled(
                 &mut txn,
                 bmc_mac_address,
                 db::credential_rotation::CredentialRotationType::DpuBmcService,
+                Some(version as i32),
             )
             .await
             .map_err(|e| record_err(e.to_string()))?;
@@ -457,17 +452,18 @@ impl BmcEndpointExplorer {
         };
         let retain_credentials = cred_data.retain_credentials;
         tracing::info!(%bmc_ip_address, %bmc_mac_address, %vendor, "attempting to set the administrative credentials to the site password");
-        let bmc_credentials = if retain_credentials {
+        let (bmc_credentials, applied_version) = if retain_credentials {
             tracing::info!(
                 %bmc_ip_address, %bmc_mac_address, %vendor,
                 "bmc_retain_credentials is set; skipping BMC password rotation + storing existing credentials"
             );
-            current_bmc_credentials
+            (current_bmc_credentials, None)
         } else {
             // use redfish to set the machine's BMC root password to
             // match Forge's sitewide BMC root password (from the factory default).
             // return an error if we cannot log into the machine's BMC using current credentials
-            let sitewide_bmc_password = self.get_sitewide_bmc_password().await?;
+            let version = self.current_sitewide_bmc_version().await?;
+            let sitewide_bmc_password = self.get_sitewide_bmc_password(version).await?;
             let rotation = self
                 .bmc_client
                 .set_bmc_root_password(
@@ -488,11 +484,11 @@ impl BmcEndpointExplorer {
                     .map(ToString::to_string)
                     .unwrap_or_default(),
             });
-            rotation?
+            (rotation?, Some(version))
         };
 
         // set the BMC root credentials in vault for this machine
-        self.set_bmc_root_credentials(bmc_mac_address, &bmc_credentials)
+        self.set_bmc_root_credentials(bmc_mac_address, &bmc_credentials, applied_version)
             .await?;
 
         Ok(bmc_credentials)
@@ -534,7 +530,7 @@ impl BmcEndpointExplorer {
             .validate_bmc_credentials(bmc_ip_address, credentials.clone())
             .await?;
 
-        self.set_bmc_root_credentials(bmc_mac_address, &credentials)
+        self.set_bmc_root_credentials(bmc_mac_address, &credentials, Some(version))
             .await?;
 
         tracing::info!(
@@ -753,24 +749,14 @@ impl EndpointExplorer for BmcEndpointExplorer {
                     .await
                 {
                     Ok(report) => report,
-                    // BMCs (HPE iLO, NVIDIA GB200/GB300, Vera Rubin, Lenovo AMI,
-                    // Viking AMI) can return intermittent 401 errors even with
-                    // valid credentials.
+                    // BMCs can return intermittent 401 errors even with valid
+                    // credentials.
                     // Allow up to MAX_AUTH_RETRIES before escalating to regular Unauthorized.
                     Err(EndpointExplorationError::Unauthorized {
                         details,
                         response_body,
                         response_code,
-                    }) if matches!(
-                        vendor,
-                        RedfishVendor::Hpe
-                            | RedfishVendor::NvidiaGBx00
-                            | RedfishVendor::LenovoGB300
-                            | RedfishVendor::LenovoAMI
-                            | RedfishVendor::AMI
-                            | RedfishVendor::VeraRubin
-                    ) =>
-                    {
+                    }) => {
                         const MAX_AUTH_RETRIES: u32 = 5;
 
                         let previous_count = last_exploration_error
@@ -1597,14 +1583,22 @@ fn warn_report_diff(report1: &EndpointExplorationReport, report2: &EndpointExplo
         );
     }
 
-    for (s1, s2) in report1.systems.iter().zip(report2.systems.iter()) {
-        if s1.id != s2.id {
-            tracing::warn!(
-                libredfish_system_id = ?s1.id,
-                nvredfish_system_id = ?s2.id,
-                "system IDs are not equal"
-            );
-        } else {
+    if report1.primary_system().map(|system| &system.id)
+        != report2.primary_system().map(|system| &system.id)
+    {
+        tracing::warn!(
+            libredfish_primary_system = ?report1.primary_system().map(|system| &system.id),
+            nvredfish_primary_system = ?report2.primary_system().map(|system| &system.id),
+            "primary system IDs are not equal"
+        );
+    }
+    let second_systems = report2
+        .systems
+        .iter()
+        .map(|system| (&system.id, system))
+        .collect::<HashMap<_, _>>();
+    for s1 in &report1.systems {
+        if let Some(s2) = second_systems.get(&s1.id) {
             if s1.ethernet_interfaces != s2.ethernet_interfaces {
                 tracing::warn!(
                     system_id = ?s1.id,
@@ -1639,6 +1633,13 @@ fn warn_report_diff(report1: &EndpointExplorationReport, report2: &EndpointExplo
                     nvredfish_serial_number = ?s2.serial_number,
                     "system serial numbers are not equal"
                 );
+            }
+
+            if s1.processors != s2.processors {
+                tracing::warn!(system_id = %s1.id,
+                    libredfish_processors = ?s1.processors,
+                    nvredfish_processors = ?s2.processors,
+                    "system processors are not equal");
             }
 
             if s1.attributes != s2.attributes {
@@ -1719,6 +1720,23 @@ fn warn_report_diff(report1: &EndpointExplorationReport, report2: &EndpointExplo
                 );
             }
 
+            if s1.bios_version != s2.bios_version {
+                tracing::warn!(system_id = %s1.id,
+                    libredfish_bios_version = ?s1.bios_version,
+                    nvredfish_bios_version = ?s2.bios_version,
+                    "system BIOS versions are not equal");
+            }
+            if report1
+                .primary_system()
+                .is_none_or(|primary| primary.id != s1.id)
+                && s1.serial_console_ssh_port != s2.serial_console_ssh_port
+            {
+                tracing::warn!(system_id = %s1.id,
+                    libredfish_serial_console_ssh_port = ?s1.serial_console_ssh_port,
+                    nvredfish_serial_console_ssh_port = ?s2.serial_console_ssh_port,
+                    "system serial-console ports are not equal");
+            }
+
             if s1.boot_order != s2.boot_order {
                 tracing::warn!(
                     system_id = ?s1.id,
@@ -1727,6 +1745,8 @@ fn warn_report_diff(report1: &EndpointExplorationReport, report2: &EndpointExplo
                     "system boot orders are not equal"
                 );
             }
+        } else {
+            tracing::warn!(system_id = %s1.id, "system is missing from the second report");
         }
     }
 
@@ -1882,34 +1902,37 @@ fn warn_report_diff(report1: &EndpointExplorationReport, report2: &EndpointExplo
         )
     }
 
-    if report1.physical_slot_number != report2.physical_slot_number {
+    let position1 = report1.rack_position();
+    let position2 = report2.rack_position();
+
+    if position1.physical_slot_number != position2.physical_slot_number {
         tracing::warn!(
-            libredfish_physical_slot_number = ?report1.physical_slot_number,
-            nvredfish_physical_slot_number = ?report2.physical_slot_number,
+            libredfish_physical_slot_number = ?position1.physical_slot_number,
+            nvredfish_physical_slot_number = ?position2.physical_slot_number,
             "physical slot numbers are not equal"
         )
     }
 
-    if report1.compute_tray_index != report2.compute_tray_index {
+    if position1.compute_tray_index != position2.compute_tray_index {
         tracing::warn!(
-            libredfish_compute_tray_index = ?report1.compute_tray_index,
-            nvredfish_compute_tray_index = ?report2.compute_tray_index,
+            libredfish_compute_tray_index = ?position1.compute_tray_index,
+            nvredfish_compute_tray_index = ?position2.compute_tray_index,
             "compute tray indexes are not equal"
         )
     }
 
-    if report1.topology_id != report2.topology_id {
+    if position1.topology_id != position2.topology_id {
         tracing::warn!(
-            libredfish_topology_id = ?report1.topology_id,
-            nvredfish_topology_id = ?report2.topology_id,
+            libredfish_topology_id = ?position1.topology_id,
+            nvredfish_topology_id = ?position2.topology_id,
             "topology IDs are not equal"
         )
     }
 
-    if report1.revision_id != report2.revision_id {
+    if position1.revision_id != position2.revision_id {
         tracing::warn!(
-            libredfish_revision_id = ?report1.revision_id,
-            nvredfish_revision_id = ?report2.revision_id,
+            libredfish_revision_id = ?position1.revision_id,
+            nvredfish_revision_id = ?position2.revision_id,
             "revision IDs are not equal"
         )
     }
@@ -1934,6 +1957,7 @@ mod tests {
         BmcCredentialType, CredentialKey, CredentialReader, CredentialWriter,
     };
     use carbide_secrets::test_support::credentials::TestCredentialManager;
+    use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, check_cases_async, value_scenarios};
     use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
@@ -1959,6 +1983,46 @@ mod tests {
             SiteExplorerExploreMode::NvRedfish,
             None,
         )
+    }
+
+    #[sqlx_test]
+    async fn retained_bmc_credentials_are_enrolled_without_a_site_version(pool: PgPool) {
+        let mut explorer = explorer_with_redfish_sim(Arc::new(RedfishSim::default()));
+        explorer.database_connection = Some(pool.clone());
+        let mac = "02:00:00:00:00:01".parse().unwrap();
+        let credentials = explorer
+            .set_sitewide_bmc_root_password(
+                "127.0.0.1:443".parse().unwrap(),
+                mac,
+                RedfishVendor::NvidiaDpu,
+                BmcCredentialsData {
+                    username: "root",
+                    password: "retained-password",
+                    retain_credentials: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(credentials, Credentials::new("root", "retained-password"));
+        assert_eq!(
+            explorer
+                .bmc_client
+                .get_bmc_root_credentials(mac)
+                .await
+                .unwrap(),
+            credentials
+        );
+        let mut conn = pool.acquire().await.unwrap();
+        let status = db::credential_rotation::device_rotation_status(
+            &mut conn,
+            db::credential_rotation::CredentialRotationType::Bmc,
+            mac,
+        )
+        .await
+        .unwrap()
+        .expect("retained credentials must remain enrolled for rotation");
+        assert_eq!(status.current_version, None);
+        assert!(!status.converged);
     }
 
     #[tokio::test]

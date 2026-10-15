@@ -83,12 +83,12 @@ pub(crate) enum Cmd {
     #[clap(about = "Show convergence status of a site-wide credential rotation")]
     RotationStatus(rotation_status::Args),
     #[clap(
-        about = "Force-converge a single BMC's credentials now (operator escape hatch)",
+        about = "Force-converge credentials for a single BMC now (operator escape hatch)",
         subcommand
     )]
     ForceBmc(force_bmc::Args),
     #[clap(
-        about = "Force-converge a single machine's UEFI credential now (operator escape hatch)",
+        about = "Force-converge the UEFI credential for a single machine now (operator escape hatch)",
         subcommand
     )]
     ForceUefi(force_uefi::Args),

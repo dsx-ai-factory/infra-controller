@@ -6,6 +6,7 @@ metadata:
   namespace: {{ include "nico-pxe.namespace" . }}
   labels:
     {{- include "nico-pxe.labels" . | nindent 4 }}
+    app.kubernetes.io/metrics: {{ include "nico-pxe.name" . }}
     app: {{ include "nico-pxe.name" . }}
     prometheus: nico-monitoring
 spec:

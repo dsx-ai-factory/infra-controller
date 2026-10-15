@@ -19,6 +19,15 @@ set -e
 . /usr/share/debconf/confmodule
 
 if [ "$1" = "configure" ]; then
+        # crictl is expected to be already provided by the DPU OS image, not
+        # installed by this package. Warn here instead of only discovering it
+        # later via repeated "puntstats scrape failed" log lines; a missing
+        # crictl does not stop otelcol-contrib from starting or affect its
+        # other receivers, so this does not fail the install.
+	if ! command -v crictl >/dev/null 2>&1; then
+		echo "otel-dpu: crictl not found in PATH; it is required by the punt_stats receiver and must be provided by the DPU OS image" >&2
+	fi
+
 	# Ensure the core file directory exists
 	# Must match /proc/sys/kernel/core_pattern
 	mkdir -p /var/support/core

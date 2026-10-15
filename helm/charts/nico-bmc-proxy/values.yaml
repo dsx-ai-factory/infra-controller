@@ -113,6 +113,8 @@ configFiles:
 bmcProxy:
   listen: "[::]:1079"
   allowedPrincipals: []
+  ## Redirect handling mode: follow_same_origin (default) or return_to_client (experimental).
+  redirectMode: follow_same_origin
 
 vaultClusterInfo: {}
 

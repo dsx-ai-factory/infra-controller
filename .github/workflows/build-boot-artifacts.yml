@@ -517,6 +517,15 @@ jobs:
             --arch "${ARCH}" \
             --root "${REPOSITORY_ROOT}"
 
+      - name: Verify Scout disables cloud-init network configuration
+        if: inputs.build_type == 'ephemeral'
+        run: |
+          set -euo pipefail
+
+          unsquashfs -cat "pxe/static/blobs/internal/${{ inputs.arch }}/scout.squashfs" \
+            etc/cloud/cloud.cfg.d/99-nico-scout.cfg |
+            grep -Fx 'network: {config: disabled}'
+
       - name: Verify mnv_cli exists in built scout image
         if: inputs.build_type == 'ephemeral' && inputs.inject_extras == true
         run: |

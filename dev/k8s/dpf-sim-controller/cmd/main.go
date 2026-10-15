@@ -40,6 +40,7 @@ func main() {
 		probeAddr    string
 		dpfNamespace string
 		phaseDwell   time.Duration
+		osInstall    time.Duration
 	)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "metrics endpoint")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe endpoint")
@@ -51,6 +52,9 @@ func main() {
 			"too short once the namespace holds thousands of DPU/DPUDevice CRs")
 	flag.DurationVar(&phaseDwell, "phase-dwell", 3*time.Second,
 		"time each dwell-gated DPU phase lingers before advancing")
+	flag.DurationVar(&osInstall, "os-install-dwell", 0,
+		"time a DPU lingers in OS Installing; 0 (default) means the same as --phase-dwell.\n"+
+			"A real BFB install takes minutes; set this to hold NICo in its DPF wait state that long")
 	var reconcileConcurrency int
 	flag.IntVar(&reconcileConcurrency, "reconcile-concurrency", 16,
 		"parallel reconcile workers (fleet-scale walks serialize on one)")
@@ -63,6 +67,10 @@ func main() {
 	// still a valid dev setting.
 	if phaseDwell < 0 {
 		fmt.Fprintf(os.Stderr, "invalid --phase-dwell %v: must be >= 0\n", phaseDwell)
+		os.Exit(2)
+	}
+	if osInstall < 0 {
+		fmt.Fprintf(os.Stderr, "invalid --os-install-dwell %v: must be >= 0\n", osInstall)
 		os.Exit(2)
 	}
 
@@ -109,11 +117,12 @@ func main() {
 	}
 
 	if err = (&controller.DPUDeviceReconciler{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		Namespace:   dpfNamespace,
-		PhaseDwell:  phaseDwell,
-		Concurrency: reconcileConcurrency,
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		Namespace:      dpfNamespace,
+		PhaseDwell:     phaseDwell,
+		OSInstallDwell: osInstall,
+		Concurrency:    reconcileConcurrency,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DPUDevice")
 		os.Exit(1)
@@ -122,7 +131,7 @@ func main() {
 	_ = mgr.AddHealthzCheck("healthz", healthz.Ping)
 	_ = mgr.AddReadyzCheck("readyz", healthz.Ping)
 
-	setupLog.Info("starting dpf-sim-controller", "dpfNamespace", dpfNamespace, "phaseDwell", phaseDwell)
+	setupLog.Info("starting dpf-sim-controller", "dpfNamespace", dpfNamespace, "phaseDwell", phaseDwell, "osInstallDwell", osInstall)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "manager exited")
 		os.Exit(1)

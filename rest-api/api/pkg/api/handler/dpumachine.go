@@ -28,17 +28,15 @@ const (
 
 // GetAllDpuMachinesHandler lists DPU machines for a Site via Core.
 type GetAllDpuMachinesHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewGetAllDpuMachinesHandler returns a handler for listing DPU machines.
 func NewGetAllDpuMachinesHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetAllDpuMachinesHandler {
 	return GetAllDpuMachinesHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -57,7 +55,7 @@ func NewGetAllDpuMachinesHandler(dbSession *cdb.Session, scp *sc.ClientPool) Get
 // @Success 200 {array} model.APIDpuMachine
 // @Router /v2/org/{org}/nico/dpu [get]
 func (gadmh GetAllDpuMachinesHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("DpuMachine", "GetAll", c, gadmh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("DpuMachine", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -194,17 +192,15 @@ func (gadmh GetAllDpuMachinesHandler) Handle(c echo.Context) error {
 
 // GetDpuMachineHandler retrieves one DPU Machine for a Site via Core.
 type GetDpuMachineHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewGetDpuMachineHandler returns a handler for retrieving one DPU Machine.
 func NewGetDpuMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetDpuMachineHandler {
 	return GetDpuMachineHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -222,7 +218,7 @@ func NewGetDpuMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetDpuM
 // @Success 200 {object} model.APIDpuMachine
 // @Router /v2/org/{org}/nico/dpu/{dpuMachineId} [get]
 func (gdmh GetDpuMachineHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("DpuMachine", "Get", c, gdmh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("DpuMachine", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

@@ -28,7 +28,7 @@ use url::Url;
 
 /// An nv-redfish Reqwest client whose transport work is detached from application spans.
 #[derive(Clone)]
-pub struct SpanIsolatedHttpClient {
+pub(super) struct SpanIsolatedHttpClient {
     inner: Client,
 }
 
@@ -64,6 +64,21 @@ impl HttpClient for SpanIsolatedHttpClient {
     {
         self.inner
             .get(url, credentials, etag, custom_headers)
+            .instrument(Self::span())
+            .await
+    }
+
+    async fn poll<T>(
+        &self,
+        url: Url,
+        credentials: &BmcCredentials,
+        custom_headers: &HeaderMap,
+    ) -> Result<ModificationResponse<T>, Self::Error>
+    where
+        T: DeserializeOwned + Send + Sync,
+    {
+        self.inner
+            .poll(url, credentials, custom_headers)
             .instrument(Self::span())
             .await
     }

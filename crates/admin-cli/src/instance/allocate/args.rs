@@ -17,7 +17,8 @@
 
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
-use clap::{ArgGroup, Parser};
+use clap::error::ErrorKind;
+use clap::{ArgGroup, CommandFactory, Parser};
 use rpc::forge::{InstanceOperatingSystemConfig, InstanceSpxConfig};
 
 #[derive(Parser, Debug)]
@@ -118,24 +119,29 @@ pub(crate) struct Args {
 
     #[clap(
         long,
+        conflicts_with_all = ["subnet", "vf_subnet", "flat_vpc_id"],
         help = "IPv6 VPC prefix to pair with each PF vpc-prefix-id for dual-stack"
     )]
     pub(crate) ipv6_vpc_prefix_id: Vec<VpcPrefixId>,
 
     #[clap(
         long,
+        requires = "vf_vpc_prefix_id",
+        conflicts_with_all = ["subnet", "vf_subnet", "flat_vpc_id"],
         help = "IPv6 VPC prefix to pair with each VF vf-vpc-prefix-id for dual-stack"
     )]
     pub(crate) ipv6_vf_prefix_id: Vec<VpcPrefixId>,
 
     #[clap(
         long,
+        requires = "ipv6_vpc_prefix_id",
         help = "Explicit IPv6 address to request for each PF interface (dual-stack)"
     )]
     pub(crate) ipv6_ip_address: Vec<String>,
 
     #[clap(
         long,
+        requires = "ipv6_vf_prefix_id",
         help = "Explicit IPv6 address to request for each VF interface (dual-stack)"
     )]
     pub(crate) ipv6_vf_ip_address: Vec<String>,
@@ -151,4 +157,169 @@ pub(crate) struct Args {
         help = "Use batch API for all-or-nothing allocation (requires --number > 1)"
     )]
     pub(super) transactional: bool,
+}
+
+impl Args {
+    pub(super) fn validate(&self) -> Result<(), clap::Error> {
+        // Lists pair by position; omitted trailing IPv6 values are valid.
+        for (flag, count, paired_flag, paired_count) in [
+            (
+                "--ipv6-vpc-prefix-id",
+                self.ipv6_vpc_prefix_id.len(),
+                "--vpc-prefix-id",
+                self.vpc_prefix_id.len(),
+            ),
+            (
+                "--ipv6-vf-prefix-id",
+                self.ipv6_vf_prefix_id.len(),
+                "--vf-vpc-prefix-id",
+                self.vf_vpc_prefix_id.len(),
+            ),
+            (
+                "--ipv6-ip-address",
+                self.ipv6_ip_address.len(),
+                "--ipv6-vpc-prefix-id",
+                self.ipv6_vpc_prefix_id.len(),
+            ),
+            (
+                "--ipv6-vf-ip-address",
+                self.ipv6_vf_ip_address.len(),
+                "--ipv6-vf-prefix-id",
+                self.ipv6_vf_prefix_id.len(),
+            ),
+        ] {
+            if count > paired_count {
+                return Err(Self::command()
+                    .bin_name("nico-admin-cli instance allocate")
+                    .error(
+                        ErrorKind::TooManyValues,
+                        format!(
+                            "{flag} has {count} values but {paired_flag} has {paired_count}; supply at most one {flag} value per {paired_flag} value"
+                        ),
+                    ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
+
+    use super::*;
+
+    #[test]
+    fn ipv6_options_require_matching_interfaces_and_prefixes() {
+        scenarios!(
+            run = |argv: &[&str]| {
+                Args::try_parse_from(
+                    ["allocate", "--prefix-name=ipv6-test"]
+                        .into_iter()
+                        .chain(argv.iter().copied()),
+                )
+                .and_then(|args| args.validate())
+                .map_err(|error| error.kind())
+            };
+            "IPv6 prefix alone does not select an interface" {
+                &["--ipv6-vpc-prefix-id=00000000-0000-0000-0000-000000000001"][..]
+                    => FailsWith(ErrorKind::MissingRequiredArgument),
+            }
+            "PF address requires its IPv6 prefix" {
+                &[
+                    "--vpc-prefix-id=00000000-0000-0000-0000-000000000001",
+                    "--ipv6-ip-address=2001:db8::1",
+                ][..] => FailsWith(ErrorKind::MissingRequiredArgument),
+            }
+            "VF address requires its IPv6 prefix" {
+                &[
+                    "--vpc-prefix-id=00000000-0000-0000-0000-000000000001",
+                    "--vf-vpc-prefix-id=00000000-0000-0000-0000-000000000002",
+                    "--ipv6-vf-ip-address=2001:db8::1",
+                ][..] => FailsWith(ErrorKind::MissingRequiredArgument),
+            }
+            "VF IPv6 prefix requires a VF" {
+                &[
+                    "--vpc-prefix-id=00000000-0000-0000-0000-000000000001",
+                    "--ipv6-vf-prefix-id=00000000-0000-0000-0000-000000000002",
+                ][..] => FailsWith(ErrorKind::MissingRequiredArgument),
+            }
+            "subnet selection cannot consume IPv6 options" {
+                &[
+                    "--subnet=tenant-subnet",
+                    "--vpc-prefix-id=00000000-0000-0000-0000-000000000001",
+                    "--ipv6-vpc-prefix-id=00000000-0000-0000-0000-000000000002",
+                ][..] => FailsWith(ErrorKind::ArgumentConflict),
+            }
+            "VF subnet selection cannot consume IPv6 options" {
+                &[
+                    "--vpc-prefix-id=00000000-0000-0000-0000-000000000001",
+                    "--vf-subnet=tenant-subnet",
+                    "--vf-vpc-prefix-id=00000000-0000-0000-0000-000000000002",
+                    "--ipv6-vf-prefix-id=00000000-0000-0000-0000-000000000003",
+                ][..] => FailsWith(ErrorKind::ArgumentConflict),
+            }
+            "flat selection rejects explicit IPv6 configuration" {
+                &[
+                    "--flat-vpc-id=00000000-0000-0000-0000-000000000001",
+                    "--ipv6-vf-prefix-id=00000000-0000-0000-0000-000000000002",
+                ][..] => FailsWith(ErrorKind::ArgumentConflict),
+            }
+            "PF IPv6 prefixes cannot outnumber PFs" {
+                &[
+                    "--vpc-prefix-id=00000000-0000-0000-0000-000000000001",
+                    "--ipv6-vpc-prefix-id=00000000-0000-0000-0000-000000000002",
+                    "--ipv6-vpc-prefix-id=00000000-0000-0000-0000-000000000003",
+                ][..] => FailsWith(ErrorKind::TooManyValues),
+            }
+            "VF IPv6 prefixes cannot outnumber VFs" {
+                &[
+                    "--vpc-prefix-id=00000000-0000-0000-0000-000000000001",
+                    "--vf-vpc-prefix-id=00000000-0000-0000-0000-000000000002",
+                    "--ipv6-vf-prefix-id=00000000-0000-0000-0000-000000000003",
+                    "--ipv6-vf-prefix-id=00000000-0000-0000-0000-000000000004",
+                ][..] => FailsWith(ErrorKind::TooManyValues),
+            }
+            "PF IPv6 addresses cannot outnumber IPv6 prefixes" {
+                &[
+                    "--vpc-prefix-id=00000000-0000-0000-0000-000000000001",
+                    "--vpc-prefix-id=00000000-0000-0000-0000-000000000002",
+                    "--ipv6-vpc-prefix-id=00000000-0000-0000-0000-000000000003",
+                    "--ipv6-ip-address=2001:db8::1",
+                    "--ipv6-ip-address=2001:db8::2",
+                ][..] => FailsWith(ErrorKind::TooManyValues),
+            }
+            "VF IPv6 addresses cannot outnumber IPv6 prefixes" {
+                &[
+                    "--vpc-prefix-id=00000000-0000-0000-0000-000000000001",
+                    "--vf-vpc-prefix-id=00000000-0000-0000-0000-000000000002",
+                    "--vf-vpc-prefix-id=00000000-0000-0000-0000-000000000003",
+                    "--ipv6-vf-prefix-id=00000000-0000-0000-0000-000000000004",
+                    "--ipv6-vf-ip-address=2001:db8::1",
+                    "--ipv6-vf-ip-address=2001:db8::2",
+                ][..] => FailsWith(ErrorKind::TooManyValues),
+            }
+            "omitted IPv6 lists remain valid" {
+                &["--vpc-prefix-id=00000000-0000-0000-0000-000000000001"][..] => Yields(()),
+            }
+            "shorter IPv6 prefix and address lists remain valid for PFs and VFs" {
+                &[
+                    "--vpc-prefix-id=00000000-0000-0000-0000-000000000001",
+                    "--vpc-prefix-id=00000000-0000-0000-0000-000000000002",
+                    "--vpc-prefix-id=00000000-0000-0000-0000-000000000003",
+                    "--vf-vpc-prefix-id=00000000-0000-0000-0000-000000000004",
+                    "--vf-vpc-prefix-id=00000000-0000-0000-0000-000000000005",
+                    "--vf-vpc-prefix-id=00000000-0000-0000-0000-000000000006",
+                    "--ipv6-vpc-prefix-id=00000000-0000-0000-0000-000000000007",
+                    "--ipv6-vpc-prefix-id=00000000-0000-0000-0000-000000000008",
+                    "--ipv6-vf-prefix-id=00000000-0000-0000-0000-000000000009",
+                    "--ipv6-vf-prefix-id=00000000-0000-0000-0000-00000000000a",
+                    "--ipv6-ip-address=2001:db8::1",
+                    "--ipv6-vf-ip-address=2001:db8::2",
+                ][..] => Yields(()),
+            }
+        );
+    }
 }

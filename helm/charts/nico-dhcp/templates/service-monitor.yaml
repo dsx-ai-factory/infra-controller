@@ -6,6 +6,7 @@ metadata:
   namespace: {{ include "nico-dhcp.namespace" . }}
   labels:
     {{- include "nico-dhcp.labels" . | nindent 4 }}
+    app.kubernetes.io/metrics: {{ include "nico-dhcp.name" . }}
     app: {{ include "nico-dhcp.name" . }}
     prometheus: nico-monitoring
 spec:

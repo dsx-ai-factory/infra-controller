@@ -53,6 +53,8 @@ type InstanceFilter struct {
 	Query     *string
 	VpcID     *string
 	IPAddress *string
+	// AllVPCs prevents the client's default VPC from narrowing the query when VpcID is nil.
+	AllVPCs bool
 }
 
 // InstanceUpdateRequest represents a simplified request to update an Instance
@@ -259,8 +261,10 @@ func (im InstanceManager) GetInstances(ctx context.Context, instanceFilter *Inst
 			gir = gir.IpAddress(*instanceFilter.IPAddress)
 		}
 	}
-	// If no explicit VPC filter was provided, fall back to the client's default VPC (if set).
-	if (instanceFilter == nil || instanceFilter.VpcID == nil) && im.client.apiMetadata.VpcID != "" {
+	// If no explicit VPC filter was provided, fall back to the client's default VPC (if set),
+	// unless the caller requested a search across all VPCs.
+	useDefaultVPC := instanceFilter == nil || (instanceFilter.VpcID == nil && !instanceFilter.AllVPCs)
+	if useDefaultVPC && im.client.apiMetadata.VpcID != "" {
 		gir = gir.VpcId(im.client.apiMetadata.VpcID)
 	}
 	if paginationFilter != nil {

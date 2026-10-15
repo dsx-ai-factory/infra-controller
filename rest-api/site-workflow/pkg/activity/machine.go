@@ -286,57 +286,15 @@ const maxPublishedMachineEvents = 20
 // pruneMachineForPublish drops what the REST layer does not read from a Machine before it is
 // published.
 //
-// Core fills both the fields under status and config and their deprecated twins on the Machine
-// itself, which the proto marks for removal once rest-api reads the new ones. The REST layer
-// already reads status and config, so the twins are an exact duplicate of about a quarter of every
-// Machine, and it persists the whole message as jsonb, so they cost storage as well as Temporal
-// payload.
-//
-// Events are the larger cost. A Machine arrives with its full state history, and the REST layer
+// Events are a large storage cost. A Machine arrives with its full state history, and the REST layer
 // uses it to date one lifecycle transition, so only the events around the current state_version
 // are worth sending.
-//
-//nolint:staticcheck // Clearing the deprecated fields is the point, so SA1019 has nothing to warn about here.
 func pruneMachineForPublish(machine *corev1.Machine) {
 	if machine == nil {
 		return
 	}
 
 	machine.Events = recentMachineEvents(machine.GetEvents(), machine.GetStateVersion())
-
-	// Superseded by status.
-	machine.Interfaces = nil
-	machine.DiscoveryInfo = nil
-	machine.LastRebootTime = nil
-	machine.LastObservationTime = nil
-	machine.AssociatedHostMachineId = nil
-	machine.LastRebootRequestedTime = nil
-	machine.LastRebootRequestedMode = nil
-	machine.DpuAgentVersion = nil
-	machine.AssociatedDpuMachineIds = nil
-	machine.Health = nil
-	machine.HealthSources = nil
-	machine.FailureDetails = nil
-	machine.IbStatus = nil
-	machine.InstanceNetworkRestrictions = nil
-	machine.Capabilities = nil
-	machine.HwSkuStatus = nil
-	machine.QuarantineState = nil
-	machine.HwSkuDeviceType = nil
-	machine.UpdateComplete = false
-	machine.NvlinkInfo = nil
-	machine.NvlinkStatusObservation = nil
-	machine.SpxStatusObservation = nil
-	// LastScoutObservedVersion stays. NewAPIMachine still falls back to it when status does not
-	// carry one, and at 26 bytes clearing it would trade a response field for nothing.
-
-	// Superseded by config.
-	machine.MaintenanceReference = nil
-	machine.MaintenanceStartTime = nil
-	machine.FirmwareAutoupdate = nil
-	machine.InstanceTypeId = nil
-	machine.HwSku = nil
-	machine.Dpf = nil
 }
 
 // recentMachineEvents keeps the tail of a Machine's event history. Core reports events oldest

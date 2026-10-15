@@ -73,7 +73,10 @@ pub enum SwitchMaintenanceOperation {
     /// Power on the switch.
     PowerOn,
     /// Power off the switch.
-    PowerOff,
+    PowerOff {
+        #[serde(default)]
+        graceful: bool,
+    },
     /// Reset the switch (restart / AC power cycle).
     Reset,
     /// Reinstall or rotate the switch NVOS mTLS certificate via Component Manager.
@@ -365,24 +368,54 @@ pub enum ReProvisioningState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum SwitchDecommissioningState {
-    /// Site Explorer is being suppressed before the destructive reset.
+    /// Requests Site Explorer suppression and advances to [`Self::FactoryResetNvos`]
+    /// once suppression is acknowledged.
     SuppressingSiteExplorer,
-    /// NVOS DHCP is suppressed before the factory reset so post-reset discovers are ignored.
-    SuppressingNvosDhcp,
     /// Submits the destructive RMS NVOS factory-reset job.
-    /// Completion is not polled: NVOS DHCP is already suppressed, so the job
-    /// cannot be observed reliably; progress continues via DHCP acknowledgement.
+    /// A returned job ID advances to [`Self::WaitingForNvosFactoryReset`]; an unknown
+    /// submission outcome advances to [`Self::NvosFactoryResetOutcomeUnknown`].
     FactoryResetNvos,
-    /// Waiting for the pre-reset NVOS DHCP suppression to be acknowledged.
+    /// Submission may have succeeded without returning a job ID. Reports an error
+    /// on every iteration without resubmitting or advancing; operator recovery is required.
+    NvosFactoryResetOutcomeUnknown {
+        /// Submission failure explaining why the reset must not be retried automatically.
+        error: String,
+    },
+    /// Polls the saved job ID, waiting while pending and advancing to
+    /// [`Self::SuppressingNvosDhcp`] only on successful completion. A failed job or
+    /// polling error is reported while retaining the job ID; the reset is not resubmitted.
+    WaitingForNvosFactoryReset {
+        /// Opaque RMS job handle retained across controller iterations and restarts.
+        job_id: String,
+    },
+    /// Records NVOS DHCP suppression after the factory reset completes, then advances
+    /// to [`Self::RebootingSwitch`] without waiting for suppression acknowledgement.
+    SuppressingNvosDhcp,
+    /// Requests a forced restart through the BMC and advances to
+    /// [`Self::WaitingForNvosDhcpAcknowledgement`] when the request succeeds.
+    RebootingSwitch,
+    /// Waits for NVOS DHCP suppression acknowledgement after requesting the reboot,
+    /// then advances to [`Self::SuppressingBmcDhcp`].
+    /// An endpoint skips this wait if its MAC has at least one recorded interface,
+    /// every interface has a current `AllocationType::Static` address, and no
+    /// current address lies within any configured network prefix.
     WaitingForNvosDhcpAcknowledgement,
-    /// BMC DHCP is suppressed before the BMC factory reset.
+    /// Records BMC DHCP suppression and advances to [`Self::FactoryResetBmc`]
+    /// without waiting for suppression acknowledgement.
     SuppressingBmcDhcp,
-    /// Issues the BMC factory reset.
+    /// Issues the BMC factory reset and advances to
+    /// [`Self::WaitingForBmcDhcpAcknowledgement`] when the request succeeds.
     FactoryResetBmc,
-    /// Waiting for the pre-reset BMC DHCP suppression to be acknowledged.
+    /// Waits for BMC DHCP suppression acknowledgement, then advances to
+    /// [`Self::DeletingManagedCredentials`].
+    /// An endpoint skips this wait if its MAC has at least one recorded interface,
+    /// every interface has a current `AllocationType::Static` address, and no
+    /// current address lies within any configured network prefix.
     WaitingForBmcDhcpAcknowledgement,
-    /// Managed per-device BMC and NVOS credentials are being removed after factory reset.
+    /// Deletes managed BMC and NVOS credentials and their credential-rotation records,
+    /// then advances to [`Self::Decommissioned`] once cleanup succeeds.
     DeletingManagedCredentials,
+    /// Terminal decommissioning state; performs no further work and retains the switch record.
     Decommissioned,
 }
 
@@ -429,6 +462,10 @@ pub enum SwitchControllerState {
     /// The Switch is executing an operator-requested maintenance operation.
     Maintenance {
         operation: SwitchMaintenanceOperation,
+        /// The request admitted before external work began. Older saved states
+        /// omit this, so their completion must leave pending requests alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request: Option<SwitchMaintenanceRequest>,
         /// Sub-states for async maintenance operations such as certificate reconfiguration.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         configure_certificate: Option<ConfigureCertificateState>,
@@ -445,15 +482,18 @@ pub enum SwitchControllerState {
 }
 
 impl SwitchControllerState {
-    /// Builds the controller state for a requested maintenance operation.
-    pub fn maintenance_for_operation(operation: SwitchMaintenanceOperation) -> Self {
+    /// Starts `Maintenance` and saves the full request for the completion check.
+    /// `ReconfigureCertificate` starts at `ConfigureCertificateState::Start`;
+    /// other operations have no certificate job state.
+    pub fn maintenance_for_request(request: SwitchMaintenanceRequest) -> Self {
         Self::Maintenance {
-            operation,
+            operation: request.operation,
             configure_certificate: matches!(
-                operation,
+                request.operation,
                 SwitchMaintenanceOperation::ReconfigureCertificate
             )
             .then_some(ConfigureCertificateState::Start),
+            request: Some(request),
         }
     }
 }
@@ -502,8 +542,19 @@ pub fn state_sla(state: &SwitchControllerState, state_version: &ConfigVersion) -
                 std::time::Duration::from_secs(slas::DECOMMISSIONING_SUPPRESSING_NVOS_DHCP),
                 time_in_state,
             ),
-            SwitchDecommissioningState::FactoryResetNvos => StateSla::with_sla(
-                std::time::Duration::from_secs(slas::DECOMMISSIONING_FACTORY_RESET_NVOS),
+            SwitchDecommissioningState::FactoryResetNvos
+            | SwitchDecommissioningState::NvosFactoryResetOutcomeUnknown { .. } => {
+                StateSla::with_sla(
+                    std::time::Duration::from_secs(slas::DECOMMISSIONING_FACTORY_RESET_NVOS),
+                    time_in_state,
+                )
+            }
+            SwitchDecommissioningState::WaitingForNvosFactoryReset { .. } => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_WAITING_FOR_NVOS_RESET),
+                time_in_state,
+            ),
+            SwitchDecommissioningState::RebootingSwitch => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_REBOOTING_SWITCH),
                 time_in_state,
             ),
             SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement => StateSla::with_sla(
@@ -722,6 +773,7 @@ mod tests {
             "maintenance: power on" {
                 SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::PowerOn,
+                    request: None,
                     configure_certificate: None,
                 } => Yields(
                     r#"{"state":"maintenance","operation":{"operation":"poweron"}}"#.to_string(),
@@ -730,10 +782,11 @@ mod tests {
 
             "maintenance: power off" {
                 SwitchControllerState::Maintenance {
-                    operation: SwitchMaintenanceOperation::PowerOff,
+                    operation: SwitchMaintenanceOperation::PowerOff { graceful: false },
+                    request: None,
                     configure_certificate: None,
                 } => Yields(
-                    r#"{"state":"maintenance","operation":{"operation":"poweroff"}}"#
+                    r#"{"state":"maintenance","operation":{"operation":"poweroff","graceful":false}}"#
                         .to_string(),
                 ),
             }
@@ -741,6 +794,7 @@ mod tests {
             "maintenance: reset" {
                 SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::Reset,
+                    request: None,
                     configure_certificate: None,
                 } => Yields(
                     r#"{"state":"maintenance","operation":{"operation":"reset"}}"#.to_string(),
@@ -750,6 +804,7 @@ mod tests {
             "maintenance: reconfigure certificate" {
                 SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::ReconfigureCertificate,
+                    request: None,
                     configure_certificate: Some(ConfigureCertificateState::Start),
                 } => Yields(
                     r#"{"state":"maintenance","operation":{"operation":"reconfigurecertificate"},"configure_certificate":"Start"}"#
@@ -866,6 +921,7 @@ mod tests {
             "maintenance: reset" {
                 r#"{"state":"maintenance","operation":{"operation":"reset"}}"# => Yields(SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::Reset,
+                    request: None,
                     configure_certificate: None,
                 }),
             }
@@ -906,8 +962,12 @@ mod tests {
                 SwitchMaintenanceOperation::PowerOn => Yields(r#"{"operation":"poweron"}"#.to_string()),
             }
 
-            "power off" {
-                SwitchMaintenanceOperation::PowerOff => Yields(r#"{"operation":"poweroff"}"#.to_string()),
+            "power off (forced, default)" {
+                SwitchMaintenanceOperation::PowerOff { graceful: false } => Yields(r#"{"operation":"poweroff","graceful":false}"#.to_string()),
+            }
+
+            "graceful power off" {
+                SwitchMaintenanceOperation::PowerOff { graceful: true } => Yields(r#"{"operation":"poweroff","graceful":true}"#.to_string()),
             }
 
             "reset" {
@@ -930,8 +990,12 @@ mod tests {
                 r#"{"operation":"poweron"}"# => Yields(SwitchMaintenanceOperation::PowerOn),
             }
 
-            "power off" {
-                r#"{"operation":"poweroff"}"# => Yields(SwitchMaintenanceOperation::PowerOff),
+            "power off defaults to forced" {
+                r#"{"operation":"poweroff"}"# => Yields(SwitchMaintenanceOperation::PowerOff { graceful: false }),
+            }
+
+            "graceful power off" {
+                r#"{"operation":"poweroff","graceful":true}"# => Yields(SwitchMaintenanceOperation::PowerOff { graceful: true }),
             }
 
             "reset" {

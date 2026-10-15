@@ -216,6 +216,7 @@ type ApiGetAllSiteExplorerEndpointRequest struct {
 	ApiService *SiteExplorerAPIService
 	siteId     *string
 	org        string
+	machineId  *string
 	pageNumber *int32
 	pageSize   *int32
 	orderBy    *string
@@ -224,6 +225,12 @@ type ApiGetAllSiteExplorerEndpointRequest struct {
 // ID of the Site
 func (r ApiGetAllSiteExplorerEndpointRequest) SiteId(siteId string) ApiGetAllSiteExplorerEndpointRequest {
 	r.siteId = &siteId
+	return r
+}
+
+// Only return endpoints whose exploration report has this Machine ID. Omit to return all endpoints in the Site.
+func (r ApiGetAllSiteExplorerEndpointRequest) MachineId(machineId string) ApiGetAllSiteExplorerEndpointRequest {
+	r.machineId = &machineId
 	return r
 }
 
@@ -253,6 +260,8 @@ func (r ApiGetAllSiteExplorerEndpointRequest) Execute() ([]ExploredEndpoint, *ht
 GetAllSiteExplorerEndpoint Retrieve all Explored Endpoints
 
 Retrieve explored endpoints discovered by Site Explorer for a Site. Use `ID_ASC` or `ID_DESC` to order by endpoint ID; the default is `ID_ASC`.
+
+Optional `machineId` filtering is applied before pagination and the total count. It requires a site-agent and nico-api version that supports the filter; older versions may ignore it and return unfiltered results and pagination totals. An empty or malformed Machine ID returns HTTP 400 when the filter is supported.
 
 The response is paged over Core `FindExploredEndpointIds` followed by
 `FindExploredEndpointsByIds`. Pagination metadata is returned in the
@@ -299,6 +308,9 @@ func (a *SiteExplorerAPIService) GetAllSiteExplorerEndpointExecute(r ApiGetAllSi
 	}
 
 	parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+	if r.machineId != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "machineId", r.machineId, "form", "")
+	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
 	}

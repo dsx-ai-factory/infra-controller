@@ -32,7 +32,7 @@ async fn create_iteration(
 ) -> Result<ControllerIteration, DatabaseError> {
     let mut query = sqlx::QueryBuilder::new("INSERT INTO ");
     query.push(table_id);
-    query.push(" DEFAULT VALUES RETURNING *");
+    query.push(" DEFAULT VALUES RETURNING id, started_at");
     query
         .build_query_as::<ControllerIteration>()
         .fetch_one(txn)
@@ -47,7 +47,7 @@ pub async fn fetch_iterations(
     table_id: &str,
     limit: Option<usize>,
 ) -> Result<Vec<ControllerIteration>, DatabaseError> {
-    let mut query = sqlx::QueryBuilder::new("SELECT * FROM ");
+    let mut query = sqlx::QueryBuilder::new("SELECT id, started_at FROM ");
     query.push(table_id);
     query.push(" ORDER BY id DESC");
     if let Some(limit) = limit {
@@ -176,7 +176,7 @@ pub async fn fetch_queued_objects(
     txn: &mut PgConnection,
     table_id: &str,
 ) -> Result<Vec<QueuedObject>, DatabaseError> {
-    let mut query = sqlx::QueryBuilder::new("SELECT * from ");
+    let mut query = sqlx::QueryBuilder::new("SELECT object_id, processed_by FROM ");
     query.push(table_id);
 
     let result = query
@@ -219,7 +219,7 @@ pub async fn acquire_queued_objects(
     query.push(" SET processed_by=");
     query.push_bind(processor_id);
     query.push(
-        ", processing_started_at=now() WHERE object_id in (SELECT object_id FROM dequeued_ids) RETURNING *",
+        ", processing_started_at=now() WHERE object_id in (SELECT object_id FROM dequeued_ids) RETURNING object_id, processed_by",
     );
 
     let result = query
@@ -265,4 +265,89 @@ pub async fn delete_queued_objects(
     }
 
     Ok(num_deleted as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use sqlx::Connection;
+
+    use super::*;
+    use crate::io::StateControllerIO;
+    use crate::tests::{TestStateControllerIO, create_test_state_controller_tables};
+
+    #[carbide_macros::sqlx_test]
+    async fn controller_queries_survive_added_columns(pool: PgPool) -> eyre::Result<()> {
+        create_test_state_controller_tables(&pool).await;
+        let mut api_connection = pool.acquire().await?;
+        exercise_controller_queries(&mut api_connection).await?;
+        assert!(api_connection.cached_statements_size() > 0);
+
+        // Keep the API connection and its prepared statements while another
+        // connection applies the schema change, just as a migration would.
+        let mut migration_connection = pool.acquire().await?;
+        let mut migration = migration_connection.begin().await?;
+        sqlx::raw_sql(
+            "SET LOCAL lock_timeout = '5s';
+             ALTER TABLE test_state_controller_iteration_ids ADD COLUMN test_added_column text;
+             ALTER TABLE test_state_controller_queued_objects ADD COLUMN test_added_column text;",
+        )
+        .execute(&mut *migration)
+        .await?;
+        migration.commit().await?;
+
+        exercise_controller_queries(&mut api_connection).await?;
+        Ok(())
+    }
+
+    async fn exercise_controller_queries(connection: &mut PgConnection) -> eyre::Result<()> {
+        let mut txn = connection.begin().await?;
+        let iteration =
+            create_iteration(&mut txn, TestStateControllerIO::DB_ITERATION_ID_TABLE_NAME).await?;
+        let stored = fetch_iterations(
+            &mut txn,
+            TestStateControllerIO::DB_ITERATION_ID_TABLE_NAME,
+            None,
+        )
+        .await?;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id, iteration.id);
+        assert_eq!(stored[0].started_at, iteration.started_at);
+
+        queue_objects(
+            &mut txn,
+            TestStateControllerIO::DB_QUEUED_OBJECTS_TABLE_NAME,
+            &["host".to_string()],
+        )
+        .await?;
+        let queued = acquire_queued_objects(
+            &mut txn,
+            TestStateControllerIO::DB_QUEUED_OBJECTS_TABLE_NAME,
+            1,
+            "processor",
+            Duration::from_secs(300),
+        )
+        .await?;
+        assert_eq!(
+            queued,
+            vec![QueuedObject {
+                object_id: "host".to_string(),
+                processed_by: Some("processor".to_string()),
+            }]
+        );
+        assert_eq!(
+            fetch_queued_objects(
+                &mut txn,
+                TestStateControllerIO::DB_QUEUED_OBJECTS_TABLE_NAME
+            )
+            .await?,
+            queued
+        );
+
+        // Leave the tables empty for the second pass without clearing the
+        // connection's prepared statements.
+        txn.rollback().await?;
+        Ok(())
+    }
 }

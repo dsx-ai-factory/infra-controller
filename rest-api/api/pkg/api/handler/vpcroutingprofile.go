@@ -24,14 +24,13 @@ import (
 // vpcRoutingProfileHandler provides shared dependencies and provider authorization
 // for routing operations; ordinary VPC PATCH remains a separate tenant operation.
 type vpcRoutingProfileHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // newVPCRoutingProfileHandler initializes the dependencies shared by routing handlers.
 func newVPCRoutingProfileHandler(dbSession *cdb.Session, scp *sc.ClientPool) vpcRoutingProfileHandler {
-	return vpcRoutingProfileHandler{dbSession: dbSession, scp: scp, tracerSpan: cutil.NewTracerSpan()}
+	return vpcRoutingProfileHandler{dbSession: dbSession, scp: scp}
 }
 
 // GetVPCRoutingProfileHandler reads authoritative VPC routing and allocation state.
@@ -55,7 +54,7 @@ func NewGetVPCRoutingProfileHandler(dbSession *cdb.Session, scp *sc.ClientPool) 
 // @Success 200 {object} model.APIVpcRoutingState
 // @Router /v2/org/{org}/nico/vpc/{vpcId}/routing-profile [get]
 func (h GetVPCRoutingProfileHandler) Handle(c echo.Context) error {
-	org, user, ctx, logger, span := common.SetupHandler("VPCRoutingProfile", "Get", c, h.tracerSpan)
+	org, user, ctx, logger, span := common.SetupHandler("VPCRoutingProfile", "Get", c)
 	if span != nil {
 		defer span.End()
 	}
@@ -100,7 +99,7 @@ func NewUpdateVPCRoutingProfileHandler(dbSession *cdb.Session, scp *sc.ClientPoo
 // @Success 200 {object} model.APIVpcRoutingState
 // @Router /v2/org/{org}/nico/vpc/{vpcId}/routing-profile [patch]
 func (h UpdateVPCRoutingProfileHandler) Handle(c echo.Context) error {
-	org, user, ctx, logger, span := common.SetupHandler("VPCRoutingProfile", "Update", c, h.tracerSpan)
+	org, user, ctx, logger, span := common.SetupHandler("VPCRoutingProfile", "Update", c)
 	if span != nil {
 		defer span.End()
 	}
@@ -186,7 +185,7 @@ func NewReleaseVPCInactiveVniHandler(dbSession *cdb.Session, scp *sc.ClientPool)
 // @Success 200 {object} model.APIVpcInactiveVniReleaseResult
 // @Router /v2/org/{org}/nico/vpc/{vpcId}/routing-profile/release-inactive-vni [post]
 func (h ReleaseVPCInactiveVniHandler) Handle(c echo.Context) error {
-	org, user, ctx, logger, span := common.SetupHandler("VPCRoutingProfile", "ReleaseInactiveVni", c, h.tracerSpan)
+	org, user, ctx, logger, span := common.SetupHandler("VPCRoutingProfile", "ReleaseInactiveVni", c)
 	if span != nil {
 		defer span.End()
 	}

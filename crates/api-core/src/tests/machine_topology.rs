@@ -16,9 +16,12 @@
  */
 use std::str::FromStr;
 
+use carbide_test_support::Outcome::Yields;
+use carbide_test_support::{Case, check_cases_async};
 use carbide_uuid::machine::MachineId;
 use common::api_fixtures::{create_managed_host, create_test_env};
 use db::{self};
+use model::allocation_type::AllocationType;
 use model::machine::machine_search_config::MachineSearchConfig;
 use rpc::forge::forge_server::Forge;
 
@@ -81,17 +84,65 @@ async fn test_find_machine_ids_by_bmc_ips(db_pool: sqlx::PgPool) -> Result<(), e
     let host_machine = env.find_machine(&host_machine_id).await.remove(0);
 
     let bmc_ip = host_machine.bmc_info.as_ref().unwrap().ip();
-    let req = tonic::Request::new(rpc::forge::BmcIpList {
-        bmc_ips: vec![bmc_ip.to_string()],
-    });
-    let res = env.api.find_machine_ids_by_bmc_ips(req).await?.into_inner();
-    assert_eq!(res.pairs.len(), 1);
-    let m = res.pairs.first().unwrap();
-    assert_eq!(
-        m.machine_id.as_ref().unwrap().to_string(),
-        host_machine_id.to_string()
-    );
-    assert_eq!(m.bmc_ip, bmc_ip);
+    let bmc_interface = db::machine_interface_address::find_by_address(&env.pool, bmc_ip.parse()?)
+        .await?
+        .unwrap();
+    let mut txn = env.pool.begin().await?;
+    db::machine_interface_address::insert(
+        &mut txn,
+        bmc_interface.id,
+        "2001:db8::10".parse()?,
+        AllocationType::Static,
+    )
+    .await?;
+    txn.commit().await?;
+
+    let api = &env.api;
+    check_cases_async(
+        [
+            Case {
+                scenario: "IPv4",
+                input: vec![bmc_ip.to_string()],
+                expect: Yields(vec![(Some(host_machine_id.into()), bmc_ip.to_string())]),
+            },
+            Case {
+                scenario: "expanded IPv6 address",
+                input: vec!["2001:0DB8:0:0:0:0:0:10".to_string()],
+                expect: Yields(vec![(
+                    Some(host_machine_id.into()),
+                    "2001:db8::10".to_string(),
+                )]),
+            },
+            Case {
+                scenario: "partial matches",
+                input: vec![
+                    bmc_ip.to_string(),
+                    "2001:db8::11".to_string(),
+                    "not-an-ip".to_string(),
+                ],
+                expect: Yields(vec![(Some(host_machine_id.into()), bmc_ip.to_string())]),
+            },
+            Case {
+                scenario: "empty request",
+                input: vec![],
+                expect: Yields(vec![]),
+            },
+        ],
+        |bmc_ips| async move {
+            api.find_machine_ids_by_bmc_ips(tonic::Request::new(rpc::forge::BmcIpList { bmc_ips }))
+                .await
+                .map(|response| {
+                    response
+                        .into_inner()
+                        .pairs
+                        .into_iter()
+                        .map(|pair| (pair.machine_id, pair.bmc_ip))
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|error| error.code())
+        },
+    )
+    .await;
 
     Ok(())
 }

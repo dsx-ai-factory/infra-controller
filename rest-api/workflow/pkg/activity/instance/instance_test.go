@@ -556,6 +556,65 @@ func TestManageInstance_UpdateInstancesInDBVpcSelectionInventory(t *testing.T) {
 	assert.Equal(t, vpc.ID, *clearedResolution.VpcID)
 	require.NotNil(t, clearedResolution.VpcIPFamilyMode)
 	assert.Equal(t, cdbm.InterfaceVpcIPFamilyModeDualStack, *clearedResolution.VpcIPFamilyMode)
+
+	prefixTests := []struct {
+		name          string
+		status        *corev1.InstanceInterfaceStatus
+		wantPrefixes  []string
+		wantAddresses []string
+	}{
+		{
+			name: "dual-stack prefixes with only an IPv4 address",
+			status: &corev1.InstanceInterfaceStatus{
+				Addresses: []string{"192.0.2.10"},
+				Prefixes:  []string{"192.0.2.0/28", "2001:db8::/64"},
+			},
+			wantPrefixes:  []string{"192.0.2.0/28", "2001:db8::/64"},
+			wantAddresses: []string{"192.0.2.10"},
+		},
+		{
+			name: "SLAAC prefix without a fixed address",
+			status: &corev1.InstanceInterfaceStatus{
+				Prefixes: []string{"2001:db8::/64"},
+			},
+			wantPrefixes:  []string{"2001:db8::/64"},
+			wantAddresses: []string{},
+		},
+		{
+			name:          "present status clears removed prefixes",
+			status:        &corev1.InstanceInterfaceStatus{},
+			wantPrefixes:  []string{},
+			wantAddresses: []string{},
+		},
+		{
+			name:          "missing status preserves prefixes",
+			wantPrefixes:  []string{"2001:db8:1::/64"},
+			wantAddresses: []string{"2001:db8:1::10"},
+		},
+	}
+	for _, tt := range prefixTests {
+		t.Run("interface prefixes/"+tt.name, func(t *testing.T) {
+			_, err := interfaceDAO.Update(ctx, nil, cdbm.InterfaceUpdateInput{
+				InterfaceID: deviceLessIfc.ID,
+				IPPrefixes:  []string{"2001:db8:1::/64"},
+				IpAddresses: []string{"2001:db8:1::10"},
+			})
+			require.NoError(t, err)
+			_, err = dbSession.DB.Exec(
+				"UPDATE instance SET updated = ? WHERE id = ?",
+				time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2),
+				deviceLessInstance.ID,
+			)
+			require.NoError(t, err)
+			inventory.Instances[0].Status.Network.Interfaces = []*corev1.InstanceInterfaceStatus{tt.status}
+			_, err = manager.UpdateInstancesInDB(ctx, site.ID, inventory)
+			require.NoError(t, err)
+			persisted, err := interfaceDAO.GetByID(ctx, nil, deviceLessIfc.ID, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantPrefixes, persisted.IPPrefixes)
+			assert.Equal(t, tt.wantAddresses, persisted.IPAddresses)
+		})
+	}
 }
 
 func TestManageInstance_deleteInstanceFromDB(t *testing.T) {
@@ -580,7 +639,12 @@ func TestManageInstance_deleteInstanceFromDB(t *testing.T) {
 
 	site := util.TestBuildSite(t, dbSession, ip, "testSite", cdbm.SiteStatusPending, nil, ipu)
 	vpc := util.TestBuildVpc(t, dbSession, ip, site, tenant, "testVpc")
-	machine := util.TestBuildMachine(t, dbSession, ip.ID, site.ID, cutil.GetPtr("mcTypeTest"), cutil.GetPtr(true), cdbm.MachineStatusReady)
+	machine := util.TestBuildMachine(t, dbSession, ip.ID, site.ID, cutil.GetPtr("mcTypeTest"), cutil.GetPtr(true), cdbm.MachineStatusInUse)
+	_, metadataErr := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{
+		MachineID: machine.ID,
+		Metadata:  &cdbm.SiteControllerMachine{Machine: &corev1.Machine{State: cdbm.ControllerMachineStateReady}},
+	})
+	require.NoError(t, metadataErr)
 	allocation := util.TestBuildAllocation(t, dbSession, ip, tenant, site, "testAllocation")
 	instanceType := util.TestBuildInstanceType(t, dbSession, ip, site, "testInstanceType")
 	_ = util.TestBuildAllocationContraints(t, dbSession, allocation, cdbm.AllocationResourceTypeInstanceType, instanceType.ID, cdbm.AllocationConstraintTypeReserved, 5, ipu)
@@ -664,7 +728,31 @@ func TestManageInstance_deleteInstanceFromDB(t *testing.T) {
 
 	err = ms.deleteInstanceFromDB(ctx, tx, instance, zerolog.Nop())
 	require.NoError(t, err)
+	// Neither the deletion nor the restored Ready state is visible before commit.
+	beforeCommit, readErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, machine.ID, nil, false)
+	require.NoError(t, readErr)
+	assert.True(t, beforeCommit.IsAssigned)
+	assert.Equal(t, cdbm.MachineStatusInUse, beforeCommit.Status)
+	statusDAO := cdbm.NewStatusDetailDAO(dbSession)
+	historyFilter := cdbm.StatusDetailFilterInput{EntityIDs: []string{machine.ID}}
+	pendingHistory, _, readErr := statusDAO.GetAll(ctx, tx, historyFilter, cdbp.PageInput{})
+	require.NoError(t, readErr)
+	require.Len(t, pendingHistory, 1)
+	assert.Equal(t, cdbm.MachineStatusReady, pendingHistory[0].Status)
+	assert.Equal(t, cutil.GetPtr(cdbm.MachineStatusReadyMessage), pendingHistory[0].Message)
+	visibleHistory, _, readErr := statusDAO.GetAll(ctx, nil, historyFilter, cdbp.PageInput{})
+	require.NoError(t, readErr)
+	assert.Empty(t, visibleHistory, "release history must not be visible before commit")
 	require.NoError(t, tx.Commit())
+	visibleHistory, _, readErr = statusDAO.GetAll(ctx, nil, historyFilter, cdbp.PageInput{})
+	require.NoError(t, readErr)
+	assert.Equal(t, pendingHistory, visibleHistory)
+	afterCommit, readErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, machine.ID, nil, false)
+	require.NoError(t, readErr)
+	assert.False(t, afterCommit.IsAssigned)
+	assert.Equal(t, cdbm.MachineStatusReady, afterCommit.Status)
+	_, readErr = isd.GetByID(ctx, nil, instance.ID, nil)
+	assert.ErrorIs(t, readErr, cdb.ErrDoesNotExist)
 
 	ibis, _, err := ibiDAO.GetAll(ctx, nil, cdbm.InfiniBandInterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
 	require.NoError(t, err)
@@ -685,6 +773,54 @@ func TestManageInstance_deleteInstanceFromDB(t *testing.T) {
 	desds, _, err := desdDAO.GetAll(ctx, nil, cdbm.DpuExtensionServiceDeploymentFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
 	require.NoError(t, err)
 	require.Empty(t, desds)
+}
+
+func TestManageInstance_clearMachineIsAssigned(t *testing.T) {
+	ctx := context.Background()
+	dbSession := util.TestInitDB(t)
+	defer dbSession.Close()
+	util.TestSetupSchema(t, dbSession)
+	user := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{"release-history"}, []string{"FORGE_PROVIDER_ADMIN"})
+	provider := util.TestBuildInfrastructureProvider(t, dbSession, "release-history", "release-history", user)
+	site := util.TestBuildSite(t, dbSession, provider, "release-history", cdbm.SiteStatusPending, nil, user)
+	manager := ManageInstance{dbSession: dbSession}
+
+	for _, tc := range []struct {
+		name      string
+		status    string
+		coreState string
+		rollback  bool
+	}{
+		{"Ready restoration rolls back", cdbm.MachineStatusInUse, cdbm.ControllerMachineStateReady, true},
+		{"release waits for Core readiness", cdbm.MachineStatusInUse, "Assigned", false},
+		{"release preserves Error", cdbm.MachineStatusError, cdbm.ControllerMachineStateReady, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			machine := util.TestBuildMachine(t, dbSession, provider.ID, site.ID, nil, cutil.GetPtr(true), tc.status)
+			machineDAO := cdbm.NewMachineDAO(dbSession)
+			_, err := machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{
+				MachineID: machine.ID,
+				Metadata:  &cdbm.SiteControllerMachine{Machine: &corev1.Machine{State: tc.coreState}},
+			})
+			require.NoError(t, err)
+			tx, err := cdb.BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = tx.Rollback() })
+			require.NoError(t, manager.clearMachineIsAssigned(ctx, tx, zerolog.Nop(), machine.ID))
+			if tc.rollback {
+				require.NoError(t, tx.Rollback())
+			} else {
+				require.NoError(t, tx.Commit())
+			}
+			persisted, err := machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
+			require.NoError(t, err)
+			assert.Equal(t, tc.rollback, persisted.IsAssigned)
+			assert.Equal(t, tc.status, persisted.Status)
+			details, _, err := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{machine.ID}}, cdbp.PageInput{})
+			require.NoError(t, err)
+			assert.Empty(t, details, "unchanged or rolled-back status must not add history")
+		})
+	}
 }
 
 func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
@@ -2292,6 +2428,9 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 		deletingInstance                      *cdbm.Instance
 		deletedInstances                      []*cdbm.Instance
 		missingInstances                      []*cdbm.Instance
+		// notMissingInstances are absent from the inventory but must keep their state,
+		// because the page carried no basis for calling them missing.
+		notMissingInstances                   []*cdbm.Instance
 		restoredInstance                      *cdbm.Instance
 		unpairedInstances                     []*cdbm.Instance
 		bootCompletedInstances                []*cdbm.Instance
@@ -2410,6 +2549,26 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 				},
 			},
 			readyInstances: pagedIns[0:34],
+		},
+		{
+			// The Site sends the ID list on the last page alone, so a middle page gives Cloud
+			// no basis to mark anything missing even though 4 of the Site's 38 Instances have
+			// stopped being reported.
+			name:             "test paged Instance inventory processing, middle page without item IDs",
+			siteID:           site2.ID,
+			clientPoolSiteID: site2.ID.String(),
+			clientPoolClient: mtc3,
+			instanceInventory: &corev1.InstanceInventory{
+				Instances: pagedCtrlIns[10:20],
+				Timestamp: timestamppb.Now(),
+				InventoryPage: &corev1.InventoryPage{
+					CurrentPage: 2,
+					TotalPages:  4,
+					PageSize:    10,
+					TotalItems:  34,
+				},
+			},
+			notMissingInstances: pagedIns[34:38],
 		},
 		{
 			name:             "test paged Instance inventory processing, last page",
@@ -2732,6 +2891,15 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil)
 				assert.Nil(t, serr)
 				assert.Equal(t, cdbm.InstancePowerStatusBootCompleted, *ui.PowerStatus)
+			}
+
+			for _, instance := range tc.notMissingInstances {
+				// The page carried no ID list, so absence from it is not evidence the Site
+				// dropped the Instance and its state has to survive untouched.
+				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil)
+				assert.Nil(t, serr)
+				assert.False(t, ui.IsMissingOnSite)
+				assert.NotEqual(t, cdbm.InstanceStatusError, ui.Status)
 			}
 
 			for _, instance := range tc.unchangedInstances {
@@ -3194,6 +3362,9 @@ func (f *spectrumXInventoryFixture) reportInventory(t *testing.T, deviceInstance
 type reportedAttachment struct {
 	deviceInstance uint32
 	attachmentType corev1.SpxAttachmentType
+	// ovs, when set, is reported as the attachment_ovs config. A nil OvnNetworkName
+	// within it reports the OVN network name as absent.
+	ovs *corev1.SpxAttachmentOvs
 }
 
 // reportAttachments drives one UpdateInstancesInDB iteration with fully specified attachment
@@ -3208,6 +3379,7 @@ func (f *spectrumXInventoryFixture) reportAttachments(t *testing.T, entries []re
 			Device:         testSpectrumXDevice,
 			DeviceInstance: entry.deviceInstance,
 			AttachmentType: entry.attachmentType,
+			AttachmentOvs:  entry.ovs,
 		})
 	}
 
@@ -3376,5 +3548,32 @@ func TestUpdateInstancesInDB_SpectrumXAttachmentReconciliation(t *testing.T) {
 		persisted := fx.get(t, sxa.ID)
 		assert.Equal(t, cdbm.SpectrumXAttachmentStatusPending, persisted.Status)
 		assert.Nil(t, persisted.MacAddress, "a Physical report must not supply the OVS attachment's MAC")
+	})
+
+	// attachment_ovs is client-owned config echoed back whole, so an omitted
+	// ovn_network_name means the mapping was removed. The row must drop the stale value
+	// rather than carry it forward and re-send it to Core on a later unrelated PATCH,
+	// even as the rest of the OVS config (the bridge) is applied and the row goes Ready.
+	t.Run("clears a removed OVN network name while applying the rest of an OVS config", func(t *testing.T) {
+		fx := newSpectrumXInventoryFixture(t)
+		sxa := fx.typedAttachment(t, 0, cdbm.SpectrumXAttachmentTypeOVS, cdbm.SpectrumXAttachmentStatusPending)
+		_, err := fx.sxaDAO.Update(context.Background(), nil, cdbm.SpectrumXAttachmentUpdateInput{
+			SpectrumXAttachmentID: sxa.ID,
+			BridgeName:            cutil.GetPtr("br-spx0"),
+			OvnNetworkName:        cutil.GetPtr("net-old"),
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, fx.reportAttachments(t, []reportedAttachment{
+			{deviceInstance: 0, attachmentType: corev1.SpxAttachmentType_OVS, ovs: &corev1.SpxAttachmentOvs{BridgeName: "br-new"}},
+		}, []*corev1.InstanceSpxAttachmentStatus{
+			{},
+		}, corev1.SyncState_SYNCED))
+
+		persisted := fx.get(t, sxa.ID)
+		assert.Equal(t, cdbm.SpectrumXAttachmentStatusReady, persisted.Status)
+		require.NotNil(t, persisted.BridgeName)
+		assert.Equal(t, "br-new", *persisted.BridgeName, "the reported bridge must be applied")
+		assert.Nil(t, persisted.OvnNetworkName, "an omitted ovn_network_name must clear the stale persisted value")
 	})
 }

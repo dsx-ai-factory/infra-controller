@@ -62,7 +62,7 @@ type BatchInstanceCreateRequest struct {
 	AutoNetwork *bool `json:"autoNetwork,omitempty"`
 	// InfiniBand interface configuration shared across all instances
 	InfinibandInterfaces []InfiniBandInterfaceCreateRequest `json:"infinibandInterfaces,omitempty"`
-	// SpectrumX Partition attachments shared across all Instances in the batch. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.
+	// SpectrumX Partition attachments shared across all Instances in the batch. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. Every selected Machine must satisfy the entire list using its individual persisted capabilities, not Instance Type capability summaries. Compatible capacity is checked before selecting an NVLink domain when topology optimization is enabled. Insufficient compatible capacity returns 409 without allocating any Machines. The response identifies SpectrumX when filtering reduces otherwise sufficient capacity below the requested count, and identifies both SpectrumX and topology constraints when filtering removes candidates and no single NVLink domain has enough compatible Machines. Final allocation remains authoritative because persisted inventory can lag behind the Site.
 	SpectrumXAttachments []InstanceSpectrumXAttachmentCreateOrUpdateRequest `json:"spectrumXAttachments,omitempty"`
 	// DPU Extension Services to deploy to all instances in the batch
 	DpuExtensionServiceDeployments []DpuExtensionServiceDeploymentRequest `json:"dpuExtensionServiceDeployments,omitempty"`
@@ -250,7 +250,7 @@ func (o *BatchInstanceCreateRequest) GetMachineLabelSelector() map[string]string
 	return o.MachineLabelSelector
 }
 
-// GetMachineLabelSelectorOk returns a tuple with the MachineLabelSelector field value if set, nil otherwise
+// GetMachineLabelSelectorOk returns a tuple with the MachineLabelSelector field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *BatchInstanceCreateRequest) GetMachineLabelSelectorOk() (map[string]string, bool) {
 	if o == nil || IsNil(o.MachineLabelSelector) {
@@ -617,7 +617,7 @@ func (o *BatchInstanceCreateRequest) GetLabels() map[string]string {
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, nil otherwise
+// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *BatchInstanceCreateRequest) GetLabelsOk() (map[string]string, bool) {
 	if o == nil || IsNil(o.Labels) {

@@ -75,7 +75,7 @@ func TestCreateOrUpdateMachineHealthReportHandlerProxiesRequest(t *testing.T) {
 	req := model.APIMachineHealthReportEntryRequest{
 		Source:    "overrides.sre",
 		Mode:      model.MachineHealthReportModeMerge,
-		Successes: []model.APIMachineHealthProbeSuccess{{ID: "probe.ok"}},
+		Successes: []model.APIHealthProbeSuccess{{ID: "probe.ok"}},
 	}
 
 	rec := fixture.Request(t, handler.Handle, http.MethodPut, "/", req, "")
@@ -97,7 +97,7 @@ func TestCreateOrUpdateMachineHealthReportHandlerAllowsPrivilegedTenant(t *testi
 	req := model.APIMachineHealthReportEntryRequest{
 		Source:    "overrides.sre",
 		Mode:      model.MachineHealthReportModeMerge,
-		Successes: []model.APIMachineHealthProbeSuccess{{ID: "probe.ok"}},
+		Successes: []model.APIHealthProbeSuccess{{ID: "probe.ok"}},
 	}
 
 	rec := fixture.Request(t, handler.Handle, http.MethodPut, "/", req, "")
