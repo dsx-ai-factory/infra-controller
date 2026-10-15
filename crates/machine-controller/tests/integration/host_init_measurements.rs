@@ -225,6 +225,16 @@ async fn pending_bundle_does_not_reboot(pool: PgPool) {
         .begin()
         .await
         .unwrap();
+    db::machine_topology::set_topology_update_needed(&mut txn, &host.host.id, true)
+        .await
+        .unwrap();
+    db::machine_topology::create_or_update(
+        &mut txn,
+        &host.host.id,
+        &host.host.hardware_info(),
+    )
+    .await
+    .unwrap();
     db::measured_boot::report::new(
         &mut txn,
         *host.host.id,
