@@ -343,3 +343,10 @@ API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} added
 # SSH Keys have no status field; these orderings were advertised but always rejected.
 GET /v2/org/{org}/nico/sshkey removed the enum value `STATUS_ASC` from the `query` request parameter `orderBy`
 GET /v2/org/{org}/nico/sshkey removed the enum value `STATUS_DESC` from the `query` request parameter `orderBy`
+
+# Instance propagation details can be absent; allow the existing null responses.
+API GET /v2/org/{org}/nico/instance the response property `items/networkSecurityGroupPropagationDetails` became nullable for the status `200`
+API POST /v2/org/{org}/nico/instance the response property `networkSecurityGroupPropagationDetails` became nullable for the status `201`
+API POST /v2/org/{org}/nico/instance/batch the response property `items/networkSecurityGroupPropagationDetails` became nullable for the status `201`
+API GET /v2/org/{org}/nico/instance/{instanceId} the response property `networkSecurityGroupPropagationDetails` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the response property `networkSecurityGroupPropagationDetails` became nullable for the status `200`

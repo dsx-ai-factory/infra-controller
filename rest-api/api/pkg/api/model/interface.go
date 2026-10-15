@@ -314,13 +314,13 @@ type APIInterface struct {
 
 // NewAPIInterface creates a new APIInterface
 func NewAPIInterface(dbis *cdbm.Interface) *APIInterface {
-	// Unknown prefixes still serialize as an empty JSON array, not null.
+	// Addresses and prefixes serialize as empty JSON arrays even when none are reported.
 	apiInterface := &APIInterface{
 		ID:                 dbis.ID.String(),
 		InstanceID:         dbis.InstanceID.String(),
 		IsPhysical:         dbis.IsPhysical,
 		MacAddress:         dbis.MacAddress,
-		IPAddresses:        dbis.IPAddresses,
+		IPAddresses:        append([]string{}, dbis.IPAddresses...),
 		IPPrefixes:         append([]string{}, dbis.IPPrefixes...),
 		RequestedIpAddress: dbis.RequestedIpAddress,
 		Status:             dbis.Status,
