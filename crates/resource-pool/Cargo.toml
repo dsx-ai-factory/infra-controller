@@ -27,16 +27,52 @@ repository.workspace = true
 # [local-dependencies]
 carbide-api-db = { path = "../api-db" }
 carbide-api-model = { path = "../api-model", default-features = false }
+carbide-resource-pool-api = { path = "../resource-pool-api" }
+trace-propagation = { path = "../trace-propagation" }
 
+hyper-util = { workspace = true, features = ["client-legacy", "tokio"] }
+libc = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 sqlx = { workspace = true, features = ["postgres"] }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "sync", "time"] }
+tonic = { workspace = true, features = ["tls-native-roots"] }
+tracing = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 carbide-macros = { path = "../macros" }
+carbide-resource-pool-api = { path = "../resource-pool-api", features = [
+  "test-support",
+] }
 carbide-sqlx-testing = { path = "../sqlx-testing" }
 carbide-test-support = { path = "../test-support" }
 
+bytes = { workspace = true }
 ctor = { workspace = true }
+http = { workspace = true }
+http-body = { workspace = true }
+http-body-util = { workspace = true }
+nix = { workspace = true, features = ["fs"] }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+prost = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true, features = ["ring"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = [
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
+tokio-stream = { workspace = true, features = ["net"] }
+tokio-util = { workspace = true }
+tower = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
