@@ -8743,16 +8743,25 @@ impl StateHandler for InstanceStateHandler {
                     // an ACK. If any of the interfaces has not yet heard back the ACk, we will continue to
                     // be in the current state.
                     if ctx.services.site_config.ewethers_enabled {
+                        let mut matching_count = 0;
                         for dpa_interface in &mh_snapshot.dpa_interface_snapshots {
                             if !dpa_interface.managed_host_network_config_version_synced(
                                 &mh_snapshot.instance,
                                 &mh_snapshot.host_snapshot.status.spx_status_observation,
                             ) {
-                                return Ok(StateHandlerOutcome::wait(
+                                tracing::warn!(
+                                    "DPA agent {} has not applied network config and reported healthy network",
+                                    dpa_interface.id
+                                );
+                            } else {
+                                matching_count += 1;
+                            }
+                        }
+                        if matching_count < mh_snapshot.dpa_interface_snapshots.len() / 2 {
+                            return Ok(StateHandlerOutcome::wait(
                                             "Waiting for DPA agent(s) to apply network config and report healthy network"
                                                 .to_string()
                                         ));
-                            }
                         }
                     }
 
@@ -9771,7 +9780,7 @@ impl StateHandler for InstanceStateHandler {
                         // XXX TODO XXX
                         // This is a temporary workaround, to be removed once we have the cabling fixed in Redstone
                         // XXX TODO XXX
-                        if matching_count == mh_snapshot.dpa_interface_snapshots.len() / 2 {
+                        if matching_count >= mh_snapshot.dpa_interface_snapshots.len() / 2 {
                             let next_state = ManagedHostState::Assigned {
                                 instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
                             };
