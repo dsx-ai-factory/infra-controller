@@ -140,6 +140,14 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 			if controllerSegment.GetConfig().GetSegmentType() != corev1.NetworkSegmentType_TENANT {
 				continue
 			}
+			// Current Core reports CAN_STRETCH for tenant-visible Subnets and NO_OP for
+			// generated FNN linknets. Segments with missing flags remain eligible for
+			// compatibility with older inventory producers.
+			segmentFlags := controllerSegment.GetStatus().GetFlags()
+			if len(segmentFlags) > 0 &&
+				!slices.Contains(segmentFlags, corev1.NetworkSegmentFlag_CAN_STRETCH) {
+				continue
+			}
 
 			reportedStatus, _ := getControllerSubnetStatus(controllerSegment.GetStatus())
 			if reportedStatus == cdbm.SubnetStatusDeleting || reportedStatus == cdbm.SubnetStatusDeleted {
