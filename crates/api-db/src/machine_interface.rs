@@ -51,10 +51,11 @@ use crate::{DatabaseError, DatabaseResult, Transaction, network_segment as db_ne
 const SQL_VIOLATION_DUPLICATE_MAC: &str = "machine_interfaces_segment_id_mac_address_key";
 const SQL_VIOLATION_ONE_PRIMARY_INTERFACE: &str = "one_primary_interface_per_machine";
 const SQL_VIOLATION_MAX_ONE_ASSOCIATION: &str = "chk_max_one_association";
-// Savepoint attempts per segment for creation, or per family recovery after an ownership race.
-// Creation can repeat the per-prefix scan budget on contention; recovery propagates its exhaustion.
+// Savepoint attempts per segment after ownership or FQDN conflicts, or per family
+// recovery after an ownership race. Each retry can repeat the full candidate scan.
+// Candidate lock contention skips retries on the same segment.
 const HOST_ALLOCATION_MAX_ATTEMPTS: usize = 128;
-// Candidate scans per prefix per attempt. Creation can perform 128 * 128 scans per prefix.
+// Candidate batches per prefix per attempt, advancing past each fully locked batch.
 const HOST_CANDIDATE_MAX_SCANS: usize = 128;
 const HOST_CANDIDATE_BATCH_SIZE: usize = 32;
 
@@ -1846,7 +1847,15 @@ pub async fn create(
 /// Create an interface of `interface_type` with dynamic or static host addresses.
 ///
 /// `Automatic` and `NextAvailableIp` try segments in order, continuing after
-/// exhaustion or the per-segment retry budget.
+/// exhaustion, candidate contention, or exhausted ownership/hostname retries.
+/// Candidate contention moves to the next segment without repeating its scan
+/// budget. If the last segment is exhausted, earlier contention returns
+/// `Internal` with contention and exhaustion details; otherwise exhaustion
+/// returns `ResourceExhausted`.
+/// Contention on the last segment returns `TryAgain`.
+/// Ownership or hostname conflicts use a separate retry budget; exhausting
+/// that budget on the last segment returns `Internal`. Other errors return
+/// immediately, even after earlier contention.
 /// Static assignment uses the containing segment or the `static-assignments` fallback.
 /// An existing static address with the same MAC reuses its interface; a different
 /// owner returns `AddressAlreadyInUse`.
@@ -1926,6 +1935,7 @@ async fn create_dynamic(
     interface_type: InterfaceType,
     allocation_type: AllocationType,
 ) -> DatabaseResult<MachineInterfaceSnapshot> {
+    let mut encountered_contention = false;
     for segments_idx in 0..segments.len() {
         let segment = &segments[segments_idx];
         for _ in 0..HOST_ALLOCATION_MAX_ATTEMPTS {
@@ -1948,7 +1958,7 @@ async fn create_dynamic(
                 .await?;
             }
 
-            let segment_exhausted = match try_create_dynamic(
+            let try_next_segment = match try_create_dynamic(
                 &mut allocation_txn,
                 segment,
                 macaddr,
@@ -1970,17 +1980,32 @@ async fn create_dynamic(
                     // Another simultaneous create got the same FQDN, try again.
                     false
                 }
-                Err(DatabaseError::TryAgain | DatabaseError::AddressAlreadyInUse(_)) => {
-                    // Candidates stayed locked, or another writer committed an address
-                    // after selection. Roll back this attempt and select again.
+                Err(DatabaseError::AddressAlreadyInUse(_)) => {
+                    // Another writer committed an address after selection. Roll
+                    // back this attempt and select again.
                     false
                 }
-                Err(DatabaseError::ResourceExhausted(_)) if segments_idx < segments.len() - 1 => {
-                    // If there are more segments to check, we just need to signal that this one was exhausted.
+                Err(DatabaseError::TryAgain) if segments_idx < segments.len() - 1 => {
+                    // This attempt already skipped locked candidates until the
+                    // prefix ended or the scan budget ran out. Try the next segment.
+                    encountered_contention = true;
                     true
                 }
+                Err(DatabaseError::ResourceExhausted(_)) if segments_idx < segments.len() - 1 => {
+                    true
+                }
+                Err(DatabaseError::ResourceExhausted(reason)) if encountered_contention => {
+                    // Earlier locked candidates may become available, and a
+                    // spent scan budget can leave later free addresses unread.
+                    allocation_txn.rollback().await?;
+                    return Err(DatabaseError::internal(format!(
+                        "host address allocation can be retried after earlier lock contention; final segment `{}` ({}) is exhausted: {reason}",
+                        segment.config.name, segment.id
+                    )));
+                }
                 Err(err) => {
-                    // Some other error, roll back the inner transaction
+                    // Return terminal contention, exhaustion, or any other error
+                    // after rolling back this attempt.
                     allocation_txn.rollback().await?;
                     return Err(err);
                 }
@@ -1988,8 +2013,7 @@ async fn create_dynamic(
 
             allocation_txn.rollback().await?;
 
-            // If this segment is exhausted, go to the next segment.
-            if segment_exhausted {
+            if try_next_segment {
                 break;
             }
         }
@@ -2002,8 +2026,7 @@ async fn create_dynamic(
         .join(", ");
 
     Err(DatabaseError::internal(format!(
-        "unable to allocate machine interface addresses from segments {} within {} creation attempts per segment",
-        segment_list, HOST_ALLOCATION_MAX_ATTEMPTS
+        "ownership or hostname retries exhausted while allocating machine interface addresses from segments {segment_list}"
     )))
 }
 
@@ -2219,11 +2242,12 @@ async fn create_inner(
 
 /// Select and lock one host candidate; the caller inserts its ownership row.
 ///
-/// Each iteration reads the first gaps between occupied addresses and selects up to
+/// Each iteration reads the next gaps between occupied addresses and selects up to
 /// `HOST_CANDIDATE_BATCH_SIZE` free candidates. Per-address advisory locks let
 /// concurrent IPv4 allocations choose different candidates from the same batch.
-/// Returns `ResourceExhausted` when no free candidates remain, or `TryAgain`
-/// after `HOST_CANDIDATE_MAX_SCANS` batches remain locked. The caller's insert
+/// Returns `ResourceExhausted` when no free candidates remain. After skipping
+/// locked candidates, reaching the end or `HOST_CANDIDATE_MAX_SCANS` returns
+/// `TryAgain` because those candidates may become available. The caller's insert
 /// still checks ownership if another writer committed after our read.
 async fn allocate_next_ip_with_retry(
     // Note: Must be a transaction since we're doing locks
@@ -2231,8 +2255,8 @@ async fn allocate_next_ip_with_retry(
     segment: &NetworkSegment,
     prefix: &NetworkPrefix,
 ) -> DatabaseResult<IpAddr> {
-    for _ in 0..HOST_CANDIDATE_MAX_SCANS {
-        let selector = host_address_candidates::HostAddressCandidates::new(prefix)?;
+    let mut selector = host_address_candidates::HostAddressCandidates::new(prefix)?;
+    for scan in 0..HOST_CANDIDATE_MAX_SCANS {
         let candidates = if let Some((first, last)) = selector.range() {
             // Ownership is global, including reservations parked without an
             // interface. `lead()` pairs occupied addresses with their successors;
@@ -2272,12 +2296,15 @@ async fn allocate_next_ip_with_retry(
             Vec::new()
         };
 
-        if candidates.is_empty() {
+        let Some(&last_candidate) = candidates.last() else {
+            if scan > 0 {
+                return Err(DatabaseError::TryAgain);
+            }
             return Err(DatabaseError::ResourceExhausted(format!(
                 "No IP addresses left in prefix {}",
                 prefix.prefix
             )));
-        }
+        };
 
         // Try to lock an IP (in case multiple allocation requests are happening at once)
         for candidate in candidates {
@@ -2285,6 +2312,7 @@ async fn allocate_next_ip_with_retry(
                 return Ok(candidate);
             }
         }
+        selector.advance_past(last_candidate);
     }
 
     Err(DatabaseError::TryAgain)
@@ -3672,7 +3700,7 @@ async fn reconcile_interface_segment(
 ///
 /// Ownership races retry within savepoints up to `HOST_ALLOCATION_MAX_ATTEMPTS`,
 /// then return `Internal`. Prefix exhaustion returns `ResourceExhausted`; candidate
-/// lock contention returns `TryAgain` after the per-prefix scan budget is spent.
+/// lock contention returns `TryAgain` at the end of the prefix or scan budget.
 pub async fn allocate_address_for_family(
     txn: &mut PgConnection,
     interface_id: MachineInterfaceId,

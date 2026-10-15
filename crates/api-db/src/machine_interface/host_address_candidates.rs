@@ -88,6 +88,11 @@ impl<'a> HostAddressCandidates<'a> {
         (threshold <= self.last).then(|| self.address(threshold))
     }
 
+    /// Advance past an address returned by this selector's current `select` call.
+    pub(super) fn advance_past(&mut self, address: IpAddr) {
+        self.first = address_number(address).checked_add(1);
+    }
+
     /// Rows must be ordered, begin with the first occupied address in `range()`,
     /// and retain each returned address's immediate occupied successor. An empty
     /// result means the range is empty of occupied addresses. For nonempty
@@ -153,7 +158,7 @@ fn address_number(address: IpAddr) -> u128 {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::{Fails, Yields};
-    use carbide_test_support::{Case, check_cases};
+    use carbide_test_support::{Case, Check, check_cases, check_values};
     use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 
     use super::*;
@@ -424,5 +429,101 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn advancing_past_candidates_preserves_family_bounds() {
+        #[derive(Debug)]
+        struct Input {
+            cidr: &'static str,
+            consumed: &'static str,
+        }
+
+        #[derive(Debug, PartialEq)]
+        struct Output {
+            range: Option<(IpAddr, IpAddr)>,
+            leading_gap_threshold: Option<IpAddr>,
+            candidates: Vec<IpAddr>,
+        }
+
+        check_values(
+            [
+                Check {
+                    scenario: "next batch moves the query bounds and leading-gap threshold",
+                    input: Input {
+                        cidr: "192.0.2.0/24",
+                        consumed: "192.0.2.33",
+                    },
+                    expect: Output {
+                        range: Some((
+                            "192.0.2.34".parse().unwrap(),
+                            "192.0.2.254".parse().unwrap(),
+                        )),
+                        leading_gap_threshold: Some("192.0.2.68".parse().unwrap()),
+                        candidates: vec!["192.0.2.34".parse().unwrap()],
+                    },
+                },
+                Check {
+                    scenario: "IPv4 stops before the broadcast address",
+                    input: Input {
+                        cidr: "255.255.255.252/30",
+                        consumed: "255.255.255.254",
+                    },
+                    expect: Output {
+                        range: None,
+                        leading_gap_threshold: None,
+                        candidates: vec![],
+                    },
+                },
+                Check {
+                    scenario: "IPv6 /0 advances across the low 64-bit boundary",
+                    input: Input {
+                        cidr: "::/0",
+                        consumed: "::ffff:ffff:ffff:ffff",
+                    },
+                    expect: Output {
+                        range: Some((
+                            "0:0:0:1::".parse().unwrap(),
+                            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe".parse().unwrap(),
+                        )),
+                        leading_gap_threshold: Some("0:0:0:1::22".parse().unwrap()),
+                        candidates: vec!["0:0:0:1::".parse().unwrap()],
+                    },
+                },
+                Check {
+                    scenario: "the maximum IPv6 candidate exhausts the cursor without wrapping",
+                    input: Input {
+                        cidr: "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+                        consumed: "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+                    },
+                    expect: Output {
+                        range: None,
+                        leading_gap_threshold: None,
+                        candidates: vec![],
+                    },
+                },
+            ],
+            |input| {
+                let prefix = NetworkPrefix {
+                    id: NetworkPrefixId::new(),
+                    segment_id: NetworkSegmentId::new(),
+                    prefix: input.cidr.parse().unwrap(),
+                    gateway: None,
+                    dhcpv6_link_address: None,
+                    num_reserved: 0,
+                    vpc_prefix_id: None,
+                    vpc_prefix: None,
+                    svi_ip: None,
+                    num_free_ips: None,
+                };
+                let mut selector = HostAddressCandidates::new(&prefix).unwrap();
+                selector.advance_past(input.consumed.parse().unwrap());
+                Output {
+                    range: selector.range(),
+                    leading_gap_threshold: selector.leading_gap_threshold(32),
+                    candidates: selector.select(&[], 1),
+                }
+            },
+        );
     }
 }
