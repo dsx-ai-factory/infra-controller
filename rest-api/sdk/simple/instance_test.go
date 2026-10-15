@@ -152,13 +152,13 @@ func TestCollectAutoCreatedSSHKeyGroupIDs(t *testing.T) {
 	t.Run("returns only groups matching instance naming convention", func(t *testing.T) {
 		instance := standard.NewInstance()
 		instance.SetName("web")
-		auto := standard.NewSshKeyGroup()
+		auto := standard.NewSshKeyGroupSummary()
 		auto.SetId("skg-auto")
 		auto.SetName(GetInstanceSshKeyGroupName("web"))
-		manual := standard.NewSshKeyGroup()
+		manual := standard.NewSshKeyGroupSummary()
 		manual.SetId("skg-manual")
 		manual.SetName("shared-ops-keys")
-		instance.SetSshKeyGroups([]standard.SshKeyGroup{*auto, *manual})
+		instance.SetSshKeyGroups([]standard.SshKeyGroupSummary{*auto, *manual})
 
 		assert.Equal(t, []string{"skg-auto"}, collectAutoCreatedSSHKeyGroupIDs(instance))
 	})
@@ -166,10 +166,10 @@ func TestCollectAutoCreatedSSHKeyGroupIDs(t *testing.T) {
 	t.Run("returns nil when instance has no matching groups", func(t *testing.T) {
 		instance := standard.NewInstance()
 		instance.SetName("web")
-		manual := standard.NewSshKeyGroup()
+		manual := standard.NewSshKeyGroupSummary()
 		manual.SetId("skg-manual")
 		manual.SetName("shared-ops-keys")
-		instance.SetSshKeyGroups([]standard.SshKeyGroup{*manual})
+		instance.SetSshKeyGroups([]standard.SshKeyGroupSummary{*manual})
 
 		assert.Nil(t, collectAutoCreatedSSHKeyGroupIDs(instance))
 	})
