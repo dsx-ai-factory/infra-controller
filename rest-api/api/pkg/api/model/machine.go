@@ -579,8 +579,9 @@ type APIMachineLldpNeighbor struct {
 	RemotePortType string `json:"remotePortType"`
 	// RemotePortValue is the LLDP port id value advertised by the neighbor
 	RemotePortValue string `json:"remotePortValue"`
-	// MedInventory is the LLDP-MED inventory, present only when the neighbor advertises it
-	MedInventory *APIMachineLldpMedInventory `json:"medInventory,omitempty"`
+	// MedInventory is the LLDP-MED inventory advertised by the neighbor, or null when the
+	// neighbor does not advertise one.
+	MedInventory *APIMachineLldpMedInventory `json:"medInventory"`
 }
 
 // FromProto populates an APIMachineLldpNeighbor from its protobuf form.

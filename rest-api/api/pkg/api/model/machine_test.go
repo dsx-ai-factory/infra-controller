@@ -1046,3 +1046,48 @@ func TestAPIMachineUpdateRequest_ToRemoveHealthReportProto(t *testing.T) {
 		})
 	}
 }
+
+// TestAPIMachineLldpNeighbor_MedInventoryJSON proves the wire contract of
+// lldpNeighbors[].medInventory: always rendered, as null when the neighbor does
+// not advertise an LLDP-MED inventory.
+func TestAPIMachineLldpNeighbor_MedInventoryJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		lldp *corev1.LldpSwitchData
+		want string
+	}{
+		{
+			name: "renders null when not advertised",
+			lldp: &corev1.LldpSwitchData{Name: "leaf-switch-01"},
+			want: `null`,
+		},
+		{
+			name: "renders object when advertised",
+			lldp: &corev1.LldpSwitchData{
+				Name: "peer-dpu-01",
+				MedInventory: &corev1.LldpMedInventory{
+					Serial:       cutil.GetPtr("SN0000000002"),
+					Manufacturer: cutil.GetPtr("https://www.mellanox.com"),
+					Model:        cutil.GetPtr("BlueField-3 DPU"),
+				},
+			},
+			want: `{"serial":"SN0000000002","manufacturer":"https://www.mellanox.com","model":"BlueField-3 DPU"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			neighbor := APIMachineLldpNeighbor{}
+			neighbor.FromProto(&corev1.InterfaceLldp{MacAddress: "02:00:00:00:01:b0", Lldp: tt.lldp})
+
+			encoded, err := json.Marshal(neighbor)
+			require.NoError(t, err)
+
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(encoded, &fields))
+			medInventory, found := fields["medInventory"]
+			require.True(t, found)
+			assert.JSONEq(t, tt.want, string(medInventory))
+		})
+	}
+}

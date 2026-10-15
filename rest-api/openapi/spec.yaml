@@ -29022,8 +29022,10 @@ components:
           type: string
           description: 'LLDP port id value advertised by the neighbor'
         medInventory:
-          $ref: '#/components/schemas/MachineLldpMedInventory'
-          description: 'LLDP-MED inventory, present only when the neighbor advertises it'
+          oneOf:
+            - $ref: '#/components/schemas/MachineLldpMedInventory'
+            - type: 'null'
+          description: 'LLDP-MED inventory advertised by the neighbor. Always present; null when the neighbor does not advertise one.'
     MachineLldpMedInventory:
       title: MachineLldpMedInventory
       type: object

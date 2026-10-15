@@ -40,8 +40,8 @@ type MachineLldpNeighbor struct {
 	RemotePortType *string `json:"remotePortType,omitempty"`
 	// LLDP port id value advertised by the neighbor
 	RemotePortValue *string `json:"remotePortValue,omitempty"`
-	// LLDP-MED inventory, present only when the neighbor advertises it
-	MedInventory *MachineLldpMedInventory `json:"medInventory,omitempty"`
+	// LLDP-MED inventory advertised by the neighbor. Always present; null when the neighbor does not advertise one.
+	MedInventory NullableMachineLldpMedInventory `json:"medInventory,omitempty"`
 }
 
 // NewMachineLldpNeighbor instantiates a new MachineLldpNeighbor object
@@ -349,36 +349,47 @@ func (o *MachineLldpNeighbor) SetRemotePortValue(v string) {
 	o.RemotePortValue = &v
 }
 
-// GetMedInventory returns the MedInventory field value if set, zero value otherwise.
+// GetMedInventory returns the MedInventory field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MachineLldpNeighbor) GetMedInventory() MachineLldpMedInventory {
-	if o == nil || IsNil(o.MedInventory) {
+	if o == nil || IsNil(o.MedInventory.Get()) {
 		var ret MachineLldpMedInventory
 		return ret
 	}
-	return *o.MedInventory
+	return *o.MedInventory.Get()
 }
 
 // GetMedInventoryOk returns a tuple with the MedInventory field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineLldpNeighbor) GetMedInventoryOk() (*MachineLldpMedInventory, bool) {
-	if o == nil || IsNil(o.MedInventory) {
+	if o == nil {
 		return nil, false
 	}
-	return o.MedInventory, true
+	return o.MedInventory.Get(), o.MedInventory.IsSet()
 }
 
 // HasMedInventory returns a boolean if a field has been set.
 func (o *MachineLldpNeighbor) HasMedInventory() bool {
-	if o != nil && !IsNil(o.MedInventory) {
+	if o != nil && o.MedInventory.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetMedInventory gets a reference to the given MachineLldpMedInventory and assigns it to the MedInventory field.
+// SetMedInventory gets a reference to the given NullableMachineLldpMedInventory and assigns it to the MedInventory field.
 func (o *MachineLldpNeighbor) SetMedInventory(v MachineLldpMedInventory) {
-	o.MedInventory = &v
+	o.MedInventory.Set(&v)
+}
+
+// SetMedInventoryNil sets the value for MedInventory to be an explicit nil
+func (o *MachineLldpNeighbor) SetMedInventoryNil() {
+	o.MedInventory.Set(nil)
+}
+
+// UnsetMedInventory ensures that no value is present for MedInventory, not even an explicit nil
+func (o *MachineLldpNeighbor) UnsetMedInventory() {
+	o.MedInventory.Unset()
 }
 
 func (o MachineLldpNeighbor) MarshalJSON() ([]byte, error) {
@@ -418,8 +429,8 @@ func (o MachineLldpNeighbor) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.RemotePortValue) {
 		toSerialize["remotePortValue"] = o.RemotePortValue
 	}
-	if !IsNil(o.MedInventory) {
-		toSerialize["medInventory"] = o.MedInventory
+	if o.MedInventory.IsSet() {
+		toSerialize["medInventory"] = o.MedInventory.Get()
 	}
 	return toSerialize, nil
 }
