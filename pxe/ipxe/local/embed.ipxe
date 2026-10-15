@@ -14,21 +14,21 @@ echo ${bold}${white}NICo${boldoff} - ${version}
 prompt --key p --timeout 4000 Hit the ${bold}p${boldoff} key to open NICo menu... && goto nico_menu || goto nico
 
 :whoami
-ifconf -c dhcp
-# nico-pxe identifies the booting machine by its client IP (read from
-# X-Forwarded-For when proxied, TCP socket peer otherwise) and resolves
-# to a machine_interface_id via find_by_ip. iPXE doesn't need to encode
-# anything identity-related in the URL -- the network layer carries it.
-# next-server is an IPv4 address from DHCP, so use the standard HTTP port
-# exposed by the PXE service instead of the container's internal port.
-time chain --autofree http://${next-server}/api/v0/pxe/whoami
+set nico-after-network whoami_ready
+goto configure_network
+
+:whoami_ready
+time chain --autofree ${nico-pxe-base}/api/v0/pxe/whoami
 goto nico_menu
 
 :nico
-ifconf -c dhcp
+set nico-after-network nico_ready
+goto configure_network
+
+:nico_ready
 imgfree nico-boot ||
 set nico-retry-provisioning 0
-time chain --name nico-boot http://${next-server}/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} && exit 1 || goto retry_nico_boot
+time chain --name nico-boot ${nico-pxe-base}/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} && exit 1 || goto retry_nico_boot
 
 # Core sets this flag to 1 when the response consumes a one-time custom PXE request.
 :retry_nico_boot
@@ -36,6 +36,35 @@ iseq ${nico-retry-provisioning} 1 || goto error_handler
 imgstat nico-boot || goto error_handler
 prompt --key p --timeout 30000 Hit the ${bold}p${boldoff} key to open NICo menu; retrying in 30 seconds... && goto nico_menu ||
 time imgexec nico-boot && exit 1 || goto retry_nico_boot
+
+:configure_network
+# This configuration pass can switch families; clear any previous HTTP binding.
+clear http-source6
+# Try DHCPv4 first to preserve the boot path on dual-stack networks.
+ifconf -c dhcp || goto configure_ipv6
+# NICo's DHCPv4 boot endpoint uses the standard HTTP port (80).
+set nico-pxe-base http://${next-server}
+goto ${nico-after-network}
+
+:configure_ipv6
+# Without a configured network, return to firmware instead of retrying a fetch.
+ifconf -c ipv6 || exit 1
+# Core looks up HTTP clients by the DHCPv6 lease; SLAAC may add another address.
+isset ${netX.dhcpv6/ip6} || goto missing_ipv6_lease
+isset ${cwuri} || goto missing_boot_uri
+set http-source6 ${netX.dhcpv6/ip6}%${netX/ifname}
+# The server named by `cwuri` must also serve `/api/v0/pxe/`. An empty base
+# reuses that URI's scheme, server, and port.
+clear nico-pxe-base
+goto ${nico-after-network}
+
+:missing_ipv6_lease
+echo NICo IPv6 boot requires a stateful DHCPv6 lease.
+exit 1
+
+:missing_boot_uri
+echo NICo IPv6 boot requires an inherited HTTP boot URI.
+exit 1
 
 :nico_menu
 menu NICo - ${hostname}
