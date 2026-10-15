@@ -563,6 +563,13 @@ int set_lease6_selected_hwaddr(CalloutHandle &handle, Lease6Ptr lease6,
     return 1;
   }
 
+  // The Core allocation is an address, never a delegated prefix. Refuse
+  // non-NA leases even if Kea has a prefix pool configured.
+  if (lease6->type_ != Lease::TYPE_NA) {
+    handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
+    return 1;
+  }
+
   boost::shared_ptr<Machine> machine;
   try {
     handle.getContext("machine", machine);

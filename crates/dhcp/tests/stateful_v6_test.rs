@@ -491,6 +491,60 @@ fn stateful_lifecycle_keeps_kea_on_the_api_address() -> Result<(), eyre::Report>
     Ok(())
 }
 
+#[test]
+fn mixed_address_and_prefix_requests_keep_address_lease() -> Result<(), eyre::Report> {
+    // Exercise native NoPrefixAvail and refusal of an otherwise allocatable PD lease.
+    for prefix_pool in [false, true] {
+        let h = Harness::new_with_config(Kea6Config {
+            prefix_pool,
+            ..Kea6Config::default()
+        });
+        let idx = 42;
+        let address = DHCPv6Factory::mock_addr(idx);
+        let advertise = send_and_recv_v6(
+            &h.socket,
+            DHCPv6Factory::with_ia_pd(DHCPv6Factory::solicit(idx), idx),
+        )?
+        .expect("Kea must answer the address request despite unavailable prefix delegation");
+        assert_eq!(advertise.msg_type(), v6::MessageType::Advertise);
+        assert_address_with_no_prefix(&advertise, address, idx);
+        let server_id = DHCPv6Factory::server_id(&advertise);
+
+        for (exchange, packet) in [
+            (
+                "REQUEST",
+                DHCPv6Factory::request(idx, server_id.clone(), address),
+            ),
+            ("RENEW", DHCPv6Factory::renew(idx, server_id, address)),
+            ("REBIND", DHCPv6Factory::rebind(idx, address)),
+        ] {
+            let response = send_and_recv_v6(&h.socket, DHCPv6Factory::with_ia_pd(packet, idx))?
+                .unwrap_or_else(|| panic!("Kea did not respond to mixed {exchange}"));
+            assert_eq!(response.msg_type(), v6::MessageType::Reply, "{exchange}");
+            assert_address_with_no_prefix(&response, address, idx);
+            h.wait_for_active_lease(address, &DHCPv6Factory::duid_ll_hex(idx))?;
+        }
+        let leases = h.read_leases()?;
+        assert_eq!(leases.len(), 1, "No delegated prefix may be persisted");
+        assert_eq!(leases[0].lease_type, KEA_LEASE_TYPE_NA);
+        assert_eq!(h.api_server.calls_for(ENDPOINT_DISCOVER_DHCP), 1);
+    }
+    Ok(())
+}
+
+fn assert_address_with_no_prefix(response: &v6::Message, address: Ipv6Addr, idx: u8) {
+    assert_eq!(DHCPv6Factory::ia_addr(response), Some(address));
+    let Some(DhcpOption::IAPD(prefix)) = response.opts().get(OptionCode::IAPD) else {
+        panic!("Missing IA_PD response: {response:?}");
+    };
+    assert_eq!(prefix.id, u32::from(idx));
+    assert!(prefix.opts.get(OptionCode::IAPrefix).is_none());
+    match prefix.opts.get(OptionCode::StatusCode) {
+        Some(DhcpOption::StatusCode(status)) => assert_eq!(status.status, Status::NoPrefixAvail),
+        other => panic!("Expected IA_PD-scoped NoPrefixAvail, got {other:?}"),
+    }
+}
+
 /// Verify valid non-MAC DUIDs fail at the trusted relay-identity boundary.
 ///
 /// DUID-EN and DUID-UUID are valid identifiers, but neither may select a
