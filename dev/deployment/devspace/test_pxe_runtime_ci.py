@@ -26,10 +26,17 @@ class PxeRuntimeCiTests(unittest.TestCase):
             ".github/workflows/ci.yaml", yaml.safe_load(filters)["pxe_kustomize"]
         )
 
-    def test_release_image_runs_pxe_runtime_regression(self):
+    def test_non_publishing_release_image_runs_pxe_runtime_regression(self):
         ci = yaml.safe_load((ROOT / ".github/workflows/ci.yaml").read_text())
         release = ci["jobs"]["build-release-container-x86_64"]
-        self.assertTrue(release["with"].get("test_pxe_boot_artifacts"))
+        self.assertEqual(
+            release["with"]["test_pxe_boot_artifacts"],
+            "${{ needs.prepare.outputs.publish_images != 'true' }}",
+        )
+        self.assertEqual(
+            release["with"]["push"],
+            "${{ needs.prepare.outputs.publish_images == 'true' }}",
+        )
         workflow = yaml.safe_load(
             (ROOT / ".github/workflows/docker-build.yml").read_text()
         )

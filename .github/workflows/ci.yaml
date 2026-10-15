@@ -865,7 +865,8 @@ jobs:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
       target_prebuild_login: ${{ needs.prepare.outputs.bases_rebuilt == 'true' && needs.prepare.outputs.publish_images == 'true' }}
       dockerfile_path: dev/docker/Dockerfile.release-container-x86_64
-      test_pxe_boot_artifacts: true
+      # Keep kind and public tool downloads out of the image publication path.
+      test_pxe_boot_artifacts: ${{ needs.prepare.outputs.publish_images != 'true' }}
       context_path: .
       # No layer cache: the Dockerfile does `COPY . ./` before the compile, so
       # any new commit invalidates the builder layer and the expensive cargo
