@@ -17,7 +17,7 @@
 
 use crate::hw::BiosAttr;
 
-pub const EXPECTED_BIOS_ATTRS: [BiosAttr; 14] = [
+pub const EXPECTED_BIOS_ATTRS: [BiosAttr; 15] = [
     BiosAttr::new_str("InBandManageabilityInterface", "Disabled"),
     BiosAttr::new_str("UefiVariableAccess", "Standard"),
     BiosAttr::new_any_str("SerialComm", &["OnConRedirAuto", "OnConRedir"]), // Second is legacy
@@ -32,4 +32,5 @@ pub const EXPECTED_BIOS_ATTRS: [BiosAttr; 14] = [
     BiosAttr::new_str("HttpDev1EnDis", "Enabled"),
     BiosAttr::new_str("HttpDev1TlsMode", "None"),
     BiosAttr::new_str("PxeDev1EnDis", "Disabled"),
+    BiosAttr::new_str("BootSeqRetry", "Enabled"),
 ];
