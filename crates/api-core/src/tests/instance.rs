@@ -73,7 +73,6 @@ use model::network_segment::{
     NewNetworkSegment,
 };
 use model::resource_pool::{OwnerType, ResourcePoolEntryState};
-use model::tenant::TenantOrganizationId;
 use model::test_support::ManagedHostConfig;
 use model::vpc_prefix::VpcPrefixConfig;
 use rpc::forge::{
@@ -2564,8 +2563,7 @@ async fn test_allocate_network_vpc_prefix_id(_: PgPoolOptions, options: PgConnec
     assert!(config.network.interfaces[0].network_segment_id.is_none());
 
     let mut txn = env.db_txn().await;
-    let tenant_organization_id = config.tenant.tenant_organization_id.clone();
-    allocate_network(&mut config.network, &tenant_organization_id, &mut txn)
+    allocate_network(&mut config.network, &mut txn)
         .await
         .unwrap();
 
@@ -3167,16 +3165,15 @@ async fn allocate_test_network_segment(
         .await
 }
 
-/// Verifies automatic selection remains deterministic and tenant-scoped across
+/// Verifies automatic selection remains deterministic across
 /// every supported address-family mode.
 #[crate::sqlx_test]
 async fn test_auto_vpc_prefix_selection_uses_static_first_fit(pool: PgPool) {
     let fixture = create_auto_vpc_selection_fixture(pool).await;
 
-    // Consume the original IPv4 capacity while checking first-fit, ownership,
+    // Consume the original IPv4 capacity while checking first-fit,
     // persisted RPC projection, and final exhaustion.
     assert_static_ipv4_first_fit(&fixture).await;
-    assert_explicit_prefix_tenant_ownership(&fixture).await;
     allocate_and_assert_auto_vpc_instance(&fixture).await;
     assert_ipv4_candidates_exhausted(&fixture).await;
 
@@ -3244,13 +3241,9 @@ async fn test_slaac_vpc_allocation_preserves_prefix_without_ipv6_address(pool: P
         .insert(persisted_prefix.id, historical_prefix);
     let expected_historical_config = historical_config.clone();
     let mut txn = fixture.env.db_txn().await;
-    allocate_network(
-        &mut historical_config,
-        &fixture.tenant_organization_id,
-        txn.as_mut(),
-    )
-    .await
-    .unwrap();
+    allocate_network(&mut historical_config, txn.as_mut())
+        .await
+        .unwrap();
     assert_eq!(historical_config, expected_historical_config);
     let replayed_prefixes = db::network_prefix::find_allocation_occupancy(
         txn.as_mut(),
@@ -3316,7 +3309,7 @@ async fn test_slaac_vpc_allocation_preserves_prefix_without_ipv6_address(pool: P
         ),
     ] {
         let mut txn = fixture.env.db_txn().await;
-        let error = allocate_network(&mut config, &fixture.tenant_organization_id, &mut txn)
+        let error = allocate_network(&mut config, &mut txn)
             .await
             .expect_err(scenario);
         assert!(
@@ -3338,13 +3331,9 @@ async fn test_slaac_vpc_allocation_preserves_prefix_without_ipv6_address(pool: P
     let mut explicit_config =
         InstanceNetworkConfig::for_vpc_prefix_id(ipv6_prefix_id, Some(fixture.vpc_id));
     let mut txn = fixture.env.db_txn().await;
-    allocate_network(
-        &mut explicit_config,
-        &fixture.tenant_organization_id,
-        txn.as_mut(),
-    )
-    .await
-    .unwrap();
+    allocate_network(&mut explicit_config, txn.as_mut())
+        .await
+        .unwrap();
     let explicit_interface = &explicit_config.interfaces[0];
     assert!(explicit_interface.ip_addrs.is_empty());
     assert!(explicit_interface.interface_prefixes.is_empty());
@@ -3527,13 +3516,9 @@ async fn test_slaac_vpc_allocation_preserves_prefix_without_ipv6_address(pool: P
     let mut retried_network = snapshot.config.network.clone();
     let expected_network = retried_network.clone();
     let mut txn = fixture.env.db_txn().await;
-    allocate_network(
-        &mut retried_network,
-        &fixture.tenant_organization_id,
-        txn.as_mut(),
-    )
-    .await
-    .unwrap();
+    allocate_network(&mut retried_network, txn.as_mut())
+        .await
+        .unwrap();
     assert_eq!(retried_network, expected_network);
     txn.rollback().await.unwrap();
 
@@ -3733,13 +3718,9 @@ async fn test_slaac_vpc_allocation_preserves_prefix_without_ipv6_address(pool: P
     let mut exhausted_config =
         automatic_network_config(fixture.vpc_id, InstanceInterfaceIpFamilyMode::Ipv6Only);
     let mut txn = fixture.env.db_txn().await;
-    let error = allocate_network(
-        &mut exhausted_config,
-        &fixture.tenant_organization_id,
-        txn.as_mut(),
-    )
-    .await
-    .unwrap_err();
+    let error = allocate_network(&mut exhausted_config, txn.as_mut())
+        .await
+        .unwrap_err();
     assert!(matches!(
         error,
         crate::CarbideError::ResourceExhausted(message)
@@ -4067,7 +4048,6 @@ async fn test_auto_vpc_prefix_selection_retries_concurrent_network_prefix_insert
     let allocation_task = tokio::spawn(allocate_automatic_ipv4_network(
         fixture.env.pool.clone(),
         fixture.vpc_id,
-        fixture.tenant_organization_id.clone(),
     ));
     wait_until_query_blocked_by(
         &fixture.env.pool,
@@ -4134,7 +4114,6 @@ async fn test_auto_vpc_prefix_selection_rechecks_concurrent_candidate_deletion(p
     let allocation_task = tokio::spawn(allocate_automatic_ipv4_network(
         fixture.env.pool.clone(),
         fixture.vpc_id,
-        fixture.tenant_organization_id.clone(),
     ));
     wait_until_query_blocked_by(&fixture.env.pool, blocker_pid, "FOR NO KEY UPDATE").await;
     blocker.commit().await.unwrap();
@@ -4155,13 +4134,10 @@ async fn test_auto_vpc_prefix_selection_freezes_concurrent_candidate_insert(pool
 
     // Exhaust both existing candidates before arranging the discovery boundary.
     assert_static_ipv4_first_fit(&fixture).await;
-    let final_original_allocation = allocate_automatic_ipv4_network(
-        fixture.env.pool.clone(),
-        fixture.vpc_id,
-        fixture.tenant_organization_id.clone(),
-    )
-    .await
-    .unwrap();
+    let final_original_allocation =
+        allocate_automatic_ipv4_network(fixture.env.pool.clone(), fixture.vpc_id)
+            .await
+            .unwrap();
     assert_eq!(
         final_original_allocation.interfaces[0].network_details,
         Some(NetworkDetails::VpcPrefixId(fixture.higher_ipv4_prefix_id)),
@@ -4190,7 +4166,6 @@ async fn test_auto_vpc_prefix_selection_freezes_concurrent_candidate_insert(pool
     let allocation_task = tokio::spawn(allocate_automatic_ipv4_network(
         fixture.env.pool.clone(),
         fixture.vpc_id,
-        fixture.tenant_organization_id.clone(),
     ));
     wait_until_query_blocked_by(&fixture.env.pool, blocker_pid, "FOR NO KEY UPDATE").await;
 
@@ -4208,61 +4183,101 @@ async fn test_auto_vpc_prefix_selection_freezes_concurrent_candidate_insert(pool
     // fresh request discovers and allocates from the newly committed candidate.
     let error = allocation_task.await.unwrap().unwrap_err();
     assert!(matches!(error, crate::CarbideError::ResourceExhausted(_)));
-    let retried = allocate_automatic_ipv4_network(
-        fixture.env.pool.clone(),
-        fixture.vpc_id,
-        fixture.tenant_organization_id.clone(),
-    )
-    .await
-    .unwrap();
+    let retried = allocate_automatic_ipv4_network(fixture.env.pool.clone(), fixture.vpc_id)
+        .await
+        .unwrap();
     assert_eq!(
         retried.interfaces[0].network_details,
         Some(NetworkDetails::VpcPrefixId(inserted_prefix_id)),
     );
 }
 
-/// Verifies a VPC-only selector cannot bypass tenant ownership checks at the
-/// public RPC boundary.
+/// Verifies trusted Core callers can allocate either selector across tenants and
+/// that ownership, selector intent, and generated resources survive a public re-read.
 #[crate::sqlx_test]
-async fn test_auto_vpc_prefix_selection_rejects_cross_tenant_rpc_request(pool: PgPool) {
-    const OTHER_TENANT: &str = "auto-prefix-selection-other-tenant";
+async fn test_cross_tenant_vpc_selectors_persist_allocations(pool: PgPool) {
+    const CONSUMER_TENANT: &str = "cross-tenant-vpc-consumer";
 
-    // Create a valid second tenant and an allocatable host so only VPC ownership fails.
+    // Keep the VPC under its original owner and create a distinct Instance tenant.
     let fixture = create_auto_vpc_selection_fixture(pool).await;
-    create_fixture_tenant(&fixture.env, OTHER_TENANT)
+    create_fixture_tenant(&fixture.env, CONSUMER_TENANT)
         .await
         .unwrap();
-    let managed_host = create_managed_host(&fixture.env).await;
+    let cases = [
+        // Automatic selection must preserve caller intent alongside its resolved Prefix.
+        ("automatic VPC", true),
+        // Explicit selection must accept foreign ownership without requiring automatic intent.
+        ("explicit Prefix", false),
+    ];
+    for (scenario, automatic) in cases {
+        let managed_host = create_managed_host(&fixture.env).await;
+        let network = if automatic {
+            automatic_ipv4_rpc_network_config(fixture.vpc_id)
+        } else {
+            single_interface_network_config_with_vpc_prefix(fixture.lower_ipv4_prefix_id)
+        };
 
-    // Request the owning tenant's VPC from a different valid tenant through AllocateInstance.
-    let error = fixture
-        .env
-        .api
-        .allocate_instance(
-            InstanceAllocationRequest::builder(false)
-                .machine_id(managed_host.id)
-                .config(
-                    InstanceConfig::default_tenant_and_os()
-                        .tenant(rpc::TenantConfig {
-                            tenant_organization_id: OTHER_TENANT.to_string(),
-                            ..default_tenant_config()
-                        })
-                        .network(automatic_ipv4_rpc_network_config(fixture.vpc_id)),
-                )
-                .tonic_request(),
+        // Allocate through the public RPC and reconcile to populate persisted address state.
+        let instance = managed_host
+            .instance_builer(&fixture.env)
+            .tenant_org(CONSUMER_TENANT)
+            .network(network)
+            .build()
+            .await;
+        let persisted = instance.rpc_instance().await;
+        assert_eq!(
+            persisted.config().tenant().tenant_organization_id,
+            CONSUMER_TENANT,
+            "{scenario}",
+        );
+        let interface = &persisted.config().network().interfaces[0];
+        if automatic {
+            assert_ipv4_auto_rpc_resolution(
+                persisted.inner(),
+                fixture.vpc_id,
+                fixture.lower_ipv4_prefix_id,
+            );
+        } else {
+            assert_eq!(
+                interface.network_details,
+                Some(
+                    rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId(
+                        fixture.lower_ipv4_prefix_id,
+                    )
+                ),
+            );
+        }
+        assert!(
+            !persisted.status().network().interfaces[0]
+                .addresses
+                .is_empty()
+        );
+
+        // The generated segment must belong to the selected VPC, not the Instance tenant.
+        let mut txn = fixture.env.db_txn().await;
+        let segment = db::network_segment::find_by(
+            txn.as_mut(),
+            ObjectColumnFilter::One(IdColumn, &interface.network_segment_id.unwrap()),
+            NetworkSegmentSearchConfig::default(),
         )
         .await
-        .unwrap_err();
-
-    // Ownership failure must retain its precise public status and diagnostic.
-    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-    assert_eq!(
-        error.message(),
-        format!(
-            "VPC `{}` is not owned by tenant `{OTHER_TENANT}`",
-            fixture.vpc_id
-        ),
-    );
+        .unwrap()
+        .pop()
+        .unwrap();
+        assert_eq!(segment.config.vpc_id, Some(fixture.vpc_id), "{scenario}");
+        assert_eq!(
+            segment.prefixes[0].vpc_prefix_id,
+            Some(fixture.lower_ipv4_prefix_id)
+        );
+        assert_eq!(
+            db::instance_address::count_by_segment_id(&mut txn, &segment.id)
+                .await
+                .unwrap(),
+            1,
+            "{scenario}",
+        );
+        txn.rollback().await.unwrap();
+    }
 }
 
 /// Verifies force deletion recognizes automatic-selector resources so generated
@@ -4357,7 +4372,6 @@ struct AutoVpcSelectionFixture {
     lower_ipv4_prefix_id: VpcPrefixId,
     lower_ipv4_prefix: IpNetwork,
     higher_ipv4_prefix_id: VpcPrefixId,
-    tenant_organization_id: TenantOrganizationId,
 }
 
 /// Holds fresh per-family candidates added after IPv4 exhaustion so future
@@ -4439,7 +4453,6 @@ async fn create_auto_vpc_selection_fixture_with_slaac(
         lower_ipv4_prefix_id: lower_prefix_id,
         lower_ipv4_prefix: lower_prefix,
         higher_ipv4_prefix_id: higher_prefix_id,
-        tenant_organization_id: FIXTURE_TENANT_ORG_ID.parse().unwrap(),
     }
 }
 
@@ -4455,13 +4468,9 @@ async fn assert_static_ipv4_first_fit(fixture: &AutoVpcSelectionFixture) {
         let mut network_config =
             automatic_network_config(fixture.vpc_id, InstanceInterfaceIpFamilyMode::Ipv4Only);
         let mut txn = fixture.env.db_txn().await;
-        allocate_network(
-            &mut network_config,
-            &fixture.tenant_organization_id,
-            &mut txn,
-        )
-        .await
-        .unwrap();
+        allocate_network(&mut network_config, &mut txn)
+            .await
+            .unwrap();
 
         // Resolution uses the rolling-compatible explicit fields internally.
         let interface = &network_config.interfaces[0];
@@ -4472,33 +4481,6 @@ async fn assert_static_ipv4_first_fit(fixture: &AutoVpcSelectionFixture) {
         assert!(interface.network_segment_id.is_some());
         txn.commit().await.unwrap();
     }
-}
-
-/// Verifies shared allocation logic does not weaken tenant ownership when a
-/// request selects a prefix explicitly.
-async fn assert_explicit_prefix_tenant_ownership(fixture: &AutoVpcSelectionFixture) {
-    // Request an existing explicit prefix under a different tenant identity.
-    let mut explicit_config = InstanceNetworkConfig::for_vpc_prefix_id(
-        fixture.higher_ipv4_prefix_id,
-        Some(fixture.vpc_id),
-    );
-    let wrong_tenant_organization_id = "another-tenant".parse().unwrap();
-    let mut txn = fixture.env.db_txn().await;
-    let error = allocate_network(
-        &mut explicit_config,
-        &wrong_tenant_organization_id,
-        &mut txn,
-    )
-    .await
-    .unwrap_err();
-
-    // The failure must identify ownership rather than allocation capacity.
-    assert!(matches!(
-        error,
-        crate::CarbideError::FailedPrecondition(message)
-            if message.contains("is not owned by tenant")
-    ));
-    txn.rollback().await.unwrap();
 }
 
 /// Allocates one instance through the public automatic VPC selector.
@@ -4553,13 +4535,9 @@ async fn assert_ipv4_candidates_exhausted(fixture: &AutoVpcSelectionFixture) {
     let mut exhausted_config =
         automatic_network_config(fixture.vpc_id, InstanceInterfaceIpFamilyMode::Ipv4Only);
     let mut txn = fixture.env.db_txn().await;
-    let error = allocate_network(
-        &mut exhausted_config,
-        &fixture.tenant_organization_id,
-        &mut txn,
-    )
-    .await
-    .unwrap_err();
+    let error = allocate_network(&mut exhausted_config, &mut txn)
+        .await
+        .unwrap_err();
     assert!(matches!(error, crate::CarbideError::ResourceExhausted(_)));
     txn.rollback().await.unwrap();
 }
@@ -4898,11 +4876,10 @@ fn automatic_network_config(
 async fn allocate_automatic_ipv4_network(
     pool: PgPool,
     vpc_id: VpcId,
-    tenant_organization_id: TenantOrganizationId,
 ) -> Result<InstanceNetworkConfig, crate::CarbideError> {
     let mut config = automatic_network_config(vpc_id, InstanceInterfaceIpFamilyMode::Ipv4Only);
     let mut txn = pool.begin().await.unwrap();
-    let result = allocate_network(&mut config, &tenant_organization_id, txn.as_mut()).await;
+    let result = allocate_network(&mut config, txn.as_mut()).await;
 
     // Commit successful generated resources; failed attempts must leave no outer effects.
     match result {

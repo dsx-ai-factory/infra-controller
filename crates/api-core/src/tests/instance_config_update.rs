@@ -3881,8 +3881,8 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
         );
     }
 
-    // Ownership validation must precede the SLAAC policy error so an update
-    // cannot disclose another tenant's VPC mode.
+    // A foreign Prefix is eligible for attachment, but its SLAAC policy must
+    // still reject an explicit IPv6 address before any update is persisted.
     let foreign_tenant_organization_id = "slaac-update-foreign-tenant";
     create_fixture_tenant(&env, foreign_tenant_organization_id)
         .await
@@ -3898,7 +3898,7 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
     .await;
     let managed_host = create_managed_host(&env).await;
     let metadata = rpc::Metadata {
-        name: "SLAAC update ownership validation".to_string(),
+        name: "Foreign SLAAC update validation".to_string(),
         ..Default::default()
     };
     let initial_config = rpc::InstanceConfig {
@@ -3921,6 +3921,11 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
         .build()
         .await;
 
+    // Capture active state so the rejected foreign request cannot silently mutate it.
+    let mut txn = env.db_txn().await;
+    let before = instance.db_instance(&mut txn).await;
+    txn.rollback().await.unwrap();
+
     let mut requested_config = initial_config;
     let mut requested_network =
         single_vpc_interface_network(NetworkDetails::VpcPrefixId(foreign_fixture.vpc_prefix_id));
@@ -3936,18 +3941,200 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
                 .tonic_request(),
         )
         .await
-        .expect_err("foreign VPC prefix must fail ownership validation");
-    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        .expect_err("foreign SLAAC VPC must reject an explicit IPv6 address");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
     assert!(
-        error.message().contains("which is not owned by tenant")
-            && !error.message().contains("has SLAAC enabled"),
-        "unexpected ownership error: {error}",
+        error.message().contains("has SLAAC enabled"),
+        "unexpected SLAAC error: {error}",
     );
 
+    // Rejection must preserve both active configuration and the absence of staged work.
     let mut txn = env.db_txn().await;
     let after = instance.db_instance(&mut txn).await;
     txn.rollback().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&after.config).unwrap(),
+        serde_json::to_value(&before.config).unwrap()
+    );
+    assert_eq!(after.config_version, before.config_version);
+    assert_eq!(after.network_config_version, before.network_config_version);
     assert!(after.update_network_config_request.is_none());
+}
+
+/// Verifies adding and removing a foreign Prefix VF preserves Instance ownership
+/// and frees its generated resources after reconciliation, avoiding cross-tenant leaks.
+#[crate::sqlx_test]
+async fn test_cross_tenant_vpc_prefix_update_releases_resources(pool: sqlx::PgPool) {
+    const VPC_OWNER: &str = "foreign-prefix-owner";
+
+    // Allocate the provider's primary interface separately from the customer's VPC.
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let tenant = default_tenant_config();
+    for tenant_id in [tenant.tenant_organization_id.as_str(), VPC_OWNER] {
+        create_fixture_tenant(&env, tenant_id).await.unwrap();
+    }
+    let own = create_fnn_vpc_prefix_fixture(
+        &env,
+        &tenant.tenant_organization_id,
+        "provider-vpc",
+        "provider-prefix",
+        "192.1.4.0/25",
+        false,
+    )
+    .await;
+    let foreign = create_fnn_vpc_prefix_fixture(
+        &env,
+        VPC_OWNER,
+        "customer-vpc",
+        "customer-prefix",
+        "192.1.4.128/25",
+        false,
+    )
+    .await;
+    let mh = create_managed_host(&env).await;
+    let metadata = rpc::Metadata {
+        name: "cross-tenant-prefix-update".to_string(),
+        ..Default::default()
+    };
+    let initial_config = rpc::InstanceConfig {
+        tenant: Some(tenant.clone()),
+        os: Some(default_os_config()),
+        network: Some(single_vpc_interface_network(NetworkDetails::VpcPrefixId(
+            own.vpc_prefix_id,
+        ))),
+        ..Default::default()
+    };
+    let instance = mh
+        .instance_builer(&env)
+        .config(initial_config.clone())
+        .metadata(metadata.clone())
+        .build()
+        .await;
+    let primary_segment = instance.rpc_instance().await.config().network().interfaces[0]
+        .network_segment_id
+        .unwrap();
+
+    // Include a requested address to exercise the update validator as well as allocation.
+    let mut attached_config = initial_config.clone();
+    let mut vf = single_vpc_interface_network(NetworkDetails::VpcPrefixId(foreign.vpc_prefix_id))
+        .interfaces
+        .remove(0);
+    vf.function_type = rpc::InterfaceFunctionType::Virtual as i32;
+    vf.virtual_function_id = Some(1);
+    vf.ip_address = Some("192.1.4.129".to_string());
+    attached_config
+        .network
+        .as_mut()
+        .unwrap()
+        .interfaces
+        .push(vf);
+    env.api
+        .update_instance_config(
+            InstanceConfigUpdateRequest::builder()
+                .instance_id(instance.id)
+                .config(attached_config)
+                .metadata(metadata.clone())
+                .tonic_request(),
+        )
+        .await
+        .unwrap();
+    env.run_machine_state_controller_iteration_network_config_return_to_ready(&mh, true)
+        .await;
+
+    // Re-read active state to prove the foreign attachment reached the selected VPC.
+    let active = instance.rpc_instance().await;
+    assert_eq!(
+        active.config().tenant().tenant_organization_id,
+        tenant.tenant_organization_id
+    );
+    assert_eq!(
+        active.config().network().interfaces[0].network_segment_id,
+        Some(primary_segment)
+    );
+    let foreign_segment = active.config().network().interfaces[1]
+        .network_segment_id
+        .unwrap();
+    assert_eq!(
+        active.status().network().interfaces[1].addresses,
+        vec!["192.1.4.129".to_string()]
+    );
+    let mut txn = env.db_txn().await;
+    let segment = db::network_segment::find_by(
+        txn.as_mut(),
+        db::ObjectColumnFilter::One(db::network_segment::IdColumn, &foreign_segment),
+        model::network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap()
+    .pop()
+    .unwrap();
+    assert_eq!(segment.config.vpc_id, Some(foreign.vpc_id));
+    assert_eq!(
+        segment.prefixes[0].vpc_prefix_id,
+        Some(foreign.vpc_prefix_id)
+    );
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &foreign_segment)
+            .await
+            .unwrap(),
+        1
+    );
+    txn.rollback().await.unwrap();
+
+    // Remove only the foreign VF through the public update and synchronize cleanup.
+    env.api
+        .update_instance_config(
+            InstanceConfigUpdateRequest::builder()
+                .instance_id(instance.id)
+                .config(initial_config)
+                .metadata(metadata)
+                .tonic_request(),
+        )
+        .await
+        .unwrap();
+    env.run_machine_state_controller_iteration_network_config_return_to_ready(&mh, false)
+        .await;
+
+    // The primary allocation survives while the foreign segment is retired and its address freed.
+    let remaining = instance.rpc_instance().await;
+    assert_eq!(remaining.config().network().interfaces.len(), 1);
+    assert_eq!(
+        remaining.config().network().interfaces[0].network_segment_id,
+        Some(primary_segment)
+    );
+    let mut txn = env.db_txn().await;
+    let retired = db::network_segment::find_by(
+        txn.as_mut(),
+        db::ObjectColumnFilter::One(db::network_segment::IdColumn, &foreign_segment),
+        model::network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap()
+    .pop()
+    .unwrap();
+    assert!(retired.is_marked_as_deleted());
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &foreign_segment)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &primary_segment)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        instance
+            .db_instance(&mut txn)
+            .await
+            .update_network_config_request
+            .is_none()
+    );
+    txn.rollback().await.unwrap();
 }
 
 /// Verifies VPC replacement, VF removal, and instance deletion release generated
