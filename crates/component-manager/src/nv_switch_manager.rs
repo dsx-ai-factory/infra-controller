@@ -433,22 +433,24 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
     ///
     /// The backend resets the bindings without requiring a working switch API
     /// endpoint, so stale client-CA trust cannot block recovery. `endpoints` must
-    /// contain at least one switch and `services` must be non-empty; backends that
-    /// support the operation return [`ComponentManagerError::InvalidArgument`]
-    /// otherwise, without dispatching work. `services` contains backend service
-    /// identifiers. A successful submission returns a non-empty, opaque job ID for
+    /// contain at least one switch and `services` must be non-empty.
+    /// `services` contains backend service identifiers. A successful submission
+    /// returns a non-empty, opaque job ID for
     /// [`Self::get_disable_switch_mtls_job_status`].
     ///
-    /// A failure to prepare the request, such as an unresolved switch identity,
-    /// returns [`ComponentManagerError::RejectedBeforeDispatch`]. If dispatch may
-    /// have reached the backend but no job ID is available, or the backend reports
-    /// the batch as failed, the implementation returns
+    /// A failure to prepare the request returns
+    /// [`ComponentManagerError::RejectedBeforeDispatch`], which establishes that no
+    /// work was dispatched. This includes an empty `endpoints` or `services` slice
+    /// and an unresolved switch identity. The default implementation returns
+    /// [`ComponentManagerError::Unsupported`], which also guarantees that no work
+    /// was dispatched.
+    ///
+    /// If dispatch may have reached the backend but no job ID is available, or the
+    /// backend reports the batch as failed, the implementation returns
     /// [`ComponentManagerError::OperationOutcomeUnknown`]. A failed batch can
     /// include a parent job ID covering only the accepted switches, so its
     /// diagnostic retains that ID without reporting complete-batch acceptance.
-    /// Callers must not automatically resubmit after an unknown outcome. The default implementation
-    /// returns [`ComponentManagerError::Unsupported`], which guarantees that no work
-    /// was dispatched.
+    /// Callers must not automatically resubmit after an unknown outcome.
     async fn batch_disable_switch_mtls(
         &self,
         _endpoints: &[SwitchEndpoint],

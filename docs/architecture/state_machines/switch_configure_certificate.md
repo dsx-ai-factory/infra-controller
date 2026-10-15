@@ -98,7 +98,7 @@ the state advances to `ConfigureCertificate` `Start`.
 | The credential store or database fails during that credential check | `StateHandlerError`; remain in `Start` and retry. |
 | `bmc_mac_address` is `None`, or the endpoint cannot be resolved | Transition to `Error`. |
 | CM returns `OperationOutcomeUnknown` on submission | Transition to `Error`; the submission is not retried. |
-| CM returns another error on submission | `StateHandlerError`; remain in `Start` and retry. |
+| CM returns `RejectedBeforeDispatch` or another error on submission | `StateHandlerError`; remain in `Start` and retry. `RejectedBeforeDispatch` establishes that RMS received nothing. |
 | CM returns `NotFound`, `OperationOutcomeUnknown`, or `Unsupported` on status | Transition to `Error`; certificate configuration is not submitted. |
 | CM returns another error on status | `StateHandlerError`; remain in `WaitForComplete` and retry. |
 | Component manager not configured while polling | Transition to `Error` (no job ID to resume); certificate configuration is not submitted. |
@@ -267,9 +267,11 @@ RMS job states are mapped in `map_rms_configure_switch_certificate_job_state`.
 
 The mTLS-disable path uses the last two RPCs:
 
-- **Submission:** `batch_disable_switch_mtls` must return a successful batch
-  status and a non-empty parent `job_id`. A gRPC `Unimplemented` status maps to
-  `Unsupported`. Any other RPC error, a missing response, a failed batch, or an
+- **Submission:** before the RPC, an empty endpoint or service list, or a
+  failure to resolve the switch identity, hostname, or node, returns
+  `RejectedBeforeDispatch` and sends nothing to RMS. The RPC must then return a
+  successful batch status and a non-empty parent `job_id`. A gRPC
+  `Unimplemented` status maps to `Unsupported`. Any other RPC error, a missing response, a failed batch, or an
   empty `job_id` maps to `OperationOutcomeUnknown`. A failed batch that carries a
   job ID keeps that ID in the error message for reconciliation.
 - **Status:** `summarize_rms_switch_job_tree` reduces the `get_job_status`
@@ -328,7 +330,7 @@ sequenceDiagram
         SCH->>SCH: skip, transition to ConfigureCertificate(Start)
     else OperationOutcomeUnknown
         SCH->>SCH: transition to Error (never resubmitted)
-    else other CM error
+    else RejectedBeforeDispatch or other CM error
         SCH->>SCH: StateHandlerError (retry next iteration in Start)
     end
 

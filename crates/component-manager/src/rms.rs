@@ -4036,13 +4036,13 @@ impl NvSwitchManager for RmsBackend {
         services: &[i32],
     ) -> Result<String, ComponentManagerError> {
         if endpoints.is_empty() {
-            return Err(ComponentManagerError::InvalidArgument(
+            return Err(ComponentManagerError::RejectedBeforeDispatch(
                 "switch mTLS disable requires at least one endpoint".to_string(),
             ));
         }
 
         if services.is_empty() {
-            return Err(ComponentManagerError::InvalidArgument(
+            return Err(ComponentManagerError::RejectedBeforeDispatch(
                 "switch mTLS disable requires at least one service".to_string(),
             ));
         }
@@ -9008,6 +9008,31 @@ mod tests {
             error,
             ComponentManagerError::RejectedBeforeDispatch(_)
         ));
+
+        assert!(mock.batch_disable_switch_mtls_calls().await.is_empty());
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn sw_batch_disable_switch_mtls_rejects_empty_input_before_dispatch(pool: sqlx::PgPool) {
+        let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
+        let endpoint = make_sw_endpoint(SW_MAC_1);
+        let services = [rms::SwitchService::NvueApi as i32];
+
+        let cases: [(&str, &[SwitchEndpoint], &[i32]); 2] = [
+            ("no endpoints", &[], &services),
+            ("no services", std::slice::from_ref(&endpoint), &[]),
+        ];
+
+        for (scenario, endpoints, services) in cases {
+            let error = NvSwitchManager::batch_disable_switch_mtls(&backend, endpoints, services)
+                .await
+                .expect_err(scenario);
+
+            assert!(
+                matches!(error, ComponentManagerError::RejectedBeforeDispatch(_)),
+                "{scenario}: {error:?}"
+            );
+        }
 
         assert!(mock.batch_disable_switch_mtls_calls().await.is_empty());
     }
