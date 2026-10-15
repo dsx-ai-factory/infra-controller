@@ -8223,7 +8223,7 @@ paths:
 
         Org must have an Infrastructure Provider entity that owns the Instance Type and the Machine. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
-        The Machine's capabilities must be a superset of the Instance Type's required capabilities for the association to succeed.
+        Each capability specified by the Instance Type must have a matching capability on the Machine. Specified fields—including count, cores, and threads—require exact equality; omitted or null optional fields impose no constraint. The Machine may have additional capabilities that the Instance Type does not specify.
       requestBody:
         content:
           application/json:
@@ -20386,8 +20386,10 @@ components:
             - 'null'
           description: 'Org of the Tenant'
         tenantContact:
-          $ref: '#/components/schemas/User'
-          description: 'Contact user for the Tenant'
+          oneOf:
+            - $ref: '#/components/schemas/User'
+            - type: 'null'
+          description: 'Contact user for the Tenant.'
         allocationCount:
           type: integer
           description: 'Number of Allocations for the Tenant Account'
@@ -21490,8 +21492,10 @@ components:
             - 'null'
           description: ID of the Network Security Group attached to the VPC
         networkSecurityGroupPropagationDetails:
-          $ref: '#/components/schemas/NetworkSecurityGroupPropagationDetails'
-          description: Propagation details for the attached Network Security Group
+          oneOf:
+            - $ref: '#/components/schemas/NetworkSecurityGroupPropagationDetails'
+            - type: 'null'
+          description: Propagation details for the attached Network Security Group. Null when no propagation details are available, including when no Network Security Group is attached
         nvLinkLogicalPartitionId:
           type:
             - string
@@ -24322,7 +24326,8 @@ components:
           type:
             - string
             - 'null'
-          description: 'Device Type of the Capability component, if available'
+          enum: [DPU, SpectrumX, NVLink, null]
+          description: 'Optional device type. `Network` accepts `DPU` or `SpectrumX`; `GPU` accepts `NVLink`; other capability types require omission or null. Omitted or null leaves device type unconstrained for every capability type. Empty strings are rejected'
     Instance:
       title: Instance
       type: object
@@ -28816,9 +28821,10 @@ components:
           type:
             - string
             - 'null'
-          description: Optional message describing the reason for moving Machine into maintenance mode. Can be updated by Provider or privileged Tenant.
+          description: Describes the reason for moving Machine into maintenance mode. Required when `setMaintenanceMode` is `true`. Omit or set to null when `setMaintenanceMode` is omitted, null, or `false`; a non-null message is rejected in those cases. Can be updated by Provider or privileged Tenant.
           minLength: 5
           maxLength: 256
+          pattern: '[^ \t\n\f\r]'
         labels:
           description: 'Machine labels will be overwritten, include existing labels to preserve them. Can be updated by Provider or privileged Tenant.'
           $ref: '#/components/schemas/Labels'
@@ -29534,7 +29540,7 @@ components:
       description: |-
         Associates one or more Machines with an Instance Type.
 
-        The Machine's capabilities must be a superset of the Instance Type's required capabilities for the association to succeed.
+        Each capability specified by the Instance Type must have a matching capability on the Machine. Specified fields—including count, cores, and threads—require exact equality; omitted or null optional fields impose no constraint. The Machine may have additional capabilities that the Instance Type does not specify.
       examples:
         - machineIds:
             - fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
@@ -33523,9 +33529,7 @@ components:
       properties:
         source:
           type: string
-          description: Source of the error.
-          enum:
-            - nico
+          description: 'Source of the error, taken from the deployment configuration `api.name` (default `nico`). This is a configurable string, for example `nico` or `carbide`'
         message:
           type: string
           description: Message describing the error

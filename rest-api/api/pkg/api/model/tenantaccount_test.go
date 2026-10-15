@@ -13,6 +13,7 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAPITenantAccountCreateRequest_Validate(t *testing.T) {
@@ -544,6 +545,14 @@ func TestAPITenantAccountNew(t *testing.T) {
 			assert.Equal(t, tc.apiObj.TenantID, got.TenantID)
 			assert.Equal(t, tc.apiObj.TenantOrg, got.TenantOrg)
 			assert.Equal(t, tc.apiObj.TenantContact, got.TenantContact)
+			encoded, err := json.Marshal(got)
+			require.NoError(t, err)
+			var response map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(encoded, &response))
+			require.Contains(t, response, "tenantContact")
+			contact, err := json.Marshal(tc.apiObj.TenantContact)
+			require.NoError(t, err)
+			assert.JSONEq(t, string(contact), string(response["tenantContact"]))
 			assert.Equal(t, tc.apiObj.AllocationCount, got.AllocationCount)
 			assert.Equal(t, tc.apiObj.Status, got.Status)
 			assert.Equal(t, tc.apiObj.StatusHistory, got.StatusHistory)
