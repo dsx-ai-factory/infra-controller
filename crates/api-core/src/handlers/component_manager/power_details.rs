@@ -30,6 +30,8 @@ use super::{
 use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 
+mod actions;
+
 // Bound request memory and hardware fan-out. The five-second snapshot budget
 // includes pool acquisition. After it completes, queued targets, credentials,
 // and hardware reads share fifteen seconds; no portion is reserved per target.
@@ -54,15 +56,15 @@ enum PowerReadEndpoint {
     Shelf(db::power_shelf::PowerShelfEndpointRow),
 }
 
-/// `PendingDetails` keeps policy and identity while a hardware read is pending.
-/// Without an endpoint, its existing error and desired policy return unchanged.
+/// `PendingDetails` keeps identity, policy and actions while hardware is read.
+/// Without an endpoint, its existing error and saved details return unchanged.
 struct PendingDetails {
     details: rpc::ComponentPowerDetails,
     endpoint: Option<PowerReadEndpoint>,
 }
 
-/// Loads identity and policy in one snapshot, then releases it before bounded
-/// credential and hardware reads. Each target retains its independent policy.
+/// Loads identity, policy and tracked maintenance in one snapshot, then releases
+/// it before bounded credential and hardware reads. Saved details remain intact.
 pub(crate) async fn get_component_power_details(
     api: &Api,
     request: Request<rpc::GetComponentPowerDetailsRequest>,
@@ -108,6 +110,8 @@ pub(crate) async fn get_component_power_details(
     let mut entries = stream::iter(snapshot.into_iter().enumerate())
         .map(|(index, mut pending)| async move {
             if let Some(endpoint) = pending.endpoint {
+                // Live-read failures replace only actual; saved policy and
+                // tracked actions remain available from the snapshot.
                 // An already-ready future can finish before timeout_at checks
                 // expiry; queued targets must not start work after the deadline.
                 pending.details.actual = Some(if tokio::time::Instant::now() >= deadline {
@@ -161,11 +165,11 @@ fn validate_ids<Id: Eq + Hash>(ids: &[Id]) -> Result<(), CarbideError> {
     Ok(())
 }
 
-/// `load_snapshot` reads identity and policy in request order within one read-only
-/// transaction, releasing it before credential lookup or hardware I/O.
+/// `load_snapshot` reads identity, policy and maintenance in request order within
+/// one read-only transaction, releasing it before credentials or hardware I/O.
 async fn load_snapshot(api: &Api, target: Target) -> Result<Vec<PendingDetails>, CarbideError> {
     let mut txn = api.txn_begin().await?;
-    // Policy and identity must come from the same snapshot, without row locks.
+    // Policy, identity and maintenance must share a snapshot, without row locks.
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .execute(txn.as_pgconn())
         .await
@@ -209,6 +213,10 @@ async fn load_snapshot(api: &Api, target: Target) -> Result<Vec<PendingDetails>,
                         id.to_string(),
                         endpoint,
                         desired_policy(policies.get(&id).copied()),
+                        actions::machine(
+                            &machine.state.value,
+                            machine.machine_maintenance_requested.as_ref(),
+                        ),
                     )
                 })
                 .collect()
@@ -219,20 +227,26 @@ async fn load_snapshot(api: &Api, target: Target) -> Result<Vec<PendingDetails>,
                 db::ObjectColumnFilter::List(db::switch::IdColumn, &list.ids),
             )
             .await?;
-            let managed: HashSet<_> = switches.into_iter().map(|switch| switch.id).collect();
+            let managed: HashMap<_, _> = switches
+                .into_iter()
+                .map(|switch| (switch.id, switch))
+                .collect();
+            let requests =
+                db::switch::find_maintenance_requests(txn.as_pgconn(), &list.ids).await?;
             let rows = db::switch::find_switch_endpoints_by_ids(txn.as_pgconn(), &list.ids).await?;
             let mut endpoints: HashMap<_, _> =
                 rows.into_iter().map(|row| (row.switch_id, row)).collect();
             list.ids
                 .into_iter()
                 .map(|id| {
-                    if !managed.contains(&id) {
+                    let Some(switch) = managed.get(&id) else {
                         return PendingDetails::missing(id.to_string());
-                    }
+                    };
                     PendingDetails::managed(
                         id.to_string(),
                         endpoints.remove(&id).map(PowerReadEndpoint::Switch),
                         inapplicable_policy(),
+                        actions::switch(&switch.controller_state.value, requests.get(&id)),
                     )
                 })
                 .collect()
@@ -243,7 +257,10 @@ async fn load_snapshot(api: &Api, target: Target) -> Result<Vec<PendingDetails>,
                 db::ObjectColumnFilter::List(db::power_shelf::IdColumn, &list.ids),
             )
             .await?;
-            let managed: HashSet<_> = shelves.into_iter().map(|shelf| shelf.id).collect();
+            let managed: HashMap<_, _> =
+                shelves.into_iter().map(|shelf| (shelf.id, shelf)).collect();
+            let requests =
+                db::power_shelf::find_maintenance_requests(txn.as_pgconn(), &list.ids).await?;
             let rows =
                 db::power_shelf::find_power_shelf_endpoints_by_ids(txn.as_pgconn(), &list.ids)
                     .await?;
@@ -254,13 +271,14 @@ async fn load_snapshot(api: &Api, target: Target) -> Result<Vec<PendingDetails>,
             list.ids
                 .into_iter()
                 .map(|id| {
-                    if !managed.contains(&id) {
+                    let Some(shelf) = managed.get(&id) else {
                         return PendingDetails::missing(id.to_string());
-                    }
+                    };
                     PendingDetails::managed(
                         id.to_string(),
                         endpoints.remove(&id).map(PowerReadEndpoint::Shelf),
                         inapplicable_policy(),
+                        actions::shelf(&shelf.controller_state.value, requests.get(&id)),
                     )
                 })
                 .collect()
@@ -271,7 +289,7 @@ async fn load_snapshot(api: &Api, target: Target) -> Result<Vec<PendingDetails>,
 }
 
 impl PendingDetails {
-    /// Builds a missing-target result with unavailable policy and no hardware read.
+    /// Reports unavailable policy/actions for a missing target without a hardware read.
     fn missing(component_id: String) -> Self {
         Self {
             details: rpc::ComponentPowerDetails {
@@ -281,17 +299,25 @@ impl PendingDetails {
                     None,
                 )),
                 desired: Some(desired_policy(None)),
+                actions: Some(rpc::ComponentPowerActionDetails {
+                    actions: vec![],
+                    error: Some(rpc::ComponentPowerError {
+                        code: rpc::ComponentPowerErrorCode::NotFound as i32,
+                        message: "managed component not found".into(),
+                    }),
+                }),
             },
             endpoint: None,
         }
     }
 
-    /// Preserves policy and reports `EndpointUnavailable` until a resolved
+    /// Preserves saved policy/actions and reports `EndpointUnavailable` until a resolved
     /// endpoint supplies a hardware read.
     fn managed(
         component_id: String,
         endpoint: Option<PowerReadEndpoint>,
         desired: rpc::ComponentPowerPolicy,
+        actions: rpc::ComponentPowerActionDetails,
     ) -> Self {
         Self {
             details: rpc::ComponentPowerDetails {
@@ -301,6 +327,7 @@ impl PendingDetails {
                     None,
                 )),
                 desired: Some(desired),
+                actions: Some(actions),
             },
             endpoint,
         }

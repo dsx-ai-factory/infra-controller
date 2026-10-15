@@ -666,8 +666,9 @@ async fn credentials_finishing_after_deadline_do_not_start_more_work(
     Ok(())
 }
 
-/// A policy change committed between the machine and policy queries must not
-/// replace the policy from the request's original database snapshot.
+/// Policy must match the initially read machine even after a concurrent write.
+/// A fresh request must see the new maintenance, proving the original absence
+/// was meaningful rather than a reader that always omits pending requests.
 #[crate::sqlx_test]
 async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
     pool: sqlx::PgPool,
@@ -710,7 +711,15 @@ async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
     };
     assert_eq!(blocked_pid, reader_pid);
 
-    // Commit a different desired state while the request retains its snapshot.
+    // Maintenance was already read with the machine. The blocked policy query
+    // must retain that snapshot even after these writes commit.
+    db::machine::set_machine_maintenance_requested(
+        &mut writer,
+        host.0,
+        "concurrent request",
+        model::machine::MachineMaintenanceOperation::PowerOn,
+    )
+    .await?;
     db::power_options::update_desired_state(
         &host.0,
         PowerState::On,
@@ -731,6 +740,42 @@ async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
         response.entries[0].desired,
         Some(stored_policy(rpc::PowerState::Off))
     );
+    assert_eq!(
+        response.entries[0].actions,
+        Some(rpc::ComponentPowerActionDetails::default()),
+        "maintenance saved after the snapshot must not appear in this response",
+    );
+
+    // The same handler must observe the pending request in a later snapshot.
+    let fresh = api
+        .get_component_power_details(host_request(&[host]))
+        .await?
+        .into_inner();
+    assert_eq!(fresh.entries.len(), 1);
+    let actions = fresh.entries[0].actions.as_ref().expect("action details");
+    let submitted_at = actions
+        .actions
+        .first()
+        .expect("new pending request")
+        .requested_at;
+    assert!(
+        submitted_at.is_some(),
+        "the new request records submission time"
+    );
+    assert_eq!(
+        actions,
+        &rpc::ComponentPowerActionDetails {
+            actions: vec![rpc::ComponentPowerAction {
+                status: rpc::ComponentPowerActionStatus::Pending as i32,
+                operation: rpc::ComponentPowerActionOperation::PowerOn as i32,
+                requested_at: submitted_at,
+                initiator: Some("concurrent request".into()),
+                ..Default::default()
+            }],
+            error: None,
+        }
+    );
+
     let policy_after = db::power_options::get_by_ids(&[host.0], pool.acquire().await?.as_mut())
         .await?
         .pop()
@@ -816,9 +861,10 @@ async fn snapshot_deadline_aborts_before_live_reads(pool: sqlx::PgPool) -> TestR
     Ok(())
 }
 
-/// Disabled management preserves policy distinctions and still rejects invalid request shapes.
+/// Disabled management preserves saved policy and action availability while
+/// still rejecting invalid requests before trying to read hardware.
 #[crate::sqlx_test]
-async fn persisted_policy_remains_visible_when_component_manager_is_disabled(
+async fn persisted_policy_and_actions_remain_visible_when_component_manager_is_disabled(
     pool: sqlx::PgPool,
 ) -> TestResult {
     let env = create_test_env(pool.clone()).await;
@@ -917,6 +963,16 @@ async fn persisted_policy_remains_visible_when_component_manager_is_disabled(
     ]) {
         assert_eq!(entry.component_id, id.to_string());
         assert_eq!(entry.desired.as_ref(), Some(&desired));
+        let actions = entry
+            .actions
+            .as_ref()
+            .expect("supporting servers always provide action details");
+        assert!(actions.actions.is_empty());
+        // A missing identity is unavailable, not confirmed absence of maintenance.
+        assert_eq!(
+            actions.error.as_ref().map(|error| error.code),
+            (id == absent_host).then_some(rpc::ComponentPowerErrorCode::NotFound as i32)
+        );
         let actual = entry.actual.as_ref().expect("actual result");
         assert_eq!(observation_error(actual).code, error as i32);
         assert_eq!(actual.source, None);
@@ -1715,6 +1771,17 @@ async fn rms_switch_and_shelf_reads_use_their_roles_without_host_policy(
                     ..Default::default()
                 })
             );
+            // Deleted and endpointless rows remain managed; only absent IDs
+            // have unavailable action details instead of a confirmed empty list.
+            let actions = entry.actions.as_ref().expect("action details");
+            assert!(actions.actions.is_empty(), "{id}");
+            assert_eq!(
+                actions.error.as_ref().map(|error| error.code),
+                (*error == Some(rpc::ComponentPowerErrorCode::NotFound))
+                    .then_some(rpc::ComponentPowerErrorCode::NotFound as i32),
+                "{id}"
+            );
+
             let actual = entry.actual.as_ref().expect("actual component state");
             if let Some(code) = error {
                 assert_eq!(observation_error(actual).code, *code as i32);
@@ -1915,5 +1982,255 @@ async fn rms_switch_and_shelf_reads_use_their_roles_without_host_policy(
             .await
             .is_empty()
     );
+    Ok(())
+}
+
+/// Saved maintenance remains readable without live power support. Strict
+/// request decoding must distinguish corrupt storage from confirmed no work.
+#[crate::sqlx_test]
+async fn tracked_actions_are_independent_of_live_reads_and_reject_invalid_storage(
+    pool: sqlx::PgPool,
+) -> TestResult {
+    let env = create_test_env(pool.clone()).await;
+    let mut txn = pool.begin().await?;
+    let (host_id, _) = create_host(&mut txn, 71, None, Some(PowerState::Off)).await?;
+    let switch_id = SwitchId::from(uuid::Uuid::new_v4());
+    let shelf_id = PowerShelfId::from(uuid::Uuid::new_v4());
+    db::switch::create(
+        &mut txn,
+        &NewSwitch {
+            id: switch_id,
+            config: SwitchConfig {
+                name: "power-actions".into(),
+                enable_nmxc: false,
+                fabric_manager_config: None,
+            },
+            bmc_mac_address: None,
+            metadata: None,
+            rack_id: None,
+            slot_number: None,
+            tray_index: None,
+        },
+    )
+    .await?;
+    db::power_shelf::create(
+        &mut txn,
+        &NewPowerShelf {
+            id: shelf_id,
+            config: power_shelf_config("power-actions"),
+            bmc_mac_address: None,
+            metadata: None,
+            rack_id: None,
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    // There is no Component Manager, and the switch/shelf have no endpoints.
+    // These limitations must not hide stored maintenance from administrators.
+    let api = TestApiBuilder::new(
+        pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .build();
+    // The replacement phase separately exercises all three disabled routing
+    // flags. Empty credentials stop the standalone host before live BMC work.
+    let routing_disabled_api = TestApiBuilder::new(
+        pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_component_manager(Arc::new(ComponentManager::new(
+        Arc::new(MockNvSwitchManager::default()),
+        Arc::new(MockPowerShelfManager),
+        Arc::new(MockComputeTrayManager),
+        false,
+        false,
+        false,
+    )))
+    .with_credential_manager(Arc::new(CompositeCredentialManager::new(
+        Arc::new(CountingCredentialReader::default()),
+        env.test_credential_manager.clone(),
+    )))
+    .build();
+    let requested_at: chrono::DateTime<chrono::Utc> = "2026-10-01T00:00:00Z".parse()?;
+    let pending = serde_json::json!({
+        "requested_at": requested_at, "initiator": "operator",
+        "operation": { "operation": "poweroff", "graceful": true },
+    });
+    let active = serde_json::json!({
+        "state": "maintenance", "operation": pending["operation"], "request": pending,
+    });
+    let active_action = rpc::ComponentPowerAction {
+        status: rpc::ComponentPowerActionStatus::Active as i32,
+        operation: rpc::ComponentPowerActionOperation::PowerOff as i32,
+        requested_at: Some(requested_at.into()),
+        initiator: Some("operator".into()),
+        graceful: Some(true),
+        chassis_id: None,
+    };
+    let replacement_at = requested_at + chrono::Duration::seconds(1);
+    let mut replacement = pending.clone();
+    replacement["requested_at"] = serde_json::to_value(replacement_at)?;
+    // An unknown recognized variant reaches the serde error. An unknown outer
+    // property would be ignored and would not establish the disclosure risk.
+    let mut malformed = pending.clone();
+    malformed["operation"]["operation"] = "private-operation-sentinel".into();
+
+    for (kind, update, id, target, actual_error) in [
+        // Compute exercises the strict JSON snapshot reader and disabled manager.
+        (
+            "compute",
+            "UPDATE machines SET controller_state = $1, machine_maintenance_requested = $2 WHERE id::text = $3",
+            host_id.to_string(),
+            Target::MachineIds(::rpc::common::HostMachineIdList {
+                machine_ids: vec![host_id],
+            }),
+            rpc::ComponentPowerErrorCode::Disabled,
+        ),
+        // Switch needs a strict pending read despite its permissive shared decoder.
+        (
+            "switch",
+            "UPDATE switches SET controller_state = $1, switch_maintenance_requested = $2 WHERE id::text = $3",
+            switch_id.to_string(),
+            Target::SwitchIds(rpc::SwitchIdList {
+                ids: vec![switch_id],
+            }),
+            rpc::ComponentPowerErrorCode::EndpointUnavailable,
+        ),
+        // Shelf has a separate SQL path with the same potential silent decode loss.
+        (
+            "shelf",
+            "UPDATE power_shelves SET controller_state = $1, power_shelf_maintenance_requested = $2 WHERE id::text = $3",
+            shelf_id.to_string(),
+            Target::PowerShelfIds(rpc::PowerShelfIdList {
+                ids: vec![shelf_id],
+            }),
+            rpc::ComponentPowerErrorCode::EndpointUnavailable,
+        ),
+    ] {
+        // First establish that the selected decoder exposes the private value;
+        // the RPC's fixed error below must then prevent that disclosure.
+        let decode_error = match &target {
+            Target::MachineIds(_) => serde_json::from_value::<
+                model::machine::MachineMaintenanceRequest,
+            >(malformed.clone())
+            .unwrap_err(),
+            Target::SwitchIds(_) => {
+                serde_json::from_value::<model::switch::SwitchMaintenanceRequest>(malformed.clone())
+                    .unwrap_err()
+            }
+            Target::PowerShelfIds(_) => serde_json::from_value::<
+                model::power_shelf::PowerShelfMaintenanceRequest,
+            >(malformed.clone())
+            .unwrap_err(),
+        };
+        assert!(
+            decode_error
+                .to_string()
+                .contains("private-operation-sentinel"),
+            "{kind}"
+        );
+        let request = rpc::GetComponentPowerDetailsRequest {
+            target: Some(target),
+        };
+
+        let before = api
+            .get_component_power_details(Request::new(request.clone()))
+            .await?
+            .into_inner();
+
+        assert_eq!(before.entries.len(), 1, "{kind}");
+        assert_eq!(
+            before.entries[0].actions,
+            Some(rpc::ComponentPowerActionDetails::default()),
+            "{kind}"
+        );
+
+        // Admission leaves the identical pending request set until completion;
+        // the response must show the admitted action only once.
+        sqlx::query(update)
+            .bind(&active)
+            .bind(&pending)
+            .bind(&id)
+            .execute(&pool)
+            .await?;
+
+        let response = api
+            .get_component_power_details(Request::new(request.clone()))
+            .await?
+            .into_inner();
+
+        assert_eq!(response.entries.len(), 1, "{kind}");
+        let entry = &response.entries[0];
+        assert_eq!(entry.component_id, id, "{kind}");
+        assert_eq!(
+            entry.actions,
+            Some(rpc::ComponentPowerActionDetails {
+                actions: vec![active_action.clone()],
+                error: None,
+            }),
+            "{kind}"
+        );
+        assert_eq!(
+            observation_error(entry.actual.as_ref().unwrap()).code,
+            actual_error as i32,
+            "{kind}"
+        );
+
+        // A later submission of the same operation is distinct work. Exercise
+        // each pending reader with routing disabled, keeping admitted metadata.
+        sqlx::query(update)
+            .bind(&active)
+            .bind(&replacement)
+            .bind(&id)
+            .execute(&pool)
+            .await?;
+
+        let response = routing_disabled_api
+            .get_component_power_details(Request::new(request.clone()))
+            .await?
+            .into_inner();
+
+        assert_eq!(response.entries.len(), 1, "{kind}");
+        assert_eq!(response.entries[0].component_id, id, "{kind}");
+        assert_eq!(
+            response.entries[0].actions,
+            Some(rpc::ComponentPowerActionDetails {
+                actions: vec![
+                    active_action.clone(),
+                    rpc::ComponentPowerAction {
+                        status: rpc::ComponentPowerActionStatus::Pending as i32,
+                        requested_at: Some(replacement_at.into()),
+                        ..active_action.clone()
+                    }
+                ],
+                error: None,
+            }),
+            "{kind}"
+        );
+
+        // The active state stays valid; only the pending payload is corrupt.
+        // The RPC must fail instead of returning a falsely complete action list.
+        sqlx::query(update)
+            .bind(&active)
+            .bind(&malformed)
+            .bind(&id)
+            .execute(&pool)
+            .await?;
+
+        let error = api
+            .get_component_power_details(Request::new(request))
+            .await
+            .expect_err(kind);
+
+        assert_eq!(error.code(), tonic::Code::Internal, "{kind}");
+        assert_eq!(
+            error.message(),
+            "internal error: power details database snapshot failed",
+            "{kind}"
+        );
+    }
     Ok(())
 }

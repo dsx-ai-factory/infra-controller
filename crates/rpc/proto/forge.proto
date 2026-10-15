@@ -10836,7 +10836,7 @@ enum ComponentPowerErrorCode {
   COMPONENT_POWER_ERROR_CODE_DEADLINE_EXCEEDED = 8;
 }
 
-// Safe details for one target whose actual power state could not be observed.
+// Safe details for a hardware observation or tracked-action lookup failure.
 message ComponentPowerError {
   // Specific failure category; clients should branch on this value.
   ComponentPowerErrorCode code = 1;
@@ -10888,7 +10888,72 @@ message ComponentPowerPolicy {
   google.protobuf.Timestamp updated_at = 4;
 }
 
-// Actual and desired power facts for one requested managed component ID.
+// Whether an explicit saved maintenance operation has been admitted.
+enum ComponentPowerActionStatus {
+  // Default enum value; this RPC always supplies Active or Pending.
+  COMPONENT_POWER_ACTION_STATUS_UNSPECIFIED = 0;
+  // The controller saved this operation in Maintenance. This does not prove
+  // that hardware work has started or that physical power is converging.
+  COMPONENT_POWER_ACTION_STATUS_ACTIVE = 1;
+  // A saved request not known to equal an admitted request. This does not
+  // promise eligibility, admission or eventual execution.
+  COMPONENT_POWER_ACTION_STATUS_PENDING = 2;
+}
+
+// The operation preserved by Core maintenance, not the original Flow task.
+enum ComponentPowerActionOperation {
+  // Default enum value; this RPC always supplies a recorded operation.
+  COMPONENT_POWER_ACTION_OPERATION_UNSPECIFIED = 0;
+  // Power on the component.
+  COMPONENT_POWER_ACTION_OPERATION_POWER_ON = 1;
+  // Power off the component; graceful identifies the saved shutdown mode.
+  COMPONENT_POWER_ACTION_OPERATION_POWER_OFF = 2;
+  // Reset the component. The saved state cannot distinguish original restart
+  // and AC-cycle requests, so no original power-control variant is inferred.
+  COMPONENT_POWER_ACTION_OPERATION_RESET = 3;
+  // Reset a specific Redfish chassis through a compute tray's BMC.
+  COMPONENT_POWER_ACTION_OPERATION_CHASSIS_RESET = 4;
+}
+
+// One explicit persisted maintenance operation. There is no stable action ID,
+// Flow task correlation ID, or recorded execution-start time in this model.
+message ComponentPowerAction {
+  // Active or Pending; never Unspecified in this RPC.
+  ComponentPowerActionStatus status = 1;
+  // Recorded operation, including the distinction between Reset and ChassisReset.
+  ComponentPowerActionOperation operation = 2;
+  // Saved request submission time, not admission/start time. Absent for legacy
+  // active maintenance states that did not save their admitted request.
+  google.protobuf.Timestamp requested_at = 3;
+  // Saved initiator, including an explicitly stored empty string. Absent only
+  // when legacy active maintenance has no admitted request metadata.
+  optional string initiator = 4;
+  // Present exactly for PowerOff. False means forced power off; true means
+  // graceful shutdown. Legacy operations without this flag default to false.
+  optional bool graceful = 5;
+  // Present exactly for ChassisReset; the recorded Redfish chassis identifier.
+  optional string chassis_id = 6;
+}
+
+// Explicit stored power maintenance from the same snapshot as identity/policy.
+// This is informational: reading it neither admits nor changes any operation.
+message ComponentPowerActionDetails {
+  // At most two entries: Active first, then Pending. Suppress Pending only when
+  // the whole saved request equals the admitted request, including operation,
+  // timestamp and initiator. Legacy active states cannot establish that match.
+  // An empty list without error means no matching tracked maintenance, not
+  // idle hardware: ComponentPowerControlRequest.bypass_state_controller calls
+  // and power steps inside other workflows are not tracked here. Switch
+  // certificate maintenance is also excluded.
+  repeated ComponentPowerAction actions = 1;
+  // NotFound when the managed target is missing; actions is empty in that case.
+  // Absent after a successful snapshot, including when actions is empty.
+  // Invalid persisted state/request data fails the whole RPC with INTERNAL;
+  // it is never silently treated as an empty action list.
+  ComponentPowerError error = 2;
+}
+
+// Actual, desired and tracked maintenance for one requested managed component ID.
 message ComponentPowerDetails {
   // The requested managed ID, in its canonical representation.
   string component_id = 1;
@@ -10896,6 +10961,13 @@ message ComponentPowerDetails {
   ComponentPowerObservation actual = 2;
   // Always present; loaded independently and retained when actual is unavailable.
   ComponentPowerPolicy desired = 3;
+  // Present from servers supporting action details, including missing targets.
+  // Absent means not provided (for example, an older Core server); callers must
+  // check message presence before generated getters turn absence into empty.
+  // Independent of endpoint discovery, actual-read failures, and the
+  // nv_switch_use_state_controller, power_shelf_use_state_controller and
+  // compute_tray_use_state_controller settings.
+  ComponentPowerActionDetails actions = 4;
 }
 
 // Power facts for every requested ID, including targets with unavailable reads.
