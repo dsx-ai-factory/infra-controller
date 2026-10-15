@@ -56,10 +56,16 @@ ConfigureCertificate --> Error : job Failed
 before `DisableMtls` existed deserialize unchanged; a switch already in
 `ConfigureCertificate` continues there without running the disable step.
 
-Transient CM or transport failures during `Start` or `WaitForComplete` return
-`StateHandlerError` and leave the switch in the same sub-state for retry on the
-next handler iteration. Only a terminal RMS job status of `Failed` (or missing
-component manager while polling) transitions to `Error`.
+In `Start` and `WaitForComplete` of both `DisableMtls` and
+`ConfigureCertificate`, a generic CM or transport error returns
+`StateHandlerError` and leaves the switch in the same sub-state for retry on the
+next handler iteration. Failures that retrying cannot resolve transition to
+`Error` instead. Examples are a missing prerequisite, an unresolved endpoint, a
+job that can no longer be observed, and a terminal job failure. `DisableMtls`
+also moves to `Error` on an unknown submission outcome, because a retry could
+submit the operation twice. The condition tables for
+[`DisableMtls`](#sub-states-disablemtlsstate) and
+[`ConfigureCertificate`](#sub-states-configurecertificatestate) list each case.
 
 ### Disable mTLS before certificate installation
 
@@ -246,8 +252,28 @@ returns an internal error (the state handler normally skips earlier when
 |-----|----------------------|-----------------------|
 | `configure_switch_certificate` | Device (`NodeInfo`), optional `domain`, `services[]` | per-node `job_id`, batch status |
 | `get_configure_switch_certificate_job_status` | `job_id` | RMS job state (`queued`, `running`, `completed`, `failed`, ...) |
+| `batch_disable_switch_mtls` | `NodeSet` of `NodeInfo`, `services[]` | batch status, parent `job_id` |
+| `get_job_status` | `job_id`, `include_child_job_states = true` | `JobStatus` list for the parent and child jobs, each with `execution_state` |
 
 RMS job states are mapped in `map_rms_configure_switch_certificate_job_state`.
+
+The mTLS-disable path uses the last two RPCs:
+
+- **Submission:** `batch_disable_switch_mtls` must return a successful batch
+  status and a non-empty parent `job_id`. A gRPC `Unimplemented` status maps to
+  `Unsupported`. Any other RPC error, a missing response, a failed batch, or an
+  empty `job_id` maps to `OperationOutcomeUnknown`. A failed batch that carries a
+  job ID keeps that ID in the error message for reconciliation.
+- **Status:** `summarize_rms_switch_job_tree` reduces the `get_job_status`
+  response to `Pending`, `Completed`, or `Failed`. `Completed` requires the
+  parent and every child it declares to be `Completed`. A child that RMS has not
+  yet reported keeps the job `Pending`. A failed child or parent is `Failed`,
+  and the child's error is preferred. A missing parent or an unspecified
+  execution state maps to `OperationOutcomeUnknown`. RMS `NotFound` and
+  `InvalidArgument` observations also map to `OperationOutcomeUnknown`.
+  `Unimplemented` maps to `Unsupported`. Unavailability, transport errors, and
+  other RMS errors surface as generic CM errors, which the switch handler
+  retries.
 
 ## Sequence diagrams
 
