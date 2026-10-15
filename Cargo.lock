@@ -2083,6 +2083,7 @@ dependencies = [
  "eyre",
  "futures-util",
  "hex",
+ "http",
  "mockito",
  "regex",
  "reqwest 0.13.4",
@@ -2096,6 +2097,7 @@ dependencies = [
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 

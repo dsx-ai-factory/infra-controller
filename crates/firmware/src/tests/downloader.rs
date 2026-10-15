@@ -18,27 +18,42 @@
 use std::path::Path;
 use std::time::Duration;
 
-use carbide_instrument::testing::{ApproxHistogramSum, CapturedLog, MetricsCapture, capture_logs};
+use carbide_instrument::testing::{
+    ApproxHistogramSum, CapturedLog, MetricsCapture, capture_logs, capture_logs_async,
+};
 use carbide_instrument::{LabelValue, emit};
 use carbide_test_support::{Check, check_values};
 use sha2::Digest;
 use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::downloader::*;
 
 const ARTIFACT_UNAVAILABLE_METRIC: &str = "carbide_firmware_artifact_unavailable_total";
 const DOWNLOAD_DURATION_METRIC: &str = "carbide_firmware_download_duration_seconds";
 
+/// Origin credentials and malformed authority text never appear in the logged URL.
 #[test]
-fn loggable_url_drops_query_parameters() {
-    assert_eq!(
-        loggable_url("https://firmware.example/bmc.fwpkg?X-Amz-Signature=secret"),
-        "https://firmware.example/bmc.fwpkg",
-    );
-    assert_eq!(
-        loggable_url("file:///tmp/bmc.fwpkg"),
-        "file:///tmp/bmc.fwpkg"
+fn loggable_url_removes_credentials() {
+    carbide_test_support::value_scenarios!(loggable_url:
+        "remote URL credentials" {
+            // Removing the query must not leave authority credentials behind.
+            "https://user:password@firmware.example/bmc.fwpkg?X-Amz-Signature=secret#token"
+                => "https://firmware.example/bmc.fwpkg".to_string(),
+        }
+        "fragment without a query" {
+            // A fragment needs removal even when there is no query to truncate.
+            "https://firmware.example/bmc.fwpkg#token"
+                => "https://firmware.example/bmc.fwpkg".to_string(),
+        }
+        "local files" {
+            // Credential removal leaves the local source path intact.
+            "file:///tmp/bmc.fwpkg" => "file:///tmp/bmc.fwpkg".to_string(),
+        }
+        "malformed URL" {
+            // Unparseable authority text cannot safely be echoed back.
+            "https://user:password@[invalid?token=secret" => "<invalid firmware URL>".to_string(),
+        }
     );
 }
 
@@ -61,10 +76,22 @@ async fn wait_for_downloads(metrics: &MetricsCapture, outcome: &str, expect: u64
 /// starting another, so the source is fetched once.
 #[tokio::test]
 async fn repeated_available_calls_share_one_download() {
+    let requested = std::sync::Arc::new(tokio::sync::Notify::new());
+    let body_requested = requested.clone();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = std::sync::Mutex::new(release_rx);
     let mut server = mockito::Server::new_async().await;
     let source = server
         .mock("GET", "/fw.bin")
-        .with_body("firmware artifact")
+        .with_chunked_body(move |writer| {
+            body_requested.notify_one();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv()
+                .map_err(std::io::Error::other)?;
+            writer.write_all(b"firmware artifact")
+        })
         .expect(1)
         .create_async()
         .await;
@@ -73,41 +100,50 @@ async fn repeated_available_calls_share_one_download() {
     let url = format!("{}/fw.bin", server.url());
     let downloader = FirmwareDownloader::new();
 
-    // The test runtime is single-threaded, so the download task cannot run
-    // until the test yields: every call below is made while it is pending.
+    assert_eq!(
+        downloader.available(&filename, &url, "").await,
+        ArtifactStatus::Downloading
+    );
+    tokio::time::timeout(Duration::from_secs(5), requested.notified())
+        .await
+        .unwrap();
     for _ in 0..9 {
         assert_eq!(
-            downloader.available(&filename, &url, ""),
+            downloader.available(&filename, &url, "").await,
             ArtifactStatus::Downloading,
         );
     }
 
+    release_tx.send(()).unwrap();
+    drop(release_tx);
     assert_eq!(
-        status_after_download(&downloader, &filename, &url).await,
+        status_after_download(&downloader, &filename, &url, "").await,
         ArtifactStatus::Available,
     );
+    assert_eq!(std::fs::read(&filename).unwrap(), b"firmware artifact");
     source.assert_async().await;
 }
 
+/// Optional checksums remain compatible with local-file downloads and completion metrics.
 #[tokio::test]
 async fn test_download_without_checksum() -> Result<(), std::io::Error> {
-    let filename = Path::new("/tmp/test_firmware_without_checksum");
-    let src_filename = "/tmp/test_firmware_without_checksum_src";
-    let url = format!("file://{src_filename}");
+    let temp_dir = tempfile::tempdir()?;
+    let filename = temp_dir.path().join("firmware.bin");
+    let src_filename = temp_dir.path().join("source.bin");
+    let url = format!("file://{}", src_filename.display());
 
-    let mut srcfile = File::create(src_filename).await?;
+    let mut srcfile = File::create(&src_filename).await?;
     for i in 0..2000 {
         srcfile.write_all(format!("{i}").as_bytes()).await?;
     }
     srcfile.flush().await?;
 
-    let _ = std::fs::remove_file(filename);
     let downloader = FirmwareDownloader::new();
     let metrics = MetricsCapture::start();
 
     let mut count = 0;
     loop {
-        if downloader.available(filename, &url, "") != ArtifactStatus::Available {
+        if downloader.available(&filename, &url, "").await != ArtifactStatus::Available {
             tokio::time::sleep(Duration::from_millis(10)).await;
             count += 1;
             if count >= 1000 {
@@ -117,25 +153,24 @@ async fn test_download_without_checksum() -> Result<(), std::io::Error> {
             // >=1 rather than an exact delta: concurrent tests can add ok
             // samples, but if the ok emit vanished nothing could satisfy this.
             wait_for_downloads(&metrics, "ok", 1).await;
-            let _ = std::fs::remove_file(filename);
-            let _ = std::fs::remove_file(src_filename);
             return Ok(());
         }
     }
 }
 
+/// A matching checksum accepts surrounding whitespace and uppercase hexadecimal.
 #[tokio::test]
 async fn test_available_verifies_sha256_checksum() -> Result<(), std::io::Error> {
-    let filename = Path::new("/tmp/test_firmware_sha256_checksum");
-    let src_filename = "/tmp/test_firmware_sha256_checksum_src";
-    let url = format!("file://{src_filename}");
+    let temp_dir = tempfile::tempdir()?;
+    let filename = temp_dir.path().join("firmware.bin");
+    let src_filename = temp_dir.path().join("source.bin");
+    let url = format!("file://{}", src_filename.display());
     let contents = b"firmware artifact";
 
-    let mut srcfile = File::create(src_filename).await?;
+    let mut srcfile = File::create(&src_filename).await?;
     srcfile.write_all(contents).await?;
     srcfile.flush().await?;
 
-    let _ = std::fs::remove_file(filename);
     let downloader = FirmwareDownloader::new();
     let checksum = format!(
         " {} ",
@@ -144,33 +179,39 @@ async fn test_available_verifies_sha256_checksum() -> Result<(), std::io::Error>
 
     let mut count = 0;
     loop {
-        if downloader.available(filename, &url, &checksum) != ArtifactStatus::Available {
+        if downloader.available(&filename, &url, &checksum).await != ArtifactStatus::Available {
             tokio::time::sleep(Duration::from_millis(10)).await;
             count += 1;
             if count >= 1000 {
                 panic!("Should not have taken this long");
             }
         } else {
-            let _ = std::fs::remove_file(filename);
-            let _ = std::fs::remove_file(src_filename);
+            // Cache acceptance releases the claim; another caller must not
+            // mistake the completed verification for an ongoing download.
+            assert_eq!(
+                downloader.available(&filename, &url, &checksum).await,
+                ArtifactStatus::Available,
+            );
             return Ok(());
         }
     }
 }
 
+/// A mismatched cached artifact is replaced with bytes that satisfy the configured checksum.
 #[tokio::test]
 async fn test_available_rejects_stale_cache_with_wrong_sha256() -> Result<(), std::io::Error> {
-    let filename = Path::new("/tmp/test_firmware_stale_cache_wrong_checksum");
-    let src_filename = "/tmp/test_firmware_stale_cache_wrong_checksum_src";
-    let url = format!("file://{src_filename}");
+    let temp_dir = tempfile::tempdir()?;
+    let filename = temp_dir.path().join("firmware.bin");
+    let src_filename = temp_dir.path().join("source.bin");
+    let url = format!("file://{}", src_filename.display());
     let contents = b"fresh firmware artifact";
 
-    let mut cached_file = File::create(filename).await?;
+    let mut cached_file = File::create(&filename).await?;
     cached_file.write_all(b"stale firmware artifact").await?;
     cached_file.flush().await?;
     drop(cached_file);
 
-    let mut srcfile = File::create(src_filename).await?;
+    let mut srcfile = File::create(&src_filename).await?;
     srcfile.write_all(contents).await?;
     srcfile.flush().await?;
     drop(srcfile);
@@ -179,49 +220,63 @@ async fn test_available_rejects_stale_cache_with_wrong_sha256() -> Result<(), st
     let checksum = hex::encode(sha2::Sha256::digest(contents));
 
     assert_eq!(
-        downloader.available(filename, &url, &checksum),
+        downloader.available(&filename, &url, &checksum).await,
         ArtifactStatus::Downloading,
     );
 
     let mut count = 0;
     loop {
-        if downloader.available(filename, &url, &checksum) != ArtifactStatus::Available {
+        if downloader.available(&filename, &url, &checksum).await != ArtifactStatus::Available {
             tokio::time::sleep(Duration::from_millis(10)).await;
             count += 1;
             if count >= 1000 {
                 panic!("Should not have taken this long");
             }
         } else {
-            assert_eq!(tokio::fs::read(filename).await?, contents);
-            let _ = std::fs::remove_file(filename);
-            let _ = std::fs::remove_file(src_filename);
+            assert_eq!(tokio::fs::read(&filename).await?, contents);
             return Ok(());
         }
     }
 }
 
+/// Checksum failures clean up staging and release the destination for a repaired source.
 #[tokio::test]
 async fn test_available_checksum_failure_does_not_publish_file() -> Result<(), std::io::Error> {
-    let filename = Path::new("/tmp/test_firmware_sha256_checksum_failure");
-    let src_filename = "/tmp/test_firmware_sha256_checksum_failure_src";
-    let url = format!("file://{src_filename}");
+    let temp_dir = tempfile::tempdir()?;
+    let filename = temp_dir.path().join("firmware.bin");
+    let src_filename = temp_dir.path().join("source.bin");
+    let url = format!("file://{}", src_filename.display());
 
-    let mut srcfile = File::create(src_filename).await?;
-    srcfile.write_all(b"firmware artifact").await?;
-    srcfile.flush().await?;
+    let contents = b"verified firmware artifact";
+    let checksum = hex::encode(sha2::Sha256::digest(contents));
+    tokio::fs::write(&src_filename, b"incorrect firmware artifact").await?;
 
-    let _ = std::fs::remove_file(filename);
     let downloader = FirmwareDownloader::new();
 
     let metrics = MetricsCapture::start();
     assert_eq!(
-        downloader.available(filename, &url, &"0".repeat(64)),
+        downloader.available(&filename, &url, &checksum).await,
         ArtifactStatus::Downloading,
     );
     wait_for_downloads(&metrics, "checksum", 1).await;
 
+    let ArtifactStatus::Failed { error } =
+        status_after_download(&downloader, &filename, &url, &checksum).await
+    else {
+        panic!("a checksum mismatch must be reported to the next caller");
+    };
+    assert!(error.contains("checksum mismatch"), "{error}");
     assert!(!filename.exists());
-    let _ = std::fs::remove_file(src_filename);
+    assert!(!temp_dir.path().join("firmware.bin.download").exists());
+
+    // Retrying the same checksum must verify the repaired bytes, not merely
+    // clear the prior failure or publish the first attempt's staging file.
+    tokio::fs::write(&src_filename, contents).await?;
+    assert_eq!(
+        status_after_download(&downloader, &filename, &url, &checksum).await,
+        ArtifactStatus::Available,
+    );
+    assert_eq!(tokio::fs::read(&filename).await?, contents);
     Ok(())
 }
 
@@ -229,33 +284,40 @@ async fn test_available_checksum_failure_does_not_publish_file() -> Result<(), s
 /// under `outcome="fetch"` and publishes nothing.
 #[tokio::test]
 async fn test_available_fetch_failure_counts() -> Result<(), std::io::Error> {
-    let filename = Path::new("/tmp/test_firmware_fetch_failure");
-    let src_filename = "/tmp/test_firmware_fetch_failure_missing_src";
-    let url = format!("file://{src_filename}");
+    let temp_dir = tempfile::tempdir()?;
+    let filename = temp_dir.path().join("firmware.bin");
+    let src_filename = temp_dir.path().join("missing-source.bin");
+    let url = format!("file://{}", src_filename.display());
 
-    let _ = std::fs::remove_file(filename);
-    let _ = std::fs::remove_file(src_filename);
     let downloader = FirmwareDownloader::new();
 
     let metrics = MetricsCapture::start();
     assert_eq!(
-        downloader.available(filename, &url, ""),
+        downloader.available(&filename, &url, "").await,
         ArtifactStatus::Downloading,
     );
     wait_for_downloads(&metrics, "fetch", 1).await;
 
+    let ArtifactStatus::Failed { error } =
+        status_after_download(&downloader, &filename, &url, "").await
+    else {
+        panic!("an unavailable source must be reported to the next caller");
+    };
+    assert!(error.contains("could not open source"), "{error}");
     assert!(!filename.exists());
+    assert!(!temp_dir.path().join("firmware.bin.download").exists());
     Ok(())
 }
 
-/// Polls until the attempt in flight ends and returns what the next caller sees.
+/// Polls the public API until an attempt completes, retaining the requested checksum.
 async fn status_after_download(
     downloader: &FirmwareDownloader,
     filename: &Path,
     url: &str,
+    checksum: &str,
 ) -> ArtifactStatus {
     for _ in 0..1000 {
-        let status = downloader.available(filename, url, "");
+        let status = downloader.available(filename, url, checksum).await;
         if status != ArtifactStatus::Downloading {
             return status;
         }
@@ -275,47 +337,219 @@ async fn failed_download_is_reported_once_then_retried() {
     let downloader = FirmwareDownloader::new();
 
     assert_eq!(
-        downloader.available(&filename, &url, ""),
+        downloader.available(&filename, &url, "").await,
         ArtifactStatus::Downloading
     );
     let ArtifactStatus::Failed { error } =
-        status_after_download(&downloader, &filename, &url).await
+        status_after_download(&downloader, &filename, &url, "").await
     else {
         panic!("a missing source should fail the download");
     };
     assert!(
-        error.contains(&url),
+        error.contains(&loggable_url(&url)),
         "error should name the source: {error}"
     );
 
     std::fs::write(&src_filename, b"firmware artifact").unwrap();
     assert_eq!(
-        downloader.available(&filename, &url, ""),
+        downloader.available(&filename, &url, "").await,
         ArtifactStatus::Downloading,
     );
     assert_eq!(
-        status_after_download(&downloader, &filename, &url).await,
+        status_after_download(&downloader, &filename, &url, "").await,
         ArtifactStatus::Available,
     );
+    assert_eq!(std::fs::read(&filename).unwrap(), b"firmware artifact");
 }
 
-/// The failure text reaches operators, so a presigned URL's query string must
-/// not survive in it, including inside the HTTP client's own error.
+/// A broken HTTP body leaves no published or partial file, and the next attempt can succeed.
 #[tokio::test]
-async fn download_failure_error_omits_url_query() {
+async fn truncated_http_body_is_removed_before_a_successful_retry() {
+    // This test emits the transfer metric. Serialize its observations with
+    // the metric-contract tests, which assert exact deltas.
+    let metrics = MetricsCapture::start();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/fw.bin", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        for response in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial"
+                .as_slice(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nfirmware".as_slice(),
+        ] {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(connection.read_u8().await.unwrap());
+            }
+            connection.write_all(response).await.unwrap();
+            connection.shutdown().await.unwrap();
+        }
+    });
+    let temp_dir = tempfile::tempdir().unwrap();
+    let filename = temp_dir.path().join("fw.bin");
+    let downloader = FirmwareDownloader::new();
+
+    let ArtifactStatus::Failed { error } =
+        status_after_download(&downloader, &filename, &url, "").await
+    else {
+        panic!("a truncated response must fail");
+    };
+    assert!(error.contains("body"), "{error}");
+    assert!(!filename.exists());
+    assert!(!temp_dir.path().join("fw.bin.download").exists());
+    assert_eq!(
+        metrics.histogram_count_delta(DOWNLOAD_DURATION_METRIC, &[("outcome", "transfer")]),
+        1,
+    );
+    assert_eq!(
+        status_after_download(&downloader, &filename, &url, "").await,
+        ArtifactStatus::Available,
+    );
+    assert_eq!(std::fs::read(&filename).unwrap(), b"firmware");
+    server.await.unwrap();
+}
+
+/// Filesystem failures before fetch and after transfer both release staging and permit retry.
+#[tokio::test]
+async fn filesystem_failures_release_the_destination_for_retry() {
+    #[derive(Clone, Copy, Debug)]
+    enum Failure {
+        Staging,
+        Publish,
+    }
+
+    for failure in [
+        // A non-directory parent rejects staging before any source request.
+        Failure::Staging,
+        // A destination directory introduced after cache inspection rejects
+        // publication only after the response body has been downloaded.
+        Failure::Publish,
+    ] {
+        let metrics = MetricsCapture::start();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().join("cache");
+        let filename = cache_dir.join("fw.bin");
+        let contents = b"verified firmware artifact";
+        let checksum = hex::encode(sha2::Sha256::digest(contents));
+        let requested = std::sync::Arc::new(tokio::sync::Notify::new());
+        let body_requested = requested.clone();
+        let first_request = std::sync::atomic::AtomicBool::new(true);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let mut server = mockito::Server::new_async().await;
+        let source = server
+            .mock("GET", "/fw.bin")
+            .with_chunked_body(move |writer| {
+                if matches!(failure, Failure::Publish)
+                    && first_request.swap(false, std::sync::atomic::Ordering::Relaxed)
+                {
+                    body_requested.notify_one();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv()
+                        .map_err(std::io::Error::other)?;
+                }
+                writer.write_all(contents)
+            })
+            .expect(match failure {
+                Failure::Staging => 1,
+                Failure::Publish => 2,
+            })
+            .create_async()
+            .await;
+        let url = format!("{}/fw.bin", server.url());
+        let downloader = FirmwareDownloader::new();
+
+        if matches!(failure, Failure::Staging) {
+            std::fs::write(&cache_dir, b"not a directory").unwrap();
+        }
+        assert_eq!(
+            downloader.available(&filename, &url, &checksum).await,
+            ArtifactStatus::Downloading,
+            "{failure:?}",
+        );
+        if matches!(failure, Failure::Publish) {
+            // The request proves cache inspection and staging completed;
+            // holding its body keeps rename from racing this filesystem edit.
+            tokio::time::timeout(Duration::from_secs(5), requested.notified())
+                .await
+                .unwrap();
+            std::fs::create_dir(&filename).unwrap();
+            release_tx.send(()).unwrap();
+        }
+        drop(release_tx);
+        wait_for_downloads(&metrics, "io", 1).await;
+        assert!(!filename.is_file(), "{failure:?}");
+        assert!(!cache_dir.join("fw.bin.download").exists(), "{failure:?}");
+
+        // Remove the injected obstruction before polling so cached-path
+        // validation cannot mask the saved download failure.
+        let expected_error = match failure {
+            Failure::Staging => {
+                std::fs::remove_file(&cache_dir).unwrap();
+                "unable to create directory"
+            }
+            Failure::Publish => {
+                std::fs::remove_dir(&filename).unwrap();
+                "unable to rename"
+            }
+        };
+        let ArtifactStatus::Failed { error } =
+            status_after_download(&downloader, &filename, &url, &checksum).await
+        else {
+            panic!("{failure:?} must retain its failure for the next caller");
+        };
+        assert!(error.contains(expected_error), "{failure:?}: {error}");
+        assert_eq!(
+            metrics.histogram_count_delta(DOWNLOAD_DURATION_METRIC, &[("outcome", "io")]),
+            1,
+            "{failure:?}",
+        );
+
+        assert_eq!(
+            status_after_download(&downloader, &filename, &url, &checksum).await,
+            ArtifactStatus::Available,
+            "{failure:?}",
+        );
+        assert_eq!(std::fs::read(&filename).unwrap(), contents, "{failure:?}");
+        source.assert_async().await;
+    }
+}
+
+/// Public failures and completion events retain source context without URL credentials.
+#[tokio::test]
+async fn download_failure_and_completion_event_redact_source_credentials() {
     let temp_dir = tempfile::tempdir().unwrap();
     let filename = temp_dir.path().join("fw.bin");
     // Nothing listens on port 1, so the connection is refused immediately.
-    let url = "http://127.0.0.1:1/fw.bin?X-Amz-Signature=secret";
+    let url = "http://user:password@127.0.0.1:1/fw.bin?X-Amz-Signature=secret#fragment-secret";
     let downloader = FirmwareDownloader::new();
 
-    downloader.available(&filename, url, "");
-    let ArtifactStatus::Failed { error } = status_after_download(&downloader, &filename, url).await
-    else {
+    let (status, logs) = capture_logs_async(async {
+        downloader.available(&filename, url, "").await;
+        status_after_download(&downloader, &filename, url, "").await
+    })
+    .await;
+    let ArtifactStatus::Failed { error } = status else {
         panic!("a refused connection should fail the download");
     };
     assert!(error.contains("http://127.0.0.1:1/fw.bin"), "{error}");
+    assert!(error.contains("error trying to download"), "{error}");
     assert!(!error.contains("secret"), "{error}");
+    assert!(!error.contains("user"), "{error}");
+    assert!(!error.contains("password"), "{error}");
+
+    // Assert the event produced by this attempt, rather than constructing a
+    // sanitized event directly and bypassing the downloader's logging path.
+    let completed = logs
+        .iter()
+        .find(|log| log.metadata_name == "firmware_download_finished")
+        .expect("a failed attempt emits its completion event");
+    assert_eq!(completed.level, tracing::Level::ERROR);
+    assert_eq!(completed.field("url"), Some("http://127.0.0.1:1/fw.bin"));
+    assert_eq!(completed.field("error"), Some(error.as_str()));
+    assert_eq!(completed.field("outcome"), Some("fetch"));
 }
 
 #[test]
@@ -406,19 +640,21 @@ fn artifact_unavailable_events_preserve_log_contracts_and_count_reasons() {
     );
 }
 
-#[test]
-fn unavailable_absent_artifact_without_url_counts_the_blocker() {
+/// An absent artifact with no download source reports its blocker and existing metric.
+#[tokio::test]
+async fn unavailable_absent_artifact_without_url_counts_the_blocker() {
     let temp_dir = tempfile::tempdir().unwrap();
     let filename = temp_dir.path().join("missing.fwpkg");
     let downloader = FirmwareDownloader::new();
     let metrics = MetricsCapture::start();
 
-    let logs = capture_logs(|| {
+    let ((), logs) = capture_logs_async(async {
         assert!(matches!(
-            downloader.available(&filename, "", ""),
+            downloader.available(&filename, "", "").await,
             ArtifactStatus::Failed { .. },
         ));
-    });
+    })
+    .await;
 
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].metadata_name, "firmware_artifact_missing_url");
@@ -435,26 +671,35 @@ fn unavailable_absent_artifact_without_url_counts_the_blocker() {
         1.0,
     );
     assert!(!filename.exists());
+    // The missing-URL return must release its claim for subsequent callers.
+    assert!(matches!(
+        downloader.available(&filename, "", "").await,
+        ArtifactStatus::Failed { .. },
+    ));
 }
 
-#[test]
-fn unavailable_stale_artifact_removal_failure_counts_the_blocker() {
+/// A stale cache entry that cannot be removed reports the filesystem error before fetching.
+#[tokio::test]
+async fn unavailable_stale_artifact_removal_failure_counts_the_blocker() {
     let temp_dir = tempfile::tempdir().unwrap();
     let filename = temp_dir.path().join("stale.fwpkg");
     std::fs::create_dir(&filename).unwrap();
     let downloader = FirmwareDownloader::new();
     let metrics = MetricsCapture::start();
 
-    let logs = capture_logs(|| {
+    let ((), logs) = capture_logs_async(async {
         assert!(matches!(
-            downloader.available(
-                &filename,
-                "https://firmware.example/stale.fwpkg",
-                "expected-checksum",
-            ),
+            downloader
+                .available(
+                    &filename,
+                    "https://firmware.example/stale.fwpkg",
+                    "expected-checksum",
+                )
+                .await,
             ArtifactStatus::Failed { .. },
         ));
-    });
+    })
+    .await;
 
     assert!(logs.iter().any(|log| {
         log.message == "Cached firmware artifact failed checksum verification"
@@ -486,6 +731,18 @@ fn unavailable_stale_artifact_removal_failure_counts_the_blocker() {
         1.0,
     );
     assert!(filename.is_dir());
+    // An unusable cache is still an immediate failure on the next call,
+    // rather than a destination left permanently marked as downloading.
+    assert!(matches!(
+        downloader
+            .available(
+                &filename,
+                "https://firmware.example/stale.fwpkg",
+                "expected-checksum",
+            )
+            .await,
+        ArtifactStatus::Failed { .. },
+    ));
 }
 
 /// The label vocabulary is the dashboard contract: every download outcome
@@ -542,10 +799,8 @@ fn download_finished_records_duration_and_owns_the_completion_line() {
             url: "https://firmware.example/bmc.fwpkg".to_string(),
             filename: "/firmware/bmc.fwpkg".to_string(),
         });
-        // Failure labels deliberately disjoint from the labels the
-        // end-to-end download tests in this binary reach (`ok`, `checksum`,
-        // `fetch`): the capture mutex serializes only capture-holding tests,
-        // so a label a capture-less test can move would race these deltas.
+        // Tests which emit `status`, `transfer`, or `io` also hold a metric
+        // capture, so their observations cannot race these exact deltas.
         emit(DownloadFinished::Status {
             took: Duration::from_secs(2),
             url: "https://firmware.example/bmc.fwpkg".to_string(),
