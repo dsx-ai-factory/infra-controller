@@ -383,7 +383,10 @@ pub async fn find_active_on_demand_machine_validation_by_id_and_machine_id(
     machine_id: &MachineId,
 ) -> DatabaseResult<MachineValidation> {
     let query = "
-        SELECT * FROM machine_validation
+        SELECT
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at
+        FROM machine_validation
         WHERE id = $1
         AND machine_id = $2
         AND context = 'OnDemand'
@@ -558,7 +561,7 @@ mod tests {
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
-        let older_run = insert_active_validation(
+        insert_active_validation(
             txn.as_mut(),
             chrono::Utc::now() - chrono::Duration::minutes(10),
             60,
@@ -576,7 +579,6 @@ mod tests {
         .await?;
 
         assert_eq!(selected.id, current_run);
-        assert_ne!(selected.id, older_run);
 
         const SET_DISCOVERY_CONTEXT: &str =
             "UPDATE machine_validation SET context = 'Discovery' WHERE id = $1";

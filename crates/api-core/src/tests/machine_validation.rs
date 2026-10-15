@@ -42,6 +42,7 @@ use rpc::forge::{
 
 use crate::handlers::machine_validation::apply_config_on_startup;
 use crate::tests::common;
+use crate::tests::common::postgres::wait_for_blocked_query;
 
 fn authenticated_machine_request<T>(
     message: T,
@@ -654,7 +655,6 @@ async fn test_machine_validation_test_on_demand_filter(
         panic!("expected typed machine validation action");
     };
     assert_eq!(machine_validation.validation_id, Some(validation_id));
-    assert_ne!(machine_validation.validation_id, Some(older_validation_id));
     let typed_filter = machine_validation
         .filter
         .as_ref()
@@ -713,6 +713,9 @@ async fn concurrent_on_demand_requests_create_only_one_run(
         .bind(mh.host().id)
         .execute(gate.as_mut())
         .await?;
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(gate.as_mut())
+        .await?;
 
     let request = || {
         tonic::Request::new(rpc::forge::MachineValidationOnDemandRequest {
@@ -728,45 +731,36 @@ async fn concurrent_on_demand_requests_create_only_one_run(
     let second_api = env.api.clone();
     let first_request = request();
     let second_request = request();
-    let mut requests = tokio::spawn(async move {
-        tokio::join!(
-            first_api.on_demand_machine_validation(first_request),
-            second_api.on_demand_machine_validation(second_request)
-        )
-    });
-
-    let wait_for_both_requests = async {
-        for _ in 0..300 {
-            let blocked: i64 = sqlx::query_scalar(
-                "SELECT COUNT(DISTINCT activity.pid)
-                 FROM pg_stat_activity AS activity
-                 WHERE activity.datname = current_database()
-                   AND activity.wait_event_type = 'Lock'
-                   AND strpos(activity.query, 'SELECT id FROM machines WHERE id = $1 FOR UPDATE') > 0",
-            )
-            .fetch_one(&env.pool)
-            .await
-            .expect("database lock state should be readable");
-            if blocked == 2 {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        panic!("both on-demand requests should wait for the machine lock");
+    let mut first =
+        tokio::spawn(async move { first_api.on_demand_machine_validation(first_request).await });
+    const LOCK_QUERY: &str = "SELECT id FROM machines WHERE id = $1 FOR UPDATE";
+    let first_pid = tokio::select! {
+        result = &mut first => panic!("first request passed the machine lock: {result:?}"),
+        pid = wait_for_blocked_query(&env.pool, gate_pid, LOCK_QUERY) => pid,
     };
-
+    let mut second = tokio::spawn(async move {
+        second_api
+            .on_demand_machine_validation(second_request)
+            .await
+    });
+    // PostgreSQL queues the second row-lock request behind the first waiter.
     tokio::select! {
-        result = &mut requests => panic!("requests passed the machine lock: {result:?}"),
-        _ = wait_for_both_requests => {},
+        result = &mut first => panic!("first request passed the machine lock: {result:?}"),
+        result = &mut second => panic!("second request passed the machine lock: {result:?}"),
+        _ = wait_for_blocked_query(&env.pool, first_pid, LOCK_QUERY) => {},
     }
     gate.commit().await?;
 
-    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(15), requests)
-        .await
-        .expect("concurrent on-demand requests should finish")
-        .expect("concurrent request task should not panic");
+    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::join!(first, second)
+    })
+    .await
+    .expect("concurrent on-demand requests should finish");
 
-    let responses = [first, second];
+    let responses = [
+        first.expect("first request task should not panic"),
+        second.expect("second request task should not panic"),
+    ];
     assert_eq!(
         responses.iter().filter(|response| response.is_ok()).count(),
         1,
