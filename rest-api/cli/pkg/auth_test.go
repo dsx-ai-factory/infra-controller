@@ -386,6 +386,76 @@ func TestIsNGCBearerAPIKey(t *testing.T) {
 	require.False(t, isNGCBearerAPIKey("NVAPI-uppercase"))
 }
 
+// TestLoginWithOIDCCmd runs the real app, because --keycloak-url, --keycloak-realm, and
+// --client-id are global flags that only reach the login command in global position.
+func TestLoginWithOIDCCmd(t *testing.T) {
+	type tokenRequest struct {
+		path     string
+		clientID string
+	}
+	tests := []struct {
+		name           string
+		configTokenURL string
+		configClientID string
+		clientIDArgs   []string
+		wantClientID   string
+	}{
+		{
+			// The configured endpoint is unreachable, so if it won, no request would arrive.
+			name:           "explicit keycloak-url beats configured token_url",
+			configTokenURL: "https://auth.example.invalid/realms/nico-dev/protocol/openid-connect/token",
+			clientIDArgs:   []string{"--client-id", "flag-client"},
+			wantClientID:   "flag-client",
+		},
+		{
+			name:           "configured client_id is used when --client-id is not passed",
+			configClientID: "config-client",
+			wantClientID:   "config-client",
+		},
+		{
+			name:           "explicit client-id beats configured client_id",
+			configClientID: "config-client",
+			clientIDArgs:   []string{"--client-id", "flag-client"},
+			wantClientID:   "flag-client",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := make(chan tokenRequest, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = r.ParseForm()
+				got <- tokenRequest{path: r.URL.Path, clientID: r.Form.Get("client_id")}
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer server.Close()
+
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			cfg := &ConfigFile{Auth: ConfigAuth{OIDC: &ConfigOIDC{
+				TokenURL: tt.configTokenURL,
+				ClientID: tt.configClientID,
+			}}}
+			require.NoError(t, SaveConfigToPath(cfg, configPath))
+			SetConfigPath(configPath)
+			defer SetConfigPath("")
+
+			app, err := NewApp([]byte(`{"openapi":"3.0.0","info":{"title":"test","version":"test"},"paths":{}}`))
+			require.NoError(t, err)
+			args := append([]string{"nicocli", "--keycloak-url", server.URL, "--keycloak-realm", "nico"}, tt.clientIDArgs...)
+			withArgs(t, append(args, "login", "--client-secret", "secret")...)
+			require.Error(t, app.Run(os.Args))
+
+			select {
+			case req := <-got:
+				require.Equal(t, "/realms/nico/protocol/openid-connect/token", req.path)
+				require.Equal(t, tt.wantClientID, req.clientID)
+			default:
+				t.Fatal("login never reached the --keycloak-url token endpoint")
+			}
+		})
+	}
+}
+
 func withArgs(t *testing.T, args ...string) {
 	t.Helper()
 	oldArgs := os.Args

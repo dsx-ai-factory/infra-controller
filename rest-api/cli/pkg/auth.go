@@ -373,11 +373,25 @@ func extractNGCToken(body []byte) string {
 	return resp.AccessToken
 }
 
-func loginWithOIDCCmd(c *cli.Context, cfg *ConfigFile) error {
-	tokenURL := c.String("token-url")
-	if tokenURL == "" && cfg.Auth.OIDC != nil {
-		tokenURL = cfg.Auth.OIDC.TokenURL
+// resolveOIDCClientID returns the OAuth client ID. An explicit flag wins over config, and
+// config wins over the flag's built-in default. --client-id declares a Value, so reading
+// the flag alone never falls through to auth.oidc.client_id.
+func resolveOIDCClientID(c *cli.Context, cfg *ConfigFile) string {
+	if cliFlagExplicitlySet(c, "client-id") {
+		return c.String("client-id")
 	}
+	if cfg.Auth.OIDC != nil && cfg.Auth.OIDC.ClientID != "" {
+		return cfg.Auth.OIDC.ClientID
+	}
+	return c.String("client-id")
+}
+
+func loginWithOIDCCmd(c *cli.Context, cfg *ConfigFile) error {
+	// An endpoint supplied on the command line or in the environment beats the config.
+	// `nicocli init` scaffolds auth.oidc.token_url, and login persists it, so checking the
+	// config first left --keycloak-url ignored and the login pointed at whichever realm the
+	// config named. Neither URL flag declares a Value, so a non-empty string came from the user.
+	tokenURL := c.String("token-url")
 	if tokenURL == "" {
 		if keycloakURL := c.String("keycloak-url"); keycloakURL != "" {
 			realm := c.String("keycloak-realm")
@@ -385,14 +399,14 @@ func loginWithOIDCCmd(c *cli.Context, cfg *ConfigFile) error {
 				strings.TrimRight(keycloakURL, "/"), realm)
 		}
 	}
+	if tokenURL == "" && cfg.Auth.OIDC != nil {
+		tokenURL = cfg.Auth.OIDC.TokenURL
+	}
 	if tokenURL == "" {
 		return fmt.Errorf("--token-url or --keycloak-url is required (or set auth.oidc.token_url in config)")
 	}
 
-	clientID := c.String("client-id")
-	if clientID == "" && cfg.Auth.OIDC != nil {
-		clientID = cfg.Auth.OIDC.ClientID
-	}
+	clientID := resolveOIDCClientID(c, cfg)
 
 	clientSecret := c.String("client-secret")
 	if clientSecret == "" && cfg.Auth.OIDC != nil {
