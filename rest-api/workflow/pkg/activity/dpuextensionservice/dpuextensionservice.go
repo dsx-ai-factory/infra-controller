@@ -19,7 +19,6 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/tenantaccess"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
@@ -413,7 +412,7 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 		}
 		tenant := &tenants[0]
 
-		hasSiteAccess, accessErr := tenantaccess.HasSiteAccess(ctx, transaction, mde.dbSession, tenant, site.ID)
+		hasSiteAccess, accessErr := cdbm.TenantHasSiteAccess(ctx, transaction, mde.dbSession, tenant, site.ID)
 		if accessErr != nil {
 			return nil, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to validate Tenant access to Site, DB error: %w", accessErr)
 		}
