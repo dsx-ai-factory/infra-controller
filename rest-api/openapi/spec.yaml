@@ -20018,6 +20018,17 @@ components:
       title: MachineCountByStatus
       type: object
       description: Describes count of Machines in various statuses
+      required:
+        - total
+        - initializing
+        - reset
+        - inUse
+        - ready
+        - error
+        - decommissioning
+        - decommissioned
+        - maintenance
+        - unknown
       examples:
         - total: 27
           initializing: 8
@@ -22287,6 +22298,7 @@ components:
         - Provisioning
         - Ready
         - Deleting
+        - Deleted
         - Error
     VpcPrefixCreateRequest:
       title: VpcPrefixCreateRequest
@@ -31720,8 +31732,10 @@ components:
           items:
             $ref: '#/components/schemas/SkuInfinibandDevice'
         tpm:
-          $ref: '#/components/schemas/SkuTpm'
-          description: TPM component
+          oneOf:
+            - $ref: '#/components/schemas/SkuTpm'
+            - type: 'null'
+          description: TPM component, null when the SKU has none
     SkuCpu:
       title: SkuCpu
       type: object
@@ -32656,6 +32670,20 @@ components:
       title: SshKeyGroupSummary
       type: object
       description: Summarizes an SSH Key Group
+      required:
+        - id
+        - name
+        - status
+        - created
+        - updated
+      examples:
+        - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+          name: reno-integration-sre
+          description: SRE access SSH keys for Reno Integration
+          version: fbc692b61ffef6fbfc38a3833f6b7e7ae508da75
+          status: Syncing
+          created: '2019-08-24T14:15:22Z'
+          updated: '2019-08-24T14:15:22Z'
       properties:
         id:
           type: string
@@ -33874,6 +33902,27 @@ components:
       title: MachineInstanceTypeTenantStats
       description: Per-tenant allocation stats for one Instance Type
       type: object
+      required:
+        - id
+        - name
+        - allocated
+        - usedMachineStats
+      examples:
+        - id: f97df110-f4de-492e-8849-4a6af68026b0
+          name: qygdmg8oqik8
+          allocated: 4
+          usedMachineStats:
+            total: 4
+            initializing: 0
+            ready: 1
+            inUse: 3
+            error: 0
+            maintenance: 0
+            unknown: 0
+          allocations:
+            - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+              name: Echo Studios Allocations
+              allocated: 4
       properties:
         id:
           type: string
@@ -33897,6 +33946,14 @@ components:
       title: MachineInstanceTypeTenantAllocationStats
       description: Stats for a single Allocation within a Tenant's Instance Type stats
       type: object
+      required:
+        - id
+        - name
+        - allocated
+      examples:
+        - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+          name: Echo Studios Allocations
+          allocated: 4
       properties:
         id:
           type: string
