@@ -94,6 +94,7 @@ the state advances to `ConfigureCertificate` `Start`.
 |-----------|----------|
 | `rack_id` is `None`, no component manager, or no services remain | Skip; advance to `ConfigureCertificate` `Start`, which skips as well. |
 | Backend returns `Unsupported` (for example NSM, or RMS without the RPC) | Log a warning, skip; advance to `ConfigureCertificate` `Start`. |
+| Per-switch NVOS admin credential is absent and cannot be seeded, or its source data is invalid | Wait in `Start`; the next iteration retries after the credential is imported or corrected. |
 | `bmc_mac_address` is `None`, or the endpoint cannot be resolved | Transition to `Error`. |
 | CM returns `OperationOutcomeUnknown` on submission | Transition to `Error`; the submission is not retried. |
 | CM returns another error on submission | `StateHandlerError`; remain in `Start` and retry. |
@@ -276,6 +277,76 @@ The mTLS-disable path uses the last two RPCs:
   retries.
 
 ## Sequence diagrams
+
+### Disable mTLS (RMS backend)
+
+Initial ingestion enters `DisableMtls(Start)` from `Initializing` once an NVOS
+interface is associated. One state-controller iteration runs `Start`; later
+iterations run `WaitForComplete` until the RMS job tree reaches a terminal
+state. The skip conditions in the
+[`DisableMtls` condition table](#sub-states-disablemtlsstate) apply before
+`Start` calls CM and are not repeated here.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant SCH as Switch State Handler<br/>(configuring.rs)
+    participant Creds as Credential Manager
+    participant DB as PostgreSQL
+    participant CM as Component Manager
+    participant RMS as RmsBackend
+    participant RPC as RMS (librms)
+
+    Note over SCH: State = Configuring::<br/>DisableMtls(Start)
+
+    SCH->>Creds: get SwitchNvosAdmin credentials
+    alt credentials absent or invalid
+        SCH->>SCH: wait in Start (retry next iteration)
+    end
+
+    SCH->>DB: find machine interfaces for switch
+    SCH->>CM: batch_disable_switch_mtls([endpoint], services)
+    CM->>RMS: NvSwitchManager::batch_disable_switch_mtls
+    RMS->>DB: find_rms_identities_by_macs(bmc_mac)
+    DB-->>RMS: node_id, rack_id
+    RMS->>RMS: build_switch_node_info(endpoint, identity)
+    RMS->>RPC: batch_disable_switch_mtls(nodes, services)
+    RPC-->>RMS: batch status, job_id
+    RMS-->>CM: job_id or error
+    CM-->>SCH: job_id or error
+
+    alt job_id returned
+        SCH->>SCH: transition to DisableMtls<br/>(WaitForComplete { job_id })
+    else Unsupported
+        SCH->>SCH: skip, transition to ConfigureCertificate(Start)
+    else OperationOutcomeUnknown
+        SCH->>SCH: transition to Error (never resubmitted)
+    else other CM error
+        SCH->>SCH: StateHandlerError (retry next iteration in Start)
+    end
+
+    Note over SCH: Next iteration(s)
+
+    SCH->>CM: get_disable_switch_mtls_job_status(job_id)
+    CM->>RMS: NvSwitchManager::get_disable_switch_mtls_job_status
+    RMS->>RPC: get_job_status(job_id, include_child_job_states = true)
+    RPC-->>RMS: parent and child JobStatus list
+    RMS->>RMS: summarize_rms_switch_job_tree
+    RMS-->>CM: SwitchMtlsDisableJobStatus or error
+    CM-->>SCH: status or error
+
+    alt state = Pending
+        SCH->>SCH: wait (retry next iteration)
+    else state = Completed (parent and every child)
+        SCH->>SCH: transition to ConfigureCertificate(Start)
+    else state = Failed
+        SCH->>SCH: transition to Error (certificates not submitted)
+    else NotFound, OperationOutcomeUnknown, or Unsupported
+        SCH->>SCH: transition to Error (certificates not submitted)
+    else other CM error
+        SCH->>SCH: StateHandlerError (retry next iteration in WaitForComplete)
+    end
+```
 
 ### Happy path (RMS backend)
 
