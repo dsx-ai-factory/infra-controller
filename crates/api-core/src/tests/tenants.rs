@@ -507,6 +507,25 @@ async fn test_tenant(pool: sqlx::PgPool) {
         }
     );
 
+    // Creating the same organization again is a conflict, not a server fault, and the
+    // message must not carry the database error.
+    let duplicate_tenant = env
+        .api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: "Org".to_string(),
+            routing_profile_type: None,
+            metadata: Some(rpc::forge::Metadata {
+                name: "Name".to_string(),
+                description: "".to_string(),
+                labels: vec![],
+            }),
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(duplicate_tenant.code(), Code::AlreadyExists);
+    assert_eq!(duplicate_tenant.message(), "Tenant already exists: Org");
+
     let find_tenant = env
         .api
         .find_tenant(tonic::Request::new(rpc::forge::FindTenantRequest {
@@ -1090,6 +1109,8 @@ async fn test_tenant_create_keyset(pool: sqlx::PgPool) {
 
     assert!(keyset.keyset_content.unwrap().public_keys.is_empty());
 
+    // Creating the same keyset again is a conflict, not a server fault, and the
+    // message must not carry the database error.
     let status = env
         .api
         .create_tenant_keyset(tonic::Request::new(rpc::forge::CreateTenantKeysetRequest {
@@ -1104,12 +1125,10 @@ async fn test_tenant_create_keyset(pool: sqlx::PgPool) {
     let response = status.into_http::<tonic::body::Body>();
     let status = tonic::Status::from_header_map(response.headers()).unwrap();
 
-    // REST uses this fixed phrase to retry an existing keyset with Update instead of Create.
-    assert_eq!(status.code(), Code::Internal);
-    assert_eq!(
-        status.message(),
-        "internal database error: duplicate key value violates unique constraint"
-    );
+    assert_eq!(status.code(), Code::AlreadyExists);
+    let message = status.message();
+    assert!(message.starts_with("keyset already exists: "), "{message}");
+    assert!(message.contains("keyset1"), "{message}");
 }
 
 #[crate::sqlx_test]

@@ -41,7 +41,9 @@ pub(crate) async fn create(
 
     let mut txn = api.txn_begin().await?;
 
-    let keyset = db::tenant_keyset::create(&keyset_request, &mut txn).await?;
+    let keyset = db::tenant_keyset::create(&keyset_request, &mut txn)
+        .await
+        .map_err(CarbideError::from)?;
 
     txn.commit().await?;
 
