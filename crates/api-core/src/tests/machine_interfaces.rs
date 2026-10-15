@@ -17,8 +17,10 @@
 
 use std::borrow::Borrow;
 use std::collections::HashSet;
+use std::net::IpAddr;
 use std::str::FromStr;
 
+use carbide_uuid::machine::{MachineId, MachineInterfaceId};
 use common::api_fixtures::network_segment::{
     FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY, create_host_inband_network_segment,
 };
@@ -45,6 +47,34 @@ use tonic::Code;
 use crate::DatabaseError;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::dpu::create_dpu_machine;
+
+/// Adds an older BMC row so tests can prove topology selection wins over row
+/// age.
+async fn insert_older_bmc_interface(
+    txn: &mut sqlx::PgConnection,
+    machine_id: MachineId,
+    current_interface: &MachineInterfaceSnapshot,
+    mac_address: MacAddress,
+    ip_address: IpAddr,
+) -> Result<MachineInterfaceId, Box<dyn std::error::Error>> {
+    let interface_id = sqlx::query_scalar(
+        "INSERT INTO machine_interfaces
+         (machine_id, association_type, segment_id, mac_address,
+          primary_interface, hostname, interface_type, created)
+         VALUES ($1, 'Machine', $2, $3, false, 'stale-bmc', 'Bmc',
+                 $4 - INTERVAL '1 day')
+         RETURNING id",
+    )
+    .bind(machine_id)
+    .bind(current_interface.segment_id)
+    .bind(mac_address)
+    .bind(current_interface.created)
+    .fetch_one(&mut *txn)
+    .await?;
+    db::machine_interface_address::insert(txn, interface_id, ip_address, AllocationType::Dhcp)
+        .await?;
+    Ok(interface_id)
+}
 
 #[crate::sqlx_test]
 async fn only_one_primary_interface_per_machine(
@@ -871,9 +901,12 @@ async fn test_delete_bmc_interface_with_machine(
 }
 
 #[crate::sqlx_test]
-async fn machine_bmc_info_uses_bmc_interface_and_interfaces_exclude_it(
+async fn machine_bmc_info_uses_topology_selected_bmc_and_interfaces_exclude_it(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Topology identifies the active BMC even when an older attached interface
+    // remains. Each reader should use that selection without exposing BMCs in
+    // the machine's general interface list.
     let env = create_test_env(pool.clone()).await;
     let host_config = env.managed_host_config();
     let host_bmc_mac = host_config.bmc_mac_address;
@@ -917,6 +950,28 @@ async fn machine_bmc_info_uses_bmc_interface_and_interfaces_exclude_it(
         .to_owned();
     assert_eq!(dpu_bmc_interface_mac, dpu_bmc_mac);
 
+    let host_stale_bmc_ip: IpAddr = "192.0.0.101".parse()?;
+    let host_stale_bmc_interface_id = insert_older_bmc_interface(
+        txn.as_mut(),
+        host_machine.id.into(),
+        host_bmc_interface,
+        "02:00:00:00:01:01".parse()?,
+        host_stale_bmc_ip,
+    )
+    .await?;
+    let dpu_stale_bmc_interface_id = insert_older_bmc_interface(
+        txn.as_mut(),
+        dpu_machine.id.into(),
+        dpu_bmc_interface,
+        "02:00:00:00:01:02".parse()?,
+        "192.0.0.102".parse()?,
+    )
+    .await?;
+    assert!(host_stale_bmc_ip < host_bmc_interface_ip);
+
+    let host_machine = managed_host.host().db_machine(&mut txn).await;
+    let dpu_machine = managed_host.dpu().db_machine(&mut txn).await;
+
     assert_eq!(
         host_machine.status.bmc_info.machine_interface_id,
         Some(host_bmc_interface_id)
@@ -948,6 +1003,34 @@ async fn machine_bmc_info_uses_bmc_interface_and_interfaces_exclude_it(
             .iter()
             .all(|interface| interface.interface_type != InterfaceType::Bmc
                 && interface.id != dpu_bmc_interface_id)
+    );
+
+    let managed_snapshot = managed_host.snapshot(&mut txn).await;
+    assert_eq!(
+        managed_snapshot
+            .host_snapshot
+            .status
+            .bmc_info
+            .machine_interface_id,
+        Some(host_bmc_interface_id)
+    );
+    assert_eq!(
+        managed_snapshot.dpu_snapshots[0]
+            .status
+            .bmc_info
+            .machine_interface_id,
+        Some(dpu_bmc_interface_id)
+    );
+
+    let host_machine_id: MachineId = host_machine.id.into();
+    let bmc_ips_by_machine = db::machine_topology::find_machine_bmc_pairs_by_machine_id(
+        txn.as_mut(),
+        vec![host_machine_id],
+    )
+    .await?;
+    assert_eq!(
+        bmc_ips_by_machine,
+        vec![(host_machine_id, Some(host_bmc_interface_ip.to_string()))]
     );
 
     txn.commit().await?;
@@ -1013,6 +1096,75 @@ async fn machine_bmc_info_uses_bmc_interface_and_interfaces_exclude_it(
             .all(|interface| interface.interface_type != Some(rpc_bmc_type)
                 && interface.id != Some(dpu_bmc_interface_id))
     );
+
+    // If the selected interfaces stop belonging to these machines, snapshots
+    // and direct lookup must not silently fall back to the older BMCs.
+    let mut txn = pool.begin().await?;
+    sqlx::query(
+        "UPDATE machine_interfaces
+         SET machine_id = NULL, association_type = 'None'
+         WHERE id = ANY($1)",
+    )
+    .bind(vec![host_bmc_interface_id, dpu_bmc_interface_id])
+    .execute(txn.as_mut())
+    .await?;
+
+    let host_machine = managed_host.host().db_machine(&mut txn).await;
+    assert_eq!(host_machine.status.bmc_info.ip, None);
+    assert_eq!(host_machine.status.bmc_info.mac, None);
+
+    let managed_snapshot = managed_host.snapshot(&mut txn).await;
+    assert_eq!(managed_snapshot.host_snapshot.status.bmc_info.ip, None);
+    assert_eq!(managed_snapshot.dpu_snapshots[0].status.bmc_info.ip, None);
+
+    let bmc_pairs = db::machine_topology::find_machine_bmc_pairs_by_machine_id(
+        txn.as_mut(),
+        vec![host_machine_id],
+    )
+    .await?;
+    assert!(bmc_pairs.is_empty());
+
+    // A topology without an interface ID retains the attached-BMC fallback.
+    sqlx::query(
+        "UPDATE machine_topologies
+         SET topology = jsonb_set(
+             topology,
+             '{bmc_info,machine_interface_id}',
+             'null'::jsonb
+         )
+         WHERE machine_id = ANY($1)",
+    )
+    .bind(vec![host_machine_id, dpu_machine.id.into()])
+    .execute(txn.as_mut())
+    .await?;
+
+    let managed_snapshot = managed_host.snapshot(&mut txn).await;
+    assert_eq!(
+        managed_snapshot
+            .host_snapshot
+            .status
+            .bmc_info
+            .machine_interface_id,
+        Some(host_stale_bmc_interface_id)
+    );
+    assert_eq!(
+        managed_snapshot.dpu_snapshots[0]
+            .status
+            .bmc_info
+            .machine_interface_id,
+        Some(dpu_stale_bmc_interface_id)
+    );
+    let bmc_pairs = db::machine_topology::find_machine_bmc_pairs_by_machine_id(
+        txn.as_mut(),
+        vec![host_machine_id],
+    )
+    .await?;
+    assert_eq!(
+        bmc_pairs,
+        vec![(host_machine_id, Some(host_stale_bmc_ip.to_string()))]
+    );
+
+    txn.rollback().await?;
 
     Ok(())
 }
