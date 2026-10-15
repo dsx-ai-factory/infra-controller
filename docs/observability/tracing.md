@@ -301,10 +301,13 @@ through nico-api. The standard `TraceContextPropagator` is installed once at sta
   malformed `traceparent` leaves the request span a fresh root.
 - **Egress.** When nico-api makes an outbound call from within a traced request, it injects the
   current `traceparent` and `tracestate` so the downstream service can continue the trace. Covered:
-  - **gRPC** - Forge and NMX-C (`crates/rpc`), the RMS clients (`crates/rms-observability`),
-    the NSM and power-shelf (PSM) backends (`crates/component-manager`), and the NMX-C client pool
-    (`crates/libnmxc`), through a shared tower
+  - **gRPC** - Forge and NMX-C (`crates/rpc`), the NSM and power-shelf (PSM) backends
+    (`crates/component-manager`), and the NMX-C client pool (`crates/libnmxc`), through a shared tower
     layer applied to every request.
+  - **gRPC (RMS)** - the RMS clients use the same `trace_propagation::TraceInjectService`, but
+    `librms` owns the transport, so `rms_observability::configure()` (`crates/rms-observability`)
+    installs it as the caller-supplied transport layer on the `RmsClientConfig`. nico-api calls it
+    from `crates/api-core/src/setup.rs`. See [RMS RPC auditing](#rms-rpc-auditing).
   - **HTTP** - the BMC/Redfish handler, machine-identity token exchange, admin-UI OAuth2, NRAS,
     the MQTT OAuth2 token provider, and firmware downloads.
 - **Interaction with the enable flag.** `tracing-enabled` is the master switch for what nico-api
