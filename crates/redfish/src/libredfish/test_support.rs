@@ -55,7 +55,9 @@ struct RedfishSimState {
     secure_boot: AtomicBool,
     no_component_integrities: bool,
     firmware_for_component_error: bool,
-    get_task_trigger_evidence_returns_interrupted: bool,
+    get_task_trigger_evidence_returns_exception: bool,
+    evidence_collection_running: bool,
+    evidence_collection_requests: Vec<(String, String)>,
     machine_setup_bios_job_id: Option<String>,
     is_bios_setup: Option<bool>,
     default_lockdown: Option<EnabledDisabled>,
@@ -331,13 +333,28 @@ impl RedfishSim {
         self.state.lock().unwrap().firmware_for_component_error = error;
     }
 
-    /// Return the evidence-collection task as `Interrupted`, modelling a BMC
+    /// Return the evidence-collection task as `Exception`, modelling a BMC
     /// that keeps failing to produce evidence.
-    pub fn set_get_task_trigger_evidence_returns_interrupted(&self, interrupted: bool) {
+    pub fn set_get_task_trigger_evidence_returns_exception(&self, exception: bool) {
         self.state
             .lock()
             .unwrap()
-            .get_task_trigger_evidence_returns_interrupted = interrupted;
+            .get_task_trigger_evidence_returns_exception = exception;
+    }
+
+    /// Keep evidence-collection tasks running until cleared. Tasks otherwise
+    /// complete immediately; the exception override takes precedence.
+    pub fn set_evidence_collection_running(&self, running: bool) {
+        self.state.lock().unwrap().evidence_collection_running = running;
+    }
+
+    /// Return evidence-collection requests in call order as `(url, nonce)` pairs.
+    pub fn evidence_collection_requests(&self) -> Vec<(String, String)> {
+        self.state
+            .lock()
+            .unwrap()
+            .evidence_collection_requests
+            .clone()
     }
 
     pub fn set_machine_setup_bios_job_id(&self, job_id: Option<String>) {
@@ -1176,7 +1193,7 @@ impl Redfish for RedfishSimClient {
                 .state
                 .lock()
                 .unwrap()
-                .get_task_trigger_evidence_returns_interrupted
+                .get_task_trigger_evidence_returns_exception
                 && id == TRIGGER_EVIDENCE_TASK_ID
             {
                 return Ok(serde_json::from_str(
@@ -1187,13 +1204,13 @@ impl Redfish for RedfishSimClient {
                     \"PercentComplete\": 100,
                     \"StartTime\": \"2024-01-30T09:00:52+00:00\",
                     \"TaskMonitor\": \"/redfish/v1/TaskService/Tasks/0/Monitor\",
-                    \"TaskState\": \"Interrupted\",
-                    \"TaskStatus\": \"OK\"
+                    \"TaskState\": \"Exception\",
+                    \"TaskStatus\": \"Critical\"
                     }",
                 )
                 .unwrap());
             }
-            Ok(serde_json::from_str(
+            let mut task: Task = serde_json::from_str(
                 "{
             \"@odata.id\": \"/redfish/v1/TaskService/Tasks/0\",
             \"@odata.type\": \"#Task.v1_4_3.Task\",
@@ -1205,7 +1222,14 @@ impl Redfish for RedfishSimClient {
             \"TaskStatus\": \"OK\"
             }",
             )
-            .unwrap())
+            .unwrap();
+            if id == TRIGGER_EVIDENCE_TASK_ID
+                && self.state.lock().unwrap().evidence_collection_running
+            {
+                task.task_state = Some(libredfish::model::task::TaskState::Running);
+                task.percent_complete = Some(0);
+            }
+            Ok(task)
         })
     }
 
@@ -2468,10 +2492,15 @@ impl Redfish for RedfishSimClient {
 
     fn trigger_evidence_collection<'a>(
         &'a self,
-        _url: &'a str,
-        _nonce: &'a str,
+        url: &'a str,
+        nonce: &'a str,
     ) -> libredfish::RedfishFuture<'a, Result<Task, RedfishError>> {
         Box::pin(async move {
+            self.state
+                .lock()
+                .unwrap()
+                .evidence_collection_requests
+                .push((url.to_string(), nonce.to_string()));
             let task_str = format!(
                 r##"{{
                     "@odata.id": "/redfish/v1/TaskService/Tasks/{TRIGGER_EVIDENCE_TASK_ID}",

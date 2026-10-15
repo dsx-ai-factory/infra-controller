@@ -20,6 +20,7 @@ pub(in crate::tests) mod tests {
     use carbide_uuid::machine::MachineId;
     use config_version::ConfigVersion;
     use model::attestation::spdm::{SpdmAttestationState, SpdmObjectId};
+    use model::controller_outcome::PersistentStateHandlerOutcome;
     use rpc::forge::forge_server::Forge;
     use rpc::forge::{
         SpdmAttestationJobStatus, SpdmListAttestationRequest, SpdmListAttestationRequestSelector,
@@ -312,9 +313,9 @@ pub(in crate::tests) mod tests {
 
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
 
-        // set up redfish to interrupt evidence collection
+        // set up redfish to fail evidence collection with a terminal exception
         env.redfish_sim
-            .set_get_task_trigger_evidence_returns_interrupted(true);
+            .set_get_task_trigger_evidence_returns_exception(true);
 
         let response = env
             .api
@@ -385,6 +386,179 @@ pub(in crate::tests) mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn test_evidence_collection_is_serialized_per_device(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(spdm_enabled_config()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+        // Host setup already performed attestation; count only requests from
+        // the two jobs below.
+        let initial_requests = env.redfish_sim.evidence_collection_requests().len();
+        // Keep BMC tasks "running" to force an overlap
+        env.redfish_sim.set_evidence_collection_running(true);
+
+        // Start job A and advance through metadata, certificate, and collection.
+        let first_job_id = uuid::Uuid::try_from(
+            env.api
+                .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                    machine_id: Some(machine_id.into()),
+                    redfish_timeout_secs: u32::MAX,
+                }))
+                .await?
+                .into_inner()
+                .result
+                .unwrap()
+                .job_id
+                .unwrap(),
+        )?;
+        for _ in 0..3 {
+            env.run_spdm_controller_iteration_no_requeue().await;
+        }
+
+        let mut txn = env.db_txn().await;
+        let devices =
+            db::attestation::spdm::get_attestations_for_job_id(&mut txn, &first_job_id).await?;
+        assert_eq!(3, devices.len());
+        // Different devices can collect at the same time. Each must retain its
+        // own claim while the BMC is still producing evidence.
+        for device in &devices {
+            let attestation = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                &mut txn,
+                &machine_id,
+                &device.device_id,
+                &first_job_id,
+            )
+            .await?;
+            assert!(matches!(
+                attestation.state,
+                SpdmAttestationState::PollEvidenceCollection { retry_count: 0, .. }
+            ));
+            // each device has its own lock, and, since we've set env.redfish_sim.set_evidence_collection_running(true);
+            // the lock with persist as the evidence collection is ongoing.
+            assert!(attestation.evidence_collection_locked);
+            assert!(attestation.evidence.is_none());
+        }
+        assert_eq!(
+            initial_requests + devices.len(),
+            env.redfish_sim.evidence_collection_requests().len()
+        );
+
+        // Start job B for the same machine while A still owns all device claims.
+        let second_job_id = uuid::Uuid::try_from(
+            env.api
+                .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                    machine_id: Some(machine_id.into()),
+                    redfish_timeout_secs: u32::MAX,
+                }))
+                .await?
+                .into_inner()
+                .result
+                .unwrap()
+                .job_id
+                .unwrap(),
+        )?;
+        assert_ne!(first_job_id, second_job_id);
+        // Reach TriggerEvidenceCollection and attempt to acquire each held claim.
+        for _ in 0..3 {
+            env.run_spdm_controller_iteration_no_requeue().await;
+        }
+        for device in &devices {
+            let second = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                &mut txn,
+                &machine_id,
+                &device.device_id,
+                &second_job_id,
+            )
+            .await?;
+            assert_eq!(
+                second.state,
+                SpdmAttestationState::TriggerEvidenceCollection { retry_count: 0 }
+            );
+            assert!(!second.evidence_collection_locked);
+            assert!(second.evidence.is_none());
+            // Prove B reached the claim check, rather than stalling on an
+            // unrelated error before it could attempt collection.
+            assert!(
+                matches!(
+                    second.state_outcome,
+                    Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
+                        if reason == "Evidence collection claim is unavailable or attestation state changed"
+                ),
+                "expected claim contention, got {:?}",
+                second.state_outcome
+            );
+        }
+        assert_eq!(
+            initial_requests + devices.len(),
+            env.redfish_sim.evidence_collection_requests().len(),
+            "the waiting job must not send a collection request"
+        );
+
+        // Let A finish. The controller must save its evidence and release its
+        // claims as it advances to verification.
+        env.redfish_sim.set_evidence_collection_running(false);
+        env.run_spdm_controller_iteration_no_requeue().await;
+        for device in &devices {
+            let first = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                &mut txn,
+                &machine_id,
+                &device.device_id,
+                &first_job_id,
+            )
+            .await?;
+            assert_eq!(first.state, SpdmAttestationState::NrasVerification);
+            assert!(
+                first.evidence.is_some(),
+                "evidence must be saved before releasing the claim"
+            );
+            assert!(!first.evidence_collection_locked);
+        }
+
+        // Device iteration order is unspecified: B may have started in the
+        // iteration that released A's claim, or may need one more iteration.
+        // Keep B's tasks running so we can inspect its newly acquired claims.
+        env.redfish_sim.set_evidence_collection_running(true);
+        env.run_spdm_controller_iteration_no_requeue().await;
+        let requests = env.redfish_sim.evidence_collection_requests();
+        assert_eq!(initial_requests + 2 * devices.len(), requests.len());
+        for device in &devices {
+            let second = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                &mut txn,
+                &machine_id,
+                &device.device_id,
+                &second_job_id,
+            )
+            .await?;
+            assert!(matches!(
+                second.state,
+                SpdmAttestationState::PollEvidenceCollection { retry_count: 0, .. }
+            ));
+            assert!(second.evidence_collection_locked);
+            assert!(second.evidence.is_none());
+            // The nonce identifies B's request even though both jobs use the
+            // same evidence URL for this device.
+            assert_eq!(
+                1,
+                requests
+                    .iter()
+                    .filter(|(url, nonce)| Some(url) == second.evidence_target.as_ref()
+                        && nonce == &second.nonce_hex())
+                    .count(),
+                "the second job must start collection exactly once for {}",
+                device.device_id
+            );
+        }
         Ok(())
     }
 

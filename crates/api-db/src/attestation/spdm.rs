@@ -91,6 +91,76 @@ pub async fn cancel_attestation_job(
     Ok(())
 }
 
+/// Claims the shared evidence endpoint for an unclaimed, current attestation.
+///
+/// Returns `false` if another job holds the claim, this job already holds it, or
+/// the attestation is stale, cancelled, completed, or missing. Uses a
+/// savepoint so expected contention does not abort the caller's transaction.
+/// The caller must commit a successful claim before triggering BMC collection.
+pub async fn try_acquire_evidence_collection_lock(
+    txn: &mut PgConnection,
+    object_id: &SpdmObjectId,
+    state_version: ConfigVersion,
+) -> DatabaseResult<bool> {
+    let query = r#"
+        UPDATE spdm_machine_devices_attestation
+        SET evidence_collection_locked = TRUE
+        WHERE machine_id = $1 AND device_id = $2 AND job_id = $3
+            AND state_version = $4 AND NOT evidence_collection_locked
+            AND cancelled_at IS NULL AND completed_at IS NULL
+    "#;
+    let mut savepoint = crate::Transaction::begin_inner(txn).await?;
+    let result = sqlx::query(query)
+        .bind(object_id.0)
+        .bind(&object_id.1)
+        .bind(object_id.2)
+        .bind(state_version)
+        .execute(savepoint.as_pgconn())
+        .await;
+
+    match result {
+        Ok(result) => {
+            savepoint.commit().await?;
+            Ok(result.rows_affected() == 1)
+        }
+        Err(sqlx::Error::Database(error))
+            if error.is_unique_violation()
+                && error.constraint() == Some("spdm_device_evidence_collection_lock") =>
+        {
+            savepoint.rollback().await?;
+            Ok(false)
+        }
+        Err(error) => {
+            savepoint.rollback().await?;
+            Err(DatabaseError::query(query, error))
+        }
+    }
+}
+
+/// Releases only this job's evidence collection claim in the caller's transaction.
+///
+/// Call only after persisting evidence or confirming that the BMC task has stopped.
+/// Releasing an already released or missing claim succeeds without changing other jobs.
+pub async fn release_evidence_collection_lock(
+    txn: &mut PgConnection,
+    object_id: &SpdmObjectId,
+) -> DatabaseResult<()> {
+    let query = r#"
+        UPDATE spdm_machine_devices_attestation
+        SET evidence_collection_locked = FALSE
+        WHERE machine_id = $1 AND device_id = $2 AND job_id = $3
+    "#;
+    sqlx::query(query)
+        .bind(object_id.0)
+        .bind(&object_id.1)
+        .bind(object_id.2)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+
+    Ok(())
+}
+
 pub async fn set_completed_at(
     txn: &mut PgConnection,
     machine_id: &MachineId,

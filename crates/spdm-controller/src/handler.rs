@@ -95,6 +95,26 @@ impl StateHandler for SpdmAttestationStateHandler {
         // record metrics irrespective of the state of the machine
         self.record_metrics(snapshot, ctx);
 
+        if snapshot.cancelled_at.is_some() && snapshot.evidence_collection_locked {
+            let SpdmAttestationState::PollEvidenceCollection { task_id, .. } = controller_state
+            else {
+                return Ok(StateHandlerOutcome::wait(
+                    "Cannot release evidence collection claim: the BMC task ID was not persisted; inspect the BMC task before recovering this job".to_string(),
+                ));
+            };
+            let redfish_client = redfish_client(&snapshot.bmc_info, ctx).await?;
+            let task = redfish_client
+                .get_task(task_id)
+                .await
+                .map_err(|error| redfish_error("wait for cancelled evidence collection", error))?;
+            if !evidence_collection_task_stopped(task.task_state.as_ref()) {
+                return Ok(StateHandlerOutcome::wait(
+                    "Waiting for BMC evidence collection to stop before cancelling attestation"
+                        .to_string(),
+                ));
+            }
+        }
+
         let transition_to_cancelled;
         let controller_state = if snapshot.cancelled_at.is_some()
             && controller_state != &SpdmAttestationState::Cancelled
@@ -174,6 +194,13 @@ impl StateHandler for SpdmAttestationStateHandler {
                 .with_txn(txn))
             }
             SpdmAttestationState::TriggerEvidenceCollection { retry_count } => {
+                // A retained claim without a task ID means a previous POST may
+                // have reached the BMC. Repeating it could overlap that collection.
+                if snapshot.evidence_collection_locked {
+                    return Ok(StateHandlerOutcome::wait(
+                        "Evidence collection claim is held without a persisted task ID; inspect the BMC task before recovering this job".to_string(),
+                    ));
+                }
                 // firmware version and certificate are collected. Let's trigger the
                 // measurement collection now.
                 let redfish_client = redfish_client(&snapshot.bmc_info, ctx).await?;
@@ -185,6 +212,22 @@ impl StateHandler for SpdmAttestationStateHandler {
                         ),
                     ));
                 };
+                let mut txn = ctx.services.db_pool.begin().await?;
+                if !db::attestation::spdm::try_acquire_evidence_collection_lock(
+                    &mut txn,
+                    object_id,
+                    snapshot.state_version,
+                )
+                .await?
+                {
+                    return Ok(StateHandlerOutcome::wait(
+                        "Evidence collection claim is unavailable or attestation state changed"
+                            .to_string(),
+                    ));
+                }
+                // Ownership must survive both this transaction and a process
+                // restart, including an ambiguous failure of the following POST.
+                txn.commit().await?;
                 let nonce = snapshot.nonce_hex();
                 let task = redfish_client
                     .trigger_evidence_collection(url.as_str(), nonce.as_str())
@@ -202,22 +245,35 @@ impl StateHandler for SpdmAttestationStateHandler {
                 task_id,
                 retry_count,
             } => {
+                if !snapshot.evidence_collection_locked {
+                    return Err(StateHandlerError::InvalidState(
+                        "Cannot collect evidence without owning the device's evidence collection claim"
+                            .to_string(),
+                    ));
+                }
                 let redfish_client = redfish_client(&snapshot.bmc_info, ctx).await?;
                 let task = redfish_client
                     .get_task(task_id)
                     .await
                     .map_err(|e| redfish_error("get_task_state", e))?;
+                let task_stopped = evidence_collection_task_stopped(task.task_state.as_ref());
 
                 match classify_evidence_collection_task_state(task.task_state.as_ref()) {
                     EvidenceCollectionTaskStateClass::Completed => {
                         // read the result
                         let Some(url) = &snapshot.evidence_target else {
                             // This is an unrecoverable error due to db discrepancy.
+                            let mut txn = ctx.services.db_pool.begin().await?;
+                            db::attestation::spdm::release_evidence_collection_lock(
+                                &mut txn, object_id,
+                            )
+                            .await?;
                             return Ok(StateHandlerOutcome::transition(
                                 SpdmAttestationState::Failed(
                                     "Could not get evidence target from DB".to_string(),
                                 ),
-                            ));
+                            )
+                            .with_txn(txn));
                         };
                         let evidence = redfish_client
                             .get_evidence(url)
@@ -230,6 +286,10 @@ impl StateHandler for SpdmAttestationStateHandler {
                             device_id,
                             job_id,
                             &evidence.into_model(),
+                        )
+                        .await?;
+                        db::attestation::spdm::release_evidence_collection_lock(
+                            &mut txn, object_id,
                         )
                         .await?;
                         Ok(
@@ -245,7 +305,11 @@ impl StateHandler for SpdmAttestationStateHandler {
                     }
                     EvidenceCollectionTaskStateClass::Unexpected(task_state) => {
                         let err = task.messages.iter().map(|t| t.message.as_str()).join("\n");
-                        let next_action = EvidenceCollectionNextAction::for_retry(*retry_count);
+                        let next_action = if task_stopped {
+                            EvidenceCollectionNextAction::for_retry(*retry_count)
+                        } else {
+                            EvidenceCollectionNextAction::Wait
+                        };
 
                         emit(SpdmEvidenceCollectionTaskStateUnexpected {
                             task_state,
@@ -257,18 +321,32 @@ impl StateHandler for SpdmAttestationStateHandler {
                             error: err,
                         });
 
+                        if next_action == EvidenceCollectionNextAction::Wait {
+                            return Ok(StateHandlerOutcome::wait(
+                                "Waiting for BMC evidence collection to stop before retrying"
+                                    .to_string(),
+                            ));
+                        }
+
+                        let mut txn = ctx.services.db_pool.begin().await?;
+                        db::attestation::spdm::release_evidence_collection_lock(
+                            &mut txn, object_id,
+                        )
+                        .await?;
                         if next_action == EvidenceCollectionNextAction::Fail {
-                            Ok(StateHandlerOutcome::transition(
-                                SpdmAttestationState::Failed(
+                            Ok(
+                                StateHandlerOutcome::transition(SpdmAttestationState::Failed(
                                     "Too many retries triggering evidence collection".to_string(),
-                                ),
-                            ))
+                                ))
+                                .with_txn(txn),
+                            )
                         } else {
                             Ok(StateHandlerOutcome::transition(
                                 SpdmAttestationState::TriggerEvidenceCollection {
                                     retry_count: retry_count + 1,
                                 },
-                            ))
+                            )
+                            .with_txn(txn))
                         }
                     }
                 }
@@ -316,6 +394,8 @@ impl StateHandler for SpdmAttestationStateHandler {
             }
             SpdmAttestationState::Cancelled => {
                 let mut txn = ctx.services.db_pool.begin().await?;
+                db::attestation::spdm::release_evidence_collection_lock(&mut txn, object_id)
+                    .await?;
                 db::attestation::spdm::set_completed_at(&mut txn, machine_id, device_id, job_id)
                     .await?;
                 if transition_to_cancelled {
@@ -329,6 +409,17 @@ impl StateHandler for SpdmAttestationStateHandler {
             }
         }
     }
+}
+
+// Only these states establish that the task is no longer collecting evidence.
+// In particular, a missing state or a request to stop does not prove completion.
+fn evidence_collection_task_stopped(task_state: Option<&TaskState>) -> bool {
+    matches!(
+        task_state,
+        Some(
+            TaskState::Completed | TaskState::Killed | TaskState::Exception | TaskState::Cancelled
+        )
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,6 +486,7 @@ fn classify_evidence_collection_task_state(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
 enum EvidenceCollectionNextAction {
+    Wait,
     Retry,
     Fail,
 }

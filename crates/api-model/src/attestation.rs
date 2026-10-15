@@ -91,6 +91,9 @@ pub mod spdm {
         pub evidence_target: Option<String>,
         // Collected Evidence.
         pub evidence: Option<Evidence>,
+        /// Whether this job owns the device's shared evidence collection endpoint.
+        /// Ownership lasts until evidence is saved or the BMC task is known to have stopped.
+        pub evidence_collection_locked: bool,
         // job id
         pub job_id: uuid::Uuid,
         // timestamps
@@ -282,6 +285,7 @@ pub mod spdm {
                 evidence_target: row.try_get("evidence_target")?,
                 ca_certificate: ca_certificate.map(|x| x.0),
                 evidence: evidence.map(|x| x.0),
+                evidence_collection_locked: row.try_get("evidence_collection_locked")?,
                 job_id: row.try_get("job_id")?,
                 started_at: row.try_get("started_at")?,
                 cancelled_at: row.try_get("cancelled_at")?,

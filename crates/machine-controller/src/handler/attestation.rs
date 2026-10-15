@@ -237,6 +237,7 @@ fn from_component_integrity(
         ca_certificate: None,
         evidence_target,
         evidence: None,
+        evidence_collection_locked: false,
         job_id: *job_id,
         started_at: *time_now,
         cancelled_at: None,
