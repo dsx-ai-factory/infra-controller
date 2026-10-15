@@ -411,6 +411,12 @@ async fn read_actual(
             fetch_powershelf_pmc_credentials(api.credential_manager.as_ref(), mac).await
         }
     };
+    // The caller's `timeout_at` polls ready results before checking expiry.
+    // Check here so a late error cannot replace `DeadlineExceeded` and late
+    // credentials cannot start another read.
+    if tokio::time::Instant::now() >= deadline {
+        return failed_observation(ErrorCode::DeadlineExceeded, Some(source));
+    }
     let credentials = match credentials {
         Ok(credentials) => credentials,
         Err(error) => {
@@ -423,12 +429,6 @@ async fn read_actual(
             return failed_observation(ErrorCode::CredentialsUnavailable, Some(source));
         }
     };
-
-    // A ready credential lookup can outlast the budget without yielding to
-    // timeout_at; check before starting another external operation.
-    if tokio::time::Instant::now() >= deadline {
-        return failed_observation(ErrorCode::DeadlineExceeded, Some(source));
-    }
 
     let result = match endpoint {
         PowerReadEndpoint::Compute {
@@ -447,22 +447,23 @@ async fn read_actual(
                 return failed_observation(ErrorCode::EndpointUnavailable, Some(source));
             };
             let nvos_credentials =
-                match fetch_switch_nvos_credentials(api.credential_manager.as_ref(), mac).await {
-                    Ok(credentials) => credentials,
-                    Err(error) => {
-                        tracing::warn!(
-                            management_mac_address = %mac,
-                            ?source,
-                            error_category = backend_error_category(&error),
-                            "power read NVOS credentials are unavailable"
-                        );
-                        return failed_observation(ErrorCode::CredentialsUnavailable, Some(source));
-                    }
-                };
-            // Apply the same guard after the second credential lookup.
+                fetch_switch_nvos_credentials(api.credential_manager.as_ref(), mac).await;
+            // Apply the same guard before classifying the second credential lookup.
             if tokio::time::Instant::now() >= deadline {
                 return failed_observation(ErrorCode::DeadlineExceeded, Some(source));
             }
+            let nvos_credentials = match nvos_credentials {
+                Ok(credentials) => credentials,
+                Err(error) => {
+                    tracing::warn!(
+                        management_mac_address = %mac,
+                        ?source,
+                        error_category = backend_error_category(&error),
+                        "power read NVOS credentials are unavailable"
+                    );
+                    return failed_observation(ErrorCode::CredentialsUnavailable, Some(source));
+                }
+            };
             let endpoint = SwitchEndpoint {
                 bmc_ip: row.bmc_ip,
                 bmc_mac: mac,
@@ -484,6 +485,11 @@ async fn read_actual(
             cm.power_shelf.get_power_state(&[endpoint]).await
         }
     };
+    // Reject expired results before `observation` classifies failures or sets
+    // `observed_at` on a successful read.
+    if tokio::time::Instant::now() >= deadline {
+        return failed_observation(ErrorCode::DeadlineExceeded, Some(source));
+    }
     observation(result, mac, source)
 }
 

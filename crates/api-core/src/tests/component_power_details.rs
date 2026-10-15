@@ -204,6 +204,8 @@ fn observation_error(actual: &rpc::ComponentPowerObservation) -> &rpc::Component
 /// Gates lookups and records admissions and drops without timing-based absence checks.
 struct GatedPowerCredentialReader {
     gates: Vec<(MacAddress, Notify)>,
+    // Anchor read-budget assertions after snapshot I/O, before credential waits.
+    first_started_at: Mutex<Option<tokio::time::Instant>>,
     started: AtomicUsize,
     active: AtomicUsize,
     peak: AtomicUsize,
@@ -216,6 +218,7 @@ impl GatedPowerCredentialReader {
     fn new(hosts: &[(HostMachineId, MacAddress)]) -> Self {
         Self {
             gates: hosts.iter().map(|(_, mac)| (*mac, Notify::new())).collect(),
+            first_started_at: Mutex::new(None),
             started: AtomicUsize::new(0),
             active: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
@@ -269,6 +272,10 @@ impl CredentialReader for GatedPowerCredentialReader {
             .iter()
             .position(|(mac, _)| mac == bmc_mac_address)
             .unwrap();
+        self.first_started_at
+            .lock()
+            .expect("first credential admission lock")
+            .get_or_insert_with(tokio::time::Instant::now);
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         let mut guard = ActivePowerRead {
             reader: self,
@@ -283,10 +290,11 @@ impl CredentialReader for GatedPowerCredentialReader {
     }
 }
 
-/// Returns valid credentials after a chosen lookup is released. Recording every
-/// key distinguishes the guard after BMC credentials from the later NVOS guard.
+/// Holds one credential result until released, leaving other keys valid.
+/// Recording keys distinguishes BMC expiry from the later NVOS check.
 struct ExpiringPowerCredentialReader {
     blocked_key: CredentialKey,
+    blocked_result: Mutex<Option<Result<Option<Credentials>, SecretsError>>>,
     started: Notify,
     release: Notify,
     requested_keys: Mutex<Vec<String>>,
@@ -303,8 +311,17 @@ impl CredentialReader for ExpiringPowerCredentialReader {
             .unwrap()
             .push(key.to_key_str().into_owned());
         if key.to_key_str() == self.blocked_key.to_key_str() {
+            // Take the result before waiting so a duplicate lookup fails immediately.
+            // Drop the mutex guard before the gate suspends this lookup.
+            let result = self
+                .blocked_result
+                .lock()
+                .expect("blocked credential result lock")
+                .take()
+                .expect("blocked credential lookup is requested once");
             self.started.notify_one();
             self.release.notified().await;
+            return result;
         }
         Ok(Some(Credentials::new("power-reader", "test-password")))
     }
@@ -459,7 +476,8 @@ async fn later_targets_start_before_first_credential_lookup_finishes(
     Ok(())
 }
 
-/// Delayed admission shares the original deadline; expiry and caller drop own pending work.
+/// Delayed admission shares the fifteen-second budget, so it must neither cut
+/// earlier reads short nor extend them. Expiry and caller drop release pending work.
 #[crate::sqlx_test]
 async fn read_deadline_and_caller_cancellation_drop_unfinished_work(
     pool: sqlx::PgPool,
@@ -494,8 +512,14 @@ async fn read_deadline_and_caller_cancellation_drop_unfinished_work(
     .await
     .expect("snapshot and initial credential reads must complete");
     assert_eq!(reader.started.load(Ordering::SeqCst), (1 << 9) - 1);
+
     // Database setup and snapshot I/O finish before time is paused.
     tokio::time::pause();
+    let first_started_at = reader
+        .first_started_at
+        .lock()
+        .expect("first credential admission lock")
+        .expect("the initial credential reads have started");
     tokio::time::advance(Duration::from_secs(4)).await;
     reader.release(1);
     tokio::time::timeout(Duration::from_millis(1), async {
@@ -508,9 +532,31 @@ async fn read_deadline_and_caller_cancellation_drop_unfinished_work(
     .expect("the tenth lookup must start when the second lookup releases its slot");
     assert_eq!(reader.started.load(Ordering::SeqCst), (1 << 10) - 1);
     assert_eq!(reader.active.load(Ordering::SeqCst), 8);
-    // The newly admitted lookup has eleven seconds left, not a fresh fifteen.
-    // Allow one millisecond for Tokio's timer rounding at the original deadline.
-    tokio::time::advance(Duration::from_secs(11) + Duration::from_millis(1)).await;
+
+    // Fourteen seconds after the first admission, even the earlier reads must
+    // remain pending. Account for time spent admitting work before the pause.
+    tokio::time::advance(
+        (first_started_at + Duration::from_secs(14))
+            .checked_duration_since(tokio::time::Instant::now())
+            .expect("the fourteen-second checkpoint is still ahead"),
+    )
+    .await;
+    assert!(
+        futures::poll!(&mut request).is_pending(),
+        "the shared budget must not expire before fifteen seconds"
+    );
+    assert_eq!(reader.started.load(Ordering::SeqCst), (1 << 10) - 1);
+    assert_eq!(reader.active.load(Ordering::SeqCst), 8);
+    assert_eq!(reader.cancelled.load(Ordering::SeqCst), 0);
+
+    // Delayed admission must not restart the original fifteen-second budget.
+    // Allow one millisecond for Tokio's timer rounding when checking expiry.
+    tokio::time::advance(
+        (first_started_at + Duration::from_secs(15) + Duration::from_millis(1))
+            .checked_duration_since(tokio::time::Instant::now())
+            .expect("the expiry checkpoint follows the pending assertion"),
+    )
+    .await;
     let response = tokio::time::timeout(Duration::from_millis(1), &mut request).await;
     tokio::time::resume();
     let response = response
@@ -565,8 +611,9 @@ async fn read_deadline_and_caller_cancellation_drop_unfinished_work(
     Ok(())
 }
 
-/// Ready credential futures must not start the next operation after expiry.
-/// A switch exercises both the shared BMC guard and the separate NVOS guard.
+/// The deadline takes precedence over ready credential results, so an expired
+/// lookup neither starts more work nor reports a credential failure instead.
+/// A switch exercises both the shared BMC check and the separate NVOS check.
 #[crate::sqlx_test]
 async fn credentials_finishing_after_deadline_do_not_start_more_work(
     pool: sqlx::PgPool,
@@ -594,12 +641,40 @@ async fn credentials_finishing_after_deadline_do_not_start_more_work(
     let nvos_key = CredentialKey::SwitchNvosAdmin { bmc_mac_address };
     let mut api = api_with_rms(&env, pool, power_profiles(0, 1, 0), PowerRole::Switch);
 
-    for (blocked_key, expected_keys) in [
+    // Lookup errors and absence share a failure branch. One form at each lookup
+    // protects both expiry checks without repeating every failure combination.
+    for (scenario, blocked_key, blocked_result, expected_keys) in [
         // The first guard must stop before even asking for NVOS credentials.
-        (bmc_key.clone(), vec![bmc_key.to_key_str().into_owned()]),
+        (
+            "expired BMC success",
+            bmc_key.clone(),
+            Ok(Some(Credentials::new("power-reader", "test-password"))),
+            vec![bmc_key.to_key_str().into_owned()],
+        ),
         // The second guard must stop before the completed endpoint reaches RMS.
         (
+            "expired NVOS success",
             nvos_key.clone(),
+            Ok(Some(Credentials::new("power-reader", "test-password"))),
+            vec![
+                bmc_key.to_key_str().into_owned(),
+                nvos_key.to_key_str().into_owned(),
+            ],
+        ),
+        // A BMC lookup error must not replace the expired shared deadline.
+        (
+            "expired BMC lookup error",
+            bmc_key.clone(),
+            Err(SecretsError::GenericError(eyre::eyre!(
+                "injected credential read failure"
+            ))),
+            vec![bmc_key.to_key_str().into_owned()],
+        ),
+        // The deadline also takes precedence over missing NVOS credentials.
+        (
+            "expired missing NVOS credentials",
+            nvos_key.clone(),
+            Ok(None),
             vec![
                 bmc_key.to_key_str().into_owned(),
                 nvos_key.to_key_str().into_owned(),
@@ -608,6 +683,7 @@ async fn credentials_finishing_after_deadline_do_not_start_more_work(
     ] {
         let reader = Arc::new(ExpiringPowerCredentialReader {
             blocked_key,
+            blocked_result: Mutex::new(Some(blocked_result)),
             started: Notify::new(),
             release: Notify::new(),
             requested_keys: Mutex::new(Vec::new()),
@@ -626,9 +702,11 @@ async fn credentials_finishing_after_deadline_do_not_start_more_work(
         tokio::time::timeout(Duration::from_secs(10), async {
             tokio::select! {
                 _ = reader.started.notified() => {}
-                result = &mut request => panic!("request completed before gated credentials: {result:?}"),
+                result = &mut request => panic!("{scenario}: request completed before gated credentials: {result:?}"),
             }
-        }).await.expect("snapshot must finish before pausing the clock");
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{scenario}: snapshot must finish before pausing the clock"));
 
         // Leave the request unpolled until the credential is ready after expiry.
         // `timeout_at` polls that ready inner future before checking its timer.
@@ -638,31 +716,178 @@ async fn credentials_finishing_after_deadline_do_not_start_more_work(
         let response = tokio::time::timeout(Duration::from_millis(1), &mut request).await;
         tokio::time::resume();
         let response = response
-            .expect("ready credential must finish within the expired budget")?
+            .unwrap_or_else(|_| panic!("{scenario}: ready credential must finish"))
+            .unwrap_or_else(|error| panic!("{scenario}: power details failed: {error}"))
             .into_inner();
         drop(request);
 
-        assert_eq!(response.entries.len(), 1);
-        assert_eq!(response.entries[0].component_id, switch.id.to_string());
-        let actual = response.entries[0]
+        assert_eq!(response.entries.len(), 1, "{scenario}");
+        let entry = &response.entries[0];
+        assert_eq!(entry.component_id, switch.id.to_string(), "{scenario}");
+        assert_eq!(
+            entry.desired,
+            Some(rpc::ComponentPowerPolicy {
+                status: rpc::ComponentPowerPolicyStatus::NotApplicable as i32,
+                ..Default::default()
+            }),
+            "{scenario}"
+        );
+        let actual = entry
             .actual
             .as_ref()
-            .expect("deadline observation");
-        assert_eq!(
-            observation_error(actual).code,
-            rpc::ComponentPowerErrorCode::DeadlineExceeded as i32
+            .unwrap_or_else(|| panic!("{scenario}: missing actual power observation"));
+        assert!(
+            matches!(actual.outcome.as_ref(), Some(Outcome::Error(error))
+                if error.code == rpc::ComponentPowerErrorCode::DeadlineExceeded as i32),
+            "{scenario}: expected a deadline error, received {actual:?}"
         );
-        assert_eq!(actual.source, Some(rpc::ComponentPowerSource::Rms as i32));
-        assert_eq!(actual.observed_at, None);
-        assert_eq!(*reader.requested_keys.lock().unwrap(), expected_keys);
+        assert_eq!(
+            actual.source,
+            Some(rpc::ComponentPowerSource::Rms as i32),
+            "{scenario}"
+        );
+        assert_eq!(actual.observed_at, None, "{scenario}");
+        assert_eq!(
+            *reader.requested_keys.lock().unwrap(),
+            expected_keys,
+            "{scenario}"
+        );
         assert!(
             env.rms_sim
                 .submitted_batch_get_power_state_requests()
                 .await
-                .is_empty()
+                .is_empty(),
+            "{scenario}"
         );
     }
 
+    Ok(())
+}
+
+/// The deadline takes precedence over ready successful and failed RMS reads.
+/// Keep the independently loaded policy so callers can still see desired power.
+#[crate::sqlx_test]
+async fn backend_result_finishing_after_deadline_preserves_policy(
+    pool: sqlx::PgPool,
+) -> TestResult {
+    let env = create_test_env(pool.clone()).await;
+    let rack_id = RackId::new("power-details-backend-expiry");
+    let mut txn = pool.begin().await?;
+    TestRackDbBuilder::new()
+        .with_rack_id(rack_id.clone())
+        .persist(&mut txn)
+        .await?;
+    let host = create_host(&mut txn, 62, Some(rack_id), Some(PowerState::Off)).await?;
+    txn.commit().await?;
+
+    env.api
+        .credential_manager
+        .set_credentials(
+            &CredentialKey::BmcCredentials {
+                credential_type: BmcCredentialType::BmcRoot {
+                    bmc_mac_address: host.1,
+                },
+            },
+            &Credentials::new("power-reader", "test-password"),
+        )
+        .await
+        .expect("seed compute power-read BMC credentials");
+    let api = api_with_rms(&env, pool, power_profiles(1, 0, 0), PowerRole::Compute);
+
+    for (index, (scenario, rms_response)) in [
+        // Valid evidence must not become a fresh observation after expiry.
+        (
+            "expired RMS success",
+            Ok(rms::BatchGetPowerStateResponse {
+                response: Some(rms::NodeBatchResponse {
+                    status: rms::ReturnCode::Success as i32,
+                    node_results: vec![rms::NodeOperationResult {
+                        node_id: host.0.to_string(),
+                        status: rms::ReturnCode::Success as i32,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                node_power_states: vec![rms::NodePowerState {
+                    node_id: host.0.to_string(),
+                    pstate: "ON".into(),
+                }],
+            }),
+        ),
+        // Failure must also report expiry, protecting the check before error conversion.
+        (
+            "expired RMS failure",
+            Err(librms::RackManagerError::ApiInvocationError(
+                tonic::Status::unavailable("injected power read failure"),
+            )),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        env.rms_sim
+            .queue_batch_get_power_state_response(rms_response)
+            .await;
+        let (entered, release) = env.rms_sim.block_next_batch_get_power_state().await;
+
+        // Finish the snapshot, credentials and RMS identity lookup before pausing time.
+        let mut request = Box::pin(api.get_component_power_details(host_request(&[host])));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                result = entered => result.unwrap_or_else(|_| panic!("{scenario}: RMS read was dropped before arrival")),
+                result = &mut request => panic!("{scenario}: request completed before gated RMS read: {result:?}"),
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{scenario}: RMS read must start before pausing the clock"));
+
+        // The handler's fifteen-second timeout and RMS's ten-second timeout poll
+        // ready inner results first. Keep the request unpolled until the queued
+        // RMS response is ready after both deadlines, then use a short watchdog.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(15) + Duration::from_millis(1)).await;
+        release
+            .send(())
+            .unwrap_or_else(|_| panic!("{scenario}: RMS read must remain pending"));
+        let response = tokio::time::timeout(Duration::from_millis(1), &mut request).await;
+        tokio::time::resume();
+        let response = response
+            .unwrap_or_else(|_| panic!("{scenario}: ready RMS response must finish"))
+            .unwrap_or_else(|error| panic!("{scenario}: power details failed: {error}"))
+            .into_inner();
+
+        assert_eq!(response.entries.len(), 1, "{scenario}");
+        let entry = &response.entries[0];
+        assert_eq!(entry.component_id, host.0.to_string(), "{scenario}");
+        assert_eq!(
+            entry.desired,
+            Some(stored_policy(rpc::PowerState::Off)),
+            "{scenario}"
+        );
+        let actual = entry
+            .actual
+            .as_ref()
+            .unwrap_or_else(|| panic!("{scenario}: missing actual power observation"));
+        assert!(
+            matches!(actual.outcome.as_ref(), Some(Outcome::Error(error))
+                if error.code == rpc::ComponentPowerErrorCode::DeadlineExceeded as i32),
+            "{scenario}: expected a deadline error, received {actual:?}"
+        );
+        assert_eq!(
+            actual.source,
+            Some(rpc::ComponentPowerSource::Rms as i32),
+            "{scenario}"
+        );
+        assert_eq!(actual.observed_at, None, "{scenario}");
+        assert_eq!(
+            env.rms_sim
+                .submitted_batch_get_power_state_requests()
+                .await
+                .len(),
+            index + 1,
+            "{scenario}: each request sends one RMS power read"
+        );
+    }
     Ok(())
 }
 
