@@ -11,58 +11,25 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
-// The deprecated observed_at alias is returned only until its date gate passes.
-// The gate is moved around the current time so both outcomes are exercised on
-// both conversion paths regardless of the date the test runs.
-func TestAPIMachineHealthObservedAtDeprecationGate(t *testing.T) {
-	saved := machineHealthObservedAtDeprecationTime
-	t.Cleanup(func() { machineHealthObservedAtDeprecationTime = saved })
+// Machine health responses carry only observedAt; the snake_case observed_at
+// alias was removed on September 10th, 2026 and must not reappear.
+func TestAPIMachineHealthOmitsRemovedObservedAtAlias(t *testing.T) {
+	observedAt := "2026-09-28T12:00:00Z"
+	var health APIMachineHealth
+	health.FromDBModel(&cdbm.MachineHealth{ObservedAt: &observedAt})
 
-	observed := time.Date(2026, time.September, 28, 12, 0, 0, 0, time.UTC)
-	observedAt := observed.Format(time.RFC3339)
-	fromDB := func() APIMachineHealth {
-		var health APIMachineHealth
-		health.FromDBModel(&cdbm.MachineHealth{ObservedAt: &observedAt})
-		return health
-	}
-	fromProto := func() APIMachineHealth {
-		var health APIMachineHealth
-		health.FromProto(&corev1.HealthReport{ObservedAt: timestamppb.New(observed)})
-		return health
-	}
-
-	tests := []struct {
-		name      string
-		gate      time.Time
-		wantAlias bool
-	}{
-		{name: "before cutoff keeps observed_at", gate: time.Now().Add(24 * time.Hour), wantAlias: true},
-		{name: "after cutoff drops observed_at", gate: time.Now().Add(-24 * time.Hour), wantAlias: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			machineHealthObservedAtDeprecationTime = tt.gate
-			for name, build := range map[string]func() APIMachineHealth{"FromDBModel": fromDB, "FromProto": fromProto} {
-				encoded, err := json.Marshal(build())
-				require.NoError(t, err, name)
-				var fields map[string]any
-				require.NoError(t, json.Unmarshal(encoded, &fields), name)
-				assert.Equal(t, observedAt, fields["observedAt"], name)
-				_, hasAlias := fields["observed_at"]
-				assert.Equal(t, tt.wantAlias, hasAlias, name)
-				if tt.wantAlias {
-					assert.Equal(t, observedAt, fields["observed_at"], name)
-				}
-			}
-		})
-	}
+	encoded, err := json.Marshal(health)
+	require.NoError(t, err)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &fields))
+	assert.Equal(t, observedAt, fields["observedAt"])
+	assert.NotContains(t, fields, "observed_at")
 }
 
 func TestAPIMachineHealthReportEntryRequestValidateAndToProto(t *testing.T) {
