@@ -98,6 +98,17 @@ async fn handle_deleting_instance(
         ));
     }
 
+    // Admin acknowledgement proves every DPU accepted networking without the Instance,
+    // while endpoint tombstones retain ownership until DPF cleanup completes.
+    if !db::instance::find_service_vpc_memberships(&ctx.services.db_pool, instance.id)
+        .await?
+        .is_empty()
+    {
+        return Ok(StateHandlerOutcome::wait(
+            "waiting for service VPC network cleanup before deleting the Instance".to_string(),
+        ));
+    }
+
     // The delete and the segment release must commit together, as in the Assigned
     // termination path.
     let mut txn = ctx.services.db_pool.begin().await?;

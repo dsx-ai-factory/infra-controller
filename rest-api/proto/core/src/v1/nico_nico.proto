@@ -5733,7 +5733,10 @@ message AdminForceDeleteMachineRequest {
   // credentials for this machine.
   bool delete_bmc_credentials = 4;
 
-  // Allow force delete of machine with orphaned dpf crds
+  // Allow force deletion to discard Core-owned service VPC resources and
+  // continue when DPF resources cannot be removed. This may leave orphaned
+  // DPF CRDs. The option is request-scoped and must be repeated on polling
+  // retries until force deletion completes.
   bool allow_delete_with_orphaned_dpf_crds = 5;
 
   // Delete Site Explorer and DHCP BMC suppressions for the host/DPU BMC MACs
@@ -9818,10 +9821,18 @@ enum DpuExtensionServiceDeploymentStatus {
 
 message FindInstancesByDpuExtensionServiceRequest {
   string service_id = 1;
+  // If set, return instances retaining this exact active or terminating
+  // version. If omitted, return one entry per matching instance: the active
+  // attachment when present, otherwise one retained terminating attachment.
+  // Set this field to select a particular retained historical version.
   optional string version = 2;
 }
 
 message FindInstancesByDpuExtensionServiceResponse {
+  // One entry per matching instance. Matching instances include soft-deleted
+  // instances until physical deletion removes the stored attachment. Entries
+  // have no defined order. When version is omitted and no active attachment
+  // remains, which retained terminating attachment is reported is unspecified.
   repeated InstanceDpuExtensionServiceInfo instances = 1;
 }
 
@@ -9829,7 +9840,10 @@ message InstanceDpuExtensionServiceInfo {
   string instance_id = 1;
   string service_id = 2;
   string version = 3;
-  optional string removed = 4; // Signals that this service is being removed from instance config and is terminating
+  // Attachment-removal timestamp. For an active attachment on a soft-deleted
+  // instance, this falls back to the instance-deletion timestamp. It is unset
+  // only while both the attachment and instance remain active.
+  optional string removed = 4;
 }
 
 message DpuExtensionServiceObservabilityConfigPrometheus {
