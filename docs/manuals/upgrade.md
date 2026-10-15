@@ -290,6 +290,7 @@ If a phase fails, `setup.sh` prints `SETUP FAILED` and offers: `Run clean.sh to 
 | `--skip-rms` | Skip the Rack Management Service upgrade (Phase 5c). RMS installs **by default** (like DPF); `NICO_RMS_IMAGE_TAG` is required unless this flag is passed. Skipping leaves an existing RMS release untouched. |
 | `--skip-dpf` | Use **only** if DPF is not enabled at this site. This is not a pure skip: it clears `INSTALL_DPF`, which drops phase 5b and redeploys NICo Core with the `[dpf]` block disabled — on a DPF-enabled site that is a config change, not a skip. |
 | `--core-values <file>` | Use a per-site NICo Core values file (same as initial install). |
+| `--flow-values <file>` | Use a per-site NICo Flow values file (same as initial install). Flow overrides applied outside `setup.sh` are reset by the upgrade unless they are in this file. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest or kustomize dir (same as initial install). |
 
 ### Estimated upgrade time

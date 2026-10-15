@@ -2267,6 +2267,9 @@ jobs:
       - name: Test Flow cleanup order
         run: bash helm-prereqs/tests/setup-flow-cleanup-order_test.sh
 
+      - name: Test Flow values option
+        run: bash helm-prereqs/tests/setup-flow-values_test.sh
+
       - name: Test legacy Flow manager cleanup
         run: bash helm-prereqs/tests/cleanup-legacy-flow-managers_test.sh
 
