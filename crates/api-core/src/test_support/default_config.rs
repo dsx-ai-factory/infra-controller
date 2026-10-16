@@ -28,7 +28,7 @@ use carbide_machine_controller::config::{
     BomValidationConfig, FirmwareGlobal, MachineStateControllerConfig, MachineValidationConfig,
     PowerManagerOptions,
 };
-use carbide_nvlink_manager::config::NvLinkConfig;
+use carbide_nvlink_manager::config::{NmxCCertificateRotationConfig, NvLinkConfig};
 use carbide_rack_controller::config::{RackValidationConfig, RmsConfig};
 use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_state_controller_common::config::StateControllerConfig;
@@ -324,7 +324,14 @@ pub fn get() -> CarbideConfig {
         bom_validation: BomValidationConfig::default(),
         listen_mode: ListenMode::Tls,
         listen_only: false,
-        nvlink_config: Some(NvLinkConfig::default()),
+        nvlink_config: Some(NvLinkConfig {
+            enabled: false,
+            nmx_c_certificate_rotation: NmxCCertificateRotationConfig {
+                enabled: false,
+                ..NmxCCertificateRotationConfig::default()
+            },
+            ..NvLinkConfig::default()
+        }),
         ewethers_config: Some(EwEthersConfig {
             enabled: true,
             svpc_enabled: true,

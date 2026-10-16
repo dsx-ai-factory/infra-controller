@@ -314,8 +314,9 @@ spec:
 ### Use the NICo Helm Chart
 
 The `nico-api` Helm chart can create the NICo client certificate, mount its
-Secret read-only, and optionally create an operator-owned server Secret. Both
-certificate profiles and the monitor are disabled by default and are enabled
+Secret read-only, and optionally create an operator-owned server Secret. The
+client certificate profile and the certificate monitor are enabled by default.
+The server certificate profile is disabled by default. Each is controlled
 independently.
 
 Merge the following values into your existing values file. Do not
@@ -380,9 +381,16 @@ mount that server trust bundle separately and set `nmx_c_tls_ca_cert_path` to
 its file instead. The current `nvSwitchTls` values do not add a custom CA
 volume; provide that mount through the surrounding deployment mechanism.
 
-Enabling `nicoClient` creates and mounts the client Secret, but does not set
-the TOML paths or start the certificate monitor. The `siteConfig` settings do
-that separately. If RMS owns the server private key, leave
+`nicoClient` creates and mounts the client Secret, but does not start the
+certificate monitor. If the site configuration sets none of the
+`nvlink_config.nmx_c_tls_*` keys and `nicoClient.mountPath` keeps its default,
+`nico-api` uses the mounted client certificate at startup and sets
+`nmx_c_tls_authority` to `initial_domain_name`. Setting any `nmx_c_tls_*` key
+disables these defaults, so set the client certificate, key, and authority
+explicitly when you set any of them, as in the example above. Separately,
+whenever `nmx_c_tls_ca_cert_path` is unset and NMX-C is reached over HTTPS,
+`nico-api` uses `ca.crt` from the client Secret or else
+`/var/run/secrets/nico-roots/ca.crt` as the CA bundle. If RMS owns the server private key, leave
 `switchServer.enabled = false` and create that certificate through the RMS
 deployment instead.
 
@@ -474,7 +482,7 @@ The following table describes the certificate rotation settings:
 
 | Rotation Setting | Default | Meaning |
 | ---------------- | ------- | ------- |
-| `enabled` | `false` | Starts the certificate monitor. This setting is independent of the NVLink partition monitor's `nvlink_config.enabled` gate. |
+| `enabled` | `true` | Starts the certificate monitor, including when `[nvlink_config.nmx_c_certificate_rotation]` or `[nvlink_config]` is omitted. This setting is independent of the NVLink partition monitor's `nvlink_config.enabled` gate. |
 | `run_interval` | `1h` | Target interval between pass starts. The first pass runs at startup; if a pass exceeds the interval, the next pass starts immediately. |
 | `rotate_before_expiry` | `1w` | Inclusive window before `notAfter` in which rotation is requested. Duration strings such as `2w` are supported. |
 | `probe_timeout` | `10s` | Separate timeout applied to TCP connection and TLS handshake operations for each endpoint. |
@@ -483,10 +491,14 @@ The following table describes the certificate rotation settings:
 `rotate_before_expiry`.
 
 <Note>
-Set `nvlink_config.enabled` according to whether the site uses automated NVLink
-partition reconciliation. The certificate monitor needs only its nested
-`enabled` setting, so an alert-only deployment can leave
-`nvlink_config.enabled = false`.
+`nvlink_config.enabled` defaults to `true`, including when `[nvlink_config]` is
+omitted. Set it to `false` on sites that do not use automated NVLink partition
+reconciliation. The certificate monitor follows only its nested `enabled`
+setting, so a deployment that sets `nvlink_config.enabled = false` still
+rotates NMX-C certificates, and `nico-api` still applies its NMX-C TLS defaults
+for the monitor. Set
+`nvlink_config.nmx_c_certificate_rotation.enabled = false` to stop the
+certificate monitor and its `ConfigureNmxCluster` maintenance requests.
 </Note>
 
 Set the server certificate's renewal time comfortably earlier than the NICo

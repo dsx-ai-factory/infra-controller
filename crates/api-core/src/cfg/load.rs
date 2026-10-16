@@ -19,6 +19,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use carbide_nvlink_manager::config::{
+    DefaultNmxCCa, DefaultNmxCClientTls, DefaultNmxCTls, NvLinkConfig,
+};
 use eyre::WrapErr;
 use figment::providers::{Env, Format, Toml};
 use figment::value::{Dict, Map, Value};
@@ -402,6 +405,45 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
 
     if let Some(config) = &config.dsx_exchange_event_bus {
         config.periodic_state_republish.validate()?;
+    }
+
+    let initial_domain_name = config.initial_domain_name.clone();
+    let nvlink_config = config
+        .nvlink_config
+        .get_or_insert_with(NvLinkConfig::default);
+    let DefaultNmxCTls { client, ca } = nvlink_config.apply_default_nmx_c_tls(
+        Path::new(NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR),
+        Path::new(NvLinkConfig::DEFAULT_NMX_C_FALLBACK_CA_CERT),
+        initial_domain_name.as_deref(),
+    );
+    match client {
+        DefaultNmxCClientTls::Applied => tracing::info!(
+            tls_dir = NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR,
+            authority = ?nvlink_config.nmx_c_tls_authority,
+            "Using default client certificate for NMX-C connections"
+        ),
+        DefaultNmxCClientTls::CertificateMissing => tracing::warn!(
+            tls_dir = NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR,
+            "NMX-C connections have no TLS settings configured and no client certificate was \
+             found in tls_dir, so they will present no client certificate. Mount \
+             the certificate there (Helm nvSwitchTls.nicoClient.mountPath) or set the \
+             nvlink_config.nmx_c_tls_* keys"
+        ),
+        DefaultNmxCClientTls::NotNeeded => {}
+    }
+    match ca {
+        DefaultNmxCCa::Applied => tracing::info!(
+            ca_cert = ?nvlink_config.nmx_c_tls_ca_cert_path,
+            "Using default CA bundle for NMX-C connections"
+        ),
+        DefaultNmxCCa::Missing => tracing::warn!(
+            client_tls_dir = NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR,
+            fallback_ca_cert = NvLinkConfig::DEFAULT_NMX_C_FALLBACK_CA_CERT,
+            "NMX-C is reached over HTTPS but no CA bundle is configured and \
+             neither default exists; no NMX-C server certificate can be verified. Set \
+             nvlink_config.nmx_c_tls_ca_cert_path"
+        ),
+        DefaultNmxCCa::NotNeeded => {}
     }
 
     // Publish the configured tool list so the admin-UI sidebar and per-machine
