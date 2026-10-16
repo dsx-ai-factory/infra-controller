@@ -7497,7 +7497,7 @@ message IpxeTemplateList {
 message ExpectedHostNic {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
-  string mac_address = 1;
+  optional string mac_address = 1;
   // Legacy free-form segment hint (bf3, onboard, oob, ...). Kept for backward
   // compatibility; declare `network_segment_type` instead, which wins.
   optional string nic_type = 2;
@@ -7538,6 +7538,12 @@ message ExpectedHostNic {
   // the legacy Host case leaves `network_segment_type` as a first-DHCP
   // selection hint.
   optional ExpectedInterfaceIpAllocation ip_allocation = 9;
+  // Physical interface identifier (for example C1-1-L1), as named in the
+  // Cerebro database.
+  // At least one of mac_address or physical_ifname must be supplied.
+  optional string physical_ifname = 10;
+  // Optional logical interface name; stored for inventory consumers.
+  optional string logical_ifname = 11;
 }
 
 // Forge RPC representation of the per-host policy for how NICo treats DPU
@@ -7650,6 +7656,10 @@ message ExpectedMachine {
   // host_nics, including `[]`; older clients leave it false so an unknown
   // nested HostBmc is not removed by a read-modify-write.
   bool replace_host_nics = 19;
+  // The server_name field is optional and is used to identify the machine. This
+  // name will be presented to the switches in LLDP responses and is potentially
+  // used for cable validation, etc.
+  optional string server_name = 20;
 }
 
 message ExpectedMachineRequest {

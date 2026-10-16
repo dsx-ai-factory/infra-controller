@@ -66,7 +66,7 @@ async fn test_expected_machine_selection_source_survives_ingestion(
         .with_dpus(vec![dpu])
         .with_expected_machine_data(ExpectedMachineData {
             interfaces: vec![ExpectedInterface {
-                mac_address: declared_primary,
+                mac_address: Some(declared_primary),
                 primary: Some(true),
                 ..Default::default()
             }],

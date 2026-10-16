@@ -415,7 +415,7 @@ async fn test_assign_remove_then_dhcp_reallocates(
             bmc_mac_address: "aa:bb:cc:dd:ef:16".into(),
             chassis_serial_number: "EXPLICIT-REMOVE-RETURNS-TO-DHCP".into(),
             host_nics: vec![rpc::forge::ExpectedInterface {
-                mac_address: mac.to_string(),
+                mac_address: Some(mac.to_string()),
                 ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
                 ..Default::default()
             }],

@@ -29700,16 +29700,31 @@ components:
       type: object
       description: Expected interface declaration. Each supplied list entry replaces the corresponding declaration, so preserve all returned attributes when editing it. Core validates role, primary selection, and allocation against the Site configuration.
       examples:
-        - macAddress: '02:00:00:00:00:10'
+        - identifier:
+            macAddress: '02:00:00:00:00:10'
           nicType: CX9
           fixedIp: '192.0.2.10'
           primary: true
           role: Host
+        - identifier:
+            astra:
+              physicalName: C1-1-L1
+              logicalName: eth_r0_p0
+          nicType: CX9
+          fixedIp: '192.0.2.11'
       properties:
+        identifier:
+          oneOf:
+            - $ref: '#/components/schemas/ExpectedMachineInterfaceIdentifier'
+            - type: 'null'
+          description: Identifies the interface by MAC address or by its Astra names. Required unless the deprecated `macAddress` is supplied.
         macAddress:
-          type: string
+          type:
+            - string
+            - 'null'
           pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
-          description: MAC address of the expected interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
+          deprecated: true
+          description: Deprecated in favor of `identifier.macAddress`. Identifies the interface by MAC address when `identifier` is omitted. When both are supplied they must name the same MAC address, and this field cannot be combined with `identifier.astra`. Responses return the interface's MAC address here when it has one, in uppercase colon-separated form.
         nicType:
           type:
             - string
@@ -29743,8 +29758,50 @@ components:
           type: [string, 'null']
           enum: [Unspecified, Dynamic, Fixed, Retained, null]
           description: On create, omission, null, or Unspecified infers Fixed from fixedIp, otherwise Retained for HostBmc and Dynamic for other roles. On update, omission or null preserves a matching stored policy while fixedIp presence is unchanged; Unspecified resets inference. Fixed requires fixedIp; Dynamic and Retained forbid it. Explicit Fixed, inferred DPU Fixed, and inferred HostBmc Fixed with a segment constraint require a containing managed prefix; legacy Host or inferred HostBmc Fixed without a constraint may use static assignments. Retained keeps a DHCP-allocated address for the interface row lifetime.
+    ExpectedMachineInterfaceIdentifier:
+      title: ExpectedMachineInterfaceIdentifier
+      type: object
+      description: Identifies an Expected Machine interface. Exactly one of `macAddress` or `astra` must be set.
+      examples:
+        - macAddress: '02:00:00:00:00:10'
+        - astra:
+            physicalName: C1-1-L1
+            logicalName: eth_r0_p0
+      properties:
+        macAddress:
+          type:
+            - string
+            - 'null'
+          pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
+          description: MAC address of the interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
+        astra:
+          oneOf:
+            - $ref: '#/components/schemas/ExpectedMachineInterfaceAstraIdentifier'
+            - type: 'null'
+          description: Cerebro names of an interface on an Astra host.
+    ExpectedMachineInterfaceAstraIdentifier:
+      title: ExpectedMachineInterfaceAstraIdentifier
+      type: object
+      description: Names that Cerebro assigns to an interface on an Astra host.
+      examples:
+        - physicalName: C1-1-L1
+          logicalName: eth_r0_p0
+      properties:
+        physicalName:
+          type: string
+          minLength: 1
+          pattern: '^[A-Za-z0-9_.:-]+$'
+          description: Physical interface name as recorded in Cerebro, for example `C1-1-L1`. May contain only ASCII letters, digits, `_`, `.`, `:`, and `-`.
+        logicalName:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 127
+          pattern: '^[A-Za-z0-9_.-]+$'
+          description: Optional logical interface name, for example `eth_r0_p0`. May contain only ASCII letters, digits, `_`, `.`, and `-`. Omission or null clears it when replacing the declaration.
       required:
-        - macAddress
+        - physicalName
     ExpectedMachine:
       title: ExpectedMachine
       type: object
@@ -29762,9 +29819,20 @@ components:
             - DPU-001
             - DPU-002
           interfaces:
-            - macAddress: '02:00:00:00:00:10'
+            - identifier:
+                macAddress: '02:00:00:00:00:10'
+                astra: null
+              macAddress: '02:00:00:00:00:10'
               nicType: CX9
               fixedIp: '192.0.2.10'
+            - identifier:
+                macAddress: null
+                astra:
+                  physicalName: C1-1-L1
+                  logicalName: eth_r0_p0
+              macAddress: null
+              nicType: CX9
+              fixedIp: '192.0.2.11'
           skuId: lenovo.sr650v2.cpu.1
           machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
           rackId: rack-01
@@ -29849,6 +29917,11 @@ components:
             - string
             - 'null'
           description: Description of this component
+        serverName:
+          type:
+            - string
+            - 'null'
+          description: Optional server name advertised to connected switches in LLDP responses and used for cable validation.
         slotId:
           type:
             - integer
@@ -29907,9 +29980,16 @@ components:
             - DPU-001
             - DPU-002
           interfaces:
-            - macAddress: '02:00:00:00:00:10'
+            - identifier:
+                macAddress: '02:00:00:00:00:10'
               nicType: CX9
               fixedIp: '192.0.2.10'
+            - identifier:
+                astra:
+                  physicalName: C1-1-L1
+                  logicalName: eth_r0_p0
+              nicType: CX9
+              fixedIp: '192.0.2.11'
           skuId: lenovo.sr650v2.cpu.1
           rackId: rack-01
           isDpfEnabled: true
@@ -29992,6 +30072,12 @@ components:
             - string
             - 'null'
           description: Description of this component
+        serverName:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional server name advertised to connected switches in LLDP responses and used for cable validation.
         slotId:
           type:
             - integer
@@ -30075,7 +30161,8 @@ components:
           rackId: rack-02
           isDpfEnabled: false
           interfaces:
-            - macAddress: '02:00:00:00:00:10'
+            - identifier:
+                macAddress: '02:00:00:00:00:10'
               nicType: CX9
               fixedIp: '192.0.2.10'
           manufacturer: Lenovo
@@ -30174,6 +30261,12 @@ components:
             - string
             - 'null'
           description: Description of this component
+        serverName:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional server name advertised to connected switches in LLDP responses and used for cable validation. Omission or null preserves the current value.
         slotId:
           type:
             - integer

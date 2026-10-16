@@ -27,7 +27,7 @@ use std::time::Duration;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::core::ObjectMeta;
-use model::dpa_interface::DpaInterface;
+use model::expected_machine::ExpectedInterface;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -3039,19 +3039,19 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
 
     /// Register a new DPU device.
     ///
-    /// astra_config includes NICs and resolved rail/software-plane prefix lengths.
+    /// astra_config includes declared CX9 NICs and resolved rail/software-plane prefix lengths.
     ///
     /// This operation is idempotent - if the device already exists, it will be
     /// skipped. This handles state machine retries gracefully.
     pub async fn register_dpu_device(
         &self,
         info: DpuDeviceInfo,
-        astra_config: Option<(Vec<&DpaInterface>, AstraRoutePrefixes)>,
+        astra_config: Option<(Vec<&ExpectedInterface>, AstraRoutePrefixes)>,
     ) -> Result<(), DpfError> {
         let cr_name = dpu_device_cr_name(&info.device_id);
 
         // Values are supplied only on creation. In particular, do not require
-        // a complete Astra NIC snapshot when this is an idempotent retry for
+        // complete Astra NIC declarations when this is an idempotent retry for
         // an existing DPUDevice.
         if let Some(existing) =
             DpuDeviceRepository::get(&*self.repo, &cr_name, &self.namespace).await?
@@ -3087,7 +3087,7 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
             ));
         }
 
-        // Build values field from astra_nics configuration passed in.
+        // Build Astra values from the declared MAC addresses and fixed underlay IPs.
         let values = match astra_config {
             Some((astra_nics, route_prefixes)) => Some(astra_underlay_configuration(
                 &cr_name,
@@ -3167,42 +3167,85 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
     }
 }
 
-/// Builds the Astra DPUDevice values from its eight ordered underlay NICs.
+/// Build one array entry per declared Astra interface, including ports without an IP.
 fn astra_underlay_configuration(
     device_name: &str,
-    astra_nics: &[&DpaInterface],
+    astra_nics: &[&ExpectedInterface],
     route_prefixes: AstraRoutePrefixes,
 ) -> Result<BTreeMap<String, serde_json::Value>, DpfError> {
-    let underlay_ip_macs = astra_nics
-        .iter()
-        .enumerate()
-        .map(|(index, nic)| {
-            let ip = match nic.underlay_ip {
-                Some(IpAddr::V4(ip)) => Ok(ip),
-                Some(IpAddr::V6(ip)) => Err(DpfError::ConfigError(format!(
+    let mut seen_ips = BTreeMap::new();
+    let mut seen_macs = BTreeSet::new();
+    let mut dpu_device_underlay_rows = Vec::with_capacity(astra_nics.len());
+    for (index, nic) in astra_nics.iter().enumerate() {
+        nic.validate_identity().map_err(|message| {
+            DpfError::ConfigError(format!("Astra underlay NIC {index}: {message}"))
+        })?;
+        if let Some(mac) = nic.mac_address
+            && !seen_macs.insert(mac)
+        {
+            return Err(DpfError::ConfigError(
+                "Astra underlay MACs must be unique".to_string(),
+            ));
+        }
+
+        // The four Cerebro lanes in a group share their bridge's IP and routes.
+        let cerebro_group = nic
+            .physical_ifname
+            .as_deref()
+            .and_then(|name| name.rsplit_once("-L"))
+            .filter(|(group, lane)| !group.is_empty() && matches!(*lane, "1" | "2" | "3" | "4"))
+            .map(|(group, _)| group);
+        let (ip, gateway, rail_route, sw_plane_route) = match nic.fixed_ip {
+            Some(IpAddr::V4(ip)) => {
+                if let Some(previous_group) = seen_ips.insert(ip, cerebro_group)
+                    && (cerebro_group.is_none() || previous_group != cerebro_group)
+                {
+                    return Err(DpfError::ConfigError(
+                        "Astra underlay IPs must be unique across bridge groups".to_string(),
+                    ));
+                }
+                let rail_network =
+                    underlay_route_network(ip, route_prefixes.rail_route_prefix_len)?;
+                let sw_plane_network =
+                    underlay_route_network(ip, route_prefixes.software_plane_route_prefix_len)?;
+                (
+                    format!("{ip}/31"),
+                    Ipv4Addr::from(u32::from(ip) ^ 1).to_string(),
+                    format!("{rail_network}/{}", route_prefixes.rail_route_prefix_len),
+                    format!(
+                        "{sw_plane_network}/{}",
+                        route_prefixes.software_plane_route_prefix_len
+                    ),
+                )
+            }
+            Some(IpAddr::V6(ip)) => {
+                return Err(DpfError::ConfigError(format!(
                     "Astra underlay NIC {index} has unsupported IPv6 address {ip}; expected IPv4"
-                ))),
-                None => Err(DpfError::ConfigError(format!(
-                    "Astra underlay NIC {index} has no underlay IP"
-                ))),
-            }?;
-            Ok((nic.mac_address.to_string(), ip))
-        })
-        .collect::<Result<Vec<_>, DpfError>>()?;
-    let values = astra_underlay_values_for_ip_macs(&underlay_ip_macs, route_prefixes)?;
-    let underlay_ip_mac_strings: Vec<String> = underlay_ip_macs
-        .iter()
-        .map(|(_, ip)| ip.to_string())
-        .collect();
+                )));
+            }
+            None => (String::new(), String::new(), String::new(), String::new()),
+        };
+        dpu_device_underlay_rows.push(json!({
+            "cerebro_ifname": nic.physical_ifname.as_deref().unwrap_or_default(),
+            "mac_address": nic.mac_address.map(|mac| mac.to_string()).unwrap_or_default(),
+            "ip": ip,
+            "rail_route": rail_route,
+            "sw_plane_route": sw_plane_route,
+            "logical_ifname": nic.logical_ifname.as_deref().unwrap_or_default(),
+            "gateway": gateway,
+        }));
+    }
     tracing::info!(
         device_name,
-        underlay_ip_macs = %underlay_ip_mac_strings.join(", "),
+        underlay_interface_count = dpu_device_underlay_rows.len(),
         rail_route_prefix_len = route_prefixes.rail_route_prefix_len,
         software_plane_route_prefix_len = route_prefixes.software_plane_route_prefix_len,
         "Set up Astra DPUDevice underlay values"
     );
-
-    Ok(values)
+    Ok(BTreeMap::from([(
+        "dpu_device_underlay_rows".to_string(),
+        json!(dpu_device_underlay_rows),
+    )]))
 }
 
 /// Calculate an IPv4 route network. SDK callers pass raw prefix lengths, so validate before shifting.
@@ -3218,97 +3261,6 @@ fn underlay_route_network(ip: Ipv4Addr, prefix_len: u8) -> Result<Ipv4Addr, DpfE
     Ok(Ipv4Addr::from(
         u32::from(ip) & u32::MAX.checked_shl(host_bits).unwrap_or(0),
     ))
-}
-
-/// Build the per-DPU values field for the DPU device object. This
-/// information is for consumption by the BF4 Astra `DPUFlavorTemplate`.
-/// Input order does not matter, the BF4 Astra template uses the MAC address
-/// to find the matching PCI device and bridge at runtime.
-/// For each input index `N`, `ip_N_val` as a `/31` address, `gw_N_val`
-/// `route1_N_val` (rail route), `route2_N_val` (software-plane route),
-/// and `mac_N_val` are added to the values field.
-fn astra_underlay_values_for_ip_macs(
-    underlay_ip_macs: &[(String, Ipv4Addr)],
-    route_prefixes: AstraRoutePrefixes,
-) -> Result<BTreeMap<String, serde_json::Value>, DpfError> {
-    // Astra has four rails and two switch planes. This documents the required set of slots; the
-    // input pair order is intentionally not tied to this array.
-    const RAIL_SWITCH_PLANES: [(u8, u8); 8] = [
-        (0, 0),
-        (1, 0),
-        (2, 0),
-        (3, 0),
-        (0, 1),
-        (1, 1),
-        (2, 1),
-        (3, 1),
-    ];
-
-    // Make sure that there are 8 MAC-IP pairs and they are all unique.
-    if underlay_ip_macs.len() != RAIL_SWITCH_PLANES.len() {
-        tracing::error!(
-            expected_underlay_ip_count = RAIL_SWITCH_PLANES.len(),
-            actual_underlay_ip_count = underlay_ip_macs.len(),
-            "Astra requires exactly eight underlay MAC/IP pairs"
-        );
-        return Err(DpfError::ConfigError(format!(
-            "Astra requires exactly {} underlay MAC/IP pairs, got {}",
-            RAIL_SWITCH_PLANES.len(),
-            underlay_ip_macs.len()
-        )));
-    }
-    let unique_underlay_ip_count = underlay_ip_macs
-        .iter()
-        .map(|(_, ip)| *ip)
-        .collect::<BTreeSet<_>>()
-        .len();
-    if unique_underlay_ip_count != underlay_ip_macs.len() {
-        tracing::error!(
-            underlay_ip_count = underlay_ip_macs.len(),
-            unique_underlay_ip_count,
-            "Astra underlay IPs must be unique"
-        );
-        return Err(DpfError::ConfigError(
-            "Astra underlay IPs must be unique".to_string(),
-        ));
-    }
-    let unique_underlay_mac_count = underlay_ip_macs
-        .iter()
-        .map(|(mac, _)| mac)
-        .collect::<BTreeSet<_>>()
-        .len();
-    if unique_underlay_mac_count != underlay_ip_macs.len() {
-        tracing::error!(
-            underlay_mac_count = underlay_ip_macs.len(),
-            unique_underlay_mac_count,
-            "Astra underlay MACs must be unique"
-        );
-        return Err(DpfError::ConfigError(
-            "Astra underlay MACs must be unique".to_string(),
-        ));
-    }
-
-    // Add ip_N_val, gw_N_val, route1_N_val, route2_N_val and mac_N_val
-    // to the values field, which will be added to the DPU device object.
-    // N goes from 0 to 7, one for each of the input ip-mac pairs.
-    let mut values = BTreeMap::new();
-    for (index, (mac, ip)) in underlay_ip_macs.iter().enumerate() {
-        let gateway = Ipv4Addr::from(u32::from(*ip) ^ 1);
-        values.insert(format!("ip_{index}_val"), json!(format!("{ip}/31")));
-        values.insert(format!("gw_{index}_val"), json!(gateway.to_string()));
-        for (route_number, prefix_len) in [
-            (1, route_prefixes.rail_route_prefix_len),
-            (2, route_prefixes.software_plane_route_prefix_len),
-        ] {
-            let network = underlay_route_network(*ip, prefix_len)?;
-            values.insert(
-                format!("route{route_number}_{index}_val"),
-                json!(format!("{network}/{prefix_len}")),
-            );
-        }
-        values.insert(format!("mac_{index}_val"), json!(mac.clone()));
-    }
-    Ok(values)
 }
 
 impl<R: DpuNodeRepository, L: ResourceLabeler> DpfSdk<R, L> {
@@ -4542,7 +4494,7 @@ impl<R: DpuRepository, L: ResourceLabeler> DpfSdk<R, L> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use std::future::Future;
     use std::sync::{Arc, RwLock};
 
@@ -6524,98 +6476,175 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn astra_underlay_values_require_unique_mac_and_ip() {
-        let underlay_ip_macs = [
-            ("dc:73:fc:21:f8:20", "100.96.0.212"),
-            ("dc:73:fc:21:f9:30", "100.97.0.214"),
-            ("dc:73:fc:21:f9:20", "100.98.0.216"),
-            ("dc:73:fc:21:f8:50", "100.99.0.218"),
-            ("dc:73:fc:21:f9:50", "100.104.0.220"),
-            ("dc:73:fc:21:f8:40", "100.105.0.222"),
-            ("dc:73:fc:21:f9:40", "100.106.0.224"),
-            ("dc:73:fc:21:f8:30", "100.107.0.226"),
-        ]
-        .map(|(mac, ip)| (mac.to_string(), ip.parse::<Ipv4Addr>().unwrap()));
-
-        let route_prefixes = AstraRoutePrefixes {
-            rail_route_prefix_len: 16,
-            software_plane_route_prefix_len: 13,
-        };
-        let values = astra_underlay_values_for_ip_macs(&underlay_ip_macs, route_prefixes).unwrap();
-        assert_eq!(values.len(), 40);
-        assert_eq!(values["mac_0_val"].as_str(), Some("dc:73:fc:21:f8:20"));
-        assert_eq!(values["ip_0_val"].as_str(), Some("100.96.0.212/31"));
-        assert_eq!(values["gw_0_val"].as_str(), Some("100.96.0.213"));
-        assert_eq!(values["route1_0_val"].as_str(), Some("100.96.0.0/16"));
-        assert_eq!(values["route2_0_val"].as_str(), Some("100.96.0.0/13"));
-        assert_eq!(values["mac_7_val"].as_str(), Some("dc:73:fc:21:f8:30"));
-        assert_eq!(values["ip_7_val"].as_str(), Some("100.107.0.226/31"));
-        assert_eq!(values["gw_7_val"].as_str(), Some("100.107.0.227"));
-        assert_eq!(values["route1_7_val"].as_str(), Some("100.107.0.0/16"));
-        assert_eq!(values["route2_7_val"].as_str(), Some("100.104.0.0/13"));
-        assert!(astra_underlay_values_for_ip_macs(&underlay_ip_macs[..7], route_prefixes).is_err());
-
-        let mut duplicate_ips = underlay_ip_macs.clone();
-        duplicate_ips[7].1 = duplicate_ips[0].1;
-        let error = astra_underlay_values_for_ip_macs(&duplicate_ips, route_prefixes).unwrap_err();
-        assert!(
-            matches!(error, DpfError::ConfigError(message) if message == "Astra underlay IPs must be unique")
-        );
-
-        let mut duplicate_macs = underlay_ip_macs;
-        duplicate_macs[7].0 = duplicate_macs[0].0.clone();
-        let error = astra_underlay_values_for_ip_macs(&duplicate_macs, route_prefixes).unwrap_err();
-        assert!(
-            matches!(error, DpfError::ConfigError(message) if message == "Astra underlay MACs must be unique")
-        );
-    }
-
-    #[test]
-    fn astra_underlay_values_use_configured_route_prefixes() {
-        let underlay_ip_macs: Vec<_> = (0..8)
-            .map(|index| {
-                (
-                    format!("00:00:00:00:00:{index:02x}"),
-                    Ipv4Addr::new(100, 107, 13, index),
-                )
+    fn astra_declared_interfaces() -> Vec<ExpectedInterface> {
+        (0..32)
+            .map(|index| ExpectedInterface {
+                // One addressed port per hardware-plane group; retain the other ports by name.
+                mac_address: (index % 4 == 0)
+                    .then(|| format!("00:00:00:00:00:{index:02x}").parse().unwrap()),
+                physical_ifname: Some(format!(
+                    "C{}-{}-L{}",
+                    index / 8 + 1,
+                    (index % 8) / 4 + 1,
+                    index % 4 + 1
+                )),
+                logical_ifname: Some(format!("eth_r{}_p{}", index / 8, index % 8)),
+                fixed_ip: (index % 4 == 0)
+                    .then(|| IpAddr::V4(Ipv4Addr::new(100, 96 + index as u8 / 4, 0, 212))),
+                nic_type: Some("CX9".to_string()),
+                ..Default::default()
             })
-            .collect();
-        let values = astra_underlay_values_for_ip_macs(
-            &underlay_ip_macs,
-            AstraRoutePrefixes {
-                rail_route_prefix_len: 20,
-                software_plane_route_prefix_len: 14,
-            },
-        )
-        .unwrap();
-        assert_eq!(values["route1_0_val"].as_str(), Some("100.107.0.0/20"));
-        assert_eq!(values["route2_0_val"].as_str(), Some("100.104.0.0/14"));
+            .collect()
     }
 
     #[test]
-    fn astra_dpu_device_values_exactly_match_flavor_template_references() {
-        let underlay_ip_macs = [
-            ("dc:73:fc:21:f8:20", "100.96.0.212"),
-            ("dc:73:fc:21:f9:30", "100.97.0.214"),
-            ("dc:73:fc:21:f9:20", "100.98.0.216"),
-            ("dc:73:fc:21:f8:50", "100.99.0.218"),
-            ("dc:73:fc:21:f9:50", "100.104.0.220"),
-            ("dc:73:fc:21:f8:40", "100.105.0.222"),
-            ("dc:73:fc:21:f9:40", "100.106.0.224"),
-            ("dc:73:fc:21:f8:30", "100.107.0.226"),
-        ]
-        .map(|(mac, ip)| (mac.to_string(), ip.parse::<Ipv4Addr>().unwrap()));
-        let values = astra_underlay_values_for_ip_macs(
-            &underlay_ip_macs,
+    fn astra_dpu_device_underlay_rows_retain_all_declared_ports() {
+        let nics = astra_declared_interfaces();
+        let values = astra_underlay_configuration(
+            "dpu-001",
+            &nics.iter().collect::<Vec<_>>(),
             AstraRoutePrefixes {
                 rail_route_prefix_len: 16,
                 software_plane_route_prefix_len: 13,
             },
         )
         .unwrap();
-        let value_keys: BTreeSet<_> = values.keys().cloned().collect();
+        assert_eq!(values.len(), 1);
+        let interfaces = values["dpu_device_underlay_rows"].as_array().unwrap();
+        assert_eq!(interfaces.len(), 32);
+        assert_eq!(
+            interfaces[0],
+            json!({
+                "cerebro_ifname": "C1-1-L1",
+                "mac_address": "00:00:00:00:00:00",
+                "ip": "100.96.0.212/31",
+                "rail_route": "100.96.0.0/16",
+                "sw_plane_route": "100.96.0.0/13",
+                "logical_ifname": "eth_r0_p0",
+                "gateway": "100.96.0.213",
+            })
+        );
+        assert_eq!(
+            interfaces[1],
+            json!({
+                "cerebro_ifname": "C1-1-L2",
+                "mac_address": "",
+                "ip": "",
+                "rail_route": "",
+                "sw_plane_route": "",
+                "logical_ifname": "eth_r0_p1",
+                "gateway": "",
+            })
+        );
+        assert_eq!(interfaces[31]["logical_ifname"], "eth_r3_p7");
+    }
 
+    #[test]
+    fn astra_dpu_device_underlay_rows_allow_shared_ip_within_cerebro_group() {
+        let mut nics = astra_declared_interfaces();
+        for group in nics.chunks_mut(4) {
+            let shared_ip = group[0].fixed_ip;
+            for nic in group {
+                nic.fixed_ip = shared_ip;
+                nic.mac_address = None;
+            }
+        }
+        let values = astra_underlay_configuration(
+            "dpu-001",
+            &nics.iter().collect::<Vec<_>>(),
+            AstraRoutePrefixes {
+                rail_route_prefix_len: 16,
+                software_plane_route_prefix_len: 13,
+            },
+        )
+        .unwrap();
+        let rows = values["dpu_device_underlay_rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 32);
+        for group in rows.chunks(4) {
+            assert!(!group[0]["ip"].as_str().unwrap().is_empty());
+            for row in group {
+                for key in ["ip", "gateway", "rail_route", "sw_plane_route"] {
+                    assert_eq!(row[key], group[0][key]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn astra_dpu_device_underlay_rows_reject_duplicate_mac_and_ip() {
+        use carbide_test_support::{Check, check_values};
+        check_values(
+            [
+                Check {
+                    scenario: "duplicate configured IP",
+                    input: true,
+                    expect: "Astra underlay IPs must be unique across bridge groups".to_string(),
+                },
+                Check {
+                    scenario: "duplicate supplied MAC",
+                    input: false,
+                    expect: "Astra underlay MACs must be unique".to_string(),
+                },
+            ],
+            |duplicate_ip| {
+                let mut nics = astra_declared_interfaces();
+                if duplicate_ip {
+                    nics[4].fixed_ip = nics[0].fixed_ip;
+                } else {
+                    nics[4].mac_address = nics[0].mac_address;
+                }
+                match astra_underlay_configuration(
+                    "dpu-001",
+                    &nics.iter().collect::<Vec<_>>(),
+                    AstraRoutePrefixes {
+                        rail_route_prefix_len: 16,
+                        software_plane_route_prefix_len: 13,
+                    },
+                )
+                .unwrap_err()
+                {
+                    DpfError::ConfigError(message) => message,
+                    other => panic!("expected config error, got {other}"),
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn astra_underlay_values_use_configured_route_prefixes() {
+        let mut nics = astra_declared_interfaces();
+        nics[0].fixed_ip = Some(IpAddr::V4(Ipv4Addr::new(100, 107, 13, 2)));
+        let values = astra_underlay_configuration(
+            "dpu-001",
+            &nics.iter().collect::<Vec<_>>(),
+            AstraRoutePrefixes {
+                rail_route_prefix_len: 20,
+                software_plane_route_prefix_len: 14,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            values["dpu_device_underlay_rows"][0]["rail_route"],
+            "100.107.0.0/20"
+        );
+        assert_eq!(
+            values["dpu_device_underlay_rows"][0]["sw_plane_route"],
+            "100.104.0.0/14"
+        );
+    }
+
+    #[test]
+    fn astra_dpu_device_interface_fields_match_flavor_references() {
+        let nics = astra_declared_interfaces();
+        let values = astra_underlay_configuration(
+            "dpu-001",
+            &nics.iter().collect::<Vec<_>>(),
+            AstraRoutePrefixes {
+                rail_route_prefix_len: 16,
+                software_plane_route_prefix_len: 13,
+            },
+        )
+        .unwrap();
         let template = crate::flavor::flavor_bf4_astra(
             "astra-ns",
             &None,
@@ -6624,55 +6653,24 @@ mod tests {
             true,
         )
         .unwrap();
-        let reference_keys: BTreeSet<_> = template
-            .spec
-            .template
-            .split("{{ .")
-            .skip(1)
-            .map(|reference| {
-                reference
-                    .split_once(" }}")
-                    .expect("Astra template reference must be closed")
-                    .0
-                    .to_owned()
-            })
-            .collect();
-
-        assert_eq!(reference_keys, value_keys);
-
-        let mut rendered_template = template.spec.template;
-        for (key, value) in values {
-            rendered_template = rendered_template.replace(
-                &format!("{{{{ .{key} }}}}"),
-                value.as_str().expect("Astra value must be a string"),
-            );
-        }
-        let rendered: serde_yaml::Value = serde_yaml::from_str(&rendered_template).unwrap();
-        let xplane_script = rendered["spec"]["configFiles"]
-            .as_sequence()
-            .unwrap()
+        let body: serde_yaml::Value = serde_yaml::from_str(&template.spec.template).unwrap();
+        let spec: crate::crds::dpuflavors_generated::DpuFlavorSpec =
+            serde_yaml::from_value(body["spec"].clone()).unwrap();
+        let files = spec.config_files.unwrap();
+        let script = files
             .iter()
-            .find(|file| file["path"].as_str() == Some("/etc/mellanox/xplane-bridge.sh"))
-            .and_then(|file| file["raw"].as_str())
+            .find(|file| file.path == "/usr/local/sbin/configure-xplane-network.sh")
+            .and_then(|file| file.raw.as_deref())
             .unwrap();
-
-        assert!(xplane_script.contains("bridge_for_mac()"));
-        assert!(
-            xplane_script
-                .contains("/sys/bus/pci/devices/${pci}/net/${iface_val}/smart_nic/pf/config")
-        );
-        assert!(xplane_script.contains("grep -qiF \"$target_mac\" \"$config_path\""));
-
-        for (mac, ip) in underlay_ip_macs {
-            let octets = ip.octets();
-            let gateway = Ipv4Addr::from(u32::from(ip) ^ 1);
-            assert!(xplane_script.contains(&format!(
-                "\"{mac}|{ip}/31|{gateway}|{}.{}.0.0/16|{}.{}.0.0/13\"",
-                octets[0],
-                octets[1],
-                octets[0],
-                octets[1] & 0b1111_1000
-            )));
+        assert!(script.contains("{{- range .dpu_device_underlay_rows }}"));
+        assert!(script.contains("{{ .logical_ifname }}"));
+        // References inside the range must resolve against each array entry.
+        for reference in script.split("{{ .").skip(1) {
+            let field = reference.split_once(" }}").unwrap().0;
+            assert!(
+                values["dpu_device_underlay_rows"][0].get(field).is_some(),
+                "missing interface field {field}"
+            );
         }
     }
 
@@ -8199,7 +8197,7 @@ mod tests {
             is_primary: true,
         };
         // An existing DPUDevice is left untouched, so a retry does not need a
-        // complete Astra NIC snapshot just to re-validate creation-only values.
+        // complete Astra NIC declarations just to re-validate creation-only values.
         sdk.register_dpu_device(
             info,
             Some((

@@ -42,7 +42,8 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn provisioning_mock_with_labels_valid(labels_valid: Arc<AtomicBool>) -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));

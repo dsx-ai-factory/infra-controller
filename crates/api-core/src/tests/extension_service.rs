@@ -4863,7 +4863,8 @@ async fn test_rejected_helm_placement_observation_does_not_advance_readiness(
     )]);
     let label_reads = Arc::new(AtomicUsize::new(0));
     let mut mock = MockDpfOperations::new();
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
@@ -5021,7 +5022,8 @@ async fn test_helm_target_placement_status_and_detach(
     ));
     let failed_device = Arc::new(Mutex::new(None::<String>));
     let mut mock = MockDpfOperations::new();
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));

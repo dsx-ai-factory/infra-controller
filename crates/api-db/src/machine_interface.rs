@@ -1479,18 +1479,21 @@ pub async fn preallocate_expected_machine_interface(
     expected_interface: &ExpectedInterface,
     retained_window: Option<chrono::Duration>,
 ) -> DatabaseResult<()> {
+    let mac_address = expected_interface
+        .require_mac_address()
+        .map_err(|message| DatabaseError::InvalidArgument(message.to_string()))?;
     let static_ip = expected_interface
         .fixed_reservation_ip()
         .map_err(|message| {
             DatabaseError::InvalidArgument(format!(
                 "expected interface {}: {message}",
-                expected_interface.mac_address,
+                expected_interface.identity(),
             ))
         })?;
 
     preallocate_machine_interface_with_options(
         txn,
-        expected_interface.mac_address,
+        mac_address,
         static_ip,
         PreallocationOptions {
             interface_type: expected_interface.role.interface_type(),

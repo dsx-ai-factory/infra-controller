@@ -399,6 +399,10 @@ fn get_bf4_astra_ovs_defaults(topology: Option<&DpfInterceptBridging>) -> String
         "}\n",
         "export -f _ovs-vsctl\n",
         "\n",
+        "{{ if and .dpu_device_underlay_rows (index .dpu_device_underlay_rows 0).cerebro_ifname }}\n",
+        "# Execute xplane-network script to setup ovs bridges and netplan\n",
+        "/usr/local/sbin/configure-xplane-network.sh || exit $?\n",
+        "{{ else }}\n",
         "# 1. Configure OVS bridges and xplane ports\n",
     ));
     if topology.is_some() {
@@ -419,7 +423,8 @@ fn get_bf4_astra_ovs_defaults(topology: Option<&DpfInterceptBridging>) -> String
         "  other_config:doca-telemetry-source-id=\"xplane\"\n",
         "\n",
         "# 3. Configure rail bridge addressing (netplan)\n",
-        "/etc/mellanox/xplane-bridge.sh\n",
+        "/usr/local/sbin/configure-xplane-network.sh\n",
+        "{{ end }}\n",
     ));
 
     // Layer configured intercept bridges onto the established Astra xplane topology after its fixed setup.
@@ -1328,6 +1333,14 @@ fn get_bf4_astra_config_files(
             r#type: None,
         },
         DpuFlavorConfigFiles {
+            path: "/etc/mellanox/interface-fixed-mapping.csv".to_string(),
+            operation: Some(DpuFlavorConfigFilesOperation::Override),
+            permissions: Some("0644".to_string()),
+            raw: Some(interface_fixed_mapping_raw()),
+            content_from: None,
+            r#type: None,
+        },
+        DpuFlavorConfigFiles {
             path: "/etc/lldpd.d/lldp-interfaces.conf".to_string(),
             operation: Some(DpuFlavorConfigFilesOperation::Override),
             permissions: Some("0644".to_string()),
@@ -1364,13 +1377,7 @@ fn get_bf4_astra_config_files(
             operation: Some(DpuFlavorConfigFilesOperation::Override),
             path: "/etc/mellanox/mlnx-ovs.conf".to_string(),
             permissions: Some("0644".to_string()),
-            raw: Some(
-                concat!(
-                    "CREATE_OVS_BRIDGES=\"no\"\n",
-                    "OVS_DOCA=\"yes\"\n",
-                )
-                .to_string(),
-            ),
+            raw: Some(concat!("CREATE_OVS_BRIDGES=\"no\"\n", "OVS_DOCA=\"yes\"\n",).to_string()),
             r#type: None,
         },
         DpuFlavorConfigFiles {
@@ -1400,203 +1407,15 @@ fn get_bf4_astra_config_files(
             operation: Some(DpuFlavorConfigFilesOperation::Override),
             path: "/etc/mellanox/ovs-script.sh".to_string(),
             permissions: Some("0755".to_string()),
-            raw: Some(
-                concat!(
-                    "#!/bin/bash\n",
-                    "\n",
-                    "# Remove default OVS configuration on the DPU and ensure no leftovers on the OVS kernel side\n",
-                    "seq -f 'ovsbr%g' 1 99 | xargs -r -n1 ovs-vsctl --if-exists del-br\n",
-                    "\n",
-                    "ovs-appctl --timeout 15 dpctl/del-dp system@ovs-system || true\n",
-                    "\n",
-                   "# Configure OVS\n",
-                    "_ovs-vsctl set Open_vSwitch . other_config:doca-init=true\n",
-                    "_ovs-vsctl set Open_vSwitch . other_config:dpdk-max-memzones=50000\n",
-                    "_ovs-vsctl set Open_vSwitch . other_config:hw-offload=true\n",
-                    "_ovs-vsctl set Open_vSwitch . other_config:pmd-quiet-idle=true\n",
-                    "_ovs-vsctl set Open_vSwitch . other_config:max-idle=20000\n",
-                    "_ovs-vsctl set Open_vSwitch . other_config:max-revalidator=5000\n",
-                    "_ovs-vsctl set Open_vSwitch . other_config:doca-congestion-threshold=60\n",
-                    "_ovs-vsctl set Open_vSwitch . other_config:flow-limit=500000\n",
-                    "_ovs-vsctl set Open_vSwitch . other_config:hw-offload-ct-unidir-udp-enabled=true\n",
-                    "_ovs-vsctl remove Open_vSwitch . other_config default-datapath-type || true\n",
-                    "\n",
-                    "if systemctl list-unit-files openvswitch-switch.service &>/dev/null; then\n",
-                    "  systemctl restart openvswitch-switch\n",
-                    "elif systemctl list-unit-files openvswitch.service &>/dev/null; then\n",
-                    "  systemctl restart openvswitch\n",
-                    "fi\n",
-                    "\n",
-                    "\n",
-                    "_ovs-vsctl --may-exist add-br br-sfc\n",
-                    "_ovs-vsctl set bridge br-sfc datapath_type=netdev\n",
-                    "_ovs-vsctl set bridge br-sfc fail_mode=secure\n",
-
-                    // br-hbn is absent on a fresh DPU, so a bare del-br would fail the run.
-                    "_ovs-vsctl --if-exists del-br br-hbn\n",
-                    "_ovs-vsctl --may-exist add-br br-hbn\n",
-                    "_ovs-vsctl set bridge br-hbn datapath_type=netdev\n",
-                    "_ovs-vsctl set bridge br-hbn fail_mode=secure\n",
-                    "\n",
-                    "# Pre plug p0 to br-sfc\n",
-                    "_ovs-vsctl --may-exist add-port br-sfc p0\n",
-                    "_ovs-vsctl set Interface p0 type=dpdk\n",
-                    "_ovs-vsctl set Interface p0 mtu_request=9216\n",
-                    "_ovs-vsctl set Port p0 external_ids:dpf-type=physical\n",
-                    "\n",
-                    "# Pre plug p1 to br-sfc\n",
-                    "_ovs-vsctl --may-exist add-port br-sfc p1\n",
-                    "_ovs-vsctl set Interface p1 type=dpdk\n",
-                    "_ovs-vsctl set Interface p1 mtu_request=9216\n",
-                    "_ovs-vsctl set Port p1 external_ids:dpf-type=physical\n",
-                    "\n",
-                    "# Configure OVS bridges and xplane ports. Each row is:\n",
-                    "# interface prefix | PCI address | bridge | xplane group ID\n",
-                    "HW_PLANES=(0 1 2 3)\n",
-                    "\n",
-                    "XPLANE_ROWS=(\n",
-                    "    \"A53|0005:03:00.0|brcx-r1swpln0|r1swpln0\"\n",
-                    "    \"A56|0005:06:00.0|brcx-r0swpln0|r0swpln0\"\n",
-                    "    \"A43|0004:03:00.0|brcx-r0swpln1|r0swpln1\"\n",
-                    "    \"A46|0004:06:00.0|brcx-r1swpln1|r1swpln1\"\n",
-                    "    \"A3|0000:03:00.0|brcx-r3swpln0|r3swpln0\"\n",
-                    "    \"A6|0000:06:00.0|brcx-r2swpln0|r2swpln0\"\n",
-                    "    \"A13|0001:03:00.0|brcx-r2swpln1|r2swpln1\"\n",
-                    "    \"A16|0001:06:00.0|brcx-r3swpln1|r3swpln1\"\n",
-                    ")\n",
-                    "\n",
-                    "_ovs-vsctl --may-exist add-br br-xplane\n",
-                    "_ovs-vsctl set bridge br-xplane datapath_type=netdev\n",
-                    "_ovs-vsctl set bridge br-xplane fail_mode=secure\n",
-                    "\n",
-                    "for row in \"${XPLANE_ROWS[@]}\"; do\n",
-                    "    IFS='|' read -r iface_prefix pci_address bridge group_id <<< \"$row\"\n",
-                    "    _ovs-vsctl --may-exist add-br \"$bridge\"\n",
-                    "    _ovs-vsctl set bridge \"$bridge\" datapath_type=netdev\n",
-                    "    _ovs-vsctl set bridge \"$bridge\" fail_mode=standalone\n",
-                    "    for hw_plane in \"${HW_PLANES[@]}\"; do\n",
-                    "        interface_val=\"${iface_prefix}p${hw_plane}\"\n",
-                    "\n",
-                    "        _ovs-vsctl --may-exist add-port br-xplane \"$interface_val\"\n",
-                    "        _ovs-vsctl set Interface \"$interface_val\" type=dpdk\n",
-                    "        _ovs-vsctl set Interface \"$interface_val\" mtu_request=9216\n",
-                    "        _ovs-vsctl set Interface \"$interface_val\" external_ids:xplane=true\n",
-                    "        _ovs-vsctl set Interface \"$interface_val\" external_ids:xplane-group-id=\"$group_id\"\n",
-                    "        _ovs-vsctl set Interface \"$interface_val\" external_ids:xplane-uplink=true\n",
-                    "        _ovs-vsctl set Interface \"$interface_val\" external_ids:xplane-plane-id=\"$hw_plane\"\n",
-                    "    done\n",
-                    "done\n",
-                    "mst start\n",
-                )
-                .to_string(),
-            ),
+            raw: Some(ovs_script_raw()),
             r#type: None,
         },
         DpuFlavorConfigFiles {
             content_from: None,
             operation: Some(DpuFlavorConfigFilesOperation::Override),
-            path: "/etc/mellanox/xplane-bridge.sh".to_string(),
+            path: "/usr/local/sbin/configure-xplane-network.sh".to_string(),
             permissions: Some("0755".to_string()),
-            raw: Some(
-                concat!(
-                    "#!/bin/bash\n",
-                    "NETPLAN_FILE=\"/etc/netplan/99-cx9-rails.yaml\"\n",
-                    "set -e\n",
-                    "# Preserve the active netplan until every bridge lookup and write succeeds.\n",
-                    "NETPLAN_TMP=\"$(mktemp \"${NETPLAN_FILE}.tmp.XXXXXX\")\"\n",
-                    "# Keep a failed candidate for debugging; successful writes rename it into place.\n",
-                    "trap 'if [ -f \"$NETPLAN_TMP\" ]; then printf \"xplane-bridge.sh: retained failed netplan candidate at %s\\n\" \"$NETPLAN_TMP\" >&2; fi' EXIT\n",
-                    "\n",
-                    "# interface prefix | PCI address | bridge. The MAC-to-PCI association is read\n",
-                    "# from the SmartNIC PF config for each interface prefix's p0 port.\n",
-                    "PCI_BRIDGE_ROWS=(\n",
-                    "    \"A53|0005:03:00.0|brcx-r1swpln0\"\n",
-                    "    \"A56|0005:06:00.0|brcx-r0swpln0\"\n",
-                    "    \"A43|0004:03:00.0|brcx-r0swpln1\"\n",
-                    "    \"A46|0004:06:00.0|brcx-r1swpln1\"\n",
-                    "    \"A3|0000:03:00.0|brcx-r3swpln0\"\n",
-                    "    \"A6|0000:06:00.0|brcx-r2swpln0\"\n",
-                    "    \"A13|0001:03:00.0|brcx-r2swpln1\"\n",
-                    "    \"A16|0001:06:00.0|brcx-r3swpln1\"\n",
-                    ")\n",
-                    "\n",
-                    "# MAC address | address | gateway | /16 route | /13 route\n",
-                    "UNDERLAY_ROWS=(\n",
-                    "    \"{{ .mac_0_val }}|{{ .ip_0_val }}|{{ .gw_0_val }}|{{ .route1_0_val }}|{{ .route2_0_val }}\"\n",
-                    "    \"{{ .mac_1_val }}|{{ .ip_1_val }}|{{ .gw_1_val }}|{{ .route1_1_val }}|{{ .route2_1_val }}\"\n",
-                    "    \"{{ .mac_2_val }}|{{ .ip_2_val }}|{{ .gw_2_val }}|{{ .route1_2_val }}|{{ .route2_2_val }}\"\n",
-                    "    \"{{ .mac_3_val }}|{{ .ip_3_val }}|{{ .gw_3_val }}|{{ .route1_3_val }}|{{ .route2_3_val }}\"\n",
-                    "    \"{{ .mac_4_val }}|{{ .ip_4_val }}|{{ .gw_4_val }}|{{ .route1_4_val }}|{{ .route2_4_val }}\"\n",
-                    "    \"{{ .mac_5_val }}|{{ .ip_5_val }}|{{ .gw_5_val }}|{{ .route1_5_val }}|{{ .route2_5_val }}\"\n",
-                    "    \"{{ .mac_6_val }}|{{ .ip_6_val }}|{{ .gw_6_val }}|{{ .route1_6_val }}|{{ .route2_6_val }}\"\n",
-                    "    \"{{ .mac_7_val }}|{{ .ip_7_val }}|{{ .gw_7_val }}|{{ .route1_7_val }}|{{ .route2_7_val }}\"\n",
-                    ")\n",
-                    "\n",
-                    "bridge_for_mac() {\n",
-                    "    local target_mac=\"$1\" row iface_prefix pci bridge iface_val config_path\n",
-                    "    for row in \"${PCI_BRIDGE_ROWS[@]}\"; do\n",
-                    "        IFS='|' read -r iface_prefix pci bridge <<< \"$row\"\n",
-                    "        iface_val=\"${iface_prefix}p0\"\n",
-                    "        config_path=\"/sys/bus/pci/devices/${pci}/net/${iface_val}/smart_nic/pf/config\"\n",
-                    "        if [ -r \"$config_path\" ] && grep -qiF \"$target_mac\" \"$config_path\"; then\n",
-                    "            printf '%s\\n' \"$bridge\"\n",
-                    "            return 0\n",
-                    "        fi\n",
-                    "    done\n",
-                    "    return 1\n",
-                    "}\n",
-                    "\n",
-                    "{\n",
-                    "    echo \"network:\"\n",
-                    "    echo \"  version: 2\"\n",
-                    "    echo \"  ethernets:\"\n",
-                    "\n",
-                    "    for row in \"${UNDERLAY_ROWS[@]}\"; do\n",
-                    "        IFS='|' read -r mac address gateway route1 route2 <<< \"$row\"\n",
-                    "        bridge=\"$(bridge_for_mac \"$mac\")\" || {\n",
-                    "            echo \"xplane-bridge.sh: no bridge found for underlay MAC ${mac}\" >&2\n",
-                    "            exit 1\n",
-                    "        }\n",
-                    "        echo \"    ${bridge}:\"\n",
-                    "        echo \"      addresses:\"\n",
-                    "        echo \"        - ${address}\"\n",
-                    "        echo \"      routes:\"\n",
-                    "        echo \"        - to: ${route1}\"\n",
-                    "        echo \"          via: ${gateway}\"\n",
-                    "        echo \"        - to: ${route2}\"\n",
-                    "        echo \"          via: ${gateway}\"\n",
-                    "    done\n",
-                    "} > \"$NETPLAN_TMP\"\n",
-                    "# Both files are in the same directory, so replacement is atomic.\n",
-                    "mv -- \"$NETPLAN_TMP\" \"$NETPLAN_FILE\"\n",
-                    "\n",
-                    "netplan apply\n",
-                    "\n",
-                    "# Block until oob_net0 has an IP again, since netplan\n",
-                    "# apply can transiently drop it. Avoids a race with\n",
-                    "# dpuagent joining the cluster afterwards.\n",
-                    "OOB_IFACE=\"oob_net0\"\n",
-                    "OOB_WAIT_TIMEOUT=120\n",
-                    "SECONDS=0\n",
-                    "\n",
-                    "while :; do\n",
-                    "    if ip -4 -o addr show dev \"$OOB_IFACE\" scope global 2>/dev/null | grep -q \"inet \"; then\n",
-                    "        echo \"xplane-bridge.sh: ${OOB_IFACE} has an IP after ${SECONDS}s\"\n",
-                    "        break\n",
-                    "    fi\n",
-                    "\n",
-                    "    if [ \"$SECONDS\" -ge \"$OOB_WAIT_TIMEOUT\" ]; then\n",
-                    "        echo \"xplane-bridge.sh: timed out after ${OOB_WAIT_TIMEOUT}s waiting for ${OOB_IFACE} to have an IP\" >&2\n",
-                    "        exit 1\n",
-                    "    fi\n",
-                    "\n",
-                    "    echo \"xplane-bridge.sh: waiting for ${OOB_IFACE} to get an IP (${SECONDS}s elapsed)\"\n",
-                    "    sleep 2\n",
-                    "done\n",
-                    "\n",
-                )
-                .to_string(),
-            ),
+            raw: Some(configure_xplane_network_script_raw()),
             r#type: None,
         },
         DpuFlavorConfigFiles {
@@ -1814,6 +1633,762 @@ fn dhcp_acl_rules(interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>) 
     rules
 }
 
+fn interface_fixed_mapping_raw() -> String {
+    concat!(
+        "pci_address,phys_port_name,cerebro_interface_name\n",
+        "0005:03:00.0,p0,C1-1-L1\n",
+        "0005:03:00.1,p1,C1-1-L2\n",
+        "0005:03:00.2,p2,C1-1-L3\n",
+        "0005:03:00.3,p3,C1-1-L4\n",
+        "0005:06:00.0,p0,C1-2-L1\n",
+        "0005:06:00.1,p1,C1-2-L2\n",
+        "0005:06:00.2,p2,C1-2-L3\n",
+        "0005:06:00.3,p3,C1-2-L4\n",
+        "0004:03:00.0,p0,C3-1-L1\n",
+        "0004:03:00.1,p1,C3-1-L2\n",
+        "0004:03:00.2,p2,C3-1-L3\n",
+        "0004:03:00.3,p3,C3-1-L4\n",
+        "0004:06:00.0,p0,C3-2-L1\n",
+        "0004:06:00.1,p1,C3-2-L2\n",
+        "0004:06:00.2,p2,C3-2-L3\n",
+        "0004:06:00.3,p3,C3-2-L4\n",
+        "0001:03:00.0,p0,C5-1-L1\n",
+        "0001:03:00.1,p1,C5-1-L2\n",
+        "0001:03:00.2,p2,C5-1-L3\n",
+        "0001:03:00.3,p3,C5-1-L4\n",
+        "0001:06:00.0,p0,C5-2-L1\n",
+        "0001:06:00.1,p1,C5-2-L2\n",
+        "0001:06:00.2,p2,C5-2-L3\n",
+        "0001:06:00.3,p3,C5-2-L4\n",
+        "0000:03:00.0,p0,C7-1-L1\n",
+        "0000:03:00.1,p1,C7-1-L2\n",
+        "0000:03:00.2,p2,C7-1-L3\n",
+        "0000:03:00.3,p3,C7-1-L4\n",
+        "0000:06:00.0,p0,C7-2-L1\n",
+        "0000:06:00.1,p1,C7-2-L2\n",
+        "0000:06:00.2,p2,C7-2-L3\n",
+        "0000:06:00.3,p3,C7-2-L4\n",
+    )
+    .to_string()
+}
+
+fn ovs_script_raw() -> String {
+    // Keep YAML block indentation and place the selected script's shebang on this line.
+    [
+        "{{ if and .dpu_device_underlay_rows (index .dpu_device_underlay_rows 0).cerebro_ifname }}",
+        ovs_cerebro_script_raw(),
+        "{{ else }}",
+        ovs_legacy_script_raw(),
+        "{{ end }}\n",
+    ]
+    .concat()
+}
+
+fn ovs_cerebro_script_raw() -> &'static str {
+    indoc::indoc! {r#"
+        #!/bin/bash
+
+        # Remove default OVS configuration on the DPU and ensure no leftovers on the OVS kernel side
+        seq -f 'ovsbr%g' 1 99 | xargs -r -n1 ovs-vsctl --if-exists del-br
+
+        ovs-appctl --timeout 15 dpctl/del-dp system@ovs-system || true
+
+        # Configure OVS
+        _ovs-vsctl set Open_vSwitch . other_config:doca-init=true
+        _ovs-vsctl set Open_vSwitch . other_config:dpdk-max-memzones=50000
+        _ovs-vsctl set Open_vSwitch . other_config:hw-offload=true
+        _ovs-vsctl set Open_vSwitch . other_config:pmd-quiet-idle=true
+        _ovs-vsctl set Open_vSwitch . other_config:max-idle=20000
+        _ovs-vsctl set Open_vSwitch . other_config:max-revalidator=5000
+        _ovs-vsctl set Open_vSwitch . other_config:doca-congestion-threshold=60
+        _ovs-vsctl set Open_vSwitch . other_config:flow-limit=500000
+        _ovs-vsctl set Open_vSwitch . other_config:hw-offload-ct-unidir-udp-enabled=true
+        _ovs-vsctl remove Open_vSwitch . other_config default-datapath-type || true
+
+        if systemctl list-unit-files openvswitch-switch.service &>/dev/null; then
+          systemctl restart openvswitch-switch
+        elif systemctl list-unit-files openvswitch.service &>/dev/null; then
+          systemctl restart openvswitch
+        fi
+
+        # Add br-sfc bridge
+        _ovs-vsctl --may-exist add-br br-sfc
+        _ovs-vsctl set bridge br-sfc datapath_type=netdev
+        _ovs-vsctl set bridge br-sfc fail_mode=secure
+
+        # Add br-hbn bridge
+        _ovs-vsctl --if-exists del-br br-hbn
+        _ovs-vsctl --may-exist add-br br-hbn
+        _ovs-vsctl set bridge br-hbn datapath_type=netdev
+        _ovs-vsctl set bridge br-hbn fail_mode=secure
+
+        # Pre plug p0 to br-sfc
+        _ovs-vsctl --may-exist add-port br-sfc p0
+        _ovs-vsctl set Interface p0 type=dpdk
+        _ovs-vsctl set Interface p0 mtu_request=9216
+        _ovs-vsctl set Port p0 external_ids:dpf-type=physical
+
+        # Pre plug p1 to br-sfc
+        _ovs-vsctl --may-exist add-port br-sfc p1
+        _ovs-vsctl set Interface p1 type=dpdk
+        _ovs-vsctl set Interface p1 mtu_request=9216
+        _ovs-vsctl set Port p1 external_ids:dpf-type=physical
+
+        # Add br-xplane bridge
+        _ovs-vsctl --may-exist add-br br-xplane
+        _ovs-vsctl set bridge br-xplane datapath_type=netdev
+        _ovs-vsctl set bridge br-xplane fail_mode=secure
+
+        # Add brcx-r<n>swpln<m> bridges and add A<x>p<y> netdev ports
+        # to br-xplane bridge with group-id set as r<n>swpln<m>
+        RAILS=(0 1 2 3)
+        SW_PLANES=(0 1)
+        HW_PLANES=(0 1 2 3)
+        for rail in "${RAILS[@]}"; do
+          for sw_plane in "${SW_PLANES[@]}"; do
+            bridge="brcx-r${rail}swpln${sw_plane}"
+            _ovs-vsctl --may-exist add-br "$bridge"
+            _ovs-vsctl set bridge "$bridge" datapath_type=netdev
+            _ovs-vsctl set bridge "$bridge" fail_mode=standalone
+            _ovs-vsctl set Interface "$bridge" mtu_request=9216
+            for hw_plane in "${HW_PLANES[@]}"; do
+              logical_ifname="eth_r${rail}_p$((4*${sw_plane}+${hw_plane}))"
+              netdev_name="${NETDEV_BY_INTERFACES[$logical_ifname]:-}"
+              if [ -z "$netdev_name" ]; then
+                echo "ovs-script.sh: no discovered netdev for interface ${logical_ifname}" >&2
+                return 1
+              fi
+
+              _ovs-vsctl --may-exist add-port br-xplane "$netdev_name"
+              _ovs-vsctl set Interface "$netdev_name" type=dpdk
+              _ovs-vsctl set Interface "$netdev_name" mtu_request=9216
+              _ovs-vsctl set Interface "$netdev_name" external_ids:xplane=true
+              _ovs-vsctl set Interface "$netdev_name" external_ids:xplane-group-id="r${rail}swpln${sw_plane}"
+              _ovs-vsctl set Interface "$netdev_name" external_ids:xplane-uplink=true
+              _ovs-vsctl set Interface "$netdev_name" external_ids:xplane-plane-id="$hw_plane"
+            done
+          done
+        done
+
+        mst start
+
+        _ovs-vsctl set Open_vSwitch . 'other_config:flow-metric-labels="to_plane,from_plane,device_name,group,plane"' other_config:doca-telemetry-interval="1000" other_config:doca-telemetry-ipc="true" other_config:doca-telemetry-source-id="xplane"
+    "#}
+}
+
+fn ovs_legacy_script_raw() -> &'static str {
+    indoc::indoc! {r#"
+        #!/bin/bash
+
+        # Remove default OVS configuration on the DPU and ensure no leftovers on the OVS kernel side
+        seq -f 'ovsbr%g' 1 99 | xargs -r -n1 ovs-vsctl --if-exists del-br
+
+        ovs-appctl --timeout 15 dpctl/del-dp system@ovs-system || true
+
+        # Configure OVS
+        _ovs-vsctl set Open_vSwitch . other_config:doca-init=true
+        _ovs-vsctl set Open_vSwitch . other_config:dpdk-max-memzones=50000
+        _ovs-vsctl set Open_vSwitch . other_config:hw-offload=true
+        _ovs-vsctl set Open_vSwitch . other_config:pmd-quiet-idle=true
+        _ovs-vsctl set Open_vSwitch . other_config:max-idle=20000
+        _ovs-vsctl set Open_vSwitch . other_config:max-revalidator=5000
+        _ovs-vsctl set Open_vSwitch . other_config:doca-congestion-threshold=60
+        _ovs-vsctl set Open_vSwitch . other_config:flow-limit=500000
+        _ovs-vsctl set Open_vSwitch . other_config:hw-offload-ct-unidir-udp-enabled=true
+        _ovs-vsctl remove Open_vSwitch . other_config default-datapath-type || true
+
+        if systemctl list-unit-files openvswitch-switch.service &>/dev/null; then
+          systemctl restart openvswitch-switch
+        elif systemctl list-unit-files openvswitch.service &>/dev/null; then
+          systemctl restart openvswitch
+        fi
+
+        _ovs-vsctl --may-exist add-br br-sfc
+        _ovs-vsctl set bridge br-sfc datapath_type=netdev
+        _ovs-vsctl set bridge br-sfc fail_mode=secure
+
+        _ovs-vsctl --if-exists del-br br-hbn
+        _ovs-vsctl --may-exist add-br br-hbn
+        _ovs-vsctl set bridge br-hbn datapath_type=netdev
+        _ovs-vsctl set bridge br-hbn fail_mode=secure
+
+        # Pre plug p0 to br-sfc
+        _ovs-vsctl --may-exist add-port br-sfc p0
+        _ovs-vsctl set Interface p0 type=dpdk
+        _ovs-vsctl set Interface p0 mtu_request=9216
+        _ovs-vsctl set Port p0 external_ids:dpf-type=physical
+
+        # Pre plug p1 to br-sfc
+        _ovs-vsctl --may-exist add-port br-sfc p1
+        _ovs-vsctl set Interface p1 type=dpdk
+        _ovs-vsctl set Interface p1 mtu_request=9216
+        _ovs-vsctl set Port p1 external_ids:dpf-type=physical
+
+        # Configure xplane bridge.
+        _ovs-vsctl --may-exist add-br br-xplane
+        _ovs-vsctl set bridge br-xplane datapath_type=netdev
+        _ovs-vsctl set bridge br-xplane fail_mode=secure
+
+        # Configure brcx-r<n>swpln<m> brdiges using mappings below.
+        # Each row is:
+        # interface prefix | PCI address | bridge | xplane group ID
+        XPLANE_ROWS=(
+            "A56|0005:06:00.0|brcx-r0swpln0|r0swpln0"
+            "A43|0004:03:00.0|brcx-r0swpln1|r0swpln1"
+            "A53|0005:03:00.0|brcx-r1swpln0|r1swpln0"
+            "A46|0004:06:00.0|brcx-r1swpln1|r1swpln1"
+            "A6|0000:06:00.0|brcx-r2swpln0|r2swpln0"
+            "A13|0001:03:00.0|brcx-r2swpln1|r2swpln1"
+            "A3|0000:03:00.0|brcx-r3swpln0|r3swpln0"
+            "A16|0001:06:00.0|brcx-r3swpln1|r3swpln1"
+        )
+        HW_PLANES=(0 1 2 3)
+
+        for row in "${XPLANE_ROWS[@]}"; do
+            IFS='|' read -r iface_prefix pci_address bridge group_id <<< "$row"
+            _ovs-vsctl --may-exist add-br "$bridge"
+            _ovs-vsctl set bridge "$bridge" datapath_type=netdev
+            _ovs-vsctl set bridge "$bridge" fail_mode=standalone
+            for hw_plane in "${HW_PLANES[@]}"; do
+                interface_val="${iface_prefix}p${hw_plane}"
+
+                _ovs-vsctl --may-exist add-port br-xplane "$interface_val"
+                _ovs-vsctl set Interface "$interface_val" type=dpdk
+                _ovs-vsctl set Interface "$interface_val" mtu_request=9216
+                _ovs-vsctl set Interface "$interface_val" external_ids:xplane=true
+                _ovs-vsctl set Interface "$interface_val" external_ids:xplane-group-id="$group_id"
+                _ovs-vsctl set Interface "$interface_val" external_ids:xplane-uplink=true
+                _ovs-vsctl set Interface "$interface_val" external_ids:xplane-plane-id="$hw_plane"
+            done
+        done
+        mst start
+    "#}
+}
+
+fn configure_xplane_network_script_raw() -> String {
+    // Go whitespace trimming here would remove the YAML block scalar's required newline.
+    [
+        "{{ if and .dpu_device_underlay_rows (index .dpu_device_underlay_rows 0).cerebro_ifname }}",
+        xplane_network_preamble_raw(),
+        &xplane_cerebro_network_script_raw(),
+        "{{ else }}",
+        &xplane_legacy_network_script_raw(),
+        "{{ end }}\n",
+    ]
+    .concat()
+}
+
+fn xplane_legacy_network_script_raw() -> String {
+    indoc::indoc! {r#"
+        #!/bin/bash
+        NETPLAN_FILE="/etc/netplan/99-cx9-rails.yaml"
+        set -e
+        # Preserve the active netplan until every bridge lookup and write succeeds.
+        NETPLAN_TMP="$(mktemp "${NETPLAN_FILE}.tmp.XXXXXX")"
+        # Keep a failed candidate for debugging; successful writes rename it into place.
+        trap 'if [ -f "$NETPLAN_TMP" ]; then printf "xplane-bridge.sh: retained failed netplan candidate at %s\n" "$NETPLAN_TMP" >&2; fi' EXIT
+
+        # interface prefix | PCI address | bridge. The MAC-to-PCI association is read
+        # from the SmartNIC PF config for each interface prefix's p0 port.
+        PCI_BRIDGE_ROWS=(
+            "A53|0005:03:00.0|brcx-r1swpln0"
+            "A56|0005:06:00.0|brcx-r0swpln0"
+            "A43|0004:03:00.0|brcx-r0swpln1"
+            "A46|0004:06:00.0|brcx-r1swpln1"
+            "A3|0000:03:00.0|brcx-r3swpln0"
+            "A6|0000:06:00.0|brcx-r2swpln0"
+            "A13|0001:03:00.0|brcx-r2swpln1"
+            "A16|0001:06:00.0|brcx-r3swpln1"
+        )
+
+        # MAC address | address | gateway | /16 route | /13 route
+        DPU_DEVICE_UNDERLAY_ROWS=(
+        {{- range .dpu_device_underlay_rows }}
+        {{- if .ip }}
+            "{{ .mac_address }}|{{ .ip }}|{{ .gateway }}|{{ .rail_route }}|{{ .sw_plane_route }}"
+        {{- end }}
+        {{- end }}
+        )
+
+        bridge_for_mac() {
+            local target_mac="$1" row iface_prefix pci bridge iface_val config_path
+            for row in "${PCI_BRIDGE_ROWS[@]}"; do
+                IFS='|' read -r iface_prefix pci bridge <<< "$row"
+                iface_val="${iface_prefix}p0"
+                config_path="/sys/bus/pci/devices/${pci}/net/${iface_val}/smart_nic/pf/config"
+                if [ -r "$config_path" ] && grep -qiF "$target_mac" "$config_path"; then
+                    printf '%s\n' "$bridge"
+                    return 0
+                fi
+            done
+            return 1
+        }
+
+        {
+            echo "network:"
+            echo "  version: 2"
+            echo "  ethernets:"
+
+            for row in "${DPU_DEVICE_UNDERLAY_ROWS[@]}"; do
+                IFS='|' read -r mac address gateway route1 route2 <<< "$row"
+                bridge="$(bridge_for_mac "$mac")" || {
+                    echo "xplane-bridge.sh: no bridge found for underlay MAC ${mac}" >&2
+                    exit 1
+                }
+                echo "    ${bridge}:"
+                echo "      addresses:"
+                echo "        - ${address}"
+                echo "      routes:"
+                echo "        - to: ${route1}"
+                echo "          via: ${gateway}"
+                echo "        - to: ${route2}"
+                echo "          via: ${gateway}"
+            done
+        } > "$NETPLAN_TMP"
+        # Both files are in the same directory, so replacement is atomic.
+        mv -- "$NETPLAN_TMP" "$NETPLAN_FILE"
+
+        netplan apply
+
+        # Block until oob_net0 has an IP again, since netplan
+        # apply can transiently drop it. Avoids a race with
+        # dpuagent joining the cluster afterwards.
+        OOB_IFACE="oob_net0"
+        OOB_WAIT_TIMEOUT=120
+        SECONDS=0
+
+        while :; do
+            if ip -4 -o addr show dev "$OOB_IFACE" scope global 2>/dev/null | grep -q "inet "; then
+                echo "xplane-bridge.sh: ${OOB_IFACE} has an IP after ${SECONDS}s"
+                break
+            fi
+
+            if [ "$SECONDS" -ge "$OOB_WAIT_TIMEOUT" ]; then
+                echo "xplane-bridge.sh: timed out after ${OOB_WAIT_TIMEOUT}s waiting for ${OOB_IFACE} to have an IP" >&2
+                exit 1
+            fi
+
+            echo "xplane-bridge.sh: waiting for ${OOB_IFACE} to get an IP (${SECONDS}s elapsed)"
+            sleep 2
+        done
+
+    "#}
+    .to_string()
+}
+
+fn xplane_network_preamble_raw() -> &'static str {
+    indoc::indoc! {r#"
+        #!/bin/bash
+        set -euo pipefail
+
+        MAPPING_FILE="${MAPPING_FILE:-/etc/mellanox/interface-fixed-mapping.csv}"
+        SYSFS_PCI_DEVICES_DIR="${SYSFS_PCI_DEVICES_DIR:-/sys/bus/pci/devices}"
+        LLDP_FILE="${LLDP_FILE:-/etc/lldpd.d/lldp-interfaces.conf}"
+        NETPLAN_FILE="${NETPLAN_FILE:-/etc/netplan/99-cx9-rails.yaml}"
+        OVS_CONFIG_SCRIPT="${OVS_CONFIG_SCRIPT:-/etc/mellanox/ovs-script.sh}"
+
+        declare -A NETDEV_BY_INTERFACES=()
+        declare -a INTERFACES=()
+        declare -A PCI_BY_INTERFACE=()
+        declare -A PHYS_PORT_BY_INTERFACE=()
+        declare -A CEREBRO_BY_INTERFACE=()
+        declare -A INTERFACE_BY_CEREBRO=()
+        declare -A BRIDGE_BY_CEREBRO=()
+        # Names needing a new or corrected altname assignment. Names already
+        # owned by the expected netdev are skipped to avoid needless delete/add.
+        # Queue changes during validation and apply them only after all checks.
+        declare -a ALTNAMES_TO_ADD=()
+
+        # Retain any incomplete configuration files for debugging.
+        trap 'for candidate in "${LLDP_TMP_FILE:-}" "${netplan_tmp:-}"; do if [ -f "$candidate" ]; then printf "configure-xplane-network.sh: retained failed candidate at %s\n" "$candidate" >&2; fi; done' EXIT
+
+        # Build DPU_DEVICE_UNDERLAY_ROWS array from values set in the DPU device
+        # Cerebro name | MAC | address | gateway | rail route | software-plane route | logical name
+        DPU_DEVICE_UNDERLAY_ROWS=(
+        {{- range .dpu_device_underlay_rows }}
+            "{{ .cerebro_ifname }}|{{ .mac_address }}|{{ .ip }}|{{ .gateway }}|{{ .rail_route }}|{{ .sw_plane_route }}|{{ .logical_ifname }}"
+        {{- end }}
+        )
+
+    "#}
+}
+
+fn xplane_build_interface_named_mappings_script_raw() -> &'static str {
+    indoc::indoc! {r#"
+        if [ ! -r "$MAPPING_FILE" ]; then
+            echo "configure-xplane-network.sh: cannot read mapping file: $MAPPING_FILE" >&2
+            exit 1
+        fi
+
+        # Build
+        #   INTERFACES+=("$logical_ifname")
+        #   PCI_BY_INTERFACE["$logical_ifname"]="$pci_address"
+        #   PHYS_PORT_BY_INTERFACE["$logical_ifname"]="$phys_port_name"
+        #   CEREBRO_BY_INTERFACE["$logical_ifname"]="$cerebro_ifname"
+        #   INTERFACE_BY_CEREBRO["$cerebro_ifname"]="$logical_ifname"
+        # where logical_ifname is eth_r0_p0, etc using
+        # (1) dpu device underlay rows has the cerebro_ifname to logical_ifname mapping
+        # (2) fixed interface map has the cerebro_ifname to pci map.
+        declare -A seen_ports=()
+        for row in "${DPU_DEVICE_UNDERLAY_ROWS[@]}"; do
+            IFS='|' read -r cerebro_ifname mac address gateway route1 route2 logical_ifname <<< "$row"
+            if [[ ! "$logical_ifname" =~ ^[a-zA-Z0-9_.-]+$ ]] || [[ ! "$cerebro_ifname" =~ ^[a-zA-Z0-9_.:-]+$ ]] || [ "${#logical_ifname}" -gt 127 ]; then
+                echo "configure-xplane-network.sh: invalid logical or Cerebro interface name: ${logical_ifname}, ${cerebro_ifname}" >&2
+                exit 1
+            fi
+            if [[ -n "${PCI_BY_INTERFACE[$logical_ifname]:-}" ]] || [[ -n "${INTERFACE_BY_CEREBRO[$cerebro_ifname]:-}" ]]; then
+                echo "configure-xplane-network.sh: duplicate declared logical or Cerebro interface: ${logical_ifname}, ${cerebro_ifname}" >&2
+                exit 1
+            fi
+            line_number=0
+            matched_port=""
+            while IFS=, read -r pci_address phys_port_name cerebro_name extra; do
+                line_number=$((line_number + 1))
+                cerebro_name="${cerebro_name%$'\r'}"
+                if [ "$line_number" -eq 1 ]; then
+                    if [ "$pci_address,$phys_port_name,$cerebro_name" != "pci_address,phys_port_name,cerebro_interface_name" ] || [ -n "${extra:-}" ]; then
+                        echo "configure-xplane-network.sh: invalid CSV header" >&2
+                        exit 1
+                    fi
+                    continue
+                fi
+                [[ -z "$pci_address$phys_port_name$cerebro_name${extra:-}" ]] && continue
+                [ "$cerebro_name" = "$cerebro_ifname" ] || continue
+                if [ -n "${extra:-}" ] || [[ ! "$pci_address" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$ ]] || [[ ! "$phys_port_name" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+                    echo "configure-xplane-network.sh: invalid fixed mapping for ${cerebro_ifname} on line ${line_number}" >&2
+                    exit 1
+                fi
+                if [ -n "$matched_port" ]; then
+                    echo "configure-xplane-network.sh: duplicate fixed mapping for ${cerebro_ifname}" >&2
+                    exit 1
+                fi
+                matched_port="$pci_address|$phys_port_name"
+            done < "$MAPPING_FILE"
+            if [ -z "$matched_port" ]; then
+                echo "configure-xplane-network.sh: no fixed mapping for Cerebro name ${cerebro_ifname}" >&2
+                exit 1
+            fi
+            IFS='|' read -r pci_address phys_port_name <<< "$matched_port"
+            port_key="$pci_address|$phys_port_name"
+            if [[ -n "${seen_ports[$port_key]:-}" ]]; then
+                echo "configure-xplane-network.sh: duplicate PCI/physical port: $port_key" >&2
+                exit 1
+            fi
+
+            INTERFACES+=("$logical_ifname")
+            PCI_BY_INTERFACE["$logical_ifname"]="$pci_address"
+            PHYS_PORT_BY_INTERFACE["$logical_ifname"]="$phys_port_name"
+            CEREBRO_BY_INTERFACE["$logical_ifname"]="$cerebro_ifname"
+            INTERFACE_BY_CEREBRO["$cerebro_ifname"]="$logical_ifname"
+            seen_ports["$port_key"]=1
+        done
+    "#}
+}
+
+fn xplane_find_netdevs_and_build_altnames_script_raw() -> &'static str {
+    indoc::indoc! {r#"
+        find_netdev_name() {
+            # Finds netdev names for input pci address in
+            # /sys/bus/pci/devices/$pci_address/net and returns
+            # matched_netdev which matches input port p<y>
+            local pci_address="$1"
+            local expected_phys_port_name="$2"
+            local net_dir="$SYSFS_PCI_DEVICES_DIR/$pci_address/net"
+            local netdev_path netdev_name actual_phys_port_name
+            local matched_netdev=""
+
+            if [ ! -d "$net_dir" ]; then
+                echo "configure-xplane-network.sh: no net directory for PCI address $pci_address" >&2
+                return 1
+            fi
+
+            shopt -s nullglob
+            local netdev_paths=("$net_dir"/*)
+            shopt -u nullglob
+
+            for netdev_path in "${netdev_paths[@]}"; do
+                if [ ! -r "$netdev_path/phys_port_name" ]; then
+                    continue
+                fi
+                netdev_name="${netdev_path##*/}"
+                IFS= read -r actual_phys_port_name < "$netdev_path/phys_port_name"
+                if [ "$actual_phys_port_name" != "$expected_phys_port_name" ]; then
+                    continue
+                fi
+                if [ -n "$matched_netdev" ]; then
+                    echo "configure-xplane-network.sh: multiple netdevs match PCI $pci_address and phys_port_name $expected_phys_port_name" >&2
+                    return 1
+                fi
+                matched_netdev="$netdev_name"
+            done
+
+            if [ -z "$matched_netdev" ]; then
+                echo "configure-xplane-network.sh: no netdev matches PCI $pci_address and phys_port_name $expected_phys_port_name" >&2
+                return 1
+            fi
+
+            printf '%s\n' "$matched_netdev"
+        }
+
+        declare -A seen_netdevs=()
+
+        for interface_name in "${INTERFACES[@]}"; do
+            netdev_name="$(find_netdev_name "${PCI_BY_INTERFACE[$interface_name]}" "${PHYS_PORT_BY_INTERFACE[$interface_name]}")" || exit 1
+
+            if [[ -n "${seen_netdevs[$netdev_name]:-}" ]]; then
+                echo "configure-xplane-network.sh: netdev $netdev_name matched more than one mapped interface" >&2
+                exit 1
+            fi
+
+            NETDEV_BY_INTERFACES["$interface_name"]="$netdev_name"
+            seen_netdevs["$netdev_name"]=1
+
+            # Check the live netdev and altname ownership before making changes.
+            # ALTNAMES_TO_ADD is a subset of INTERFACES where we remove
+            # interfaces that already have the altname configured previously
+            # and the netdev "owner" matches so don't need to redo it.
+            ip -o link show dev "$netdev_name" >/dev/null || exit 1
+            if link_info="$(ip -o link show dev "$interface_name" 2>/dev/null)"; then
+                read -r link_index owner link_details <<< "$link_info"
+                owner="${owner%:}"
+                owner="${owner%%@*}"
+                if [ "$owner" = "$netdev_name" ]; then
+                    continue
+                fi
+            fi
+            ALTNAMES_TO_ADD+=("$interface_name")
+        done
+    "#}
+}
+
+fn xplane_check_net_config_and_build_bridge_by_cerebro_script_raw() -> &'static str {
+    indoc::indoc! {r#"
+        bridge_for_cerebro() {
+            local cerebro_name="$1" rail sw_plane port interface_name
+            for rail in 0 1 2 3; do
+                for sw_plane in 0 1; do
+                    for port in 0 1 2 3; do
+                        interface_name="eth_r${rail}_p$((4 * sw_plane + port))"
+                        if [ "${CEREBRO_BY_INTERFACE[$interface_name]:-}" = "$cerebro_name" ]; then
+                            printf 'brcx-r%sswpln%s\n' "$rail" "$sw_plane"
+                            return 0
+                        fi
+                    done
+                done
+            done
+            return 1
+        }
+
+        valid_ipv4() {
+            local value="$1" octet
+            local -a octets=()
+            [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+            IFS=. read -r -a octets <<< "$value"
+            for octet in "${octets[@]}"; do
+                ((10#$octet <= 255)) || return 1
+            done
+        }
+
+        valid_ipv4_cidr() {
+            local value="$1" prefix="${1##*/}"
+            [[ "$value" == */* && "$prefix" =~ ^[0-9]{1,2}$ ]] || return 1
+            ((10#$prefix <= 32)) || return 1
+            valid_ipv4 "${value%/*}"
+        }
+
+        # OVS expects all four ports of each rail/software-plane group.
+        for rail in 0 1 2 3; do
+            for plane in 0 1 2 3 4 5 6 7; do
+                interface_name="eth_r${rail}_p${plane}"
+                if [ -z "${NETDEV_BY_INTERFACES[$interface_name]:-}" ]; then
+                    echo "configure-xplane-network.sh: no discovered netdev for interface $interface_name" >&2
+                    exit 1
+                fi
+            done
+        done
+        if [ ! -r "$OVS_CONFIG_SCRIPT" ]; then
+            echo "configure-xplane-network.sh: cannot read OVS script: $OVS_CONFIG_SCRIPT" >&2
+            exit 1
+        fi
+        bash -n "$OVS_CONFIG_SCRIPT" || exit 1
+        for destination in "$LLDP_FILE" "$NETPLAN_FILE"; do
+            if [ -d "$destination" ]; then
+                echo "configure-xplane-network.sh: configuration destination is a directory: $destination" >&2
+                exit 1
+            fi
+        done
+
+        declare -A seen_bridges=()
+        declare -A bridge_by_address=()
+        for row in "${DPU_DEVICE_UNDERLAY_ROWS[@]}"; do
+            IFS='|' read -r cerebro_ifname mac address gateway route1 route2 logical_ifname <<< "$row"
+            [ -n "$address" ] || continue
+            bridge_name="$(bridge_for_cerebro "$cerebro_ifname")" || {
+                echo "configure-xplane-network.sh: no bridge found for Cerebro name $cerebro_ifname" >&2
+                exit 1
+            }
+            bridge_configuration="$address|$gateway|$route1|$route2"
+            if [[ -n "${seen_bridges[$bridge_name]:-}" && "${seen_bridges[$bridge_name]}" != "$bridge_configuration" ]]; then
+                echo "configure-xplane-network.sh: conflicting underlay entries for bridge $bridge_name" >&2
+                exit 1
+            fi
+            if [[ -n "${bridge_by_address[$address]:-}" && "${bridge_by_address[$address]}" != "$bridge_name" ]]; then
+                echo "configure-xplane-network.sh: address $address is shared by different bridges" >&2
+                exit 1
+            fi
+            if ! valid_ipv4_cidr "$address" || ! valid_ipv4 "$gateway" ||
+                ! valid_ipv4_cidr "$route1" || ! valid_ipv4_cidr "$route2"; then
+                echo "configure-xplane-network.sh: invalid address, gateway, or route for $cerebro_ifname" >&2
+                exit 1
+            fi
+            BRIDGE_BY_CEREBRO["$cerebro_ifname"]="$bridge_name"
+            seen_bridges["$bridge_name"]="$bridge_configuration"
+            bridge_by_address["$address"]="$bridge_name"
+        done
+    "#}
+}
+
+fn xplane_build_lldp_tmp_configuration_script_raw() -> &'static str {
+    indoc::indoc! {r#"
+        lldp_dir="$(dirname -- "$LLDP_FILE")"
+        mkdir -p "$lldp_dir" || exit 1
+
+        LLDP_TMP_FILE="$(mktemp "$lldp_dir/.lldp-interfaces.conf.XXXXXX")" || exit 1
+
+        printf '%s\n' \
+            'configure system interface pattern *' \
+            'configure lldp portidsubtype macaddress' > "$LLDP_TMP_FILE" || exit 1
+        for interface_name in "${INTERFACES[@]}"; do
+            netdev_name="${NETDEV_BY_INTERFACES[$interface_name]}"
+            printf 'configure ports %s lldp portdescription "%s"\n' \
+                "$netdev_name" "${CEREBRO_BY_INTERFACE[$interface_name]}" \
+                >> "$LLDP_TMP_FILE" || exit 1
+        done
+
+        chmod 0644 "$LLDP_TMP_FILE" || exit 1
+    "#}
+}
+
+fn xplane_build_netplan_tmp_configuration_script_raw() -> &'static str {
+    indoc::indoc! {r#"
+        mkdir -p "$(dirname -- "$NETPLAN_FILE")" || exit 1
+        # Preserve the active configuration until every lookup and write succeeds.
+        netplan_tmp="$(mktemp "${NETPLAN_FILE}.tmp.XXXXXX")" || exit 1
+        # Each four-lane group repeats its bridge configuration; emit the bridge once.
+        declare -A written_bridges=()
+        {
+            printf '%s\n' 'network:' '  version: 2' '  ethernets:' || exit 1
+
+            for row in "${DPU_DEVICE_UNDERLAY_ROWS[@]}"; do
+                IFS='|' read -r cerebro_ifname mac address gateway route1 route2 logical_ifname <<< "$row"
+                [ -n "$address" ] || continue
+                bridge_name="${BRIDGE_BY_CEREBRO[$cerebro_ifname]:-}"
+                if [ -z "$bridge_name" ]; then
+                    echo "configure-xplane-network.sh: no validated bridge for $cerebro_ifname" >&2
+                    exit 1
+                fi
+                [[ -z "${written_bridges[$bridge_name]:-}" ]] || continue
+                written_bridges["$bridge_name"]=1
+                printf '%s\n' \
+                    "    ${bridge_name}:" \
+                    "      mtu: 9216" \
+                    "      addresses:" \
+                    "        - ${address}" \
+                    "      routes:" \
+                    "        - to: ${route1}" \
+                    "          via: ${gateway}" \
+                    "        - to: ${route2}" \
+                    "          via: ${gateway}" || exit 1
+            done
+        } > "$netplan_tmp" || exit 1
+    "#}
+}
+
+fn xplane_execute_verified_network_configuration_script_raw() -> &'static str {
+    indoc::indoc! {r#"
+        # At this point we have done as much verification can we can.
+        # Execute the changes and log if any failure.
+        for interface_name in "${ALTNAMES_TO_ADD[@]}"; do
+            netdev_name="${NETDEV_BY_INTERFACES[$interface_name]}"
+            # Recheck ownership because it may have changed since validation.
+            if link_info="$(ip -o link show dev "$interface_name" 2>/dev/null)"; then
+                read -r link_index owner link_details <<< "$link_info"
+                owner="${owner%:}"
+                owner="${owner%%@*}"
+                [ "$owner" != "$netdev_name" ] || continue
+                if ! ip link property del dev "$owner" altname "$interface_name"; then
+                    echo "configure-xplane-network.sh: failed to remove altname $interface_name from $owner" >&2
+                    continue
+                fi
+            fi
+            if ! ip link property add dev "$netdev_name" altname "$interface_name"; then
+                echo "configure-xplane-network.sh: failed to set altname $interface_name on $netdev_name" >&2
+                continue
+            fi
+        done
+
+        # Source OVS setup so it can use the discovered NETDEV_BY_INTERFACES array.
+        source "$OVS_CONFIG_SCRIPT"
+
+        # Both candidates are complete before replacing either active file.
+        mv -fT -- "$LLDP_TMP_FILE" "$LLDP_FILE" || exit 1
+        mv -fT -- "$netplan_tmp" "$NETPLAN_FILE" || exit 1
+
+        # Both candidates are installed; stop reporting retained temporary files on exit.
+        trap - EXIT
+
+        systemctl daemon-reload
+        systemctl restart lldpd.service
+        netplan apply
+    "#}
+}
+
+fn xplane_oob_network_wait_script_raw() -> &'static str {
+    indoc::indoc! {r#"
+        # Block until oob_net0 has an IP again, since netplan apply can
+        # transiently drop it. This avoids a race with dpuagent joining
+        # the cluster afterwards.
+        oob_iface="oob_net0"
+        oob_wait_timeout=120
+        SECONDS=0
+
+        while :; do
+            if ip -4 -o addr show dev "$oob_iface" scope global 2>/dev/null | grep -q "inet "; then
+                echo "configure-xplane-network.sh: ${oob_iface} has an IP after ${SECONDS}s"
+                break
+            fi
+            if [ "$SECONDS" -ge "$oob_wait_timeout" ]; then
+                echo "configure-xplane-network.sh: timed out after ${oob_wait_timeout}s waiting for ${oob_iface} to have an IP" >&2
+                exit 1
+            fi
+            echo "configure-xplane-network.sh: waiting for ${oob_iface} to get an IP (${SECONDS}s elapsed)"
+            sleep 2
+        done
+    "#}
+}
+
+// Generate netdev altnames, lldp config and netplan. Build temporary
+// files/buffers while checking the config. Once all checks are
+// verified, install the new configuration from the temporary files/buffers.
+fn xplane_cerebro_network_script_raw() -> String {
+    [
+        // Validation: check mappings, netdevs, altname ownership, bridges, and addresses.
+        // Build the named mappings and queue altname changes without changing the network.
+        xplane_build_interface_named_mappings_script_raw(),
+        xplane_find_netdevs_and_build_altnames_script_raw(),
+        xplane_check_net_config_and_build_bridge_by_cerebro_script_raw(),
+        // Preparation: generate both temporary files while keeping active files unchanged.
+        xplane_build_lldp_tmp_configuration_script_raw(),
+        xplane_build_netplan_tmp_configuration_script_raw(),
+        // Execution: only after validation and generation succeed, apply the queued
+        // altnames, configure OVS, install both files, and reload/apply the services.
+        xplane_execute_verified_network_configuration_script_raw(),
+        // Wait for the OOB address to return after netplan apply.
+        xplane_oob_network_wait_script_raw(),
+    ]
+    .concat()
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -2020,14 +2595,31 @@ export -f run_stage ovs-vsctl
         let log = fixture.join("stages.log");
         // Replace external hooks and fixed scripts while leaving generated topology commands
         // intact for exact inspection.
-        let script = get_bf4_astra_ovs_defaults(Some(&intercept_bridging()))
+        // The generated script wraps its fixed OVS and xplane invocations in a Go-template
+        // `{{ if ...cerebro_ifname }}` branch that DPF renders per device. Render the legacy
+        // (non-Cerebro) branch here so the staged bash below is executable while still exercising
+        // the fixed OVS, telemetry, and xplane ordering around the topology commands.
+        let template = get_bf4_astra_ovs_defaults(Some(&intercept_bridging()));
+        let (prefix, after_if) = template
+            .split_once("{{ if ")
+            .expect("astra script must contain the cerebro branch guard");
+        let (_, after_cond) = after_if
+            .split_once(" }}\n")
+            .expect("astra cerebro branch guard must close");
+        let (_, after_else) = after_cond
+            .split_once("{{ else }}\n")
+            .expect("astra script must contain the legacy branch");
+        let (legacy, suffix) = after_else
+            .split_once("{{ end }}\n")
+            .expect("astra legacy branch must close");
+        let script = format!("{prefix}{legacy}{suffix}")
             .replace("/opt/dpf/extra-script-pre-ovs.sh", "\"$TEST_PRE_OVS\"")
             .replace(
                 "bash -e /etc/mellanox/ovs-script.sh",
                 "bash -e \"$TEST_FIXED_OVS\"",
             )
             .replace(
-                "/etc/mellanox/xplane-bridge.sh",
+                "/usr/local/sbin/configure-xplane-network.sh",
                 "bash \"$TEST_XPLANE\"",
             )
             .replace(
@@ -2074,7 +2666,7 @@ export -f run_stage ovs-vsctl
         // Pin the complete serialized template spec rather than one nested script.
         assert_eq!(
             template.unique_name(DEFAULT_FLAVOR_NAME).unwrap(),
-            "dpu-flavor-369cd609a3d2e3a4"
+            "dpu-flavor-97651f8d94f18f42"
         );
     }
 
@@ -2244,7 +2836,401 @@ export -f run_stage ovs-vsctl
     /// Verifies a failed rail lookup preserves the installed netplan and skips applying a partial
     /// candidate because incomplete xplane addressing must not replace working configuration.
     #[test]
-    fn astra_netplan_preserves_existing_file_on_failed_bridge_lookup() {
+    fn xplane_interface_mapping_uses_declared_logical_names() {
+        use carbide_test_support::{Check, check_values};
+        let fixture =
+            std::env::temp_dir().join(format!("carbide-dpf-mapping-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&fixture).unwrap();
+        let mapping = fixture.join("mapping.csv");
+        // CSV ordering and unused entries must not determine the declared interface list.
+        fs::write(&mapping, "pci_address,phys_port_name,cerebro_interface_name\n0005:03:00.1,p1,C1-1-L2\n0005:03:00.2,p2,C1-1-L3\n0005:03:00.0,p0,C1-1-L1\n").unwrap();
+        check_values([
+            Check {
+                scenario: "join unaddressed ports by Cerebro name, keyed by logical name",
+                input: r#""C1-1-L1||||||eth_r1_p0" "C1-1-L2||||||eth_r1_p1""#,
+                expect: (true, "eth_r1_p0|0005:03:00.0|p0|C1-1-L1|eth_r1_p0\neth_r1_p1|0005:03:00.1|p1|C1-1-L2|eth_r1_p1\n".to_string()),
+            },
+            Check {
+                scenario: "a declared Cerebro name must have a fixed mapping",
+                input: r#""C9-1-L1||||||eth_r1_p0""#,
+                expect: (false, String::new()),
+            },
+        ], |rows| {
+            let script = [
+                "set -euo pipefail\n".to_string(),
+                format!("DPU_DEVICE_UNDERLAY_ROWS=({rows})\n"),
+                "declare -a INTERFACES=()\ndeclare -A PCI_BY_INTERFACE=() PHYS_PORT_BY_INTERFACE=() CEREBRO_BY_INTERFACE=() INTERFACE_BY_CEREBRO=()\n".to_string(),
+                "configure_mapping() {\n".to_string(),
+                xplane_build_interface_named_mappings_script_raw().to_string(),
+                "}\nconfigure_mapping\n".to_string(),
+                r#"for logical in "${INTERFACES[@]}"; do
+    cerebro="${CEREBRO_BY_INTERFACE[$logical]}"
+    printf '%s|%s|%s|%s|%s\n' "$logical" "${PCI_BY_INTERFACE[$logical]}" "${PHYS_PORT_BY_INTERFACE[$logical]}" "$cerebro" "${INTERFACE_BY_CEREBRO[$cerebro]}"
+done
+"#.to_string(),
+            ].concat();
+            let output = Command::new("bash").arg("-c").arg(script)
+                .env("MAPPING_FILE", &mapping)
+                .output().unwrap();
+            (output.status.success(), String::from_utf8(output.stdout).unwrap())
+        });
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn xplane_altname_application_rechecks_ownership_and_continues_on_failure() {
+        let fixture =
+            std::env::temp_dir().join(format!("carbide-dpf-altnames-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&fixture).unwrap();
+        let calls = fixture.join("calls");
+        for (scenario, expected_calls) in [
+            ("unassigned", "add target\nadd second\nnetplan\n"),
+            ("new_owner", "del wrong\nadd target\nadd second\nnetplan\n"),
+            ("now_correct", "add second\nnetplan\n"),
+            ("delete_failure", "del wrong\nadd second\nnetplan\n"),
+            (
+                "add_failure",
+                "del wrong\nadd target\nadd second\nnetplan\n",
+            ),
+        ] {
+            fs::write(&calls, "").unwrap();
+            let setup = indoc::indoc! {r#"
+                        set -euo pipefail
+                        ALTNAMES_TO_ADD=(eth_r0_p0 eth_r0_p1)
+                        declare -A NETDEV_BY_INTERFACES=([eth_r0_p0]=target [eth_r0_p1]=second)
+                        OVS_CONFIG_SCRIPT=/dev/null
+                        LLDP_TMP_FILE=lldp.tmp
+                        LLDP_FILE=lldp.conf
+                        netplan_tmp=netplan.tmp
+                        NETPLAN_FILE=netplan.yaml
+                        mv() { :; }
+                        systemctl() { :; }
+                        netplan() { builtin printf 'netplan\n' >> "$TEST_CALLS"; }
+                        ip() {
+                            if [ "$1" = -o ]; then
+                                if [ "${@: -1}" = eth_r0_p1 ]; then return 1; fi
+                                if [ "$TEST_CASE" = unassigned ]; then return 1; fi
+                                if [ "$TEST_CASE" = now_correct ]; then
+                                    builtin printf '1: target@peer: mtu 9216\n'
+                                else
+                                    builtin printf '2: wrong@peer: mtu 9216\n'
+                                fi
+                            else
+                                builtin printf '%s %s\n' "$3" "$5" >> "$TEST_CALLS"
+                                if [ "$TEST_CASE" = delete_failure ] && [ "$3" = del ]; then return 1; fi
+                                if [ "$TEST_CASE" = add_failure ] && [ "$3" = add ] && [ "$5" = target ]; then return 1; fi
+                            fi
+                        }
+                    "#};
+            let script = format!(
+                "{setup}{}",
+                xplane_execute_verified_network_configuration_script_raw()
+            );
+            let output = Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .env("TEST_CALLS", &calls)
+                .env("TEST_CASE", scenario)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{scenario}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                fs::read_to_string(&calls).unwrap(),
+                expected_calls,
+                "{scenario}"
+            );
+            if scenario.ends_with("failure") {
+                assert!(String::from_utf8_lossy(&output.stderr).contains("eth_r0_p0"));
+            }
+        }
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn xplane_cerebro_checks_and_stages_files_before_changing_network() {
+        for (scenario, succeeds) in [
+            ("success", true),
+            ("shared_group_ip", true),
+            ("existing_altname", true),
+            ("missing_netdev", false),
+            ("conflicting_altname", true),
+            ("missing_ovs_port", false),
+            ("shared_ip_across_bridges", false),
+            ("conflicting_group_ip", false),
+            ("invalid_route", false),
+            ("lldp_write", false),
+            ("netplan_write", false),
+        ] {
+            let fixture = std::env::temp_dir()
+                .join(format!("carbide-dpf-preflight-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&fixture).unwrap();
+            let sysfs = fixture.join("pci");
+            let mut mapping = "pci_address,phys_port_name,cerebro_interface_name\n".to_string();
+            let mut rows = Vec::new();
+            for index in 0..32 {
+                let pci = format!("0005:03:00.{:x}", index / 4);
+                let port = format!("p{}", index % 4);
+                let netdev = sysfs.join(&pci).join("net").join(format!("cx9_{index}"));
+                fs::create_dir_all(&netdev).unwrap();
+                if scenario != "missing_netdev" || index != 31 {
+                    fs::write(netdev.join("phys_port_name"), format!("{port}\n")).unwrap();
+                }
+                mapping.push_str(&format!("{pci},{port},C{index}\n"));
+                let logical = if scenario == "missing_ovs_port" && index == 31 {
+                    "other_port".to_string()
+                } else {
+                    format!("eth_r{}_p{}", index / 8, index % 8)
+                };
+                let address = if index == 0
+                    || (scenario == "shared_group_ip" && index < 4)
+                    || (scenario == "shared_ip_across_bridges" && index == 31)
+                {
+                    "100.96.0.0/31"
+                } else if scenario == "conflicting_group_ip" && index == 1 {
+                    "100.96.0.2/31"
+                } else {
+                    ""
+                };
+                let route = if scenario == "invalid_route" {
+                    "100.999.0.0/16"
+                } else {
+                    "100.96.0.0/16"
+                };
+                rows.push(format!(
+                    "\"C{index}||{address}|100.96.0.1|{route}|100.96.0.0/13|{logical}\""
+                ));
+            }
+            let mapping_file = fixture.join("mapping.csv");
+            fs::write(&mapping_file, mapping).unwrap();
+            let lldp = fixture.join("lldp.conf");
+            let netplan = fixture.join("netplan.yaml");
+            fs::write(&lldp, "original LLDP\n").unwrap();
+            fs::write(&netplan, "original netplan\n").unwrap();
+            let ovs = fixture.join("ovs.sh");
+            fs::write(&ovs, "printf 'ovs\\n' >> \"$TEST_CALLS\"\n").unwrap();
+            let calls = fixture.join("calls");
+            let mut preamble = xplane_network_preamble_raw().to_string();
+            let start = preamble
+                .find("{{- range .dpu_device_underlay_rows }}")
+                .unwrap();
+            let end = start + preamble[start..].find("{{- end }}").unwrap() + "{{- end }}".len();
+            preamble.replace_range(start..end, &rows.join("\n"));
+            let stubs = indoc::indoc! {r#"
+                        ip() {
+                            if [ "$1" = -o ]; then
+                                dev="${@: -1}"
+                                if [[ "$dev" == eth_* || "$dev" == other_port ]]; then
+                                    if [ "$TEST_CASE" = conflicting_altname ] && [ "$dev" = eth_r3_p7 ]; then
+                                        builtin printf '99: wrong_netdev: mtu 9216\n'
+                                    elif [ "$TEST_CASE" = existing_altname ] && [ "$dev" = eth_r0_p0 ]; then
+                                        builtin printf '1: cx9_0: mtu 9216\n'
+                                    else
+                                        return 1
+                                    fi
+                                else
+                                    builtin printf '1: %s: mtu 9216\n' "$dev"
+                                fi
+                            elif [ "$1" = link ]; then
+                                builtin printf 'altname %s\n' "$*" >> "$TEST_CALLS"
+                            else
+                                builtin printf 'inet 192.0.2.1/24\n'
+                            fi
+                        }
+                        printf() {
+                            if { [ "$TEST_CASE" = lldp_write ] && [[ "$1" == 'configure ports '* ]]; } ||
+                                { [ "$TEST_CASE" = netplan_write ] && [ "${2:-}" = network: ]; }; then
+                                builtin printf 'partial write\n'
+                                return 1
+                            fi
+                            builtin printf "$@"
+                        }
+                        systemctl() { builtin printf 'systemctl\n' >> "$TEST_CALLS"; }
+                        netplan() { builtin printf 'netplan\n' >> "$TEST_CALLS"; }
+                    "#};
+            let script = format!("{preamble}{stubs}{}", xplane_cerebro_network_script_raw());
+            let output = Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .env("MAPPING_FILE", &mapping_file)
+                .env("SYSFS_PCI_DEVICES_DIR", &sysfs)
+                .env("LLDP_FILE", &lldp)
+                .env("NETPLAN_FILE", &netplan)
+                .env("OVS_CONFIG_SCRIPT", &ovs)
+                .env("TEST_CALLS", &calls)
+                .env("TEST_CASE", scenario)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                succeeds,
+                "{scenario}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let events = fs::read_to_string(&calls).unwrap_or_default();
+            if succeeds {
+                assert_eq!(
+                    events
+                        .lines()
+                        .filter(|line| line.starts_with("altname link property add "))
+                        .count(),
+                    if scenario == "existing_altname" {
+                        31
+                    } else {
+                        32
+                    }
+                );
+                if scenario == "conflicting_altname" {
+                    let delete = events
+                        .find("property del dev wrong_netdev altname eth_r3_p7")
+                        .unwrap();
+                    let add = events
+                        .find("property add dev cx9_31 altname eth_r3_p7")
+                        .unwrap();
+                    assert!(delete < add);
+                    assert_eq!(events.matches("property del").count(), 1);
+                } else {
+                    assert!(!events.contains("property del"));
+                }
+                assert!(events.rfind("altname ").unwrap() < events.find("ovs\n").unwrap());
+                assert!(events.find("ovs\n").unwrap() < events.find("netplan\n").unwrap());
+                assert!(
+                    fs::read_to_string(&netplan)
+                        .unwrap()
+                        .contains("brcx-r0swpln0:")
+                );
+                if scenario == "shared_group_ip" {
+                    let configuration: serde_yaml::Value =
+                        serde_yaml::from_str(&fs::read_to_string(&netplan).unwrap()).unwrap();
+                    assert_eq!(
+                        configuration["network"]["ethernets"]
+                            .as_mapping()
+                            .unwrap()
+                            .len(),
+                        1
+                    );
+                    assert_eq!(
+                        configuration["network"]["ethernets"]["brcx-r0swpln0"]["addresses"][0],
+                        "100.96.0.0/31"
+                    );
+                }
+            } else {
+                assert!(
+                    events.is_empty(),
+                    "{scenario}: network changed before validation completed"
+                );
+                assert_eq!(fs::read_to_string(&lldp).unwrap(), "original LLDP\n");
+                assert_eq!(fs::read_to_string(&netplan).unwrap(), "original netplan\n");
+                if scenario.ends_with("write") {
+                    assert!(
+                        String::from_utf8_lossy(&output.stderr)
+                            .contains("retained failed candidate")
+                    );
+                }
+            }
+            fs::remove_dir_all(fixture).unwrap();
+        }
+    }
+
+    #[test]
+    fn xplane_cerebro_files_preserve_existing_contents_on_failure() {
+        let fixture =
+            std::env::temp_dir().join(format!("carbide-dpf-file-writes-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&fixture).unwrap();
+        let active = fixture.join("active.conf");
+        for (snippet, failure) in [
+            (xplane_build_lldp_tmp_configuration_script_raw(), "write"),
+            (xplane_build_lldp_tmp_configuration_script_raw(), "chmod"),
+            (xplane_build_lldp_tmp_configuration_script_raw(), "rename"),
+            (xplane_build_netplan_tmp_configuration_script_raw(), "write"),
+            (
+                xplane_build_netplan_tmp_configuration_script_raw(),
+                "rename",
+            ),
+            (
+                xplane_build_netplan_tmp_configuration_script_raw(),
+                "lookup",
+            ),
+        ] {
+            fs::write(&active, "original configuration\n").unwrap();
+            let setup = r#"set -eu
+    LLDP_FILE="$TEST_ACTIVE"
+    NETPLAN_FILE="$TEST_ACTIVE"
+    INTERFACES=(eth_r0_p0)
+    declare -A NETDEV_BY_INTERFACES=([eth_r0_p0]=cx9_0)
+    declare -A CEREBRO_BY_INTERFACE=([eth_r0_p0]=C1)
+    declare -A BRIDGE_BY_CEREBRO=([C1]=brcx-r0swpln0)
+    DPU_DEVICE_UNDERLAY_ROWS=("C1||100.96.0.0/31|100.96.0.1|100.96.0.0/16|100.96.0.0/13|eth_r0_p0")
+    write_count=0
+    printf() {
+        if [[ "$1" == brcx-* ]]; then builtin printf "$@"; return; fi
+        write_count=$((write_count + 1))
+        if [ "$TEST_FAILURE" = write ] && [ "$write_count" -eq 2 ]; then
+            builtin printf 'partial write\n'
+            return 1
+        fi
+        builtin printf "$@"
+    }
+    chmod() {
+        [ "$TEST_FAILURE" != chmod ] || return 1
+        command chmod "$@"
+    }
+    mv() {
+        [ "$TEST_FAILURE" != rename ] || return 1
+        command mv "$@"
+    }
+    if [ "$TEST_FAILURE" = lookup ]; then BRIDGE_BY_CEREBRO=(); fi
+    write_configuration() {
+    "#;
+            // A conditional call suppresses Bash errexit inside the function:
+            // failures must be checked explicitly before replacing the active file.
+            let preamble = xplane_network_preamble_raw();
+            let preamble = preamble
+                .split("# Build DPU_DEVICE_UNDERLAY_ROWS")
+                .next()
+                .unwrap();
+            let candidate = if snippet == xplane_build_lldp_tmp_configuration_script_raw() {
+                "$LLDP_TMP_FILE"
+            } else {
+                "$netplan_tmp"
+            };
+            let script = format!(
+                "{preamble}{setup}{snippet}\nmv -fT -- \"{candidate}\" \"$TEST_ACTIVE\" || exit 1\n}}\nif write_configuration; then exit 0; else exit 1; fi\n"
+            );
+            let output = Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .env("TEST_ACTIVE", &active)
+                .env("TEST_FAILURE", failure)
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "failure={failure}");
+            assert_eq!(
+                fs::read_to_string(&active).unwrap(),
+                "original configuration\n",
+                "failure={failure}"
+            );
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            let candidate = stderr
+                .lines()
+                .find(|line| line.contains("retained failed"))
+                .and_then(|line| line.rsplit_once(" at "))
+                .map(|(_, path)| path)
+                .expect("failure must report the retained candidate path");
+            let contents = fs::read_to_string(candidate).unwrap();
+            assert!(!contents.is_empty(), "failure={failure}");
+            if failure == "write" {
+                assert!(contents.contains("partial write"));
+            }
+        }
+        fs::remove_dir_all(&fixture).unwrap();
+    }
+
+    #[test]
+    fn xplane_legacy_netplan_preserves_existing_file_on_failed_bridge_lookup() {
         let fixture =
             std::env::temp_dir().join(format!("carbide-dpf-netplan-{}", uuid::Uuid::new_v4()));
         let config = fixture.join("0005:03:00.0/net/A53p0/smart_nic/pf/config");
@@ -2254,30 +3240,22 @@ export -f run_stage ovs-vsctl
         let netplan = fixture.join("99-cx9-rails.yaml");
         fs::write(&netplan, "original configuration\n").unwrap();
         let applied = fixture.join("applied");
-        let mut script = get_bf4_astra_config_files(&None, None)
-            .unwrap()
-            .into_iter()
-            .find(|file| file.path == "/etc/mellanox/xplane-bridge.sh")
-            .unwrap()
-            .raw
-            .unwrap()
+        let legacy = xplane_legacy_network_script_raw();
+        let mut script = legacy[legacy.find("NETPLAN_FILE=").unwrap()..]
             .replace(
                 "NETPLAN_FILE=\"/etc/netplan/99-cx9-rails.yaml\"",
                 "NETPLAN_FILE=\"$TEST_NETPLAN\"",
             )
             .replace("/sys/bus/pci/devices/", "$TEST_SYSFS/");
-        for index in 0..2 {
-            for (key, value) in [
-                ("mac", format!("00:00:00:00:00:{index:02x}")),
-                ("ip", format!("100.96.0.{}/31", index * 2)),
-                ("gw", format!("100.96.0.{}", index * 2 + 1)),
-                ("route1", "100.96.0.0/16".to_owned()),
-                ("route2", "100.96.0.0/13".to_owned()),
-            ] {
-                script = script.replace(&format!("{{{{ .{key}_{index}_val }}}}"), &value);
-            }
-        }
-        // Execute with only the first rail discoverable so generation fails after a partial write.
+        let rows_start = script
+            .find("{{- range .dpu_device_underlay_rows }}")
+            .unwrap();
+        let rows_end = script[rows_start..].find("\n)\n").unwrap() + rows_start;
+        script.replace_range(
+            rows_start..rows_end,
+            r#"    "00:00:00:00:00:00|100.96.0.0/31|100.96.0.1|100.96.0.0/16|100.96.0.0/13"
+    "00:00:00:00:00:01|100.96.0.2/31|100.96.0.3|100.96.0.0/16|100.96.0.0/13""#,
+        );
         let output = Command::new("bash")
             .arg("-c")
             .arg(format!(
@@ -3016,6 +3994,31 @@ export -f run_stage ovs-vsctl
         }
     }
 
+    #[test]
+    fn astra_bootstrap_stops_before_post_hook_when_network_setup_fails() {
+        let template = get_bf4_astra_ovs_defaults(None);
+        let (prefix, branches) = template.split_once("{{ if ").unwrap();
+        let (_, branches) = branches.split_once(" }}\n").unwrap();
+        let (cerebro, legacy) = branches.split_once("{{ else }}\n").unwrap();
+        let (_, suffix) = legacy.split_once("{{ end }}\n").unwrap();
+        let script = format!("{prefix}{cerebro}{suffix}")
+            .replace(
+                "if [ -x /opt/dpf/extra-script-pre-ovs.sh ]; then /opt/dpf/extra-script-pre-ovs.sh; fi",
+                "printf 'pre\n'",
+            )
+            .replace(
+                "if [ -x /opt/dpf/extra-script-post-ovs.sh ]; then /opt/dpf/extra-script-post-ovs.sh; fi",
+                "printf 'post\n'",
+            )
+            .replace(
+                "/usr/local/sbin/configure-xplane-network.sh",
+                "bash -c 'declare -F _ovs-vsctl >/dev/null || exit 99; printf \"network\\n\"; exit 7'",
+            );
+        let output = Command::new("bash").arg("-c").arg(script).output().unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "pre\nnetwork\n");
+    }
+
     /// The hook files must keep referencing the ConfigMaps the SDK seeds, under
     /// the key it writes, and stay executable agent-applied files.
     #[test]
@@ -3424,20 +4427,19 @@ export -f run_stage ovs-vsctl
                 ) => true,
             }
 
-            "OVS bootstrap invokes both Astra scripts" {
-                (
-                    ovs_script.contains("/etc/mellanox/ovs-script.sh")
-                        && ovs_script.contains("/etc/mellanox/xplane-bridge.sh")
-                ) => true,
+            "OVS bootstrap invokes the ordered Astra network setup" {
+                ovs_script.contains("/usr/local/sbin/configure-xplane-network.sh || exit $?") => true,
             }
 
-            "OVS bootstrap enables xplane and Weave metrics" {
-                (
-                    ovs_script.contains("'other_config:flow-metric-labels=\"to_plane,from_plane,device_name,group,plane\"'")
-                        && ovs_script.contains("other_config:doca-telemetry-interval=\"1000\"")
-                        && ovs_script.contains("other_config:doca-telemetry-ipc=\"true\"")
-                        && ovs_script.contains("other_config:doca-telemetry-source-id=\"xplane\"")
-                ) => true,
+            "Astra network setup enables xplane and Weave metrics" {
+                {
+                    [ovs_script.as_str(), ovs_cerebro_script_raw()].into_iter().all(|script| {
+                        script.contains("'other_config:flow-metric-labels=\"to_plane,from_plane,device_name,group,plane\"'")
+                            && script.contains("other_config:doca-telemetry-interval=\"1000\"")
+                            && script.contains("other_config:doca-telemetry-ipc=\"true\"")
+                            && script.contains("other_config:doca-telemetry-source-id=\"xplane\"")
+                    })
+                } => true,
             }
 
             "OVS bootstrap recreates the HBN bridge" {
@@ -3447,29 +4449,19 @@ export -f run_stage ovs-vsctl
                     .is_some_and(|(delete_bridge, add_bridge)| delete_bridge < add_bridge) => true,
             }
 
-            "xplane bridge setup uses DPUDevice-provided rail values" {
+            "xplane network setup uses the addressed DPUDevice interfaces" {
                 {
                     let xplane_script = flavor
-                        .spec
-                        .config_files
-                        .as_ref()
-                        .unwrap()
-                        .iter()
-                        .find(|file| file.path == "/etc/mellanox/xplane-bridge.sh")
-                        .and_then(|file| file.raw.as_ref())
-                        .unwrap();
-                    xplane_script.contains("{{ .mac_0_val }}")
-                        && xplane_script.contains("{{ .ip_0_val }}")
-                        && xplane_script.contains("{{ .gw_0_val }}")
-                        && xplane_script.contains("{{ .route1_0_val }}")
-                        && xplane_script.contains("{{ .mac_7_val }}")
-                        && xplane_script.contains("{{ .ip_7_val }}")
-                        && xplane_script.contains("{{ .gw_7_val }}")
-                        && xplane_script.contains("{{ .route2_7_val }}")
-                        && xplane_script.contains(
-                            "/sys/bus/pci/devices/${pci}/net/${iface_val}/smart_nic/pf/config",
-                        )
-                        && xplane_script.contains("iface_val=\"${iface_prefix}p0\"")
+                        .spec.config_files.as_ref().unwrap().iter()
+                        .find(|file| file.path == "/usr/local/sbin/configure-xplane-network.sh")
+                        .and_then(|file| file.raw.as_ref()).unwrap();
+                    xplane_script.contains("{{- range .dpu_device_underlay_rows }}")
+                        && xplane_script.contains("{{ .logical_ifname }}")
+                        && xplane_script.contains("{{ .cerebro_ifname }}")
+                        && xplane_script.contains("{{ .ip }}")
+                        && xplane_script.contains("{{ .gateway }}")
+                        && xplane_script.contains("{{ .rail_route }}")
+                        && xplane_script.contains("{{ .sw_plane_route }}")
                 } => true,
             }
 
@@ -3508,7 +4500,7 @@ export -f run_stage ovs-vsctl
                         .as_ref()
                         .unwrap()
                         .iter()
-                        .find(|file| file.path == "/etc/mellanox/xplane-bridge.sh")
+                        .find(|file| file.path == "/usr/local/sbin/configure-xplane-network.sh")
                         .and_then(|file| file.raw.as_ref())
                         .unwrap();
                     xplane_script.contains("OOB_WAIT_TIMEOUT=120")
@@ -3601,12 +4593,12 @@ export -f run_stage ovs-vsctl
                     .count();
                 (files.len(), proxy_file_count)
             };
-            "no proxy keeps the fourteen Astra base files" {
-                None => (14, 0),
+            "no proxy keeps the fifteen Astra base files" {
+                None => (15, 0),
             }
 
             "configured proxy appends exactly one proxy file" {
-                proxy("http://proxy:3128", &["10.0.0.0/8", "localhost"]) => (15, 1),
+                proxy("http://proxy:3128", &["10.0.0.0/8", "localhost"]) => (16, 1),
             }
         );
     }

@@ -44,7 +44,7 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 		SkuID:                    cutil.GetPtr("old-sku"),
 		MachineID:                cutil.GetPtr("old-machine"),
 		FallbackDpuSerialNumbers: []string{"old-dpu"},
-		Interfaces:               []ExpectedMachineInterface{{MacAddress: "02:00:00:00:00:08"}},
+		Interfaces:               []ExpectedMachineInterface{{MacAddress: cutil.GetPtr("02:00:00:00:00:08")}},
 		IsDpfEnabled:             cutil.GetPtr(true),
 		HostLifecycleProfile:     HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
 	}
@@ -68,8 +68,9 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 				BmcIpAddress:             cutil.GetPtr("10.0.0.1"),
 				RackId:                   &corev1.RackId{Id: "rack-1"},
 				SkuId:                    cutil.GetPtr("sku-1"),
+				ServerName:               cutil.GetPtr("server-1"),
 				FallbackDpuSerialNumbers: []string{"dpu-1", "dpu-2"},
-				HostNics:                 []*corev1.ExpectedHostNic{{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIp: &fixedIP}},
+				HostNics:                 []*corev1.ExpectedHostNic{{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), PhysicalIfname: cutil.GetPtr("C1-1-L1"), LogicalIfname: cutil.GetPtr("rail0"), NicType: &nicType, FixedIp: &fixedIP}},
 				IsDpfEnabled:             cutil.GetPtr(false),
 				HostLifecycleProfile:     &corev1.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
 				Name:                     cutil.GetPtr("obsolete-name"),
@@ -108,9 +109,10 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 				HostID:                   cutil.GetPtr(int32(6)),
 				Labels:                   Labels{"manufacturer": "NVIDIA", "model": "model-1", "slot_id": "1", "tray_idx": "2", "host_id": "3", "env": "prod"},
 				SkuID:                    cutil.GetPtr("sku-1"),
+				ServerName:               cutil.GetPtr("server-1"),
 				MachineID:                cutil.GetPtr("machine-1"),
 				FallbackDpuSerialNumbers: []string{"dpu-1", "dpu-2"},
-				Interfaces:               []ExpectedMachineInterface{{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIP: &fixedIP}},
+				Interfaces:               []ExpectedMachineInterface{{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), PhysicalName: cutil.GetPtr("C1-1-L1"), LogicalName: cutil.GetPtr("rail0"), NicType: &nicType, FixedIP: &fixedIP}},
 				IsDpfEnabled:             cutil.GetPtr(false),
 				HostLifecycleProfile:     HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
 			},
@@ -253,16 +255,41 @@ func TestExpectedMachine_ToProto(t *testing.T) {
 			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
 			ChassisSerialNumber: "CSN-1",
 			Interfaces: []ExpectedMachineInterface{
-				{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIP: &fixedIP},
-				{MacAddress: "02:00:00:00:00:0a"},
+				{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), PhysicalName: cutil.GetPtr("C1-1-L1"), LogicalName: cutil.GetPtr("rail0"), NicType: &nicType, FixedIP: &fixedIP},
+				{MacAddress: cutil.GetPtr("02:00:00:00:00:0a")},
 			},
 		}
 		got := em.ToProto(ExpectedMachineCredentials{}).GetHostNics()
 		require.Len(t, got, 2)
 		assert.Equal(t, "02:00:00:00:00:09", got[0].GetMacAddress())
+		assert.Equal(t, "C1-1-L1", got[0].GetPhysicalIfname())
+		assert.Equal(t, "rail0", got[0].GetLogicalIfname())
 		assert.Equal(t, "CX9", got[0].GetNicType())
 		assert.Equal(t, "192.0.2.9", got[0].GetFixedIp())
 		assert.Equal(t, "02:00:00:00:00:0a", got[1].GetMacAddress())
+		assert.Nil(t, got[1].PhysicalIfname)
+		assert.Nil(t, got[1].LogicalIfname)
+	})
+
+	t.Run("forwards server name when stored", func(t *testing.T) {
+		em := &ExpectedMachine{
+			ID:                  id,
+			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
+			ChassisSerialNumber: "CSN-1",
+			ServerName:          cutil.GetPtr("server-1"),
+		}
+		proto := em.ToProto(ExpectedMachineCredentials{})
+		assert.Equal(t, "server-1", proto.GetServerName())
+	})
+
+	t.Run("omits server name when unset", func(t *testing.T) {
+		em := &ExpectedMachine{
+			ID:                  id,
+			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
+			ChassisSerialNumber: "CSN-1",
+		}
+		proto := em.ToProto(ExpectedMachineCredentials{})
+		assert.Nil(t, proto.ServerName)
 	})
 }
 
@@ -347,7 +374,7 @@ func TestExpectedMachineSQLDAO_Create(t *testing.T) {
 					ChassisSerialNumber:      "CHASSIS123",
 					FallbackDpuSerialNumbers: []string{"DPU001", "DPU002"},
 					Interfaces: []ExpectedMachineInterface{{
-						MacAddress: "02:00:00:00:00:09",
+						MacAddress: cutil.GetPtr("02:00:00:00:00:09"),
 						NicType:    cutil.GetPtr("CX9"),
 						FixedIP:    cutil.GetPtr("192.0.2.9"),
 					}},

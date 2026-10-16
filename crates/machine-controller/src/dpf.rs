@@ -32,8 +32,8 @@ use carbide_dpf::{
     ResourceLabeler, node_id_from_dpu_node_cr_name,
 };
 use carbide_uuid::machine::{DpuMachineId, HostMachineId};
-use model::dpa_interface::DpaInterface;
 use model::dpu_machine_update::OutdatedDpfDpu;
+use model::expected_machine::ExpectedInterface;
 use model::machine::{DpuMachine, ManagedHostStateSnapshot};
 use model::machine_pending_action::{MachinePendingAction, MachinePendingActionKind};
 use sqlx::PgPool;
@@ -64,11 +64,12 @@ pub const HOST_BMC_IP_LABEL: &str = "carbide.nvidia.com/host-bmc-ip";
 #[cfg_attr(feature = "test-support", mockall::automock)]
 #[async_trait]
 pub trait DpfOperations: Send + Sync + std::fmt::Debug {
-    /// Register a DPU device.
-    async fn register_dpu_device<'a>(
+    /// Register a DPU device, using declared host NICs only for Astra deployments.
+    async fn register_dpu_device(
         &self,
         info: DpuDeviceInfo,
-        astra_nics: Option<Vec<&'a DpaInterface>>,
+        host_nics: Vec<ExpectedInterface>,
+        deployment_type: DpuDeploymentType,
     ) -> Result<(), DpfError>;
 
     /// Register a DPU node.
@@ -726,17 +727,21 @@ impl std::fmt::Debug for DpfSdkOps {
 /// Delegates everything to the underlying DPF SDK.
 #[async_trait]
 impl DpfOperations for DpfSdkOps {
-    async fn register_dpu_device<'a>(
+    async fn register_dpu_device(
         &self,
         info: DpuDeviceInfo,
-        astra_nics: Option<Vec<&'a DpaInterface>>,
+        host_nics: Vec<ExpectedInterface>,
+        deployment_type: DpuDeploymentType,
     ) -> Result<(), DpfError> {
-        self.sdk
-            .register_dpu_device(
-                info,
-                astra_nics.map(|nics| (nics, self.astra_route_prefixes)),
-            )
-            .await
+        // Only Astra deployments consume the declared CX9 underlay interfaces.
+        let astra_config = (deployment_type == DpuDeploymentType::Bf4Astra).then(|| {
+            let nics = host_nics
+                .iter()
+                .filter(|nic| nic.nic_type.as_deref() == Some("CX9"))
+                .collect();
+            (nics, self.astra_route_prefixes)
+        });
+        self.sdk.register_dpu_device(info, astra_config).await
     }
 
     async fn register_dpu_node(&self, info: DpuNodeInfo) -> Result<(), DpfError> {

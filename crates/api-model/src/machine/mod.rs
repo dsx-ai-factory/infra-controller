@@ -64,6 +64,7 @@ use crate::state_history::StateHistoryRecord;
 
 pub mod slas;
 
+pub mod astra;
 pub mod capabilities;
 pub mod config;
 pub mod health_override;

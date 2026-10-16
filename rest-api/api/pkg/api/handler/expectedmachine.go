@@ -207,6 +207,7 @@ func (cemh CreateExpectedMachineHandler) Handle(c echo.Context) error {
 				Manufacturer:             apiRequest.Manufacturer,
 				Model:                    apiRequest.Model,
 				Description:              apiRequest.Description,
+				ServerName:               apiRequest.ServerName,
 				SlotID:                   apiRequest.SlotID,
 				TrayIdx:                  apiRequest.TrayIdx,
 				HostID:                   apiRequest.HostID,
@@ -718,6 +719,7 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 				Manufacturer:             apiRequest.Manufacturer,
 				Model:                    apiRequest.Model,
 				Description:              apiRequest.Description,
+				ServerName:               apiRequest.ServerName,
 				SlotID:                   apiRequest.SlotID,
 				TrayIdx:                  apiRequest.TrayIdx,
 				HostID:                   apiRequest.HostID,
@@ -1136,6 +1138,7 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 			Manufacturer:             machineReq.Manufacturer,
 			Model:                    machineReq.Model,
 			Description:              machineReq.Description,
+			ServerName:               machineReq.ServerName,
 			SlotID:                   machineReq.SlotID,
 			TrayIdx:                  machineReq.TrayIdx,
 			HostID:                   machineReq.HostID,
@@ -1269,6 +1272,7 @@ type expectedMachineUpdateFieldSet struct {
 	manufacturer             bool
 	model                    bool
 	description              bool
+	serverName               bool
 	slotID                   bool
 	trayIdx                  bool
 	hostID                   bool
@@ -1295,6 +1299,7 @@ func expectedMachineUpdateFields(req model.APIExpectedMachineUpdateRequest) expe
 		manufacturer:             req.Manufacturer != nil,
 		model:                    req.Model != nil,
 		description:              req.Description != nil,
+		serverName:               req.ServerName != nil,
 		slotID:                   req.SlotID != nil,
 		trayIdx:                  req.TrayIdx != nil,
 		hostID:                   req.HostID != nil,
@@ -1627,6 +1632,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 			Manufacturer:             machineReq.Manufacturer,
 			Model:                    machineReq.Model,
 			Description:              machineReq.Description,
+			ServerName:               machineReq.ServerName,
 			SlotID:                   machineReq.SlotID,
 			TrayIdx:                  machineReq.TrayIdx,
 			HostID:                   machineReq.HostID,
@@ -1809,7 +1815,7 @@ func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
 			SkuID: machine.SkuID, FallbackDpuSerialNumbers: machine.FallbackDPUSerialNumbers,
 			Interfaces: machine.InterfacesToDBModel(),
 			RackID:     machine.RackID, Name: machine.Name, Manufacturer: machine.Manufacturer,
-			Model: machine.Model, Description: machine.Description, SlotID: machine.SlotID,
+			Model: machine.Model, Description: machine.Description, ServerName: machine.ServerName, SlotID: machine.SlotID,
 			TrayIdx: machine.TrayIdx, HostID: machine.HostID, IsDpfEnabled: machine.IsDpfEnabled,
 			Labels: machine.Labels, HostLifecycleProfile: machine.HostLifecycleProfile.ToDBModel(), CreatedBy: dbUser.ID,
 		})

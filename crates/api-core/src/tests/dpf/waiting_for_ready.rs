@@ -56,7 +56,8 @@ fn dpf_left_operator_provisioning_substates(host: &ManagedHostState) -> bool {
 /// Does NOT set up `get_dpu_phase` -- each test configures it to control the
 /// DPU CR phase (the authoritative readiness signal).
 fn expect_provisioning(mock: &mut MockDpfOperations) {
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_deployment_type_for_dpu()
         .returning(move |__, _| Ok(DpuDeploymentType::Bf3));

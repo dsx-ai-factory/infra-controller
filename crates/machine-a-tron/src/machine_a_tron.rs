@@ -59,7 +59,7 @@ fn expected_interfaces(
         .into_iter()
         .enumerate()
         .map(|(index, mac_address)| ExpectedInterface {
-            mac_address: mac_address.to_string(),
+            mac_address: Some(mac_address.to_string()),
             nic_type: None,
             fixed_ip: None,
             fixed_mask: None,
@@ -494,7 +494,7 @@ mod tests {
 
     fn expected_nic(mac_address: MacAddress, primary: bool) -> ExpectedInterface {
         ExpectedInterface {
-            mac_address: mac_address.to_string(),
+            mac_address: Some(mac_address.to_string()),
             nic_type: None,
             fixed_ip: None,
             fixed_mask: None,

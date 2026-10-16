@@ -1930,6 +1930,7 @@ dependencies = [
  "hex",
  "http",
  "hyper",
+ "indoc",
  "k8s-openapi",
  "kopium",
  "kube",
