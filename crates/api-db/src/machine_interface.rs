@@ -878,7 +878,7 @@ pub async fn find_or_create_observed_machine_interface(
                             .await?;
 
                     if network_segments.is_empty() {
-                        return Err(DatabaseError::internal(format!(
+                        return Err(DatabaseError::FailedPrecondition(format!(
                             "No network segment defined for relay addresses: {:?}",
                             relays
                         )));
@@ -1323,7 +1323,7 @@ async fn validate_existing_mac_and_create_inner(
                 .await?;
                 restore_retained_boot_interface(txn, interface, retained_window).await
             } else {
-                Err(DatabaseError::internal(format!(
+                Err(DatabaseError::FailedPrecondition(format!(
                     "No network segment defined for relay addresses: {:?}",
                     relays
                 )))
@@ -2690,7 +2690,7 @@ pub async fn move_predicted_machine_interface_to_machine(
         "Got DHCP from predicted machine interface, moving to machine"
     );
     let Some(network_segment) = crate::network_segment::for_relay(txn, relay_ip).await? else {
-        return Err(DatabaseError::internal(format!(
+        return Err(DatabaseError::FailedPrecondition(format!(
             "No network segment defined for relay address: {relay_ip}"
         )));
     };
@@ -3604,7 +3604,7 @@ async fn reconcile_interface_segment(
     };
 
     if relay_segments.is_empty() {
-        return Err(DatabaseError::internal(format!(
+        return Err(DatabaseError::FailedPrecondition(format!(
             "No network segment defined for DHCP relay addresses: {}",
             relays.iter().join(", ")
         )));
