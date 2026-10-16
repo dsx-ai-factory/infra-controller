@@ -39,7 +39,7 @@ type OperatingSystem struct {
 	ImageUrl NullableString `json:"imageUrl,omitempty"`
 	// SHA hash of the image file, only present for image-based OS
 	ImageSha NullableString `json:"imageSha,omitempty"`
-	// Authentication type for image URL, e.g., 'Basic' or 'Bearer'
+	// Authentication type for image URL
 	ImageAuthType NullableString `json:"imageAuthType,omitempty"`
 	// Auth token to retrieve the image from image URL
 	ImageAuthToken NullableString `json:"imageAuthToken,omitempty"`

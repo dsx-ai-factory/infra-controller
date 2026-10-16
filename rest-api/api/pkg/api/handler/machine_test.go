@@ -1808,7 +1808,7 @@ func TestMachineHandler_Update(t *testing.T) {
 				},
 			},
 			HealthIssue: &model.APIMachineHealthIssue{
-				Category: model.HealthIssueStorage,
+				Category: model.HealthIssueHardware,
 				Summary:  cutil.GetPtr("tenant summary"),
 				Details:  cutil.GetPtr("tenant details"),
 			},

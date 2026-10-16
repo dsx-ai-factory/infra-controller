@@ -38,7 +38,8 @@ const (
 	// TenantReportedIssueAlertID is the ID of the tenant-reported issue health alert.
 	MachineTenantReportedIssueAlertID = "tenant-reported"
 	// MachineHealthIssueSummaryMaxLength is the maximum length of the summary of the MachineHealthIssue.
-	MachineHealthIssueSummaryMaxLength = 512
+	// Shared with the Instance delete health issue; Core proto does not constrain either field.
+	MachineHealthIssueSummaryMaxLength = 1024
 	// MachineHealthIssueDetailsMaxLength is the maximum length of the details of the MachineHealthIssue.
 	MachineHealthIssueDetailsMaxLength = 8192
 )
@@ -59,6 +60,8 @@ const (
 )
 
 // ValidHealthIssueCategories lists accepted HealthIssue.category values for online repair.
+// Online repair stores these values as strings in a HealthProbeAlert payload rather
+// than converting them through Core's IssueCategory enum.
 var ValidHealthIssueCategoriesMap = map[string]string{
 	HealthIssueHardware:    "HARDWARE",
 	HealthIssueNetwork:     "NETWORK",
@@ -68,7 +71,8 @@ var ValidHealthIssueCategoriesMap = map[string]string{
 	HealthIssueOther:       "OTHER",
 }
 
-// APIMachineHealthIssue describes the tenant-reported issue when requesting online repair.
+// APIMachineHealthIssue describes a tenant-reported machine issue.
+// Online repair and Instance deletion apply endpoint-specific validation.
 type APIMachineHealthIssue struct {
 	// Category is the type of the issue
 	Category string `json:"category"`
