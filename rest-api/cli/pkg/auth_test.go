@@ -5,12 +5,14 @@ package cli
 
 import (
 	"flag"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,6 +131,89 @@ func TestLoginWithOIDCConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseTokenResponseRejectsUntrustedErrorText(t *testing.T) {
+	const secret = "synthetic-secret-4686"
+	tests := []struct {
+		name, method, body, wantCode string
+	}{
+		{
+			name: "post structured credential echo", method: "client_secret_post",
+			body:     `{"error":"invalid_client","error_description":"` + secret + `"}`,
+			wantCode: "invalid_client",
+		},
+		{
+			name: "basic raw credential echo", method: "client_secret_basic",
+			body: `token endpoint rejected ` + secret,
+		},
+		{
+			name: "unknown error identifier and reason phrase", method: "client_secret_post",
+			body: `{"error":"` + secret + `","error_description":"` + secret + `"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tt.method == "client_secret_basic" {
+					_, _, ok := r.BasicAuth()
+					require.True(t, ok)
+				} else {
+					require.NoError(t, r.ParseForm())
+					require.Equal(t, secret, r.Form.Get("client_secret"))
+				}
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+			cfg := &ConfigFile{Auth: ConfigAuth{OIDC: &ConfigOIDC{
+				TokenURL: server.URL, ClientID: "synthetic-client", ClientSecret: secret,
+				ClientAuthMethod: tt.method,
+			}}}
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			_, err := LoginWithOIDCConfig(cfg, configPath)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "HTTP 401")
+			require.ErrorContains(t, err, "token endpoint: "+server.URL)
+			require.ErrorContains(t, err, "check OIDC client credentials")
+			if tt.wantCode != "" {
+				require.ErrorContains(t, err, tt.wantCode)
+			}
+			require.NotContains(t, err.Error(), secret)
+			require.NoFileExists(t, configPath)
+		})
+	}
+	// Password and refresh grants also use postToken; rejection diagnostics
+	// must stay safe for those shared call sites.
+	for _, grant := range []struct {
+		name string
+		call func(string) (*TokenResponse, error)
+	}{
+		{"password", func(endpoint string) (*TokenResponse, error) {
+			return passwordGrant(endpoint, "client", secret, "user", "password")
+		}},
+		{"refresh", func(endpoint string) (*TokenResponse, error) {
+			return refreshTokenGrant(endpoint, "client", secret, "refresh")
+		}},
+	} {
+		t.Run(grant.name+" grant", func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"` + secret + `"}`))
+			}))
+			defer server.Close()
+			_, err := grant.call(server.URL)
+			require.ErrorContains(t, err, "HTTP 401, invalid_grant")
+			require.NotContains(t, err.Error(), secret)
+		})
+	}
+	// Go's HTTP server writes a standard status text, but a custom upstream
+	// Status value must not override the numeric code or enter diagnostics.
+	resp := &http.Response{StatusCode: http.StatusBadRequest, Status: "400 " + secret,
+		Body: io.NopCloser(strings.NewReader(`{"error":"` + secret + `"}`))}
+	_, err := parseTokenResponse(resp)
+	require.ErrorContains(t, err, "HTTP 400")
+	require.NotContains(t, err.Error(), secret)
 }
 
 func TestLoginWithOIDCCmd(t *testing.T) {
