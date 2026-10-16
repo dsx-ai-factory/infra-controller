@@ -5,6 +5,7 @@
 # Prepare an x86_64 or aarch64 Ubuntu VM to run tests and stack for NICo.
 # You should be able to execute the following tasks:
 #   - run `cargo test`
+#   - run `cargo test --profile ci-tests`
 #   - run `make -C rest-api test`
 #   - bring up the devspace stack
 #
@@ -185,6 +186,10 @@ cd -- "${REPO_DIR}"
 DEV_PATH="${USER_HOME}/.cargo/bin:/usr/local/go/bin:/usr/local/protobuf/bin:${USER_HOME}/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 DATABASE_URL="postgresql://postgres:admin@localhost"
 OPENSSL_COMPAT_CONFIG="${USER_HOME}/.config/nico/openssl-compat.cnf"
+NATIVE_BUILD_ENV=()
+if [[ "${MACHINE_ARCH}" == aarch64 ]]; then
+  NATIVE_BUILD_ENV+=(CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold)
+fi
 
 run_as_user() {
   runuser -u "${DEV_USER}" -- env \
@@ -204,6 +209,7 @@ run_as_user() {
     REPO_ROOT="${REPO_DIR}" \
     RUSTUP_TOOLCHAIN="${RUST_VERSION}" \
     RUSTC_WRAPPER="sccache" \
+    "${NATIVE_BUILD_ENV[@]}" \
     "$@"
 }
 
@@ -233,6 +239,26 @@ EOF
   chmod 0644 "${OPENSSL_COMPAT_CONFIG}"
 }
 
+configure_hashicorp_apt_source() {
+  local keyring=/usr/share/keyrings/hashicorp-archive-keyring.gpg
+  local source=/etc/apt/sources.list.d/hashicorp.sources
+
+  # Normalize the malformed deb822 source produced by older setup versions.
+  # A duplicate source with different Signed-By settings also breaks apt.
+  rm -f /etc/apt/sources.list.d/hashicorp.list
+  if [[ ! -s "${keyring}" ]]; then
+    rm -f "${source}"
+    return
+  fi
+  cat >"${source}" <<EOF
+Types: deb
+URIs: https://apt.releases.hashicorp.com
+Suites: ${VERSION_CODENAME}
+Components: main
+Signed-By: ${keyring}
+EOF
+}
+
 install_base_packages() {
   log "Installing native build and test dependencies for ${MACHINE_ARCH}"
   apt-get update
@@ -245,6 +271,7 @@ install_base_packages() {
     ca-certificates
     clang
     cmake
+    cpio
     curl
     dosfstools
     fdisk
@@ -294,6 +321,17 @@ install_base_packages() {
   fi
 
   DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
+}
+
+configure_native_linker() {
+  [[ "${MACHINE_ARCH}" == aarch64 ]] || return 0
+  # Match the ARM64 CI image: GNU ld exhausts a 16 GiB VM when several large
+  # test binaries link concurrently. Do not change the system linker for C builds.
+  cat >/usr/local/bin/clang-mold <<'EOF'
+#!/bin/sh
+exec clang -fuse-ld=mold "$@"
+EOF
+  chmod 0755 /usr/local/bin/clang-mold
 }
 
 install_docker() {
@@ -462,11 +500,20 @@ install_grpcurl() {
 }
 
 install_vault() {
-  local vault_path installed_version
+  local keyring vault_path installed_version
+  keyring=/usr/share/keyrings/hashicorp-archive-keyring.gpg
   vault_path="$(command -v vault 2>/dev/null || true)"
   installed_version="$(
     dpkg-query -W -f='${Version}' vault 2>/dev/null || true
   )"
+  if [[ ! -s "${keyring}" || \
+    -z "${vault_path}" || \
+    "$(readlink -f "${vault_path}" 2>/dev/null || true)" != "/usr/bin/vault" || \
+    "${installed_version}" != "${VAULT_VERSION}" ]]; then
+    curl -fsSL https://apt.releases.hashicorp.com/gpg |
+      gpg --dearmor --yes -o "${keyring}"
+  fi
+  configure_hashicorp_apt_source
   if [[ -n "${vault_path}" && \
     "$(readlink -f "${vault_path}")" == "/usr/bin/vault" && \
     "${installed_version}" == "${VAULT_VERSION}" ]]; then
@@ -475,15 +522,6 @@ install_vault() {
   fi
 
   log "Installing Vault ${VAULT_VERSION}"
-  curl -fsSL https://apt.releases.hashicorp.com/gpg |
-    gpg --dearmor --yes -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
-  cat >/etc/apt/sources.list.d/hashicorp.sources <<EOF
-Types: deb
-URIs: https://apt.releases.hashicorp.com
-Suites: ${VERSION_CODENAME}
-Components: main
-Signed-By: /usr/share/keyrings/hashicorp-archive-keyring.gpg
-EOF
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     --allow-change-held-packages "vault=${VAULT_VERSION}"
@@ -504,23 +542,34 @@ configure_kea_apparmor() {
   canonical_repo_dir="$(realpath "${REPO_DIR}")"
   install -m 0755 -d /etc/apparmor.d/local
 
-  local daemon profile local_profile
+  local daemon profile local_profile rule
   for daemon in kea-dhcp4 kea-dhcp6; do
     profile="/etc/apparmor.d/usr.sbin.${daemon}"
     [[ -e "${profile}" ]] || continue
 
-    log "Allowing ${daemon} tests to use temporary files and Cargo-built hooks"
+    log "Allowing ${daemon} tests and DevSpace to use development runtime paths"
     local_profile="/etc/apparmor.d/local/usr.sbin.${daemon}"
+    touch "${local_profile}"
     {
       printf '# Managed by prepare-ubuntu-host-for-dev.sh\n'
       printf '/tmp/** rwk,\n'
-      printf '%s/target/debug/*.so mr,\n' "${REPO_DIR}"
-      printf '%s/target/debug/deps/*.so mr,\n' "${REPO_DIR}"
+      printf '"%s" r,\n' "${OPENSSL_COMPAT_CONFIG}"
+      # kind shares the host kernel, including the native Kea AppArmor profile.
+      printf '/run/kea/* rwk,\n'
+      printf '/usr/lib/kea/hooks/*.so mr,\n'
+      printf '/run/secrets/spiffe.io/** r,\n'
+      printf '"%s/target/{debug,ci-tests}/*.so" mr,\n' "${REPO_DIR}"
+      printf '"%s/target/{debug,ci-tests}/deps/*.so" mr,\n' "${REPO_DIR}"
       if [[ "${canonical_repo_dir}" != "${REPO_DIR}" ]]; then
-        printf '%s/target/debug/*.so mr,\n' "${canonical_repo_dir}"
-        printf '%s/target/debug/deps/*.so mr,\n' "${canonical_repo_dir}"
+        printf '"%s/target/{debug,ci-tests}/*.so" mr,\n' "${canonical_repo_dir}"
+        printf '"%s/target/{debug,ci-tests}/deps/*.so" mr,\n' "${canonical_repo_dir}"
       fi
-    } >"${local_profile}"
+    } | while IFS= read -r rule; do
+      # Preserve permissions for other checkouts and administrator overrides.
+      if ! grep -Fxq -- "${rule}" "${local_profile}"; then
+        printf '\n%s\n' "${rule}" >>"${local_profile}"
+      fi
+    done
     apparmor_parser -r "${profile}"
   done
 }
@@ -585,6 +634,9 @@ update_shell_file() {
       printf 'setenv DATABASE_URL postgresql://postgres:admin@localhost\n'
       printf 'setenv REPO_ROOT "%s"\n' "${REPO_DIR}"
       printf 'setenv RUSTC_WRAPPER sccache\n'
+      if [[ "${MACHINE_ARCH}" == aarch64 ]]; then
+        printf 'setenv CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER /usr/local/bin/clang-mold\n'
+      fi
       if run_as_user test -r "${USER_HOME}/.kube/config"; then
         # shellcheck disable=SC2016 # Expand $HOME in the developer's login shell.
         printf 'setenv KUBECONFIG "$HOME/.kube/config"\n'
@@ -605,6 +657,9 @@ update_shell_file() {
       printf 'export DATABASE_URL=postgresql://postgres:admin@localhost\n'
       printf 'export REPO_ROOT="%s"\n' "${REPO_DIR}"
       printf 'export RUSTC_WRAPPER=sccache\n'
+      if [[ "${MACHINE_ARCH}" == aarch64 ]]; then
+        printf 'export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold\n'
+      fi
       if run_as_user test -r "${USER_HOME}/.kube/config"; then
         # shellcheck disable=SC2016 # Expand $HOME in the developer's login shell.
         printf 'export KUBECONFIG="$HOME/.kube/config"\n'
@@ -690,9 +745,30 @@ start_core_postgres() {
       -c fsync=off \
       -c synchronous_commit=off \
       -c full_page_writes=off \
+      -c max_connections=1000 \
       >/dev/null
   fi
 
+  wait_for_core_postgres
+  # Match CI's connection budget for parallel SQLx-backed tests. Upgrade an
+  # existing test container in place, preserving its databases and volumes.
+  local max_connections
+  max_connections="$(run_as_user docker exec "${CORE_POSTGRES_CONTAINER}" \
+    psql -U postgres -d forgetest -Atc 'SHOW max_connections')"
+  if ((max_connections < 1000)); then
+    log "Increasing test PostgreSQL max_connections to 1000 (restarting container)"
+    run_as_user docker exec "${CORE_POSTGRES_CONTAINER}" \
+      psql -U postgres -d forgetest -v ON_ERROR_STOP=1 \
+      -c 'ALTER SYSTEM SET max_connections = 1000'
+    run_as_user docker restart "${CORE_POSTGRES_CONTAINER}" >/dev/null
+    wait_for_core_postgres
+    max_connections="$(run_as_user docker exec "${CORE_POSTGRES_CONTAINER}" \
+      psql -U postgres -d forgetest -Atc 'SHOW max_connections')"
+    ((max_connections >= 1000)) || die "test PostgreSQL command-line settings override max_connections; configure at least 1000"
+  fi
+}
+
+wait_for_core_postgres() {
   local _attempt
   for _attempt in {1..60}; do
     if run_as_user docker exec "${CORE_POSTGRES_CONTAINER}" \
@@ -743,6 +819,7 @@ Start a fresh login shell, then run:
 
   cd ${REPO_DIR}
   cargo test
+  cargo test --profile ci-tests
   make -C rest-api test
 
 Rust tests use ${CORE_POSTGRES_CONTAINER} on localhost:5432.
@@ -752,7 +829,9 @@ EOF
 
 main() {
   configure_openssl_tls
+  configure_hashicorp_apt_source
   install_base_packages
+  configure_native_linker
   install_docker
   install_go
   install_rust
