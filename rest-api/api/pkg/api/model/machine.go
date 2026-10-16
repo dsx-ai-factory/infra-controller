@@ -630,11 +630,11 @@ type APIMachineMetadata struct {
 	// BMCInfo is the BMC Info of the machine
 	BMCInfo *APIBMCInfo `json:"bmcInfo,omitempty"`
 	// GPUInfo is the list of GPUs for the machine
-	GPUs []APIMachineGPUInfo `json:"gpus,omitempty"`
+	GPUs APIList[APIMachineGPUInfo] `json:"gpus"`
 	// NetworkInterfaces is the list of Ethernet interfaces of the machine
-	NetworkInterfaces []APIMachineNetworkInterface `json:"networkInterfaces,omitempty"`
+	NetworkInterfaces APIList[APIMachineNetworkInterface] `json:"networkInterfaces"`
 	// InfiniBandInterfaces is the list of InfiniBand interfaces of the machine
-	InfiniBandInterfaces []APIMachineInfiniBandInterface `json:"infinibandInterfaces,omitempty"`
+	InfiniBandInterfaces APIList[APIMachineInfiniBandInterface] `json:"infinibandInterfaces"`
 	// LifecycleState is the machine lifecycle state details
 	LifecycleState *APIMachineLifecycleState `json:"lifecycleState,omitempty"`
 	// LldpNeighbors is the list of LLDP neighbors observed on the machine's NICs, as last reported by the machine.
