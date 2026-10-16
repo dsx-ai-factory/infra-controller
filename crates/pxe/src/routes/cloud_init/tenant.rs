@@ -36,8 +36,11 @@ use crate::metrics::{BootEndpoint, CloudInitConsumer, OutcomeReason, PxeBootOutc
 
 /// Every outcome on these routes carries the same endpoint label.
 const ENDPOINT: BootEndpoint = BootEndpoint::CloudInit(CloudInitConsumer::Tenant);
+const CLOUD_CONFIG_HEADER: &str = "#cloud-config";
+const NETWORK_CONFIG_KEY: &str = "network";
 
-/// Serves the tenant's own cloud-init document.
+/// Serves the tenant's cloud-init document, removing a supported network
+/// block delivered separately through NoCloud's network-config document.
 ///
 /// An instance with none configured gets an empty document rather than an
 /// error: having no user-data is an ordinary way to run an instance, and
@@ -49,6 +52,7 @@ async fn user_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
         machine
             .instructions
             .custom_cloud_init
+            .map(|data| user_data_without_network(&data).unwrap_or(data))
             .unwrap_or_else(|| "{}".to_string()),
     );
     emit(PxeBootOutcome {
@@ -61,6 +65,45 @@ async fn user_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
         state.engine.clone(),
         template_data,
     )
+}
+
+/// Removes an unindented `network:` entry from a plain cloud-config block
+/// mapping. Preserve the remaining source: reserializing YAML can change
+/// quoted strings under cloud-init's YAML 1.1 scalar rules. Unsupported
+/// layouts or references into the removed block are passed through unchanged.
+fn user_data_without_network(custom_cloud_init: &str) -> Option<String> {
+    if custom_cloud_init.lines().next()? != CLOUD_CONFIG_HEADER {
+        return None;
+    }
+    let mut expected: serde_yaml::Value = serde_yaml::from_str(custom_cloud_init).ok()?;
+    expected.as_mapping_mut()?.remove(NETWORK_CONFIG_KEY)?;
+
+    let mut start = None;
+    let mut end = custom_cloud_init.len();
+    let mut offset = 0;
+    for line in custom_cloud_init.split_inclusive('\n') {
+        if start.is_some() && !line.starts_with(char::is_whitespace) && !line.starts_with('#') {
+            end = offset;
+            break;
+        }
+        if line
+            .strip_prefix(NETWORK_CONFIG_KEY)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            start = Some(offset);
+        }
+        offset += line.len();
+    }
+    let start = start?;
+    let mut user_data = custom_cloud_init.to_string();
+    user_data.replace_range(start..end, "");
+    // A network-only document must still contain an empty cloud-config mapping.
+    if expected.as_mapping()?.is_empty() {
+        user_data = format!("{CLOUD_CONFIG_HEADER}\n{{}}\n");
+    }
+    let actual: serde_yaml::Value = serde_yaml::from_str(&user_data).ok()?;
+    (actual == expected).then_some(user_data)
 }
 
 async fn meta_data(machine: Machine, state: State<AppState>) -> impl IntoResponse {
@@ -94,11 +137,11 @@ async fn meta_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
 /// Extracts the top-level `network:` key (if present) from a tenant's
 /// custom cloud-init document and returns it as its own standalone YAML
 /// document, suitable for seeding NoCloud's separate `network-config`
-/// file. A `network:` key inside `user-data` itself is not a recognized
-/// user-data format and is silently ignored by cloud-init.
+/// file. The user-data handler removes supported network blocks because
+/// cloud-init rejects that key during user-data schema validation.
 fn extract_network_config(custom_cloud_init: &str) -> Option<String> {
     let value: serde_yaml::Value = serde_yaml::from_str(custom_cloud_init).ok()?;
-    serde_yaml::to_string(value.get("network")?).ok()
+    serde_yaml::to_string(value.get(NETWORK_CONFIG_KEY)?).ok()
 }
 
 /// Default network-config served when a tenant hasn't provided a custom
@@ -187,6 +230,120 @@ mod tests {
 
     use super::*;
     use crate::common::{test_app_state, test_app_state_with_templates};
+
+    #[tokio::test]
+    async fn tenant_cloud_config_separates_network_from_user_data() {
+        let _metrics = MetricsCapture::start();
+        for custom_cloud_init in [
+            "#cloud-config\nnetwork:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp6: true\n      dhcp4: false\nhostname: 'on'\nusers: [default]\nwrite_files:\n  - path: /etc/example.yaml\n    content: 'off'\n  - path: /etc/nested.yaml\n    content: |\n      network: keep this nested content\n",
+            "#cloud-config\nnetwork:\n  version: 2\n  ethernets: {}\n",
+        ] {
+            let mut expected: serde_yaml::Value = serde_yaml::from_str(custom_cloud_init).unwrap();
+            let expected_network = expected
+                .as_mapping_mut()
+                .unwrap()
+                .remove("network")
+                .unwrap();
+            let machine = || Machine {
+                instructions: forge::CloudInitInstructions {
+                    custom_cloud_init: Some(custom_cloud_init.to_string()),
+                    ..Default::default()
+                },
+            };
+            let state = test_app_state_with_templates();
+
+            let response = user_data(machine(), State(state.clone()))
+                .await
+                .into_response();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let text = std::str::from_utf8(&body).unwrap();
+            assert!(text.starts_with("#cloud-config\n"));
+            if let Some((_, remaining)) = custom_cloud_init.split_once("hostname:") {
+                assert!(text.contains(&format!("hostname:{remaining}")));
+            }
+            let actual: serde_yaml::Value = serde_yaml::from_str(text).unwrap();
+            assert_eq!(
+                actual, expected,
+                "user-data must retain only the non-network settings"
+            );
+
+            let response = network_config(machine(), State(state))
+                .await
+                .into_response();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let actual: serde_yaml::Value = serde_yaml::from_slice(&body).unwrap();
+            assert_eq!(actual, expected_network);
+        }
+    }
+
+    #[tokio::test]
+    async fn user_data_preserves_documents_that_do_not_need_splitting() {
+        let _metrics = MetricsCapture::start();
+        for (name, input) in [
+            ("absent", None),
+            (
+                "cloud-config without network",
+                Some("#cloud-config\n# preserve comments\nusers: [default]\n"),
+            ),
+            (
+                "script",
+                Some("#!/bin/sh\n# network configuration is script-owned\nnetwork: value\n"),
+            ),
+            (
+                "jinja template",
+                Some(
+                    "## template: jinja\n#cloud-config\nnetwork: {}\nhostname: '{{ v1.local_hostname }}'\n",
+                ),
+            ),
+            (
+                "malformed cloud-config",
+                Some("#cloud-config\nnetwork: [\n"),
+            ),
+            ("unmarked YAML", Some("network: {}\n")),
+            (
+                "flow mapping",
+                Some("#cloud-config\n{network: {version: 2}, hostname: 'on'}\n"),
+            ),
+            (
+                "network text inside a multiline scalar",
+                Some(
+                    "#cloud-config\nwrite_files: [{path: /etc/x, content: \"before\nnetwork: keep\nafter\"}]\nnetwork: {version: 2}\n",
+                ),
+            ),
+            (
+                "referenced network anchor",
+                Some("#cloud-config\nnetwork: &network\n  version: 2\nx-network: *network\n"),
+            ),
+        ] {
+            let response = user_data(
+                Machine {
+                    instructions: forge::CloudInitInstructions {
+                        custom_cloud_init: input.map(str::to_string),
+                        ..Default::default()
+                    },
+                },
+                State(test_app_state_with_templates()),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), axum::http::StatusCode::OK, "{name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            // The template appends a newline to the supplied user-data.
+            assert_eq!(
+                std::str::from_utf8(&body).unwrap(),
+                format!("{}\n", input.unwrap_or("{}")),
+                "{name}"
+            );
+        }
+    }
 
     /// Table-driven coverage for `extract_network_config` across its three
     /// input variants: a present `network:` key, a missing one, and
