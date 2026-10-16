@@ -50,8 +50,10 @@ function curl_url() {
 	if [ -z "$file" ]; then
 		file=$(basename "${url%%\?*}")
 	fi
-	curl --retry 5 --retry-all-errors -k -L "$@" \
+	curl --fail --retry 5 --retry-all-errors -k -L "$@" \
 		--output "$file" "$url" 2>&1 | tee "$log_output"
+	# Return curl's status, not tee's.
+	return "${PIPESTATUS[0]}"
 }
 
 # Announces the download without exposing URL queries, which may contain
@@ -115,6 +117,8 @@ function verify_sha() {
 		exit 1;
 	fi
 	echo "$sha $file" | $shasum --check 2>&1 | tee $log_output
+	# Return the checksum tool's status, not tee's.
+	return "${PIPESTATUS[1]}"
 }
 
 function find_efi_disk() {
@@ -1205,9 +1209,14 @@ function main() {
 
 	announce_image_download
 	curl_url "$image_url" "${image_auth[@]}"
+	curl_status=$?
 	if [ -n "$image_auth_header_file" ]; then
 		rm -f "$image_auth_header_file"
 		trap - EXIT INT TERM
+	fi
+	if [ "$curl_status" -ne 0 ]; then
+		echo "Image download failed" | tee $log_output
+		return 1
 	fi
 	if [ ! -z "$image_sha" ]; then
 		echo "Verifying image with digest $image_sha" | tee $log_output

@@ -248,7 +248,7 @@ curl() {
 				shift 2
 				continue
 				;;
-			--retry-all-errors|-k|-L)
+			--fail|--retry-all-errors|-k|-L)
 				shift
 				continue
 				;;
@@ -470,10 +470,11 @@ image_url="https://images.example/image.qcow2"
 image_auth=()
 curl_url "$image_url"
 read_mock_curl_args
-assert_eq "unauthenticated curl arg count" "8" "${#mock_curl_args[@]}"
-assert_eq "unauthenticated curl output flag" "--output" "${mock_curl_args[5]}"
-assert_eq "unauthenticated curl output filename" "$file" "${mock_curl_args[6]}"
-assert_eq "unauthenticated curl url is the last argument" "$image_url" "${mock_curl_args[7]}"
+assert_eq "unauthenticated curl arg count" "9" "${#mock_curl_args[@]}"
+assert_eq "curl fails on HTTP error responses" "--fail" "${mock_curl_args[0]}"
+assert_eq "unauthenticated curl output flag" "--output" "${mock_curl_args[6]}"
+assert_eq "unauthenticated curl output filename" "$file" "${mock_curl_args[7]}"
+assert_eq "unauthenticated curl url is the last argument" "$image_url" "${mock_curl_args[8]}"
 
 file=
 query_marker="synthetic-query-marker"
@@ -497,13 +498,13 @@ fi
 curl_url "$image_url" "${image_auth[@]}"
 read_mock_curl_args
 assert_eq "authenticated query selects the path filename" "image.qcow2" "$file"
-assert_eq "authenticated curl arg count" "10" "${#mock_curl_args[@]}"
-assert_eq "authenticated curl auth flag" "-K" "${mock_curl_args[5]}"
+assert_eq "authenticated curl arg count" "11" "${#mock_curl_args[@]}"
+assert_eq "authenticated curl auth flag" "-K" "${mock_curl_args[6]}"
 assert_eq "authenticated curl auth value is the header file, not the token" \
-	"$image_auth_header_file" "${mock_curl_args[6]}"
-assert_eq "authenticated curl output flag" "--output" "${mock_curl_args[7]}"
-assert_eq "authenticated curl output filename" "$file" "${mock_curl_args[8]}"
-assert_eq "authenticated curl url preserves the query" "$image_url" "${mock_curl_args[9]}"
+	"$image_auth_header_file" "${mock_curl_args[7]}"
+assert_eq "authenticated curl output flag" "--output" "${mock_curl_args[8]}"
+assert_eq "authenticated curl output filename" "$file" "${mock_curl_args[9]}"
+assert_eq "authenticated curl url preserves the query" "$image_url" "${mock_curl_args[10]}"
 for arg in "${mock_curl_args[@]}"; do
 	case "$arg" in
 		*my-token*) fail "token leaked into curl's argument list: $arg" ;;
@@ -632,5 +633,47 @@ assert_eq "override partition" "/dev/targetp2" "$boot_part"
 assert_eq "override source" "override" "$boot_part_source"
 assert_log_contains "Resolved /boot from bootfs_uuid=boot-override to /dev/targetp2"
 bootfs_uuid=
+
+echo "curl_url returns curl's exit status, not tee's"
+# curl_url pipes curl through tee, so without PIPESTATUS a failed download
+# reports success and imaging carries on with a missing or partial image.
+mock_curl_status=0
+curl() {
+	return "$mock_curl_status"
+}
+image_auth=()
+
+mock_curl_status=0
+curl_url "$image_url" >/dev/null
+assert_eq "curl_url returns 0 when curl succeeds" "0" "$?"
+
+mock_curl_status=22
+curl_url "$image_url" >/dev/null
+assert_eq "curl_url returns curl's failure" "22" "$?"
+unset -f curl
+
+echo "verify_sha returns the checksum tool's exit status, not tee's"
+# A mismatch used to print FAILED and still return 0, so an image that did
+# not match image_sha was written to disk.
+file="$temp_dir/image.img"
+sha256_digest=$(printf 'a%.0s' {1..64})
+mock_sha256sum_status=0
+sha256sum() {
+	echo "$file: mock"
+	return "$mock_sha256sum_status"
+}
+
+mock_sha256sum_status=0
+verify_sha "$sha256_digest" >/dev/null
+assert_eq "verify_sha returns 0 when the checksum matches" "0" "$?"
+
+mock_sha256sum_status=1
+verify_sha "$sha256_digest" >/dev/null
+assert_eq "verify_sha returns the checksum tool's failure" "1" "$?"
+unset -f sha256sum
+
+# An unrecognised digest length stops the script, so run it in a subshell.
+(verify_sha "tooshort" >/dev/null 2>&1)
+assert_eq "verify_sha rejects an unknown digest length" "1" "$?"
 
 echo "disk imaging identifier tests passed"
