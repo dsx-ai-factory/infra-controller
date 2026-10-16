@@ -2658,17 +2658,12 @@ async fn initial_network_wait_keeps_admin_until_tenant_configuration_is_ready(
         let waiting = ManagedHostState::Assigned {
             instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
         };
-        // Observe the intermediate state before a requeued transition can leave it.
-        for _ in 0..10 {
-            env.run_machine_state_controller_iteration_without_requeue()
-                .await;
-            let mut txn = env.db_txn().await;
-            let state = mh.snapshot(&mut txn).await.managed_state;
-            txn.commit().await.unwrap();
-            if state == waiting {
-                break;
-            }
-        }
+        env.run_machine_state_controller_iteration_until_state_matches(
+            &mh.id.into(),
+            10,
+            waiting.clone(),
+        )
+        .await;
 
         let mut txn = env.db_txn().await;
         let snapshot = mh.snapshot(&mut txn).await;
