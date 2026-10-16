@@ -101,7 +101,7 @@ pub(crate) async fn trigger_managed_host_reset(
     let machine_id: MachineId = convert_and_log_machine_id(req.machine_id.as_ref())?;
 
     // A reset tears down every attached DPU, so it is only expressible against the host.
-    if !machine_id.machine_type().is_host() {
+    if machine_id.machine_type().is_dpu() {
         return Err(CarbideError::InvalidArgument(format!(
             "{machine_id} is not a host machine; reset targets the host, not an individual DPU"
         ))

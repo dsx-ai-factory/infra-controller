@@ -19,7 +19,9 @@ use std::collections::HashMap;
 
 use carbide_machine_controller::handler::MachineStateHandlerBuilder;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
-use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
+use carbide_uuid::machine::{
+    DpuMachineId, HostMachineIdSubtypeTrait, MachineId, MachineIdSubtypeTrait,
+};
 use chrono::Utc;
 use common::api_fixtures::{
     create_managed_host_multi_dpu, create_managed_host_with_hardware_info_template,
@@ -44,6 +46,7 @@ use crate::tests::common::api_fixtures::dpu::create_dpu_machine_in_waiting_for_n
 use crate::tests::common::api_fixtures::instance::TestInstance;
 use crate::tests::common::api_fixtures::rpc_instance::RpcInstance;
 use crate::tests::common::api_fixtures::test_machine::TestMachineInterface;
+use crate::tests::common::api_fixtures::test_managed_host::TestAnyManagedHost;
 use crate::tests::common::api_fixtures::{
     TestEnv, TestMachine, TestManagedHost, create_managed_host, forge_agent_control,
     update_time_params,
@@ -2243,7 +2246,7 @@ async fn test_dpu_for_reprovisioning_cannot_restart_if_not_started(pool: sqlx::P
     }
 }
 
-impl TestManagedHost {
+impl<ID: HostMachineIdSubtypeTrait> TestAnyManagedHost<ID> {
     pub(in crate::tests) async fn mark_machine_for_updates(&self) {
         self.api
             .insert_machine_health_report(tonic::Request::new(
