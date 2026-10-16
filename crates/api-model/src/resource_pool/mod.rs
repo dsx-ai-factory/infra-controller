@@ -14,9 +14,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+pub mod allocation;
 pub mod binding;
 pub mod common;
 pub mod define;
+pub mod remote;
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -168,7 +170,9 @@ impl fmt::Display for ValueType {
     }
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+/// `OwnerType` identifies the kind of entity holding a resource pool value.
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OwnerType {
     /// owner_type for loopback_ip
     Machine,
@@ -177,9 +181,10 @@ pub enum OwnerType {
     NetworkSegment,
 
     /// owner_type for pkey
+    #[serde(rename = "ib_partition")]
     IBPartition,
 
-    /// owner_type for vpc_cni
+    /// A VPC holding a VNI allocation.
     Vpc,
 
     /// owner_type for East West Networks
@@ -387,6 +392,24 @@ mod tests {
 
             "vpc" {
                 OwnerType::Vpc => Yields(OwnerType::Vpc),
+            }
+        );
+    }
+
+    #[test]
+    fn owner_serde_preserves_existing_names() {
+        value_scenarios!(
+            run = |owner| {
+                let serialized = serde_json::to_string(&owner).unwrap();
+                assert_eq!(serde_json::from_str::<OwnerType>(&serialized).unwrap(), owner);
+                serialized
+            };
+            "owner names" {
+                OwnerType::Machine => r#""machine""#.to_owned(),
+                OwnerType::NetworkSegment => r#""network_segment""#.to_owned(),
+                OwnerType::IBPartition => r#""ib_partition""#.to_owned(),
+                OwnerType::Vpc => r#""vpc""#.to_owned(),
+                OwnerType::SpxPartition => r#""spx_partition""#.to_owned(),
             }
         );
     }

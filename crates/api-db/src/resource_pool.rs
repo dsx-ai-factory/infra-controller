@@ -14,7 +14,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+pub mod allocation;
 pub mod binding;
+pub mod remote;
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -273,6 +275,10 @@ where
 /// An omitted `requested_value` requires `auto_assign=true`; an exact request
 /// requires `auto_assign=false`. Use [`allocate_exact`] when an exact request
 /// may claim a free value from either partition.
+///
+/// The database maintains the shared [`allocation`] record in this same statement,
+/// including on an autocommit connection. If that record cannot be written, the
+/// inventory write rolls back too.
 pub async fn allocate<T>(
     value: &ResourcePool<T>,
     txn: &mut PgConnection,

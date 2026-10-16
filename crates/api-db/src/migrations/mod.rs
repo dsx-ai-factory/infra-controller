@@ -22,6 +22,8 @@ use sqlx::migrate::{MigrateError, Migrator};
 
 #[cfg(test)]
 mod prefix_overlap_scope;
+#[cfg(test)]
+mod resource_pool_allocation;
 
 static MIGRATION_LAYOUT: LazyLock<MigrationLayout> = LazyLock::new(|| {
     MigrationLayout::new(

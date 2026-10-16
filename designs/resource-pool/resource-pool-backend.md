@@ -4,7 +4,7 @@
 
 This design specifies the implementation contract for [P01: execution, ownership, and recovery](https://github.com/dsx-ai-factory/infra-controller/issues/7130), part of [ResourcePoolBackend foundations](https://github.com/dsx-ai-factory/infra-controller/issues/7129). It addresses the external VNI and route target requirements in [issue #6249](https://github.com/dsx-ai-factory/infra-controller/issues/6249).
 
-The contracts below describe proposed behavior. This document does not enable a backend, add configuration, change an API, or migrate allocations. Source observations refer to revision `b4075867e725d272e41710adac394bce0e469e35`.
+The contracts below guide the implementation across the planned PRs. The Existing Boundaries section records the baseline at revision `b4075867e725d272e41710adac394bce0e469e35`; later sections identify the work that implements each contract. Adding allocation records does not move allocations between backends or enable remote pool selection.
 
 The release boundaries are:
 
@@ -85,6 +85,18 @@ The Integrated backend must retain the existing SQL success path, owner strings,
 
 Old Integrated allocations remain valid without acquiring remote handles. Integrated cleanup continues using its existing ownership checks. New remote generations do not retroactively change the same-owner semantics of Integrated exact allocation.
 
+### Shared Allocation Records
+
+Every backend uses `resource_pool_allocations` to record the value assigned to an owner. Each record has its own allocation UUID, logical pool, typed value, owner, assignment mode when known, and a link to its source. An Integrated record links to the inventory row. A remote record links to the original operation, which retains the binding, provider allocation handle, routing policy, and recovery information. The common model and bounded reads live in `api-model::resource_pool::allocation` and `api-db::resource_pool::allocation`.
+
+The record describes one allocation, rather than every event in its history. Integrated release removes it in the same SQL statement that frees the inventory row. Remote cancellation or release keeps it until the provider confirms cleanup. Removing that record does not remove the remote operation or its saved result: those remain necessary to recognize delayed retries. A pending request without an assignment, a rejected request, or uninitialized inventory without an owner has no allocation record.
+
+Integrated inventory writes maintain their allocation records through database triggers. This keeps old and new API instances consistent during a rolling upgrade, including allocations made after the migration's initial backfill. It also preserves the existing single SQL round-trip and rollback behavior: if the allocation record cannot be written, the inventory change fails with it. The triggers copy existing inventory facts; they do not select values, resolve configuration, or contact a backend. Rust does not duplicate those writes. Adding the inventory foreign key blocks inventory writers while the migration installs the triggers and copies existing allocations. That lock lasts until commit; no duration bound is claimed without site-size measurements.
+
+Common allocation state is derived from its source: Integrated allocations are attached; remote assignments are reserved, attached, or awaiting cleanup according to their operation. Do not maintain a second independently mutable lifecycle state. An Integrated owner or allocation-time change creates a new allocation UUID; other inventory metadata changes preserve it. Missing historical allocation times or assignment modes remain absent. `recorded_at` is when NICo inserts the record, including during backfill. `allocated_at` preserves the Integrated inventory time and is absent for remote records, whose provider allocation time is unknown.
+
+An allocation-details API and web page can use this common model in a later change. P06 provides the storage and read helpers; it does not add a public inspection API or enable a production remote pool.
+
 ## Binding and Authority
 
 Configuration names select a binding; they do not identify the authority that issued an allocation.
@@ -105,7 +117,7 @@ An omitted pool `backend` selects Integrated. An unknown reference is an error, 
 
 Resolve an alias with `Describe`, compare the returned authority and pool with any saved binding, and persist that identity before allocation. P07 and P08 implement these caller checks before remote activation. Every later RPC uses the saved `PoolBinding`, including after a reconnect; the provider must reject an authority or pool it does not serve. The gRPC client does not issue an extra `Describe` behind each method call. An endpoint or credential update must preserve the saved authority and pool. Provider identity checks supplement authenticated TLS; a self-reported ID alone does not authenticate a service.
 
-Retain issuing authority, provider pool, and binding identity on every remote operation and allocation. Lookup and release use those records, even if configuration changes. Removal or redirection of a binding with unresolved operations, attached reservations, retained allocations, or unfinished cleanup is rejected.
+Retain issuing authority, provider pool, and binding identity on every remote operation and allocation. Lookup and release use those records, even if configuration changes. Removal or redirection of a binding with unresolved operations, attached reservations, retained allocations, or unfinished cleanup is rejected. Retained terminal operations also keep their binding: the database foreign key prevents deleting it while those operations remain.
 
 [P03: named backends and bindings](https://github.com/dsx-ai-factory/infra-controller/issues/7132) owns exact TOML keys beyond the agreed selectors, precedence, credential delivery, and startup validation. It also owns the explicit first-selection procedure for an upgraded deployment and whether a previously seeded, drained binding can be reassigned. Until that procedure is implemented and tested, changing an existing binding is rejected. An empty allocation list alone is insufficient because a request can still be in flight.
 
@@ -186,15 +198,16 @@ The existing gates need explicit backend-aware equivalents:
 
 The [common-pool constructor](../../crates/api-db/src/resource_pool.rs), [machine allocation and backfill helpers](../../crates/api-db/src/machine.rs), and [VPC transition handler](../../crates/api-core/src/handlers/vpc.rs) contain these gates. Remote overlap checks use full effective eligibility, including any retained assignments, rather than only allocations observed locally. A provider's inventory outside NICo's eligibility does not make those values NICo pool members.
 
-## Durable Remote Records
+## Stored Allocation and Recovery Records
 
 Reservations persist until explicit release. There are no expiry or renewal semantics in the first provider contract.
 
-The durable records must satisfy these requirements; [P06: operation and allocation persistence](https://github.com/dsx-ai-factory/infra-controller/issues/7135) owns the concrete schema:
+The records must satisfy these requirements. [P06: operation and allocation persistence](https://github.com/dsx-ai-factory/infra-controller/issues/7135) supplies the shared allocation and remote operation storage. P07 and the consumer adoption work add entity attachment and completion intent where each workflow needs them.
 
 | Record | Required Contents |
 | --- | --- |
 | Binding | Stable site, logical pool, authority, provider pool, binding identity, and effective eligibility revision |
+| Allocation | One current assignment from any backend, with its own UUID, pool, typed value, owner, known assignment mode and timestamps, and source link |
 | Operation | Unique operation ID, immutable request body or digest plus recoverable input, binding, eligibility revision, owner, slot, generation, completion authority, and lifecycle state |
 | Assignment | Issuing identity, allocation handle, typed value, associated immutable policy payload, and provider result identity |
 | Attachment | Entity and slot reference to the assignment; retained until the entity's lifecycle permits release |
@@ -214,18 +227,18 @@ Use these semantic states, with transition guards implemented in short database 
 | --- | --- | --- |
 | Pending | Intent committed; dispatch can be absent, running, or have an unknown result | Attached or CancelRequested |
 | Attached | Entity and validated assignment committed together | ReleaseRequested after consumer-specific drain or retention checks |
-| CancelRequested | Attachment forbidden; provider reservation must be cancelled, including a request not yet received | Cancelled after terminal provider acknowledgement |
+| CancelRequested | Attachment forbidden; provider reservation must be cancelled, including a request not yet received | Cancelled or Released after terminal provider acknowledgement |
 | ReleaseRequested | Entity no longer uses the assignment; cleanup retains original handle and issuing authority | Released after provider acknowledgement |
 | Cancelled | Provider guarantees this operation cannot reserve later | Terminal |
 | Released | Original allocation is gone; replay cannot create another | Terminal |
 
-A provider result can be persisted while the operation remains Pending. Result availability does not grant attachment permission. The transaction attaching the entity also records the assignment and moves the operation to Attached; it must verify the current completion authority, slot generation, policy, and Pending state.
+A provider result can be persisted while the operation remains Pending. Result availability does not grant attachment permission. A definite failure also remains Pending and keeps the owner slot occupied until cancellation is confirmed; saving a failure alone does not permit a new generation. The transaction attaching the entity also records the assignment and moves the operation to Attached; it must verify the current completion authority, slot generation, policy, and Pending state.
 
 Cancellation first conditionally moves Pending to CancelRequested. Attachment and cancellation contend on the same durable state, so exactly one can win. If attachment already committed, cancellation must follow the entity's normal deletion or retention lifecycle rather than release its live assignment.
 
 A routing change that retains an inactive VNI must retain that assignment's handle and policy independently of the new active generation. Explicit inactive-VNI cleanup releases only the retained assignment after its existing version and expected-value checks.
 
-The operation record survives a failed entity transaction. Cleanup records survive entity deletion. If a workflow allocates several resources, persist each reservation and an aggregate completion intent. Failure of the second allocation cancels the first unless the entity transaction attached the complete set.
+The operation record survives a failed entity transaction. Cleanup records survive entity deletion. If a workflow allocates several resources, persist each reservation and an aggregate completion intent. Failure of the second allocation cancels the first unless the entity transaction attached the complete set. P07 defines the coordination, and each consumer adoption owns its entity-specific completion intent; P06 does not introduce a generic workflow engine.
 
 ### Work Ownership
 
@@ -269,9 +282,9 @@ The provider can compact terminal records to the complete binding and operation 
 
 A future retirement protocol can permit garbage collection only after fencing the namespace against all old requests, credentials, and restored clients. Provider disaster recovery must preserve reservation and tombstone durability or stop allocation until reconciliation establishes it.
 
-Ordinary process restart uses the current durable database. Restoring an older database is a separate offline recovery procedure owned by P06 and P07 and required before remote activation. Stop and fence every original writer, invalidate its provider access, and establish that accepted in-flight requests can no longer change the reconciled state. A provider that cannot establish that boundary keeps the site offline. Starting a live clone with the original site identity and credentials is unsupported; a database-local ID cannot distinguish that clone from a legitimate replica.
+Ordinary process restart uses the current durable database. Restoring an older database requires a separate offline recovery procedure. P06 preserves the operation identities; [P07: execution and recovery](https://github.com/dsx-ai-factory/infra-controller/issues/7136) must document and test the procedure before remote activation. Stop and fence every original writer, invalidate its provider access, and establish that accepted in-flight requests can no longer change the reconciled state. A provider that cannot establish that boundary keeps the site offline. Starting a live clone with the original site identity and credentials is unsupported; a database-local ID cannot distinguish that clone from a legitimate replica.
 
-Before resuming provider dispatch, entity use, or DPU configuration publication, reconcile all Pending, Attached, retained, and cleanup records with their original provider identities. Matching handles can resume; missing, released, reissued, or conflicting handles quarantine their consumers until repaired and drained as needed. Never render a stale Attached VNI merely because the backup contains it. Provider reservations absent from the backup require an authoritative ownership audit before adoption or cleanup; absence from restored Core state is not cancellation authority. P06/P07 must document and prove this fence and reconciliation procedure. A clone used as a new site needs a new identity and may not replay or claim the original site's operations or handles.
+Before resuming provider dispatch, entity use, or DPU configuration publication, reconcile all Pending, Attached, retained, and cleanup records with their original provider identities. Matching handles can resume; missing, released, reissued, or conflicting handles quarantine their consumers until repaired and drained as needed. Never render a stale Attached VNI merely because the backup contains it. Provider reservations absent from the backup require an authoritative ownership audit before adoption or cleanup; absence from restored Core state is not cancellation authority. P07 must prove this fence and reconciliation procedure. A clone used as a new site needs a new identity and may not replay or claim the original site's operations or handles.
 
 Handles identify allocation instances, not values. If value 101 is released and reissued under a new handle, releasing the old handle is an idempotent terminal result or an explicit ownership conflict. It must never release the new reservation, even if the owner string is identical.
 
