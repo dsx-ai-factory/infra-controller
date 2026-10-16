@@ -934,8 +934,6 @@ impl ExploredManagedHost {
 pub struct ExploredManagedSwitch {
     /// The Switch's BMC IP
     pub bmc_ip: IpAddr,
-    // Host mac address
-    pub nv_os_mac_addresses: Vec<MacAddress>,
     /// Exploration report for this switch endpoint
     pub report: EndpointExplorationReport,
 }

@@ -17809,7 +17809,8 @@ type ExpectedSwitch struct {
 	// Static IP reservation for the single wired NVOS port. Only meaningful
 	// when `nvos_interfaces` has exactly one entry.
 	NvosIpAddress *string `protobuf:"bytes,13,opt,name=nvos_ip_address,json=nvosIpAddress,proto3,oneof" json:"nvos_ip_address,omitempty"`
-	// The switch's NVOS ethernet ports. Exactly one entry must be flagged
+	// The switch's NVOS ethernet ports. Create and replace-all entries require
+	// at least one port. Exactly one entry must be flagged
 	// `is_primary` when more than one is present; a single port is primary
 	// implicitly. On reads the flags report the current primary.
 	NvosInterfaces []*ExpectedNvosInterface `protobuf:"bytes,14,rep,name=nvos_interfaces,json=nvosInterfaces,proto3" json:"nvos_interfaces,omitempty"`

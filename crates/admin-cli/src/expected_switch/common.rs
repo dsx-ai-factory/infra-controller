@@ -73,7 +73,6 @@ pub(crate) struct ExpectedSwitchJson {
     /// The switch's NVOS ethernet ports. Mark one entry `"is_primary": true` to
     /// choose eth0; a single-port switch is primary implicitly and omitting the
     /// flag on a multi-port switch defaults the first entry to primary.
-    #[serde(default)]
     pub(crate) nvos_interfaces: Vec<NvosInterfaceArg>,
     pub(crate) nvos_username: Option<String>,
     pub(crate) nvos_password: Option<String>,
@@ -89,7 +88,7 @@ pub(crate) struct ExpectedSwitchJson {
 
 /// Builds the structured `nvos_interfaces` wire list from the per-port CLI or
 /// JSON inputs. When no port is marked primary, the first is flagged; a
-/// single-port switch is primary implicitly (all enforced server-side). Call
+/// single-port switch is primary implicitly. Core validates the resulting set. Call
 /// [`ensure_single_primary`] first to reject more than one primary.
 pub(crate) fn nvos_interfaces_wire(
     interfaces: &[NvosInterfaceArg],
@@ -126,6 +125,42 @@ pub(crate) fn ensure_single_primary(interfaces: &[NvosInterfaceArg]) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacement_json_requires_the_structured_port_field() {
+        for (field, ports, accepted) in [
+            (
+                "nvos_interfaces",
+                serde_json::json!([{"mac_address": "02:00:00:00:00:01", "is_primary": true}]),
+                true,
+            ),
+            (
+                "nvos_mac_addresses",
+                serde_json::json!(["02:00:00:00:00:01"]),
+                false,
+            ),
+        ] {
+            let mut value = serde_json::json!({
+                "bmc_mac_address": "02:00:00:00:00:02",
+                "bmc_username": "admin",
+                "bmc_password": "test-password",
+                "switch_serial_number": "JSON-PORTS",
+                "expected_switch_id": "12345678-1234-5678-90ab-cdef01234567"
+            });
+            value[field] = ports;
+            let result = serde_json::from_value::<ExpectedSwitchJson>(value);
+            if accepted {
+                assert!(result.is_ok(), "{field}: {result:?}");
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("missing field `nvos_interfaces`")
+                );
+            }
+        }
+    }
 
     fn wire(values: &[&str]) -> Vec<(String, bool)> {
         let interfaces: Vec<NvosInterfaceArg> = values

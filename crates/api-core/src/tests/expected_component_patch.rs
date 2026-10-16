@@ -834,17 +834,22 @@ async fn patch_expected_switch_preserves_unselected_fields(pool: PgPool) {
 async fn patch_expected_switch_allows_unrelated_updates_on_a_zero_port_row(pool: PgPool) {
     let env = create_test_env(pool).await;
     let id = Uuid::new_v4();
-    env.api
-        .add_expected_switch(Request::new(forge::ExpectedSwitch {
-            expected_switch_id: rpc_id(id),
-            bmc_mac_address: "02:00:00:00:59:30".to_string(),
+    // Seed a legacy record directly: new API creates require NVOS ports.
+    let mut txn = env.pool.begin().await.unwrap();
+    db::expected_switch::create(
+        &mut txn,
+        model::expected_switch::ExpectedSwitch {
+            expected_switch_id: Some(id),
+            bmc_mac_address: "02:00:00:00:59:30".parse().unwrap(),
             bmc_username: "bmc-user".to_string(),
             bmc_password: "before".to_string(),
-            switch_serial_number: "SWITCH-030".to_string(),
+            serial_number: "SWITCH-030".to_string(),
             ..Default::default()
-        }))
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
 
     env.api
         .patch_expected_switch(Request::new(forge::PatchExpectedSwitchRequest {

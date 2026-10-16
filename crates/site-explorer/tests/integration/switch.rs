@@ -78,11 +78,17 @@ fn explored_managed_switch_fixture(
     };
     ExploredManagedSwitch {
         bmc_ip,
-        nv_os_mac_addresses: vec![nvos_mac],
         report: EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
             vendor: Some(bmc_vendor::BMCVendor::Nvidia),
             chassis: vec![chassis],
+            systems: vec![ComputerSystem {
+                ethernet_interfaces: vec![EthernetInterface {
+                    mac_address: Some(nvos_mac),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
             model: Some("Switch".to_string()),
             ..Default::default()
         },

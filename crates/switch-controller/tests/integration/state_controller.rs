@@ -78,7 +78,7 @@ fn nvos_and_nmxc_activities() -> Vec<model::rack::MaintenanceActivity> {
 }
 
 #[sqlx_test]
-async fn initializing_waits_when_only_a_non_primary_nvos_port_is_associated(
+async fn initializing_requires_only_the_primary_nvos_port_to_be_associated(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = ControllerEnv::new(pool.clone()).await;
@@ -129,7 +129,27 @@ async fn initializing_waits_when_only_a_non_primary_nvos_port_is_associated(
     ));
     let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), non_primary).await?;
     assert_eq!(interfaces[0].switch_id, Some(switch_id));
-    txn.rollback().await?;
+
+    // Make the discovered port primary; the still-unknown secondary must not
+    // prevent initialization from advancing.
+    for interface in &mut expected.nvos_interfaces {
+        interface.is_primary = interface.mac_address == non_primary;
+    }
+    db::expected_switch::update(txn.as_mut(), &expected).await?;
+    txn.commit().await?;
+    env.run_switch_controller_iteration().await;
+
+    let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
+        .await?
+        .expect("switch exists");
+    assert!(matches!(
+        switch.controller_state.value,
+        SwitchControllerState::Configuring {
+            config_state: ConfiguringState::ConfigureCertificate {
+                configure_certificate: ConfigureCertificateState::Start,
+            },
+        }
+    ));
     Ok(())
 }
 

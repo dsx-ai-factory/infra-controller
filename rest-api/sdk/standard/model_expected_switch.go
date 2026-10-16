@@ -31,7 +31,7 @@ type ExpectedSwitch struct {
 	BmcMacAddress *string `json:"bmcMacAddress,omitempty" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
 	// Serial number of the Expected Switch
 	SwitchSerialNumber *string `json:"switchSerialNumber,omitempty"`
-	// NVOS ethernet ports of the Expected Switch, with the primary (eth0) port flagged.
+	// NVOS ethernet ports of the Expected Switch, with the primary (eth0) port flagged. Array order is not stable across inventory synchronization; identify ports by MAC and use isPrimary for selection.
 	NvosInterfaces []NvosInterface `json:"nvosInterfaces,omitempty"`
 	// Deprecated flat NVOS MAC list retained for v2 compatibility. Use `nvosInterfaces`. Responses emit both fields, and this array contains the same MACs in the same order as `nvosInterfaces`.
 	// Deprecated

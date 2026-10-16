@@ -31210,7 +31210,7 @@ components:
           description: Serial number of the Expected Switch
         nvosInterfaces:
           type: array
-          description: NVOS ethernet ports of the Expected Switch, with the primary (eth0) port flagged.
+          description: NVOS ethernet ports of the Expected Switch, with the primary (eth0) port flagged. Array order is not stable across inventory synchronization; identify ports by MAC and use isPrimary for selection.
           items:
             $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
@@ -31345,7 +31345,8 @@ components:
           description: NvOS password for the Expected Switch
         nvosInterfaces:
           type: array
-          description: NVOS ethernet ports of the Expected Switch. Mark one entry primary to choose eth0; when none is marked, the first entry on a multi-port switch defaults to primary and a single-port switch is always its own primary. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
+          minItems: 1
+          description: Required NVOS ethernet ports of the Expected Switch. Mark one entry primary to choose eth0; when none is marked, the first entry on a multi-port switch defaults to primary and a single-port switch is always its own primary. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
           items:
             $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
@@ -31411,6 +31412,7 @@ components:
         - siteId
         - bmcMacAddress
         - switchSerialNumber
+        - nvosInterfaces
     ExpectedSwitchList:
       title: ExpectedSwitchList
       type: object
@@ -31522,6 +31524,7 @@ components:
           description: NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
         nvosInterfaces:
           type: array
+          minItems: 1
           description: Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array is rejected because a switch must keep at least one NVOS port. Mark one entry primary to choose eth0. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
           items:
             $ref: '#/components/schemas/NvosInterface'

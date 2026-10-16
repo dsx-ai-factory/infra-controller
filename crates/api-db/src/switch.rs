@@ -824,7 +824,7 @@ pub async fn clear_bmc_credential_rotation_requested(
 
 /// Full endpoint info for a switch: BMC MAC/IP and optionally NVOS MAC/IP.
 ///
-/// NVOS fields are nullable because `nvos_mac_addresses` may not be set on the
+/// NVOS fields are nullable because `nvos_interfaces` may not be set on a legacy
 /// expected switch, or the corresponding `machine_interfaces` / addresses may
 /// not exist yet.
 #[derive(Debug, sqlx::FromRow)]
@@ -896,15 +896,15 @@ pub struct ReadyControlPlaneSwitchEndpointRow {
 
 /// Resolve SwitchIds to full endpoint info (BMC + NVOS MAC/IP).
 ///
-/// Selects the lowest-MAC discovered inventory port with an address, preferring
-/// IPv4 on that port, then the lowest segment ID and address. NVOS LEFT JOINs
+/// Selects the operator-declared primary port, even when it has no address.
+/// Within that port, prefers IPv4, then the lowest segment ID and address. NVOS LEFT JOINs
 /// preserve switches without usable NVOS data with nullable MAC/IP fields.
 /// BMC resolution still requires an underlay address.
 ///
 /// Path:
 ///   switches.bmc_mac_address -> expected_switches.bmc_mac_address (BMC MAC)
 ///   -> machine_interfaces (by bmc_mac) -> machine_interface_addresses (underlay) -> BMC IP
-///   -> expected_switches.nvos_mac_addresses (NVOS MAC, nullable)
+///   -> expected_switch_nvos_interfaces (NVOS MAC and primary flag)
 ///   -> machine_interfaces (by nvos_mac) -> machine_interface_addresses -> NVOS IP
 pub async fn find_switch_endpoints_by_ids(
     db: impl crate::db_read::DbReader<'_>,
@@ -2103,7 +2103,7 @@ mod tests {
     /// The pre-ingestion endpoint resolver is anchored on
     /// `expected_switches.bmc_mac_address` (no `switches` row): it resolves the
     /// BMC IP from an underlay-segment BMC interface, joins the NVOS MAC/IP by
-    /// `nvos_mac_addresses` membership, and builds the NVOS hostname from the
+    /// `expected_switch_nvos_interfaces`, preferring the primary, and builds the NVOS hostname from the
     /// interface hostname plus its domain. A BMC interface on a non-underlay
     /// segment must not resolve.
     #[crate::sqlx_test]

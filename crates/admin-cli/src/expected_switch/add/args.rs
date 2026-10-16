@@ -32,12 +32,13 @@ EXAMPLES:
 
 Add an expected switch with its BMC credentials and serial number:
     $ nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 \
-    --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB
+    --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB \
+    --nvos-interface aa:bb:cc:dd:ee:ff
 
 Add an expected switch and associate it with a rack:
     $ nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 \
     --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB \
-    --rack_id 12345678-1234-5678-90ab-cdef01234567
+    --nvos-interface aa:bb:cc:dd:ee:ff --rack_id 12345678-1234-5678-90ab-cdef01234567
 
 Add an expected switch with NVOS credentials and a static NVOS IP:
     $ nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 \
@@ -53,7 +54,7 @@ Add an expected switch with two NVOS ports, selecting the primary (eth0):
 Add an expected switch with metadata name and a label:
     $ nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 \
     --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB \
-    --meta-name spine-01 --label DATACENTER:XYZ
+    --nvos-interface aa:bb:cc:dd:ee:ff --meta-name spine-01 --label DATACENTER:XYZ
 
 ")]
 pub(crate) struct Args {
@@ -72,6 +73,7 @@ pub(crate) struct Args {
 
     #[clap(
         long = "nvos-interface",
+        required = true,
         value_name = "MAC[,primary]",
         help = "An NVOS ethernet port of the expected switch. Repeat for each port. Append ',primary' to mark the primary port (eth0); when none is marked the first is primary and a single port is always primary",
         action = clap::ArgAction::Append

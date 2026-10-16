@@ -11,7 +11,7 @@ nico-admin-cli-expected-switch-add - Add expected switch
 ```text
 nico-admin-cli expected-switch add <-a|--bmc-mac-address>
 <-u|--bmc-username> <-p|--bmc-password>
-<-s|--switch-serial-number> [--nvos-interface]
+<-s|--switch-serial-number> <--nvos-interface>
 [--nvos-username] [--nvos-password] [--meta-name]
 [--meta-description] [--label] [--rack_id]
 [--bmc-ip-address] [--nvos-ip-address]
@@ -44,8 +44,8 @@ Chassis serial number of the expected switch
 `--nvos-interface <MAC[,primary]>`
 
 An NVOS ethernet port of the expected switch. Repeat for each port.
-Append ',primary' to mark the primary port (eth0); when none is marked
-the first is primary and a single port is always primary
+Append ,primary to mark the primary port (eth0); when none is marked the
+first is primary and a single port is always primary
 
 `--nvos-username <NVOS_USERNAME>`
 
@@ -91,9 +91,9 @@ factory-default credentials in Vault as-is
 
 *Possible values:*
 
-> - true
->
-> - false
+- true
+
+- false
 
 `--extended`
 
@@ -109,9 +109,9 @@ Sort output by specified field
 
 *Possible values:*
 
-> - primary-id: Sort by the primary ID
->
-> - state: Sort by state
+- primary-id: Sort by the primary ID
+
+- state: Sort by state
 
 `-h, --help`
 
@@ -120,11 +120,11 @@ Print help (see a summary with -h)
 ## Examples
 
 ```sh
-nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB
-nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB --rack_id 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB --nvos-interface aa:bb:cc:dd:ee:ff
+nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB --nvos-interface aa:bb:cc:dd:ee:ff --rack_id 12345678-1234-5678-90ab-cdef01234567
 nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB --nvos-interface aa:bb:cc:dd:ee:ff --nvos-username admin --nvos-password mypassword --nvos-ip-address 192.0.2.10
-nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB --nvos-interface aa:bb:cc:dd:ee:ff --nvos-interface aa:bb:cc:dd:ee:00,primary
-nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB --meta-name spine-01 --label DATACENTER:XYZ
+nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB --nvos-interface aa:bb:cc:dd:ee:ff,primary --nvos-interface aa:bb:cc:dd:ee:00
+nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --switch-serial-number DGX-H100-640GB --nvos-interface aa:bb:cc:dd:ee:ff --meta-name spine-01 --label DATACENTER:XYZ
 ```
 
 ---
