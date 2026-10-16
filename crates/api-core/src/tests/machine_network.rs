@@ -24,6 +24,7 @@ use ::rpc::forge::{
     ManagedHostNetworkConfigRequest, ManagedHostNetworkStatusRequest,
 };
 use carbide_instrument::testing::MetricsCapture;
+use carbide_network::ip::IdentifyAddressFamily;
 use carbide_secrets::credentials::{BgpCredentialType, CredentialKey, Credentials};
 use carbide_uuid::machine::{AsMachineId, DpuMachineId};
 use carbide_uuid::network::NetworkSegmentId;
@@ -203,6 +204,272 @@ async fn create_dual_stack_admin_segment(
         .into_inner()
         .id
         .expect("created admin segment must have an id")
+}
+
+/// Reject either family move atomically, but allow it once no sibling is retained.
+#[crate::sqlx_test]
+async fn test_static_assignment_rejects_cross_segment_dual_stack(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_admin_ipv6_test_env(pool).await;
+    let source_id = create_dual_stack_admin_segment(
+        &env,
+        "SOURCE",
+        "192.0.2.0/24",
+        "192.0.2.1",
+        "2001:db8:1::/64",
+        3,
+        None,
+    )
+    .await;
+    let target_id = create_dual_stack_admin_segment(
+        &env,
+        "TARGET",
+        "192.0.12.0/24",
+        "192.0.12.1",
+        "2001:db8:2::/64",
+        3,
+        None,
+    )
+    .await;
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+
+    for (mac, ipv4, ipv6, requested, sibling) in [
+        (
+            "aa:bb:cc:dd:ee:30",
+            "192.0.2.42",
+            "2001:db8:1::42",
+            "192.0.12.42",
+            "2001:db8:1::42",
+        ),
+        (
+            "aa:bb:cc:dd:ee:31",
+            "192.0.2.43",
+            "2001:db8:1::43",
+            "2001:db8:2::43",
+            "192.0.2.43",
+        ),
+    ] {
+        let mut txn = env.db_txn().await;
+        let interface = db::machine_interface::validate_existing_mac_and_create(
+            &mut txn,
+            mac.parse()?,
+            &["192.0.2.1".parse()?],
+            None,
+            None,
+        )
+        .await?;
+        db::machine_interface_address::delete(&mut txn, &interface.id).await?;
+        for address in [ipv4, ipv6] {
+            db::machine_interface_address::insert(
+                &mut txn,
+                interface.id,
+                address.parse()?,
+                model::allocation_type::AllocationType::Dhcp,
+            )
+            .await?;
+        }
+        let before = db::machine_interface::find_one(&mut *txn, interface.id).await?;
+        assert_eq!(before.segment_id, source_id);
+        let before_allocations: serde_json::Value = sqlx::query_scalar(
+            "SELECT jsonb_agg(to_jsonb(a) ORDER BY address) FROM machine_interface_addresses a WHERE interface_id = $1",
+        )
+        .bind(interface.id)
+        .fetch_one(&mut *txn)
+        .await?;
+        txn.commit().await?;
+
+        let error = env
+            .api
+            .assign_static_address(tonic::Request::new(
+                rpc::forge::AssignStaticAddressRequest {
+                    interface_id: Some(interface.id),
+                    ip_address: requested.to_string(),
+                },
+            ))
+            .await
+            .expect_err("a cross-segment move must not retain an out-of-segment sibling");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+        // Reload independently after the rejected RPC, including allocation types and timestamps.
+        let mut txn = env.db_txn().await;
+        let after = db::machine_interface::find_one(&mut *txn, interface.id).await?;
+        assert_eq!(after.segment_id, before.segment_id);
+        assert_eq!(after.domain_id, before.domain_id);
+        assert_eq!(after.hostname, before.hostname);
+        let after_allocations: serde_json::Value = sqlx::query_scalar(
+            "SELECT jsonb_agg(to_jsonb(a) ORDER BY address) FROM machine_interface_addresses a WHERE interface_id = $1",
+        )
+        .bind(interface.id)
+        .fetch_one(&mut *txn)
+        .await?;
+        assert_eq!(after_allocations, before_allocations);
+        txn.rollback().await?;
+
+        let same_segment_address = if requested.parse::<std::net::IpAddr>()?.is_ipv4() {
+            ipv4
+        } else {
+            ipv6
+        };
+        env.api
+            .assign_static_address(tonic::Request::new(
+                rpc::forge::AssignStaticAddressRequest {
+                    interface_id: Some(interface.id),
+                    ip_address: same_segment_address.to_string(),
+                },
+            ))
+            .await?;
+        let mut txn = env.db_txn().await;
+        let same_segment = db::machine_interface::find_one(&mut *txn, interface.id).await?;
+        assert_eq!(same_segment.segment_id, source_id);
+        assert_eq!(same_segment.addresses.len(), 2);
+        assert!(same_segment.addresses.contains(&sibling.parse()?));
+        db::machine_interface_address::delete_by_interface_family(
+            &mut txn,
+            interface.id,
+            sibling.parse::<std::net::IpAddr>()?.address_family(),
+            model::allocation_type::AllocationType::Dhcp,
+        )
+        .await?;
+        txn.commit().await?;
+        env.api
+            .assign_static_address(tonic::Request::new(
+                rpc::forge::AssignStaticAddressRequest {
+                    interface_id: Some(interface.id),
+                    ip_address: requested.to_string(),
+                },
+            ))
+            .await?;
+        let mut txn = env.db_txn().await;
+        let moved = db::machine_interface::find_one(&mut *txn, interface.id).await?;
+        assert_eq!(moved.segment_id, target_id);
+        assert_eq!(
+            moved.addresses,
+            vec![requested.parse::<std::net::IpAddr>()?]
+        );
+        db::machine_interface_address::delete(&mut txn, &interface.id).await?;
+        txn.commit().await?;
+        let response = env
+            .api
+            .assign_static_address(tonic::Request::new(
+                rpc::forge::AssignStaticAddressRequest {
+                    interface_id: Some(interface.id),
+                    ip_address: same_segment_address.to_string(),
+                },
+            ))
+            .await?
+            .into_inner();
+        assert_eq!(
+            response.status(),
+            rpc::forge::AssignStaticAddressStatus::Assigned
+        );
+        let mut txn = env.db_txn().await;
+        let moved_back = db::machine_interface::find_one(&mut *txn, interface.id).await?;
+        assert_eq!(moved_back.segment_id, source_id);
+        assert_eq!(
+            moved_back.addresses,
+            vec![same_segment_address.parse::<std::net::IpAddr>()?]
+        );
+        txn.rollback().await?;
+    }
+    Ok(())
+}
+
+/// A sibling committed while assignment waits must participate in the segment check.
+#[crate::sqlx_test]
+async fn test_static_assignment_rechecks_sibling_after_waiting(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_admin_ipv6_test_env(pool.clone()).await;
+    let source_id = create_dual_stack_admin_segment(
+        &env,
+        "SOURCE",
+        "192.0.2.0/24",
+        "192.0.2.1",
+        "2001:db8:1::/64",
+        3,
+        None,
+    )
+    .await;
+    create_dual_stack_admin_segment(
+        &env,
+        "TARGET",
+        "192.0.12.0/24",
+        "192.0.12.1",
+        "2001:db8:2::/64",
+        3,
+        None,
+    )
+    .await;
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let interface = db::machine_interface::validate_existing_mac_and_create(
+        &mut txn,
+        "aa:bb:cc:dd:ee:32".parse()?,
+        &["192.0.2.1".parse()?],
+        None,
+        None,
+    )
+    .await?;
+    db::machine_interface_address::delete(&mut txn, &interface.id).await?;
+    db::machine_interface_address::insert(
+        &mut txn,
+        interface.id,
+        "192.0.2.44".parse()?,
+        model::allocation_type::AllocationType::Dhcp,
+    )
+    .await?;
+    txn.commit().await?;
+
+    let mut holder = env.db_txn().await;
+    db::machine_interface::lock_for_address_assignment(&mut holder, interface.id).await?;
+    db::machine_interface_address::insert(
+        &mut holder,
+        interface.id,
+        "2001:db8:1::44".parse()?,
+        model::allocation_type::AllocationType::Dhcp,
+    )
+    .await?;
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await?;
+    let assignment = env.api.assign_static_address(tonic::Request::new(
+        rpc::forge::AssignStaticAddressRequest {
+            interface_id: Some(interface.id),
+            ip_address: "192.0.12.44".to_string(),
+        },
+    ));
+    let commit_sibling = async {
+        db::test_support::postgres::wait_for_blocked_query(
+            &pool,
+            holder_pid,
+            "SELECT segment_id FROM machine_interfaces",
+        )
+        .await;
+        holder.commit().await
+    };
+    let (assignment, sibling_commit) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(assignment, commit_sibling)
+        })
+        .await?;
+    sibling_commit?;
+    assert_eq!(
+        assignment
+            .expect_err("the newly committed sibling must prevent the move")
+            .code(),
+        tonic::Code::FailedPrecondition,
+    );
+    let mut txn = env.db_txn().await;
+    let after = db::machine_interface::find_one(&mut *txn, interface.id).await?;
+    assert_eq!(after.segment_id, source_id);
+    assert_eq!(after.addresses.len(), 2);
+    assert!(after.addresses.contains(&"192.0.2.44".parse()?));
+    assert!(after.addresses.contains(&"2001:db8:1::44".parse()?));
+    txn.rollback().await?;
+    Ok(())
 }
 
 #[crate::sqlx_test]
@@ -595,17 +862,21 @@ async fn test_managed_host_network_config_omits_ipv6_outside_reassigned_admin_se
         .await
         .unwrap();
 
-    // Public static assignment moves the interface to the target while replacing only IPv4.
+    // Simulate legacy inconsistent storage. The public assignment API now rejects this move.
     let target_ipv4: std::net::IpAddr = "192.0.12.42".parse().unwrap();
-    env.api
-        .assign_static_address(tonic::Request::new(
-            rpc::forge::AssignStaticAddressRequest {
-                interface_id: Some(primary_interface_id),
-                ip_address: target_ipv4.to_string(),
-            },
-        ))
+    let mut txn = env.db_txn().await;
+    db::machine_interface_address::assign_static(&mut txn, primary_interface_id, target_ipv4)
         .await
         .unwrap();
+    db::machine_interface::update_segment_id(
+        &mut txn,
+        primary_interface_id,
+        target_segment_id,
+        Some(env.domain.into()),
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
 
     // Production reconciliation must not make the stale sibling-family allocation appear valid.
     let mut txn = env.db_txn().await;
