@@ -4998,7 +4998,7 @@ mod test {
     }
 
     #[crate::sqlx_test]
-    async fn dpu_creation_keeps_exhausted_fnn_asn_nonfatal(
+    async fn dpu_creation_keeps_unavailable_fnn_asn_nonfatal(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         const RESOURCE_POOL_LIFECYCLE_FAILURES_METRIC: &str =
@@ -5007,49 +5007,83 @@ mod test {
         let common_pools = common_pools_without_seeded_values();
         let dpu_id =
             MachineId::from_str("fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng")?;
-        let mut connection = pool.acquire().await?;
-        let metrics = MetricsCapture::start();
+        for (scenario, exhaust_pool, expected_failure) in [
+            ("exhausted", true, "exhausted"),
+            ("unconfigured", false, "requested_value_unavailable"),
+        ] {
+            let mut txn = pool.begin().await?;
+            let asn_pool = &common_pools.ethernet.pool_fnn_asn;
+            if exhaust_pool {
+                crate::resource_pool::populate(asn_pool, txn.as_mut(), vec![64512], true).await?;
+                crate::resource_pool::allocate(
+                    asn_pool,
+                    txn.as_mut(),
+                    model::resource_pool::OwnerType::Machine,
+                    "existing-dpu",
+                    None,
+                )
+                .await?;
+            }
+            let stats = crate::resource_pool::stats(txn.as_mut(), asn_pool.name()).await?;
+            assert_eq!(
+                (stats.auto_assign_free, stats.auto_assign_used),
+                (0, usize::from(exhaust_pool)),
+                "{scenario}: verify the pool state before creating the DPU"
+            );
+            let metrics = MetricsCapture::start();
 
-        let (machine, logs) = capture_logs_async(super::create(
-            connection.as_mut(),
-            Some(&common_pools),
-            &dpu_id,
-            ManagedHostState::Ready,
-            None,
-            2,
-        ))
-        .await;
-        let machine = machine?;
+            let (machine, logs) = capture_logs_async(super::create(
+                txn.as_mut(),
+                Some(&common_pools),
+                &dpu_id,
+                ManagedHostState::Ready,
+                None,
+                2,
+            ))
+            .await;
+            let machine = machine?;
 
-        assert_eq!(machine.asn, None);
-        let event_logs = logs
-            .iter()
-            .filter(|log| log.metadata_name == "dpu_asn_allocation_failed")
-            .collect::<Vec<_>>();
-        assert_eq!(event_logs.len(), 1);
-        let log = event_logs[0];
-        assert_eq!(log.level, tracing::Level::INFO);
-        assert_eq!(log.message, "Failed to allocate asn for dpu");
-        assert_eq!(
-            log.field("stable_machine_id"),
-            Some(dpu_id.to_string().as_str())
-        );
-        assert_eq!(log.field("failure"), Some("exhausted"));
-        assert_eq!(log.field("failure_policy"), Some("best_effort"));
-        assert_eq!(log.field("allocation_mode"), Some("automatic"));
-        assert_eq!(
-            metrics.counter_delta(
-                RESOURCE_POOL_LIFECYCLE_FAILURES_METRIC,
-                &[
-                    ("operation", "allocate"),
-                    ("failure", "exhausted"),
-                    ("failure_policy", "best_effort"),
-                    ("allocation_mode", "automatic"),
-                    ("value_type", "integer"),
-                ],
-            ),
-            1.0
-        );
+            assert_eq!(machine.asn, None, "{scenario}");
+            let event_logs = logs
+                .iter()
+                .filter(|log| log.metadata_name == "dpu_asn_allocation_failed")
+                .collect::<Vec<_>>();
+            assert_eq!(event_logs.len(), 1, "{scenario}");
+            let log = event_logs[0];
+            assert_eq!(log.level, tracing::Level::INFO, "{scenario}");
+            assert_eq!(log.message, "Failed to allocate asn for dpu", "{scenario}");
+            assert_eq!(
+                log.field("stable_machine_id"),
+                Some(dpu_id.to_string().as_str()),
+                "{scenario}"
+            );
+            assert_eq!(log.field("failure"), Some(expected_failure), "{scenario}");
+            assert_eq!(
+                log.field("failure_policy"),
+                Some("best_effort"),
+                "{scenario}"
+            );
+            assert_eq!(
+                log.field("allocation_mode"),
+                Some("automatic"),
+                "{scenario}"
+            );
+            assert_eq!(
+                metrics.counter_delta(
+                    RESOURCE_POOL_LIFECYCLE_FAILURES_METRIC,
+                    &[
+                        ("operation", "allocate"),
+                        ("failure", expected_failure),
+                        ("failure_policy", "best_effort"),
+                        ("allocation_mode", "automatic"),
+                        ("value_type", "integer"),
+                    ],
+                ),
+                1.0,
+                "{scenario}"
+            );
+            txn.rollback().await?;
+        }
 
         Ok(())
     }
