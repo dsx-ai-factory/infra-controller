@@ -23,6 +23,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/errors"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/rackopreport"
+	commonutils "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
@@ -1122,22 +1123,41 @@ func (s *PostgresStore) AddComponent(ctx context.Context, comp *component.Compon
 }
 
 // PatchComponent updates a single component's fields and reconciles BMCs in the database.
-func (s *PostgresStore) PatchComponent(ctx context.Context, comp *component.Component) error {
-	newDAO := dao.ComponentTo(comp, comp.RackID)
+func (s *PostgresStore) PatchComponent(ctx context.Context, patch ComponentPatch) error {
+	componentPatch := model.ComponentPatch{
+		ID:              patch.ID,
+		FirmwareVersion: patch.FirmwareVersion,
+		RackID:          patch.RackID,
+		SlotID:          patch.SlotID,
+		TrayIndex:       patch.TrayIndex,
+		HostID:          patch.HostID,
+	}
+	if patch.Description != nil {
+		description := commonutils.JSONStringToMap("description", *patch.Description)
+		componentPatch.Description = &description
+	}
+
+	componentDAO := &model.Component{ID: patch.ID}
+	for _, bmcType := range devicetypes.BMCTypes() {
+		bmcs := patch.BMCsByType[bmcType]
+		for i := range bmcs {
+			componentDAO.BMCs = append(componentDAO.BMCs, *dao.BMCTo(bmcType, &bmcs[i], componentDAO))
+		}
+	}
 
 	operation := func(ctx context.Context, tx bun.Tx) error {
-		if err := newDAO.Patch(ctx, tx); err != nil {
+		if err := componentPatch.Patch(ctx, tx); err != nil {
 			return err
 		}
 
-		if len(newDAO.BMCs) == 0 {
+		if len(componentDAO.BMCs) == 0 {
 			return nil
 		}
 
 		// Load existing BMCs for this component
 		var existingBMCs []model.BMC
 		if err := tx.NewSelect().Model(&existingBMCs).
-			Where("component_id = ?", newDAO.ID).Scan(ctx); err != nil {
+			Where("component_id = ?", componentDAO.ID).Scan(ctx); err != nil {
 			return err
 		}
 
@@ -1146,8 +1166,8 @@ func (s *PostgresStore) PatchComponent(ctx context.Context, comp *component.Comp
 			bmcsByMac[existingBMCs[i].MacAddress] = &existingBMCs[i]
 		}
 
-		for i := range newDAO.BMCs {
-			nb := &newDAO.BMCs[i]
+		for i := range componentDAO.BMCs {
+			nb := &componentDAO.BMCs[i]
 			if cb, ok := bmcsByMac[nb.MacAddress]; ok {
 				if pb := nb.BuildPatch(cb); pb != nil {
 					if err := pb.Patch(ctx, tx); err != nil {

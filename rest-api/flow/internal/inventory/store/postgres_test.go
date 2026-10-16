@@ -22,6 +22,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/resolver"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
@@ -171,6 +172,94 @@ func TestPostgresStore_GetListOfComponents(t *testing.T) {
 	assert.Equal(t, domain.ID, components[0].NVLDomainID)
 	assert.Equal(t, domain.ExternalID, components[0].NVLDomainExternalID)
 	assert.Equal(t, domain.ExternalID, protobuf.ComponentTo(components[0]).NvlDomainExternalId)
+}
+
+func TestPostgresStore_PatchComponent(t *testing.T) {
+	if os.Getenv("DB_PORT") == "" {
+		t.Skip("Skipping integration test: no DB environment specified")
+	}
+
+	ctx := t.Context()
+	dbConf, err := cdb.ConfigFromEnv()
+	require.NoError(t, err)
+	pool, err := commonutils.UnitTestDB(ctx, t, dbConf)
+	require.NoError(t, err)
+	store := NewPostgres(pool)
+
+	powerState := nicoapi.PowerStateOn
+	status := &types.ComponentOperationStatus{Phase: types.PhaseReady, Reason: "preserve status"}
+	health := &types.HealthReport{Source: "core"}
+	stored := model.Component{
+		Name:            "unattached switch",
+		Type:            devicetypes.ComponentTypeToString(devicetypes.ComponentTypeToRSwitch),
+		Manufacturer:    "NVIDIA",
+		Model:           "test model",
+		SerialNumber:    "test serial",
+		FirmwareVersion: "1.0.0",
+		SlotID:          -1,
+		TrayIndex:       -1,
+		HostID:          -1,
+		ComponentID:     stringPtr("core-switch-id"),
+		PowerState:      &powerState,
+		Status:          status,
+		Health:          health,
+		LeakStatus:      types.LeakStatusDetected,
+	}
+	require.NoError(t, stored.Create(ctx, pool.DB))
+
+	firmwareVersion := "2.0.0"
+	description := `{"purpose":"coordinate patch"}`
+	slotID, trayIndex, hostID := 5, 6, 7
+	require.NoError(t, store.PatchComponent(ctx, ComponentPatch{
+		ID:              stored.ID,
+		FirmwareVersion: &firmwareVersion,
+		Description:     &description,
+		SlotID:          &slotID,
+		TrayIndex:       &trayIndex,
+		HostID:          &hostID,
+	}))
+
+	var got model.Component
+	require.NoError(t, pool.DB.NewSelect().Model(&got).Where("id = ?", stored.ID).Scan(ctx))
+	assert.Equal(t, "2.0.0", got.FirmwareVersion)
+	assert.Equal(t, map[string]any{"purpose": "coordinate patch"}, got.Description)
+	assert.Equal(t, 5, got.SlotID)
+	assert.Equal(t, 6, got.TrayIndex)
+	assert.Equal(t, 7, got.HostID)
+	assert.Equal(t, uuid.Nil, got.RackID)
+	assert.Equal(t, stored.Name, got.Name)
+	assert.Equal(t, stored.Type, got.Type)
+	assert.Equal(t, stored.Manufacturer, got.Manufacturer)
+	assert.Equal(t, stored.Model, got.Model)
+	assert.Equal(t, stored.SerialNumber, got.SerialNumber)
+	assert.Equal(t, stored.ComponentID, got.ComponentID)
+	assert.Equal(t, stored.PowerState, got.PowerState)
+	assert.Equal(t, stored.Status, got.Status)
+	assert.Equal(t, stored.Health, got.Health)
+	assert.Equal(t, stored.LeakStatus, got.LeakStatus)
+
+	staleSnapshot, err := store.GetComponentByID(ctx, stored.ID)
+	require.NoError(t, err)
+	_, err = pool.DB.NewUpdate().
+		Model((*model.Component)(nil)).
+		Set("firmware_version = ?", "3.0.0").
+		Set("description = ?", map[string]any{"purpose": "concurrent update"}).
+		Where("id = ?", stored.ID).
+		Exec(ctx)
+	require.NoError(t, err)
+
+	staleSnapshot.Position.SlotID = 8
+	require.NoError(t, store.PatchComponent(ctx, ComponentPatch{
+		ID:     staleSnapshot.Info.ID,
+		SlotID: &staleSnapshot.Position.SlotID,
+	}))
+
+	require.NoError(t, pool.DB.NewSelect().Model(&got).Where("id = ?", stored.ID).Scan(ctx))
+	assert.Equal(t, "3.0.0", got.FirmwareVersion)
+	assert.Equal(t, map[string]any{"purpose": "concurrent update"}, got.Description)
+	assert.Equal(t, 8, got.SlotID)
+	assert.Equal(t, 6, got.TrayIndex)
+	assert.Equal(t, 7, got.HostID)
 }
 
 func stringPtr(value string) *string {
