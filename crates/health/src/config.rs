@@ -287,8 +287,8 @@ pub struct StaticBmcEndpoint {
     /// Optional inline password. Mutually exclusive with `password_file`.
     pub password: Option<String>,
     /// UTF-8 username file, mutually exclusive with `username`.
-    /// Watched by the shared secrets provider; one trailing LF or CRLF is
-    /// removed. Relative paths use the process working directory.
+    /// Reread before requests and stream connections; one trailing LF or CRLF
+    /// is removed. Relative paths use the process working directory.
     pub username_file: Option<PathBuf>,
     /// UTF-8 password file, mutually exclusive with `password`.
     /// Uses the same path and reload rules as `username_file`.

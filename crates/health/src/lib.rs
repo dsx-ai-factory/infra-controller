@@ -27,9 +27,9 @@ pub mod api_client;
 pub mod bmc;
 pub mod collectors;
 pub mod config;
-mod credentials;
 pub mod discovery;
 pub mod endpoint;
+mod file_credentials;
 mod inventory;
 pub mod limiter;
 pub mod metrics;
@@ -65,9 +65,14 @@ use crate::sink::{
 
 #[derive(thiserror::Error, Debug)]
 pub enum HealthError {
-    /// Failure from the shared credential provider, preserving its typed error.
-    #[error("credential source error: {0}")]
-    CredentialSource(carbide_secrets::SecretsError),
+    /// A credential file could not be read as UTF-8. File contents are never included.
+    #[error("failed to read credential file {path}: {source}")]
+    CredentialFileRead {
+        /// Configured path to the username or password file.
+        path: std::path::PathBuf,
+        /// Underlying filesystem or UTF-8 decoding error.
+        source: std::io::Error,
+    },
     #[error("unable to connect to carbide API: {0}")]
     ApiConnectFailed(String),
 

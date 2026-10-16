@@ -32,12 +32,12 @@ use crate::bmc::{
     bmc_latency_endpoint_labels,
 };
 use crate::config::{StaticBmcEndpoint, StaticSwitchEndpointRole};
-use crate::credentials::StaticCredentialProvider;
 use crate::endpoint::{
     BmcAddr, BmcCredentials, BmcEndpoint, BoxFuture, EndpointMetadata, EndpointSnapshot,
     EndpointSource, InventorySnapshot, MachineData, PowerShelfData, SharedSystemUuid, SwitchData,
     SwitchEndpointRole,
 };
+use crate::file_credentials::FileCredentialProvider;
 use crate::metrics::BmcLatencyMetrics;
 
 fn parse_static_nvlink_domain_uuid(
@@ -232,7 +232,7 @@ impl StaticEndpointSource {
             };
             let provider: Arc<dyn CredentialProvider> =
                 if cfg.username_file.is_some() || cfg.password_file.is_some() {
-                    Arc::new(StaticCredentialProvider::new(cfg, mac))
+                    Arc::new(FileCredentialProvider::from_config(cfg))
                 } else if let Some(username) = &cfg.username {
                     Arc::new(FixedCredentialProvider::new(
                         BmcCredentials::UsernamePassword {

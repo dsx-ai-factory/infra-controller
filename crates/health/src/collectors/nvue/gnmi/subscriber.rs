@@ -2683,26 +2683,14 @@ mod tests {
             "username": "admin", "password_file": file.path(),
         }))
         .unwrap();
-        let provider = Arc::new(crate::credentials::StaticCredentialProvider::from_config(
-            &config,
-            Duration::from_millis(20),
-        ));
+        let provider =
+            Arc::new(crate::file_credentials::FileCredentialProvider::from_config(&config));
         let cache = GnmiCredentialCache::new(provider, test_addr());
         let (first, generation) = cache.ensure().await.unwrap();
         assert_eq!(first.password.as_deref(), Some("first"));
         assert_eq!(cache.ensure().await.unwrap().1, generation);
         std::fs::write(file.path(), "second").unwrap();
-        let (second, changed_generation) = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let current = cache.ensure().await.unwrap();
-                if current.0.password.as_deref() == Some("second") {
-                    break current;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
+        let (second, changed_generation) = cache.ensure().await.unwrap();
         assert_eq!(second.password.as_deref(), Some("second"));
         assert_eq!(changed_generation, generation + 1);
     }

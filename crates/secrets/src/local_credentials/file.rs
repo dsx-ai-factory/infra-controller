@@ -183,121 +183,11 @@ fn start_primary_watcher(path: &Path, tx: WatchEventSender) -> notify::Result<Re
     Ok(primary)
 }
 
-/// A credential field supplied inline or in a plain UTF-8 file.
-/// File values remove one trailing LF or CRLF and preserve other whitespace.
-#[derive(Clone)]
-pub enum CredentialValue {
-    /// A fixed value. Debug output redacts its contents.
-    Inline(String),
-    /// A path reopened on reload, including after atomic or symlink replacement.
-    File(PathBuf),
-}
-
-impl std::fmt::Debug for CredentialValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Inline(_) => f.write_str("Inline(<redacted>)"),
-            Self::File(path) => f.debug_tuple("File").field(path).finish(),
-        }
-    }
-}
-
-impl CredentialValue {
-    async fn read(&self) -> Result<String, SecretsError> {
-        match self {
-            Self::Inline(value) => Ok(value.clone()),
-            Self::File(path) => {
-                let mut value = tokio::fs::read_to_string(path).await.map_err(|error| {
-                    SecretsError::GenericError(
-                        eyre::Report::new(error)
-                            .wrap_err(format!("failed to read credential file {}", path.display())),
-                    )
-                })?;
-                if value.ends_with("\r\n") {
-                    value.truncate(value.len() - 2);
-                } else if value.ends_with('\n') {
-                    value.truncate(value.len() - 1);
-                }
-                Ok(value)
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-enum FileSource {
-    Snapshot(PathBuf),
-    Fields {
-        key: CredentialKey,
-        username: CredentialValue,
-        password: CredentialValue,
-    },
-}
-
-impl FileSource {
-    fn paths(&self) -> Vec<PathBuf> {
-        match self {
-            Self::Snapshot(path) => vec![path.clone()],
-            Self::Fields {
-                username, password, ..
-            } => {
-                let mut paths = Vec::new();
-                for value in [username, password] {
-                    if let CredentialValue::File(path) = value
-                        && !paths.contains(path)
-                    {
-                        paths.push(path.clone());
-                    }
-                }
-                paths
-            }
-        }
-    }
-
-    async fn load(&self) -> Result<WatchedCredentials, SecretsError> {
-        match self {
-            Self::Snapshot(path) => FileCredentialsWatcher::load_file(path)
-                .await
-                .map(|snapshot| WatchedCredentials::Snapshot(Box::new(snapshot))),
-            Self::Fields {
-                key,
-                username,
-                password,
-            } => Ok(WatchedCredentials::Fields {
-                key: key.to_key_str().into_owned(),
-                credentials: Credentials::new(username.read().await?, password.read().await?),
-            }),
-        }
-    }
-}
-
-// Structured files and plain-text pairs share the watcher lifecycle without
-// adding application-specific fields to the shared credential-file schema.
-enum WatchedCredentials {
-    Snapshot(Box<CredentialSnapshot>),
-    Fields {
-        key: String,
-        credentials: Credentials,
-    },
-}
-
-impl WatchedCredentials {
-    fn get_credentials(&self, key: &CredentialKey) -> Option<Credentials> {
-        match self {
-            Self::Snapshot(snapshot) => snapshot.get_credentials(key),
-            Self::Fields {
-                key: stored_key,
-                credentials,
-            } => (key.to_key_str().as_ref() == stored_key.as_str()).then(|| credentials.clone()),
-        }
-    }
-}
-
 pub struct FileCredentialsWatcher {
-    credentials: Arc<ArcSwap<WatchedCredentials>>,
-    /// Kernel-backed watchers that were successfully armed. Polling covers
-    /// every configured path, including those without a primary watcher.
-    _primary_watchers: Vec<RecommendedWatcher>,
+    credentials: Arc<ArcSwap<CredentialSnapshot>>,
+    /// `None` when the kernel-backed watcher could not be armed at startup;
+    /// the poll watcher then detects every change on its own.
+    _primary_watcher: Option<RecommendedWatcher>,
     _secondary_watcher: PollWatcher,
 }
 
@@ -315,70 +205,27 @@ impl FileCredentialsWatcher {
     /// startup with its own error rather than a polling warning.
     async fn new_with_primary_watcher(
         config: FileCredentialsConfig,
-        start_primary: impl Fn(&Path, WatchEventSender) -> notify::Result<RecommendedWatcher>,
+        start_primary: impl FnOnce(&Path, WatchEventSender) -> notify::Result<RecommendedWatcher>,
     ) -> Result<Self, SecretsError> {
-        Self::watch(
-            FileSource::Snapshot(config.path()),
-            config.poll_interval(),
-            start_primary,
-        )
-        .await
-    }
-
-    /// Watches a username/password pair for `key` using the same notification,
-    /// polling, and last-valid-snapshot policy as structured credential files.
-    /// At least one field must be a file. Initial read failures fail construction;
-    /// later failures retain the previous pair. Poll intervals must be nonzero.
-    /// Only the supplied key resolves through this reader; other keys return `None`.
-    /// No credential storage backend or Vault connection is required.
-    pub async fn from_fields(
-        key: CredentialKey,
-        username: CredentialValue,
-        password: CredentialValue,
-        poll_interval: Duration,
-    ) -> Result<Self, SecretsError> {
-        Self::watch(
-            FileSource::Fields {
-                key,
-                username,
-                password,
-            },
-            poll_interval,
-            start_primary_watcher,
-        )
-        .await
-    }
-
-    async fn watch(
-        source: FileSource,
-        poll_interval: Duration,
-        start_primary: impl Fn(&Path, WatchEventSender) -> notify::Result<RecommendedWatcher>,
-    ) -> Result<Self, SecretsError> {
+        let path = config.path();
+        let poll_interval = config.poll_interval();
         if poll_interval.is_zero() {
             return Err(SecretsError::GenericError(eyre::eyre!(
                 "credentials.file.poll_interval must be greater than zero"
             )));
         }
-        let paths = source.paths();
-        if paths.is_empty() {
-            return Err(SecretsError::GenericError(eyre::eyre!(
-                "credential watcher requires a file source"
-            )));
-        }
-        for path in &paths {
-            tokio::fs::metadata(path).await.map_err(|err| {
-                SecretsError::GenericError(eyre::Report::new(err).wrap_err(format!(
-                    "credentials file {} is not accessible",
-                    path.display()
-                )))
-            })?;
-        }
+        // Fail on a missing file before arming any watcher. `PollWatcher::watch`
+        // registers nothing for a missing path yet returns `Ok`, and the kernel
+        // watch failure for it would otherwise read as an inotify shortage.
+        tokio::fs::metadata(&path).await.map_err(|err| {
+            SecretsError::GenericError(eyre::Report::new(err).wrap_err(format!(
+                "credentials file {} is not accessible",
+                path.display()
+            )))
+        })?;
         let (tx, mut rx) = mpsc::channel(4);
 
-        let primary: Vec<_> = paths
-            .iter()
-            .map(|path| start_primary(path, tx.clone()))
-            .collect();
+        let primary = start_primary(&path, tx.clone());
 
         let mut secondary = PollWatcher::new(
             move |res: notify::Result<notify::Event>| match res {
@@ -393,17 +240,15 @@ impl FileCredentialsWatcher {
         )
         .map_err(|err| SecretsError::GenericError(err.into()))?;
 
-        for path in &paths {
-            secondary
-                .watch(path, RecursiveMode::NonRecursive)
-                .map_err(|err| SecretsError::GenericError(err.into()))?;
-        }
+        secondary
+            .watch(&path, RecursiveMode::NonRecursive)
+            .map_err(|err| SecretsError::GenericError(err.into()))?;
 
         // Arm the watchers before reading the initial snapshot. Otherwise a
         // replacement between the read and watcher registration could remain
         // invisible until the file changes again. Events received while this
         // read is in flight remain queued for the reload task below.
-        let initial = match source.load().await {
+        let initial = match Self::load_file(&path).await {
             Ok(initial) => initial,
             Err(error) => {
                 // Close the receiver before dropping the watchers so callbacks
@@ -412,33 +257,30 @@ impl FileCredentialsWatcher {
                 return Err(error);
             }
         };
-        let primary = primary
-            .into_iter()
-            .filter_map(|result| match result {
-                Ok(primary) => Some(primary),
-                Err(err) => {
-                    emit(StaticCredentialWatcherFailed::PrimaryWatchSetup {
-                        error: err.to_string(),
-                        poll_interval_secs: poll_interval.as_secs_f64(),
-                    });
-                    None
-                }
-            })
-            .collect();
+        let primary = match primary {
+            Ok(primary) => Some(primary),
+            Err(err) => {
+                emit(StaticCredentialWatcherFailed::PrimaryWatchSetup {
+                    error: err.to_string(),
+                    poll_interval_secs: poll_interval.as_secs_f64(),
+                });
+                None
+            }
+        };
         let credentials = Arc::new(ArcSwap::from_pointee(initial));
-
+        let watched_path = path.clone();
         let credentials_clone = credentials.clone();
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                if !event.paths.iter().any(|event_path| {
-                    paths
-                        .iter()
-                        .any(|path| event_path.file_name() == path.file_name())
-                }) {
+                if !event
+                    .paths
+                    .iter()
+                    .any(|event_path| event_path.file_name() == watched_path.file_name())
+                {
                     continue;
                 }
 
-                match source.load().await {
+                match Self::load_file(&watched_path).await {
                     Ok(updated) => {
                         credentials_clone.store(Arc::new(updated));
                     }
@@ -453,7 +295,7 @@ impl FileCredentialsWatcher {
 
         Ok(Self {
             credentials,
-            _primary_watchers: primary,
+            _primary_watcher: primary,
             _secondary_watcher: secondary,
         })
     }
@@ -489,7 +331,7 @@ impl CredentialReader for FileCredentialsWatcher {
         &self,
         key: &CredentialKey,
     ) -> Result<Option<Credentials>, SecretsError> {
-        Ok(self.credentials.load().get_credentials(key))
+        self.credentials.load().get_credentials(key).await
     }
 }
 
@@ -501,164 +343,6 @@ mod tests {
 
     use super::*;
     use crate::credentials::{CredentialKey, CredentialType, Credentials};
-
-    #[test]
-    fn field_snapshot_resolves_only_its_key() {
-        use carbide_test_support::value_scenarios;
-        let key = CredentialKey::UfmAuth {
-            fabric: "one".to_string(),
-        };
-        let pair = Credentials::new("admin", "secret");
-        let snapshot = WatchedCredentials::Fields {
-            key: key.to_key_str().into_owned(),
-            credentials: pair.clone(),
-        };
-        value_scenarios!(run = |requested| snapshot.get_credentials(&requested);
-            "key selection" {
-                key => Some(pair),
-                CredentialKey::UfmAuth { fabric: "two".to_string() } => None,
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn plain_credential_field_contents() {
-        use carbide_test_support::Outcome::Yields;
-        use carbide_test_support::{Case, check_cases_async};
-        check_cases_async(
-            [
-                Case {
-                    scenario: "plain",
-                    input: "secret",
-                    expect: Yields("secret".to_string()),
-                },
-                Case {
-                    scenario: "LF preserves spaces",
-                    input: " secret \n",
-                    expect: Yields(" secret ".to_string()),
-                },
-                Case {
-                    scenario: "CRLF",
-                    input: "secret\r\n",
-                    expect: Yields("secret".to_string()),
-                },
-                Case {
-                    scenario: "empty",
-                    input: "",
-                    expect: Yields(String::new()),
-                },
-            ],
-            |contents| async move {
-                let dir = tempdir().unwrap();
-                let path = dir.path().join("field");
-                tokio::fs::write(&path, contents).await.unwrap();
-                CredentialValue::File(path).read().await.map_err(|_| ())
-            },
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn field_errors_and_debug_redact_values() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("field");
-        for contents in [None, Some(b"do-not-log-this\xff".as_slice())] {
-            if let Some(contents) = contents {
-                tokio::fs::write(&path, contents).await.unwrap();
-            }
-            let error = CredentialValue::File(path.clone())
-                .read()
-                .await
-                .unwrap_err();
-            assert!(!format!("{error:?}").contains("do-not-log-this"));
-        }
-        assert!(
-            !format!(
-                "{:?}",
-                CredentialValue::Inline("do-not-log-this".to_string())
-            )
-            .contains("do-not-log-this")
-        );
-    }
-
-    #[tokio::test]
-    async fn field_watcher_reloads_and_retains_last_valid_pair() {
-        let dir = tempdir().unwrap();
-        let user_path = dir.path().join("username");
-        let pass_path = dir.path().join("password");
-        let key = CredentialKey::BmcCredentials {
-            credential_type: crate::credentials::BmcCredentialType::BmcRoot {
-                bmc_mac_address: "aa:bb:cc:dd:ee:ff".parse().unwrap(),
-            },
-        };
-        for (scenario, inline_user, inline_password) in [
-            ("both fields from files", false, false),
-            ("inline username", true, false),
-            ("inline password", false, true),
-        ] {
-            tokio::fs::write(&user_path, "before").await.unwrap();
-            tokio::fs::write(&pass_path, "before").await.unwrap();
-            let source = FileSource::Fields {
-                key: key.clone(),
-                username: if inline_user {
-                    CredentialValue::Inline("fixed-user".to_string())
-                } else {
-                    CredentialValue::File(user_path.clone())
-                },
-                password: if inline_password {
-                    CredentialValue::Inline("fixed-password".to_string())
-                } else {
-                    CredentialValue::File(pass_path.clone())
-                },
-            };
-            let provider = FileCredentialsWatcher::watch(
-                source,
-                Duration::from_millis(20),
-                start_primary_watcher,
-            )
-            .await
-            .unwrap();
-            let replacement = dir.path().join("replacement");
-            tokio::fs::write(&replacement, "after \r\n").await.unwrap();
-            let changed_path = if inline_password {
-                &user_path
-            } else {
-                &pass_path
-            };
-            tokio::fs::rename(&replacement, changed_path).await.unwrap();
-            let expected = Some(Credentials::new(
-                if inline_user {
-                    "fixed-user"
-                } else if inline_password {
-                    "after "
-                } else {
-                    "before"
-                },
-                if inline_password {
-                    "fixed-password"
-                } else {
-                    "after "
-                },
-            ));
-            tokio::time::timeout(Duration::from_secs(2), async {
-                while provider.get_credentials(&key).await.unwrap() != expected {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap_or_else(|_| panic!("{scenario}: field rotation was not loaded"));
-            // A malformed update must not replace a usable pair.
-            tokio::fs::write(changed_path, b"invalid\xff")
-                .await
-                .unwrap();
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            assert_eq!(
-                provider.get_credentials(&key).await.unwrap(),
-                expected,
-                "{scenario}"
-            );
-        }
-    }
 
     #[tokio::test]
     async fn loads_json_file_and_reloads_on_change() {

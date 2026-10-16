@@ -155,17 +155,13 @@ Files contain UTF-8 text. One trailing LF or CRLF is removed; other whitespace
 is preserved. An empty password file supplies an empty password, whereas an
 omitted password supplies no password.
 
-Credential files use the shared `carbide-secrets` watcher. Filesystem events
-trigger reloads, with content polling every 60 seconds as a fallback. Each
-successful reload replaces the credential snapshot. Initial read failures
-prevent collection; subsequent reload failures retain the last valid pair and
-report an error without file contents. Per-target watchers start on first use.
-Initial credential-fetch failures use Redfish's existing 60-second retry cooldown.
-
-Health retrieves the current snapshot before each Redfish operation, NVUE REST
-collection pass, and gNMI connection. Established streams adopt updated
-credentials when they reconnect. Atomic replacements and Kubernetes Secret
-symlink updates are supported.
+The service rereads the configured paths before each Redfish operation, NVUE
+REST collection pass, and gNMI connection. Changes take effect on the next such
+operation without restarting the service, including atomic file replacements
+and Kubernetes Secret symlink updates. Existing streams use their established
+connection until they reconnect. A file read failure fails the operation or
+skips the REST collection pass, with an error that excludes file contents.
+Redfish credential fetch failures use the existing 60-second retry cooldown.
 
 For the complete configuration surface, including real BMC endpoints,
 additional collectors, OTLP, and NICo API sinks, see
