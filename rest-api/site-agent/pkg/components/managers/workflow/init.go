@@ -31,8 +31,8 @@ func (wflow *API) Init() {
 
 	CertExpirationMetric = promauto.NewGauge(prometheus.GaugeOpts{
 		Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
-		Name:      "temporal_cert_expiration",
-		Help:      "The expiration date of the Temporal certificate",
+		Name:      "temporal_cert_expiration_timestamp_seconds",
+		Help:      "Unix timestamp in seconds when the Temporal client certificate expires",
 	})
 
 	prometheus.MustRegister(
