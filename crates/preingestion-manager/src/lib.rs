@@ -52,6 +52,7 @@ use futures_util::FutureExt;
 use libredfish::model::task::TaskState;
 use libredfish::model::update_service::TransferProtocolType;
 use libredfish::{PowerState, Redfish, RedfishError, SystemPowerControl};
+use model::DpuModel;
 use model::firmware::{Firmware, FirmwareComponent, FirmwareComponentType, FirmwareEntry};
 use model::rack_type::RackProfileConfig;
 use model::site_explorer::{
@@ -1949,7 +1950,10 @@ impl PreingestionManagerStatic {
                 return false;
             }
         };
-        if status != PowerState::Off {
+        // BlueField-3 may report Paused after ForceOff; the resume helper handles it.
+        let is_bluefield3 = endpoint.report.identify_dpu() == Some(DpuModel::BlueField3);
+        let is_off = status == PowerState::Off || (status == PowerState::Paused && is_bluefield3);
+        if !is_off {
             tracing::warn!(
                 bmc_ip_address = %endpoint.address,
                 power_state = %status,
@@ -2002,7 +2006,7 @@ impl PreingestionManagerStatic {
             Err(_) => return false,
         }
 
-        let status = match redfish_client.get_power_state().await {
+        let mut status = match redfish_client.get_power_state().await {
             Ok(status) => status,
             Err(e) => {
                 tracing::warn!(
@@ -2013,6 +2017,35 @@ impl PreingestionManagerStatic {
                 return false;
             }
         };
+        // On can leave a BlueField-3 in the UEFI shell reporting Paused.
+        // Restart only in that case, and still require On before advancing.
+        if status == PowerState::Paused
+            && endpoint.report.identify_dpu() == Some(DpuModel::BlueField3)
+        {
+            if instrument_power_op(
+                PowerOperation::ForceRestart,
+                redfish_client.power(SystemPowerControl::ForceRestart),
+                PowerControlLog::RecoverySequence {
+                    bmc_ip_address: endpoint.address,
+                },
+            )
+            .await
+            .is_err()
+            {
+                return false;
+            }
+            status = match redfish_client.get_power_state().await {
+                Ok(status) => status,
+                Err(e) => {
+                    tracing::warn!(
+                        bmc_ip_address = %endpoint.address,
+                        error = %e,
+                        "Could not get power state"
+                    );
+                    return false;
+                }
+            };
+        }
         if status != PowerState::On {
             tracing::warn!(
                 bmc_ip_address = %endpoint.address,
