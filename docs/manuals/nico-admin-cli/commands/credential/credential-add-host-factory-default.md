@@ -49,6 +49,8 @@ Manufacturer default password
 
 - delta
 
+- sushy
+
 - unknown
 
 `--extended`

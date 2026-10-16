@@ -2536,9 +2536,9 @@ async fn test_measurement_host_init_failed_to_waiting_for_measurements_to_pendin
         nras_should_fail_parsing_flag,
         &mh,
         &mut txn,
-        ManagedHostState::HostInit {
+        |job_id| ManagedHostState::HostInit {
             machine_state: MachineState::SpdmMeasuring {
-                spdm_measuring_state: SpdmMeasuringState::PollResult,
+                spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
             },
         },
     )

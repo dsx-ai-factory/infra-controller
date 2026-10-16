@@ -15,27 +15,26 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
 use clap::{Parser, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
 EXAMPLES:
 
-List all SPDM attestations recorded for a machine:
-    $ nico-admin-cli attestation spdm list 12345678-1234-5678-90ab-cdef01234567
+List in-progress SPDM attestation jobs:
+    $ nico-admin-cli attestation spdm list --selector in-progress
 
 ")]
 pub(crate) struct Args {
-    #[clap(long, help = "Machine ID", conflicts_with = "selector")]
-    pub(super) machine_id: Option<MachineId>,
-    #[clap(long, value_enum, help = "Filter attestation machines by selector")]
-    pub(super) selector: Option<Selector>,
+    #[clap(long, value_enum, help = "Filter attestation jobs by status")]
+    pub(super) selector: Selector,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
 #[clap(rename_all = "kebab_case")]
 pub(super) enum Selector {
     InProgress,
-    Unsuccessful,
+    Cancelled,
+    Failed,
+    Passed,
 }

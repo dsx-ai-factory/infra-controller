@@ -231,7 +231,7 @@ impl StateControllerIO for MachineStateControllerIO {
         fn spdm_measuring_state_name(spdm_measuring_state: &SpdmMeasuringState) -> &'static str {
             match spdm_measuring_state {
                 SpdmMeasuringState::TriggerMeasurements => "triggermeasurements",
-                SpdmMeasuringState::PollResult => "pollresult",
+                SpdmMeasuringState::PollResult(..) => "pollresult",
             }
         }
 

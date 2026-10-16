@@ -111,9 +111,10 @@ pub struct SchedulingResult {
     /// may have been edited between the operator's last read and this call.
     pub profile_version: Option<String>,
     /// The `started_at` written on every device row this call scheduled,
-    /// absent when it scheduled none. Identifies the scheduling run, so a
-    /// caller can tell its own from one that replaced it.
+    /// absent when it scheduled none. Every device in the job shares it.
     pub started_at: Option<DateTime<Utc>>,
+    /// The persisted job, absent when this attempt scheduled no devices.
+    pub job_id: Option<uuid::Uuid>,
     pub devices_scheduled: u64,
 }
 
@@ -126,6 +127,7 @@ impl SchedulingResult {
             used_any_fallback: false,
             profile_version: None,
             started_at: None,
+            job_id: None,
             devices_scheduled: 0,
         }
     }
@@ -246,6 +248,7 @@ async fn schedule(
         used_any_fallback,
         profile_version: Some(profile_version.clone()),
         started_at: None,
+        job_id: None,
         devices_scheduled: 0,
     };
     let selection = &profile.policy_document.selection;
@@ -330,16 +333,16 @@ async fn schedule(
         }
     };
 
-    // The rows this writes replace the machine's existing ones: the profile
-    // decides what to attest, so this selection supersedes whatever an earlier
-    // trigger left behind.
+    // Each scheduling attempt creates a separate job. Existing jobs retain
+    // their evidence collection claims and results until completion and cleanup.
     // Truncated to what `timestamptz` stores, so the value reported back is
     // the one a caller finds on the rows rather than a sub-microsecond miss.
     let time_now = Utc::now().trunc_subsecs(6);
+    let job_id = uuid::Uuid::new_v4();
     let device_attestations = eligible
         .into_iter()
         .filter(|component| selected.contains(&component.id))
-        .map(|x| from_component_integrity(x.clone(), machine_id, &time_now, bmc_info))
+        .map(|x| from_component_integrity(x.clone(), machine_id, &time_now, bmc_info, &job_id))
         .collect_vec();
 
     let mut txn = db_pool.begin().await?;
@@ -348,6 +351,7 @@ async fn schedule(
         &mut txn,
         machine_id,
         device_attestations,
+        &job_id,
     )
     .await?;
 
@@ -359,6 +363,7 @@ async fn schedule(
         used_any_fallback,
         profile_version: Some(profile_version),
         started_at: Some(time_now),
+        job_id: Some(job_id),
         devices_scheduled: records_inserted,
     })
 }
@@ -430,6 +435,7 @@ fn from_component_integrity(
     machine_id: &MachineId,
     time_now: &DateTime<Utc>,
     bmc_info: &BmcInfo,
+    job_id: &uuid::Uuid,
 ) -> SpdmDeviceAttestation {
     let ca_certificate_link = integrity
         .spdm
@@ -457,6 +463,8 @@ fn from_component_integrity(
         ca_certificate: None,
         evidence_target,
         evidence: None,
+        evidence_collection_locked: false,
+        job_id: *job_id,
         started_at: *time_now,
         cancelled_at: None,
         completed_at: None,
@@ -469,27 +477,62 @@ fn from_component_integrity(
 pub(crate) async fn handle_spdm_attestation_failed_recovery(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     host_machine_id: &MachineId,
+    bmc_info: &BmcInfo,
     details: &FailureDetails,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let mut txn = ctx.services.db_pool.begin().await?;
     let should_resume_attestation = if !ctx.services.site_config.spdm_enabled {
         true
     } else {
-        let attestation_status = db::attestation::spdm::list_single_machine_attestation_status(
-            &mut txn,
-            host_machine_id,
-        )
-        .await?;
-        attestation_status == SpdmAttestationStatus::InProgress
-            || attestation_status == SpdmAttestationStatus::Cancelled
-            || attestation_status == SpdmAttestationStatus::Passed
+        // Resolve the same policy as scheduling, so devices excluded by a new
+        // profile cannot keep the machine stuck on an older failed result.
+        let bmc_address = bmc_info
+            .ip_addr()
+            .map_err(StateHandlerError::GenericError)?;
+        let recorded_class =
+            db::explored_endpoints::lookup_hardware_class_by_ip(bmc_address, &mut *txn)
+                .await?
+                .flatten();
+        match db::attestation_profile::resolve(&mut *txn, recorded_class.as_deref()).await? {
+            ProfileResolution::Resolved { profile, .. } => {
+                let attestations = db::attestation::spdm::get_attestations_for_machine_id(
+                    &mut txn,
+                    host_machine_id,
+                )
+                .await?;
+                let device_ids = attestations
+                    .iter()
+                    .map(|attestation| attestation.device_id.as_str())
+                    .unique()
+                    .collect_vec();
+                match profile.policy_document.selection.evaluate(&device_ids) {
+                    SelectionOutcome::Scheduled(selected)
+                    | SelectionOutcome::PartiallySatisfied { selected, .. } => {
+                        db::attestation::spdm::list_single_machine_attestation_status(
+                            &mut txn,
+                            host_machine_id,
+                            Some(&selected),
+                        )
+                        .await?
+                            == SpdmAttestationStatus::Passed
+                    }
+                    // Re-enter scheduling when nothing needs checking here.
+                    // It applies the policy to the current BMC inventory and
+                    // either creates a job or advances through the skip path.
+                    SelectionOutcome::AttestationDisabled
+                    | SelectionOutcome::NoAttestersFound
+                    | SelectionOutcome::PolicyMatchedNothing(_) => true,
+                }
+            }
+            ProfileResolution::ClassNotRecorded | ProfileResolution::NoProfile => true,
+        }
     };
     if should_resume_attestation {
         match &details.source {
             FailureSource::StateMachineArea(StateMachineArea::HostInit) => {
                 Ok(StateHandlerOutcome::transition(ManagedHostState::HostInit {
                     machine_state: MachineState::SpdmMeasuring {
-                        spdm_measuring_state: SpdmMeasuringState::PollResult,
+                        spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
                     },
                 })
                 .with_txn(txn))
@@ -497,14 +540,14 @@ pub(crate) async fn handle_spdm_attestation_failed_recovery(
             FailureSource::StateMachineArea(StateMachineArea::AssignedInstance) => Ok(
                 StateHandlerOutcome::transition(ManagedHostState::PostAssignedMeasuring {
                     attestation_mode: AttestationMode::SpdmAttestation {
-                        spdm_measuring_state: SpdmMeasuringState::PollResult,
+                        spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
                     },
                 })
                 .with_txn(txn),
             ),
             FailureSource::StateMachineArea(StateMachineArea::MainFlow) => Ok(
                 StateHandlerOutcome::transition(ManagedHostState::PreAssignedMeasuring {
-                    spdm_measuring_state: SpdmMeasuringState::PollResult,
+                    spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
                 })
                 .with_txn(txn),
             ),
@@ -519,9 +562,8 @@ pub(crate) async fn handle_spdm_trigger_state(
     services: &MachineStateHandlerServices,
     mh_snapshot: &mut ManagedHostStateSnapshot,
     host_machine_id: &MachineId,
-    next_spdm_state: ManagedHostState,
-    next_skip_state: ManagedHostState,
-) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+) -> Result<Option<uuid::Uuid>, StateHandlerError> {
+    // Create the BMC client only when the resolved profile requires collection.
     let result = trigger_attestation(
         &services.db_pool,
         async || {
@@ -535,32 +577,36 @@ pub(crate) async fn handle_spdm_trigger_state(
     )
     .await?;
 
-    // The remaining outcomes left no work to poll for, whether because the
-    // operator asked for none or because none could be selected.
-    // `trigger_attestation` has already reported which, so the machine
-    // proceeds rather than waiting on results that will never arrive.
-    if matches!(
-        result.outcome,
-        SchedulingOutcome::Scheduled | SchedulingOutcome::PartiallySatisfied
-    ) {
-        Ok(StateHandlerOutcome::transition(next_spdm_state))
-    } else {
-        Ok(StateHandlerOutcome::transition(next_skip_state))
-    }
+    // The caller polls the newly created job. Outcomes that schedule nothing
+    // have no job ID and let the machine advance without polling.
+    Ok(result.job_id)
 }
 
 pub(crate) async fn handle_spdm_poll_state(
     db_pool: &PgPool,
     host_machine_id: &MachineId,
+    job_id: &uuid::Uuid,
     failure_source: FailureSource,
     next_skip_state: ManagedHostState,
+    restart_state: ManagedHostState,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let mut txn = db_pool.begin().await?;
 
-    // get attestation status for the entire machine
+    // A completed job may be removed before the machine controller reads its result.
+    // Restart in the caller's lifecycle stage; the next iteration creates a fresh job.
     let attestation_status =
-        db::attestation::spdm::list_single_machine_attestation_status(&mut txn, host_machine_id)
-            .await?;
+        match db::attestation::spdm::get_attestation_job_status(&mut txn, job_id).await {
+            Ok(status) => status,
+            Err(db::DatabaseError::NotFoundError { .. }) => {
+                tracing::info!(
+                    machine_id = %host_machine_id,
+                    %job_id,
+                    "SPDM attestation job not found; restarting attestation"
+                );
+                return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
+            }
+            Err(error) => return Err(error.into()),
+        };
 
     // passed or cancelled -> just move to the next state
     // failed -> get states for all devices and log to the Failed state logging them there
@@ -569,10 +615,21 @@ pub(crate) async fn handle_spdm_poll_state(
             Ok(StateHandlerOutcome::transition(next_skip_state).with_txn(txn))
         }
         SpdmAttestationStatus::Failed => {
+            // The job can also disappear between the status and details queries.
             let attestation_states =
-                db::attestation::spdm::get_attestations_for_machine_id(&mut txn, host_machine_id)
-                    .await?;
-            // here, move to failed state with a full details
+                match db::attestation::spdm::get_attestations_for_job_id(&mut txn, job_id).await {
+                    Ok(states) => states,
+                    Err(db::DatabaseError::NotFoundError { .. }) => {
+                        tracing::info!(
+                            machine_id = %host_machine_id,
+                            %job_id,
+                            "SPDM attestation job not found; restarting attestation"
+                        );
+                        return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+            // here, move to failed state with full details
             Ok(StateHandlerOutcome::transition(ManagedHostState::Failed {
                 details: FailureDetails {
                     cause: FailureCause::SpdmAttestationFailed {
@@ -681,7 +738,8 @@ mod test {
                     used_any_fallback,
                     profile_version: profile_version.map(str::to_string),
                     started_at: None,
-                    devices_scheduled: 0,
+                    job_id: None,
+            devices_scheduled: 0,
                 })
             };
 

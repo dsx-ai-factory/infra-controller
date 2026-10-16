@@ -484,9 +484,9 @@ const (
 	Forge_GetDpuExtensionServiceVersionsInfo_FullMethodName                 = "/forge.Forge/GetDpuExtensionServiceVersionsInfo"
 	Forge_FindInstancesByDpuExtensionService_FullMethodName                 = "/forge.Forge/FindInstancesByDpuExtensionService"
 	Forge_TriggerMachineAttestation_FullMethodName                          = "/forge.Forge/TriggerMachineAttestation"
-	Forge_CancelMachineAttestation_FullMethodName                           = "/forge.Forge/CancelMachineAttestation"
-	Forge_ListAttestationMachines_FullMethodName                            = "/forge.Forge/ListAttestationMachines"
-	Forge_GetAttestationMachine_FullMethodName                              = "/forge.Forge/GetAttestationMachine"
+	Forge_CancelAttestation_FullMethodName                                  = "/forge.Forge/CancelAttestation"
+	Forge_ListAttestation_FullMethodName                                    = "/forge.Forge/ListAttestation"
+	Forge_GetAttestation_FullMethodName                                     = "/forge.Forge/GetAttestation"
 	Forge_CreateAttestationProfile_FullMethodName                           = "/forge.Forge/CreateAttestationProfile"
 	Forge_UpdateAttestationProfile_FullMethodName                           = "/forge.Forge/UpdateAttestationProfile"
 	Forge_DeleteAttestationProfile_FullMethodName                           = "/forge.Forge/DeleteAttestationProfile"
@@ -1402,9 +1402,9 @@ type ForgeClient interface {
 	FindInstancesByDpuExtensionService(ctx context.Context, in *FindInstancesByDpuExtensionServiceRequest, opts ...grpc.CallOption) (*FindInstancesByDpuExtensionServiceResponse, error)
 	// SPDM attestation APIs start
 	TriggerMachineAttestation(ctx context.Context, in *SpdmMachineAttestationTriggerRequest, opts ...grpc.CallOption) (*SpdmMachineAttestationTriggerResponse, error)
-	CancelMachineAttestation(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	ListAttestationMachines(ctx context.Context, in *SpdmListAttestationMachinesRequest, opts ...grpc.CallOption) (*SpdmListAttestationMachinesResponse, error)
-	GetAttestationMachine(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*SpdmGetAttestationMachineResponse, error)
+	CancelAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	ListAttestation(ctx context.Context, in *SpdmListAttestationRequest, opts ...grpc.CallOption) (*SpdmListAttestationResponse, error)
+	GetAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*SpdmGetAttestationResponse, error)
 	// Attestation profiles APIs
 	CreateAttestationProfile(ctx context.Context, in *CreateAttestationProfileRequest, opts ...grpc.CallOption) (*AttestationProfile, error)
 	UpdateAttestationProfile(ctx context.Context, in *UpdateAttestationProfileRequest, opts ...grpc.CallOption) (*AttestationProfile, error)
@@ -6222,30 +6222,30 @@ func (c *forgeClient) TriggerMachineAttestation(ctx context.Context, in *SpdmMac
 	return out, nil
 }
 
-func (c *forgeClient) CancelMachineAttestation(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *forgeClient) CancelAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, Forge_CancelMachineAttestation_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Forge_CancelAttestation_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *forgeClient) ListAttestationMachines(ctx context.Context, in *SpdmListAttestationMachinesRequest, opts ...grpc.CallOption) (*SpdmListAttestationMachinesResponse, error) {
+func (c *forgeClient) ListAttestation(ctx context.Context, in *SpdmListAttestationRequest, opts ...grpc.CallOption) (*SpdmListAttestationResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SpdmListAttestationMachinesResponse)
-	err := c.cc.Invoke(ctx, Forge_ListAttestationMachines_FullMethodName, in, out, cOpts...)
+	out := new(SpdmListAttestationResponse)
+	err := c.cc.Invoke(ctx, Forge_ListAttestation_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *forgeClient) GetAttestationMachine(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*SpdmGetAttestationMachineResponse, error) {
+func (c *forgeClient) GetAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*SpdmGetAttestationResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SpdmGetAttestationMachineResponse)
-	err := c.cc.Invoke(ctx, Forge_GetAttestationMachine_FullMethodName, in, out, cOpts...)
+	out := new(SpdmGetAttestationResponse)
+	err := c.cc.Invoke(ctx, Forge_GetAttestation_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7807,9 +7807,9 @@ type ForgeServer interface {
 	FindInstancesByDpuExtensionService(context.Context, *FindInstancesByDpuExtensionServiceRequest) (*FindInstancesByDpuExtensionServiceResponse, error)
 	// SPDM attestation APIs start
 	TriggerMachineAttestation(context.Context, *SpdmMachineAttestationTriggerRequest) (*SpdmMachineAttestationTriggerResponse, error)
-	CancelMachineAttestation(context.Context, *MachineId) (*emptypb.Empty, error)
-	ListAttestationMachines(context.Context, *SpdmListAttestationMachinesRequest) (*SpdmListAttestationMachinesResponse, error)
-	GetAttestationMachine(context.Context, *MachineId) (*SpdmGetAttestationMachineResponse, error)
+	CancelAttestation(context.Context, *UUID) (*emptypb.Empty, error)
+	ListAttestation(context.Context, *SpdmListAttestationRequest) (*SpdmListAttestationResponse, error)
+	GetAttestation(context.Context, *UUID) (*SpdmGetAttestationResponse, error)
 	// Attestation profiles APIs
 	CreateAttestationProfile(context.Context, *CreateAttestationProfileRequest) (*AttestationProfile, error)
 	UpdateAttestationProfile(context.Context, *UpdateAttestationProfileRequest) (*AttestationProfile, error)
@@ -9383,14 +9383,14 @@ func (UnimplementedForgeServer) FindInstancesByDpuExtensionService(context.Conte
 func (UnimplementedForgeServer) TriggerMachineAttestation(context.Context, *SpdmMachineAttestationTriggerRequest) (*SpdmMachineAttestationTriggerResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method TriggerMachineAttestation not implemented")
 }
-func (UnimplementedForgeServer) CancelMachineAttestation(context.Context, *MachineId) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "method CancelMachineAttestation not implemented")
+func (UnimplementedForgeServer) CancelAttestation(context.Context, *UUID) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method CancelAttestation not implemented")
 }
-func (UnimplementedForgeServer) ListAttestationMachines(context.Context, *SpdmListAttestationMachinesRequest) (*SpdmListAttestationMachinesResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ListAttestationMachines not implemented")
+func (UnimplementedForgeServer) ListAttestation(context.Context, *SpdmListAttestationRequest) (*SpdmListAttestationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListAttestation not implemented")
 }
-func (UnimplementedForgeServer) GetAttestationMachine(context.Context, *MachineId) (*SpdmGetAttestationMachineResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetAttestationMachine not implemented")
+func (UnimplementedForgeServer) GetAttestation(context.Context, *UUID) (*SpdmGetAttestationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAttestation not implemented")
 }
 func (UnimplementedForgeServer) CreateAttestationProfile(context.Context, *CreateAttestationProfileRequest) (*AttestationProfile, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateAttestationProfile not implemented")
@@ -17916,56 +17916,56 @@ func _Forge_TriggerMachineAttestation_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_CancelMachineAttestation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(MachineId)
+func _Forge_CancelAttestation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UUID)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).CancelMachineAttestation(ctx, in)
+		return srv.(ForgeServer).CancelAttestation(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_CancelMachineAttestation_FullMethodName,
+		FullMethod: Forge_CancelAttestation_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).CancelMachineAttestation(ctx, req.(*MachineId))
+		return srv.(ForgeServer).CancelAttestation(ctx, req.(*UUID))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_ListAttestationMachines_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SpdmListAttestationMachinesRequest)
+func _Forge_ListAttestation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SpdmListAttestationRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).ListAttestationMachines(ctx, in)
+		return srv.(ForgeServer).ListAttestation(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_ListAttestationMachines_FullMethodName,
+		FullMethod: Forge_ListAttestation_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).ListAttestationMachines(ctx, req.(*SpdmListAttestationMachinesRequest))
+		return srv.(ForgeServer).ListAttestation(ctx, req.(*SpdmListAttestationRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_GetAttestationMachine_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(MachineId)
+func _Forge_GetAttestation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UUID)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).GetAttestationMachine(ctx, in)
+		return srv.(ForgeServer).GetAttestation(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_GetAttestationMachine_FullMethodName,
+		FullMethod: Forge_GetAttestation_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).GetAttestationMachine(ctx, req.(*MachineId))
+		return srv.(ForgeServer).GetAttestation(ctx, req.(*UUID))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -21085,16 +21085,16 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_TriggerMachineAttestation_Handler,
 		},
 		{
-			MethodName: "CancelMachineAttestation",
-			Handler:    _Forge_CancelMachineAttestation_Handler,
+			MethodName: "CancelAttestation",
+			Handler:    _Forge_CancelAttestation_Handler,
 		},
 		{
-			MethodName: "ListAttestationMachines",
-			Handler:    _Forge_ListAttestationMachines_Handler,
+			MethodName: "ListAttestation",
+			Handler:    _Forge_ListAttestation_Handler,
 		},
 		{
-			MethodName: "GetAttestationMachine",
-			Handler:    _Forge_GetAttestationMachine_Handler,
+			MethodName: "GetAttestation",
+			Handler:    _Forge_GetAttestation_Handler,
 		},
 		{
 			MethodName: "CreateAttestationProfile",

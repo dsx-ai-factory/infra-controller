@@ -25,11 +25,11 @@ pub(in crate::tests) mod tests {
         ComponentIdMatch,
     };
     use model::attestation::spdm::{SpdmAttestationState, SpdmObjectId};
+    use model::controller_outcome::PersistentStateHandlerOutcome;
     use rpc::forge::forge_server::Forge;
     use rpc::forge::{
-        SpdmListAttestationMachinesRequest, SpdmListAttestationMachinesRequestSelector,
-        SpdmMachineAttestationStatus, SpdmMachineAttestationTriggerRequest, SpdmSchedulingOutcome,
-        spdm_list_attestation_machines_request,
+        SpdmAttestationJobStatus, SpdmListAttestationRequest, SpdmListAttestationRequestSelector,
+        SpdmMachineAttestationTriggerRequest, SpdmSchedulingOutcome,
     };
     use sqlx::PgConnection;
     use state_controller::io::StateControllerIO;
@@ -73,18 +73,20 @@ pub(in crate::tests) mod tests {
     async fn test_spdm_controller_persistence_honors_supplied_versions(pool: sqlx::PgPool) {
         let env = create_test_env(pool).await;
         let machine_id = create_managed_host(&env).await.host().id.into();
-        let object_id = SpdmObjectId(machine_id, "HGX_IRoT_GPU_0".to_string());
+        let job_id = uuid::Uuid::new_v4();
+        let object_id = SpdmObjectId(machine_id, "HGX_IRoT_GPU_0".to_string(), job_id);
         let old_version = ConfigVersion::initial();
 
         sqlx::query(
             "INSERT INTO spdm_machine_devices_attestation \
-             (machine_id, device_id, nonce, state, state_version, started_at) \
-             VALUES ($1, $2, gen_random_uuid(), $3, $4, now())",
+             (machine_id, device_id, nonce, state, state_version, job_id, started_at) \
+             VALUES ($1, $2, gen_random_uuid(), $3, $4, $5, now())",
         )
         .bind(machine_id)
         .bind(&object_id.1)
         .bind(sqlx::types::Json(SpdmAttestationState::FetchMetadata))
         .bind(old_version)
+        .bind(job_id)
         .execute(&env.pool)
         .await
         .unwrap();
@@ -148,7 +150,7 @@ pub(in crate::tests) mod tests {
             let write = io
                 .persist_controller_state(
                     &mut txn,
-                    &SpdmObjectId(machine_id, case.device_id.to_string()),
+                    &SpdmObjectId(machine_id, case.device_id.to_string(), job_id),
                     case.old_version,
                     replacement_version,
                     &case.state,
@@ -161,10 +163,11 @@ pub(in crate::tests) mod tests {
             let stored_state: Option<(sqlx::types::Json<SpdmAttestationState>, ConfigVersion)> =
                 sqlx::query_as(
                     "SELECT state, state_version FROM spdm_machine_devices_attestation \
-                     WHERE machine_id = $1 AND device_id = $2",
+                     WHERE machine_id = $1 AND device_id = $2 AND job_id = $3",
                 )
                 .bind(machine_id)
                 .bind(case.device_id)
+                .bind(job_id)
                 .fetch_optional(&env.pool)
                 .await
                 .unwrap();
@@ -318,8 +321,7 @@ pub(in crate::tests) mod tests {
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
 
         for case in cases {
-            // Only a scheduling run clears the device rows, so the cases that
-            // schedule nothing would otherwise inherit the previous case's.
+            // Isolate each policy case from the jobs scheduled by earlier cases.
             let mut txn = env.pool.begin().await?;
             sqlx::query("DELETE FROM attestation_profiles")
                 .execute(&mut *txn)
@@ -561,7 +563,7 @@ pub(in crate::tests) mod tests {
             }))
             .await?;
 
-        assert_eq!(0, response.into_inner().devices_under_attestation);
+        assert!(response.into_inner().job_id.is_none());
 
         // device attestations should not be created
         let machine_ids = list_machines_under_attestation(&env).await?;
@@ -616,10 +618,11 @@ pub(in crate::tests) mod tests {
         }
 
         for object_id in &*object_ids {
-            let SpdmObjectId(_, device_id) = object_id;
-            let (attestation_state, _) = get_state_from_db(&mut txn, &machine_id, device_id)
-                .await
-                .expect("Failed getting attestation state from the DB");
+            let SpdmObjectId(_, device_id, job_id) = object_id;
+            let (attestation_state, _) =
+                get_state_from_db(&mut txn, &machine_id, device_id, job_id)
+                    .await
+                    .expect("Failed getting attestation state from the DB");
 
             assert!(
                 matches!(attestation_state, SpdmAttestationState::FetchMetadata),
@@ -646,9 +649,9 @@ pub(in crate::tests) mod tests {
 
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
 
-        // set up redfish to interrupt evidence collection
+        // set up redfish to fail evidence collection with a terminal exception
         env.redfish_sim
-            .set_get_task_trigger_evidence_returns_interrupted(true);
+            .set_get_task_trigger_evidence_returns_exception(true);
 
         let response = env
             .api
@@ -677,15 +680,20 @@ pub(in crate::tests) mod tests {
             .expect("Failed getting object ids for attestation");
 
         for object_id in &*object_ids {
-            let SpdmObjectId(_, device_id) = object_id;
-            let (attestation_state, _) = get_state_from_db(&mut txn, &machine_id, device_id)
-                .await
-                .expect("Failed getting attestation state from the DB");
+            let SpdmObjectId(_, device_id, job_id) = object_id;
+            let (attestation_state, _) =
+                get_state_from_db(&mut txn, &machine_id, device_id, job_id)
+                    .await
+                    .expect("Failed getting attestation state from the DB");
 
             assert!(
                 matches!(
                     attestation_state,
-                    SpdmAttestationState::TriggerEvidenceCollection { retry_count: 3 }
+                    SpdmAttestationState::TriggerEvidenceCollection {
+                        retry_count: 3,
+                        redfish_retry_count: 0,
+                        last_redfish_failure_tstamp: None,
+                    }
                 ),
                 "expected Trigger, got: {:?}",
                 attestation_state
@@ -698,10 +706,11 @@ pub(in crate::tests) mod tests {
         }
 
         for object_id in &*object_ids {
-            let SpdmObjectId(_, device_id) = object_id;
-            let (attestation_state, _) = get_state_from_db(&mut txn, &machine_id, device_id)
-                .await
-                .expect("Failed getting attestation state from the DB");
+            let SpdmObjectId(_, device_id, job_id) = object_id;
+            let (attestation_state, _) =
+                get_state_from_db(&mut txn, &machine_id, device_id, job_id)
+                    .await
+                    .expect("Failed getting attestation state from the DB");
 
             assert!(
                 matches!(attestation_state, SpdmAttestationState::Failed { .. }),
@@ -710,6 +719,179 @@ pub(in crate::tests) mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn test_evidence_collection_is_serialized_per_device(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(spdm_enabled_config()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+        // Host setup already performed attestation; count only requests from
+        // the two jobs below.
+        let initial_requests = env.redfish_sim.evidence_collection_requests().len();
+        // Keep BMC tasks "running" to force an overlap
+        env.redfish_sim.set_evidence_collection_running(true);
+
+        // Start job A and advance through metadata, certificate, and collection.
+        let first_job_id = uuid::Uuid::try_from(
+            env.api
+                .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                    machine_id: Some(machine_id.into()),
+                    redfish_timeout_secs: u32::MAX,
+                }))
+                .await?
+                .into_inner()
+                .job_id
+                .unwrap(),
+        )?;
+        for _ in 0..3 {
+            env.run_spdm_controller_iteration_no_requeue().await;
+        }
+
+        let mut txn = env.db_txn().await;
+        let devices =
+            db::attestation::spdm::get_attestations_for_job_id(&mut txn, &first_job_id).await?;
+        assert_eq!(3, devices.len());
+        // Different devices can collect at the same time. Each must retain its
+        // own claim while the BMC is still producing evidence.
+        for device in &devices {
+            let attestation = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                &mut txn,
+                &machine_id,
+                &device.device_id,
+                &first_job_id,
+            )
+            .await?;
+            assert!(matches!(
+                attestation.state,
+                SpdmAttestationState::PollEvidenceCollection { retry_count: 0, .. }
+            ));
+            // each device has its own lock, and, since we've set env.redfish_sim.set_evidence_collection_running(true);
+            // the lock with persist as the evidence collection is ongoing.
+            assert!(attestation.evidence_collection_locked);
+            assert!(attestation.evidence.is_none());
+        }
+        assert_eq!(
+            initial_requests + devices.len(),
+            env.redfish_sim.evidence_collection_requests().len()
+        );
+
+        // Start job B for the same machine while A still owns all device claims.
+        let second_job_id = uuid::Uuid::try_from(
+            env.api
+                .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                    machine_id: Some(machine_id.into()),
+                    redfish_timeout_secs: u32::MAX,
+                }))
+                .await?
+                .into_inner()
+                .job_id
+                .unwrap(),
+        )?;
+        assert_ne!(first_job_id, second_job_id);
+        // Reach TriggerEvidenceCollection and attempt to acquire each held claim.
+        for _ in 0..3 {
+            env.run_spdm_controller_iteration_no_requeue().await;
+        }
+        for device in &devices {
+            let second = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                &mut txn,
+                &machine_id,
+                &device.device_id,
+                &second_job_id,
+            )
+            .await?;
+            assert_eq!(
+                second.state,
+                SpdmAttestationState::TriggerEvidenceCollection {
+                    retry_count: 0,
+                    redfish_retry_count: 0,
+                    last_redfish_failure_tstamp: None,
+                }
+            );
+            assert!(!second.evidence_collection_locked);
+            assert!(second.evidence.is_none());
+            // Prove B reached the claim check, rather than stalling on an
+            // unrelated error before it could attempt collection.
+            assert!(
+                matches!(
+                    second.state_outcome,
+                    Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
+                        if reason == "Evidence collection claim is unavailable or attestation state changed"
+                ),
+                "expected claim contention, got {:?}",
+                second.state_outcome
+            );
+        }
+        assert_eq!(
+            initial_requests + devices.len(),
+            env.redfish_sim.evidence_collection_requests().len(),
+            "the waiting job must not send a collection request"
+        );
+
+        // Let A finish. The controller must save its evidence and release its
+        // claims as it advances to verification.
+        env.redfish_sim.set_evidence_collection_running(false);
+        env.run_spdm_controller_iteration_no_requeue().await;
+        for device in &devices {
+            let first = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                &mut txn,
+                &machine_id,
+                &device.device_id,
+                &first_job_id,
+            )
+            .await?;
+            assert_eq!(first.state, SpdmAttestationState::NrasVerification);
+            assert!(
+                first.evidence.is_some(),
+                "evidence must be saved before releasing the claim"
+            );
+            assert!(!first.evidence_collection_locked);
+        }
+
+        // Device iteration order is unspecified: B may have started in the
+        // iteration that released A's claim, or may need one more iteration.
+        // Keep B's tasks running so we can inspect its newly acquired claims.
+        env.redfish_sim.set_evidence_collection_running(true);
+        env.run_spdm_controller_iteration_no_requeue().await;
+        let requests = env.redfish_sim.evidence_collection_requests();
+        assert_eq!(initial_requests + 2 * devices.len(), requests.len());
+        for device in &devices {
+            let second = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                &mut txn,
+                &machine_id,
+                &device.device_id,
+                &second_job_id,
+            )
+            .await?;
+            assert!(matches!(
+                second.state,
+                SpdmAttestationState::PollEvidenceCollection { retry_count: 0, .. }
+            ));
+            assert!(second.evidence_collection_locked);
+            assert!(second.evidence.is_none());
+            // The nonce identifies B's request even though both jobs use the
+            // same evidence URL for this device.
+            assert_eq!(
+                1,
+                requests
+                    .iter()
+                    .filter(|(url, nonce)| Some(url) == second.evidence_target.as_ref()
+                        && nonce == &second.nonce_hex())
+                    .count(),
+                "the second job must start collection exactly once for {}",
+                device.device_id
+            );
+        }
         Ok(())
     }
 
@@ -735,20 +917,23 @@ pub(in crate::tests) mod tests {
         )
         .await;
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
-        let _ = env
+        let response = env
             .api
             .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
                 machine_id: Some(machine_id.into()),
                 redfish_timeout_secs: u32::MAX,
             }))
-            .await?;
+            .await?
+            .into_inner();
+        let job_id = response
+            .job_id
+            .expect("attestation result should include a job ID");
 
         // device attestations should be created now
         let statuses = list_machines_under_attestation(&env).await?;
 
         assert_eq!(1, statuses.len());
-
-        let machine_id = statuses[0].machine_id.expect("missing machine id");
+        assert_eq!(Some(&job_id), statuses[0].job_id.as_ref());
 
         // check that attestation's status is InProgress
         assert_eq!(
@@ -764,10 +949,11 @@ pub(in crate::tests) mod tests {
             .expect("Failed getting object ids for attestation");
 
         for object_id in &object_ids {
-            let SpdmObjectId(_, device_id) = object_id;
-            let (attestation_state, _) = get_state_from_db(&mut txn, &machine_id, device_id)
-                .await
-                .expect("Failed getting attestation state from the DB");
+            let SpdmObjectId(_, device_id, job_id) = object_id;
+            let (attestation_state, _) =
+                get_state_from_db(&mut txn, &machine_id, device_id, job_id)
+                    .await
+                    .expect("Failed getting attestation state from the DB");
 
             assert_eq!(SpdmAttestationState::FetchMetadata, attestation_state);
         }
@@ -775,10 +961,11 @@ pub(in crate::tests) mod tests {
         env.run_spdm_controller_iteration_no_requeue().await;
 
         for object_id in &*object_ids {
-            let SpdmObjectId(_, device_id) = object_id;
-            let (attestation_state, _) = get_state_from_db(&mut txn, &machine_id, device_id)
-                .await
-                .expect("Failed getting attestation state from the DB");
+            let SpdmObjectId(_, device_id, job_id) = object_id;
+            let (attestation_state, _) =
+                get_state_from_db(&mut txn, &machine_id, device_id, job_id)
+                    .await
+                    .expect("Failed getting attestation state from the DB");
             assert_eq!(SpdmAttestationState::FetchCertificate, attestation_state);
         }
 
@@ -791,10 +978,11 @@ pub(in crate::tests) mod tests {
         assert_eq!(3, object_ids.len());
 
         for object_id in &*object_ids {
-            let SpdmObjectId(_, device_id) = object_id;
-            let (attestation_state, _) = get_state_from_db(&mut txn, &machine_id, device_id)
-                .await
-                .expect("Failed getting attestation state from the DB");
+            let SpdmObjectId(_, device_id, job_id) = object_id;
+            let (attestation_state, _) =
+                get_state_from_db(&mut txn, &machine_id, device_id, job_id)
+                    .await
+                    .expect("Failed getting attestation state from the DB");
 
             assert!(
                 matches!(
@@ -807,17 +995,14 @@ pub(in crate::tests) mod tests {
         }
 
         // now let's cancel the whole thing
-        let _ = env
-            .api
-            .cancel_machine_attestation(Request::new(machine_id))
-            .await?;
+        let _ = env.api.cancel_attestation(Request::new(job_id)).await?;
 
         env.run_spdm_controller_iteration_no_requeue().await;
 
         for object_id in &*object_ids {
-            let SpdmObjectId(_, device_id) = object_id;
+            let SpdmObjectId(_, device_id, job_id) = object_id;
             let (attestation_state, completed_at) =
-                get_state_from_db(&mut txn, &machine_id, device_id)
+                get_state_from_db(&mut txn, &machine_id, device_id, job_id)
                     .await
                     .expect("Failed getting attestation state from the DB");
 
@@ -838,11 +1023,12 @@ pub(in crate::tests) mod tests {
         txn: &mut PgConnection,
         machine_id: &MachineId,
         device_id: &str,
+        job_id: &uuid::Uuid,
     ) -> Result<(SpdmAttestationState, Option<chrono::DateTime<chrono::Utc>>), sqlx::Error> {
         let query = r#"
             SELECT state, completed_at
             FROM spdm_machine_devices_attestation
-            WHERE machine_id = $1 AND device_id = $2
+            WHERE machine_id = $1 AND device_id = $2 AND job_id = $3
         "#;
 
         let query_result: (
@@ -851,6 +1037,7 @@ pub(in crate::tests) mod tests {
         ) = sqlx::query_as(query)
             .bind(machine_id)
             .bind(device_id)
+            .bind(job_id)
             .fetch_one(txn)
             .await?;
         Ok((query_result.0.0, query_result.1))
@@ -858,12 +1045,10 @@ pub(in crate::tests) mod tests {
 
     async fn list_machines_under_attestation(
         env: &TestEnv,
-    ) -> Result<Vec<SpdmMachineAttestationStatus>, tonic::Status> {
+    ) -> Result<Vec<SpdmAttestationJobStatus>, tonic::Status> {
         env.api
-            .list_attestation_machines(Request::new(SpdmListAttestationMachinesRequest {
-                variant: Some(spdm_list_attestation_machines_request::Variant::Selector(
-                    SpdmListAttestationMachinesRequestSelector::SpdmListInProgress.into(),
-                )),
+            .list_attestation(Request::new(SpdmListAttestationRequest {
+                selector: SpdmListAttestationRequestSelector::SpdmListInProgress.into(),
             }))
             .await
             .map(|response| response.into_inner().statuses)

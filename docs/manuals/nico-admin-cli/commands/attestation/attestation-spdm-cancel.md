@@ -4,19 +4,18 @@
 
 ## NAME
 
-nico-admin-cli-attestation-spdm-cancel - Cancel attestation for a given
-machine id
+nico-admin-cli-attestation-spdm-cancel - Cancel an attestation job
 
 ## SYNOPSIS
 
 ```text
 nico-admin-cli attestation spdm cancel [--extended]
-[--sort-by] [-h|--help] <MACHINE_ID>
+[--sort-by] [-h|--help] <JOB_ID>
 ```
 
 ## DESCRIPTION
 
-Cancel attestation for a given machine id
+Cancel an attestation job
 
 ## OPTIONS
 
@@ -42,9 +41,9 @@ Sort output by specified field
 
 Print help (see a summary with -h)
 
-`<MACHINE_ID>`
+`<JOB_ID>`
 
-Machine ID
+Attestation job ID
 
 ## Examples
 

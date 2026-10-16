@@ -45,10 +45,10 @@ Print help (see a summary with -h)
 
 | Subcommand | Description |
 |---|---|
-| [`cancel`](./attestation-spdm-cancel.md) | Cancel attestation for a given machine id |
+| [`cancel`](./attestation-spdm-cancel.md) | Cancel an attestation job |
 | [`coverage`](./attestation-spdm-coverage.md) | Show which hardware classes the site has and what would attest each |
-| [`get`](./attestation-spdm-get.md) | Get SPDM attestation details for a given machine id |
-| [`list`](./attestation-spdm-list.md) | List SPDM attestation machine statuses |
+| [`get`](./attestation-spdm-get.md) | Get SPDM attestation details for a given job id |
+| [`list`](./attestation-spdm-list.md) | List SPDM attestation jobs by status |
 | [`profile`](./attestation-spdm-profile.md) | Manage the attestation policy stored for each hardware class |
 | [`trigger`](./attestation-spdm-trigger.md) | Trigger attestation for a given machine with id |
 

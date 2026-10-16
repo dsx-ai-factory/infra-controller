@@ -1043,11 +1043,10 @@ service Forge {
 
   // SPDM attestation APIs start
   rpc TriggerMachineAttestation(SpdmMachineAttestationTriggerRequest) returns (SpdmMachineAttestationTriggerResponse);
-  rpc CancelMachineAttestation(common.MachineId) returns (google.protobuf.Empty);
+  rpc CancelAttestation(common.UUID) returns (google.protobuf.Empty);
 
-  rpc ListAttestationMachines(SpdmListAttestationMachinesRequest) returns (SpdmListAttestationMachinesResponse);
-  rpc GetAttestationMachine(common.MachineId) returns (SpdmGetAttestationMachineResponse);
-
+  rpc ListAttestation(SpdmListAttestationRequest) returns (SpdmListAttestationResponse);
+  rpc GetAttestation(common.UUID) returns (SpdmGetAttestationResponse);
   // Attestation profiles APIs
   rpc CreateAttestationProfile(CreateAttestationProfileRequest) returns (AttestationProfile);
   rpc UpdateAttestationProfile(UpdateAttestationProfileRequest) returns (AttestationProfile);
@@ -1274,10 +1273,12 @@ enum SpdmAttestationStatus{
   SPDM_ATT_FAILED = 3;
 }
 
-message SpdmMachineAttestationStatus {
+message SpdmAttestationJobStatus {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  common.MachineId machine_id = 1;
+  reserved 1;
+  reserved "machine_id";
   SpdmAttestationStatus attestation_status = 2;
+  common.UUID job_id = 3;
 }
 
 // Why one attestation scheduling attempt ended as it did.
@@ -1316,14 +1317,15 @@ message SpdmMachineAttestationTriggerResponse {
   // written for this machine's own class.
   bool used_any_fallback = 5;
   // Version of the profile that decided this call, absent when no profile
-  // applied. Scoped to this call: a later trigger replaces the machine's whole
-  // work set, so this is not a lasting claim about the attestation in flight.
+  // applied. Describes the policy used to select this job's devices.
   optional string profile_version = 6;
   // When the scheduled devices were written, absent unless something was
   // scheduled. Every device row this call wrote carries it, so a caller can
-  // tell whether its scheduling is still the live one or was replaced. The same
+  // correlate its scheduling with the stored device rows. The same
   // value is reported as SpdmAttestationDetails.started_at.
   optional google.protobuf.Timestamp started_at = 7;
+  // Present only when devices were scheduled. Use this ID to get or cancel the job.
+  common.UUID job_id = 8;
 }
 
 message SpdmAttestationDetails{
@@ -1337,7 +1339,7 @@ message SpdmAttestationDetails{
   optional google.protobuf.Timestamp completed_at = 9;
 }
 
-message SpdmGetAttestationMachineResponse {
+message SpdmGetAttestationResponse {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   repeated SpdmAttestationDetails attestations_details = 1;
 }
@@ -1347,21 +1349,24 @@ message SpdmMachineAttestationTriggerRequest {
   uint32 redfish_timeout_secs = 2;
 }
 
-enum SpdmListAttestationMachinesRequestSelector {
+enum SpdmListAttestationRequestSelector {
+  reserved 1;
+  reserved "SPDM_LIST_UNSUCCESSFUL";
   SPDM_LIST_IN_PROGRESS = 0;
-  SPDM_LIST_UNSUCCESSFUL = 1;
+  SPDM_LIST_CANCELLED = 2;
+  SPDM_LIST_FAILED = 3;
+  SPDM_LIST_PASSED = 4;
 }
 
-message SpdmListAttestationMachinesRequest {
-  oneof variant {
-    common.MachineId machine_id = 1;
-    SpdmListAttestationMachinesRequestSelector selector = 2;
-  }
+message SpdmListAttestationRequest {
+  reserved 1, 3;
+  reserved "machine_id", "job_id";
+  SpdmListAttestationRequestSelector selector = 2;
 }
 
-message SpdmListAttestationMachinesResponse {
+message SpdmListAttestationResponse {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  repeated SpdmMachineAttestationStatus statuses = 1;
+  repeated SpdmAttestationJobStatus statuses = 1;
 }
 
 // Attestation profiles: one policy per hardware class, naming which attesters

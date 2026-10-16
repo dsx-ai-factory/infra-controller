@@ -60,13 +60,13 @@ async fn write_output<T: Serialize>(
 // a list of subcommands
 #[derive(Dispatch, Parser, Debug)]
 pub(crate) enum Cmd {
-    #[clap(about = "Cancel attestation for a given machine id")]
+    #[clap(about = "Cancel an attestation job")]
     Cancel(cancel::args::Args),
     #[clap(about = "Show which hardware classes the site has and what would attest each")]
     Coverage(coverage::args::Args),
-    #[clap(about = "Get SPDM attestation details for a given machine id")]
+    #[clap(about = "Get SPDM attestation details for a given job id")]
     Get(get::args::Args),
-    #[clap(about = "List SPDM attestation machine statuses")]
+    #[clap(about = "List SPDM attestation jobs by status")]
     List(list::args::Args),
     #[dispatch]
     #[clap(

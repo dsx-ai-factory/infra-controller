@@ -2065,7 +2065,13 @@ impl MachineStateHandler {
                         }
                     }
                     FailureCause::SpdmAttestationFailed { .. } => {
-                        handle_spdm_attestation_failed_recovery(ctx, host_machine_id, details).await
+                        handle_spdm_attestation_failed_recovery(
+                            ctx,
+                            host_machine_id,
+                            &mh_snapshot.host_snapshot.status.bmc_info,
+                            details,
+                        )
+                        .await
                     }
                     FailureCause::MachineValidation { .. }
                         if machine_id.machine_type().is_host() =>
@@ -2218,27 +2224,39 @@ impl MachineStateHandler {
                         }
                         match spdm_measuring_state {
                             SpdmMeasuringState::TriggerMeasurements => {
-                                handle_spdm_trigger_state(
+                                match handle_spdm_trigger_state(
                                     ctx.services,
                                     mh_snapshot,
                                     host_machine_id,
-                                    ManagedHostState::PostAssignedMeasuring {
-                                        attestation_mode: AttestationMode::SpdmAttestation {
-                                            spdm_measuring_state: SpdmMeasuringState::PollResult,
-                                        },
-                                    },
-                                    next_skip_state,
                                 )
-                                .await
+                                .await?
+                                {
+                                    Some(job_id) => Ok(StateHandlerOutcome::transition(
+                                        ManagedHostState::PostAssignedMeasuring {
+                                            attestation_mode: AttestationMode::SpdmAttestation {
+                                                spdm_measuring_state:
+                                                    SpdmMeasuringState::PollResult(job_id),
+                                            },
+                                        },
+                                    )),
+                                    None => Ok(StateHandlerOutcome::transition(next_skip_state)),
+                                }
                             }
-                            SpdmMeasuringState::PollResult => {
+                            SpdmMeasuringState::PollResult(job_id) => {
                                 handle_spdm_poll_state(
                                     &ctx.services.db_pool,
                                     host_machine_id,
+                                    job_id,
                                     FailureSource::StateMachineArea(
                                         StateMachineArea::AssignedInstance,
                                     ),
                                     next_skip_state,
+                                    ManagedHostState::PostAssignedMeasuring {
+                                        attestation_mode: AttestationMode::SpdmAttestation {
+                                            spdm_measuring_state:
+                                                SpdmMeasuringState::TriggerMeasurements,
+                                        },
+                                    },
                                 )
                                 .await
                             }
@@ -2255,23 +2273,27 @@ impl MachineStateHandler {
                 }
                 match spdm_measuring_state {
                     SpdmMeasuringState::TriggerMeasurements => {
-                        handle_spdm_trigger_state(
-                            ctx.services,
-                            mh_snapshot,
-                            host_machine_id,
-                            ManagedHostState::PreAssignedMeasuring {
-                                spdm_measuring_state: SpdmMeasuringState::PollResult,
-                            },
-                            next_skip_state,
-                        )
-                        .await
+                        match handle_spdm_trigger_state(ctx.services, mh_snapshot, host_machine_id)
+                            .await?
+                        {
+                            Some(job_id) => Ok(StateHandlerOutcome::transition(
+                                ManagedHostState::PreAssignedMeasuring {
+                                    spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
+                                },
+                            )),
+                            None => Ok(StateHandlerOutcome::transition(next_skip_state)),
+                        }
                     }
-                    SpdmMeasuringState::PollResult => {
+                    SpdmMeasuringState::PollResult(job_id) => {
                         handle_spdm_poll_state(
                             &ctx.services.db_pool,
                             host_machine_id,
+                            job_id,
                             FailureSource::StateMachineArea(StateMachineArea::MainFlow),
                             next_skip_state,
+                            ManagedHostState::PreAssignedMeasuring {
+                                spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
+                            },
                         )
                         .await
                     }
@@ -8239,26 +8261,37 @@ impl StateHandler for HostMachineStateHandler {
                         return Ok(StateHandlerOutcome::transition(next_skip_state));
                     }
                     match spdm_measuring_state {
-                        SpdmMeasuringState::TriggerMeasurements => {
-                            handle_spdm_trigger_state(
-                                ctx.services,
-                                mh_snapshot,
-                                host_machine_id,
+                        SpdmMeasuringState::TriggerMeasurements => match handle_spdm_trigger_state(
+                            ctx.services,
+                            mh_snapshot,
+                            host_machine_id,
+                        )
+                        .await?
+                        {
+                            Some(job_id) => Ok(StateHandlerOutcome::transition(
                                 ManagedHostState::HostInit {
                                     machine_state: MachineState::SpdmMeasuring {
-                                        spdm_measuring_state: SpdmMeasuringState::PollResult,
+                                        spdm_measuring_state: SpdmMeasuringState::PollResult(
+                                            job_id,
+                                        ),
                                     },
                                 },
-                                next_skip_state,
-                            )
-                            .await
-                        }
-                        SpdmMeasuringState::PollResult => {
+                            )),
+                            None => Ok(StateHandlerOutcome::transition(next_skip_state)),
+                        },
+                        SpdmMeasuringState::PollResult(job_id) => {
                             handle_spdm_poll_state(
                                 &ctx.services.db_pool,
                                 host_machine_id,
+                                job_id,
                                 FailureSource::StateMachineArea(StateMachineArea::HostInit),
                                 next_skip_state,
+                                ManagedHostState::HostInit {
+                                    machine_state: MachineState::SpdmMeasuring {
+                                        spdm_measuring_state:
+                                            SpdmMeasuringState::TriggerMeasurements,
+                                    },
+                                },
                             )
                             .await
                         }
