@@ -188,6 +188,8 @@ pub(crate) async fn list_attestation(
     api: &Api,
     request: tonic::Request<rpc::SpdmListAttestationRequest>,
 ) -> Result<Response<rpc::SpdmListAttestationResponse>, Status> {
+    log_request_data(&request);
+
     let mut txn = api.txn_begin().await?;
 
     let request_selector =

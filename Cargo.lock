@@ -3437,6 +3437,7 @@ dependencies = [
  "carbide-redfish",
  "carbide-test-support",
  "carbide-utils",
+ "chrono",
  "config-version",
  "itertools 0.14.0",
  "libredfish",

@@ -11,12 +11,16 @@ VPC
 
 ```text
 nico-admin-cli domain create [--vpc-id] [--default-ttl]
-[--extended] [--sort-by] [-h|--help] <NAME>
+[-h|--help] <NAME>
 ```
 
 ## DESCRIPTION
 
-Create a Domain, optionally owned by a VPC
+Create a Domain, optionally owned by a VPC.
+
+On success, JSON mode prints the created domain as pretty JSON. Other
+output modes print these fields for the created domain: ID, NAME,
+DEFAULT TTL, VPC, CREATED, UPDATED, and DELETED.
 
 ## OPTIONS
 
@@ -28,24 +32,6 @@ VPC that owns the domain. A VPC owns at most one live domain
 
 Default TTL for the zones records, 30 to 86400 seconds. Omit for the
 site default
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
-
-`--sort-by <SORT_BY> [default: primary-id]`
-
-Sort output by specified field
-
-*Possible values:*
-
-> - primary-id: Sort by the primary ID
->
-> - state: Sort by state
 
 `-h, --help`
 

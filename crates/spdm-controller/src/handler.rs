@@ -103,10 +103,12 @@ impl StateHandler for SpdmAttestationStateHandler {
         let mut transition_to_cancelled = false;
         let controller_state: &SpdmAttestationState; // we might need to override the original state
         if let Some(cancellation_time) = snapshot.cancelled_at {
-            if snapshot.evidence_collection_locked { // i.e. we are in trigger or poll state
+            if snapshot.evidence_collection_locked {
+                // i.e. we are in trigger or poll state
                 if chrono::Utc::now() < cancellation_time + chrono::Duration::minutes(2) {
                     return Ok(StateHandlerOutcome::wait(
-                        "Cancellation waiting two minutes to release the evidence collection lock".to_string(),
+                        "Cancellation waiting two minutes to release the evidence collection lock"
+                            .to_string(),
                     ));
                 }
             }
@@ -211,12 +213,13 @@ impl StateHandler for SpdmAttestationStateHandler {
                             &mut txn, object_id,
                         )
                         .await?;
-                        return Ok(StateHandlerOutcome::transition(
-                            SpdmAttestationState::Failed(
+                        return Ok(
+                            StateHandlerOutcome::transition(SpdmAttestationState::Failed(
                                 "Exceeded redfish retry limit while attempting to collect evidence"
                                     .to_string(),
-                            ),
-                        ).with_txn(txn));
+                            ))
+                            .with_txn(txn),
+                        );
                     }
                     if chrono::Utc::now() < *last_failure_time + chrono::Duration::minutes(1) {
                         return Ok(StateHandlerOutcome::wait(
@@ -224,8 +227,8 @@ impl StateHandler for SpdmAttestationStateHandler {
                             .to_string(),
                     ));
                     }
-                } 
-                
+                }
+
                 // firmware version and certificate are collected. Let's trigger the
                 // measurement collection now.
                 let redfish_client = redfish_client(&snapshot.bmc_info, ctx).await?;
@@ -256,7 +259,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                 }
                 // Ownership must survive both this transaction and a process
                 // restart, including an ambiguous failure of the following POST.
-                
+
                 let nonce = snapshot.nonce_hex();
                 match redfish_client
                     .trigger_evidence_collection(url.as_str(), nonce.as_str())
