@@ -652,6 +652,11 @@ prefix = "carbide_hardware_health"
 # Redfish HTTP requests to BMCs.
 enable_bmc_latency_metrics = false
 
+# Disabled by default. When enabled, emits one {prefix}_inventory_endpoint_info
+# series per discovered endpoint, including separate BMC and NVOS switch targets.
+# This adds per-endpoint series to /metrics and does not probe devices.
+enable_endpoint_inventory_metrics = false
+
 # Defaults to ["all"]. Set a subset to control emitted labels. Allowed values:
 # "all", "http_response_status_code", "http_request_method", "http_path",
 # "server_address", "url_scheme", "bmc_vendor", "bmc_model", "entity_type",

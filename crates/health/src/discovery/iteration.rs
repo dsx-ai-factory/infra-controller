@@ -118,6 +118,12 @@ pub async fn run_discovery_iteration(
         }
     }
 
+    // Inventory is the endpoint-source view after sharding, not a consequence
+    // of successful Redfish polling or collector startup.
+    if let Some(inventory_endpoint_metrics) = &ctx.inventory_endpoint_metrics {
+        inventory_endpoint_metrics.reconcile(&sharded_endpoints);
+    }
+
     // Resolve machine identity before collectors start when possible. Shared
     // write-once state propagates the result to running collectors and caches
     // both present and absent UUIDs, preventing repeated successful BMC queries.
@@ -501,6 +507,51 @@ mod tests {
         ]);
 
         assert_eq!(keys, HashSet::from([expected_key]));
+    }
+
+    #[tokio::test]
+    async fn inventory_metric_is_emitted_only_when_enabled() {
+        let switch = switch_endpoint(
+            MacAddress::from_str("00:00:00:00:00:16").unwrap(),
+            false,
+            false,
+        );
+
+        for (enabled, prefix) in [(false, "inventory_off"), (true, "inventory_on")] {
+            let mut config = Config::default();
+            config.metrics.prefix = prefix.to_string();
+            config.metrics.enable_endpoint_inventory_metrics = enabled;
+            config.endpoint_sources.carbide_api = Configurable::Disabled;
+            config.collectors.sensors = Configurable::Disabled;
+            config.collectors.leak_detector = Configurable::Disabled;
+
+            let manager = Arc::new(MetricsManager::new(prefix).expect("metrics manager"));
+            let mut context =
+                DiscoveryLoopContext::new(Arc::new(NoopLimiter), manager.clone(), Arc::new(config))
+                    .expect("discovery context");
+            let source: Arc<dyn EndpointSource> =
+                Arc::new(StaticEndpointSource::new(vec![switch.as_ref().clone()]));
+
+            run_discovery_iteration(
+                source,
+                &ShardManager {
+                    shard: 0,
+                    shards_count: 1,
+                },
+                &mut context,
+                None,
+                prefix,
+            )
+            .await
+            .expect("discovery iteration");
+
+            let exported = manager.export_metrics().expect("metrics exposition");
+            assert_eq!(
+                exported.contains("_inventory_endpoint_info{"),
+                enabled,
+                "inventory metric state for {prefix}"
+            );
+        }
     }
 
     #[tokio::test]

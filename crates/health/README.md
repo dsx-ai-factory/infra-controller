@@ -67,6 +67,8 @@ The expected results are:
 - `/livez` returns `ok`. This proves that the HTTP listener is running; it
   does not prove that a BMC collection succeeded.
 - `/metrics` contains service-level discovery, collector, and process metrics.
+  Per-endpoint inventory identities appear only when
+  `metrics.enable_endpoint_inventory_metrics = true` is configured.
 - `/telemetry` contains per-sensor gauges after the first discovery and sensor
   collection pass. The default sensor poll interval is 60 seconds.
 

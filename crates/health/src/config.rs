@@ -2598,6 +2598,9 @@ pub struct MetricsConfig {
     pub prefix: String,
     /// Emit per-request BMC latency histograms.
     pub enable_bmc_latency_metrics: bool,
+    /// Emit one inventory identity metric per discovered endpoint on /metrics.
+    /// Disabled by default because per-endpoint series add scrape cardinality.
+    pub enable_endpoint_inventory_metrics: bool,
     /// Label attributes emitted on the BMC latency histogram.
     #[serde(
         default = "default_bmc_latency_attributes",
@@ -2622,6 +2625,7 @@ impl Default for MetricsConfig {
             endpoint: "[::]:9009".to_string(),
             prefix: "carbide_hardware_health".to_string(),
             enable_bmc_latency_metrics: false,
+            enable_endpoint_inventory_metrics: false,
             bmc_latency_attributes: default_bmc_latency_attributes(),
         }
     }
@@ -4398,6 +4402,7 @@ reload_interval = "30s"
         assert_eq!(config.bmc_request_concurrency.get(), 4);
         assert_eq!(config.metrics.endpoint, "[::]:9009");
         assert!(!config.metrics.enable_bmc_latency_metrics);
+        assert!(!config.metrics.enable_endpoint_inventory_metrics);
         assert_eq!(
             config.metrics.bmc_latency_attributes,
             BmcLatencyAttribute::ATTRIBUTES.to_vec()
@@ -4571,6 +4576,19 @@ bmc_latency_attributes = ["http_path", "all"]
             config.metrics.bmc_latency_attributes(),
             BmcLatencyAttribute::ATTRIBUTES.to_vec()
         );
+    }
+
+    #[test]
+    fn endpoint_inventory_metrics_config_parsing() {
+        let config: Config = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string(
+                "[metrics]\nenable_endpoint_inventory_metrics = true\n",
+            ))
+            .extract()
+            .expect("endpoint inventory config should parse");
+
+        assert!(config.metrics.enable_endpoint_inventory_metrics);
     }
 
     #[test]

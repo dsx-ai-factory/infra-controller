@@ -31,11 +31,13 @@ use hyper_util::rt::TokioIo;
 use prometheus::core::{Collector, Desc};
 use prometheus::proto::LabelPair;
 use prometheus::{
-    Encoder, HistogramOpts, HistogramVec, IntCounterVec, Registry, TextEncoder, proto,
+    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry, TextEncoder,
+    proto,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::HealthError;
+use crate::endpoint::{BmcEndpoint, EndpointMetadata, SwitchEndpointRole};
 
 pub type MetricLabel = (Cow<'static, str>, String);
 type BoxedErr = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -175,6 +177,115 @@ impl BmcLatencyMetrics {
         self.latency_ms
             .with_label_values(&labels)
             .observe(observation.duration.as_secs_f64() * 1_000.0);
+    }
+}
+
+/// Current sharded endpoint identities from the configured endpoint source.
+/// This is inventory membership, not a BMC reachability or health signal.
+pub(crate) struct InventoryEndpointMetrics {
+    info: GaugeVec,
+}
+
+impl InventoryEndpointMetrics {
+    pub(crate) fn new(registry: &Registry, prefix: &str) -> Result<Self, prometheus::Error> {
+        let info = GaugeVec::new(
+            Opts::new(
+                format!("{prefix}_inventory_endpoint_info"),
+                "Discovered endpoint identity, independent of reachability",
+            ),
+            &[
+                "endpoint_key",
+                "rack_id",
+                "domain_id",
+                "component_type",
+                "endpoint_type",
+                "tray",
+                "tray_label",
+                "switch_serial",
+            ],
+        )?;
+        registry.register(Box::new(info.clone()))?;
+        Ok(Self { info })
+    }
+
+    /// Replace the previous successful discovery pass so removed or renamed
+    /// endpoints cannot linger in the inventory series.
+    pub(crate) fn reconcile(&self, endpoints: &[Arc<BmcEndpoint>]) {
+        self.info.reset();
+        for endpoint in endpoints {
+            let metadata = endpoint.metadata.as_ref();
+            let (domain_id, tray, tray_label, switch_serial) = match metadata {
+                Some(EndpointMetadata::Machine(machine)) => (
+                    machine
+                        .nvlink_domain_uuid
+                        .map(|id| id.to_string())
+                        .unwrap_or_default(),
+                    machine
+                        .machine_id
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| endpoint.key()),
+                    machine
+                        .machine_serial
+                        .clone()
+                        .filter(|serial| !serial.is_empty())
+                        .unwrap_or_else(|| endpoint.addr.ip.to_string()),
+                    String::new(),
+                ),
+                Some(EndpointMetadata::Switch(switch)) => (
+                    switch
+                        .nvlink_domain_uuid
+                        .map(|id| id.to_string())
+                        .unwrap_or_default(),
+                    String::new(),
+                    String::new(),
+                    switch
+                        .serial
+                        .as_deref()
+                        .filter(|value| !value.is_empty())
+                        .or(switch.log_checkpoint_identity.as_deref())
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+                Some(EndpointMetadata::PowerShelf(power_shelf)) => (
+                    power_shelf
+                        .nvlink_domain_uuid
+                        .map(|id| id.to_string())
+                        .unwrap_or_default(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ),
+                None => (String::new(), String::new(), String::new(), String::new()),
+            };
+            let endpoint_key = endpoint.key();
+            let component_type = metadata.map_or("unknown", EndpointMetadata::component_type);
+            let endpoint_type = match metadata {
+                Some(EndpointMetadata::Switch(switch))
+                    if switch.endpoint_role == SwitchEndpointRole::Host =>
+                {
+                    "nvos"
+                }
+                _ => "bmc",
+            };
+            let rack_id = endpoint
+                .rack_id
+                .as_ref()
+                .map(ToString::to_string)
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| "__unknown_rack__".to_string());
+            self.info
+                .with_label_values(&[
+                    &endpoint_key,
+                    &rack_id,
+                    &domain_id,
+                    component_type,
+                    endpoint_type,
+                    &tray,
+                    &tray_label,
+                    &switch_serial,
+                ])
+                .set(1.0);
+        }
     }
 }
 
@@ -751,8 +862,176 @@ pub fn sanitize_unit(unit: &str) -> String {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::{Check, check_values};
+    use carbide_uuid::rack::RackId;
 
     use super::*;
+    use crate::endpoint::test_support::{mac, test_endpoint};
+    use crate::endpoint::{
+        EndpointMetadata, MachineData, PowerShelfData, SharedSystemUuid, SwitchData,
+    };
+
+    #[test]
+    fn inventory_info_tracks_discovered_trays_without_bmc_access() {
+        let manager = MetricsManager::new("carbide_hardware_health").unwrap();
+        let inventory =
+            InventoryEndpointMetrics::new(manager.global_registry(), "carbide_hardware_health")
+                .unwrap();
+        let mut tray = test_endpoint(mac("02:00:00:00:00:01"));
+        tray.rack_id = Some(RackId::new("vr-nvl72-test"));
+        tray.metadata = Some(EndpointMetadata::Machine(MachineData {
+            machine_id: Some(
+                "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"
+                    .parse()
+                    .unwrap(),
+            ),
+            machine_serial: Some("TRAY-01".to_string()),
+            system_uuid: SharedSystemUuid::default(),
+            slot_number: Some(1),
+            tray_index: Some(1),
+            nvlink_domain_uuid: None,
+            driver_version: None,
+        }));
+
+        inventory.reconcile(&[Arc::new(tray)]);
+        let first = manager.export_metrics().unwrap();
+        assert!(first.contains("carbide_hardware_health_inventory_endpoint_info{"));
+        assert!(first.contains("rack_id=\"vr-nvl72-test\""));
+        assert!(first.contains("endpoint_type=\"bmc\""));
+        assert!(first.contains("tray_label=\"TRAY-01\""));
+
+        inventory.reconcile(&[]);
+        let second = manager.export_metrics().unwrap();
+        assert!(!second.contains("carbide_hardware_health_inventory_endpoint_info{"));
+    }
+
+    #[test]
+    fn inventory_info_keeps_endpoints_with_missing_identity_visible() {
+        let manager = MetricsManager::new("inventory_unknown").unwrap();
+        let inventory =
+            InventoryEndpointMetrics::new(manager.global_registry(), "inventory_unknown").unwrap();
+        inventory.reconcile(&[Arc::new(test_endpoint(mac("02:00:00:00:00:02")))]);
+
+        let body = manager.export_metrics().unwrap();
+        assert!(body.contains("inventory_unknown_inventory_endpoint_info{"));
+        assert!(body.contains("rack_id=\"__unknown_rack__\""));
+        assert!(body.contains("component_type=\"unknown\""));
+    }
+
+    #[test]
+    fn inventory_info_distinguishes_switch_bmc_and_nvos_endpoints() {
+        let manager = MetricsManager::new("inventory_components").unwrap();
+        let inventory =
+            InventoryEndpointMetrics::new(manager.global_registry(), "inventory_components")
+                .unwrap();
+        let mut switch_bmc = test_endpoint(mac("02:00:00:00:00:03"));
+        switch_bmc.rack_id = Some(RackId::new("rack-1"));
+        switch_bmc.metadata = Some(EndpointMetadata::Switch(SwitchData {
+            id: None,
+            serial: Some("SWITCH-01".to_string()),
+            log_checkpoint_identity: None,
+            slot_number: None,
+            tray_index: None,
+            nvlink_domain_uuid: None,
+            endpoint_role: SwitchEndpointRole::Bmc,
+            is_primary: true,
+            nmxc_enabled: true,
+            nmxt_enabled: true,
+        }));
+        let mut switch_host = switch_bmc.clone();
+        switch_host.addr.mac = Some(mac("02:00:00:00:00:04"));
+        if let Some(EndpointMetadata::Switch(switch)) = switch_host.metadata.as_mut() {
+            switch.endpoint_role = SwitchEndpointRole::Host;
+        }
+        let mut power_shelf = test_endpoint(mac("02:00:00:00:00:05"));
+        power_shelf.rack_id = Some(RackId::new("rack-1"));
+        power_shelf.metadata = Some(EndpointMetadata::PowerShelf(PowerShelfData {
+            id: None,
+            serial: Some("SHELF-01".to_string()),
+            nvlink_domain_uuid: None,
+        }));
+
+        inventory.reconcile(&[
+            Arc::new(switch_bmc),
+            Arc::new(switch_host.clone()),
+            Arc::new(power_shelf),
+        ]);
+        let body = manager.export_metrics().unwrap();
+        assert_eq!(
+            body.matches("inventory_components_inventory_endpoint_info{")
+                .count(),
+            3
+        );
+        let switch_lines: Vec<_> = body
+            .lines()
+            .filter(|line| line.contains("switch_serial=\"SWITCH-01\""))
+            .collect();
+        assert_eq!(switch_lines.len(), 2);
+        assert!(
+            switch_lines
+                .iter()
+                .any(|line| line.contains("endpoint_type=\"bmc\""))
+        );
+        assert!(
+            switch_lines
+                .iter()
+                .any(|line| line.contains("endpoint_type=\"nvos\""))
+        );
+        assert!(
+            body.lines()
+                .any(|line| line.contains("component_type=\"power_shelf\"")
+                    && line.contains("endpoint_type=\"bmc\""))
+        );
+
+        // A switch with NVOS inventory but no BMC inventory must remain visible.
+        inventory.reconcile(&[Arc::new(switch_host.clone())]);
+        let host_only = manager.export_metrics().unwrap();
+        assert_eq!(
+            host_only
+                .matches("inventory_components_inventory_endpoint_info{")
+                .count(),
+            1
+        );
+        assert!(host_only.contains("endpoint_type=\"nvos\""));
+
+        if let Some(EndpointMetadata::Switch(switch)) = switch_host.metadata.as_mut() {
+            switch.serial = None;
+        }
+        inventory.reconcile(&[Arc::new(switch_host.clone())]);
+        let no_serial = manager.export_metrics().unwrap();
+        assert!(no_serial.contains("endpoint_type=\"nvos\""));
+        assert!(no_serial.contains("switch_serial=\"\""));
+
+        if let Some(EndpointMetadata::Switch(switch)) = switch_host.metadata.as_mut() {
+            switch.log_checkpoint_identity = Some("gb-nvl-050-switch01".to_string());
+        }
+        inventory.reconcile(&[Arc::new(switch_host)]);
+        let configured_name = manager.export_metrics().unwrap();
+        assert!(configured_name.contains("switch_serial=\"gb-nvl-050-switch01\""));
+    }
+
+    #[test]
+    fn inventory_info_preserves_power_shelf_domain_id() {
+        let manager = MetricsManager::new("inventory_shelf_domain").unwrap();
+        let inventory =
+            InventoryEndpointMetrics::new(manager.global_registry(), "inventory_shelf_domain")
+                .unwrap();
+        let mut power_shelf = test_endpoint(mac("02:00:00:00:00:06"));
+        power_shelf.rack_id = Some(RackId::new("rack-1"));
+        power_shelf.metadata = Some(EndpointMetadata::PowerShelf(PowerShelfData {
+            id: None,
+            serial: Some("SHELF-01".to_string()),
+            nvlink_domain_uuid: Some("ec000000-0000-0000-0000-000000000001".parse().unwrap()),
+        }));
+
+        inventory.reconcile(&[Arc::new(power_shelf)]);
+        let body = manager.export_metrics().unwrap();
+        let shelf_line = body
+            .lines()
+            .find(|line| line.contains("inventory_shelf_domain_inventory_endpoint_info{"))
+            .expect("power shelf inventory series should be exported");
+        assert!(shelf_line.contains("component_type=\"power_shelf\""));
+        assert!(shelf_line.contains("domain_id=\"ec000000-0000-0000-0000-000000000001\""));
+    }
 
     #[test]
     fn unknown_metrics_route_returns_not_found() {
