@@ -50,7 +50,7 @@ function curl_url() {
 	if [ -z "$file" ]; then
 		file=$(basename "${url%%\?*}")
 	fi
-	curl --retry 5 --retry-all-errors -k -L "$@" \
+	curl --fail --retry 5 --retry-all-errors -k -L "$@" \
 		--output "$file" "$url" 2>&1 | tee "$log_output"
 	# Return curl's status, not tee's.
 	return "${PIPESTATUS[0]}"
