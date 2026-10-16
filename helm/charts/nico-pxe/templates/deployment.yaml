@@ -131,12 +131,10 @@ spec:
           {{- end }}
           imagePullPolicy: {{ include "nico-pxe.imagePullPolicy" . }}
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 10001
-            runAsGroup: 10001
-            capabilities:
-              add:
-                - SYS_PTRACE
+            allowPrivilegeEscalation: false
+            {{- with .Values.containerSecurityContext }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           ports:
