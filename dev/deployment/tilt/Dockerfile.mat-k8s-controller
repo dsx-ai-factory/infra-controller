@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1.7
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# mat-k8s-controller image: the Go controller for the controller container. The build context is the repository root.
+
+ARG GO_IMAGE=golang:1.26.4-bookworm@sha256:b305420a68d0f229d91eb3b3ed9e519fcf2cf5461da4bef997bf927e8c0bfd2b
+# Go controller build stage
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS controller-builder
+
+ARG TARGETARCH
+
+WORKDIR /src
+
+COPY dev/k8s/machine-a-tron-controller/go.mod dev/k8s/machine-a-tron-controller/go.sum ./
+RUN go mod download
+
+COPY dev/k8s/machine-a-tron-controller/ ./
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
+    go build -ldflags="-s -w" -o /out/mat-k8s-controller ./cmd/mat-k8s-controller
+
+# Runtime stage
+FROM nico-tilt-runtime-base
+
+ARG VERSION
+ARG CI_COMMIT_SHORT_SHA
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${CI_COMMIT_SHORT_SHA}"
+LABEL org.opencontainers.image.title="mat-k8s-controller"
+LABEL org.opencontainers.image.description="machine-a-tron Kubernetes controller"
+LABEL org.opencontainers.image.vendor="NVIDIA"
+
+COPY --from=controller-builder /out/mat-k8s-controller /mat-k8s-controller
+
+USER 65534:65534
+
+ENTRYPOINT ["/mat-k8s-controller"]
