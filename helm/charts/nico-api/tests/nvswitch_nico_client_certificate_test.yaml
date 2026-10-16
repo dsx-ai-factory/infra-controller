@@ -58,3 +58,28 @@ tests:
           path: spec.uris
           value:
             - spiffe://switch.local/nico-system/sa/nico-nmxc
+
+  - it: uses the global certificate issuer when nvSwitchTls.issuerRef is empty
+    set:
+      global.certificate.issuerRef.name: my-custom-issuer
+    asserts:
+      - equal:
+          path: spec.issuerRef
+          value:
+            kind: ClusterIssuer
+            name: my-custom-issuer
+            group: cert-manager.io
+
+  - it: uses an explicit nvSwitchTls issuer
+    set:
+      nvSwitchTls.issuerRef:
+        kind: Issuer
+        name: nvswitch-issuer
+        group: cert-manager.io
+    asserts:
+      - equal:
+          path: spec.issuerRef
+          value:
+            kind: Issuer
+            name: nvswitch-issuer
+            group: cert-manager.io

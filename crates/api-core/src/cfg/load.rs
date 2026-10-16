@@ -345,12 +345,12 @@ pub fn parse_carbide_config(
         DefaultNmxCClientTls::Applied => tracing::info!(
             tls_dir = NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR,
             authority = ?nvlink_config.nmx_c_tls_authority,
-            "Using default NMX-C client certificate for NvLink partitioning"
+            "Using default client certificate for NMX-C connections"
         ),
         DefaultNmxCClientTls::CertificateMissing => tracing::warn!(
             tls_dir = NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR,
-            "NvLink partitioning is enabled without NMX-C TLS settings and no client certificate \
-             was found in tls_dir; NMX-C connections will present no client certificate. Mount \
+            "NMX-C connections have no TLS settings configured and no client certificate was \
+             found in tls_dir, so they will present no client certificate. Mount \
              the certificate there (Helm nvSwitchTls.nicoClient.mountPath) or set the \
              nvlink_config.nmx_c_tls_* keys"
         ),
@@ -359,12 +359,12 @@ pub fn parse_carbide_config(
     match ca {
         DefaultNmxCCa::Applied => tracing::info!(
             ca_cert = ?nvlink_config.nmx_c_tls_ca_cert_path,
-            "Using default NMX-C CA bundle for NvLink partitioning"
+            "Using default CA bundle for NMX-C connections"
         ),
         DefaultNmxCCa::Missing => tracing::warn!(
             client_tls_dir = NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR,
             fallback_ca_cert = NvLinkConfig::DEFAULT_NMX_C_FALLBACK_CA_CERT,
-            "NvLink partitioning reaches NMX-C over HTTPS but no CA bundle is configured and \
+            "NMX-C is reached over HTTPS but no CA bundle is configured and \
              neither default exists; no NMX-C server certificate can be verified. Set \
              nvlink_config.nmx_c_tls_ca_cert_path"
         ),

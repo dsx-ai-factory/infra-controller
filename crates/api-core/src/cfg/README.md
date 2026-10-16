@@ -523,8 +523,8 @@ shipped configuration selects a plaintext mode.
 | `nmx_c_certificate_rotation` | `NmxCCertificateRotationConfig` | *(default)* | Optional expiry-driven rotation for NMX-C server certificates. |
 | `partition_monitor_max_concurrent_groups` | `NonZeroUsize` | `16` | Maximum number of NMX-C machine groups (chassis or rack) processed concurrently per monitor iteration. Bounds DB pool usage and gRPC fan-out. Must be ≥ 1. |
 
-When `enabled` is `true`, `nico-api` fills in unset NMX-C TLS settings at
-startup:
+When `enabled` or `nmx_c_certificate_rotation.enabled` is `true`, `nico-api`
+fills in unset NMX-C TLS settings at startup:
 
 - **Client certificate, key, and authority.** When `allow_insecure` is `false`
   and none of the four `nmx_c_tls_*` keys is set, `nico-api` checks for

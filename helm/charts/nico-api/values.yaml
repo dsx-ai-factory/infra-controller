@@ -193,14 +193,13 @@ certificate:
   ipAddresses: []
 
 ## Optional NVSwitch control-plane certificates. Both leaves use the
-## same existing issuer, which defaults to the vault-nico-issuer deployed by
-## the standard NICo prerequisites. nicoClient is enabled by default;
-## switchServer is disabled by default.
+## same issuer. nicoClient is enabled by default; switchServer is disabled by
+## default.
 nvSwitchTls:
-  issuerRef:
-    kind: ClusterIssuer
-    name: vault-nico-issuer
-    group: cert-manager.io
+  ## Issuer for both leaves. Empty uses global.certificate.issuerRef, the issuer
+  ## of nico-api's own certificate (vault-nico-issuer by default). Set kind,
+  ## name, and group together to use a different issuer.
+  issuerRef: {}
 
   ## Dedicated NICo client identity for direct mTLS connections to NMX-C.
   ## When enabled, the generated Secret is mounted read-only at mountPath.

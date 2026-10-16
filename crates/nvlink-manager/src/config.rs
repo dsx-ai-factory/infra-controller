@@ -77,9 +77,10 @@ pub struct DefaultNmxCTls {
 pub enum DefaultNmxCClientTls {
     /// The mounted client certificate and `initial_domain_name` authority are now in use.
     Applied,
-    /// Partitioning is disabled or insecure, or an `nmx_c_tls_*` key is configured.
+    /// Neither partitioning nor the certificate monitor is enabled, NMX-C is reached
+    /// insecurely, or an `nmx_c_tls_*` key is configured.
     NotNeeded,
-    /// Secure partitioning has no NMX-C TLS configuration and no mounted client certificate,
+    /// Secure NMX-C access has no NMX-C TLS configuration and no mounted client certificate,
     /// so NMX-C connections will present no client certificate.
     CertificateMissing,
 }
@@ -89,7 +90,8 @@ pub enum DefaultNmxCClientTls {
 pub enum DefaultNmxCCa {
     /// A default CA bundle is now in use.
     Applied,
-    /// Partitioning is disabled, NMX-C is reached over plain HTTP, or a CA is configured.
+    /// Neither partitioning nor the certificate monitor is enabled, NMX-C is reached over
+    /// plain HTTP, or a CA is configured.
     NotNeeded,
     /// NMX-C is reached over HTTPS with no configured or default CA bundle, so no NMX-C
     /// server certificate can be verified.
@@ -115,7 +117,8 @@ impl NvLinkConfig {
                 && self.nmx_c_tls_client_key_path.is_some())
     }
 
-    /// Fills in NMX-C TLS settings the site configuration leaves unset.
+    /// Fills in NMX-C TLS settings the site configuration leaves unset, when partitioning or
+    /// the certificate monitor is enabled.
     ///
     /// The client certificate, key, and authority are defaulted together, and only when none of
     /// the four `nmx_c_tls_*` keys is set: the certificate and key come from `client_tls_dir`
@@ -128,7 +131,7 @@ impl NvLinkConfig {
         fallback_ca_cert: &std::path::Path,
         default_authority: Option<&str>,
     ) -> DefaultNmxCTls {
-        if !self.enabled {
+        if !self.enabled && !self.nmx_c_certificate_rotation.enabled {
             return DefaultNmxCTls {
                 client: DefaultNmxCClientTls::NotNeeded,
                 ca: DefaultNmxCCa::NotNeeded,
@@ -405,9 +408,24 @@ mod test {
                 expected_ca: Some("client/ca.crt"),
             },
             Case {
-                name: "disabled",
+                name: "certificate monitor alone still gets defaults",
                 config: NvLinkConfig {
                     enabled: false,
+                    ..NvLinkConfig::default()
+                },
+                mount: Mount::ClientWithCa,
+                client: DefaultNmxCClientTls::Applied,
+                ca: DefaultNmxCCa::Applied,
+                expected_ca: Some("client/ca.crt"),
+            },
+            Case {
+                name: "partitioning and certificate monitor disabled",
+                config: NvLinkConfig {
+                    enabled: false,
+                    nmx_c_certificate_rotation: NmxCCertificateRotationConfig {
+                        enabled: false,
+                        ..NmxCCertificateRotationConfig::default()
+                    },
                     ..NvLinkConfig::default()
                 },
                 mount: Mount::ClientWithCa,

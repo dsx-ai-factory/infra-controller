@@ -495,7 +495,8 @@ The following table describes the certificate rotation settings:
 omitted. Set it to `false` on sites that do not use automated NVLink partition
 reconciliation. The certificate monitor follows only its nested `enabled`
 setting, so a deployment that sets `nvlink_config.enabled = false` still
-rotates NMX-C certificates. Set
+rotates NMX-C certificates, and `nico-api` still applies its NMX-C TLS defaults
+for the monitor. Set
 `nvlink_config.nmx_c_certificate_rotation.enabled = false` to stop the
 certificate monitor and its `ConfigureNmxCluster` maintenance requests.
 </Note>

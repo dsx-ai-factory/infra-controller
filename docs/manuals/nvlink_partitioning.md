@@ -26,14 +26,14 @@ for the role and interface model.
 
 | Task | Role | Interface |
 | --- | --- | --- |
-| Enable NVLink; NMX-C connection and TLS settings | Operator | **TOML** (`[nvlink_config]`) — Day 0 / rare |
+| Opt out of NVLink; override NMX-C connection and TLS settings | Operator | **TOML** (`[nvlink_config]`) — Day 0 / rare |
 | Fallback NMX-C endpoints (per chassis serial) | Operator | `nico-admin-cli nvlink-nmxc-endpoints ...` (gRPC) — not in REST |
 | Create / update / delete an NVLink Logical Partition | Tenant | **REST** `.../nico/nvlink-logical-partition` · `nicocli nvlink-logical-partition create` |
 | Assign or change an instance's GPUs' partition | Tenant | **REST** `.../nico/instance` (`nvLinkInterfaces`) · `nicocli instance update` |
 | Inspect a machine's GPU domain placement (triage) | Operator | `nico-admin-cli machine nvlink-info show <MACHINE_ID>` (gRPC) |
 
 The operator NMX setup (the first two rows) is detailed under
-[Enabling NMX-C-based NVLink Partitioning](#enabling-nmx-c-based-nvlink-partitioning).
+[Configuring NMX-C-based NVLink Partitioning](#configuring-nmx-c-based-nvlink-partitioning).
 Certificate lifecycle setup and alerting are described in
 [NMX-C Certificate Monitoring and Rotation](../operations/nvlink-certificate-rotation.md).
 The tenant rows are the REST / `nicocli` flow described next.
@@ -174,7 +174,7 @@ When a host is force-deleted, the instance running on it is implicitly
 released and the above cleanup path runs. Operators do not need to detach
 NVLink configuration manually before force-deleting.
 
-### Enabling NMX-C-based NVLink Partitioning
+### Configuring NMX-C-based NVLink Partitioning
 
 NMX-C is the supported gRPC control path for NVLink partition management.
 
@@ -185,16 +185,18 @@ available temporarily so existing scripts receive a clear unsupported error;
 they do not modify credentials.
 </Note>
 
-Configure the NMX-C client under `[nvlink_config]`:
+NVLink partitioning is on by default. Configure the NMX-C client under
+`[nvlink_config]` when the defaults described below do not fit the site:
 
 ```toml
 [nvlink_config]
 enabled = true
 monitor_run_interval = "60s"
 
-# TLS material for NMX-C. The CA path is required by the certificate
-# monitor. Configure the client certificate and key together when NMX-C
-# requires mTLS.
+# TLS material for NMX-C. The CA path defaults when nico-api finds a
+# ca.crt (see below); otherwise set it, because the certificate monitor
+# requires it. Configure the client certificate and key together when
+# NMX-C requires mTLS.
 nmx_c_tls_ca_cert_path     = "/etc/nico/nmxc/ca.pem"
 nmx_c_tls_client_cert_path = "/etc/nico/nmxc/client.crt"
 nmx_c_tls_client_key_path  = "/etc/nico/nmxc/client.key"
@@ -214,9 +216,26 @@ allow_insecure = false
 | `allow_insecure` | Development option that can select plaintext HTTP for rack-derived endpoints when no client certificate and key are configured. It does not disable certificate-monitor TLS verification |
 
 `enabled` and the certificate monitor's `nmx_c_certificate_rotation.enabled`
-default to `true`, including when `[nvlink_config]` is omitted. When the TLS
-keys are omitted, `nico-api` takes them from the nico-api Helm chart's
-`nvSwitchTls.nicoClient` mount and `initial_domain_name`. The
+default to `true`, including when `[nvlink_config]` is omitted. Set
+`enabled = false` on sites that do not use NVLink partitioning. Set
+`nmx_c_certificate_rotation.enabled = false` to also stop the certificate
+monitor.
+
+When either setting is `true`, `nico-api` fills in unset TLS settings at
+startup:
+
+- **Client certificate, key, and authority.** When none of the four
+  `nmx_c_tls_*` keys is set, `nico-api` uses `tls.crt` and `tls.key` from the
+  nico-api Helm chart's `nvSwitchTls.nicoClient` mount,
+  `/var/run/secrets/nvswitch-client`, and sets `nmx_c_tls_authority` to
+  `initial_domain_name`. Setting any `nmx_c_tls_*` key disables these three
+  defaults.
+- **CA bundle.** When `nmx_c_tls_ca_cert_path` is unset and NMX-C is reached
+  over HTTPS, `nico-api` uses `ca.crt` from that mount, or else
+  `/var/run/secrets/nico-roots/ca.crt`. This applies regardless of the other
+  keys.
+
+The
 [`NvLinkConfig` reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#nvlinkconfig)
 describes exactly when each default applies.
 
