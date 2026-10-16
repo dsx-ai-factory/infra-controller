@@ -69,3 +69,27 @@ CREATE TRIGGER t_spdm_attestation_jobs_keep_limit
     FOR EACH ROW
     WHEN (OLD.completed_at IS NULL AND NEW.completed_at IS NOT NULL)
     EXECUTE FUNCTION spdm_attestation_jobs_keep_limit();
+
+-- Restart legacy SPDM polling states that have no job ID to resume. I.e. we "shift" attestation to the previous state.
+UPDATE machines
+SET controller_state = jsonb_set(
+    controller_state, '{machine_state,spdm_measuring_state}', '"triggermeasurements"', false
+)
+WHERE controller_state->>'state' = 'hostinit'
+  AND controller_state #>> '{machine_state,state}' = 'spdmmeasuring'
+  AND controller_state #> '{machine_state,spdm_measuring_state}' = '"pollresult"'::jsonb;
+
+UPDATE machines
+SET controller_state = jsonb_set(
+    controller_state, '{spdm_measuring_state}', '"triggermeasurements"', false
+)
+WHERE controller_state->>'state' = 'preassignedmeasuring'
+  AND controller_state->'spdm_measuring_state' = '"pollresult"'::jsonb;
+
+UPDATE machines
+SET controller_state = jsonb_set(
+    controller_state, '{attestation_mode,spdmattestation,spdm_measuring_state}',
+    '"triggermeasurements"', false
+)
+WHERE controller_state->>'state' = 'postassignedmeasuring'
+  AND controller_state #> '{attestation_mode,spdmattestation,spdm_measuring_state}' = '"pollresult"'::jsonb;
