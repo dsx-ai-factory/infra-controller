@@ -215,6 +215,7 @@ func TestTenantAccountSQLDAO_Create(t *testing.T) {
 			}
 		})
 	}
+
 }
 
 func TestTenantAccountSQLDAO_GetByID(t *testing.T) {
@@ -1168,6 +1169,28 @@ func TestTenantAccountSQLDAO_Update(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("capability updates preserve omitted config keys", func(t *testing.T) {
+		got, err := tasd.Update(ctx, nil, TenantAccountUpdateInput{
+			TenantAccountID: ta.ID,
+			Config: &TenantAccountConfigUpdate{
+				TargetedInstanceCreation: cutil.GetPtr(true),
+			},
+		})
+		assert.NoError(t, err)
+		assert.True(t, got.Config.TargetedInstanceCreation)
+		assert.False(t, got.Config.CrossTenantVpcAttachment)
+
+		got, err = tasd.Update(ctx, nil, TenantAccountUpdateInput{
+			TenantAccountID: ta.ID,
+			Config: &TenantAccountConfigUpdate{
+				CrossTenantVpcAttachment: cutil.GetPtr(true),
+			},
+		})
+		assert.NoError(t, err)
+		assert.True(t, got.Config.TargetedInstanceCreation)
+		assert.True(t, got.Config.CrossTenantVpcAttachment)
+	})
 }
 
 func TestTenantAccountSQLDAO_Delete(t *testing.T) {

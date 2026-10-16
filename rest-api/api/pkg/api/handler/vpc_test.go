@@ -3974,6 +3974,13 @@ func TestGetAllVPCHandler_Handle(t *testing.T) {
 	}
 }
 
+func TestVpcInstanceReferenceFilter(t *testing.T) {
+	vpcID := uuid.New()
+	filter := vpcInstanceReferenceFilter(vpcID)
+	assert.Equal(t, []uuid.UUID{vpcID}, filter.VpcIDs)
+	assert.Empty(t, filter.TenantIDs)
+}
+
 func TestDeleteVPCHandler_Handle(t *testing.T) {
 	ctx := context.Background()
 	type fields struct {
@@ -4057,6 +4064,20 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 
 	vpcPrefix := testVPCBuildVPCPrefix(t, dbSession, "test-vpc-prefix", tn1, vpc3, cutil.GetPtr(ipb1.ID), "10.0.0.0/24", tnu1)
 	assert.NotNil(t, vpcPrefix)
+
+	vpcWithForeignAttachment := testVPCBuildVPC(t, dbSession, "test-vpc-with-foreign-attachment", ip, tn1, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu1)
+	foreignPrimaryVpc := testVPCBuildVPC(t, dbSession, "test-foreign-primary-vpc", ip, tn2, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu2)
+	foreignInstance := testInstanceBuildInstance(
+		t, dbSession, "test-foreign-instance", tn2.ID, ip.ID, st.ID,
+		nil, foreignPrimaryVpc.ID, nil, nil, nil, cdbm.InstanceStatusReady,
+	)
+	_, err := cdbm.NewInterfaceDAO(dbSession).Create(ctx, nil, cdbm.InterfaceCreateInput{
+		InstanceID: foreignInstance.ID,
+		VpcID:      &vpcWithForeignAttachment.ID,
+		Status:     cdbm.InterfaceStatusReady,
+		CreatedBy:  tnu2.ID,
+	})
+	require.NoError(t, err)
 
 	nvllp := testBuildNVLinkLogicalPartition(t, dbSession, "test-nvllp", cutil.GetPtr("Test NVLink Logical Partition"), tn1.Org, st, tn1, cutil.GetPtr(cdbm.NVLinkLogicalPartitionStatusReady), false)
 	assert.NotNil(t, nvllp)
@@ -4318,6 +4339,21 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 			},
 			args: args{
 				reqVPC:   vpc3.ID.String(),
+				reqOrg:   tnOrg1,
+				reqUser:  tnu1,
+				respCode: http.StatusBadRequest,
+			},
+		},
+		{
+			name: "VPC delete is blocked by a foreign Tenant Interface attachment",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqVPC:   vpcWithForeignAttachment.ID.String(),
 				reqOrg:   tnOrg1,
 				reqUser:  tnu1,
 				respCode: http.StatusBadRequest,

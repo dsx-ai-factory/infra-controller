@@ -232,6 +232,7 @@ type InterfaceUpdateInput struct {
 type InterfaceFilterInput struct {
 	InstanceIDs    []uuid.UUID
 	SubnetID       *uuid.UUID
+	VpcID          *uuid.UUID
 	VpcPrefixID    *uuid.UUID
 	Device         *string
 	DeviceInstance *int
@@ -354,6 +355,21 @@ func (ifcd InterfaceSQLDAO) setQueryWithFilter(filter InterfaceFilterInput, quer
 		cotel.SetAttribute(interfaceDAOSpan, attribute.String("subnet_id", filter.SubnetID.String()))
 	}
 
+	if filter.VpcID != nil {
+		query = query.WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			return q.
+				Where("ifc.vpc_id = ?", *filter.VpcID).
+				WhereOr(`EXISTS (
+					SELECT 1
+					FROM vpc_prefix AS vp
+					WHERE vp.id = ifc.vpc_prefix_id
+						AND vp.vpc_id = ?
+						AND vp.deleted IS NULL
+				)`, *filter.VpcID)
+		})
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("vpc_id", filter.VpcID.String()))
+	}
+
 	if filter.VpcPrefixID != nil {
 		query = query.Where(
 			"(ifc.vpc_prefix_id = ? OR ifc.secondary_vpc_prefix_id = ?)",
@@ -416,20 +432,23 @@ func (ifcd InterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Interf
 
 	// if no order is passed, set default to make sure objects return always in the same order and pagination works properly
 	if page.OrderBy == nil {
-		page.OrderBy = paginator.NewDefaultOrderBy(VpcOrderByDefault)
+		page.OrderBy = paginator.NewDefaultOrderBy(InterfaceOrderByDefault)
 	}
 
-	paginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, InterfaceOrderByFields)
+	dbPaginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, InterfaceOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+	if filter.VpcID != nil {
+		dbPaginator.Query = dbPaginator.Query.OrderExpr("ifc.id ASC")
+	}
+
+	err = dbPaginator.Query.Limit(dbPaginator.Limit).Offset(dbPaginator.Offset).Scan(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	err = paginator.Query.Limit(paginator.Limit).Offset(paginator.Offset).Scan(ctx)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return iss, paginator.Total, nil
+	return iss, dbPaginator.Total, nil
 }
 
 // Update updates specified fields of an existing Interface

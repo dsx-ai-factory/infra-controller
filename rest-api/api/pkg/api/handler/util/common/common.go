@@ -58,7 +58,9 @@ const (
 	// MachineHealthStatusUnhealthy is the health status for a machine that is unhealthy
 	MachineHealthStatusUnhealthy = "unhealthy"
 	// TenantCapabilityTargetedInstanceCreation is the capability key for targeted instance creation
-	TenantCapabilityTargetedInstanceCreation = "targetedInstanceCreation"
+	TenantCapabilityTargetedInstanceCreation = cdbm.TenantSiteConfigKeyTargetedInstanceCreation
+	// TenantCapabilityCrossTenantVpcAttachment is the capability key for cross-Tenant VPC attachment.
+	TenantCapabilityCrossTenantVpcAttachment = cdbm.TenantSiteConfigKeyCrossTenantVpcAttachment
 )
 
 var (
@@ -1629,6 +1631,12 @@ func TenantHasLegacyTargetedInstanceCreation(ctx context.Context, tx *cdb.Tx, db
 // cdbm.TenantHasTargetedInstanceCreation.
 func TenantHasTargetedInstanceCreation(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, scope *TenantPrivilegeScope) (bool, error) {
 	return cdbm.TenantHasTargetedInstanceCreation(ctx, tx, dbSession, tenant, scope)
+}
+
+// TenantHasCrossTenantVpcAttachment reports whether the Tenant has the
+// cross-Tenant VPC attachment capability enabled at the specified Site.
+func TenantHasCrossTenantVpcAttachment(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID) (bool, error) {
+	return cdbm.TenantHasCrossTenantVpcAttachment(ctx, tx, dbSession, tenant, siteID)
 }
 
 // TenantHasSiteAccess reports whether the Tenant has an Allocation or effective TargetedInstanceCreation on the Site.

@@ -206,8 +206,8 @@ func testMachineEnableTenantAccountTargetedInstanceCreation(t *testing.T, dbSess
 
 	_, err = taDAO.Update(context.Background(), nil, cdbm.TenantAccountUpdateInput{
 		TenantAccountID: tas[0].ID,
-		Config: &cdbm.TenantAccountConfig{
-			TargetedInstanceCreation: true,
+		Config: &cdbm.TenantAccountConfigUpdate{
+			TargetedInstanceCreation: cutil.GetPtr(true),
 		},
 	})
 	assert.Nil(t, err)
