@@ -417,6 +417,8 @@ const (
 	Forge_FindNicFirmwareSiteSelectionIds_FullMethodName                    = "/forge.Forge/FindNicFirmwareSiteSelectionIds"
 	Forge_FindNicFirmwareSiteSelectionsByIds_FullMethodName                 = "/forge.Forge/FindNicFirmwareSiteSelectionsByIds"
 	Forge_SetMachineNicFirmwareConfig_FullMethodName                        = "/forge.Forge/SetMachineNicFirmwareConfig"
+	Forge_GetTenantNicFirmwareConfig_FullMethodName                         = "/forge.Forge/GetTenantNicFirmwareConfig"
+	Forge_SetTenantNicFirmwareConfig_FullMethodName                         = "/forge.Forge/SetTenantNicFirmwareConfig"
 	Forge_GetDesiredNicFirmware_FullMethodName                              = "/forge.Forge/GetDesiredNicFirmware"
 	Forge_CreateSku_FullMethodName                                          = "/forge.Forge/CreateSku"
 	Forge_GenerateSkuFromMachine_FullMethodName                             = "/forge.Forge/GenerateSkuFromMachine"
@@ -1306,6 +1308,10 @@ type ForgeClient interface {
 	FindNicFirmwareSiteSelectionsByIds(ctx context.Context, in *FindNicFirmwareSiteSelectionsByIdsRequest, opts ...grpc.CallOption) (*FindNicFirmwareSiteSelectionsByIdsResponse, error)
 	// Set or clear the operator's machine and card selections using Machine.version.
 	SetMachineNicFirmwareConfig(ctx context.Context, in *SetMachineNicFirmwareConfigRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Only operators may read the tenant selection and shared Tenant.version.
+	GetTenantNicFirmwareConfig(ctx context.Context, in *GetTenantNicFirmwareConfigRequest, opts ...grpc.CallOption) (*TenantNicFirmwareConfig, error)
+	// Set or clear the operator's tenant selection using the shared Tenant.version.
+	SetTenantNicFirmwareConfig(ctx context.Context, in *SetTenantNicFirmwareConfigRequest, opts ...grpc.CallOption) (*TenantNicFirmwareConfig, error)
 	// Get desired firmware for each device using stored host observations.
 	GetDesiredNicFirmware(ctx context.Context, in *GetDesiredNicFirmwareRequest, opts ...grpc.CallOption) (*GetDesiredNicFirmwareResponse, error)
 	// Create A SKU to be assigned to a machine so the machine hardware can be validated.
@@ -5552,6 +5558,26 @@ func (c *forgeClient) SetMachineNicFirmwareConfig(ctx context.Context, in *SetMa
 	return out, nil
 }
 
+func (c *forgeClient) GetTenantNicFirmwareConfig(ctx context.Context, in *GetTenantNicFirmwareConfigRequest, opts ...grpc.CallOption) (*TenantNicFirmwareConfig, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TenantNicFirmwareConfig)
+	err := c.cc.Invoke(ctx, Forge_GetTenantNicFirmwareConfig_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) SetTenantNicFirmwareConfig(ctx context.Context, in *SetTenantNicFirmwareConfigRequest, opts ...grpc.CallOption) (*TenantNicFirmwareConfig, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TenantNicFirmwareConfig)
+	err := c.cc.Invoke(ctx, Forge_SetTenantNicFirmwareConfig_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) GetDesiredNicFirmware(ctx context.Context, in *GetDesiredNicFirmwareRequest, opts ...grpc.CallOption) (*GetDesiredNicFirmwareResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetDesiredNicFirmwareResponse)
@@ -7711,6 +7737,10 @@ type ForgeServer interface {
 	FindNicFirmwareSiteSelectionsByIds(context.Context, *FindNicFirmwareSiteSelectionsByIdsRequest) (*FindNicFirmwareSiteSelectionsByIdsResponse, error)
 	// Set or clear the operator's machine and card selections using Machine.version.
 	SetMachineNicFirmwareConfig(context.Context, *SetMachineNicFirmwareConfigRequest) (*emptypb.Empty, error)
+	// Only operators may read the tenant selection and shared Tenant.version.
+	GetTenantNicFirmwareConfig(context.Context, *GetTenantNicFirmwareConfigRequest) (*TenantNicFirmwareConfig, error)
+	// Set or clear the operator's tenant selection using the shared Tenant.version.
+	SetTenantNicFirmwareConfig(context.Context, *SetTenantNicFirmwareConfigRequest) (*TenantNicFirmwareConfig, error)
 	// Get desired firmware for each device using stored host observations.
 	GetDesiredNicFirmware(context.Context, *GetDesiredNicFirmwareRequest) (*GetDesiredNicFirmwareResponse, error)
 	// Create A SKU to be assigned to a machine so the machine hardware can be validated.
@@ -9181,6 +9211,12 @@ func (UnimplementedForgeServer) FindNicFirmwareSiteSelectionsByIds(context.Conte
 }
 func (UnimplementedForgeServer) SetMachineNicFirmwareConfig(context.Context, *SetMachineNicFirmwareConfigRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetMachineNicFirmwareConfig not implemented")
+}
+func (UnimplementedForgeServer) GetTenantNicFirmwareConfig(context.Context, *GetTenantNicFirmwareConfigRequest) (*TenantNicFirmwareConfig, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetTenantNicFirmwareConfig not implemented")
+}
+func (UnimplementedForgeServer) SetTenantNicFirmwareConfig(context.Context, *SetTenantNicFirmwareConfigRequest) (*TenantNicFirmwareConfig, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetTenantNicFirmwareConfig not implemented")
 }
 func (UnimplementedForgeServer) GetDesiredNicFirmware(context.Context, *GetDesiredNicFirmwareRequest) (*GetDesiredNicFirmwareResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetDesiredNicFirmware not implemented")
@@ -16710,6 +16746,42 @@ func _Forge_SetMachineNicFirmwareConfig_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_GetTenantNicFirmwareConfig_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetTenantNicFirmwareConfigRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetTenantNicFirmwareConfig(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetTenantNicFirmwareConfig_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetTenantNicFirmwareConfig(ctx, req.(*GetTenantNicFirmwareConfigRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_SetTenantNicFirmwareConfig_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetTenantNicFirmwareConfigRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).SetTenantNicFirmwareConfig(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_SetTenantNicFirmwareConfig_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).SetTenantNicFirmwareConfig(ctx, req.(*SetTenantNicFirmwareConfigRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_GetDesiredNicFirmware_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetDesiredNicFirmwareRequest)
 	if err := dec(in); err != nil {
@@ -20815,6 +20887,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetMachineNicFirmwareConfig",
 			Handler:    _Forge_SetMachineNicFirmwareConfig_Handler,
+		},
+		{
+			MethodName: "GetTenantNicFirmwareConfig",
+			Handler:    _Forge_GetTenantNicFirmwareConfig_Handler,
+		},
+		{
+			MethodName: "SetTenantNicFirmwareConfig",
+			Handler:    _Forge_SetTenantNicFirmwareConfig_Handler,
 		},
 		{
 			MethodName: "GetDesiredNicFirmware",

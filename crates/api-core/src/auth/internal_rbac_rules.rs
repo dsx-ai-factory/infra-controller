@@ -720,6 +720,8 @@ impl InternalRBACRules {
         x.perm("FindNicFirmwareSiteSelectionIds", vec![ForgeAdminCLI]);
         x.perm("FindNicFirmwareSiteSelectionsByIds", vec![ForgeAdminCLI]);
         x.perm("SetMachineNicFirmwareConfig", vec![ForgeAdminCLI]);
+        x.perm("GetTenantNicFirmwareConfig", vec![ForgeAdminCLI]);
+        x.perm("SetTenantNicFirmwareConfig", vec![ForgeAdminCLI]);
         x.perm("GetDesiredNicFirmware", vec![ForgeAdminCLI]);
         x.perm("CreateSku", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GenerateSkuFromMachine", vec![ForgeAdminCLI]);
@@ -1355,8 +1357,19 @@ mod rbac_rule_tests {
         );
     }
 
+    /// Firmware configuration stays operator-only, including tenant selections
+    /// that ordinary tenant callers must neither read nor change.
     #[test]
     fn nic_firmware_profile_operator_permissions() {
+        // Check the complete grant set for the new tenant methods so adding any
+        // service or anonymous grant cannot hide behind the sampled callers below.
+        let operator_principals = RuleInfo::new(vec![ForgeAdminCLI]).principals;
+        for method in ["GetTenantNicFirmwareConfig", "SetTenantNicFirmwareConfig"] {
+            assert_eq!(
+                INTERNAL_RBAC_RULES.perms[method].principals, operator_principals,
+                "{method} must remain operator-only"
+            );
+        }
         for (principal, allowed) in [
             (
                 Principal::ExternalUser(ExternalUserInfo::new(
@@ -1382,6 +1395,8 @@ mod rbac_rule_tests {
                 "FindNicFirmwareSiteSelectionIds",
                 "FindNicFirmwareSiteSelectionsByIds",
                 "SetMachineNicFirmwareConfig",
+                "GetTenantNicFirmwareConfig",
+                "SetTenantNicFirmwareConfig",
                 "GetDesiredNicFirmware",
             ] {
                 assert_eq!(

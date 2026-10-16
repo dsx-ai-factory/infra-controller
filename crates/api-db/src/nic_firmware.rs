@@ -204,7 +204,7 @@ pub async fn update(
 /// `delete` removes a profile whose complete version matches the caller's token.
 /// Missing profiles return `NotFoundError`; stale tokens return
 /// `ConcurrentModificationError` and leave the profile in place.
-/// A profile referenced by a site, machine, or card selection returns
+/// A profile referenced by a site, machine, card, or tenant selection returns
 /// `FailedPrecondition`.
 pub async fn delete(
     txn: &mut PgConnection,
@@ -237,6 +237,13 @@ pub async fn delete(
             {
                 DatabaseError::FailedPrecondition(
                     "profile is selected by a card NIC firmware selection".into(),
+                )
+            }
+            sqlx::Error::Database(error)
+                if error.constraint() == Some("tenants_nic_firmware_profile_id_fkey") =>
+            {
+                DatabaseError::FailedPrecondition(
+                    "profile is selected by a tenant NIC firmware selection".into(),
                 )
             }
             error => DatabaseError::query(query, error),

@@ -30,8 +30,201 @@ use common::api_fixtures::{
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use crate::cfg::file::ComputeAllocationEnforcement;
+use crate::test_support::network_segment::{
+    FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS, FIXTURE_TENANT_ORG_ID, create_tenant_network_segment,
+};
 use crate::tests::common;
 use crate::tests::common::api_fixtures::TestManagedHost;
+use crate::tests::common::api_fixtures::tenant::create_fixture_tenant;
+use crate::tests::common::rpc_builder::VpcCreationRequest;
+use crate::tests::instance_allocate::{
+    TENANT_FIRMWARE_DPA_MAC, create_spx_allocation_request,
+    create_spx_allocation_request_for_tenant, set_tenant_nic_firmware_profile,
+};
+
+const UNSELECTED_SPX_TENANT: &str = "unselected-spx-tenant";
+const UNSELECTED_SPX_MAC: &str = "02:11:22:33:44:56";
+
+/// Give the unselected tenant its own valid network so batch results distinguish
+/// firmware applicability from cross-tenant resource validation.
+async fn create_unselected_spx_tenant_segment(env: &TestEnv) -> NetworkSegmentId {
+    create_fixture_tenant(env, UNSELECTED_SPX_TENANT)
+        .await
+        .unwrap();
+    let vpc = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder(UNSELECTED_SPX_TENANT)
+                .metadata(rpc::Metadata {
+                    name: "unselected-spx-vpc".to_string(),
+                    ..Default::default()
+                })
+                .tonic_request(),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+    let segment_id = create_tenant_network_segment(
+        &env.api,
+        vpc.id,
+        FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[1],
+        "unselected-spx-segment",
+        true,
+    )
+    .await;
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    segment_id
+}
+
+/// A selected tenant's ordinary request must not impose its requirement on
+/// another tenant's SPX request in the same batch.
+#[crate::sqlx_test]
+async fn tenant_nic_firmware_selection_allows_unrelated_spx_batch(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let selected_segment_id = env.create_vpc_and_tenant_segment().await;
+    let unselected_segment_id = create_unselected_spx_tenant_segment(&env).await;
+    let ordinary_host = create_managed_host(&env).await;
+    let spx_host = create_managed_host(&env).await;
+    let mut ordinary_request =
+        build_test_instance_allocation_request(&env, &ordinary_host, selected_segment_id);
+    ordinary_request
+        .config
+        .as_mut()
+        .unwrap()
+        .tenant
+        .as_mut()
+        .unwrap()
+        .tenant_organization_id = FIXTURE_TENANT_ORG_ID.to_string();
+    let spx_request = create_spx_allocation_request_for_tenant(
+        &env,
+        &spx_host,
+        unselected_segment_id,
+        UNSELECTED_SPX_TENANT,
+        UNSELECTED_SPX_MAC,
+    )
+    .await;
+    set_tenant_nic_firmware_profile(&env, Some("ordinary-batch-profile")).await;
+
+    let allocated = env
+        .api
+        .allocate_instances(tonic::Request::new(
+            rpc::forge::BatchInstanceAllocationRequest {
+                instance_requests: vec![ordinary_request, spx_request],
+            },
+        ))
+        .await
+        .expect("only the unselected tenant requests SPX attachments")
+        .into_inner();
+    assert_eq!(allocated.instances.len(), 2);
+    for (host, tenant_id, expected_macs) in [
+        // Selection alone must not add an attachment requirement to this request.
+        (&ordinary_host, FIXTURE_TENANT_ORG_ID, vec![]),
+        // The unrelated tenant's requested attachment must still bind normally.
+        (
+            &spx_host,
+            UNSELECTED_SPX_TENANT,
+            vec![Some(UNSELECTED_SPX_MAC)],
+        ),
+    ] {
+        let instance_id = db::instance::find_id_by_machine_id(&env.pool, &host.host().id.into())
+            .await
+            .unwrap()
+            .unwrap();
+        let persisted = db::instance::find_by_id(&env.pool, instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            persisted.config.tenant.tenant_organization_id.as_str(),
+            tenant_id
+        );
+        assert_eq!(
+            persisted
+                .config
+                .spxconfig
+                .spx_attachments
+                .iter()
+                .map(|attachment| attachment.mac_address.as_deref())
+                .collect::<Vec<_>>(),
+            expected_macs
+        );
+    }
+}
+
+/// An unselected SPX tenant first in the batch must not stop traversal before a
+/// later selected SPX tenant, and rejection must leave both hosts unallocated.
+#[crate::sqlx_test]
+async fn tenant_nic_firmware_selection_rejects_entire_spx_batch(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let selected_segment_id = env.create_vpc_and_tenant_segment().await;
+    let unselected_segment_id = create_unselected_spx_tenant_segment(&env).await;
+    let unselected_host = create_managed_host(&env).await;
+    let selected_host = create_managed_host(&env).await;
+    let unselected_request = create_spx_allocation_request_for_tenant(
+        &env,
+        &unselected_host,
+        unselected_segment_id,
+        UNSELECTED_SPX_TENANT,
+        UNSELECTED_SPX_MAC,
+    )
+    .await;
+    let selected_request =
+        create_spx_allocation_request(&env, &selected_host, selected_segment_id).await;
+    let batch = rpc::forge::BatchInstanceAllocationRequest {
+        instance_requests: vec![unselected_request, selected_request],
+    };
+    let profile_id = "spx-batch-profile";
+    set_tenant_nic_firmware_profile(&env, Some(profile_id)).await;
+
+    let error = env
+        .api
+        .allocate_instances(tonic::Request::new(batch.clone()))
+        .await
+        .expect_err("one applicable tenant requirement rejects the entire batch");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("NIC firmware preparation"));
+    assert!(!error.message().contains(profile_id));
+    for host in [&unselected_host, &selected_host] {
+        assert!(
+            db::instance::find_id_by_machine_id(&env.pool, &host.host().id.into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    // Both requests must bind after clearing the requirement, proving the
+    // rejection did not merely mask an invalid partition or DPA selection.
+    set_tenant_nic_firmware_profile(&env, None).await;
+    let allocated = env
+        .api
+        .allocate_instances(tonic::Request::new(batch))
+        .await
+        .expect("both SPX requests are valid after clearing the selection")
+        .into_inner();
+    assert_eq!(allocated.instances.len(), 2);
+    for (host, expected_mac) in [
+        (&unselected_host, UNSELECTED_SPX_MAC),
+        (&selected_host, TENANT_FIRMWARE_DPA_MAC),
+    ] {
+        let instance_id = db::instance::find_id_by_machine_id(&env.pool, &host.host().id.into())
+            .await
+            .unwrap()
+            .unwrap();
+        let persisted = db::instance::find_by_id(&env.pool, instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.config.spxconfig.spx_attachments.len(), 1);
+        assert_eq!(
+            persisted.config.spxconfig.spx_attachments[0]
+                .mac_address
+                .as_deref(),
+            Some(expected_mac)
+        );
+    }
+}
 
 /// Allocate 3 instances in a single batch request.
 /// Expect all 3 instances to be created with correct machine_id and network config.
