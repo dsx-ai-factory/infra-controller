@@ -153,13 +153,16 @@ func (s *Suite) setup() error {
 	rtr := mux.NewRouter()
 	rtr.HandleFunc("/v1/pki/ca/pem", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Write([]byte(testCACert))
+		_, err := w.Write([]byte(testCACert))
+		if err != nil {
+			return
+		}
 		if s.forceErr {
 			http.Error(w, "forced error", http.StatusInternalServerError)
 		}
 	})
 
-	rtr.HandleFunc("/v1/pki/cloud-cert", func(w http.ResponseWriter, _ *http.Request) {
+	rtr.HandleFunc("/v1/pki/cloud-cert", func(w http.ResponseWriter, r *http.Request) {
 		resp := &certs.CertificateResponse{
 			Key:         testKey,
 			Certificate: testCert,
@@ -169,7 +172,10 @@ func (s *Suite) setup() error {
 			panic(err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(c)
+		_, err = w.Write(c)
+		if err != nil {
+			return
+		}
 		if s.forceErr {
 			http.Error(w, "forced error", http.StatusInternalServerError)
 		}
@@ -520,7 +526,10 @@ func (s *Suite) TestManagerSiteTest() error {
 		return fmt.Errorf("!SiteAwaitHandshake %+v", sgr.BootstrapState)
 	}
 
-	ts.getSiteCreds(Testuuid1, sgr.OTP)
+	_, err = ts.getSiteCreds(Testuuid1, sgr.OTP)
+	if err != nil {
+		return err
+	}
 	testCase("Roll a non-existent site")
 	r, err = tc.Post(testURL+"/v1/site/roll/"+testuuid2, "", nil)
 	if err != nil {

@@ -6,7 +6,7 @@ package core
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -41,7 +41,7 @@ func TestHTTPServiceRoutes(t *testing.T) {
 		s.ServeHTTP(w, req)
 
 		resp := w.Result()
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		return string(body), resp.StatusCode
 	}
 
@@ -82,13 +82,14 @@ func TestHTTPServiceRoutes(t *testing.T) {
 	// test request body limit
 	{
 		s.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
-			body, err := ioutil.ReadAll(r.Body)
+			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			w.WriteHeader(http.StatusOK)
-			w.Write(body)
+			_, err = w.Write(body)
+			assert.NoError(t, err)
 		}).Methods("POST")
 
 		body, code := run("POST", "/echo", "123")
@@ -112,7 +113,8 @@ func TestHTTPServiceRoutes(t *testing.T) {
 				case <-time.After(d):
 					log.Printf("SlowAPIcall done after %v", d)
 					w.WriteHeader(http.StatusOK)
-					w.Write([]byte("ok\n"))
+					_, err := w.Write([]byte("ok\n"))
+					assert.NoError(t, err)
 				}
 			}
 		}
@@ -134,7 +136,7 @@ func TestHTTPServiceStart(t *testing.T) {
 
 	get := func(c *http.Client, url string) (string, int) {
 		resp, _ := c.Get(url)
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		return string(body), resp.StatusCode
 	}
 
@@ -147,7 +149,8 @@ func TestHTTPServiceStart(t *testing.T) {
 		s := NewHTTPService("unix://" + socketPath)
 		s.AddHealthRoute(ctx)
 		s.Use(NewHTTPMiddleware(ctx)...)
-		s.Start(ctx)
+		_, err := s.Start(ctx)
+		assert.NoError(t, err)
 
 		c := &http.Client{
 			Timeout: 10 * time.Second,

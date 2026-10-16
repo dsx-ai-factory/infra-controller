@@ -65,14 +65,14 @@ func TestDaemon(t *testing.T) {
 	d.Start(ctx)
 
 	time.Sleep(2 * time.Second)
-	syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+	assert.NoError(t, syscall.Kill(syscall.Getpid(), syscall.SIGTERM))
 
 	<-ctx.Done()
 	SetDefaultLogLevel(logrus.InfoLevel)
 	//code coverage and setLevel  for empty string and check if its successful
 	assert.Error(t, SetLevel(GetLogger(ctx), ""), "SetLevel failed for empty string")
 
-	SetLevel(GetLogger(ctx), "info")
+	assert.NoError(t, SetLevel(GetLogger(ctx), "info"))
 	GetLogger(ctx).Infof("ctx.Done(), shutting down")
 
 	// GetCurrentTime

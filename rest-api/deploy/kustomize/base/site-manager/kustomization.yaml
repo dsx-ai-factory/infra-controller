@@ -10,3 +10,4 @@ resources:
   - service.yaml
   - rbac.yaml
   - certificate.yaml
+  - client-certificate.yaml
