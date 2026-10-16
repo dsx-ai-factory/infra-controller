@@ -805,13 +805,55 @@ TOML section: `[extension_service_state_controller]`.
 | `max_uploads` | `usize` | `4` | Max concurrent firmware uploads. |
 | `concurrency_limit` | `usize` | `16` | Max concurrent firmware flashing operations. |
 | `firmware_directory` | `PathBuf` | `/opt/nico/firmware` | Firmware binary storage directory. |
+| `firmware_download_cache_directory` | `PathBuf` | `/mnt/persistence/fw/download-cache` | Writable directory used to cache downloaded firmware artifacts. |
+| `downloads` | `FirmwareDownloadConfig` | *(see below)* | Shared downloader limits, applied at Core startup. |
 | `host_firmware_upgrade_retry_interval` | `Duration` | `60m` | Retry delay for failed host firmware upgrades. |
 | `instance_updates_manual_tagging` | `bool` | `true` | Require manual tagging before firmware updates. |
 | `no_reset_retries` | `bool` | `false` | Disable retry logic after BMC resets. |
 | `hgx_bmc_gpu_reboot_delay` | `Duration` | `30s` | Delay after GPU reboot before HGX BMC access. |
 | `requires_manual_upgrade` | `bool` | `false` | Force all firmware upgrades to require admin approval. |
-| `firmware_download_cache_directory` | `PathBuf` | `/mnt/persistence/fw/download-cache` | Writable directory used to cache downloaded firmware artifacts. |
 | `max_concurrent_bfb_copies` | `usize` | `10` | Maximum number of concurrent BFB copy operations. |
+
+### `FirmwareDownloadConfig`
+
+Optional TOML section: `[firmware_global.downloads]`. Omitted fields use the
+defaults below. Core rejects out-of-range values at startup; changes require a
+restart. Base configuration is overridden by site configuration, then
+`CARBIDE_API_` environment configuration.
+
+See the [firmware download operational guide](../../../../docs/operations/firmware-updates/configuration.md#firmware-downloads)
+for affected workflows, deployment guidance, and failure handling.
+
+| Field | Type | Default | Accepted range and behavior |
+| ------- | ------ | --------- | ------------- |
+| `max_concurrent_downloads` | `usize` | `4` | `1`–`16` cache-verification/download workers per Core process. A slot remains occupied through filesystem work and cleanup after cancellation. Saturation defers the next check, even for a cached artifact, without queuing work or consuming a recorded failure. |
+| `max_download_bytes` | `u64` | `4294967296` (4 GiB) | `1`–`17179869184` (16 GiB) bytes per HTTP response body, counted while streaming regardless of `Content-Length`. |
+| `connect_timeout_seconds` | `u64` | `30` | `1`–`300` seconds to connect. |
+| `read_timeout_seconds` | `u64` | `60` | `1`–`600` seconds from starting the request through receiving final response headers, including connection establishment; then an idle timer that resets after each body read. |
+| `request_timeout_seconds` | `u64` | `1800` | `1`–`7200` seconds for one HTTP request, from connecting through body completion. |
+
+Connection and read timeouts must not exceed the whole-request timeout. Before
+headers, the first expired timer wins, so a shorter read timeout also caps
+connection establishment. These are HTTP transport deadlines, not hard deadlines
+for local filesystem operations, cache verification, hashing, or cleanup. A
+blocked filesystem operation retains its worker slot; timeout detection can wait
+for that operation to finish. The whole-request clock continues while received
+bytes are written to disk, but cannot interrupt the physical write.
+
+The defaults are initial resource-policy guardrails, not measured site capacity:
+four workers allow concurrent host work while limiting parallel transfers, and
+4 GiB per response gives a nominal 16 GiB HTTP staging envelope. At both hard
+maxima the envelope is 256 GiB per Core process. Retained cache and local copies
+are outside this size envelope. Check artifact sizes, available storage, and
+source transfer rates before selecting larger values. The 30-second connection,
+60-second initial/read-idle, and 30-minute request defaults distinguish stalled
+sources from a progressing large transfer; they do not resume partial downloads.
+
+Local-file copies share worker capacity without HTTP size or timeout limits.
+Optional legacy checksums remain optional. A timed-out or oversized HTTP transfer
+fails without publishing its partial file; the polling retry contract still
+applies. BFB delivery, retained cache storage, and firmware upload/flash
+concurrency have separate owners and limits.
 
 ### `MachineUpdater`
 

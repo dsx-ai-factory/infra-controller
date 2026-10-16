@@ -11551,7 +11551,7 @@ impl HostUpgradeState {
                     ArtifactStatus::Available => {}
                     ArtifactStatus::Downloading => {
                         return Ok(StateHandlerOutcome::wait(format!(
-                            "waiting for firmware artifact {} to download",
+                            "waiting for firmware artifact {} to become available",
                             artifact.local_path.display()
                         )));
                     }

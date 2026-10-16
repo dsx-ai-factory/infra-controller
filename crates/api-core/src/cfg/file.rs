@@ -7286,6 +7286,8 @@ path = "credentials.yaml"
                 "[fnn.routing_profiles.test]\nunknown_routing_profile_field = true" => Fails,
                 "[host_health]\nunknown_host_health_field = true" => Fails,
                 "[firmware_global]\nunknown_firmware_field = true" => Fails,
+                // The nested downloader schema must participate in Core's unknown-key handling.
+                "[firmware_global.downloads]\nunknown_download_field = true" => Fails,
                 "[machine_validation_config]\nunknown_validation_field = true" => Fails,
                 "[network_security_group]\nunknown_nsg_field = true" => Fails,
                 "[machine_identity]\nunknown_identity_field = true" => Fails,

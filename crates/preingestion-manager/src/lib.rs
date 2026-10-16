@@ -3331,7 +3331,7 @@ impl PreingestionManagerStatic {
                             tracing::debug!(
                                 bmc_ip_address = %endpoint_clone.address,
                                 path = %artifact.local_path.display(),
-                                "Firmware artifact is being downloaded; update deferred"
+                                "Waiting for firmware artifact availability; update deferred"
                             );
                             return Ok(false);
                         }

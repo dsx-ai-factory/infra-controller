@@ -1797,7 +1797,8 @@ async fn initialize_and_start_controllers<'a>(
         );
     }
 
-    let downloader = FirmwareDownloader::new();
+    let downloader =
+        FirmwareDownloader::with_config(carbide_config.firmware_global.downloads.clone())?;
     let upload_limiter = Arc::new(Semaphore::new(carbide_config.firmware_global.max_uploads));
 
     // Create state change emitter with DSX Exchange Event Bus hook if enabled
