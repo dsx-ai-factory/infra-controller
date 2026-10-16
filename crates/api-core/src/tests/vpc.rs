@@ -1472,6 +1472,7 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
         SeededWrongPool,
         OverlappingPools,
         InvalidDestinationVni,
+        MissingAutomaticRange,
         ExhaustedDestination,
         MissingDestinationPool,
     }
@@ -1509,6 +1510,7 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
         Failure::SeededWrongPool,
         Failure::OverlappingPools,
         Failure::InvalidDestinationVni,
+        Failure::MissingAutomaticRange,
         Failure::ExhaustedDestination,
         Failure::MissingDestinationPool,
     ] {
@@ -1611,11 +1613,27 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
                     message: "between 1 and 16777215",
                 }
             }
-            Failure::ExhaustedDestination => {
+            Failure::MissingAutomaticRange => {
                 sqlx::query("UPDATE resource_pool SET auto_assign = false WHERE name = $1")
                     .bind(external_pool)
                     .execute(&env.pool)
                     .await?;
+                ExpectedFailure {
+                    destination: "EXTERNAL",
+                    code: tonic::Code::FailedPrecondition,
+                    message: "has no automatic allocation range",
+                }
+            }
+            Failure::ExhaustedDestination => {
+                let automatic_values = original_external_values
+                    .iter()
+                    .filter(|(_, auto_assign)| *auto_assign)
+                    .count();
+                assert!(automatic_values > 0, "destination has an automatic range");
+                // Other owners consume the range so this VPC has no retained VNI to reuse.
+                for _ in 0..automatic_values {
+                    allocate_external_vni(&env, VpcId::new()).await?;
+                }
                 ExpectedFailure {
                     destination: "EXTERNAL",
                     code: tonic::Code::ResourceExhausted,
