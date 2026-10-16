@@ -67,6 +67,15 @@ The expected results are:
 - `/livez` returns `ok`. This proves that the HTTP listener is running; it
   does not prove that a BMC collection succeeded.
 - `/metrics` contains service-level discovery, collector, and process metrics.
+  Setting `component_health_state = true` under `[sinks.prometheus]` also
+  publishes the latest non-empty component report state per report source as
+  `carbide_hardware_health_component_health_state` (`1` healthy, `2` warning,
+  `3` degraded, `4` critical) and its observation time as
+  `carbide_hardware_health_component_health_observed_time_seconds`.
+  The sink emits these series only for a report with an observation time and a
+  matching `Machine`, `Switch`, or `PowerShelf` target. The context must also
+  provide a rack ID, component type, and component identity: a machine ID, a
+  switch ID or non-empty serial, or a power-shelf ID or non-empty serial.
 - `/telemetry` contains per-sensor gauges after the first discovery and sensor
   collection pass. The default sensor poll interval is 60 seconds.
 
