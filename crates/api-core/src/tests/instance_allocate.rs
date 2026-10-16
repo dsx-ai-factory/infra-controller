@@ -408,6 +408,7 @@ async fn test_zero_dpu_instance_allocation_rejects_explicit_interfaces(
 /// host snapshot and stores the resolved interface internally. What the caller
 /// sees on the wire is stripped back to `{ auto: true, vpc_id, interfaces: [] }`,
 /// while `instance.status.network.interfaces` reflects the resolved details.
+/// Reusing the host's address leaves HostInband capacity unchanged.
 #[crate::sqlx_test]
 async fn test_zero_dpu_instance_allocation_auto(
     pool: sqlx::PgPool,
@@ -454,6 +455,37 @@ async fn test_zero_dpu_instance_allocation_auto(
     assert_eq!(interfaces[0].addresses.len(), 1);
     assert!(interfaces[0].addresses[0].is_ipv4());
     txn.rollback().await?;
+
+    let host_inband_prefix = host_inband_segment
+        .prefixes
+        .iter()
+        .find(|prefix| prefix.prefix.is_ipv4())
+        .expect("HostInband segment should have an IPv4 prefix");
+    let count_request = || {
+        tonic::Request::new(forge::NetworkSegmentsByIdsRequest {
+            network_segments_ids: vec![host_inband_segment.id],
+            include_history: false,
+            include_num_free_ips: true,
+        })
+    };
+    let segments = env
+        .api
+        .find_network_segments_by_ids(count_request())
+        .await?
+        .into_inner()
+        .network_segments;
+    assert_eq!(segments.len(), 1);
+    let prefix = segments[0]
+        .config
+        .as_ref()
+        .unwrap()
+        .prefixes
+        .iter()
+        .find(|prefix| prefix.id == Some(host_inband_prefix.id))
+        .expect("HostInband prefix should be returned");
+    // The /24 excludes .0 through .2, the broadcast address, and one host lease.
+    let free_before = (prefix.free_ip_count, prefix.free_ip_count_v2);
+    assert_eq!(free_before, (251, Some(251)));
 
     let instance = crate::handlers::instance::allocate(
         env.api.as_ref(),
@@ -576,6 +608,37 @@ async fn test_zero_dpu_instance_allocation_auto(
     };
     assert_eq!(address.vpc_id, flat_vpc_id);
     assert!(address.address.is_ipv4());
+    assert_eq!(address.prefix, host_inband_prefix.prefix);
+    txn.rollback().await?;
+
+    // The stored prefix describes the host's subnet. Allocating the instance
+    // reuses its host lease and does not consume the rest of the subnet.
+    let segments = env
+        .api
+        .find_network_segments_by_ids(count_request())
+        .await?
+        .into_inner()
+        .network_segments;
+    assert_eq!(segments.len(), 1);
+    let prefix = segments[0]
+        .config
+        .as_ref()
+        .unwrap()
+        .prefixes
+        .iter()
+        .find(|prefix| prefix.id == Some(host_inband_prefix.id))
+        .expect("HostInband prefix should be returned");
+    assert_eq!((prefix.free_ip_count, prefix.free_ip_count_v2), free_before);
+
+    env.run_network_segment_controller_iteration().await;
+    assert!(
+        env.test_meter
+            .formatted_metrics("carbide_available_ips_count")
+            .contains(&format!(
+                "{{fresh=\"true\",name=\"HOST_INBAND\",prefix=\"{}\",type=\"host_inband\"}} 251",
+                host_inband_prefix.prefix
+            ))
+    );
     Ok(())
 }
 
