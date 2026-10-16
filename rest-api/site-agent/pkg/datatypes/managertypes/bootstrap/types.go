@@ -104,8 +104,7 @@ type Bootstrap struct {
 	Secret       coreV1Types.SecretInterface
 	Secretfiles  map[string]bool
 	Registration *Registration
-	mutex        sync.RWMutex // protects Config
-	updateMutex  sync.Mutex   // serializes credential download and publication
+	mutex        sync.RWMutex // protects Config and serializes credential updates
 }
 
 // GetConfig returns a consistent copy of the active bootstrap configuration.
@@ -129,10 +128,25 @@ func (b *Bootstrap) ReplaceConfig(config SecretConfig) {
 }
 
 // RunCredentialUpdate serializes one credential download, store, and publication operation.
-func (b *Bootstrap) RunCredentialUpdate(update func() error) error {
-	b.updateMutex.Lock()
-	defer b.updateMutex.Unlock()
-	return update()
+// The callback receives a consistent copy of the active configuration; its returned
+// configuration is published only after the operation succeeds.
+func (b *Bootstrap) RunCredentialUpdate(update func(SecretConfig) (SecretConfig, error)) error {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	config := SecretConfig{}
+	if b.Config != nil {
+		config = *b.Config
+	}
+	updatedConfig, err := update(config)
+	if err != nil {
+		return err
+	}
+	if b.Config == nil {
+		b.Config = &SecretConfig{}
+	}
+	*b.Config = updatedConfig
+	return nil
 }
 
 // NewBootstrapInstance - creates a new instance of Bootstrap

@@ -235,30 +235,36 @@ func isBootstrapSecretUpdate(event fsnotify.Event, files map[string]bool, dir st
 
 func (bs *BoostrapAPI) reloadBootstrapCredentials(dir string) error {
 	bootstrap := ManagerAccess.Data.EB.Managers.Bootstrap
-	return bootstrap.RunCredentialUpdate(func() error {
+	var publishedConfig bootstraptypes.SecretConfig
+	err := bootstrap.RunCredentialUpdate(func(currentConfig bootstraptypes.SecretConfig) (bootstraptypes.SecretConfig, error) {
 		candidate, _, err := readBootstrapConfig(dir)
 		if err != nil {
-			return err
+			return currentConfig, err
 		}
 
-		currentSiteID := bootstrap.GetConfig().UUID
+		currentSiteID := currentConfig.UUID
 		if currentSiteID != "" && candidate.UUID != currentSiteID {
-			return fmt.Errorf("bootstrap Secret Site ID changed from %s to %s", currentSiteID, candidate.UUID)
+			return currentConfig, fmt.Errorf("bootstrap Secret Site ID changed from %s to %s", currentSiteID, candidate.UUID)
 		}
 
 		if err := bs.downloadAndStoreCreds(candidate, true); err != nil {
-			return err
+			return currentConfig, err
 		}
 
 		bootstrap.Registration.AddOTP(candidate.OTP)
-		bootstrap.ReplaceConfig(candidate)
-		log.Info().
-			Str("site_id", candidate.UUID).
-			Str("credentials_url", candidate.CredsURL).
-			Str("ca_certificate", cutils.RedactSecret(candidate.CACert, cutils.CertLogPrefixLen)).
-			Msg("Bootstrap: configuration reloaded, OTP read")
-		return nil
+		publishedConfig = candidate
+		return candidate, nil
 	})
+	if err != nil {
+		return err
+	}
+
+	log.Info().
+		Str("site_id", publishedConfig.UUID).
+		Str("credentials_url", publishedConfig.CredsURL).
+		Str("ca_certificate", cutils.RedactSecret(publishedConfig.CACert, cutils.CertLogPrefixLen)).
+		Msg("Bootstrap: configuration reloaded, OTP read")
+	return nil
 }
 
 // watchSecretFiles watch on the secret file
@@ -346,22 +352,20 @@ func (bs *BoostrapAPI) CheckRegistration() error {
 // DownloadAndStoreCreds - Download and Store Temporal credentials
 func (bs *BoostrapAPI) DownloadAndStoreCreds(otpOverride []byte) error {
 	bootstrap := ManagerAccess.Data.EB.Managers.Bootstrap
-	return bootstrap.RunCredentialUpdate(func() error {
-		candidate := bootstrap.GetConfig()
+	return bootstrap.RunCredentialUpdate(func(candidate bootstraptypes.SecretConfig) (bootstraptypes.SecretConfig, error) {
 		if otpOverride != nil {
 			candidate.OTP = string(otpOverride)
 			log.Info().Msg("Bootstrap: Using OTP override")
 		}
 
 		if err := bs.downloadAndStoreCreds(candidate, otpOverride == nil); err != nil {
-			return err
+			return candidate, err
 		}
 
 		if otpOverride != nil {
 			bootstrap.Registration.AddOTP(candidate.OTP)
-			bootstrap.ReplaceConfig(candidate)
 		}
-		return nil
+		return candidate, nil
 	})
 }
 
