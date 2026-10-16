@@ -50,7 +50,7 @@ type Instance struct {
 	// External power provisioning profile associated with the Instance.
 	PowerProfile NullableString `json:"powerProfile,omitempty"`
 	// Propagation details for the attached Network Security Group
-	NetworkSecurityGroupPropagationDetails *NetworkSecurityGroupPropagationDetails `json:"networkSecurityGroupPropagationDetails,omitempty"`
+	NetworkSecurityGroupPropagationDetails NullableNetworkSecurityGroupPropagationDetails `json:"networkSecurityGroupPropagationDetails,omitempty"`
 	// Indicates if the Network Security Group is inherited from VPC
 	NetworkSecurityGroupInherited *bool `json:"networkSecurityGroupInherited,omitempty"`
 	// ID of the Instance in Site Controller
@@ -598,36 +598,47 @@ func (o *Instance) UnsetPowerProfile() {
 	o.PowerProfile.Unset()
 }
 
-// GetNetworkSecurityGroupPropagationDetails returns the NetworkSecurityGroupPropagationDetails field value if set, zero value otherwise.
+// GetNetworkSecurityGroupPropagationDetails returns the NetworkSecurityGroupPropagationDetails field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Instance) GetNetworkSecurityGroupPropagationDetails() NetworkSecurityGroupPropagationDetails {
-	if o == nil || IsNil(o.NetworkSecurityGroupPropagationDetails) {
+	if o == nil || IsNil(o.NetworkSecurityGroupPropagationDetails.Get()) {
 		var ret NetworkSecurityGroupPropagationDetails
 		return ret
 	}
-	return *o.NetworkSecurityGroupPropagationDetails
+	return *o.NetworkSecurityGroupPropagationDetails.Get()
 }
 
 // GetNetworkSecurityGroupPropagationDetailsOk returns a tuple with the NetworkSecurityGroupPropagationDetails field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Instance) GetNetworkSecurityGroupPropagationDetailsOk() (*NetworkSecurityGroupPropagationDetails, bool) {
-	if o == nil || IsNil(o.NetworkSecurityGroupPropagationDetails) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NetworkSecurityGroupPropagationDetails, true
+	return o.NetworkSecurityGroupPropagationDetails.Get(), o.NetworkSecurityGroupPropagationDetails.IsSet()
 }
 
 // HasNetworkSecurityGroupPropagationDetails returns a boolean if a field has been set.
 func (o *Instance) HasNetworkSecurityGroupPropagationDetails() bool {
-	if o != nil && !IsNil(o.NetworkSecurityGroupPropagationDetails) {
+	if o != nil && o.NetworkSecurityGroupPropagationDetails.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetNetworkSecurityGroupPropagationDetails gets a reference to the given NetworkSecurityGroupPropagationDetails and assigns it to the NetworkSecurityGroupPropagationDetails field.
+// SetNetworkSecurityGroupPropagationDetails gets a reference to the given NullableNetworkSecurityGroupPropagationDetails and assigns it to the NetworkSecurityGroupPropagationDetails field.
 func (o *Instance) SetNetworkSecurityGroupPropagationDetails(v NetworkSecurityGroupPropagationDetails) {
-	o.NetworkSecurityGroupPropagationDetails = &v
+	o.NetworkSecurityGroupPropagationDetails.Set(&v)
+}
+
+// SetNetworkSecurityGroupPropagationDetailsNil sets the value for NetworkSecurityGroupPropagationDetails to be an explicit nil
+func (o *Instance) SetNetworkSecurityGroupPropagationDetailsNil() {
+	o.NetworkSecurityGroupPropagationDetails.Set(nil)
+}
+
+// UnsetNetworkSecurityGroupPropagationDetails ensures that no value is present for NetworkSecurityGroupPropagationDetails, not even an explicit nil
+func (o *Instance) UnsetNetworkSecurityGroupPropagationDetails() {
+	o.NetworkSecurityGroupPropagationDetails.Unset()
 }
 
 // GetNetworkSecurityGroupInherited returns the NetworkSecurityGroupInherited field value if set, zero value otherwise.
@@ -1470,8 +1481,8 @@ func (o Instance) ToMap() (map[string]interface{}, error) {
 	if o.PowerProfile.IsSet() {
 		toSerialize["powerProfile"] = o.PowerProfile.Get()
 	}
-	if !IsNil(o.NetworkSecurityGroupPropagationDetails) {
-		toSerialize["networkSecurityGroupPropagationDetails"] = o.NetworkSecurityGroupPropagationDetails
+	if o.NetworkSecurityGroupPropagationDetails.IsSet() {
+		toSerialize["networkSecurityGroupPropagationDetails"] = o.NetworkSecurityGroupPropagationDetails.Get()
 	}
 	if !IsNil(o.NetworkSecurityGroupInherited) {
 		toSerialize["networkSecurityGroupInherited"] = o.NetworkSecurityGroupInherited
