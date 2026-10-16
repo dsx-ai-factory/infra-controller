@@ -320,7 +320,7 @@ impl InternalRBACRules {
         x.perm("DeleteTenantKeyset", vec![SiteAgent]);
         x.perm("ValidateTenantPublicKey", vec![SiteAgent, Ssh, SshRs]);
         x.perm("GetBmcCredentials", vec![Health, BmcProxy]);
-        x.perm("GetSwitchNvosCredentials", vec![Health]);
+        x.perm("GetSwitchNvosCredentials", vec![Health, BmcProxy]);
         x.perm("GetAllManagedHostNetworkStatus", vec![ForgeAdminCLI]);
         x.perm(
             "GetSiteExplorationReport",
@@ -888,7 +888,7 @@ impl InternalRBACRules {
         );
         x.perm(
             "FindSwitchIds",
-            vec![ForgeAdminCLI, Machineatron, Flow, Health],
+            vec![ForgeAdminCLI, Machineatron, Flow, Health, BmcProxy],
         );
         x.perm(
             "FindSwitchesByIds",
@@ -1763,7 +1763,12 @@ mod rbac_rule_tests {
             "MachineSetAutoUpdate",
             &[Principal::SpiffeServiceIdentifier("nico-flow".to_string())]
         ));
-        for method in ["FindMacAddressByBmcIp", "GetBmcCredentials"] {
+        for method in [
+            "FindMacAddressByBmcIp",
+            "GetBmcCredentials",
+            "FindSwitchIds",
+            "GetSwitchNvosCredentials",
+        ] {
             assert!(
                 InternalRBACRules::allowed_from_static(
                     method,
