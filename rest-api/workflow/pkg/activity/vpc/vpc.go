@@ -795,7 +795,7 @@ func NewManageVpcLifecycleMetrics(reg prometheus.Registerer, dbSession *cdb.Sess
 			prometheus.GaugeOpts{
 				Namespace: namespace,
 				Name:      "vpc_operation_latency_seconds",
-				Help:      "Current latency of vpc operations",
+				Help:      "Latency in seconds of the most recently recorded completed VPC operation for each label set on this worker replica",
 			},
 			[]string{"site", "site_id", "operation_type", "from_status", "to_status"}),
 
