@@ -2325,6 +2325,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
             data: create_extension_service_data("test"),
             credential: None,
             observability: None,
+            deployment_type: 0,
         }))
         .await
         .unwrap()
@@ -2349,6 +2350,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
             data: create_extension_service_data("test2"),
             credential: None,
             observability: None,
+            deployment_type: 0,
         }))
         .await
         .unwrap()

@@ -45,7 +45,8 @@ use model::ConfigValidationError;
 use model::dpa_interface::{DpaInterface, DpaSearchConfig};
 use model::expected_machine::ExpectedMachine;
 use model::extension_service::{
-    DpuTarget, ExtensionService, ExtensionServiceLifecycleState, ExtensionServiceType,
+    DpuTarget, ExtensionService, ExtensionServiceDeploymentType, ExtensionServiceLifecycleState,
+    ExtensionServiceType,
 };
 use model::hardware_info::InfinibandInterface;
 use model::ib::{DEFAULT_IB_FABRIC_NAME, IbMembership};
@@ -1856,6 +1857,15 @@ pub(crate) fn validate_instance_extension_services(
             ))
         })?;
 
+        // Baseline services are deployed to all DPUs at creation time
+        // and never participate in instance attachment.
+        if service.deployment_type == ExtensionServiceDeploymentType::Baseline {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "baseline extension service {} is deployed independently of instance attachment",
+                config.service_id,
+            )));
+        }
+
         // Issue #6125 adds service-interface reconciliation. Until then, an existing
         // attachment may be retained or removed but a networked service cannot be attached.
         // Networked definitions cannot create another native version, so the
@@ -2993,6 +3003,7 @@ pub(crate) fn allocate_spx_port_mac(
 mod tests {
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, Check, check_cases, check_values, value_scenarios};
+    use model::instance::config::extension_services::InstanceExtensionServiceConfig;
     use model::instance::config::infiniband::InstanceIbInterfaceConfig;
 
     use super::*;
@@ -3595,6 +3606,63 @@ mod tests {
                     == format!(
                         "machine {machine_id} has a pending boot configuration; retry after it has been applied"
                     )
+        ));
+    }
+
+    /// Verifies instance attachment rejects baseline services before checking
+    /// targets or versions, because these services already deploy to all DPUs.
+    #[test]
+    fn baseline_extension_service_cannot_be_attached_to_an_instance() {
+        // Build a valid baseline registration and a matching active attachment request.
+        let service_id = ExtensionServiceId::new();
+        let version = ConfigVersion::initial();
+        let extension_services = InstanceExtensionServicesConfig {
+            service_configs: vec![InstanceExtensionServiceConfig {
+                id: Some(uuid::Uuid::new_v4()),
+                service_id,
+                version,
+                dpu_target: None,
+                removed: None,
+            }],
+        };
+        let now = chrono::Utc::now();
+        let services = HashMap::from([(
+            service_id,
+            ExtensionService {
+                id: service_id,
+                service_type: ExtensionServiceType::DpfHelmChart,
+                deployment_type: ExtensionServiceDeploymentType::Baseline,
+                dpu_target: None,
+                name: "baseline-service".to_string(),
+                tenant_organization_id: "best_org".parse().unwrap(),
+                description: String::new(),
+                service_vpc_interfaces: vec![],
+                version_ctr: 1,
+                status: Default::default(),
+                created: now,
+                updated: now,
+                deleted: None,
+            },
+        )]);
+        let machine_id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"
+            .parse()
+            .expect("valid host machine ID");
+
+        // Baseline rejection must take precedence over missing version and target data.
+        let error = validate_instance_extension_services(
+            machine_id,
+            true,
+            true,
+            &extension_services,
+            &services,
+            &HashMap::new(),
+            &HashSet::new(),
+        )
+        .expect_err("baseline services must remain independent of instance attachment");
+        assert!(matches!(
+            error,
+            CarbideError::FailedPrecondition(message)
+                if message.contains("deployed independently of instance attachment")
         ));
     }
 }

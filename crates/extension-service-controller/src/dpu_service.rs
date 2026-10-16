@@ -27,20 +27,18 @@ use carbide_dpf::{
 use carbide_uuid::extension_service::ExtensionServiceId;
 use model::extension_service::{
     DPF_HELM_CHART_OWNER_LABEL, DPF_HELM_CHART_PLACEMENT_LABEL_VALUE, DpfHelmChartIdentity,
-    DpfHelmChartIntOrString, DpfHelmChartServiceData,
+    DpfHelmChartIntOrString, DpfHelmChartServiceData, ExtensionServiceDeploymentType,
 };
 use serde_json::{Map, Value, json};
 
-/// Builds the complete, detached DPUService data owned by one extension
-/// service. The DPF SDK alone converts this data to the checked CR type.
-///
-/// The service is deliberately detached until an instance lifecycle operation
-/// applies `placement_label_key=enabled` to a DPU.  Its `nodeSelector` is an
-/// exact-match selector, so it has no target before that label exists.
+/// Builds a DPUService with no node selector for baseline services, allowing
+/// deployment to all DPUs. Demand-driven services use a label selector so they
+/// deploy only to DPUs selected by instance attachment.
 pub fn project_dpu_service(
     extension_service_id: ExtensionServiceId,
     namespace: &str,
     data: &DpfHelmChartServiceData,
+    deployment_type: ExtensionServiceDeploymentType,
 ) -> DetachedDpuServiceDefinition {
     let identity = DpfHelmChartIdentity::from_service_id(extension_service_id);
     DetachedDpuServiceDefinition {
@@ -56,7 +54,11 @@ pub fn project_dpu_service(
             privileged: data.security.privileged,
             spiffe: data.security.spiffe.is_some(),
         },
-        service_daemon_set: Some(projected_service_daemon_set(&identity, data)),
+        service_daemon_set: Some(projected_service_daemon_set(
+            &identity,
+            data,
+            deployment_type,
+        )),
         service_id: data.service_id.clone(),
     }
 }
@@ -212,15 +214,16 @@ fn json_object(values: &BTreeMap<String, Value>) -> Map<String, Value> {
         .collect()
 }
 
-/// Validates that a live DPUService is the object NICo is allowed to manage.
-///
-/// Errors name the conflicting contract field only.  They intentionally never
-/// include live or desired Helm values, which may contain tenant secrets.
+/// Checks that the DPUService belongs to this registration and has the expected
+/// selector before NICo uses it. Baseline must have no selector to allow all DPUs;
+/// demand-driven services must keep the selector used by instance attachment.
+/// Errors identify only the conflicting field to avoid exposing tenant secrets.
 pub fn verify_dpu_service_ownership(
     existing: &DpuServiceObservation,
     extension_service_id: ExtensionServiceId,
     namespace: &str,
     expected_service_id: Option<&str>,
+    deployment_type: ExtensionServiceDeploymentType,
 ) -> Result<(), DpuServiceOwnershipConflict> {
     let identity = DpfHelmChartIdentity::from_service_id(extension_service_id);
 
@@ -257,13 +260,18 @@ pub fn verify_dpu_service_ownership(
         Some(identity.helm_release_name.as_str()),
         "spec.helmChart.source.releaseName",
     )?;
-    let expected_node_selector = node_selector_json(&detached_node_selector_labels(&identity));
+    let expected_node_selector = match deployment_type {
+        ExtensionServiceDeploymentType::DemandDriven => Some(node_selector_json(
+            &detached_node_selector_labels(&identity),
+        )),
+        ExtensionServiceDeploymentType::Baseline => None,
+    };
     immutable_field_matches(
         existing
             .service_daemon_set
             .as_ref()
             .and_then(|daemon_set| daemon_set.node_selector.as_ref()),
-        Some(&expected_node_selector),
+        expected_node_selector.as_ref(),
         "spec.serviceDaemonSet.nodeSelector",
     )
 }
@@ -312,13 +320,18 @@ fn projected_helm_chart(
 fn projected_service_daemon_set(
     identity: &DpfHelmChartIdentity,
     data: &DpfHelmChartServiceData,
+    deployment_type: ExtensionServiceDeploymentType,
 ) -> DetachedServiceDaemonSet {
     let service_daemon_set = data.service_daemon_set.as_ref();
 
-    // Always supply NICo-owned placement while preserving omission of each
-    // tenant-configurable field.
+    // Only demand-driven placement is gated on labels from instance attachment.
     DetachedServiceDaemonSet {
-        node_selector_labels: Some(detached_node_selector_labels(identity)),
+        node_selector_labels: match deployment_type {
+            ExtensionServiceDeploymentType::DemandDriven => {
+                Some(detached_node_selector_labels(identity))
+            }
+            ExtensionServiceDeploymentType::Baseline => None,
+        },
         annotations: service_daemon_set.and_then(|daemon_set| daemon_set.annotations.clone()),
         labels: service_daemon_set.and_then(|daemon_set| daemon_set.labels.clone()),
         resources: service_daemon_set
@@ -499,7 +512,12 @@ mod tests {
         )])));
         service_data.service_id = Some("tenant-service-v1".to_owned());
         service_data.deploy_in_cluster = Some(false);
-        let projected = project_dpu_service(service_id(), NAMESPACE, &service_data);
+        let projected = project_dpu_service(
+            service_id(),
+            NAMESPACE,
+            &service_data,
+            ExtensionServiceDeploymentType::DemandDriven,
+        );
 
         assert_eq!(
             projected.name,
@@ -538,9 +556,82 @@ mod tests {
         );
     }
 
+    /// Verifies baseline has no node selector, allowing deployment to all DPUs,
+    /// and keeps the owner label so NICo can identify it for updates and deletion.
+    #[test]
+    fn baseline_projection_omits_placement_but_retains_ownership() {
+        // Build the DPUService that NICo sends to DPF for a baseline service.
+        let projected = project_dpu_service(
+            service_id(),
+            NAMESPACE,
+            &data(None),
+            ExtensionServiceDeploymentType::Baseline,
+        );
+
+        // Check the owner label still identifies this registration and the
+        // node selector is absent so deployment is allowed on all DPUs.
+        assert_eq!(
+            projected.labels.get(DPF_HELM_CHART_OWNER_LABEL),
+            Some(&SERVICE_ID.to_owned())
+        );
+        assert!(
+            projected
+                .service_daemon_set
+                .as_ref()
+                .unwrap()
+                .node_selector_labels
+                .is_none()
+        );
+    }
+
+    /// Verifies NICo accepts a baseline DPUService with no node selector and
+    /// rejects a present selector, so it cannot adopt a service that conflicts
+    /// with the request to deploy to all DPUs.
+    #[test]
+    fn baseline_ownership_rejects_a_present_selector() {
+        // Start from a valid selector-free baseline observation.
+        let projected = project_dpu_service(
+            service_id(),
+            NAMESPACE,
+            &data(None),
+            ExtensionServiceDeploymentType::Baseline,
+        );
+        let mut observed = observation(&projected);
+        assert_eq!(
+            verify_dpu_service_ownership(
+                &observed,
+                service_id(),
+                NAMESPACE,
+                projected.service_id.as_deref(),
+                ExtensionServiceDeploymentType::Baseline,
+            ),
+            Ok(())
+        );
+
+        // Reject even an empty selector: baseline requires the field to be absent.
+        observed.service_daemon_set.as_mut().unwrap().node_selector = Some(json!({}));
+        assert_eq!(
+            verify_dpu_service_ownership(
+                &observed,
+                service_id(),
+                NAMESPACE,
+                projected.service_id.as_deref(),
+                ExtensionServiceDeploymentType::Baseline,
+            ),
+            Err(DpuServiceOwnershipConflict::ImmutableField {
+                field: "spec.serviceDaemonSet.nodeSelector",
+            })
+        );
+    }
+
     #[test]
     fn projection_omits_absent_values_and_all_attachment_bound_fields() {
-        let projected = project_dpu_service(service_id(), NAMESPACE, &data(None));
+        let projected = project_dpu_service(
+            service_id(),
+            NAMESPACE,
+            &data(None),
+            ExtensionServiceDeploymentType::DemandDriven,
+        );
         assert!(projected.helm_chart.values.is_none());
         assert_eq!(projected.deploy_in_cluster, Some(false));
     }
@@ -568,7 +659,12 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let initial_projection = project_dpu_service(service_id(), NAMESPACE, &initial);
+        let initial_projection = project_dpu_service(
+            service_id(),
+            NAMESPACE,
+            &initial,
+            ExtensionServiceDeploymentType::DemandDriven,
+        );
 
         // Confirm projection preserves security, integer quantities, and limits.
         assert!(initial_projection.security.spiffe);
@@ -616,7 +712,12 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let desired_projection = project_dpu_service(service_id(), NAMESPACE, &desired);
+        let desired_projection = project_dpu_service(
+            service_id(),
+            NAMESPACE,
+            &desired,
+            ExtensionServiceDeploymentType::DemandDriven,
+        );
         let existing = observation(&initial_projection);
         let patch = dpu_service_mutable_patch(&desired_projection, Some(&existing));
 
@@ -645,11 +746,16 @@ mod tests {
     }
 
     /// Verifies updates omit immutable DPF DPUService ID as well as Kubernetes
-    /// object identity, deployment mode, and attachment-owned fields.
+    /// object identity, deployment cluster, and attachment-owned fields.
     #[test]
     fn mutable_patch_omits_immutable_identity_and_attachment_fields() {
         let service_data = data(None);
-        let projected = project_dpu_service(service_id(), NAMESPACE, &service_data);
+        let projected = project_dpu_service(
+            service_id(),
+            NAMESPACE,
+            &service_data,
+            ExtensionServiceDeploymentType::DemandDriven,
+        );
         let patch = dpu_service_mutable_patch(&projected, None);
 
         assert_eq!(patch["spec"]["helmChart"]["values"], Value::Null);
@@ -688,6 +794,7 @@ mod tests {
                 ("replicas".to_owned(), json!(3)),
                 ("image".to_owned(), json!({"tag": "2.0.0"})),
             ]))),
+            ExtensionServiceDeploymentType::DemandDriven,
         );
 
         let mut existing = observation(&projected);
@@ -709,7 +816,12 @@ mod tests {
 
     #[test]
     fn mutable_patch_replaces_an_existing_values_object_with_an_empty_one() {
-        let projected = project_dpu_service(service_id(), NAMESPACE, &data(Some(Map::new())));
+        let projected = project_dpu_service(
+            service_id(),
+            NAMESPACE,
+            &data(Some(Map::new())),
+            ExtensionServiceDeploymentType::DemandDriven,
+        );
         let existing_values = BTreeMap::from_iter([("debug".to_owned(), json!(true))]);
 
         let mut existing = observation(&projected);
@@ -721,13 +833,19 @@ mod tests {
 
     #[test]
     fn ownership_and_immutable_contract_is_enforced_without_value_diagnostics() {
-        let projected = project_dpu_service(service_id(), NAMESPACE, &data(None));
+        let projected = project_dpu_service(
+            service_id(),
+            NAMESPACE,
+            &data(None),
+            ExtensionServiceDeploymentType::DemandDriven,
+        );
         assert_eq!(
             verify_dpu_service_ownership(
                 &observation(&projected),
                 service_id(),
                 NAMESPACE,
-                projected.service_id.as_deref()
+                projected.service_id.as_deref(),
+                ExtensionServiceDeploymentType::DemandDriven
             ),
             Ok(())
         );
@@ -742,7 +860,8 @@ mod tests {
                 &wrong_owner,
                 service_id(),
                 NAMESPACE,
-                projected.service_id.as_deref()
+                projected.service_id.as_deref(),
+                ExtensionServiceDeploymentType::DemandDriven
             ),
             Err(DpuServiceOwnershipConflict::OwnershipLabel)
         );
@@ -754,6 +873,7 @@ mod tests {
             service_id(),
             NAMESPACE,
             projected.service_id.as_deref(),
+            ExtensionServiceDeploymentType::DemandDriven,
         )
         .unwrap_err();
         assert_eq!(
@@ -771,7 +891,8 @@ mod tests {
                 &wrong_deployment_mode,
                 service_id(),
                 NAMESPACE,
-                projected.service_id.as_deref()
+                projected.service_id.as_deref(),
+                ExtensionServiceDeploymentType::DemandDriven
             ),
             Err(DpuServiceOwnershipConflict::ImmutableField {
                 field: "spec.deployInCluster",
@@ -791,7 +912,8 @@ mod tests {
                 &wrong_placement,
                 service_id(),
                 NAMESPACE,
-                projected.service_id.as_deref()
+                projected.service_id.as_deref(),
+                ExtensionServiceDeploymentType::DemandDriven
             ),
             Err(DpuServiceOwnershipConflict::ImmutableField {
                 field: "spec.serviceDaemonSet.nodeSelector",
@@ -801,7 +923,12 @@ mod tests {
 
     #[test]
     fn delete_ownership_check_requires_only_the_owner_label() {
-        let projected = project_dpu_service(service_id(), NAMESPACE, &data(None));
+        let projected = project_dpu_service(
+            service_id(),
+            NAMESPACE,
+            &data(None),
+            ExtensionServiceDeploymentType::DemandDriven,
+        );
         let mut modified_but_owned = observation(&projected);
         modified_but_owned.deploy_in_cluster = Some(true);
 
@@ -812,7 +939,8 @@ mod tests {
                 &modified_but_owned,
                 service_id(),
                 NAMESPACE,
-                projected.service_id.as_deref()
+                projected.service_id.as_deref(),
+                ExtensionServiceDeploymentType::DemandDriven
             ),
             Err(DpuServiceOwnershipConflict::ImmutableField {
                 field: "spec.deployInCluster",
