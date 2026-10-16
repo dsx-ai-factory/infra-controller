@@ -484,7 +484,10 @@ jobs:
           if [[ "${PXE_KUSTOMIZE_CHANGED}" == "true" ]]; then
              pxe_kustomize_changed=true
           fi
-          if [[ "${MACHINE_LIFECYCLE_CHANGED}" == "true" ]]; then
+          # Release tags change no paths, so build the lifecycle image for every
+          # tag like the other images; a tag-matched image runs against the
+          # NICo images cut from the same commit.
+          if [[ "${MACHINE_LIFECYCLE_CHANGED}" == "true" ]] || [[ "${GITHUB_REF}" == refs/tags/* ]]; then
              machine_lifecycle_changed=true
           fi
 
