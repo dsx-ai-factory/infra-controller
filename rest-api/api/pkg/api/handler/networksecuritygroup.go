@@ -125,8 +125,7 @@ func (cnsgh CreateNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 	}
 
 	// Ensure that Tenant has access to Site
-	tsDAO := cdbm.NewTenantSiteDAO(cnsgh.dbSession)
-	_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, site.ID, nil)
+	err = common.ValidateTenantSiteAccess(ctx, nil, cnsgh.dbSession, tenant, site.ID)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have access to Site, Network Security Group cannot be created", nil)

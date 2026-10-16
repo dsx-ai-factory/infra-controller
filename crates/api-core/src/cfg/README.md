@@ -587,13 +587,22 @@ pools can select only Integrated backends; selecting a gRPC backend fails startu
 
 TOML section: `[resource_pool_backends.<name>.tls]`. All paths are optional;
 omission and an empty table both configure no certificate files. Any configured
-certificate or key requires an HTTPS endpoint. v2.4 validates field combinations
-without opening files or checking their contents.
+certificate or key requires an HTTPS endpoint. Startup in v2.4 validates these
+field combinations without opening files or checking their contents.
+
+The gRPC client library reads these files on each call. Each source must resolve
+to a regular file containing 1 byte to 256 KiB of PEM data; symlinked files are
+supported. Changed bytes cause a new connection, including when the timestamp is
+unchanged. Calls already in progress can finish on their existing connection.
+Invalid replacements fail the new call without falling back to old credentials.
+If a rotation happens between reading the certificate and key, that call can
+fail; the next call reads both files again. Production remote selection remains
+disabled in v2.4.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
-| `ca_cert_file` | `Option<PathBuf>` | — | Path to a PEM CA certificate file for validating the provider. |
-| `client_cert_file` | `Option<PathBuf>` | — | Path to a PEM client certificate file. Must be configured together with `client_key_file`. |
+| `ca_cert_file` | `Option<PathBuf>` | — | Path to a PEM CA bundle. When supplied, only this bundle is trusted; omission uses the host's native root store and fails if it has no usable roots. The bundle must contain valid certificates. |
+| `client_cert_file` | `Option<PathBuf>` | — | Path to a PEM client certificate chain. Must be configured together with `client_key_file`. |
 | `client_key_file` | `Option<PathBuf>` | — | Path to a PEM client private key file. Must be configured together with `client_cert_file`. |
 
 ### `IBFabricConfig`

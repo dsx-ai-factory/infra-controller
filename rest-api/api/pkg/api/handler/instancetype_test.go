@@ -783,6 +783,7 @@ func TestGetAllInstanceTypeHandler_Handle(t *testing.T) {
 	// by orgProvider), but tenant perspective should succeed.
 	externalSite := common.TestBuildSite(t, dbSession, ip, "External Site For Dual-Role Tenant", ipu)
 	common.TestBuildTenantSite(t, dbSession, orgTenant, externalSite, orgUser)
+	common.TestBuildAllocation(t, dbSession, externalSite, orgTenant, "test-ext-site-allocation", ipu)
 	externalSiteITCount := 3
 	for i := 0; i < externalSiteITCount; i++ {
 		it := common.TestBuildInstanceType(t, dbSession, fmt.Sprintf("test-ext-site-it-%02d", i), sutil.GetPtr(uuid.New()), externalSite, map[string]string{

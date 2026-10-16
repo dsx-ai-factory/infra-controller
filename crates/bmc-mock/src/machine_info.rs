@@ -24,8 +24,8 @@ use crate::infiniband::Guid;
 use crate::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use crate::redfish::update_service::UpdateServiceConfig;
 use crate::{
-    Callbacks, DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME, HardwareType, RackPlacement, hw,
-    redfish,
+    Callbacks, DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME, DUMMY_NVOS_USERNAME, HardwareType,
+    RackPlacement, hw, nvue, redfish,
 };
 
 /// Represents static information we know ahead of time about a host or DPU (independent of any
@@ -761,6 +761,25 @@ impl HostMachineInfo {
             DUMMY_FACTORY_USERNAME,
             DUMMY_FACTORY_PASSWORD,
         )
+    }
+
+    /// The NVOS a switch tray runs, served over NVUE at its NVOS address;
+    /// `None` for hardware without one. The administrator starts on the
+    /// factory password, as the BMC's accounts do.
+    pub(crate) fn nvue_config(&self) -> Option<nvue::Config> {
+        let admin = nvue::Account::new(DUMMY_NVOS_USERNAME, DUMMY_FACTORY_PASSWORD);
+        let management_mac = self.nvos_mac_addresses.first().copied();
+        match self.hw_type {
+            HardwareType::NvidiaSwitchN5700Ld => Some(
+                self.nvidia_switch_n5700_ld()
+                    .nvue_config(management_mac, admin),
+            ),
+            HardwareType::NvidiaSwitchNd5200Ld => Some(
+                self.nvidia_switch_nd5200_ld()
+                    .nvue_config(management_mac, admin),
+            ),
+            _ => None,
+        }
     }
 
     fn dell_poweredge_r750(&self) -> hw::dell_poweredge_r750::DellPowerEdgeR750<'_> {

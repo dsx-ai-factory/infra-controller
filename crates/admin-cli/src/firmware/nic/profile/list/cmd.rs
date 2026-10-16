@@ -4,17 +4,24 @@
  */
 
 use eyre::Context;
-use rpc::forge::{FindNicFirmwareProfileIdsRequest, FindNicFirmwareProfilesByIdsRequest};
+use rpc::forge::{
+    FindNicFirmwareProfileIdsRequest, FindNicFirmwareProfilesByIdsRequest, NicFirmwareHardware,
+};
 
 use super::super::output::write_profiles;
+use super::Args;
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
 
-pub(super) async fn list(ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+pub(super) async fn list(args: Args, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+    let hardware = args
+        .part_number
+        .zip(args.psid)
+        .map(|(part_number, psid)| NicFirmwareHardware { part_number, psid });
     let ids = ctx
         .api_client
         .0
-        .find_nic_firmware_profile_ids(FindNicFirmwareProfileIdsRequest { hardware: None })
+        .find_nic_firmware_profile_ids(FindNicFirmwareProfileIdsRequest { hardware })
         .await
         .wrap_err("while attempting to list NIC firmware profile IDs")?
         .profile_ids;

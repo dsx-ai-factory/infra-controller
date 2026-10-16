@@ -74,9 +74,14 @@ const (
 	PortNameSSH = "ssh"
 	// PortNameNmxc is the name of the NMX-C gRPC port on an NVOS Service.
 	PortNameNmxc = "nmxc"
+	// PortNameNvue is the name of the NVUE REST API port on an NVOS Service.
+	PortNameNvue = "nvue"
 
 	// NmxcPort is the port NICo expects NMX-C on at a switch NVOS address.
 	NmxcPort = 9370
+	// NvuePort is the port NICo expects the NVUE REST API on at a switch NVOS
+	// address.
+	NvuePort = 443
 
 	// DefaultConcurrency is the default number of concurrent workers for K8s API calls.
 	DefaultConcurrency = 50
@@ -222,12 +227,13 @@ func (b *ServiceBuilder) BuildService(machine *matclient.MachineStatus, machineT
 
 // BuildNvosService creates a Kubernetes Service for a switch's NVOS endpoint.
 //
-// NICo reaches a rack's NMX-C at a switch NVOS address on port 9370. The
-// Service publishes the switch's leased NVOS address as an externalIP, as the
-// BMC Service publishes the BMC address, with an apiserver-allocated
-// clusterIP, and forwards that port to machine-a-tron's bmc-mock listener,
-// where the hosted NMX-C mock tells switches apart by the address each
-// request was sent to.
+// NICo reaches a rack's NMX-C at a switch NVOS address on port 9370, and the
+// switch's NVUE REST API there on port 443. The Service publishes the switch's
+// leased NVOS address as an externalIP, as the BMC Service publishes the BMC
+// address, with an apiserver-allocated clusterIP, and forwards both ports to
+// machine-a-tron's bmc-mock listener, where the hosted NMX-C mock and the
+// switch's NVUE mock tell switches apart by the address each request was
+// sent to.
 func (b *ServiceBuilder) BuildNvosService(machine *matclient.MachineStatus, podName string) *corev1.Service {
 	labels := map[string]string{
 		LabelManagedBy:   LabelManagedByValue,
@@ -269,6 +275,12 @@ func (b *ServiceBuilder) BuildNvosService(machine *matclient.MachineStatus, podN
 					Name:       PortNameNmxc,
 					Protocol:   corev1.ProtocolTCP,
 					Port:       NmxcPort,
+					TargetPort: intstr.FromInt32(int32(machine.BMC.Redfish.ListenPort)),
+				},
+				{
+					Name:       PortNameNvue,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       NvuePort,
 					TargetPort: intstr.FromInt32(int32(machine.BMC.Redfish.ListenPort)),
 				},
 			},

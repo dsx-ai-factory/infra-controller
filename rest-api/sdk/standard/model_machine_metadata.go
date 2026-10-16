@@ -34,6 +34,8 @@ type MachineMetadata struct {
 	InfinibandInterfaces []MachineInfiniBandInterface `json:"infinibandInterfaces,omitempty"`
 	// Lifecycle state details for the Machine
 	LifecycleState NullableMachineLifecycleState `json:"lifecycleState,omitempty"`
+	// LLDP neighbors observed on the machine NICs, as last reported by the machine (scout or DPU agent). Empty when the machine has not reported any neighbors.
+	LldpNeighbors []MachineLldpNeighbor `json:"lldpNeighbors,omitempty"`
 }
 
 // NewMachineMetadata instantiates a new MachineMetadata object
@@ -256,6 +258,38 @@ func (o *MachineMetadata) UnsetLifecycleState() {
 	o.LifecycleState.Unset()
 }
 
+// GetLldpNeighbors returns the LldpNeighbors field value if set, zero value otherwise.
+func (o *MachineMetadata) GetLldpNeighbors() []MachineLldpNeighbor {
+	if o == nil || IsNil(o.LldpNeighbors) {
+		var ret []MachineLldpNeighbor
+		return ret
+	}
+	return o.LldpNeighbors
+}
+
+// GetLldpNeighborsOk returns a tuple with the LldpNeighbors field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *MachineMetadata) GetLldpNeighborsOk() ([]MachineLldpNeighbor, bool) {
+	if o == nil || IsNil(o.LldpNeighbors) {
+		return nil, false
+	}
+	return o.LldpNeighbors, true
+}
+
+// HasLldpNeighbors returns a boolean if a field has been set.
+func (o *MachineMetadata) HasLldpNeighbors() bool {
+	if o != nil && !IsNil(o.LldpNeighbors) {
+		return true
+	}
+
+	return false
+}
+
+// SetLldpNeighbors gets a reference to the given []MachineLldpNeighbor and assigns it to the LldpNeighbors field.
+func (o *MachineMetadata) SetLldpNeighbors(v []MachineLldpNeighbor) {
+	o.LldpNeighbors = v
+}
+
 func (o MachineMetadata) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -283,6 +317,9 @@ func (o MachineMetadata) ToMap() (map[string]interface{}, error) {
 	}
 	if o.LifecycleState.IsSet() {
 		toSerialize["lifecycleState"] = o.LifecycleState.Get()
+	}
+	if !IsNil(o.LldpNeighbors) {
+		toSerialize["lldpNeighbors"] = o.LldpNeighbors
 	}
 	return toSerialize, nil
 }

@@ -22,17 +22,12 @@ use axum::Json;
 use axum::extract::State as AxumState;
 use axum::response::{Html, IntoResponse, Response};
 use carbide_api_core::Api;
+use carbide_uuid::DbTable;
 use hyper::http::StatusCode;
 use model::firmware::DesiredFirmwareVersions;
 use sqlx::types::Json as SqlxJson;
 
 use super::Base;
-
-const DESIRED_FIRMWARE_QUERY: &str = r#"
-    SELECT vendor, model, versions, explicit_update_start_needed
-    FROM desired_firmware
-    ORDER BY vendor, model
-"#;
 
 #[derive(Template)]
 #[template(path = "firmware_show.html")]
@@ -60,7 +55,8 @@ struct DesiredFirmware {
     explicit_update_start_needed: bool,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx::FromRow, carbide_macros::DbTable)]
+#[db_table(name = "desired_firmware")]
 struct DesiredFirmwareRow {
     vendor: String,
     model: String,
@@ -104,7 +100,11 @@ pub(super) async fn show_json(AxumState(state): AxumState<Arc<Api>>) -> Response
 }
 
 async fn fetch_desired_firmware(api: &Api) -> Result<Vec<DesiredFirmware>, sqlx::Error> {
-    sqlx::query_as::<_, DesiredFirmwareRow>(DESIRED_FIRMWARE_QUERY)
+    let query = format!(
+        "SELECT {} FROM desired_firmware ORDER BY vendor, model",
+        DesiredFirmwareRow::db_table_columns(),
+    );
+    sqlx::query_as::<_, DesiredFirmwareRow>(sqlx::AssertSqlSafe(query))
         .fetch_all(&api.database_connection)
         .await
         .map(|rows| rows.into_iter().map(Into::into).collect())

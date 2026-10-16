@@ -25,7 +25,9 @@ use sqlx::{FromRow, Row};
 
 use super::hardware_info::CpuInfo;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// `Sku` describes expected or observed hardware, with fields named for `machine_skus` columns.
+#[derive(Clone, Debug, Deserialize, Serialize, carbide_macros::DbTable)]
+#[db_table(name = "machine_skus")]
 pub struct Sku {
     pub schema_version: u32,
     pub id: String,

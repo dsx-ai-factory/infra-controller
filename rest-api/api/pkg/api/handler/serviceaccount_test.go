@@ -6,20 +6,26 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cauth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	tmocks "go.temporal.io/sdk/mocks"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
@@ -51,6 +57,10 @@ func TestServiceAccountHandler_GetCurrent(t *testing.T) {
 	ip4 := common.TestBuildInfrastructureProvider(t, dbSession, "test-provider-4", org4, user4)
 	tn4 := common.TestBuildTenant(t, dbSession, "test-tenant-4", org4, user4)
 	ta4 := common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip4, &tn4.ID, org4, cdbm.TenantAccountStatusPending, user4)
+	sites := map[string]*cdbm.Site{
+		org2: testIPBlockBuildSite(t, dbSession, ip2, "existing-account-site", cdbm.SiteStatusRegistered, false, user2),
+		org4: testIPBlockBuildSite(t, dbSession, ip4, "promoted-account-site", cdbm.SiteStatusRegistered, false, user4),
+	}
 
 	tests := []struct {
 		name                  string
@@ -65,7 +75,7 @@ func TestServiceAccountHandler_GetCurrent(t *testing.T) {
 			serviceAccountEnabled: true,
 		},
 		{
-			name:                  "test get current ServiceAccount when service account is enabled and org has Provider/Tenant/TenantAccount",
+			name:                  "test get current ServiceAccount tolerates association lock failure and retries",
 			org:                   org2,
 			user:                  user2,
 			serviceAccountEnabled: true,
@@ -86,6 +96,17 @@ func TestServiceAccountHandler_GetCurrent(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			site := sites[test.org]
+			scp := sc.NewClientPool(nil)
+			tsc := &tmocks.Client{}
+			if site != nil {
+				scp.IDClientMap[site.ID.String()] = tsc
+				tsc.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateTenant", &corev1.CreateTenantRequest{
+					OrganizationId: test.org, Metadata: &corev1.Metadata{Name: "Test Tenant"},
+				}).Return(&tmocks.WorkflowRun{}, nil).Once()
+			}
+			defer tsc.AssertExpectations(t)
+
 			// Setup echo server/context
 			e := echo.New()
 			req := httptest.NewRequest(http.MethodGet, "/service-account/current", nil)
@@ -104,8 +125,20 @@ func TestServiceAccountHandler_GetCurrent(t *testing.T) {
 			// set it manually for testing purposes.
 			cauth.SetIsServiceAccountInContext(ec, test.serviceAccountEnabled)
 
-			handler := GetCurrentServiceAccountHandler{
-				dbSession: dbSession,
+			handler := NewGetCurrentServiceAccountHandler(dbSession, scp)
+			if test.org == org2 {
+				lockKey := fmt.Sprintf("%s-%s-%s", ip2.ID, site.ID, tn2.ID)
+				testWithAdvisoryLocks(t, ctx, dbSession, []string{lockKey}, func(_ *cdb.Tx) error {
+					err := handler.Handle(ec)
+					assert.Equal(t, http.StatusOK, rec.Code)
+					assert.JSONEq(t, fmt.Sprintf(`{"enabled":true,"infrastructureProviderId":%q,"tenantId":%q}`, ip2.ID.String(), tn2.ID.String()), rec.Body.String())
+					tsc.AssertNumberOfCalls(t, "ExecuteWorkflow", 0)
+					_, serr := cdbm.NewTenantSiteDAO(dbSession).GetByTenantIDAndSiteID(ctx, nil, tn2.ID, site.ID, nil)
+					assert.ErrorIs(t, serr, cdb.ErrDoesNotExist)
+					return err
+				})
+				rec = httptest.NewRecorder()
+				ec.SetResponse(echo.NewResponse(rec, e))
 			}
 
 			err := handler.Handle(ec)
@@ -117,6 +150,12 @@ func TestServiceAccountHandler_GetCurrent(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Equal(t, test.serviceAccountEnabled, sa.Enabled)
+			if site != nil {
+				require.NotNil(t, sa.TenantID)
+				ts, serr := cdbm.NewTenantSiteDAO(dbSession).GetByTenantIDAndSiteID(ctx, nil, uuid.MustParse(*sa.TenantID), site.ID, nil)
+				require.NoError(t, serr)
+				assert.Equal(t, test.user.ID, ts.CreatedBy)
+			}
 
 			if test.serviceAccountEnabled {
 				assert.NotNil(t, sa.InfrastructureProviderID)

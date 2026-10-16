@@ -35,7 +35,10 @@ use api_test_helper::{
 use bmc_mock::test_support::TEST_MAC_POOL;
 use bmc_mock::{HardwareType, ListenerOrAddress};
 use carbide_uuid::machine::StableHostMachineId;
+use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
+use carbide_uuid::rack::RackId;
 use carbide_uuid::site_prefix::SitePrefixId;
+use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
 use eyre::{ContextCompat, WrapErr};
 use futures::FutureExt;
 use futures::future::join_all;
@@ -43,9 +46,12 @@ use itertools::Itertools;
 use mac_address::MacAddress;
 use model::machine_boot_interface::BootInterfaceSelectionSource;
 use model::metadata::Metadata;
+use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
+use model::rack::RackConfig;
 use model::resource_pool::binding::INTEGRATED_AUTHORITY_ID;
 use model::resource_pool::{ResourcePoolBackendKind, ResourcePoolValueDomain};
 use model::site_prefix::{NewTenantManagedSitePrefix, SitePrefixLifecycleState};
+use model::switch::{NewSwitch, SwitchConfig};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
@@ -99,6 +105,52 @@ async fn test_integration() -> eyre::Result<()> {
     )
     .await?
     .site_prefix;
+    // Switch, rack and power-shelf controller families only appear in the
+    // catalogue scrape once their controllers process an object.
+    db::rack::create(
+        &mut txn,
+        &RackId::new("metric-catalogue-rack"),
+        None,
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+    db::switch::create(
+        &mut txn,
+        &NewSwitch {
+            id: SwitchId::new(SwitchIdSource::Tpm, [1u8; 32], SwitchType::NvLink),
+            config: SwitchConfig {
+                name: "metric-catalogue-switch".to_string(),
+                enable_nmxc: false,
+                fabric_manager_config: None,
+            },
+            bmc_mac_address: None,
+            metadata: None,
+            rack_id: None,
+            slot_number: None,
+            tray_index: None,
+        },
+    )
+    .await?;
+    db::power_shelf::create(
+        &mut txn,
+        &NewPowerShelf {
+            id: PowerShelfId::new(
+                PowerShelfIdSource::ProductBoardChassisSerial,
+                [1u8; 32],
+                PowerShelfType::Rack,
+            ),
+            config: PowerShelfConfig {
+                name: "metric-catalogue-power-shelf".to_string(),
+                capacity: None,
+                voltage: None,
+            },
+            bmc_mac_address: None,
+            metadata: None,
+            rack_id: None,
+        },
+    )
+    .await?;
     txn.commit().await?;
     assert_eq!(
         site_prefix.status.lifecycle_state,
@@ -402,6 +454,18 @@ async fn test_integration() -> eyre::Result<()> {
             .any(|metric| metric.name == "carbide_scout_pci_evaluations_total"),
         "the MaT scout path must exercise PCI comparison observability",
     );
+    for object_type in ["switches", "racks", "power_shelves"] {
+        for (family, metric_type) in [
+            ("object_tasks_completed_total", "counter"),
+            ("per_state", "gauge"),
+        ] {
+            metrics::wait_for_metric_line(
+                &test_env.carbide_metrics_addrs,
+                &format!("# TYPE carbide_{object_type}_{family} {metric_type}\n"),
+            )
+            .await?;
+        }
+    }
     generate_core_metric_docs(&test_env.carbide_metrics_addrs);
     drop(mqtt_client);
 

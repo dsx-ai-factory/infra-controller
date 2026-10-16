@@ -142,34 +142,11 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 
 	// Verify or validate site
 	sdDAO := cdbm.NewStatusDetailDAO(cskgh.dbSession)
-	tsDAO := cdbm.NewTenantSiteDAO(cskgh.dbSession)
 	skaDAO := cdbm.NewSSHKeyAssociationDAO(cskgh.dbSession)
 	skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(cskgh.dbSession)
 
-	sttsmap := map[uuid.UUID]*cdbm.TenantSite{}
-
-	// Validate inputs (Tenant/Site access, requested Sites, requested SSH Keys)
-	// outside the transaction — these are pure read-only checks and don't need
-	// to be in the tx scope. The tx is opened later just for the writes.
-	tss, _, err := tsDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.TenantSiteFilterInput{
-			TenantIDs: []uuid.UUID{tenant.ID},
-		},
-		cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
-		nil,
-	)
-	if err != nil {
-		logger.Error().Err(err).Msg("db error retrieving TenantSite records for Tenant")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site associations for Tenant, DB error", nil)
-	}
-
-	for _, ts := range tss {
-		cts := ts
-		sttsmap[ts.SiteID] = &cts
-	}
-
+	// Validate requested Sites and SSH Keys outside the transaction; these are
+	// read-only checks, so the tx is opened later just for the writes.
 	rdbst := []cdbm.Site{}
 	for _, stID := range apiRequest.SiteIDs {
 		// Validate the site for which this SSH Key Group is being created
@@ -190,8 +167,12 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to create SSH Key Group, Site: %s specified in request is not in Registered state", site.ID.String()), nil)
 		}
 
-		// Validate the TenantSite exists for current tenant and this site
-		_, ok := sttsmap[site.ID]
+		// Validate the current tenant has access to this site
+		ok, serr := common.TenantHasSiteAccess(ctx, nil, cskgh.dbSession, tenant, site.ID)
+		if serr != nil {
+			logger.Error().Err(serr).Msg("error checking Tenant access to Site")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create SSH Key Group, DB error checking Site access", nil)
+		}
 		if !ok {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Unable to associate SSH Key Group with Site: %s, Tenant does not have access to Site", stID), nil)
 		}
@@ -377,7 +358,7 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 	}
 
 	// Create response
-	apiskg := model.NewAPISSHKeyGroup(uskg, dbskgsas, sttsmap, dbska, dbskgsd)
+	apiskg := model.NewAPISSHKeyGroup(uskg, dbskgsas, nil, dbska, dbskgsd)
 
 	logger.Info().Msg("finishing API handler")
 
@@ -525,32 +506,9 @@ func (uskgh UpdateSSHKeyGroupHandler) Handle(c echo.Context) error {
 		}
 	}
 
-	tsDAO := cdbm.NewTenantSiteDAO(uskgh.dbSession)
 	skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(uskgh.dbSession)
 	sdDAO := cdbm.NewStatusDetailDAO(uskgh.dbSession)
 	skaDAO := cdbm.NewSSHKeyAssociationDAO(uskgh.dbSession)
-
-	// Pre-validate the Tenant's site access map outside the transaction (e.g.
-	// does the tenant own the site they're targeting?), which doesn't need to
-	// be in the tx scope; we open it later for lock + writes.
-	sttsmap := map[uuid.UUID]*cdbm.TenantSite{}
-	tss, _, err := tsDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.TenantSiteFilterInput{
-			TenantIDs: []uuid.UUID{tenant.ID},
-		},
-		cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
-		nil,
-	)
-	if err != nil {
-		logger.Error().Err(err).Msg("db error retrieving TenantSite records for Tenant")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site associations for Tenant, DB error", nil)
-	}
-	for _, ts := range tss {
-		cts := ts
-		sttsmap[ts.SiteID] = &cts
-	}
 
 	skgsasToSync := []cdbm.SSHKeyGroupSiteAssociation{}
 	skgsasToDelete := []cdbm.SSHKeyGroupSiteAssociation{}
@@ -631,8 +589,12 @@ func (uskgh UpdateSSHKeyGroupHandler) Handle(c echo.Context) error {
 					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to update SSH Key Group, The Site with ID: %s where this SSH Key Group is being created is not in Registered state", site.ID.String()), nil)
 				}
 
-				// Validate the TenantSite exists for current tenant and this site
-				_, ok := sttsmap[site.ID]
+				// Validate the current tenant has access to this site
+				ok, serr := common.TenantHasSiteAccess(ctx, tx, uskgh.dbSession, tenant, site.ID)
+				if serr != nil {
+					logger.Error().Err(serr).Msg("error checking Tenant access to Site")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SSH Key Group, DB error checking Site access", nil)
+				}
 				if !ok {
 					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Unable to associate SSH Key Group with Site: %s, Tenant does not have access to Site", stID), nil)
 				}
@@ -943,7 +905,7 @@ func (uskgh UpdateSSHKeyGroupHandler) Handle(c echo.Context) error {
 	}
 
 	// Create response
-	apiskg := model.NewAPISSHKeyGroup(skg, dbskgsas, sttsmap, dbska, dbskgsd)
+	apiskg := model.NewAPISSHKeyGroup(skg, dbskgsas, nil, dbska, dbskgsd)
 	logger.Info().Msg("finishing API handler")
 	return c.JSON(http.StatusOK, apiskg)
 }
@@ -1253,13 +1215,13 @@ func (gaskgh GetAllSSHKeyGroupHandler) Handle(c echo.Context) error {
 		}
 
 		// Determine if tenant has access to requested site
-		_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, site.ID, nil)
-		if err != nil {
-			if err == cdb.ErrDoesNotExist {
-				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant is not associated with Site specified in query", nil)
-			}
-			logger.Warn().Err(err).Msg("error retrieving Tenant Site association from DB")
+		ok, serr := common.TenantHasSiteAccess(ctx, nil, gaskgh.dbSession, tenant, site.ID)
+		if serr != nil {
+			logger.Warn().Err(serr).Msg("error checking Tenant access to Site")
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to determine if Tenant has access to Site specified in query, DB error", nil)
+		}
+		if !ok {
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant is not associated with Site specified in query", nil)
 		}
 	}
 

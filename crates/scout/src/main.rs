@@ -688,7 +688,7 @@ async fn handle_mlxreport_commands(
                 Err(e) => {
                     emit(metrics::ScoutMlxReconciliationFailed::Lock {
                         pci_name: dev_pci_name,
-                        error: mlx_device::lockdown_error_context(&e, &key),
+                        error: e.to_string(),
                     });
                 }
             },
@@ -764,7 +764,7 @@ async fn handle_mlxreport_commands(
                 Err(e) => {
                     emit(metrics::ScoutMlxReconciliationFailed::Unlock {
                         pci_name: dev_pci_name,
-                        error: mlx_device::lockdown_error_context(&e, &key),
+                        error: e.to_string(),
                     });
                 }
             },

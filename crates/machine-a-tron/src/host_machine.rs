@@ -807,6 +807,7 @@ impl MachineHandle {
             }),
             active_host_firmware: live_state.active_host_firmware.clone(),
             bmc_state,
+            nvos_admin: None,
         }
     }
 

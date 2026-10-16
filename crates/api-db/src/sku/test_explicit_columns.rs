@@ -86,6 +86,11 @@ async fn exercise_queries(connection: &mut PgConnection) -> Result<(), Box<dyn s
             serde_json::to_value(&expected)?
         );
     }
+    assert!(
+        find_matching_with_exclusion(txn.as_mut(), &expected, Some(&expected.id))
+            .await?
+            .is_none()
+    );
     txn.rollback().await?;
     Ok(())
 }

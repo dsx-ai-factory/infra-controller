@@ -5,9 +5,11 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 
+	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/google/uuid"
 	temporalClient "go.temporal.io/sdk/client"
 
@@ -26,6 +28,7 @@ import (
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 )
 
 // ~~~~~ Create Handler ~~~~~ //
@@ -92,14 +95,16 @@ func (cth CreateTenantHandler) Handle(c echo.Context) error {
 // GetCurrentTenantHandler is the API Handler for retrieving Tenant associated with the org
 type GetCurrentTenantHandler struct {
 	dbSession *cdb.Session
+	scp       *sc.ClientPool
 	tc        temporalClient.Client
 	cfg       *config.Config
 }
 
 // NewGetCurrentTenantHandler initializes and returns a new handler to retrieve Tenant associate with the org
-func NewGetCurrentTenantHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetCurrentTenantHandler {
+func NewGetCurrentTenantHandler(dbSession *cdb.Session, scp *sc.ClientPool, tc temporalClient.Client, cfg *config.Config) GetCurrentTenantHandler {
 	return GetCurrentTenantHandler{
 		dbSession: dbSession,
+		scp:       scp,
 		tc:        tc,
 		cfg:       cfg,
 	}
@@ -204,6 +209,10 @@ func (gcth GetCurrentTenantHandler) Handle(c echo.Context) error {
 	if err != nil {
 		return common.HandleTxError(c, logger, err, "Failed to retrieve current Tenant, DB transaction error")
 	}
+	err = ensurePrivilegedTenantSites(ctx, gcth.dbSession, gcth.scp, logger, tn, dbUser.ID)
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to ensure privileged Tenant/Site associations")
+	}
 
 	targetedInstanceCreation, err := common.TenantHasLegacyTargetedInstanceCreation(ctx, nil, gcth.dbSession, tn)
 	if err != nil {
@@ -216,6 +225,92 @@ func (gcth GetCurrentTenantHandler) Handle(c echo.Context) error {
 	logger.Info().Msg("finishing API handler")
 
 	return c.JSON(http.StatusOK, apiInstance)
+}
+
+// ensurePrivilegedTenantSites creates missing site associations without changing existing site settings.
+// When onlySiteIDs are given, only those Sites are provisioned and Tenant creation on them is awaited.
+func ensurePrivilegedTenantSites(ctx context.Context, dbSession *cdb.Session, scp *sc.ClientPool, logger zerolog.Logger, tenant *cdbm.Tenant, createdBy uuid.UUID, onlySiteIDs ...uuid.UUID) error {
+	siteIDs, err := common.GetPrivilegedAccessSiteIDsForTenant(ctx, nil, dbSession, tenant)
+	if err == nil && len(onlySiteIDs) > 0 {
+		siteIDs = mapset.NewSet(siteIDs...).Intersect(mapset.NewSet(onlySiteIDs...)).ToSlice()
+	}
+	if err != nil || len(siteIDs) == 0 {
+		return err
+	}
+	tsDAO := cdbm.NewTenantSiteDAO(dbSession)
+	tenantSites, _, err := tsDAO.GetAll(ctx, nil, cdbm.TenantSiteFilterInput{
+		TenantIDs: []uuid.UUID{tenant.ID}, SiteIDs: siteIDs,
+	}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+	if err != nil {
+		return err
+	}
+	missingSiteIDs := mapset.NewSet(siteIDs...)
+	for _, ts := range tenantSites {
+		missingSiteIDs.Remove(ts.SiteID)
+	}
+	sites, _, err := cdbm.NewSiteDAO(dbSession).GetAll(ctx, nil, cdbm.SiteFilterInput{
+		SiteIDs: missingSiteIDs.ToSlice(), Statuses: []string{cdbm.SiteStatusRegistered},
+	}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, site := range sites {
+		created, err := cdb.WithTxResult(ctx, dbSession, func(tx *cdb.Tx) (*cdbm.TenantSite, error) {
+			// Serialize missing associations with capability updates before taking the allocation lock.
+			for _, lockID := range []string{
+				fmt.Sprintf("tenant-account-capabilities-%s-%s", tenant.ID, site.InfrastructureProviderID),
+				fmt.Sprintf("%s-%s-%s", site.InfrastructureProviderID, site.ID, tenant.ID),
+			} {
+				derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockID), nil)
+				if derr != nil {
+					return nil, derr
+				}
+			}
+			_, derr := tsDAO.GetByTenantIDAndSiteID(ctx, tx, tenant.ID, site.ID, nil)
+			if derr != cdb.ErrDoesNotExist {
+				return nil, derr
+			}
+			// Recheck privilege after locking; a provider may have revoked it since discovery.
+			enabled, derr := common.TenantHasTargetedInstanceCreation(ctx, tx, dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &site.ID})
+			if derr != nil || !enabled {
+				return nil, derr
+			}
+			return tsDAO.Create(ctx, tx, cdbm.TenantSiteCreateInput{
+				TenantID: tenant.ID, TenantOrg: tenant.Org, SiteID: site.ID, CreatedBy: createdBy,
+			})
+		})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("site %s: %w", site.ID, err))
+			continue
+		}
+		if created == nil {
+			continue
+		}
+		we := startTenantCreate(ctx, scp, logger, tenant, site.ID)
+		if we != nil && len(onlySiteIDs) > 0 {
+			wctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+			// Core reports a Tenant that is still missing; waiting only avoids racing its creation.
+			_ = we.Get(wctx, nil)
+			cancel()
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// startTenantCreate triggers Tenant creation on the Site; inventory reconciliation retries failures.
+func startTenantCreate(ctx context.Context, scp *sc.ClientPool, logger zerolog.Logger, tenant *cdbm.Tenant, siteID uuid.UUID) temporalClient.WorkflowRun {
+	var we temporalClient.WorkflowRun
+	stc, err := scp.GetClientByID(siteID)
+	if err == nil {
+		we, err = stc.ExecuteWorkflow(ctx, temporalClient.StartWorkflowOptions{
+			ID: "site-tenant-create-" + tenant.Org, TaskQueue: queue.SiteTaskQueue,
+		}, "CreateTenant", tenant.ToCreateRequestProto())
+	}
+	if err != nil {
+		logger.Error().Err(err).Str("Site ID", siteID.String()).Str("Tenant ID", tenant.ID.String()).Msg("failed to trigger Tenant creation; inventory reconciliation will retry")
+	}
+	return we
 }
 
 // ~~~~~ Get Current Routing Profile Handler ~~~~~ //
@@ -293,17 +388,13 @@ func (gctrph GetCurrentTenantRoutingProfileHandler) Handle(c echo.Context) error
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant", nil)
 	}
 
-	allocationDAO := cdbm.NewAllocationDAO(gctrph.dbSession)
-	allocationCount, err := allocationDAO.GetCount(ctx, nil, cdbm.AllocationFilterInput{
-		TenantIDs: []uuid.UUID{tenant.ID},
-		SiteIDs:   []uuid.UUID{site.ID},
-	})
+	hasSiteAccess, err := common.TenantHasSiteAccess(ctx, nil, gctrph.dbSession, tenant, site.ID)
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving Allocations count from DB for Tenant and Site")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site Allocations count for Tenant", nil)
+		logger.Error().Err(err).Msg("error checking Tenant access to Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant access to Site, DB error", nil)
 	}
-	if allocationCount == 0 {
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have any Allocations with Site specified in query", nil)
+	if !hasSiteAccess {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have access to Site specified in query", nil)
 	}
 
 	stc, err := gctrph.scp.GetClientByID(site.ID)

@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::collections::HashMap;
+
 use carbide_uuid::nvlink::NvLinkDomainId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackProfileId;
@@ -351,6 +353,35 @@ pub async fn update_controller_state_outcome(
         .map_err(|e| DatabaseError::new("update_controller_state_outcome", e))?;
 
     Ok(())
+}
+
+/// `find_maintenance_requests` reads pending requests for the supplied shelves.
+/// Missing shelves and `NULL` requests are omitted; requests that cannot be
+/// decoded return an error. Read related controller state in the same snapshot
+/// to keep the state and requests consistent.
+pub async fn find_maintenance_requests(
+    txn: impl DbReader<'_>,
+    ids: &[PowerShelfId],
+) -> DatabaseResult<HashMap<PowerShelfId, PowerShelfMaintenanceRequest>> {
+    let requests = sqlx::query_as::<
+        _,
+        (
+            PowerShelfId,
+            sqlx::types::Json<PowerShelfMaintenanceRequest>,
+        ),
+    >(
+        "SELECT id, power_shelf_maintenance_requested FROM power_shelves
+             WHERE id = ANY($1) AND power_shelf_maintenance_requested IS NOT NULL",
+    )
+    .bind(ids)
+    .fetch_all(txn)
+    .await
+    .map_err(|error| DatabaseError::new("power_shelf::find_maintenance_requests", error))?;
+
+    Ok(requests
+        .into_iter()
+        .map(|(id, request)| (id, request.0))
+        .collect())
 }
 
 pub async fn set_power_shelf_maintenance_requested(

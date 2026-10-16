@@ -686,6 +686,12 @@ func TestNewAPIVpc(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := NewAPIVpc(tt.args.dbVpc, tt.args.dbsds, false)
+			encoded, err := json.Marshal(got)
+			require.NoError(t, err)
+			var response map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(encoded, &response))
+			require.Contains(t, response, "networkSecurityGroupPropagationDetails")
+			assert.JSONEq(t, "null", string(response["networkSecurityGroupPropagationDetails"]))
 
 			assert.Equal(t, tt.want.ID, got.ID)
 			assert.Equal(t, tt.want.Name, got.Name)

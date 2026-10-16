@@ -140,11 +140,18 @@ Kubernetes Secret does not install or bind the server identity on a switch.
 
 ### Grafana Dashboards
 
-The chart packages three dashboards built from NICo's exported Prometheus
-metrics: a site overview, object lifecycle diagnostics, and API performance.
+The chart packages six dashboards built from NICo's exported Prometheus
+metrics: a site overview, a deep per-site detail view, a multi-site fleet
+rollup, object lifecycle diagnostics, API performance, and BMC performance.
 They are disabled by default because this chart does not install Grafana.
 The source JSON files live in [`observability/dashboards/`](./observability/dashboards/) and can also be
 imported into Grafana directly.
+
+The fleet dashboard groups every panel by a site label, which defaults to
+`forge_site`, the external label the NICo observability bundle sets per site.
+A Prometheus that serves only its own site leaves that label empty, because
+Prometheus attaches external labels only when data leaves the server; set the
+dashboard's `site_label` variable to `job` there.
 
 To expose the dashboards to a Grafana dashboard sidecar in the release
 namespace:
@@ -170,6 +177,20 @@ grafanaDashboards:
     grafana_dashboard: "1"
   annotations: {}
 ```
+
+The chart creates one ConfigMap per dashboard, so a single large dashboard
+cannot push the set past the 1 MiB object limit. Each name is
+`<release-namespace>-<release-name>-<dashboard>`, where the dashboard part is
+the JSON filename without its extension. The prefix is the Helm release
+namespace and release name, not `grafanaDashboards.namespace`. The namespace
+and release parts are truncated to 16 characters each, and the full name to 63.
+Long namespaces or release names therefore shorten the rendered name. Read the
+name back with `helm get manifest` before you reference it from a `configMapRef`.
+
+Upgrading from a chart version that rendered a single
+`<release-namespace>-<release-name>-grafana-dashboards` ConfigMap removes that
+ConfigMap. Update any `configMapRef` that points to it to use the per-dashboard
+names.
 
 The target namespace must exist before Helm runs, and the Helm identity must be
 allowed to create ConfigMaps there. The Grafana sidecar must also watch that

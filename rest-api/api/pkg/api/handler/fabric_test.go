@@ -180,6 +180,7 @@ func TestFabricHandler_Get(t *testing.T) {
 
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg1, tn1.ID, site1.ID, tnu1.ID)
 	assert.NotNil(t, ts1)
+	common.TestBuildAllocation(t, dbSession, site1, tn1, "test-allocation-1", ipu)
 
 	fb1 := testFabricBuildFabric(t, dbSession, ip1.Org, cutil.GetPtr("IFabric1"), ip1, site1, nil, false)
 	assert.NotNil(t, fb1)
@@ -399,6 +400,7 @@ func TestFabricHandler_GetAll(t *testing.T) {
 
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg1, tn1.ID, site1.ID, tnu1.ID)
 	assert.NotNil(t, ts1)
+	common.TestBuildAllocation(t, dbSession, site1, tn1, "test-allocation-1", ipu)
 
 	totalCount := 30
 

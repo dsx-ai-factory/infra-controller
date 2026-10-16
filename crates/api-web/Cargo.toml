@@ -33,6 +33,7 @@ carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-authn = { path = "../authn" }
 carbide-health-report = { path = "../health-report" }
+carbide-macros = { path = "../macros" }
 carbide-measured-boot = { path = "../measured-boot", features = ["sqlx"] }
 carbide-rpc = { path = "../rpc", features = ["sqlx", "model"] }
 carbide-rpc-utils = { path = "../rpc-utils" }
@@ -104,12 +105,10 @@ carbide-version = { path = "../version" }
 workspace = true
 
 [dev-dependencies]
-# The admin-UI tests build a real `Api` through carbide-test-harness. The other entries provide
-# test-only crates not needed by the library itself (e.g. the sqlx_test macro and request-body
-# helpers). `db`/`model` resolve via carbide-api-db/carbide-api-model's lib names, already normal
-# deps.
+# The admin-UI tests build a real `Api` through carbide-test-harness. These entries
+# also enable test-support features and provide request-body helpers.
+# `db`/`model` are the library names of the existing normal dependencies.
 carbide-api-model = { path = "../api-model", features = ["test-support"] }
-carbide-macros = { path = "../macros" }
 carbide-redfish = { path = "../redfish", features = ["test-support"] }
 carbide-sqlx-testing = { path = "../sqlx-testing", default-features = false }
 carbide-test-harness = { path = "../test-harness" }

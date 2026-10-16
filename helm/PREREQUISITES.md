@@ -43,8 +43,8 @@ If you want Prometheus metrics collection, install the [Prometheus Operator](htt
 
 ### Grafana Dashboard Sidecar (Optional)
 
-The umbrella chart can install its packaged Grafana dashboards as a ConfigMap
-when `grafanaDashboards.enabled=true`. This requires an existing Grafana
+The umbrella chart can install its packaged Grafana dashboards, one ConfigMap
+per dashboard, when `grafanaDashboards.enabled=true`. This requires an existing Grafana
 installation with a dashboard sidecar watching the ConfigMap namespace and
 labels. The default `grafana_dashboard: "1"` label matches the common
 `kube-prometheus-stack` selector. To place dashboards in the configured NICo

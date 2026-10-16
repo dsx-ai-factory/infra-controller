@@ -82,6 +82,12 @@ func testDpuExtensionServiceSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create TenantSite table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.TenantSite)(nil))
 	require.NoError(t, err)
+	// create Allocation table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Allocation)(nil))
+	require.NoError(t, err)
+	// create TenantAccount table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.TenantAccount)(nil))
+	require.NoError(t, err)
 	// create DpuExtensionService table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.DpuExtensionService)(nil))
 	require.NoError(t, err)
@@ -120,10 +126,10 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 	st9 := util.TestBuildSite(t, dbSession, ip, "test-site-9", cdbm.SiteStatusRegistered, nil, user)
 	st10 := util.TestBuildSite(t, dbSession, ip, "test-site-10", cdbm.SiteStatusRegistered, nil, user)
 	st11 := util.TestBuildSite(t, dbSession, ip, "test-site-11", cdbm.SiteStatusRegistered, nil, user)
-	util.TestBuildTenantSiteAssociation(t, dbSession, tenant.Org, tenant.ID, st8.ID, user.ID)
-	util.TestBuildTenantSiteAssociation(t, dbSession, tenant.Org, tenant.ID, st9.ID, user.ID)
-	util.TestBuildTenantSiteAssociation(t, dbSession, tenant.Org, tenant.ID, st10.ID, user.ID)
-	util.TestBuildTenantSiteAssociation(t, dbSession, tenant.Org, tenant.ID, st11.ID, user.ID)
+	util.TestBuildAllocation(t, dbSession, ip, tenant, st8, "test-allocation-8")
+	util.TestBuildAllocation(t, dbSession, ip, tenant, st9, "test-allocation-9")
+	util.TestBuildAllocation(t, dbSession, ip, tenant, st10, "test-allocation-10")
+	util.TestBuildAllocation(t, dbSession, ip, tenant, st11, "test-allocation-11")
 
 	// Create DPU Extension Services with different statuses
 	version1 := fmt.Sprintf("V1-T%d", time.Now().Unix()*1000000)
@@ -924,9 +930,10 @@ func TestManageDpuExtensionService_CreateOrUpdateDpuExtensionServiceFromSite(t *
 
 	type recoveryState struct {
 		manager                ManageDpuExtensionService
+		ip                     *cdbm.InfrastructureProvider
 		site                   *cdbm.Site
 		tenant                 *cdbm.Tenant
-		tenantSite             *cdbm.TenantSite
+		allocation             *cdbm.Allocation
 		user                   *cdbm.User
 		controllerService      *corev1.DpuExtensionService
 		dpuExtensionServiceDAO cdbm.DpuExtensionServiceDAO
@@ -1159,10 +1166,43 @@ func TestManageDpuExtensionService_CreateOrUpdateDpuExtensionServiceFromSite(t *
 		{
 			name: "skips service when tenant does not have Site access",
 			setup: func(t *testing.T, state *recoveryState) {
-				err := cdbm.NewTenantSiteDAO(dbSession).Delete(ctx, nil, state.tenantSite.ID)
+				err := cdbm.NewAllocationDAO(dbSession).Delete(ctx, nil, state.allocation.ID)
 				require.NoError(t, err)
 			},
 			wantNil: true,
+		},
+		{
+			name: "skips service when tenant only has a Tenant/Site association",
+			setup: func(t *testing.T, state *recoveryState) {
+				err := cdbm.NewAllocationDAO(dbSession).Delete(ctx, nil, state.allocation.ID)
+				require.NoError(t, err)
+				util.TestBuildTenantSiteAssociation(t, dbSession, state.tenant.Org, state.tenant.ID, state.site.ID, state.user.ID)
+			},
+			wantNil: true,
+		},
+		{
+			name: "recovers service for privileged tenant without Allocation",
+			setup: func(t *testing.T, state *recoveryState) {
+				err := cdbm.NewAllocationDAO(dbSession).Delete(ctx, nil, state.allocation.ID)
+				require.NoError(t, err)
+				_, err = cdbm.NewTenantAccountDAO(dbSession).Create(ctx, nil, cdbm.TenantAccountCreateInput{
+					AccountNumber:             uuid.NewString(),
+					TenantID:                  &state.tenant.ID,
+					TenantOrg:                 state.tenant.Org,
+					InfrastructureProviderID:  state.ip.ID,
+					InfrastructureProviderOrg: state.ip.Org,
+					Status:                    cdbm.TenantAccountStatusReady,
+					Config:                    &cdbm.TenantAccountConfig{TargetedInstanceCreation: true},
+					CreatedBy:                 state.user.ID,
+				})
+				require.NoError(t, err)
+			},
+			check: func(t *testing.T, state *recoveryState, got *cdbm.DpuExtensionService) {
+				if assert.NotNil(t, got) {
+					assert.Equal(t, state.site.ID, got.SiteID)
+					assert.Equal(t, state.tenant.ID, got.TenantID)
+				}
+			},
 		},
 		{
 			name: "skips service with invalid ID",
@@ -1183,16 +1223,17 @@ func TestManageDpuExtensionService_CreateOrUpdateDpuExtensionServiceFromSite(t *
 			user := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{"test-org"}, []string{"ADMIN"})
 			tenant := util.TestBuildTenant(t, dbSession, "test-tenant", "test-org", nil, user)
 			site := util.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, nil, user)
-			tenantSite := util.TestBuildTenantSiteAssociation(t, dbSession, tenant.Org, tenant.ID, site.ID, user.ID)
+			allocation := util.TestBuildAllocation(t, dbSession, ip, tenant, site, "test-allocation")
 
 			serviceID := uuid.New()
 			state := &recoveryState{
 				manager: ManageDpuExtensionService{
 					dbSession: dbSession,
 				},
+				ip:                     ip,
 				site:                   site,
 				tenant:                 tenant,
-				tenantSite:             tenantSite,
+				allocation:             allocation,
 				user:                   user,
 				dpuExtensionServiceDAO: cdbm.NewDpuExtensionServiceDAO(dbSession),
 				controllerService: &corev1.DpuExtensionService{

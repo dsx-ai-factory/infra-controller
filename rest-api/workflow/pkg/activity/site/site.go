@@ -668,6 +668,21 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 		}
 	}
 
+	// Delete Tenant/Site associations
+	tsDAO := cdbm.NewTenantSiteDAO(mst.dbSession)
+	tss, _, err := tsDAO.GetAll(ctx, nil, cdbm.TenantSiteFilterInput{SiteIDs: []uuid.UUID{siteID}}, cdbp.PageInput{Limit: ccu.GetPtr(cdbp.TotalLimit)}, nil)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve Tenant/Site associations from DB by Site ID")
+		return err
+	}
+	for _, ts := range tss {
+		serr := tsDAO.Delete(ctx, nil, ts.ID)
+		if serr != nil && serr != cdb.ErrDoesNotExist {
+			logger.Error().Err(serr).Str("Tenant Site ID", ts.ID.String()).Msg("error deleting Tenant/Site association in DB")
+			return serr
+		}
+	}
+
 	// Delete Site if exists
 	err = siteDAO.Delete(ctx, nil, siteID)
 	if err != nil && err != cdb.ErrDoesNotExist {

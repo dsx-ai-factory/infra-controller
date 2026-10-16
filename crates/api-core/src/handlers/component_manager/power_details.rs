@@ -30,9 +30,13 @@ use super::{
 use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 
+mod actions;
+
 // Bound request memory and hardware fan-out. The five-second snapshot budget
-// includes pool acquisition. After it completes, queued targets, credentials,
-// and hardware reads share fifteen seconds; no portion is reserved per target.
+// includes pool acquisition. `SNAPSHOT_TIMEOUT` also caps each server statement
+// after snapshot setup, independently of that overall client deadline. After
+// the snapshot completes, queued targets, credentials, and hardware reads share
+// fifteen seconds; no portion is reserved per target.
 // Caller cancellation can stop work sooner, as can Core/RMS's ten-second
 // backend read budgets.
 const MAX_TARGETS: usize = 64;
@@ -54,15 +58,85 @@ enum PowerReadEndpoint {
     Shelf(db::power_shelf::PowerShelfEndpointRow),
 }
 
-/// `PendingDetails` keeps policy and identity while a hardware read is pending.
-/// Without an endpoint, its existing error and desired policy return unchanged.
+/// `PendingDetails` keeps identity, policy and actions while hardware is read.
+/// Without an endpoint, its existing error and saved details return unchanged.
 struct PendingDetails {
     details: rpc::ComponentPowerDetails,
     endpoint: Option<PowerReadEndpoint>,
 }
 
-/// Loads identity and policy in one snapshot, then releases it before bounded
-/// credential and hardware reads. Each target retains its independent policy.
+/// `DbSessionGuard` owns a pooled connection until successful work explicitly
+/// returns it through `return_to_pool`. Dropping the guard before that discards
+/// the connection and immediately releases the local pool slot.
+///
+/// SQLx's normal cleanup can wait for a blocked query before rollback, so the
+/// guard also covers setup and network stalls that the statement cap cannot.
+struct DbSessionGuard {
+    connection: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
+}
+
+impl DbSessionGuard {
+    /// Wraps the pooled connection before `BEGIN`, so failed or cancelled
+    /// transaction startup still releases its pool slot.
+    async fn acquire(pool: &sqlx::PgPool) -> Result<Self, db::DatabaseError> {
+        Ok(Self {
+            connection: Some(pool.acquire().await.map_err(db::DatabaseError::acquire)?),
+        })
+    }
+
+    /// Starts a consistent, read-only snapshot with a transaction-local server
+    /// limit of at most `SNAPSHOT_TIMEOUT` per subsequent statement. A shorter
+    /// operator setting remains in effect. The separate client deadline covers
+    /// acquisition and setup; the server limit does not cover those stages.
+    async fn begin(&mut self) -> Result<db::Transaction<'_>, db::DatabaseError> {
+        let connection = self
+            .connection
+            .as_deref_mut()
+            .expect("the snapshot retains its connection until return_to_pool consumes it");
+        let mut txn = db::Transaction::begin_inner(connection).await?;
+        // Policy, identity and maintenance must share a snapshot, without row locks.
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(txn.as_pgconn())
+            .await
+            .map_err(|error| db::DatabaseError::query("set power details snapshot", error))?;
+
+        // `pg_settings` reports milliseconds. `NULLIF` turns a disabled (zero)
+        // timeout into NULL, which `LEAST` ignores when applying our cap. A
+        // shorter limit remains unchanged. The `true` argument makes this
+        // transaction-local, so the setting resets when the txn ends.
+        sqlx::query(
+            "SELECT set_config('statement_timeout', \
+                LEAST(NULLIF(setting::bigint, 0), $1::text::bigint)::text, true) \
+             FROM pg_settings WHERE name = 'statement_timeout'",
+        )
+        .bind(SNAPSHOT_TIMEOUT.as_millis().to_string())
+        .execute(txn.as_pgconn())
+        .await
+        .map_err(|error| db::DatabaseError::query("set power details statement timeout", error))?;
+        Ok(txn)
+    }
+
+    /// Returns a healthy connection through SQLx after its transaction commits.
+    fn return_to_pool(mut self) {
+        drop(self.connection.take());
+    }
+}
+
+impl Drop for DbSessionGuard {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            // Detaching frees the local pool slot immediately. Closing the
+            // socket does not guarantee that PostgreSQL stops immediately;
+            // after snapshot setup, its statement timeout separately bounds
+            // each subsequent SQL statement. Discarded server sessions may
+            // briefly remain alongside replacements and exceed the pool limit.
+            drop(connection.detach());
+        }
+    }
+}
+
+/// Loads identity, policy and tracked maintenance in one snapshot, then releases
+/// it before bounded credential and hardware reads. Saved details remain intact.
 pub(crate) async fn get_component_power_details(
     api: &Api,
     request: Request<rpc::GetComponentPowerDetailsRequest>,
@@ -108,6 +182,8 @@ pub(crate) async fn get_component_power_details(
     let mut entries = stream::iter(snapshot.into_iter().enumerate())
         .map(|(index, mut pending)| async move {
             if let Some(endpoint) = pending.endpoint {
+                // Live-read failures replace only actual; saved policy and
+                // tracked actions remain available from the snapshot.
                 // An already-ready future can finish before timeout_at checks
                 // expiry; queued targets must not start work after the deadline.
                 pending.details.actual = Some(if tokio::time::Instant::now() >= deadline {
@@ -161,15 +237,11 @@ fn validate_ids<Id: Eq + Hash>(ids: &[Id]) -> Result<(), CarbideError> {
     Ok(())
 }
 
-/// `load_snapshot` reads identity and policy in request order within one read-only
-/// transaction, releasing it before credential lookup or hardware I/O.
+/// `load_snapshot` reads identity, policy and maintenance in request order within
+/// one read-only transaction, releasing it before credentials or hardware I/O.
 async fn load_snapshot(api: &Api, target: Target) -> Result<Vec<PendingDetails>, CarbideError> {
-    let mut txn = api.txn_begin().await?;
-    // Policy and identity must come from the same snapshot, without row locks.
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .execute(txn.as_pgconn())
-        .await
-        .map_err(|error| db::DatabaseError::query("set power details snapshot", error))?;
+    let mut connection = DbSessionGuard::acquire(api.pg_pool()).await?;
+    let mut txn = connection.begin().await?;
     let entries = match target {
         Target::MachineIds(list) => {
             let machines = db::machine::find(
@@ -209,6 +281,10 @@ async fn load_snapshot(api: &Api, target: Target) -> Result<Vec<PendingDetails>,
                         id.to_string(),
                         endpoint,
                         desired_policy(policies.get(&id).copied()),
+                        actions::machine(
+                            &machine.state.value,
+                            machine.machine_maintenance_requested.as_ref(),
+                        ),
                     )
                 })
                 .collect()
@@ -219,20 +295,26 @@ async fn load_snapshot(api: &Api, target: Target) -> Result<Vec<PendingDetails>,
                 db::ObjectColumnFilter::List(db::switch::IdColumn, &list.ids),
             )
             .await?;
-            let managed: HashSet<_> = switches.into_iter().map(|switch| switch.id).collect();
+            let managed: HashMap<_, _> = switches
+                .into_iter()
+                .map(|switch| (switch.id, switch))
+                .collect();
+            let requests =
+                db::switch::find_maintenance_requests(txn.as_pgconn(), &list.ids).await?;
             let rows = db::switch::find_switch_endpoints_by_ids(txn.as_pgconn(), &list.ids).await?;
             let mut endpoints: HashMap<_, _> =
                 rows.into_iter().map(|row| (row.switch_id, row)).collect();
             list.ids
                 .into_iter()
                 .map(|id| {
-                    if !managed.contains(&id) {
+                    let Some(switch) = managed.get(&id) else {
                         return PendingDetails::missing(id.to_string());
-                    }
+                    };
                     PendingDetails::managed(
                         id.to_string(),
                         endpoints.remove(&id).map(PowerReadEndpoint::Switch),
                         inapplicable_policy(),
+                        actions::switch(&switch.controller_state.value, requests.get(&id)),
                     )
                 })
                 .collect()
@@ -243,7 +325,10 @@ async fn load_snapshot(api: &Api, target: Target) -> Result<Vec<PendingDetails>,
                 db::ObjectColumnFilter::List(db::power_shelf::IdColumn, &list.ids),
             )
             .await?;
-            let managed: HashSet<_> = shelves.into_iter().map(|shelf| shelf.id).collect();
+            let managed: HashMap<_, _> =
+                shelves.into_iter().map(|shelf| (shelf.id, shelf)).collect();
+            let requests =
+                db::power_shelf::find_maintenance_requests(txn.as_pgconn(), &list.ids).await?;
             let rows =
                 db::power_shelf::find_power_shelf_endpoints_by_ids(txn.as_pgconn(), &list.ids)
                     .await?;
@@ -254,24 +339,26 @@ async fn load_snapshot(api: &Api, target: Target) -> Result<Vec<PendingDetails>,
             list.ids
                 .into_iter()
                 .map(|id| {
-                    if !managed.contains(&id) {
+                    let Some(shelf) = managed.get(&id) else {
                         return PendingDetails::missing(id.to_string());
-                    }
+                    };
                     PendingDetails::managed(
                         id.to_string(),
                         endpoints.remove(&id).map(PowerReadEndpoint::Shelf),
                         inapplicable_policy(),
+                        actions::shelf(&shelf.controller_state.value, requests.get(&id)),
                     )
                 })
                 .collect()
         }
     };
     txn.commit().await?;
+    connection.return_to_pool();
     Ok(entries)
 }
 
 impl PendingDetails {
-    /// Builds a missing-target result with unavailable policy and no hardware read.
+    /// Reports unavailable policy/actions for a missing target without a hardware read.
     fn missing(component_id: String) -> Self {
         Self {
             details: rpc::ComponentPowerDetails {
@@ -281,17 +368,25 @@ impl PendingDetails {
                     None,
                 )),
                 desired: Some(desired_policy(None)),
+                actions: Some(rpc::ComponentPowerActionDetails {
+                    actions: vec![],
+                    error: Some(rpc::ComponentPowerError {
+                        code: rpc::ComponentPowerErrorCode::NotFound as i32,
+                        message: "managed component not found".into(),
+                    }),
+                }),
             },
             endpoint: None,
         }
     }
 
-    /// Preserves policy and reports `EndpointUnavailable` until a resolved
+    /// Preserves saved policy/actions and reports `EndpointUnavailable` until a resolved
     /// endpoint supplies a hardware read.
     fn managed(
         component_id: String,
         endpoint: Option<PowerReadEndpoint>,
         desired: rpc::ComponentPowerPolicy,
+        actions: rpc::ComponentPowerActionDetails,
     ) -> Self {
         Self {
             details: rpc::ComponentPowerDetails {
@@ -301,6 +396,7 @@ impl PendingDetails {
                     None,
                 )),
                 desired: Some(desired),
+                actions: Some(actions),
             },
             endpoint,
         }
@@ -384,6 +480,12 @@ async fn read_actual(
             fetch_powershelf_pmc_credentials(api.credential_manager.as_ref(), mac).await
         }
     };
+    // The caller's `timeout_at` polls ready results before checking expiry.
+    // Check here so a late error cannot replace `DeadlineExceeded` and late
+    // credentials cannot start another read.
+    if tokio::time::Instant::now() >= deadline {
+        return failed_observation(ErrorCode::DeadlineExceeded, Some(source));
+    }
     let credentials = match credentials {
         Ok(credentials) => credentials,
         Err(error) => {
@@ -396,12 +498,6 @@ async fn read_actual(
             return failed_observation(ErrorCode::CredentialsUnavailable, Some(source));
         }
     };
-
-    // A ready credential lookup can outlast the budget without yielding to
-    // timeout_at; check before starting another external operation.
-    if tokio::time::Instant::now() >= deadline {
-        return failed_observation(ErrorCode::DeadlineExceeded, Some(source));
-    }
 
     let result = match endpoint {
         PowerReadEndpoint::Compute {
@@ -420,22 +516,23 @@ async fn read_actual(
                 return failed_observation(ErrorCode::EndpointUnavailable, Some(source));
             };
             let nvos_credentials =
-                match fetch_switch_nvos_credentials(api.credential_manager.as_ref(), mac).await {
-                    Ok(credentials) => credentials,
-                    Err(error) => {
-                        tracing::warn!(
-                            management_mac_address = %mac,
-                            ?source,
-                            error_category = backend_error_category(&error),
-                            "power read NVOS credentials are unavailable"
-                        );
-                        return failed_observation(ErrorCode::CredentialsUnavailable, Some(source));
-                    }
-                };
-            // Apply the same guard after the second credential lookup.
+                fetch_switch_nvos_credentials(api.credential_manager.as_ref(), mac).await;
+            // Apply the same guard before classifying the second credential lookup.
             if tokio::time::Instant::now() >= deadline {
                 return failed_observation(ErrorCode::DeadlineExceeded, Some(source));
             }
+            let nvos_credentials = match nvos_credentials {
+                Ok(credentials) => credentials,
+                Err(error) => {
+                    tracing::warn!(
+                        management_mac_address = %mac,
+                        ?source,
+                        error_category = backend_error_category(&error),
+                        "power read NVOS credentials are unavailable"
+                    );
+                    return failed_observation(ErrorCode::CredentialsUnavailable, Some(source));
+                }
+            };
             let endpoint = SwitchEndpoint {
                 bmc_ip: row.bmc_ip,
                 bmc_mac: mac,
@@ -457,6 +554,11 @@ async fn read_actual(
             cm.power_shelf.get_power_state(&[endpoint]).await
         }
     };
+    // Reject expired results before `observation` classifies failures or sets
+    // `observed_at` on a successful read.
+    if tokio::time::Instant::now() >= deadline {
+        return failed_observation(ErrorCode::DeadlineExceeded, Some(source));
+    }
     observation(result, mac, source)
 }
 
@@ -581,6 +683,66 @@ mod tests {
     use carbide_uuid::switch::SwitchId;
 
     use super::*;
+
+    /// Snapshot setup must configure read-only, repeatable-read queries and the
+    /// server cap without extending a tighter operator limit or changing the
+    /// setting used by later pool borrowers.
+    #[crate::sqlx_test]
+    async fn snapshot_statement_timeout_is_capped_and_transaction_local(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut connection = DbSessionGuard::acquire(&pool).await?;
+        for (configured_ms, expected_ms) in [
+            // A disabled server timeout still needs the snapshot's limit.
+            (0, 5000_i64),
+            // A broader site limit must not extend snapshot SQL work.
+            (60000, 5000),
+            // Preserve an operator's stricter limit.
+            (1000, 1000),
+        ] {
+            sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+                .bind(configured_ms.to_string())
+                .execute(
+                    connection
+                        .connection
+                        .as_deref_mut()
+                        .expect("snapshot lease"),
+                )
+                .await?;
+
+            let mut txn = connection.begin().await?;
+            let effective_ms: i64 = sqlx::query_scalar(
+                "SELECT setting::bigint FROM pg_settings WHERE name = 'statement_timeout'",
+            )
+            .fetch_one(txn.as_pgconn())
+            .await?;
+            assert_eq!(effective_ms, expected_ms, "configured {configured_ms}ms");
+            let (read_only, isolation): (String, String) = sqlx::query_as(
+                "SELECT current_setting('transaction_read_only'), \
+                        current_setting('transaction_isolation')",
+            )
+            .fetch_one(txn.as_pgconn())
+            .await?;
+            assert_eq!(read_only, "on");
+            assert_eq!(isolation, "repeatable read");
+            txn.commit().await?;
+
+            let restored_ms: i64 = sqlx::query_scalar(
+                "SELECT setting::bigint FROM pg_settings WHERE name = 'statement_timeout'",
+            )
+            .fetch_one(
+                connection
+                    .connection
+                    .as_deref_mut()
+                    .expect("snapshot lease"),
+            )
+            .await?;
+            assert_eq!(restored_ms, configured_ms, "configured {configured_ms}ms");
+        }
+        connection.return_to_pool();
+
+        Ok(())
+    }
 
     /// Keep invalid batches out of snapshot acquisition while preserving each
     /// typed target arm and the inclusive request-size boundary.

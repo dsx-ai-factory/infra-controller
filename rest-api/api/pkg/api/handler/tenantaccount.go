@@ -26,6 +26,7 @@ import (
 	common "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -619,14 +620,16 @@ func (gtah GetTenantAccountHandler) Handle(c echo.Context) error {
 // UpdateTenantAccountHandler is the API Handler for updating a TenantAccount
 type UpdateTenantAccountHandler struct {
 	dbSession *cdb.Session
+	scp       *sc.ClientPool
 	tc        temporalClient.Client
 	cfg       *config.Config
 }
 
 // NewUpdateTenantAccountHandler initializes and returns a new handler for updating Tenant
-func NewUpdateTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateTenantAccountHandler {
+func NewUpdateTenantAccountHandler(dbSession *cdb.Session, scp *sc.ClientPool, tc temporalClient.Client, cfg *config.Config) UpdateTenantAccountHandler {
 	return UpdateTenantAccountHandler{
 		dbSession: dbSession,
+		scp:       scp,
 		tc:        tc,
 		cfg:       cfg,
 	}
@@ -886,6 +889,7 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Tenant Account does not have an associated Tenant", nil)
 	}
 
+	var newSiteIDs []uuid.UUID
 	err = cdb.WithTx(ctx, utah.dbSession, func(tx *cdb.Tx) error {
 		lockKey := fmt.Sprintf("tenant-account-capabilities-%s-%s", ta.TenantID.String(), ta.InfrastructureProviderID.String())
 		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
@@ -898,7 +902,7 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 		// checks and subsequent writes operate on the same transactional
 		// snapshot rather than the pre-transaction read used to derive the
 		// lock key.
-		ta, derr = taDAO.GetByID(ctx, tx, taID, nil)
+		ta, derr = taDAO.GetByID(ctx, tx, taID, []string{cdbm.TenantRelationName})
 		if derr != nil {
 			logger.Warn().Err(derr).Msg("error retrieving TenantAccount DB entity within transaction")
 			return cutil.NewAPIError(http.StatusNotFound, "Could not retrieve TenantAccount to update", nil)
@@ -951,10 +955,32 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 		}
 
 		for siteID := range siteUpdates {
+			lockKey = fmt.Sprintf("%s-%s-%s", ta.InfrastructureProviderID, siteID, ta.TenantID)
+			derr = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
+			if derr != nil {
+				return derr
+			}
 			ts, gerr := tsDAO.GetByTenantIDAndSiteID(ctx, tx, *ta.TenantID, siteID, []string{"Site"})
 			if gerr != nil {
 				if errors.Is(gerr, cdb.ErrDoesNotExist) {
-					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Site %s is not associated with Tenant", siteID.String()), nil)
+					site, serr := cdbm.NewSiteDAO(utah.dbSession).GetByID(ctx, tx, siteID, nil, false)
+					if serr != nil && !errors.Is(serr, cdb.ErrDoesNotExist) {
+						return serr
+					}
+					if serr != nil || site.InfrastructureProviderID != ta.InfrastructureProviderID {
+						return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Site %s is not owned by the Tenant Account Infrastructure Provider", siteID.String()), nil)
+					}
+					_, derr = tsDAO.Create(ctx, tx, cdbm.TenantSiteCreateInput{
+						TenantID: *ta.TenantID, TenantOrg: ta.TenantOrg, SiteID: siteID, CreatedBy: dbUser.ID,
+						Config: &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(siteUpdates[siteID])},
+					})
+					if derr != nil {
+						return derr
+					}
+					if siteUpdates[siteID] {
+						newSiteIDs = append(newSiteIDs, siteID)
+					}
+					continue
 				}
 				logger.Error().Err(gerr).Msg("error retrieving TenantSite for siteCapabilities update")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)
@@ -990,16 +1016,37 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 			if _, listed := siteIDs[ts.SiteID]; listed {
 				continue
 			}
-			if ts.Config.TargetedInstanceCreation == nil {
+			lockKey = fmt.Sprintf("%s-%s-%s", ta.InfrastructureProviderID, ts.SiteID, ta.TenantID)
+			derr = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
+			if derr != nil {
+				return derr
+			}
+			if ts.Config.TargetedInstanceCreation != nil {
+				_, derr = tsDAO.Update(ctx, tx, cdbm.TenantSiteUpdateInput{
+					TenantSiteID: ts.ID,
+					Config:       &cdbm.TenantSiteConfig{},
+				})
+				if derr != nil {
+					logger.Error().Err(derr).Msg("error clearing stale TenantSite capability override")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)
+				}
+			}
+			// Omitted overrides are revoked by replacement; check the remaining privileges before cleanup.
+			enabled, derr := common.TenantHasTargetedInstanceCreation(ctx, tx, utah.dbSession, &cdbm.Tenant{ID: *ta.TenantID}, &common.TenantPrivilegeScope{SiteID: &ts.SiteID})
+			if derr != nil {
+				return derr
+			}
+			if enabled {
 				continue
 			}
-			_, derr = tsDAO.Update(ctx, tx, cdbm.TenantSiteUpdateInput{
-				TenantSiteID: ts.ID,
-				Config:       &cdbm.TenantSiteConfig{},
+			count, derr := cdbm.NewAllocationDAO(utah.dbSession).GetCount(ctx, tx, cdbm.AllocationFilterInput{
+				TenantIDs: []uuid.UUID{*ta.TenantID}, SiteIDs: []uuid.UUID{ts.SiteID},
 			})
+			if derr == nil && count == 0 {
+				derr = tsDAO.Delete(ctx, tx, ts.ID)
+			}
 			if derr != nil {
-				logger.Error().Err(derr).Msg("error clearing stale TenantSite capability override")
-				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)
+				return derr
 			}
 		}
 
@@ -1007,6 +1054,9 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 	})
 	if err != nil {
 		return common.HandleTxError(c, logger, err, "Failed to update Tenant Account capabilities")
+	}
+	for _, siteID := range newSiteIDs {
+		startTenantCreate(ctx, utah.scp, logger, ta.Tenant, siteID)
 	}
 
 	ta, err = taDAO.GetByID(ctx, nil, taID, nil)
@@ -1147,30 +1197,53 @@ func (dtah DeleteTenantAccountHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "InfrastructureProvider for Org does not match InfrastructureProvider in TenantAccount", nil)
 	}
 
-	if ta.TenantID != nil {
-		// Verify that Tenant does not have any Allocations with the Provider
-		allocationDAO := cdbm.NewAllocationDAO(dtah.dbSession)
-		allocationFilter := cdbm.AllocationFilterInput{InfrastructureProviderIDs: []uuid.UUID{ip.ID}}
+	err = cdb.WithTx(ctx, dtah.dbSession, func(tx *cdb.Tx) error {
 		if ta.TenantID != nil {
+			// Serialize cleanup with ensurePrivilegedTenantSites.
+			lockKey := fmt.Sprintf("tenant-account-capabilities-%s-%s", ta.TenantID.String(), ta.InfrastructureProviderID.String())
+			err := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
+			if err != nil {
+				return err
+			}
+
+			// Verify that Tenant does not have any Allocations with the Provider
+			allocationDAO := cdbm.NewAllocationDAO(dtah.dbSession)
+			allocationFilter := cdbm.AllocationFilterInput{InfrastructureProviderIDs: []uuid.UUID{ip.ID}}
 			allocationFilter.TenantIDs = append(allocationFilter.TenantIDs, *ta.TenantID)
-		}
-		aCount, err := allocationDAO.GetCount(ctx, nil, allocationFilter)
-		if err != nil {
-			logger.Error().Str("ip", ip.ID.String()).Str("tenant", ta.TenantID.String()).Err(err).Msg("error getting allocations")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Error getting allocations for InfrastructureProvider, Tenant", nil)
+			aCount, err := allocationDAO.GetCount(ctx, tx, allocationFilter)
+			if err != nil {
+				logger.Error().Str("ip", ip.ID.String()).Str("tenant", ta.TenantID.String()).Err(err).Msg("error getting allocations")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Error getting allocations for InfrastructureProvider, Tenant", nil)
+			}
+
+			if aCount > 0 {
+				logger.Warn().Str("tenant", ta.TenantID.String()).Msg("allocations exist for tenant")
+				return cutil.NewAPIError(http.StatusBadRequest, "Allocations exist for Tenant", nil)
+			}
+
+			// Delete Tenant/Site associations with the Provider's Sites
+			tsDAO := cdbm.NewTenantSiteDAO(dtah.dbSession)
+			tss, _, err := tsDAO.GetAll(ctx, tx, cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{*ta.TenantID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, []string{"Site"})
+			if err != nil {
+				logger.Error().Err(err).Msg("error retrieving Tenant/Site associations")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete TenantAccount, DB error retrieving Tenant/Site associations", nil)
+			}
+			for _, ts := range tss {
+				if ts.Site != nil && ts.Site.InfrastructureProviderID == ip.ID {
+					err = tsDAO.Delete(ctx, tx, ts.ID)
+					if err != nil {
+						logger.Error().Err(err).Msg("error deleting Tenant/Site association")
+						return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete TenantAccount, DB error deleting Tenant/Site association", nil)
+					}
+				}
+			}
 		}
 
-		if aCount > 0 {
-			logger.Warn().Str("tenant", ta.TenantID.String()).Msg("allocations exist for tenant")
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Allocations exist for Tenant", nil)
-		}
-	}
-
-	// Delete TenantAccount in DB
-	err = taDAO.Delete(ctx, nil, taID)
+		// Delete TenantAccount in DB
+		return taDAO.Delete(ctx, tx, taID)
+	})
 	if err != nil {
-		logger.Error().Err(err).Msg("error deleting TenantAccount in DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to delete Tenant", nil)
+		return common.HandleTxError(c, logger, err, "Failed to delete Tenant")
 	}
 
 	// Create response

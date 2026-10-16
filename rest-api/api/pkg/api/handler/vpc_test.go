@@ -577,6 +577,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 
 	tst3.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
 		"CreateVPCV2", mock.Anything).Return(wruntimeout, nil)
+	tst3.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateTenant", mock.Anything).Return(wrun, nil)
 
 	tst3.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
@@ -1404,7 +1405,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "test VPC create API endpoint failure, Tenant has no Site Allocation",
+			name: "test VPC create API endpoint failure, Tenant has no Site Allocation or privilege",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -1416,9 +1417,36 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 					Description: cutil.GetPtr("Test VPC Description"),
 					SiteID:      st2.ID.String(),
 				},
-				reqOrg:   tnOrg,
-				reqUser:  tnu,
+				reqOrg:   tnOrg3,
+				reqUser:  tnu3,
 				respCode: http.StatusForbidden,
+			},
+			wantErr: false,
+		},
+		{
+			name: "test VPC create API endpoint success, privileged Tenant has no Site Allocation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:        "Test VPC",
+					Description: cutil.GetPtr("Test VPC Description"),
+					SiteID:      st2.ID.String(),
+				},
+				reqOrg:                     tnOrg,
+				reqUser:                    tnu,
+				respCode:                   http.StatusCreated,
+				expectedStatus:             cdbm.VpcStatusProvisioning,
+				expectedVirtualizationType: cdbm.VpcFNN,
+				expectedStatusDetails: []expectedStatusDetail{
+					{
+						status:  cdbm.VpcStatusProvisioning,
+						message: "VPC provisioning has been initiated on Site",
+					},
+				},
 			},
 			wantErr: false,
 		},
@@ -1802,6 +1830,8 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 
 	vpc4 := testVPCBuildVPC(t, dbSession, "test-vpc-3", ip, tn, st3, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, map[string]string{"zone": "west6"}, cdbm.VpcStatusReady, tnu)
 	assert.NotNil(t, vpc4)
+	// Deny the privileged Tenant at the Site without Allocations
+	cdbm.TestBuildTenantSite(t, dbSession, tn, st3, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, tnu)
 
 	// Associate tenant 1 with site 1
 	ts1t1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st.ID, tnu.ID)
@@ -2564,6 +2594,18 @@ func TestUpdateVirtualizationVPCHandler_Handle(t *testing.T) {
 	vpcNoNativeNet := testVPCBuildVPC(t, dbSession, "test-vpc-no-native-net", ip, tn, stNoNativeNet, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, map[string]string{"zone": "west-nonative"}, cdbm.VpcStatusReady, tnu)
 	assert.NotNil(t, vpcNoNativeNet)
 
+	// Site where the Tenant is denied without Allocations
+	stDenied := testVPCBuildSite(t, dbSession, ip, "test-site-denied", true, true, cdbm.SiteStatusRegistered, ipu)
+	cdbm.TestBuildTenantSite(t, dbSession, tn, stDenied, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, tnu)
+	vpcDeniedSite := testVPCBuildVPC(t, dbSession, "test-vpc-denied-site", ip, tn, stDenied, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, map[string]string{"zone": "west-denied"}, cdbm.VpcStatusReady, tnu)
+
+	// Privileged Tenant without a Tenant/Site association or Allocations
+	tnOrgPriv := "test-privileged-tenant-org"
+	tnuPriv := testVPCBuildUser(t, dbSession, "test-starfleet-id-3", tnOrgPriv, tnOrgRoles)
+	tnPriv := testVPCBuildTenant(t, dbSession, "test-privileged-tenant", tnOrgPriv, tnuPriv)
+	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tnPriv.ID, tnOrgPriv, cdbm.TenantAccountStatusReady, tnuPriv)
+	vpcPrivileged := testVPCBuildVPC(t, dbSession, "test-vpc-privileged", ip, tnPriv, st, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, map[string]string{"zone": "west-privileged"}, cdbm.VpcStatusReady, tnuPriv)
+
 	e := echo.New()
 	cfg := common.GetTestConfig()
 	tc := &tmocks.Client{}
@@ -2796,6 +2838,44 @@ func TestUpdateVirtualizationVPCHandler_Handle(t *testing.T) {
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
+		},
+		{
+			name: "test VPC virtualization update error, Site denied for Tenant without Allocations",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcVirtualizationUpdateRequest{
+					NetworkVirtualizationType: "FNN",
+				},
+				reqOrg:   tnOrg,
+				reqVPCID: vpcDeniedSite.ID.String(),
+				reqVPC:   vpcDeniedSite,
+				reqUser:  tnu,
+				respCode: http.StatusForbidden,
+			},
+			wantErr: false,
+		},
+		{
+			name: "test VPC virtualization update success, privileged Tenant without Tenant/Site association",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcVirtualizationUpdateRequest{
+					NetworkVirtualizationType: "FNN",
+				},
+				reqOrg:   tnOrgPriv,
+				reqVPCID: vpcPrivileged.ID.String(),
+				reqVPC:   vpcPrivileged,
+				reqUser:  tnuPriv,
+				respCode: http.StatusOK,
+			},
+			wantErr: false,
 		},
 	}
 	for _, tt := range tests {

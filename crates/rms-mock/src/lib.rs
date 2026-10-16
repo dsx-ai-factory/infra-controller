@@ -86,12 +86,29 @@ impl RmsMock {
         for job in std::iter::once(&status).chain(&status.children) {
             // Only a node's job carries an effect, and it names its node.
             let (Some(effect), Some(rack_id), Some(node_id)) =
-                (job.effect, &job.rack_id, &job.node_id)
+                (&job.effect, &job.rack_id, &job.node_id)
             else {
                 continue;
             };
             match effect {
                 jobs::Effect::ResetFabricRole => self.fabric.reset(rack_id, node_id),
+                jobs::Effect::SetSwitchPassword {
+                    bmc_mac,
+                    username,
+                    password,
+                } => {
+                    if let Err(error) = self
+                        .inventory
+                        .set_switch_password(*bmc_mac, username, password)
+                    {
+                        tracing::warn!(
+                            %node_id,
+                            %bmc_mac,
+                            %error,
+                            "The host did not take the switch's rotated NVOS password",
+                        );
+                    }
+                }
             }
         }
         status
@@ -109,6 +126,10 @@ impl RmsMock {
 pub struct StaticInventory {
     nodes: std::sync::Arc<[SimNode]>,
     power: std::sync::Mutex<std::collections::HashMap<mac_address::MacAddress, SimPowerState>>,
+    /// The NVOS credentials rotations set, by switch BMC MAC, for tests to
+    /// read back; a static inventory has no NVOS to apply them to.
+    switch_passwords:
+        std::sync::Mutex<std::collections::HashMap<mac_address::MacAddress, (String, String)>>,
 }
 
 impl StaticInventory {
@@ -117,7 +138,14 @@ impl StaticInventory {
         Self {
             nodes,
             power: std::sync::Mutex::default(),
+            switch_passwords: std::sync::Mutex::default(),
         }
+    }
+
+    /// The NVOS username and password the last completed rotation set on the
+    /// switch whose BMC has `bmc_mac`, if any has.
+    pub fn switch_password(&self, bmc_mac: mac_address::MacAddress) -> Option<(String, String)> {
+        lock(&self.switch_passwords).get(&bmc_mac).cloned()
     }
 
     fn has_bmc(&self, bmc_mac: mac_address::MacAddress) -> eyre::Result<()> {
@@ -171,6 +199,17 @@ impl RmsInventory for StaticInventory {
             ) => SimPowerState::On,
         };
         lock(&self.power).insert(bmc_mac, power);
+        Ok(())
+    }
+
+    fn set_switch_password(
+        &self,
+        bmc_mac: mac_address::MacAddress,
+        username: &str,
+        password: &str,
+    ) -> eyre::Result<()> {
+        self.has_bmc(bmc_mac)?;
+        lock(&self.switch_passwords).insert(bmc_mac, (username.to_string(), password.to_string()));
         Ok(())
     }
 }

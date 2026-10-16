@@ -124,7 +124,10 @@ use crate::health_report::{
 use crate::redfish::{
     did_dpu_finish_booting, host_power_control, host_power_control_with_location,
 };
-use crate::{MeasuringOutcome, get_measuring_prerequisites, handle_measuring_state};
+use crate::{
+    MeasuringOutcome, get_measuring_prerequisites, handle_measuring_state,
+    waiting_for_measurements_outcome,
+};
 
 pub mod attestation;
 mod bios_config;
@@ -8190,7 +8193,7 @@ impl StateHandler for HostMachineStateHandler {
                             },
                         ));
                     }
-                    match handle_measuring_state(
+                    let measuring_outcome = match handle_measuring_state(
                         measuring_state,
                         &mh_snapshot.host_snapshot.id,
                         &mut ctx.services.db_reader,
@@ -8202,22 +8205,51 @@ impl StateHandler for HostMachineStateHandler {
                     )
                     .await
                     {
-                        Ok(measuring_outcome) => {
-                            map_host_init_measuring_outcome_to_state_handler_outcome(
-                                &measuring_outcome,
-                                measuring_state,
+                        Ok(measuring_outcome) => measuring_outcome,
+                        Err(StateHandlerError::MissingData {
+                            object_id: _,
+                            missing: "ek_cert_verification_status",
+                        }) if *measuring_state == MeasuringState::WaitingForMeasurements => {
+                            waiting_for_measurements_outcome(
+                                &mh_snapshot.host_snapshot.id,
+                                mh_snapshot.host_snapshot.state.version.timestamp(),
+                                self.host_handler_params
+                                    .reachability_params
+                                    .waiting_for_measurements_timeout,
                             )
                         }
                         Err(StateHandlerError::MissingData {
                             object_id: _,
                             missing: "ek_cert_verification_status",
                         }) => {
-                            Ok(StateHandlerOutcome::wait(
+                            return Ok(StateHandlerOutcome::wait(
                                 "Waiting for Scout to start and send registration info (in discover_machine)".to_string(),
-                            ))
+                            ));
                         }
-                        Err(e) => Err(e),
+                        Err(e) => return Err(e),
+                    };
+
+                    if *measuring_state == MeasuringState::WaitingForMeasurements
+                        && measuring_outcome == MeasuringOutcome::NoChange
+                    {
+                        let status = trigger_reboot_if_needed(
+                            &mh_snapshot.host_snapshot,
+                            mh_snapshot,
+                            None,
+                            &self.host_handler_params.reachability_params,
+                            ctx,
+                        )
+                        .await?;
+                        return Ok(StateHandlerOutcome::wait(format!(
+                            "Waiting for Scout measurements: {}",
+                            status.status
+                        )));
                     }
+
+                    map_host_init_measuring_outcome_to_state_handler_outcome(
+                        &measuring_outcome,
+                        measuring_state,
+                    )
                 }
                 MachineState::SpdmMeasuring {
                     spdm_measuring_state,
@@ -8776,25 +8808,16 @@ impl StateHandler for InstanceStateHandler {
                     // an ACK. If any of the interfaces has not yet heard back the ACk, we will continue to
                     // be in the current state.
                     if ctx.services.site_config.ewethers_enabled {
-                        let mut matching_count = 0;
                         for dpa_interface in &mh_snapshot.dpa_interface_snapshots {
                             if !dpa_interface.managed_host_network_config_version_synced(
                                 &mh_snapshot.instance,
                                 &mh_snapshot.host_snapshot.status.spx_status_observation,
                             ) {
-                                tracing::warn!(
-                                    "DPA agent {} has not applied network config and reported healthy network",
-                                    dpa_interface.id
-                                );
-                            } else {
-                                matching_count += 1;
-                            }
-                        }
-                        if matching_count < mh_snapshot.dpa_interface_snapshots.len() / 2 {
-                            return Ok(StateHandlerOutcome::wait(
+                                return Ok(StateHandlerOutcome::wait(
                                             "Waiting for DPA agent(s) to apply network config and report healthy network"
                                                 .to_string()
                                         ));
+                            }
                         }
                     }
 
@@ -9796,32 +9819,16 @@ impl StateHandler for InstanceStateHandler {
                     // be in the current state.
 
                     if ctx.services.site_config.ewethers_enabled {
-                        let mut matching_count = 0;
                         for dpa_interface in &mh_snapshot.dpa_interface_snapshots {
                             if !dpa_interface.managed_host_network_config_version_synced(
                                 &mh_snapshot.instance,
                                 &mh_snapshot.host_snapshot.status.spx_status_observation,
                             ) {
-                                tracing::warn!(
-                                    "DPA agent {} has not applied network config and reported healthy network",
-                                    dpa_interface.id
-                                );
-                            } else {
-                                matching_count += 1;
+                                return Ok(StateHandlerOutcome::wait(format!(
+                                    "Waiting for DPA agent {dpa_id} to apply network config and report healthy network",
+                                    dpa_id = dpa_interface.id,
+                                )));
                             }
-                        }
-                        // XXX TODO XXX
-                        // This is a temporary workaround, to be removed once we have the cabling fixed in Redstone
-                        // XXX TODO XXX
-                        if matching_count >= mh_snapshot.dpa_interface_snapshots.len() / 2 {
-                            let next_state = ManagedHostState::Assigned {
-                                instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
-                            };
-                            return Ok(StateHandlerOutcome::transition(next_state));
-                        } else {
-                            return Ok(StateHandlerOutcome::wait(
-                                "Waiting for DPA agents to apply network config and report healthy network".to_string(),
-                            ));
                         }
                     }
 
@@ -11569,7 +11576,11 @@ impl HostUpgradeState {
 
         match &artifact.source {
             ResolvedFirmwareArtifactSource::Remote { url, sha256 } => {
-                match self.downloader.available(&artifact.local_path, url, sha256) {
+                match self
+                    .downloader
+                    .available(&artifact.local_path, url, sha256)
+                    .await
+                {
                     ArtifactStatus::Available => {}
                     ArtifactStatus::Downloading => {
                         return Ok(StateHandlerOutcome::wait(format!(

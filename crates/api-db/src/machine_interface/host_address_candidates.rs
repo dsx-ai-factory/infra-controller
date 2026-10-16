@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ipnetwork::IpNetwork;
@@ -31,8 +32,9 @@ pub(super) struct OccupiedAddress {
     next_address: Option<IpAddr>,
 }
 
-/// `HostAddressCandidates` selects free addresses from gaps between occupied
-/// addresses without enumerating the prefix, even for an IPv6 /0.
+/// `HostAddressCandidates` counts free addresses and selects them from gaps
+/// in the same eligible interval. It does not enumerate the prefix, even
+/// for an IPv6 /0.
 /// IPv6 reservations mirror `IpAllocator`; IPv4 retains the machine-interface
 /// policy, which also reserves an implicit gateway when none is configured.
 pub(super) struct HostAddressCandidates<'a> {
@@ -81,11 +83,33 @@ impl<'a> HostAddressCandidates<'a> {
             .map(|first| (self.address(first), self.address(self.last)))
     }
 
+    pub(super) fn num_free(&self, used_ips: &[IpAddr]) -> u128 {
+        let Some((first, last)) = self.range() else {
+            return 0;
+        };
+        let unavailable = used_ips
+            .iter()
+            .copied()
+            .chain(self.prefix.gateway)
+            .chain(self.prefix.svi_ip)
+            .filter(|address| (first..=last).contains(address))
+            .collect::<HashSet<_>>();
+
+        // IPv6 /0 excludes both endpoints, so the interval fits in u128.
+        // Count an owned gateway or SVI once, and only inside that interval.
+        address_number(last) - address_number(first) + 1 - unavailable.len() as u128
+    }
+
     // A leading gap this large fills the batch even if it includes both the
     // gateway and SVI. Keep the threshold in range before converting to IPv4.
     pub(super) fn leading_gap_threshold(&self, limit: usize) -> Option<IpAddr> {
         let threshold = self.first?.checked_add(limit as u128)?.checked_add(2)?;
         (threshold <= self.last).then(|| self.address(threshold))
+    }
+
+    /// Advance past an address returned by this selector's current `select` call.
+    pub(super) fn advance_past(&mut self, address: IpAddr) {
+        self.first = address_number(address).checked_add(1);
     }
 
     /// Rows must be ordered, begin with the first occupied address in `range()`,
@@ -153,7 +177,7 @@ fn address_number(address: IpAddr) -> u128 {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::{Fails, Yields};
-    use carbide_test_support::{Case, check_cases};
+    use carbide_test_support::{Case, Check, check_cases, check_values};
     use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 
     use super::*;
@@ -166,6 +190,149 @@ mod tests {
         svi: Option<&'static str>,
         occupied: &'static [(&'static str, Option<&'static str>)],
         limit: usize,
+    }
+
+    #[test]
+    fn free_counts_use_host_bounds_and_distinct_exclusions() {
+        #[derive(Debug)]
+        struct CountInput {
+            prefix: &'static str,
+            num_reserved: i32,
+            gateway: Option<&'static str>,
+            svi: Option<&'static str>,
+            used_ips: &'static [&'static str],
+        }
+
+        check_cases(
+            [
+                Case {
+                    scenario: "unowned gateway and SVI addresses remain unavailable",
+                    input: CountInput {
+                        prefix: "192.0.2.0/29",
+                        num_reserved: 0,
+                        gateway: Some("192.0.2.2"),
+                        svi: Some("192.0.2.3"),
+                        used_ips: &[],
+                    },
+                    expect: Yields(4),
+                },
+                Case {
+                    scenario: "IPv4 /31 has no host addresses even with a configured gateway",
+                    input: CountInput {
+                        prefix: "192.0.2.0/31",
+                        num_reserved: 0,
+                        gateway: Some("192.0.2.0"),
+                        svi: None,
+                        used_ips: &[],
+                    },
+                    expect: Yields(0),
+                },
+                Case {
+                    scenario: "IPv4 /32 has no host addresses",
+                    input: CountInput {
+                        prefix: "0.0.0.0/32",
+                        num_reserved: 0,
+                        gateway: None,
+                        svi: None,
+                        used_ips: &[],
+                    },
+                    expect: Yields(0),
+                },
+                Case {
+                    scenario: "only distinct exclusions within the host interval reduce its count",
+                    input: CountInput {
+                        prefix: "192.0.2.0/29",
+                        num_reserved: 3,
+                        gateway: Some("192.0.2.3"),
+                        svi: Some("192.0.2.2"),
+                        used_ips: &[
+                            "192.0.2.0",
+                            "192.0.2.1",
+                            "192.0.2.3",
+                            "192.0.2.3",
+                            "192.0.2.4",
+                            "192.0.2.7",
+                            "192.0.3.4",
+                            "::4",
+                        ],
+                    },
+                    expect: Yields(2),
+                },
+                Case {
+                    scenario: "IPv6 /0 counts a large reserved range without enumerating it",
+                    input: CountInput {
+                        prefix: "::/0",
+                        num_reserved: i32::MAX,
+                        gateway: None,
+                        svi: None,
+                        used_ips: &["::7fff:ffff"],
+                    },
+                    expect: Yields(u128::MAX - i32::MAX as u128 - 1),
+                },
+                Case {
+                    scenario: "IPv6 /128 includes the maximum host address",
+                    input: CountInput {
+                        prefix: "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+                        num_reserved: 0,
+                        gateway: None,
+                        svi: None,
+                        used_ips: &[],
+                    },
+                    expect: Yields(1),
+                },
+                Case {
+                    scenario: "reservation past the maximum IPv6 address leaves no hosts",
+                    input: CountInput {
+                        prefix: "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe/127",
+                        num_reserved: 2,
+                        gateway: None,
+                        svi: None,
+                        used_ips: &[],
+                    },
+                    expect: Yields(0),
+                },
+                Case {
+                    scenario: "negative IPv4 reservation count remains an accounting error",
+                    input: CountInput {
+                        prefix: "192.0.2.0/24",
+                        num_reserved: -1,
+                        gateway: None,
+                        svi: None,
+                        used_ips: &[],
+                    },
+                    expect: Fails,
+                },
+            ],
+            |input| {
+                let prefix = NetworkPrefix {
+                    id: NetworkPrefixId::new(),
+                    segment_id: NetworkSegmentId::new(),
+                    prefix: input.prefix.parse().unwrap(),
+                    gateway: input.gateway.map(|address| address.parse().unwrap()),
+                    dhcpv6_link_address: None,
+                    num_reserved: input.num_reserved,
+                    vpc_prefix_id: None,
+                    vpc_prefix: None,
+                    svi_ip: input.svi.map(|address| address.parse().unwrap()),
+                    num_free_ips: None,
+                };
+                let used_ips = input
+                    .used_ips
+                    .iter()
+                    .map(|address| address.parse().unwrap())
+                    .collect::<Vec<_>>();
+                super::super::num_free_host_addresses(&prefix, &used_ips).map_err(|error| {
+                    assert!(
+                        matches!(
+                            &error,
+                            DatabaseError::Internal { message }
+                                if message.contains("negative reservation count -1")
+                        ),
+                        "{error:?}"
+                    );
+                })
+            },
+        );
     }
 
     #[test]
@@ -424,5 +591,101 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn advancing_past_candidates_preserves_family_bounds() {
+        #[derive(Debug)]
+        struct Input {
+            cidr: &'static str,
+            consumed: &'static str,
+        }
+
+        #[derive(Debug, PartialEq)]
+        struct Output {
+            range: Option<(IpAddr, IpAddr)>,
+            leading_gap_threshold: Option<IpAddr>,
+            candidates: Vec<IpAddr>,
+        }
+
+        check_values(
+            [
+                Check {
+                    scenario: "next batch moves the query bounds and leading-gap threshold",
+                    input: Input {
+                        cidr: "192.0.2.0/24",
+                        consumed: "192.0.2.33",
+                    },
+                    expect: Output {
+                        range: Some((
+                            "192.0.2.34".parse().unwrap(),
+                            "192.0.2.254".parse().unwrap(),
+                        )),
+                        leading_gap_threshold: Some("192.0.2.68".parse().unwrap()),
+                        candidates: vec!["192.0.2.34".parse().unwrap()],
+                    },
+                },
+                Check {
+                    scenario: "IPv4 stops before the broadcast address",
+                    input: Input {
+                        cidr: "255.255.255.252/30",
+                        consumed: "255.255.255.254",
+                    },
+                    expect: Output {
+                        range: None,
+                        leading_gap_threshold: None,
+                        candidates: vec![],
+                    },
+                },
+                Check {
+                    scenario: "IPv6 /0 advances across the low 64-bit boundary",
+                    input: Input {
+                        cidr: "::/0",
+                        consumed: "::ffff:ffff:ffff:ffff",
+                    },
+                    expect: Output {
+                        range: Some((
+                            "0:0:0:1::".parse().unwrap(),
+                            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe".parse().unwrap(),
+                        )),
+                        leading_gap_threshold: Some("0:0:0:1::22".parse().unwrap()),
+                        candidates: vec!["0:0:0:1::".parse().unwrap()],
+                    },
+                },
+                Check {
+                    scenario: "the maximum IPv6 candidate exhausts the cursor without wrapping",
+                    input: Input {
+                        cidr: "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+                        consumed: "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+                    },
+                    expect: Output {
+                        range: None,
+                        leading_gap_threshold: None,
+                        candidates: vec![],
+                    },
+                },
+            ],
+            |input| {
+                let prefix = NetworkPrefix {
+                    id: NetworkPrefixId::new(),
+                    segment_id: NetworkSegmentId::new(),
+                    prefix: input.cidr.parse().unwrap(),
+                    gateway: None,
+                    dhcpv6_link_address: None,
+                    num_reserved: 0,
+                    vpc_prefix_id: None,
+                    vpc_prefix: None,
+                    svi_ip: None,
+                    num_free_ips: None,
+                };
+                let mut selector = HostAddressCandidates::new(&prefix).unwrap();
+                selector.advance_past(input.consumed.parse().unwrap());
+                Output {
+                    range: selector.range(),
+                    leading_gap_threshold: selector.leading_gap_threshold(32),
+                    candidates: selector.select(&[], 1),
+                }
+            },
+        );
     }
 }

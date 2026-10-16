@@ -159,11 +159,13 @@ impl EntityTypeRef for LogEntryPage {
     }
 }
 
-/// Discovery cache containing only SDK navigation IDs, not expanded log bodies.
+/// Cached URIs for a log service and its entries collection, plus the SDK flag
+/// allowing oversized member counts on filtered scans.
 #[derive(Clone)]
 struct ServiceRef {
     id: ODataId,
     entries: ODataId,
+    filtered_count_is_unreliable: bool,
 }
 
 struct LogsCollectorState {
@@ -339,6 +341,7 @@ impl<B: Bmc + 'static> LogsCollector<B> {
                 services.push(ServiceRef {
                     id: raw.odata_id.clone(),
                     entries: entries.id().clone(),
+                    filtered_count_is_unreliable: service.filtered_entries_count_is_unreliable(),
                 });
             }
         };
@@ -573,17 +576,19 @@ impl<B: Bmc + 'static> LogsCollector<B> {
     }
 
     /// Collects navigation IDs, following even empty pages with continuations.
-    /// Paginated responses require a stable count that matches the complete walk.
+    /// Paginated responses require a stable count matching the complete walk,
+    /// except for oversized filtered counts covered by the SDK quirk.
     async fn collect_entry_uris(
         &self,
         base: &Url,
-        entries: &ODataId,
+        service: &ServiceRef,
         cursor: Option<i64>,
         filter_disabled: &mut bool,
     ) -> Result<Vec<ODataId>, HealthError> {
-        let mut uri = resolve_log_uri(base, "/", &entries.to_string())?;
+        let mut uri = resolve_log_uri(base, "/", &service.entries.to_string())?;
         let mut visited = HashSet::new();
         let mut member_count = None;
+        let mut filtered = false;
         // Gather navigation IDs before reading entries; evicted members fail the scan.
         let mut members = Vec::new();
 
@@ -600,17 +605,19 @@ impl<B: Bmc + 'static> LogsCollector<B> {
                 && !*filter_disabled
                 && let Some(cursor) = cursor
             {
+                filtered = true;
+
+                // Redfish Id is a string even when the local cursor is numeric.
                 self.bmc
-                    .filter::<LogEntryPage>(&uri, FilterQuery::gt(&"Id", cursor))
+                    .filter::<LogEntryPage>(&uri, FilterQuery::gt(&"Id", cursor.to_string()))
                     .await
             } else {
                 self.bmc.get::<LogEntryPage>(&uri).await
             };
 
             let page = match result {
-                Err(error)
-                    if cursor.is_some() && visited.len() == 1 && unsupported_filter(&error) =>
-                {
+                Err(error) if filtered && visited.len() == 1 && unsupported_filter(&error) => {
+                    filtered = false;
                     *filter_disabled = true;
                     self.read_limiter.acquire().await;
                     self.bmc.get::<LogEntryPage>(&uri).await
@@ -647,8 +654,12 @@ impl<B: Bmc + 'static> LogsCollector<B> {
             uri = resolve_log_uri(base, &current_uri, &next.to_string())?;
         }
 
-        if member_count.is_some_and(|count| count != members.len()) {
-            // Some BMC filters report the unfiltered count; retry without filtering.
+        let allow_oversized_count = filtered && service.filtered_count_is_unreliable;
+
+        if member_count.is_some_and(|count| {
+            count < members.len() || (!allow_oversized_count && count != members.len())
+        }) {
+            // Retry invalid counts without filtering.
             *filter_disabled |= cursor.is_some();
 
             return Err(HealthError::GenericError(
@@ -693,7 +704,7 @@ impl<B: Bmc + 'static> LogsCollector<B> {
         let cursor = original.map(|anchor| anchor.id);
 
         let members = self
-            .collect_entry_uris(&base, &service.entries, cursor, filter_disabled)
+            .collect_entry_uris(&base, service, cursor, filter_disabled)
             .await?;
 
         // An empty baseline must still collect its first future entry.
@@ -1023,8 +1034,10 @@ mod tests {
 
     #[derive(Default)]
     struct Source {
+        vendor: Option<&'static str>,
         entries: Vec<Value>,
         reads: usize,
+        filtered_reads: usize,
         fail: Option<&'static str>,
         ignore_filter: bool,
         empty_first: bool,
@@ -1040,9 +1053,13 @@ mod tests {
                 .into_owned()
                 .collect();
 
-        let filter = query
-            .get("$filter")
-            .and_then(|f| f.rsplit(' ').next()?.parse::<i64>().ok());
+        let filter = query.get("$filter").map(|f| {
+            f.strip_prefix("Id gt '")
+                .and_then(|value| value.strip_suffix('\''))
+                .expect("expected a quoted Id cursor")
+                .parse::<i64>()
+                .unwrap()
+        });
 
         let skip = query
             .get("$skip")
@@ -1050,9 +1067,10 @@ mod tests {
             .unwrap_or(0);
 
         source.reads += 1;
+        source.filtered_reads += usize::from(filter.is_some());
 
         if (source.fail == Some("page") && skip == 1)
-            || (source.fail == Some("filter") && filter.is_some())
+            || (matches!(source.fail, Some("filter" | "filter_truncated")) && filter.is_some())
         {
             return StatusCode::NOT_IMPLEMENTED.into_response();
         }
@@ -1091,6 +1109,9 @@ mod tests {
             Some("unfiltered_count") => {
                 page["Members@odata.count"] = json!(source.entries.len());
             }
+            Some("undersized_count") => {
+                page["Members@odata.count"] = json!(entries.len().saturating_sub(1));
+            }
             Some("missing_count") => {
                 page.as_object_mut().unwrap().remove("Members@odata.count");
             }
@@ -1105,13 +1126,15 @@ mod tests {
             page["Members@odata.nextLink"] = json!("?%24skip=0");
         } else if source.fail == Some("cycle") {
             page["Members@odata.nextLink"] = json!(format!("?%24skip={}", 1 - skip.min(1)));
-        } else if skip + page_size < entries.len() && source.fail != Some("truncated") {
+        } else if skip + page_size < entries.len()
+            && !matches!(source.fail, Some("truncated" | "filter_truncated"))
+        {
             page["Members@odata.nextLink"] = json!(source.next_link.clone().unwrap_or_else(|| {
                 format!(
                     "?%24skip={}{}",
                     skip + page_size,
                     filter
-                        .map(|h| format!("&%24filter=Id%20gt%20{h}"))
+                        .map(|h| format!("&%24filter=Id%20gt%20%27{h}%27"))
                         .unwrap_or_default()
                 )
             }));
@@ -1137,6 +1160,7 @@ mod tests {
         let response = match uri.path() {
             "/redfish/v1" => Json(json!({
                 "@odata.id": "/redfish/v1", "Id": "Root", "Name": "Root",
+                "Vendor": source.vendor,
                 "Links": {"Sessions": {"@odata.id": "/sessions"}},
                 "Managers": {
                     "@odata.id": "/managers",
@@ -1517,8 +1541,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filtered_unfiltered_count_retries_without_filtering() {
+    async fn stale_filtered_counts_keep_filtering_without_retry() {
+        for (page_size, expected_reads) in [(1, 2), (2, 1)] {
+            let mut rig = Rig::new(false);
+            rig.source.lock().unwrap().vendor = Some("NVIDIA");
+
+            rig.collect(&[(0, "old")], Some(0), &["old"]).await;
+
+            {
+                let mut source = rig.source.lock().unwrap();
+                source.fail = Some("unfiltered_count");
+                source.page_size = page_size;
+                source.reads = 0;
+                source.filtered_reads = 0;
+            }
+
+            let entries = [(0, "old"), (1, "one"), (2, "two")];
+
+            rig.collect(&entries, Some(2), &["one", "two"]).await;
+
+            {
+                let source = rig.source.lock().unwrap();
+                assert_eq!(source.reads, expected_reads);
+                assert_eq!(source.filtered_reads, expected_reads);
+            }
+
+            // The next poll returns no new entries but still reports the full count.
+            rig.collect(&entries, Some(2), &[]).await;
+
+            let source = rig.source.lock().unwrap();
+            assert_eq!(source.reads, expected_reads + 1);
+            assert_eq!(source.filtered_reads, expected_reads + 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_filtered_counts_without_quirk_retry_unfiltered() {
         let mut rig = Rig::new(false);
+        rig.source.lock().unwrap().vendor = Some("Dell");
+
         rig.collect(&[(0, "old")], Some(0), &["old"]).await;
 
         {
@@ -1526,13 +1587,63 @@ mod tests {
             source.entries.push(entry(1, "new"));
 
             source.fail = Some("unfiltered_count");
+            source.reads = 0;
+            source.filtered_reads = 0;
         }
 
-        rig.fail_scan("unfiltered count on filtered response").await;
+        rig.fail_scan("stale filtered count without SDK quirk")
+            .await;
 
-        // Leave the server unchanged; the next iteration must use an unfiltered read.
+        assert_eq!(*rig.sink.0.lock().unwrap(), ["old"]);
+
+        // Leave the server unchanged; the next scan must retry without filtering.
         rig.collect(&[(0, "old"), (1, "new")], Some(1), &["new"])
             .await;
+
+        let source = rig.source.lock().unwrap();
+
+        assert_eq!(source.reads, 3);
+        assert_eq!(source.filtered_reads, 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_counts_preserve_checkpoint_after_filtering_or_fallback() {
+        for (failure, filter_disabled, expected_reads) in [
+            ("undersized_count", false, 2),
+            ("truncated", true, 1),
+            ("filter_truncated", false, 2),
+        ] {
+            let mut rig = Rig::new(false);
+            rig.source.lock().unwrap().vendor = Some("NVIDIA");
+
+            rig.collect(&[(0, "old")], Some(0), &["old"]).await;
+
+            {
+                let mut source = rig.source.lock().unwrap();
+                source.entries.extend([entry(1, "one"), entry(2, "two")]);
+
+                source.fail = Some(failure);
+                source.reads = 0;
+            }
+
+            let state = rig.collector.state.as_mut().unwrap();
+            state
+                .persistent
+                .services
+                .get_mut(&ODataId::from(EVENTLOG.to_string()))
+                .unwrap()
+                .filter_disabled = filter_disabled;
+
+            rig.fail_scan(failure).await;
+
+            assert_eq!(
+                rig.source.lock().unwrap().reads,
+                expected_reads,
+                "{failure}"
+            );
+
+            assert_eq!(*rig.sink.0.lock().unwrap(), ["old"], "{failure}");
+        }
     }
 
     #[tokio::test]
