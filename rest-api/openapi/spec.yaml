@@ -22298,7 +22298,6 @@ components:
         - Provisioning
         - Ready
         - Deleting
-        - Deleted
         - Error
     VpcPrefixCreateRequest:
       title: VpcPrefixCreateRequest
