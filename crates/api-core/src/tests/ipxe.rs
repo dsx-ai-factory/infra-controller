@@ -391,6 +391,10 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
     assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
 
     for reprovision_state in [
+        HostReprovisionState::CheckingFirmwareV2 {
+            firmware_type: None,
+            firmware_number: None,
+        },
         HostReprovisionState::WaitingForManualUpgrade {
             manual_upgrade_started: Utc::now(),
         },
