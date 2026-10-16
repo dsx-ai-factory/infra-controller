@@ -177,6 +177,114 @@ async fn test_add_expected_switch_validates_nvos_credentials_pair(pool: sqlx::Pg
 }
 
 #[crate::sqlx_test]
+async fn expected_switch_writes_validate_port_sets_before_persisting(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let stored = rpc::forge::ExpectedSwitch {
+        bmc_mac_address: "02:00:00:fe:00:01".to_string(),
+        nvos_interfaces: nvos_ifaces(&["02:00:00:fe:00:02"]),
+        bmc_username: "ADMIN".into(),
+        bmc_password: "PASS".into(),
+        switch_serial_number: "PORT-VALIDATION".into(),
+        ..Default::default()
+    };
+    env.api
+        .add_expected_switch(tonic::Request::new(stored.clone()))
+        .await
+        .unwrap();
+    let before = env
+        .api
+        .get_all_expected_switches(tonic::Request::new(()))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Each operation has independent validation wiring. Empty legacy updates
+    // remain supported, but all explicit port replacements must be valid.
+    for (operation, empty) in [
+        ("add", true),
+        ("replace-all", true),
+        ("add", false),
+        ("replace-all", false),
+        ("update", false),
+        ("masked-update", false),
+        ("patch", false),
+    ] {
+        let mut invalid = before.expected_switches[0].clone();
+        invalid.nvos_interfaces = if empty {
+            vec![]
+        } else {
+            vec![
+                rpc::forge::ExpectedNvosInterface {
+                    mac_address: "02:00:00:fe:00:03".into(),
+                    is_primary: false,
+                },
+                rpc::forge::ExpectedNvosInterface {
+                    mac_address: "02:00:00:fe:00:04".into(),
+                    is_primary: false,
+                },
+            ]
+        };
+        let result = match operation {
+            "add" => {
+                env.api
+                    .add_expected_switch(tonic::Request::new(invalid))
+                    .await
+            }
+            "replace-all" => {
+                env.api
+                    .replace_all_expected_switches(tonic::Request::new(ExpectedSwitchList {
+                        expected_switches: vec![invalid],
+                    }))
+                    .await
+            }
+            "update" => {
+                env.api
+                    .update_expected_switch(tonic::Request::new(invalid))
+                    .await
+            }
+            "masked-update" => {
+                let mut request = tonic::Request::new(invalid);
+                request.metadata_mut().insert(
+                    EXPECTED_SWITCH_UPDATE_MASK_HEADER,
+                    "nvos_interfaces".parse().unwrap(),
+                );
+                env.api.update_expected_switch(request).await
+            }
+            "patch" => {
+                env.api
+                    .patch_expected_switch(tonic::Request::new(
+                        rpc::forge::PatchExpectedSwitchRequest {
+                            expected_switch: Some(invalid),
+                            update_mask: Some(prost_types::FieldMask {
+                                paths: vec!["nvos_interfaces".into()],
+                            }),
+                        },
+                    ))
+                    .await
+            }
+            _ => unreachable!(),
+        };
+        let error = result.expect_err(operation);
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{operation}");
+        assert!(
+            error.message().contains(if empty {
+                "at least one NVOS ethernet port"
+            } else {
+                "exactly one NVOS ethernet port must be marked primary"
+            }),
+            "{operation}: {error}"
+        );
+        let after = env
+            .api
+            .get_all_expected_switches(tonic::Request::new(()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(before, after, "{operation} must not alter inventory");
+    }
+}
+
+#[crate::sqlx_test]
 async fn test_add_expected_switch_rejects_claimed_nvos_mac(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
 
@@ -1246,8 +1354,7 @@ async fn test_add_expected_switch_rejects_nvos_ip_without_mac(
         .expect_err("add must reject nvos_ip_address with no nvos_mac_addresses");
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
     assert!(
-        err.message()
-            .contains("nvos_ip_address requires exactly one nvos_interfaces entry"),
+        err.message().contains("at least one NVOS ethernet port"),
         "{err}"
     );
 

@@ -158,7 +158,7 @@ func (escr *APIExpectedSwitchCreateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validation.Match(util.NotAllWhitespaceRegexp).Error("Switch serial number consists only of whitespace"),
 			validation.Length(1, 32).Error("Switch serial number must be 32 characters or less")),
-		validation.Field(&escr.NvosInterfaces),
+		validation.Field(&escr.NvosInterfaces, validation.Required.Error("at least one nvosInterfaces entry is required")),
 		validation.Field(&escr.RackID,
 			validation.NilOrNotEmpty.Error("RackID cannot be empty")),
 		validation.Field(&escr.BmcIpAddress,

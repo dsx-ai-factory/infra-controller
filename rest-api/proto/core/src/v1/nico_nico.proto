@@ -3111,7 +3111,8 @@ message ExpectedSwitch {
   // Static IP reservation for the single wired NVOS port. Only meaningful
   // when `nvos_interfaces` has exactly one entry.
   optional string nvos_ip_address = 13;
-  // The switch's NVOS ethernet ports. Exactly one entry must be flagged
+  // The switch's NVOS ethernet ports. Create and replace-all entries require
+  // at least one port. Exactly one entry must be flagged
   // `is_primary` when more than one is present; a single port is primary
   // implicitly. On reads the flags report the current primary.
   repeated ExpectedNvosInterface nvos_interfaces = 14;

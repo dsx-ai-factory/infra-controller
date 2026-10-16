@@ -164,9 +164,8 @@ fn validate_nvos_credentials_pair(switch: &ExpectedSwitch) -> Result<(), Carbide
 
 /// Validate the switch fields carried by a write.
 ///
-/// Zero-port rows predate the structured NVOS interface contract and remain
-/// writable. The stronger port-set invariant is enforced only when a request
-/// supplies a nonempty set or explicitly selects `nvos_interfaces` in a patch.
+/// Creates and replace-all entries require ports. Legacy zero-port rows remain
+/// writable when an update does not explicitly replace their port set.
 fn validate_expected_switch(
     switch: &mut ExpectedSwitch,
     validate_nvos_interfaces: bool,
@@ -193,8 +192,7 @@ pub(crate) async fn add_expected_switch(
                 CarbideError::InvalidArgument(e.to_string())
             })?;
 
-    let validate_nvos_interfaces = !switch.nvos_interfaces.is_empty();
-    validate_expected_switch(&mut switch, validate_nvos_interfaces)?;
+    validate_expected_switch(&mut switch, true)?;
 
     let mut txn = api
         .database_connection
@@ -551,8 +549,7 @@ pub(crate) async fn replace_all_expected_switches(
                     CarbideError::InvalidArgument(e.to_string())
                 })?;
 
-        let validate_nvos_interfaces = !switch.nvos_interfaces.is_empty();
-        validate_expected_switch(&mut switch, validate_nvos_interfaces)?;
+        validate_expected_switch(&mut switch, true)?;
 
         switches.push(switch);
     }

@@ -185,7 +185,7 @@ func TestCreateExpectedSwitchHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusCreated,
 		},
 		{
-			name: "creation ignores deprecated NvosMacAddresses",
+			name: "creation rejects missing interfaces even with deprecated NvosMacAddresses",
 			requestBody: model.APIExpectedSwitchCreateRequest{
 				SiteID:             site.ID.String(),
 				BmcMacAddress:      "00:11:22:33:44:56",
@@ -199,11 +199,12 @@ func TestCreateExpectedSwitchHandler_Handle(t *testing.T) {
 				c.SetParamNames("orgName")
 				c.SetParamValues(org)
 			},
-			expectedStatus: http.StatusCreated,
+			expectedStatus: http.StatusBadRequest,
 		},
 		{
 			name: "missing user context",
 			requestBody: model.APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     model.APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             site.ID.String(),
 				BmcMacAddress:      "00:11:22:33:44:77",
 				DefaultBmcUsername: cutil.GetPtr("admin"),
@@ -219,6 +220,7 @@ func TestCreateExpectedSwitchHandler_Handle(t *testing.T) {
 		{
 			name: "invalid mac address length",
 			requestBody: model.APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     model.APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             site.ID.String(),
 				BmcMacAddress:      "00:11:22:33:44",
 				DefaultBmcUsername: cutil.GetPtr("admin"),
@@ -235,6 +237,7 @@ func TestCreateExpectedSwitchHandler_Handle(t *testing.T) {
 		{
 			name: "site not found",
 			requestBody: model.APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     model.APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             "12345678-1234-1234-1234-123456789099",
 				BmcMacAddress:      "00:11:22:33:44:88",
 				DefaultBmcUsername: cutil.GetPtr("admin"),
@@ -251,6 +254,7 @@ func TestCreateExpectedSwitchHandler_Handle(t *testing.T) {
 		{
 			name: "cannot create on unmanaged site",
 			requestBody: model.APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     model.APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             unmanagedSite.ID.String(),
 				BmcMacAddress:      "00:11:22:33:44:99",
 				DefaultBmcUsername: cutil.GetPtr("admin"),
@@ -267,6 +271,7 @@ func TestCreateExpectedSwitchHandler_Handle(t *testing.T) {
 		{
 			name: "duplicate MAC address should return 409",
 			requestBody: model.APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     model.APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             site.ID.String(),
 				BmcMacAddress:      existingMAC,
 				DefaultBmcUsername: cutil.GetPtr("admin"),
