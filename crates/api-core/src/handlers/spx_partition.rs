@@ -232,7 +232,7 @@ pub(crate) async fn find_by_ids(
 mod tests {
     use ::rpc::forge as rpc;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
-    use carbide_test_support::{Check, check_values};
+    use carbide_test_support::{Check, check_values, value_scenarios};
     use db::resource_pool::ResourcePoolDatabaseError;
     use model::resource_pool::common::DPA_VNI;
     use model::resource_pool::{ResourcePool, ResourcePoolError, ValueType};
@@ -572,22 +572,41 @@ mod tests {
     }
 
     #[test]
-    fn test_create_spx_partition_without_metadata() {
-        let request = rpc::SpxPartitionCreationRequest {
-            metadata: None,
-            id: None,
-            vni: Some(200),
-            tenant_organization_id: "tenant-org-456".to_string(),
-        };
-
-        let result = NewSpxPartition::try_from(request);
-        assert!(result.is_ok());
-
-        let partition = result.unwrap();
-        assert!(partition.name.is_empty());
-        assert!(partition.description.is_empty());
-        assert!(partition.labels.is_empty());
-        assert_eq!(partition.vni, Some(200));
+    fn test_create_spx_partition_rejects_invalid_metadata() {
+        value_scenarios!(
+            run = |metadata| NewSpxPartition::try_from(rpc::SpxPartitionCreationRequest {
+                metadata,
+                tenant_organization_id: "tenant-org-456".to_string(),
+                ..Default::default()
+            })
+            .map(|_| ())
+            .map_err(|error| tonic::Status::from(error).code());
+            "omitted metadata cannot supply a valid name" {
+                None => Err(Code::InvalidArgument),
+            }
+            "minimum name length is required" {
+                Some(rpc::Metadata {
+                    name: "x".to_string(),
+                    ..Default::default()
+                }) => Err(Code::InvalidArgument),
+            }
+            "non-ASCII names are rejected" {
+                Some(rpc::Metadata {
+                    name: "分区".to_string(),
+                    ..Default::default()
+                }) => Err(Code::InvalidArgument),
+            }
+            "labels receive shared validation too" {
+                Some(rpc::Metadata {
+                    name: "test-partition".to_string(),
+                    labels: vec![rpc::Label {
+                        key: String::new(),
+                        value: None,
+                    }],
+                    ..Default::default()
+                }) => Err(Code::InvalidArgument),
+            }
+        );
     }
 
     #[test]
@@ -598,6 +617,7 @@ mod tests {
         };
         let request = rpc::SpxPartitionCreationRequest {
             metadata: Some(rpc::Metadata {
+                name: "test-partition".to_string(),
                 labels: vec![label.clone(), label],
                 ..Default::default()
             }),

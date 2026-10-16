@@ -10756,6 +10756,7 @@ message ListComponentFirmwareVersionsResponse {
 }
 
 message SpxPartitionCreationRequest {
+  // Required. Invalid metadata returns INVALID_ARGUMENT.
   Metadata metadata = 1;
   optional common.SpxPartitionId id = 2;
   optional uint32 vni = 3;

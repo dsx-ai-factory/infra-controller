@@ -64862,11 +64862,12 @@ func (x *ListComponentFirmwareVersionsResponse) GetDevices() []*DeviceFirmwareVe
 }
 
 type SpxPartitionCreationRequest struct {
-	state                protoimpl.MessageState `protogen:"open.v1"`
-	Metadata             *Metadata              `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	Id                   *SpxPartitionId        `protobuf:"bytes,2,opt,name=id,proto3,oneof" json:"id,omitempty"`
-	Vni                  *uint32                `protobuf:"varint,3,opt,name=vni,proto3,oneof" json:"vni,omitempty"`
-	TenantOrganizationId string                 `protobuf:"bytes,4,opt,name=tenant_organization_id,json=tenantOrganizationId,proto3" json:"tenant_organization_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required. Invalid metadata returns INVALID_ARGUMENT.
+	Metadata             *Metadata       `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
+	Id                   *SpxPartitionId `protobuf:"bytes,2,opt,name=id,proto3,oneof" json:"id,omitempty"`
+	Vni                  *uint32         `protobuf:"varint,3,opt,name=vni,proto3,oneof" json:"vni,omitempty"`
+	TenantOrganizationId string          `protobuf:"bytes,4,opt,name=tenant_organization_id,json=tenantOrganizationId,proto3" json:"tenant_organization_id,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }

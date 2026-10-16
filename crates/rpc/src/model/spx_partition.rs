@@ -47,6 +47,12 @@ impl TryFrom<rpc::SpxPartitionCreationRequest> for NewSpxPartition {
             .transpose()?
             .unwrap_or_default();
 
+        metadata.validate(true).map_err(|error| {
+            RpcDataConversionError::InvalidArgument(format!(
+                "SPX partition metadata is not valid: {error}"
+            ))
+        })?;
+
         Ok(NewSpxPartition {
             id,
             name: metadata.name,
