@@ -4,6 +4,7 @@
 package elektra
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"os"
@@ -108,7 +109,7 @@ func Test_Bootstrap(t *testing.T) {
 
 				state := bootstrap.ManagerAccess.Data.EB.Managers.Workflow.State
 				state.ConnectionAttempted.Store(0)
-				err = bootstrap.ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(nil)
+				err = bootstrap.ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(context.Background(), nil)
 				if err != nil {
 					t.Error(err.Error())
 				}
@@ -139,7 +140,7 @@ func Test_Bootstrap(t *testing.T) {
 				assert.Equal(t, s.UUID1OTP, string(otpBytes))
 
 				// Try to download again, should be skipped since OTP is same
-				err = bootstrap.ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(nil)
+				err = bootstrap.ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(context.Background(), nil)
 				assert.NoError(t, err)
 
 				assert.Equal(t, attemptCount, state.ConnectionAttempted.Load())

@@ -4,11 +4,49 @@
 package utils
 
 import (
+	"bytes"
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestRetryWithExponentialBackoff(t *testing.T) {
+	requestReceived := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestReceived <- struct{}{}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+
+	requestBody := []byte(`{"request":"body"}`)
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL, bytes.NewReader(requestBody))
+	require.NoError(t, err)
+
+	retryDone := make(chan error, 1)
+	go func() {
+		response, retryErr := RetryWithExponentialBackoff(server.Client(), request, requestBody)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		retryDone <- retryErr
+	}()
+	<-requestReceived
+	cancel()
+
+	select {
+	case retryErr := <-retryDone:
+		require.ErrorIs(t, retryErr, context.Canceled)
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("retry backoff did not stop after context cancellation")
+	}
+}
 
 func TestSiteHealth(t *testing.T) {
 	tests := []struct {
