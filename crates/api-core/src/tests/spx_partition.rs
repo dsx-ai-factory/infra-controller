@@ -41,6 +41,55 @@ async fn create_partition(env: &TestEnv, name: &str) -> rpc::forge::SpxPartition
         .into_inner()
 }
 
+#[crate::sqlx_test]
+async fn spx_partition_metadata_survives_creation_and_lookup(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let metadata = rpc::forge::Metadata {
+        name: "labeled partition".to_string(),
+        description: "partition metadata round trip".to_string(),
+        labels: vec![
+            rpc::forge::Label {
+                key: "environment".to_string(),
+                value: Some("test".to_string()),
+            },
+            rpc::forge::Label {
+                key: "reserved".to_string(),
+                value: None,
+            },
+        ],
+    };
+    let expected = model::metadata::Metadata::try_from(metadata.clone()).unwrap();
+    let created = env
+        .api
+        .create_spx_partition(Request::new(SpxPartitionCreationRequest {
+            metadata: Some(metadata),
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .expect("create labeled SPX partition")
+        .into_inner();
+    assert_eq!(
+        model::metadata::Metadata::try_from(created.metadata.unwrap()).unwrap(),
+        expected
+    );
+
+    let partitions = env
+        .api
+        .find_spx_partitions_by_ids(Request::new(rpc::forge::SpxPartitionsByIdsRequest {
+            spx_partition_ids: vec![created.id.unwrap()],
+        }))
+        .await
+        .expect("read persisted SPX partition")
+        .into_inner()
+        .spx_partitions;
+    assert_eq!(partitions.len(), 1);
+    assert_eq!(
+        model::metadata::Metadata::try_from(partitions[0].metadata.clone().unwrap()).unwrap(),
+        expected
+    );
+}
+
 async fn deletion_records(env: &TestEnv, id: SpxPartitionId) -> serde_json::Value {
     sqlx::query_scalar(
         "SELECT jsonb_build_object('partition', to_jsonb(p), 'allocation', to_jsonb(r))

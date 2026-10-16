@@ -586,7 +586,33 @@ mod tests {
         let partition = result.unwrap();
         assert!(partition.name.is_empty());
         assert!(partition.description.is_empty());
+        assert!(partition.labels.is_empty());
         assert_eq!(partition.vni, Some(200));
+    }
+
+    #[test]
+    fn test_create_spx_partition_rejects_duplicate_labels() {
+        let label = rpc::Label {
+            key: "environment".to_string(),
+            value: Some("test".to_string()),
+        };
+        let request = rpc::SpxPartitionCreationRequest {
+            metadata: Some(rpc::Metadata {
+                labels: vec![label.clone(), label],
+                ..Default::default()
+            }),
+            tenant_organization_id: "tenant-org-123".to_string(),
+            ..Default::default()
+        };
+
+        let error = NewSpxPartition::try_from(request).unwrap_err();
+        let status = tonic::Status::from(error);
+        assert_eq!(status.code(), Code::InvalidArgument);
+        assert!(
+            status
+                .message()
+                .contains("Duplicate key found: environment")
+        );
     }
 
     #[test]
