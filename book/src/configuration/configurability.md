@@ -1059,6 +1059,7 @@ overrides.
 | `max_uploads` | `4` | Concurrent firmware uploads in flight. |
 | `concurrency_limit` | `16` | Concurrent firmware flashing operations across the fleet. |
 | `firmware_directory` | auto-detect (`/opt/nico/firmware` then `/opt/carbide/firmware`) | Where firmware binaries live on the API pod. Override to pin one location explicitly. |
+| `downloads` | See linked defaults | [Firmware download settings](https://docs.nvidia.com/infra-controller/documentation/operations-day-2/firmware-updates/configure-firmware-versions#firmware-downloads): worker, HTTP timeout, and response-size limits for each Core process. Requires a supporting Core build as described in the linked reference. |
 | `host_firmware_upgrade_retry_interval` | `60m` | Backoff between retries on failed host upgrades. |
 | `instance_updates_manual_tagging` | `true` | Require explicit instance tagging before instance-attached firmware upgrades fire. |
 | `no_reset_retries` | `false` | Disable retry logic after BMC resets during firmware ops. |
