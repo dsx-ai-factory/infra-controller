@@ -38,6 +38,7 @@ type mockManager struct {
 	racks           map[uuid.UUID]*rack.Rack
 	domainRacks     map[uuid.UUID][]*rack.Rack
 	drifts          []inventorystore.ComponentDrift
+	componentPatch  inventorymanager.ComponentPatch
 }
 
 func newMockManager() *mockManager {
@@ -166,8 +167,30 @@ func (m *mockManager) AddComponent(_ context.Context, comp *component.Component)
 	return comp.Info.ID, nil
 }
 
-func (m *mockManager) PatchComponent(_ context.Context, comp *component.Component) error {
-	m.components[comp.Info.ID] = comp
+func (m *mockManager) PatchComponent(_ context.Context, patch inventorymanager.ComponentPatch) error {
+	comp := m.components[patch.ID]
+	if patch.FirmwareVersion != nil {
+		comp.FirmwareVersion = *patch.FirmwareVersion
+	}
+	if patch.Description != nil {
+		comp.Info.Description = *patch.Description
+	}
+	if patch.RackID != nil {
+		comp.RackID = *patch.RackID
+	}
+	if patch.SlotID != nil {
+		comp.Position.SlotID = *patch.SlotID
+	}
+	if patch.TrayIndex != nil {
+		comp.Position.TrayIndex = *patch.TrayIndex
+	}
+	if patch.HostID != nil {
+		comp.Position.HostID = *patch.HostID
+	}
+	if len(patch.BMCsByType) > 0 {
+		comp.BmcsByType = patch.BMCsByType
+	}
+	m.componentPatch = patch
 	return nil
 }
 
@@ -505,6 +528,17 @@ func TestPatchComponent_Success(t *testing.T) {
 	assert.Equal(t, 3, updated.Position.SlotID)
 	assert.Equal(t, 2, updated.Position.TrayIndex)
 	assert.Equal(t, 5, updated.Position.HostID)
+	assert.Equal(t, compID, mgr.componentPatch.ID)
+	require.NotNil(t, mgr.componentPatch.FirmwareVersion)
+	require.NotNil(t, mgr.componentPatch.SlotID)
+	require.NotNil(t, mgr.componentPatch.TrayIndex)
+	require.NotNil(t, mgr.componentPatch.HostID)
+	assert.Equal(t, newFW, *mgr.componentPatch.FirmwareVersion)
+	assert.Equal(t, 3, *mgr.componentPatch.SlotID)
+	assert.Equal(t, 2, *mgr.componentPatch.TrayIndex)
+	assert.Equal(t, 5, *mgr.componentPatch.HostID)
+	assert.Nil(t, mgr.componentPatch.Description)
+	assert.Nil(t, mgr.componentPatch.RackID)
 }
 
 func TestPatchComponent_PositionMask(t *testing.T) {
@@ -579,6 +613,13 @@ func TestPatchComponent_PositionMask(t *testing.T) {
 			assert.Equal(t, tc.wantPosition, mgr.components[compID].Position)
 			if tc.wantCode != codes.OK {
 				assert.Equal(t, "original", mgr.components[compID].FirmwareVersion)
+				assert.Empty(t, mgr.componentPatch)
+			} else {
+				path := tc.updateMask.Paths[0]
+				assert.Equal(t, compID, mgr.componentPatch.ID)
+				assert.Equal(t, path == "position.slot_id", mgr.componentPatch.SlotID != nil)
+				assert.Equal(t, path == "position.tray_idx", mgr.componentPatch.TrayIndex != nil)
+				assert.Equal(t, path == "position.host_id", mgr.componentPatch.HostID != nil)
 			}
 		})
 	}
