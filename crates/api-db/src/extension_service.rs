@@ -73,7 +73,7 @@ pub enum InsertExtensionServiceInterfaceMacError {
 
 /// Reads a service's stable interface MAC assignments in ordinal order.
 pub async fn find_interface_macs(
-    txn: impl DbReader<'_>,
+    txn: &mut PgConnection,
     service_id: ExtensionServiceId,
 ) -> DatabaseResult<Vec<ExtensionServiceInterfaceMac>> {
     let query = "SELECT service_id, interface_ordinal, mac_address
@@ -202,7 +202,7 @@ pub async fn delete_interface_macs(
 /// * `description`            - The description of the extension service
 /// * `service_vpc_interfaces` - Service-facing interface requirements
 /// * `data`                   - Data of the initial version of the extension service
-/// * `dpf_service_id`         - DPU Service service_ID, only for dpf-helm-chart services
+/// * `dpf_service_id`         - DPUService service ID, only for DPF Helm services
 /// * `observability`          - Observability config for the extension service
 /// * `has_credential`         - Whether the initial extension service version has a credential
 ///   stored in the vault
@@ -231,7 +231,7 @@ pub async fn create(
     // not be derived from the API-visible service version counter.
     let initial_controller_state_version = ConfigVersion::initial();
 
-    // Validate DPF Helm chart extension service service_id uniqueness
+    // Reserve the chart-provided DPF identity before inserting its owner.
     if matches!(service_type, ExtensionServiceType::DpfHelmChart)
         && let Some(dpf_service_id) = dpf_service_id
     {

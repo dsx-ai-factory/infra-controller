@@ -50,6 +50,7 @@ use crate::crds::dpunodes_generated::{
     DPUNode, DpuNodeDpus, DpuNodeNodeRebootMethod, DpuNodeNodeRebootMethodExternal, DpuNodeSpec,
 };
 use crate::crds::dpus_generated::DPU;
+use crate::crds::dpuservicechains_generated::DPUServiceChain;
 use crate::crds::dpuserviceconfigurations_generated::{
     DPUServiceConfiguration, DpuServiceConfigurationInterfaces,
     DpuServiceConfigurationServiceConfiguration,
@@ -97,23 +98,26 @@ use crate::error::DpfError;
 use crate::repository::{
     BfbRepository, BlueFieldSoftwareRepository, DpfOperatorConfigRepository,
     DpuDeploymentRepository, DpuDeviceRepository, DpuFlavorRepository, DpuFlavorTemplateRepository,
-    DpuNodeMaintenanceRepository, DpuNodeRepository, DpuRepository,
-    DpuServiceConfigurationRepository, DpuServiceNADRepository, DpuServiceRepository,
-    DpuServiceTemplateRepository, K8sConfigRepository,
+    DpuNodeMaintenanceRepository, DpuNodeRepository, DpuRepository, DpuServiceChainRepository,
+    DpuServiceConfigurationRepository, DpuServiceInterfaceRepository, DpuServiceNADRepository,
+    DpuServiceRepository, DpuServiceTemplateRepository, K8sConfigRepository,
 };
 use crate::service_vpc_slot::MAX_HBN_SERVICE_INTERFACES;
 use crate::types::{
     AstraRoutePrefixes, BlueFieldSoftwareParams, BmcPasswordProvider, ConfigPortsServiceType,
     DHCP_SERVER_SERVICE_NAME, DOCA_HBN_SERVICE_NAME, DOCA_WEAVE_DHCP_AGENT_PF_TOTAL_SF,
-    DPU_AGENT_SERVICE_NAME, DPU_ENABLED_NODE_LABEL, DTS_SERVICE_NAME, DetachedDpuServiceDefinition,
-    DpfInterceptBridging, DpuDeploymentType, DpuDeviceInfo, DpuDeviceSummary, DpuMismatch,
-    DpuNodeInfo, DpuNodeSummary, DpuPhase, DpuServiceDaemonSetObservation,
-    DpuServiceHelmChartObservation, DpuServiceInterfacePatch,
-    DpuServiceInterfaceTemplateDefinition, DpuServiceInterfaceTemplateType, DpuServiceObservation,
-    DpuServiceSecurityObservation, DpuServiceVersion, DpuSummary, FMDS_SERVICE_NAME,
-    HostDpfSnapshot, InitDpfResourcesConfig, MAX_BLUEFIELD_VFS_PER_PF, OTEL_COLLECTOR_SERVICE_NAME,
-    PF_TOTAL_SF_BF4_ASTRA_FUDGE, ServiceConfigPortProtocol, ServiceDefinition, ServiceNAD,
-    ServiceNADResourceType, ServiceTemplateVersion,
+    DPU_AGENT_SERVICE_NAME, DPU_ENABLED_NODE_LABEL, DTS_SERVICE_NAME,
+    DetachedDpfResourceObservation, DetachedDpuServiceChainDefinition,
+    DetachedDpuServiceDefinition, DetachedDpuServiceInterface,
+    DetachedDpuServiceInterfaceDefinition, DpfDeletePreconditions, DpfInterceptBridging,
+    DpuDeploymentType, DpuDeviceInfo, DpuDeviceSummary, DpuMismatch, DpuNodeInfo, DpuNodeSummary,
+    DpuPhase, DpuServiceDaemonSetObservation, DpuServiceHelmChartObservation,
+    DpuServiceInterfacePatch, DpuServiceInterfaceTemplateDefinition,
+    DpuServiceInterfaceTemplateType, DpuServiceObservation, DpuServiceSecurityObservation,
+    DpuServiceVersion, DpuSummary, FMDS_SERVICE_NAME, HostDpfSnapshot, InitDpfResourcesConfig,
+    MAX_BLUEFIELD_VFS_PER_PF, OTEL_COLLECTOR_SERVICE_NAME, PF_TOTAL_SF_BF4_ASTRA_FUDGE,
+    ServiceConfigPortProtocol, ServiceDefinition, ServiceNAD, ServiceNADResourceType,
+    ServiceTemplateVersion,
 };
 #[cfg(test)]
 use crate::types::{DEFAULT_PF_TOTAL_SF_RESERVED, InitDpfResourcesConfigBuilder};
@@ -2421,7 +2425,7 @@ async fn delete_stale_unscoped_legacy_service_interfaces<
     repo: &R,
     namespace: &str,
 ) -> Result<(), crate::error::DpfError> {
-    let stale_names = crate::repository::DpuServiceInterfaceRepository::list(repo, namespace)
+    let stale_names = crate::repository::DpuServiceInterfaceRepository::list(repo, namespace, None)
         .await?
         .into_iter()
         .filter(|interface| interface.spec.template.spec.node_selector.is_none())
@@ -2449,7 +2453,7 @@ async fn delete_pre_topology_scoped_astra_pf_vf_interfaces<
         .map(|name| service_cr_name(name, suffix))
         .chain((0..=13).map(|vf_id| service_cr_name(&format!("pf0vf{vf_id}"), suffix)))
         .collect::<BTreeSet<_>>();
-    let stale_names = crate::repository::DpuServiceInterfaceRepository::list(repo, namespace)
+    let stale_names = crate::repository::DpuServiceInterfaceRepository::list(repo, namespace, None)
         .await?
         .into_iter()
         .filter(|interface| interface.spec.template.spec.node_selector.is_some())
@@ -2819,6 +2823,270 @@ impl<R: DpuDeploymentRepository, L> DpfSdk<R, L> {
     }
 }
 
+/// Builds a checked DPUServiceInterface from DetachedDpuServiceInterfaceDefinition and rejects
+/// missing required fields before repository calls.
+fn detached_dpu_service_interface_to_resource(
+    interface: &DetachedDpuServiceInterfaceDefinition,
+) -> Result<DPUServiceInterface, DpfError> {
+    let interface_spec = match &interface.interface {
+        DetachedDpuServiceInterface::Service {
+            service_id,
+            interface_name,
+            network,
+        } => json!({
+            "interfaceType": "service",
+            "service": {
+                "serviceID": service_id,
+                "interfaceName": interface_name,
+                "network": network,
+            },
+        }),
+        DetachedDpuServiceInterface::Patch { peer_bridge } => json!({
+            "interfaceType": "patch",
+            "patch": {"peerBridge": peer_bridge},
+        }),
+    };
+    Ok(serde_json::from_value(json!({
+        "apiVersion": "svc.dpu.nvidia.com/v1alpha1",
+        "kind": "DPUServiceInterface",
+        "metadata": {
+            "name": interface.name,
+            "namespace": interface.namespace,
+            "labels": interface.labels,
+        },
+        "spec": {
+            "template": {
+                "metadata": {"labels": interface.template_labels},
+                "spec": {
+                    "nodeSelector": {"matchLabels": interface.node_selector_labels},
+                    "template": {
+                        "metadata": {"labels": interface.template_labels},
+                        "spec": interface_spec,
+                    },
+                },
+            },
+        },
+    }))?)
+}
+
+/// Builds the checked DPUServiceChain CR for one detached registration parent.
+/// Converts interface label selectors into chain ports so generated children cannot
+/// connect to unrelated interfaces.
+fn detached_dpu_service_chain_to_resource(
+    chain: &DetachedDpuServiceChainDefinition,
+) -> Result<DPUServiceChain, DpfError> {
+    let ports = chain
+        .interface_selectors
+        .iter()
+        .map(|selector| json!({"serviceInterface": {"matchLabels": selector}}))
+        .collect::<Vec<_>>();
+    Ok(serde_json::from_value(json!({
+        "apiVersion": "svc.dpu.nvidia.com/v1alpha1",
+        "kind": "DPUServiceChain",
+        "metadata": {
+            "name": chain.name,
+            "namespace": chain.namespace,
+            "labels": chain.labels,
+        },
+        "spec": {
+            "template": {
+                "metadata": {"labels": chain.template_labels},
+                "spec": {
+                    "nodeSelector": {"matchLabels": chain.node_selector_labels},
+                    "template": {
+                        "metadata": {"labels": chain.template_labels},
+                        "spec": {
+                            "switches": [{
+                                "ports": ports,
+                                "serviceMTU": chain.service_mtu,
+                            }],
+                        },
+                    },
+                },
+            },
+        },
+    }))?)
+}
+
+/// Returns the canonical DPUServiceInterface spec used to validate immutable attachment
+/// fields and detect mutable drift.
+/// Builds through the creation converter so validation and repair match the CR sent to Kubernetes.
+pub fn detached_dpu_service_interface_spec(
+    interface: &DetachedDpuServiceInterfaceDefinition,
+) -> Result<serde_json::Value, DpfError> {
+    Ok(serde_json::to_value(
+        detached_dpu_service_interface_to_resource(interface)?.spec,
+    )?)
+}
+
+/// Returns the canonical DPUServiceChain spec used to detect selector, port, and MTU drift.
+/// Builds through the creation converter so repair matches the CR sent to Kubernetes.
+pub fn detached_dpu_service_chain_spec(
+    chain: &DetachedDpuServiceChainDefinition,
+) -> Result<serde_json::Value, DpfError> {
+    Ok(serde_json::to_value(
+        detached_dpu_service_chain_to_resource(chain)?.spec,
+    )?)
+}
+
+/// Converts a checked DPUServiceInterface into a DetachedDpfResourceObservation while
+/// retaining fields needed to validate ownership and drift or fence patches and deletions.
+fn detached_dpu_service_interface_from_resource(
+    interface: DPUServiceInterface,
+) -> Result<DetachedDpfResourceObservation, DpfError> {
+    Ok(DetachedDpfResourceObservation {
+        name: interface.metadata.name,
+        namespace: interface.metadata.namespace,
+        labels: interface.metadata.labels.unwrap_or_default(),
+        spec: serde_json::to_value(interface.spec)?,
+        uid: interface.metadata.uid,
+        resource_version: interface.metadata.resource_version,
+        is_deleting: interface.metadata.deletion_timestamp.is_some(),
+    })
+}
+
+/// Converts a checked DPUServiceChain into a DetachedDpfResourceObservation while retaining
+/// fields needed to validate ownership and drift or fence patches and deletions.
+fn detached_dpu_service_chain_from_resource(
+    chain: DPUServiceChain,
+) -> Result<DetachedDpfResourceObservation, DpfError> {
+    Ok(DetachedDpfResourceObservation {
+        name: chain.metadata.name,
+        namespace: chain.metadata.namespace,
+        labels: chain.metadata.labels.unwrap_or_default(),
+        spec: serde_json::to_value(chain.spec)?,
+        uid: chain.metadata.uid,
+        resource_version: chain.metadata.resource_version,
+        is_deleting: chain.metadata.deletion_timestamp.is_some(),
+    })
+}
+
+impl<R: DpuServiceInterfaceRepository, L> DpfSdk<R, L> {
+    /// Lists dynamic service interfaces, optionally restricted by a Kubernetes label selector.
+    pub async fn list_detached_dpu_service_interfaces(
+        &self,
+        label_selector: Option<&str>,
+    ) -> Result<Vec<DetachedDpfResourceObservation>, DpfError> {
+        DpuServiceInterfaceRepository::list(&*self.repo, &self.namespace, label_selector)
+            .await?
+            .into_iter()
+            .map(detached_dpu_service_interface_from_resource)
+            .collect()
+    }
+
+    /// Gets one dynamic service interface by its deterministic Kubernetes name.
+    pub async fn get_detached_dpu_service_interface(
+        &self,
+        name: &str,
+    ) -> Result<Option<DetachedDpfResourceObservation>, DpfError> {
+        DpuServiceInterfaceRepository::get(&*self.repo, name, &self.namespace)
+            .await?
+            .map(detached_dpu_service_interface_from_resource)
+            .transpose()
+    }
+
+    /// Creates one detached service interface without force-applying an existing deterministic
+    /// name.
+    pub async fn create_detached_dpu_service_interface(
+        &self,
+        definition: &DetachedDpuServiceInterfaceDefinition,
+    ) -> Result<DetachedDpfResourceObservation, DpfError> {
+        let mut resource = detached_dpu_service_interface_to_resource(definition)?;
+        resource.metadata.namespace = Some(self.namespace.clone());
+        let created = DpuServiceInterfaceRepository::create(&*self.repo, &resource).await?;
+        detached_dpu_service_interface_from_resource(created)
+    }
+
+    /// Applies a revision-fenced JSON Patch and returns the resulting service-interface
+    /// observation.
+    pub async fn patch_detached_dpu_service_interface(
+        &self,
+        name: &str,
+        patch: serde_json::Value,
+    ) -> Result<DetachedDpfResourceObservation, DpfError> {
+        let patched =
+            DpuServiceInterfaceRepository::patch(&*self.repo, name, &self.namespace, patch).await?;
+        detached_dpu_service_interface_from_resource(patched)
+    }
+
+    /// Deletes the exact detached service interface previously observed.
+    pub async fn delete_detached_dpu_service_interface(
+        &self,
+        name: &str,
+        preconditions: &DpfDeletePreconditions,
+    ) -> Result<(), DpfError> {
+        DpuServiceInterfaceRepository::delete_if_current(
+            &*self.repo,
+            name,
+            &self.namespace,
+            preconditions,
+        )
+        .await
+    }
+}
+
+impl<R: DpuServiceChainRepository, L> DpfSdk<R, L> {
+    /// Lists dynamic service chains, optionally restricted by a Kubernetes label selector.
+    pub async fn list_detached_dpu_service_chains(
+        &self,
+        label_selector: Option<&str>,
+    ) -> Result<Vec<DetachedDpfResourceObservation>, DpfError> {
+        DpuServiceChainRepository::list(&*self.repo, &self.namespace, label_selector)
+            .await?
+            .into_iter()
+            .map(detached_dpu_service_chain_from_resource)
+            .collect()
+    }
+
+    /// Gets one dynamic service chain by its deterministic Kubernetes name.
+    pub async fn get_detached_dpu_service_chain(
+        &self,
+        name: &str,
+    ) -> Result<Option<DetachedDpfResourceObservation>, DpfError> {
+        DpuServiceChainRepository::get(&*self.repo, name, &self.namespace)
+            .await?
+            .map(detached_dpu_service_chain_from_resource)
+            .transpose()
+    }
+
+    /// Creates one detached service chain without force-applying an existing deterministic name.
+    pub async fn create_detached_dpu_service_chain(
+        &self,
+        definition: &DetachedDpuServiceChainDefinition,
+    ) -> Result<DetachedDpfResourceObservation, DpfError> {
+        let mut resource = detached_dpu_service_chain_to_resource(definition)?;
+        resource.metadata.namespace = Some(self.namespace.clone());
+        let created = DpuServiceChainRepository::create(&*self.repo, &resource).await?;
+        detached_dpu_service_chain_from_resource(created)
+    }
+
+    /// Applies a revision-fenced JSON Patch and returns the resulting service-chain observation.
+    pub async fn patch_detached_dpu_service_chain(
+        &self,
+        name: &str,
+        patch: serde_json::Value,
+    ) -> Result<DetachedDpfResourceObservation, DpfError> {
+        let patched =
+            DpuServiceChainRepository::patch(&*self.repo, name, &self.namespace, patch).await?;
+        detached_dpu_service_chain_from_resource(patched)
+    }
+
+    /// Deletes the exact detached service chain previously observed.
+    pub async fn delete_detached_dpu_service_chain(
+        &self,
+        name: &str,
+        preconditions: &DpfDeletePreconditions,
+    ) -> Result<(), DpfError> {
+        DpuServiceChainRepository::delete_if_current(
+            &*self.repo,
+            name,
+            &self.namespace,
+            preconditions,
+        )
+        .await
+    }
+}
+
 impl<R: DpuServiceRepository, L> DpfSdk<R, L> {
     /// Get any observed DPUService from this SDK's namespace.
     pub async fn get_dpu_service(
@@ -2845,23 +3113,36 @@ impl<R: DpuServiceRepository, L> DpfSdk<R, L> {
         dpu_service_from_resource(created)
     }
 
-    /// Merge-patch a detached DPUService in this SDK's namespace.
+    /// Apply an RFC 6902 JSON Patch to a detached DPUService in this SDK's namespace.
     pub async fn patch_dpu_service(
         &self,
         service_name: &str,
         patch: serde_json::Value,
-    ) -> Result<(), DpfError> {
-        DpuServiceRepository::patch(&*self.repo, service_name, &self.namespace, patch).await
+    ) -> Result<DpuServiceObservation, DpfError> {
+        let patched =
+            DpuServiceRepository::patch(&*self.repo, service_name, &self.namespace, patch).await?;
+        dpu_service_from_resource(patched)
     }
 
-    /// Delete a detached DPUService in this SDK's namespace.
-    pub async fn delete_dpu_service(&self, service_name: &str) -> Result<(), DpfError> {
-        DpuServiceRepository::delete(&*self.repo, service_name, &self.namespace).await
+    /// Deletes the exact detached DPUService previously observed in this SDK's namespace.
+    /// Kubernetes preconditions prevent a same-name replacement from being removed after a race.
+    pub async fn delete_dpu_service(
+        &self,
+        service_name: &str,
+        preconditions: &DpfDeletePreconditions,
+    ) -> Result<(), DpfError> {
+        DpuServiceRepository::delete_if_current(
+            &*self.repo,
+            service_name,
+            &self.namespace,
+            preconditions,
+        )
+        .await
     }
 }
 
-/// Convert the SDK-owned detached-service definition at the SDK/repository
-/// boundary.  DPF's generated type must not escape this module.
+/// Converts DetachedDpuServiceDefinition into a checked DPUService while keeping generated CR types
+/// behind DpfOperations.
 fn dpu_service_to_resource(service: &DetachedDpuServiceDefinition) -> DPUService {
     DPUService {
         metadata: ObjectMeta {
@@ -2884,7 +3165,7 @@ fn dpu_service_to_resource(service: &DetachedDpuServiceDefinition) -> DPUService
                 },
                 values: service.helm_chart.values.clone(),
             },
-            interfaces: None,
+            interfaces: service.interfaces.clone(),
             paused: None,
             security: Some(DpuServiceSecurity {
                 privileged: Some(service.security.privileged),
@@ -2921,9 +3202,8 @@ fn dpu_service_to_resource(service: &DetachedDpuServiceDefinition) -> DPUService
     }
 }
 
-/// Convert a DPF-generated DPUService into the SDK-owned view needed by the
-/// controller.  The repository remains the only layer that deals in checked
-/// DPF CR types.
+/// Converts a generated DPF DPUService into DpuServiceObservation so controllers never depend on
+/// generated CR types.
 fn dpu_service_from_resource(service: DPUService) -> Result<DpuServiceObservation, DpfError> {
     let service_daemon_set = service
         .spec
@@ -2960,7 +3240,7 @@ fn dpu_service_from_resource(service: DPUService) -> Result<DpuServiceObservatio
         },
         deploy_in_cluster: service.spec.deploy_in_cluster,
         dpu_cluster_selector_present: service.spec.dpu_cluster_selector.is_some(),
-        interfaces_present: service.spec.interfaces.is_some(),
+        interfaces: service.spec.interfaces,
         paused: service.spec.paused,
         security: service
             .spec
@@ -2972,6 +3252,8 @@ fn dpu_service_from_resource(service: DPUService) -> Result<DpuServiceObservatio
         service_daemon_set,
         service_id: service.spec.service_id,
         config_ports_present: service.spec.config_ports.is_some(),
+        uid: service.metadata.uid,
+        resource_version: service.metadata.resource_version,
         is_deleting: service.metadata.deletion_timestamp.is_some(),
     })
 }
@@ -4558,7 +4840,8 @@ mod tests {
     use crate::crds::dpuservices_generated::DPUService;
     use crate::repository::{
         DpuDeviceRepository, DpuFlavorRepository, DpuFlavorTemplateRepository, DpuNodeRepository,
-        DpuRepository, DpuServiceRepository,
+        DpuRepository, DpuServiceChainRepository, DpuServiceInterfaceRepository,
+        DpuServiceRepository,
     };
     use crate::types::{
         DetachedDpuServiceSecurity, DetachedHelmChart, DpfInterceptBridge, DpfInterceptBridging,
@@ -6088,7 +6371,14 @@ mod tests {
         flavors: Arc<RwLock<BTreeMap<String, DPUFlavor>>>,
         flavor_templates: Arc<RwLock<BTreeMap<String, DPUFlavorTemplate>>>,
         services: Arc<RwLock<BTreeMap<String, DPUService>>>,
+        service_interfaces: Arc<RwLock<BTreeMap<String, DPUServiceInterface>>>,
+        service_chains: Arc<RwLock<BTreeMap<String, DPUServiceChain>>>,
         service_patch: Arc<RwLock<Option<(String, String, serde_json::Value)>>>,
+        service_delete_preconditions: Arc<RwLock<Option<(String, String, DpfDeletePreconditions)>>>,
+        service_interface_delete_preconditions:
+            Arc<RwLock<Option<(String, String, DpfDeletePreconditions)>>>,
+        service_chain_delete_preconditions:
+            Arc<RwLock<Option<(String, String, DpfDeletePreconditions)>>>,
         node_patches: Arc<RwLock<Vec<serde_json::Value>>>,
         dpu_delete_error: Arc<RwLock<Option<DpfError>>>,
     }
@@ -6108,6 +6398,47 @@ mod tests {
 
         fn ns_key(ns: &str, name: &str) -> String {
             format!("{}/{}", ns, name)
+        }
+
+        /// Applies an RFC 6902 patch to an in-memory CR and returns the resulting observation.
+        /// Mirroring apiserver patch application keeps SDK tests honest about response-based
+        /// convergence.
+        fn patch_resource<T>(
+            resources: &RwLock<BTreeMap<String, T>>,
+            key: String,
+            kind: &'static str,
+            patch: serde_json::Value,
+        ) -> Result<T, DpfError>
+        where
+            T: Clone + serde::Serialize + serde::de::DeserializeOwned,
+        {
+            let mut resources = resources.write().unwrap();
+            let resource = resources
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| DpfError::not_found(kind, &key))?;
+            let mut document = serde_json::to_value(resource).unwrap();
+            let patch = serde_json::from_value::<json_patch::Patch>(patch).unwrap();
+            json_patch::patch(&mut document, &patch).unwrap();
+            let resource: T = serde_json::from_value(document).unwrap();
+            resources.insert(key, resource.clone());
+            Ok(resource)
+        }
+
+        /// Matches one label equality selector so SDK mock lists mirror Kubernetes filtering.
+        fn matches_selector<T: Resource>(resource: &T, selector: Option<&str>) -> bool {
+            let Some(selector) = selector else {
+                return true;
+            };
+            let Some((key, value)) = selector.split_once('=') else {
+                return false;
+            };
+            resource
+                .meta()
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(key))
+                .is_some_and(|label| label == value)
         }
     }
 
@@ -6141,8 +6472,13 @@ mod tests {
                     service.meta().name.as_deref().unwrap_or(""),
                 ));
             }
-            services.insert(key, service.clone());
-            Ok(service.clone())
+            // Model metadata assigned by Kubernetes so SDK tests distinguish the response from
+            // the submitted resource.
+            let mut created = service.clone();
+            created.metadata.uid = Some("created-service-uid".to_string());
+            created.metadata.resource_version = Some("1".to_string());
+            services.insert(key, created.clone());
+            Ok(created)
         }
 
         async fn patch(
@@ -6150,13 +6486,187 @@ mod tests {
             name: &str,
             ns: &str,
             patch: serde_json::Value,
-        ) -> Result<(), DpfError> {
-            *self.service_patch.write().unwrap() = Some((name.to_string(), ns.to_string(), patch));
-            Ok(())
+        ) -> Result<DPUService, DpfError> {
+            *self.service_patch.write().unwrap() =
+                Some((name.to_string(), ns.to_string(), patch.clone()));
+            Self::patch_resource(&self.services, Self::ns_key(ns, name), "DPUService", patch)
         }
 
         async fn delete(&self, name: &str, ns: &str) -> Result<(), DpfError> {
             self.services
+                .write()
+                .unwrap()
+                .remove(&Self::ns_key(ns, name));
+            Ok(())
+        }
+
+        async fn delete_if_current(
+            &self,
+            name: &str,
+            ns: &str,
+            preconditions: &DpfDeletePreconditions,
+        ) -> Result<(), DpfError> {
+            // This in-memory repository has no apiserver race, so conditional deletion shares
+            // the same observable behavior as its unconditional test helper.
+            *self.service_delete_preconditions.write().unwrap() =
+                Some((name.to_string(), ns.to_string(), preconditions.clone()));
+            <Self as DpuServiceRepository>::delete(self, name, ns).await
+        }
+    }
+
+    #[async_trait]
+    impl DpuServiceInterfaceRepository for SdkMock {
+        async fn get(&self, name: &str, ns: &str) -> Result<Option<DPUServiceInterface>, DpfError> {
+            Ok(self
+                .service_interfaces
+                .read()
+                .unwrap()
+                .get(&Self::ns_key(ns, name))
+                .cloned())
+        }
+
+        async fn list(
+            &self,
+            ns: &str,
+            label_selector: Option<&str>,
+        ) -> Result<Vec<DPUServiceInterface>, DpfError> {
+            Ok(self
+                .service_interfaces
+                .read()
+                .unwrap()
+                .iter()
+                .filter(|(key, interface)| {
+                    key.starts_with(&format!("{ns}/"))
+                        && Self::matches_selector(*interface, label_selector)
+                })
+                .map(|(_, interface)| interface.clone())
+                .collect())
+        }
+
+        async fn apply(
+            &self,
+            interface: &DPUServiceInterface,
+        ) -> Result<DPUServiceInterface, DpfError> {
+            self.service_interfaces
+                .write()
+                .unwrap()
+                .insert(Self::key(interface), interface.clone());
+            Ok(interface.clone())
+        }
+
+        async fn create(
+            &self,
+            interface: &DPUServiceInterface,
+        ) -> Result<DPUServiceInterface, DpfError> {
+            let key = Self::key(interface);
+            let mut interfaces = self.service_interfaces.write().unwrap();
+            if interfaces.contains_key(&key) {
+                return Err(already_exists_error(
+                    interface.meta().name.as_deref().unwrap_or(""),
+                ));
+            }
+            interfaces.insert(key, interface.clone());
+            Ok(interface.clone())
+        }
+
+        async fn patch(
+            &self,
+            name: &str,
+            ns: &str,
+            patch: serde_json::Value,
+        ) -> Result<DPUServiceInterface, DpfError> {
+            Self::patch_resource(
+                &self.service_interfaces,
+                Self::ns_key(ns, name),
+                "DPUServiceInterface",
+                patch,
+            )
+        }
+
+        async fn delete(&self, name: &str, ns: &str) -> Result<(), DpfError> {
+            self.service_interfaces
+                .write()
+                .unwrap()
+                .remove(&Self::ns_key(ns, name));
+            Ok(())
+        }
+
+        async fn delete_if_current(
+            &self,
+            name: &str,
+            ns: &str,
+            preconditions: &DpfDeletePreconditions,
+        ) -> Result<(), DpfError> {
+            *self.service_interface_delete_preconditions.write().unwrap() =
+                Some((name.to_string(), ns.to_string(), preconditions.clone()));
+            <Self as DpuServiceInterfaceRepository>::delete(self, name, ns).await
+        }
+    }
+
+    #[async_trait]
+    impl DpuServiceChainRepository for SdkMock {
+        async fn get(&self, name: &str, ns: &str) -> Result<Option<DPUServiceChain>, DpfError> {
+            Ok(self
+                .service_chains
+                .read()
+                .unwrap()
+                .get(&Self::ns_key(ns, name))
+                .cloned())
+        }
+
+        async fn list(
+            &self,
+            ns: &str,
+            label_selector: Option<&str>,
+        ) -> Result<Vec<DPUServiceChain>, DpfError> {
+            Ok(self
+                .service_chains
+                .read()
+                .unwrap()
+                .iter()
+                .filter(|(key, chain)| {
+                    key.starts_with(&format!("{ns}/"))
+                        && Self::matches_selector(*chain, label_selector)
+                })
+                .map(|(_, chain)| chain.clone())
+                .collect())
+        }
+
+        async fn create(&self, chain: &DPUServiceChain) -> Result<DPUServiceChain, DpfError> {
+            let key = Self::key(chain);
+            let mut chains = self.service_chains.write().unwrap();
+            if chains.contains_key(&key) {
+                return Err(already_exists_error(
+                    chain.meta().name.as_deref().unwrap_or(""),
+                ));
+            }
+            chains.insert(key, chain.clone());
+            Ok(chain.clone())
+        }
+
+        async fn patch(
+            &self,
+            name: &str,
+            ns: &str,
+            patch: serde_json::Value,
+        ) -> Result<DPUServiceChain, DpfError> {
+            Self::patch_resource(
+                &self.service_chains,
+                Self::ns_key(ns, name),
+                "DPUServiceChain",
+                patch,
+            )
+        }
+
+        async fn delete_if_current(
+            &self,
+            name: &str,
+            ns: &str,
+            preconditions: &DpfDeletePreconditions,
+        ) -> Result<(), DpfError> {
+            *self.service_chain_delete_preconditions.write().unwrap() =
+                Some((name.to_string(), ns.to_string(), preconditions.clone()));
+            self.service_chains
                 .write()
                 .unwrap()
                 .remove(&Self::ns_key(ns, name));
@@ -6492,6 +7002,346 @@ mod tests {
             templates.insert(key, template.clone());
             Ok(template.clone())
         }
+    }
+
+    /// Verifies detached parents preserve specs, scoped observations, patch results, and delete
+    /// preconditions.
+    /// Scoped lists prevent cross-owner reconciliation, while delete preconditions preserve
+    /// same-name replacements.
+    #[tokio::test]
+    async fn detached_parent_lifecycle_preserves_specs_scoping_and_delete_preconditions() {
+        let mock = SdkMock::new();
+        let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, String::new())
+            .build_without_resources()
+            .await
+            .expect("build SDK");
+        let labels = |owner: &str| BTreeMap::from([("owner".to_string(), owner.to_string())]);
+
+        // Owner A's service variant makes every placement and attachment field observable.
+        let service_interface = DetachedDpuServiceInterfaceDefinition {
+            name: "interface-a".to_string(),
+            namespace: TEST_NAMESPACE.to_string(),
+            labels: labels("a"),
+            node_selector_labels: BTreeMap::from([("node".to_string(), "a".to_string())]),
+            template_labels: BTreeMap::from([("template".to_string(), "a".to_string())]),
+            interface: DetachedDpuServiceInterface::Service {
+                service_id: "service-a".to_string(),
+                interface_name: "svc0".to_string(),
+                network: "dpf-operator/service-vpc-ipv4".to_string(),
+            },
+        };
+
+        // Use Owner B's patch variant to exercise bridge conversion with a complete placement spec.
+        let patch_interface = DetachedDpuServiceInterfaceDefinition {
+            name: "interface-b".to_string(),
+            namespace: TEST_NAMESPACE.to_string(),
+            labels: labels("b"),
+            node_selector_labels: BTreeMap::from([("node".to_string(), "b".to_string())]),
+            template_labels: BTreeMap::from([("template".to_string(), "b".to_string())]),
+            interface: DetachedDpuServiceInterface::Patch {
+                peer_bridge: "br-svc-1".to_string(),
+            },
+        };
+
+        // The owner-A chain carries two distinct ports and a nondefault MTU through checked
+        // conversion.
+        let chain_a = DetachedDpuServiceChainDefinition {
+            name: "chain-a".to_string(),
+            namespace: TEST_NAMESPACE.to_string(),
+            labels: labels("a"),
+            node_selector_labels: BTreeMap::from([("node".to_string(), "a".to_string())]),
+            template_labels: BTreeMap::from([("template".to_string(), "a".to_string())]),
+            interface_selectors: vec![labels("a"), labels("b")],
+            service_mtu: 9_000,
+        };
+
+        // Owner B supplies the foreign same-namespace object that scoping and preservation
+        // assertions need.
+        let chain_b = DetachedDpuServiceChainDefinition {
+            name: "chain-b".to_string(),
+            namespace: TEST_NAMESPACE.to_string(),
+            labels: labels("b"),
+            node_selector_labels: BTreeMap::from([("node".to_string(), "b".to_string())]),
+            template_labels: BTreeMap::from([("template".to_string(), "b".to_string())]),
+            interface_selectors: vec![labels("b")],
+            service_mtu: 1_500,
+        };
+
+        // Creation must preserve both interface variants and every placement field in checked CR
+        // specs.
+        let observed_service_interface = sdk
+            .create_detached_dpu_service_interface(&service_interface)
+            .await
+            .expect("create service interface");
+        let observed_patch_interface = sdk
+            .create_detached_dpu_service_interface(&patch_interface)
+            .await
+            .expect("create patch interface");
+        assert_eq!(
+            observed_service_interface
+                .spec
+                .pointer("/template/metadata/labels"),
+            Some(&json!({"template": "a"}))
+        );
+        assert_eq!(
+            observed_service_interface
+                .spec
+                .pointer("/template/spec/nodeSelector/matchLabels"),
+            Some(&json!({"node": "a"}))
+        );
+        assert_eq!(
+            observed_service_interface
+                .spec
+                .pointer("/template/spec/template/metadata/labels"),
+            Some(&json!({"template": "a"}))
+        );
+        assert_eq!(
+            observed_service_interface
+                .spec
+                .pointer("/template/spec/template/spec/interfaceType"),
+            Some(&json!("service"))
+        );
+        assert_eq!(
+            observed_service_interface
+                .spec
+                .pointer("/template/spec/template/spec/service"),
+            Some(&json!({
+                "serviceID": "service-a",
+                "interfaceName": "svc0",
+                "network": "dpf-operator/service-vpc-ipv4",
+            }))
+        );
+        assert_eq!(
+            observed_patch_interface
+                .spec
+                .pointer("/template/spec/template/spec/interfaceType"),
+            Some(&json!("patch"))
+        );
+        assert_eq!(
+            observed_patch_interface
+                .spec
+                .pointer("/template/spec/nodeSelector/matchLabels"),
+            Some(&json!({"node": "b"}))
+        );
+        assert_eq!(
+            observed_patch_interface
+                .spec
+                .pointer("/template/spec/template/spec/patch/peerBridge"),
+            Some(&json!("br-svc-1"))
+        );
+        let observed_chain = sdk
+            .create_detached_dpu_service_chain(&chain_a)
+            .await
+            .expect("create owner-a chain");
+        sdk.create_detached_dpu_service_chain(&chain_b)
+            .await
+            .expect("create owner-b chain");
+        assert_eq!(
+            observed_chain.spec.pointer("/template/metadata/labels"),
+            Some(&json!({"template": "a"}))
+        );
+        assert_eq!(
+            observed_chain
+                .spec
+                .pointer("/template/spec/nodeSelector/matchLabels"),
+            Some(&json!({"node": "a"}))
+        );
+        assert_eq!(
+            observed_chain
+                .spec
+                .pointer("/template/spec/template/metadata/labels"),
+            Some(&json!({"template": "a"}))
+        );
+        assert_eq!(
+            observed_chain
+                .spec
+                .pointer("/template/spec/template/spec/switches/0"),
+            Some(&json!({
+                "ports": [
+                    {"serviceInterface": {"matchLabels": {"owner": "a"}}},
+                    {"serviceInterface": {"matchLabels": {"owner": "b"}}},
+                ],
+                "serviceMTU": 9_000,
+            }))
+        );
+
+        // Seed API-assigned identities and finalizers so SDK observations drive safe deletion.
+        {
+            let mut interfaces = mock.service_interfaces.write().unwrap();
+            let interface_a = interfaces
+                .get_mut(&SdkMock::ns_key(TEST_NAMESPACE, "interface-a"))
+                .expect("owner-a interface is retained by the mock");
+            interface_a.metadata.uid = Some("interface-uid".to_string());
+            interface_a.metadata.resource_version = Some("7".to_string());
+            interfaces
+                .get_mut(&SdkMock::ns_key(TEST_NAMESPACE, "interface-b"))
+                .expect("owner-b interface is retained by the mock")
+                .metadata
+                .deletion_timestamp = Some(terminating_timestamp());
+        }
+        {
+            let mut chains = mock.service_chains.write().unwrap();
+            let chain_a = chains
+                .get_mut(&SdkMock::ns_key(TEST_NAMESPACE, "chain-a"))
+                .expect("owner-a chain is retained by the mock");
+            chain_a.metadata.uid = Some("chain-uid".to_string());
+            chain_a.metadata.resource_version = Some("9".to_string());
+            chains
+                .get_mut(&SdkMock::ns_key(TEST_NAMESPACE, "chain-b"))
+                .expect("owner-b chain is retained by the mock")
+                .metadata
+                .deletion_timestamp = Some(terminating_timestamp());
+        }
+
+        // Owner-scoped lists return only owner A, while exact GET can still find owner B by name.
+        let interfaces = sdk
+            .list_detached_dpu_service_interfaces(Some("owner=a"))
+            .await
+            .expect("list owner interfaces");
+        let chains = sdk
+            .list_detached_dpu_service_chains(Some("owner=a"))
+            .await
+            .expect("list owner chains");
+        assert_eq!(
+            interfaces
+                .iter()
+                .filter_map(|resource| resource.name.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["interface-a"]
+        );
+        assert_eq!(
+            chains
+                .iter()
+                .filter_map(|resource| resource.name.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["chain-a"]
+        );
+        let interface_a = interfaces.first().expect("owner-a interface is listed");
+        assert_eq!(interface_a.uid.as_deref(), Some("interface-uid"));
+        assert_eq!(interface_a.resource_version.as_deref(), Some("7"));
+        let interface_preconditions = interface_a
+            .delete_preconditions()
+            .expect("observed interface has complete deletion identity");
+        let chain_a = chains.first().expect("owner-a chain is listed");
+        assert_eq!(chain_a.uid.as_deref(), Some("chain-uid"));
+        assert_eq!(chain_a.resource_version.as_deref(), Some("9"));
+        let chain_preconditions = chain_a
+            .delete_preconditions()
+            .expect("observed chain has complete deletion identity");
+
+        // Revision-fenced parent PATCHes return the resulting observation with Kubernetes identity
+        // intact.
+        let mut interface_spec = interface_a.spec.clone();
+        *interface_spec
+            .pointer_mut("/template/spec/template/spec/service/network")
+            .expect("service interface carries its NAD") = json!("dpf-operator/repaired");
+        let patched_interface = sdk
+            .patch_detached_dpu_service_interface(
+                "interface-a",
+                json!([
+                    {"op": "test", "path": "/metadata/resourceVersion", "value": "7"},
+                    {"op": "replace", "path": "/spec", "value": interface_spec},
+                ]),
+            )
+            .await
+            .expect("patch owner-a interface");
+        assert_eq!(patched_interface.uid.as_deref(), Some("interface-uid"));
+        assert_eq!(patched_interface.resource_version.as_deref(), Some("7"));
+        assert_eq!(
+            patched_interface
+                .spec
+                .pointer("/template/spec/template/spec/service/network"),
+            Some(&json!("dpf-operator/repaired"))
+        );
+
+        let mut chain_spec = chain_a.spec.clone();
+        *chain_spec
+            .pointer_mut("/template/spec/template/spec/switches/0/serviceMTU")
+            .expect("chain carries its service MTU") = json!(1_500);
+        let patched_chain = sdk
+            .patch_detached_dpu_service_chain(
+                "chain-a",
+                json!([
+                    {"op": "test", "path": "/metadata/resourceVersion", "value": "9"},
+                    {"op": "replace", "path": "/spec", "value": chain_spec},
+                ]),
+            )
+            .await
+            .expect("patch owner-a chain");
+        assert_eq!(patched_chain.uid.as_deref(), Some("chain-uid"));
+        assert_eq!(patched_chain.resource_version.as_deref(), Some("9"));
+        assert_eq!(
+            patched_chain
+                .spec
+                .pointer("/template/spec/template/spec/switches/0/serviceMTU"),
+            Some(&json!(1_500))
+        );
+
+        // Exact GET retains finalization state for resources excluded by owner-scoped lists.
+        let interface_b = sdk
+            .get_detached_dpu_service_interface("interface-b")
+            .await
+            .expect("get interface")
+            .expect("owner-b interface exists");
+        assert_eq!(interface_b.name.as_deref(), Some("interface-b"));
+        assert!(interface_b.is_deleting);
+        let chain_b = sdk
+            .get_detached_dpu_service_chain("chain-b")
+            .await
+            .expect("get chain")
+            .expect("owner-b chain exists");
+        assert_eq!(chain_b.name.as_deref(), Some("chain-b"));
+        assert!(chain_b.is_deleting);
+
+        // Observation-derived identities reach each repository, and only the selected owner is
+        // deleted.
+        sdk.delete_detached_dpu_service_interface("interface-a", &interface_preconditions)
+            .await
+            .expect("delete owner-a interface");
+        assert_eq!(
+            *mock.service_interface_delete_preconditions.read().unwrap(),
+            Some((
+                "interface-a".to_string(),
+                TEST_NAMESPACE.to_string(),
+                interface_preconditions,
+            ))
+        );
+        assert!(
+            sdk.get_detached_dpu_service_interface("interface-a")
+                .await
+                .expect("get deleted interface")
+                .is_none()
+        );
+        assert!(
+            sdk.get_detached_dpu_service_interface("interface-b")
+                .await
+                .expect("get preserved interface")
+                .is_some()
+        );
+
+        sdk.delete_detached_dpu_service_chain("chain-a", &chain_preconditions)
+            .await
+            .expect("delete owner-a chain");
+        assert_eq!(
+            *mock.service_chain_delete_preconditions.read().unwrap(),
+            Some((
+                "chain-a".to_string(),
+                TEST_NAMESPACE.to_string(),
+                chain_preconditions,
+            ))
+        );
+        assert!(
+            sdk.get_detached_dpu_service_chain("chain-a")
+                .await
+                .expect("get deleted chain")
+                .is_none()
+        );
+        assert!(
+            sdk.get_detached_dpu_service_chain("chain-b")
+                .await
+                .expect("get preserved chain")
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -7941,6 +8791,7 @@ mod tests {
                 )])),
                 ..Default::default()
             }),
+            interfaces: None,
         }
     }
 
@@ -7998,8 +8849,29 @@ mod tests {
         assert!(observed_daemon_set.node_selector.is_some());
     }
 
+    /// Verifies a networked DPUService retains its checked interface list and stable service
+    /// identity.
+    /// DPF requires these fields together before it can attach a service-side interface to the pod.
+    #[test]
+    fn detached_dpu_service_network_identity_round_trips_through_checked_cr_type() {
+        // Add the one service-side parent that a networked registration exposes to DPF.
+        let mut service = test_dpu_service("extension-service");
+        service.service_id = Some("extsvc-stable-identity".to_string());
+        service.interfaces = Some(vec!["extsvc-stable-identity-if0-svc".to_string()]);
+
+        // Conversion through the generated type proves both required fields survive together.
+        let observed = dpu_service_from_resource(dpu_service_to_resource(&service)).unwrap();
+        assert_eq!(observed.service_id, service.service_id);
+        assert_eq!(observed.interfaces, service.interfaces);
+    }
+
+    /// Verifies detached DPUService create, observe, patch, and conditional delete preserve
+    /// namespace, returned observations, and delete preconditions across `DpfSdk` and
+    /// `DpuServiceRepository`.
     #[tokio::test]
     async fn dpu_service_lifecycle_delegates_to_repository() {
+        // Build the checked SDK over an inspectable repository so every delegated mutation is
+        // visible.
         let mock = SdkMock::new();
         let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, String::new())
             .build_without_resources()
@@ -8007,9 +8879,12 @@ mod tests {
             .unwrap();
         let service = test_dpu_service("extension-service");
 
+        // Creation rewrites the caller's namespace and retains every detached contract field.
         let created = sdk.create_dpu_service(&service).await.unwrap();
         assert_eq!(created.name.as_deref(), Some("extension-service"));
         assert_eq!(created.namespace.as_deref(), Some(TEST_NAMESPACE));
+        assert_eq!(created.uid.as_deref(), Some("created-service-uid"));
+        assert_eq!(created.resource_version.as_deref(), Some("1"));
         let resource = mock
             .services
             .read()
@@ -8026,6 +8901,8 @@ mod tests {
                     "labels": {"nico/extension-service-id": "id"},
                     "name": "extension-service",
                     "namespace": TEST_NAMESPACE,
+                    "resourceVersion": "1",
+                    "uid": "created-service-uid",
                 },
                 "spec": {
                     "deployInCluster": false,
@@ -8054,13 +8931,21 @@ mod tests {
                 },
             })
         );
-        assert!(
-            !sdk.get_dpu_service("extension-service")
-                .await
-                .unwrap()
-                .expect("created service can be observed")
-                .is_deleting
-        );
+
+        // Derive deletion preconditions from the metadata returned by the repository.
+        let observed = sdk
+            .get_dpu_service("extension-service")
+            .await
+            .unwrap()
+            .expect("created service can be observed");
+        assert_eq!(observed.uid.as_deref(), Some("created-service-uid"));
+        assert_eq!(observed.resource_version.as_deref(), Some("1"));
+        assert!(!observed.is_deleting);
+        let preconditions = observed
+            .delete_preconditions()
+            .expect("observed service has complete deletion identity");
+
+        // A deletion timestamp remains observable so controllers wait on finalizers.
         mock.services
             .write()
             .unwrap()
@@ -8076,10 +8961,18 @@ mod tests {
                 .is_deleting
         );
 
-        let patch = serde_json::json!({"spec": {"paused": true}});
-        sdk.patch_dpu_service("extension-service", patch.clone())
+        // Apply a mutable JSON patch and require the returned DPUService identity and fields to
+        // match the stored object.
+        let patch = serde_json::json!([
+            {"op": "add", "path": "/spec/paused", "value": true},
+        ]);
+        let patched = sdk
+            .patch_dpu_service("extension-service", patch.clone())
             .await
             .unwrap();
+        assert_eq!(patched.paused, Some(true));
+        assert_eq!(patched.uid.as_deref(), Some("created-service-uid"));
+        assert_eq!(patched.resource_version.as_deref(), Some("1"));
         assert_eq!(
             *mock.service_patch.read().unwrap(),
             Some((
@@ -8089,7 +8982,19 @@ mod tests {
             ))
         );
 
-        sdk.delete_dpu_service("extension-service").await.unwrap();
+        // Conditional delete forwards both observed identities before removing the namespaced
+        // object.
+        sdk.delete_dpu_service("extension-service", &preconditions)
+            .await
+            .unwrap();
+        assert_eq!(
+            *mock.service_delete_preconditions.read().unwrap(),
+            Some((
+                "extension-service".to_string(),
+                TEST_NAMESPACE.to_string(),
+                preconditions,
+            ))
+        );
         assert!(
             sdk.get_dpu_service("extension-service")
                 .await

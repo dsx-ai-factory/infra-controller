@@ -735,6 +735,118 @@ pub struct DetachedDpuServiceDefinition {
     pub service_daemon_set: Option<DetachedServiceDaemonSet>,
     /// Optional stable workload identity projected to the DPUService specification.
     pub service_id: Option<String>,
+    /// DPUServiceInterface parents DPF attaches to every service pod.
+    /// Networked registrations list only their service-side interfaces.
+    pub interfaces: Option<Vec<String>>,
+}
+
+/// Desired definition of a dynamically managed DPUServiceInterface parent.
+/// Keeps generated DPF CR types inside the SDK so controllers can define interfaces
+/// without importing codegen modules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedDpuServiceInterfaceDefinition {
+    /// Kubernetes resource name.
+    pub name: String,
+    /// Kubernetes namespace containing the resource.
+    pub namespace: String,
+    /// Resource labels used for ownership and registration identity.
+    pub labels: BTreeMap<String, String>,
+    /// Exact labels selecting the DPU nodes where the interface is instantiated.
+    pub node_selector_labels: BTreeMap<String, String>,
+    /// Labels propagated to each generated interface object.
+    pub template_labels: BTreeMap<String, String>,
+    /// Immutable interface kind and attachment identity.
+    pub interface: DetachedDpuServiceInterface,
+}
+
+/// Immutable interface-specific portion of a detached DPUServiceInterface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetachedDpuServiceInterface {
+    /// Service-side SF attached to a raw platform NAD.
+    Service {
+        /// Stable DPF service identity receiving the interface.
+        service_id: String,
+        /// Interface name presented inside the service pod.
+        interface_name: String,
+        /// Namespaced network attachment definition used by DPF.
+        network: String,
+    },
+    /// Patch endpoint terminating on one fixed service-VPC bridge.
+    Patch {
+        /// OVS bridge at the tenant-facing end of this fixed slot.
+        peer_bridge: String,
+    },
+}
+
+/// Desired definition of a dynamically managed DPUServiceChain parent.
+/// Ports are interface-label selectors because DPF materializes the matching children per selected
+/// DPU.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedDpuServiceChainDefinition {
+    /// Kubernetes resource name.
+    pub name: String,
+    /// Kubernetes namespace containing the resource.
+    pub namespace: String,
+    /// Resource labels used for ownership and slot identity.
+    pub labels: BTreeMap<String, String>,
+    /// Exact labels selecting the DPU nodes where the chain is instantiated.
+    pub node_selector_labels: BTreeMap<String, String>,
+    /// Labels propagated to each generated chain object.
+    pub template_labels: BTreeMap<String, String>,
+    /// Ordered interface-label selectors forming the chain's ports.
+    pub interface_selectors: Vec<BTreeMap<String, String>>,
+    /// MTU applied to the generated service-chain switch.
+    pub service_mtu: i64,
+}
+
+/// Kubernetes identity required to delete exactly the resource that was observed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DpfDeletePreconditions {
+    /// UID of the exact Kubernetes object generation that may be deleted.
+    pub uid: String,
+    /// Resource version of the exact Kubernetes object generation that may be deleted.
+    pub resource_version: String,
+}
+
+/// Captures DPUServiceInterface and DPUServiceChain observations for ownership checks,
+/// drift detection, and fenced patches or deletions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetachedDpfResourceObservation {
+    /// Observed resource name, if present in Kubernetes metadata.
+    pub name: Option<String>,
+    /// Observed namespace, if present in Kubernetes metadata.
+    pub namespace: Option<String>,
+    /// Complete observed label set.
+    pub labels: BTreeMap<String, String>,
+    /// Complete observed spec used to validate immutable DPUServiceInterface fields
+    /// and detect mutable interface or chain drift.
+    pub spec: serde_json::Value,
+    /// Kubernetes UID used to fence deletion.
+    pub uid: Option<String>,
+    /// Kubernetes resource version used to fence deletion.
+    pub resource_version: Option<String>,
+    /// Whether Kubernetes has accepted deletion and is waiting for finalizers.
+    pub is_deleting: bool,
+}
+
+impl DetachedDpfResourceObservation {
+    /// Returns deletion preconditions for the exact observed Kubernetes object.
+    /// Refusing an object without a UID avoids deleting a same-name replacement after a
+    /// reconciliation race.
+    pub fn delete_preconditions(&self) -> Result<DpfDeletePreconditions, crate::DpfError> {
+        Ok(DpfDeletePreconditions {
+            uid: self.uid.clone().ok_or_else(|| {
+                crate::DpfError::InvalidState(
+                    "observed DPF resource is missing metadata.uid".to_string(),
+                )
+            })?,
+            resource_version: self.resource_version.clone().ok_or_else(|| {
+                crate::DpfError::InvalidState(
+                    "observed DPF resource is missing metadata.resourceVersion".to_string(),
+                )
+            })?,
+        })
+    }
 }
 
 /// Security settings for a detached DPUService managed by an SDK caller.
@@ -794,15 +906,40 @@ pub struct DpuServiceObservation {
     pub helm_chart: DpuServiceHelmChartObservation,
     pub deploy_in_cluster: Option<bool>,
     pub dpu_cluster_selector_present: bool,
-    pub interfaces_present: bool,
+    /// DPUServiceInterface parents attached to every generated service pod.
+    pub interfaces: Option<Vec<String>>,
     pub paused: Option<bool>,
     pub security: Option<DpuServiceSecurityObservation>,
     pub service_daemon_set: Option<DpuServiceDaemonSetObservation>,
     pub service_id: Option<String>,
     pub config_ports_present: bool,
+    /// Kubernetes UID used to fence replacement deletion.
+    pub uid: Option<String>,
+    /// Kubernetes resource version used to fence replacement deletion and patching.
+    pub resource_version: Option<String>,
     /// Whether Kubernetes has accepted deletion and the CR is retained only
     /// while finalizers remove its dependent resources.
     pub is_deleting: bool,
+}
+
+impl DpuServiceObservation {
+    /// Returns deletion preconditions for the exact observed DPUService.
+    /// Replacement reconciliation must never delete a foreign same-name object created after its
+    /// read.
+    pub fn delete_preconditions(&self) -> Result<DpfDeletePreconditions, crate::DpfError> {
+        Ok(DpfDeletePreconditions {
+            uid: self.uid.clone().ok_or_else(|| {
+                crate::DpfError::InvalidState(
+                    "observed DPUService is missing metadata.uid".to_string(),
+                )
+            })?,
+            resource_version: self.resource_version.clone().ok_or_else(|| {
+                crate::DpfError::InvalidState(
+                    "observed DPUService is missing metadata.resourceVersion".to_string(),
+                )
+            })?,
+        })
+    }
 }
 
 /// Security settings observed on a live DPUService.
@@ -818,8 +955,7 @@ pub struct DpuServiceSecurityObservation {
 /// SDK-owned view of the DaemonSet settings observed on a DPUService.
 #[derive(Debug, Clone)]
 pub struct DpuServiceDaemonSetObservation {
-    /// Serialized Kubernetes NodeSelector, retained for immutable ownership
-    /// validation.
+    /// Serialized Kubernetes NodeSelector used to reject immutable placement drift.
     pub node_selector: Option<serde_json::Value>,
     /// DaemonSet annotations observed on the DPUService
     pub annotations: Option<BTreeMap<String, String>>,

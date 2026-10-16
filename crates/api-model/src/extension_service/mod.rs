@@ -22,6 +22,7 @@ use chrono::prelude::*;
 use config_version::{ConfigVersion, Versioned};
 use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
 
@@ -35,6 +36,10 @@ pub const DPF_HELM_CHART_NAME_PREFIX: &str = "extsvc-";
 pub const DPF_HELM_CHART_LABEL_PREFIX: &str = "nico/";
 /// The label placed on a DPUService to identify its owning extension service.
 pub const DPF_HELM_CHART_OWNER_LABEL: &str = "nico/extension-service-id";
+/// The interface ordinal propagated to DPF registration resources and their children.
+pub const DPF_HELM_CHART_INTERFACE_ORDINAL_LABEL: &str = "nico/extension-service-interface-ordinal";
+/// The fixed service-VPC slot propagated to slot-specific registration resources.
+pub const DPF_HELM_CHART_SERVICE_VPC_SLOT_LABEL: &str = "nico/extension-service-vpc-slot";
 /// The value used to enable a UUID-derived DPU placement label.
 pub const DPF_HELM_CHART_PLACEMENT_LABEL_VALUE: &str = "enabled";
 
@@ -45,7 +50,7 @@ pub enum ExtensionServiceType {
 }
 
 /// Address family required by one service-facing VPC interface.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceVpcAddressFamily {
     /// The service interface uses IPv4.
@@ -70,6 +75,34 @@ pub struct ExtensionServiceInterfaceMac {
     pub interface_ordinal: u32,
     /// MAC reused for this service interface on every attached DPU.
     pub mac_address: MacAddress,
+}
+
+impl ExtensionServiceInterfaceMac {
+    /// Derives one collision-attempt candidate while keeping MAC identity stable across retries.
+    /// Domain separation prevents another UUID-derived identifier from accidentally sharing this
+    /// space.
+    pub fn candidate(service_id: ExtensionServiceId, interface_ordinal: u32, attempt: u32) -> Self {
+        // Hash the complete identity and attempt so collision recovery remains deterministic after
+        // restart.
+        let service_uuid: uuid::Uuid = service_id.into();
+        let digest = Sha256::new()
+            .chain_update(b"nico-extension-service-interface-mac-v1")
+            .chain_update(service_uuid.as_bytes())
+            .chain_update(interface_ordinal.to_be_bytes())
+            .chain_update(attempt.to_be_bytes())
+            .finalize();
+        let mut bytes = [
+            digest[0], digest[1], digest[2], digest[3], digest[4], digest[5],
+        ];
+
+        // Ethernet bit zero is multicast and bit one marks a locally administered address.
+        bytes[0] = (bytes[0] & 0xfe) | 0x02;
+        Self {
+            service_id,
+            interface_ordinal,
+            mac_address: MacAddress::new(bytes),
+        }
+    }
 }
 
 impl std::fmt::Display for ExtensionServiceType {
@@ -436,6 +469,8 @@ pub struct DpfHelmChartIdentity {
 }
 
 impl DpfHelmChartIdentity {
+    /// Derives collision-free Kubernetes and Helm identities from the complete service UUID.
+    /// Keeping one canonical derivation prevents API, controller, and activation naming drift.
     pub fn from_service_id(service_id: ExtensionServiceId) -> Self {
         let dpu_service_name = format!("{DPF_HELM_CHART_NAME_PREFIX}{service_id}");
         Self {
@@ -443,6 +478,39 @@ impl DpfHelmChartIdentity {
             helm_release_name: dpu_service_name.clone(),
             dpu_service_name,
         }
+    }
+
+    /// Returns the service-side DPUServiceInterface name for one declared ordinal.
+    /// The UUID-bearing parent keeps this pod-local interface identity globally unique.
+    pub fn service_interface_name(&self, interface_ordinal: u32) -> String {
+        format!("{}-if{interface_ordinal}-svc", self.dpu_service_name)
+    }
+
+    /// Returns a slot-specific patch-interface name for one service interface.
+    /// Sharing this formula with activation avoids selecting a different dormant parent.
+    pub fn slot_patch_interface_name(&self, interface_ordinal: u32, slot: u32) -> String {
+        format!(
+            "{}-if{interface_ordinal}-slot{slot}-patch",
+            self.dpu_service_name
+        )
+    }
+
+    /// Returns a slot-specific chain name for one service interface.
+    /// Its deterministic identity lets reconciliation distinguish replacement from adoption.
+    pub fn slot_chain_name(&self, interface_ordinal: u32, slot: u32) -> String {
+        format!(
+            "{}-if{interface_ordinal}-slot{slot}-chain",
+            self.dpu_service_name
+        )
+    }
+
+    /// Returns the activation label selecting one service interface and fixed slot.
+    /// Registration requires this label while leaving it absent from every DPU until activation.
+    pub fn slot_placement_label_key(&self, interface_ordinal: u32, slot: u32) -> String {
+        format!(
+            "{DPF_HELM_CHART_LABEL_PREFIX}{}-if{interface_ordinal}-slot{slot}",
+            self.dpu_service_name
+        )
     }
 }
 
@@ -860,6 +928,61 @@ mod tests {
                 .len()
                 <= 63
         );
+    }
+
+    /// Verifies every registration resource derives from the same untruncated UUID identity.
+    /// This protects deterministic reconciliation from name collisions across services and slots.
+    #[test]
+    fn dpf_helm_chart_identity_derives_service_vpc_resource_names() {
+        // A fixed UUID makes every expected Kubernetes identity reviewable and stable.
+        let service_id = ExtensionServiceId::from(
+            uuid::Uuid::parse_str("f91aaea9-c117-4d6b-b744-635702317750").unwrap(),
+        );
+
+        // Project ordinal and slot identities from the one canonical service identity.
+        let identity = DpfHelmChartIdentity::from_service_id(service_id);
+
+        // Names and the activation selector must retain both dimensions.
+        assert_eq!(
+            identity.service_interface_name(0),
+            "extsvc-f91aaea9-c117-4d6b-b744-635702317750-if0-svc"
+        );
+        assert_eq!(
+            identity.slot_patch_interface_name(0, 2),
+            "extsvc-f91aaea9-c117-4d6b-b744-635702317750-if0-slot2-patch"
+        );
+        assert_eq!(
+            identity.slot_chain_name(0, 2),
+            "extsvc-f91aaea9-c117-4d6b-b744-635702317750-if0-slot2-chain"
+        );
+        assert_eq!(
+            identity.slot_placement_label_key(0, 2),
+            "nico/extsvc-f91aaea9-c117-4d6b-b744-635702317750-if0-slot2"
+        );
+    }
+
+    /// Verifies repeated fixed inputs are stable, the next attempt differs, and every candidate is
+    /// locally administered and unicast, protecting collision recovery from candidate reuse and
+    /// invalid Ethernet bits.
+    #[test]
+    fn extension_service_interface_mac_candidates_preserve_ethernet_identity_contract() {
+        // Use a UUID whose raw digest lacks the local bit so the assertion requires normalization.
+        let service_id = ExtensionServiceId::from(
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
+        );
+
+        // Repeat one attempt to verify stable output, then increment the attempt to require a
+        // different collision candidate.
+        let first = ExtensionServiceInterfaceMac::candidate(service_id, 0, 0);
+        let repeated = ExtensionServiceInterfaceMac::candidate(service_id, 0, 0);
+        let retry = ExtensionServiceInterfaceMac::candidate(service_id, 0, 1);
+        assert_eq!(first, repeated);
+        assert_ne!(first.mac_address, retry.mac_address);
+
+        // The low bits encode unicast (zero) and locally administered (one).
+        let first_octet = first.mac_address.bytes()[0];
+        assert_eq!(first_octet & 0x01, 0);
+        assert_eq!(first_octet & 0x02, 0x02);
     }
 
     #[test]

@@ -1558,17 +1558,32 @@ events, so consumers handle them identically.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
-| `bfb_url` | `Option<String>` | BF3 bf-bundle URL | BlueField firmware bundle used for BF3 provisioning. Mutually exclusive with `bluefield_software`; BF4 requires `bluefield_software` instead. |
+| `bfb_url` | `Option<String>` | BF3 bf-bundle URL when the complete deployment block is omitted | BlueField firmware bundle used for BF3 provisioning. A written BF3 deployment block must set a site-qualified value. Mutually exclusive with `bluefield_software`. BF4 requires `bluefield_software` instead. |
 | `bluefield_software` | `Option<BlueFieldSoftwareConfig>` | — | BF4 OS ISO and PSID-to-PLDM firmware source. BF4 requires this field with at least one `pldm_fw_bundle` entry. |
 | `flavor_name` | `String` | `carbide-dpu-flavor` | Base name for the generated BF3/generic-BF4 `DPUFlavor` or Astra `DPUFlavorTemplate`. |
 | `deployment_name` | `String` | `nico-deployment-v2` | Name of the generated `DPUDeployment`. |
 | `node_label_key` | `String` | `carbide.nvidia.com/controlled.node.v2` | Label key used to select DPU nodes for this deployment. |
 | `max_sf_per_pf` | `u32` | `126` | Operator-declared SF ceiling per parent PF for BF3 and generic BF4 when service slots are enabled. Must then be positive. Omission in a written deployment block also uses 126. Rejects a generated `PF_TOTAL_SF` above this ceiling before initialization writes. The platform's per-SF BAR size determines the corresponding allocation. Ignored with zero slots to preserve existing pool overrides. It bounds the pool rather than adding capacity or changing the flavor by itself. Operators must declare a ceiling qualified for the deployment's platform/firmware tuple. The default is not hardware qualification. BF3 GB200 uses its fixed 128-SF profile and ignores this generic ceiling. The fixed-xplane deployment derives its SF capacity from its effective interface inventory and ignores this generic ceiling. |
+| `service_vpc_enabled_address_families` | `ServiceVpcEnabledAddressFamilies` | `[]` | Declares that this deployment's service-VPC DHCP CNI runtime and family-specific raw NAD are installed and qualified. Accepted values are `ipv4` and `ipv6`. Order is irrelevant. Duplicates and unknown values fail startup configuration parsing. The BF3 declaration also applies to the derived BF3 GB200 deployment, while generic BF4 has an independent declaration. Enabling a family on any supported non-Astra concrete deployment enables creation of global dormant registration parents for that family. Omission and an empty list retain the configured deployment (and for BF3, its GB200 derivative) in the per-target capability map with no enabled families. A new registration is deferred when no supported deployment enables its family. Service-VPC registration currently projects only IPv4, so IPv6 registrations are also deferred even when IPv6 is listed. The setting does not create, inspect, or delete the shared NAD. Before enablement, operators must install the raw NAD with MTU 1500 at `dpf-operator-system/nico-service-vpc-ipv4` or `dpf-operator-system/nico-service-vpc-ipv6` and install the corresponding DHCP CNI runtime. Astra rejects a nonempty value. Reference-bearing registrations remain repairable after a family is disabled. Registrations whose DPUService remains observable also retain and repair their parent graphs without an instance reference. |
 | `services` | `Option<Box<DpfMandatoryServicesConfig>>` | inherit `[dpf.services]` | Optional complete per-deployment mandatory-service override. Omitted service entries use built-in defaults rather than top-level values. |
 | `extra_services` | `BTreeMap<DpfExtraService, DpfServiceConfigOverride>` | `{}` | Deployment-local overlays for supported extra services. |
 | `enable_delay_host_init` | `bool` | `false` | When enabled, delay host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true. |
 
 Every active DPF deployment must use distinct `deployment_name`, `flavor_name`, and `node_label_key` values. A deployment `node_label_key` must not be `feature.node.kubernetes.io/dpu-enabled`, which marks every DPF-managed node, or `carbide.nvidia.com/host-bmc-ip`, whose per-node contextual value is the host BMC address. These checks use the local configuration and do not query or modify cluster resources.
+
+The initial service-VPC rollout enables only IPv4 on qualified deployments. A written deployment block must include its required identity fields and provisioning source:
+
+```toml
+[dpf.deployments.bf3]
+flavor_name = "carbide-dpu-flavor"
+deployment_name = "nico-deployment-v2"
+node_label_key = "carbide.nvidia.com/controlled.node.v2"
+# Use the BF3 BFB qualified for this site's platform and firmware.
+bfb_url = "https://artifacts.example.com/bluefield/site-qualified-bf3.bfb"
+service_vpc_enabled_address_families = ["ipv4"]
+```
+
+At least one fixed service-VPC slot must be configured before a supported deployment enables a family. The configuration is read once at API startup, so all Core replicas must receive the same configuration. During a rollout that changes enabled families or slot inventory, quiesce extension-service registration creates and updates. Wait for in-flight updates and registrations for already-enabled families to settle, but do not wait for declarations held in `Creating` solely because their family is disabled. The enabling restart resumes them. Changes to `service_vpc_slot_count` are eventually consistent after every Core replica runs the new inventory. During a rolling restart, periodic `Ready` reconciliation continues, so replicas using old and new inventories can temporarily create and remove conflicting parent graphs. Prefer a non-overlapping restart to avoid this churn. If using a rolling restart, keep registration writes quiesced until every replica is running the same configuration and reconciliation has converged. Registration parents are common dormant DPF resources. Activation of networked extension services is not implemented. [Issue #6125](https://github.com/dsx-ai-factory/infra-controller/issues/6125) tracks activation based on durable machine and DPU deployment state, including rejection of unknown or disabled target deployments without a synchronous Kubernetes query.
 
 Each entry under `[dpf.services]` accepts a chart-native `extra_helm_values` table. NICo deep-merges it over generated `DPUServiceTemplate` values. Nested scalars and arrays replace generated values. DPF applies NICo's deployment-specific `DPUServiceConfiguration` values after the template values. Top-level and per-deployment service fields both overlay the service's built-in defaults.
 

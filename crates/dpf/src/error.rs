@@ -31,6 +31,15 @@ pub enum DpfError {
     #[error("resource already exists: {kind} '{name}'")]
     AlreadyExists { kind: &'static str, name: String },
 
+    /// A revision-fenced Kubernetes JSON Patch lost a race with another writer.
+    #[error("patch conflict for {kind} '{name}'")]
+    PatchConflict {
+        /// Kubernetes resource kind whose observation became stale.
+        kind: &'static str,
+        /// Name of the resource that must be observed again before retrying.
+        name: String,
+    },
+
     #[error("timeout waiting for {operation}: {details}")]
     Timeout { operation: String, details: String },
 
