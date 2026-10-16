@@ -477,11 +477,14 @@ async fn vpc_consumers_observe_external_pool_growth_after_a_miss(
                     .collect();
                 assert_eq!(events.len(), 1, "{logs:?}");
                 let event = events[0];
-                assert_eq!(event.field("event_name"), Some("resource_pool_exhausted"));
+                assert_eq!(
+                    event.field("event_name"),
+                    Some("resource_pool_allocation_failed")
+                );
                 assert_eq!(event.field("pool"), Some(EXTERNAL_VPC_VNI));
                 let labels = [
                     ("operation", "allocate"),
-                    ("failure", "exhausted"),
+                    ("failure", "requested_value_unavailable"),
                     ("failure_policy", "required"),
                     ("allocation_mode", "automatic"),
                     ("value_type", "integer"),
@@ -497,7 +500,7 @@ async fn vpc_consumers_observe_external_pool_growth_after_a_miss(
             let error = result.expect_err("external pool has not been created");
             assert_eq!(
                 error.code(),
-                tonic::Code::ResourceExhausted,
+                tonic::Code::FailedPrecondition,
                 "{scenario}/{name}"
             );
             assert!(error.message().contains(EXTERNAL_VPC_VNI), "{error}");
@@ -2104,6 +2107,158 @@ async fn create_fnn_vpc_requires_existing_tenant(
         .vpc_ids;
     assert_eq!(persisted_ids, vec![etv_vpc.id.expect("created ETV VPC ID")]);
 
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn create_vpc_rejects_allocations_without_external_pool(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let tenant_org = "missing-external-pool";
+    env.api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: tenant_org.to_string(),
+            routing_profile_type: Some("INTERNAL".to_string()),
+            metadata: Some(rpc::Metadata {
+                name: tenant_org.to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await?;
+
+    let mut txn = env.pool.begin().await?;
+    for query in [
+        "DELETE FROM resource_pool WHERE name = $1",
+        "DELETE FROM resource_pool_def WHERE name = $1",
+        "DELETE FROM resource_pool_binding WHERE pool_name = $1",
+    ] {
+        sqlx::query(query)
+            .bind(EXTERNAL_VPC_VNI)
+            .execute(txn.as_mut())
+            .await?;
+    }
+    let registry =
+        ResourcePoolRegistry::resolve(PoolDefinitionSource::ListenOnly, &mut txn, &HashMap::new())
+            .await?;
+    txn.commit().await?;
+    assert!(registry.get(EXTERNAL_VPC_VNI).is_none());
+    let api = TestApiBuilder::new(
+        env.pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_resource_pool_registry(registry)
+    .with_runtime_config(env.config.clone())
+    .build();
+    let before = vpc_vni_pool_state(&env).await?;
+
+    for requested_vni in [Some(50001u32), None] {
+        let mut request = VpcCreationRequest::builder(tenant_org)
+            .metadata(rpc::Metadata {
+                name: "missing-pool-vni".to_string(),
+                ..Default::default()
+            })
+            .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+            .routing_profile_type("EXTERNAL".to_string())
+            .tonic_request()
+            .into_inner();
+        request.vni = requested_vni;
+        let error = api
+            .create_vpc(tonic::Request::new(request))
+            .await
+            .expect_err("a missing pool must reject both allocation modes");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        if requested_vni.is_some() {
+            assert!(error.message().contains("VNI `50001` cannot be requested"));
+        } else {
+            assert!(error.message().contains("has no allocation range"));
+        }
+        assert_eq!(vpc_vni_pool_state(&env).await?, before);
+    }
+    let persisted_ids = api
+        .find_vpc_ids(tonic::Request::new(rpc::forge::VpcSearchFilter {
+            tenant_org_id: Some(tenant_org.to_string()),
+            ..Default::default()
+        }))
+        .await?
+        .into_inner()
+        .vpc_ids;
+    assert!(persisted_ids.is_empty());
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn create_vpc_rejects_unconfigured_assignment_mode(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    for (scenario, auto_assign, requested_vni) in [
+        ("automatic-vni-only", true, Some(20001u32)),
+        ("explicit-vni-only", false, None),
+    ] {
+        let tenant = create_fixture_tenant(&env, scenario).await?;
+        sqlx::query("UPDATE resource_pool SET auto_assign = $2 WHERE name = $1")
+            .bind(env.common_pools.ethernet.pool_vpc_vni.name())
+            .bind(auto_assign)
+            .execute(&env.pool)
+            .await?;
+        let before = vpc_vni_pool_state(&env).await?;
+        let mut request = VpcCreationRequest::builder(&tenant.organization_id)
+            .metadata(rpc::forge::Metadata {
+                name: "unconfigured-mode".to_string(),
+                ..Default::default()
+            })
+            .tonic_request()
+            .into_inner();
+        request.vni = requested_vni;
+        let error = env
+            .api
+            .create_vpc(tonic::Request::new(request))
+            .await
+            .expect_err("the pool must reject an unconfigured assignment mode");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
+        assert_eq!(vpc_vni_pool_state(&env).await?, before, "{scenario}");
+
+        let expected_ids = if auto_assign {
+            let automatic = env
+                .api
+                .create_vpc(
+                    VpcCreationRequest::builder(&tenant.organization_id)
+                        .metadata(rpc::forge::Metadata {
+                            name: "automatic-vni".to_string(),
+                            ..Default::default()
+                        })
+                        .tonic_request(),
+                )
+                .await?
+                .into_inner();
+            assert!(
+                automatic
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.vni)
+                    .is_some()
+            );
+            vec![automatic.id.expect("created VPC ID")]
+        } else {
+            vec![]
+        };
+        let persisted_ids = env
+            .api
+            .find_vpc_ids(tonic::Request::new(rpc::forge::VpcSearchFilter {
+                tenant_org_id: Some(tenant.organization_id),
+                ..Default::default()
+            }))
+            .await?
+            .into_inner()
+            .vpc_ids;
+        assert_eq!(persisted_ids, expected_ids, "{scenario}");
+    }
     Ok(())
 }
 

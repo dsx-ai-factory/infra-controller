@@ -327,8 +327,7 @@ RETURNING allocate.value
 
     // A successful allocation is a single round-trip. The pool-state accounting
     // (`stats`) is consulted only when the allocation statement returns no row,
-    // so it never burdens the common success path — while the error it produces
-    // is exactly what an up-front pre-scan would have returned.
+    // so it never burdens the common success path.
     //
     // Concurrency note: the accounting now reads pool state at failure time
     // rather than before the allocation attempt, so a caller losing a race
@@ -341,20 +340,25 @@ RETURNING allocate.value
         Ok(row) => row,
         Err(sqlx::Error::RowNotFound) => {
             let stats = stats(&mut *txn, value.name()).await?;
-            let free = if auto_assign {
-                stats.auto_assign_free
+            let (free, used) = if auto_assign {
+                (stats.auto_assign_free, stats.auto_assign_used)
             } else {
-                stats.non_auto_assign_free
+                (stats.non_auto_assign_free, stats.non_auto_assign_used)
             };
             if free == 0 {
-                // The relevant partition of the pool is exhausted.
-                return Err(ResourcePoolError::Empty.into());
+                if used != 0 {
+                    return Err(ResourcePoolError::Empty.into());
+                }
+                let assignment = if auto_assign { "automatic" } else { "explicit" };
+                return Err(DatabaseError::FailedPrecondition(format!(
+                    "resource-pool `{}` has no {assignment} allocation range",
+                    value.name()
+                ))
+                .into());
             }
             if !auto_assign {
-                // A specific value was requested and the pool has free
-                // non-auto-assign entries, but this value is not one of them:
-                // it was either already allocated or it is not a value that is
-                // allowed to be explicitly requested.
+                // The value is already allocated or cannot be explicitly
+                // requested, even though other explicit values remain free.
                 return Err(DatabaseError::FailedPrecondition(format!(
                     "`{}` not an available value for resource-pool `{}`",
                     req.unwrap_or_default(),
@@ -2357,66 +2361,60 @@ mod tests {
         Ok(())
     }
 
-    /// Requesting a specific value that the pool cannot hand out — while the
-    /// pool still has free non-auto-assign entries — must map to
-    /// `FailedPrecondition`, distinct from the `Empty` (exhausted) case. The
-    /// pool is seeded non-empty on purpose so the asserted status code is what
-    /// callers observe regardless of the pre-scan being present or deferred.
+    /// Unavailable values and unconfigured assignment modes are failed preconditions.
     #[crate::sqlx_test]
     async fn allocate_requested_value_unavailable_is_failed_precondition(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use model::resource_pool::define::{Range, ResourcePoolDef, ResourcePoolType};
 
-        let mut txn = pool.begin().await?;
+        for (scenario, auto_assign, requested_value) in [
+            ("value outside explicit range", false, Some(99)),
+            ("value in automatic-only pool", true, Some(10)),
+            ("automatic allocation in explicit-only pool", false, None),
+        ] {
+            let mut txn = pool.begin().await?;
+            define(
+                &mut txn,
+                "test-requested-unavail-pool",
+                &ResourcePoolDef {
+                    prefix: None,
+                    ranges: vec![Range {
+                        start: 10.to_string(),
+                        end: 13.to_string(),
+                        auto_assign,
+                    }],
+                    pool_type: ResourcePoolType::Integer,
+                    delegate_prefix_len: None,
+                },
+            )
+            .await?;
 
-        // A pool of non-auto-assign values 10, 11, 12 — so it has free
-        // non-auto-assign entries, but no auto-assign entries.
-        define(
-            &mut txn,
-            "test-requested-unavail-pool",
-            &ResourcePoolDef {
-                prefix: None,
-                ranges: vec![Range {
-                    start: 10.to_string(),
-                    end: 13.to_string(),
-                    auto_assign: false,
-                }],
-                pool_type: ResourcePoolType::Integer,
-                delegate_prefix_len: None,
-            },
-        )
-        .await
-        .unwrap();
+            let pool_handle = ResourcePool::<i64>::new(
+                "test-requested-unavail-pool".to_string(),
+                ValueType::Integer,
+            );
+            let err = allocate(
+                &pool_handle,
+                &mut txn,
+                OwnerType::Machine,
+                "owner",
+                requested_value,
+            )
+            .await
+            .expect_err("requesting an unavailable value must error");
 
-        let pool_handle = ResourcePool::<i64>::new(
-            "test-requested-unavail-pool".to_string(),
-            ValueType::Integer,
-        );
+            assert!(
+                matches!(
+                    &err,
+                    ResourcePoolDatabaseError::Database(boxed)
+                        if matches!(boxed.as_ref(), DatabaseError::FailedPrecondition(_))
+                ),
+                "{scenario}: expected FailedPrecondition, got {err:?}"
+            );
 
-        // 99 is not in the pool, so the request cannot be satisfied even though
-        // the pool is not exhausted (free non-auto-assign entries remain).
-        let err = allocate(
-            &pool_handle,
-            &mut txn,
-            OwnerType::Machine,
-            "owner",
-            Some(99),
-        )
-        .await
-        .expect_err("requesting an unavailable value must error");
-
-        match err {
-            ResourcePoolDatabaseError::Database(boxed) => {
-                assert!(
-                    matches!(*boxed, DatabaseError::FailedPrecondition(_)),
-                    "expected FailedPrecondition, got {boxed:?}"
-                );
-            }
-            other => panic!("expected FailedPrecondition, got {other:?}"),
+            txn.rollback().await?;
         }
-
-        txn.rollback().await?;
         Ok(())
     }
 

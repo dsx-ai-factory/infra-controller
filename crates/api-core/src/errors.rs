@@ -183,7 +183,7 @@ pub enum CarbideError {
     ResourcePoolError(#[from] resource_pool::ResourcePoolError),
 
     #[error("resource pool database error: {0}")]
-    ResourcePoolDatabaseError(#[from] ResourcePoolDatabaseError),
+    ResourcePoolDatabaseError(#[source] ResourcePoolDatabaseError),
 
     #[error("hardware info error: {0}")]
     HardwareInfoError(#[from] HardwareInfoError),
@@ -327,6 +327,15 @@ impl From<ResourcePoolRegistryError> for CarbideError {
             ResourcePoolRegistryError::Database(error)
             | ResourcePoolRegistryError::Binding(BindingError::Database(error)) => error.into(),
             error => Self::FailedPrecondition(error.to_string()),
+        }
+    }
+}
+
+impl From<ResourcePoolDatabaseError> for CarbideError {
+    fn from(error: ResourcePoolDatabaseError) -> Self {
+        match error {
+            ResourcePoolDatabaseError::Database(error) => (*error).into(),
+            error => Self::ResourcePoolDatabaseError(error),
         }
     }
 }
@@ -719,6 +728,24 @@ fn tenant_site_prefix_quota_error_is_actionable() {
         "Review the tenant's retained SitePrefixes; complete removal of an unneeded prefix or \
          increase max_site_prefixes_per_tenant if additional roots are intended."
     );
+}
+
+#[test]
+fn resource_pool_database_errors_preserve_status() {
+    for (error, expected_code) in [
+        (
+            DatabaseError::FailedPrecondition("no allocation range".to_string()),
+            tonic::Code::FailedPrecondition,
+        ),
+        (
+            DatabaseError::query("allocate", sqlx::Error::RowNotFound),
+            tonic::Code::Internal,
+        ),
+    ] {
+        let error = ResourcePoolDatabaseError::from(error);
+        let status = tonic::Status::from(CarbideError::from(error));
+        assert_eq!(status.code(), expected_code);
+    }
 }
 
 #[test]

@@ -836,7 +836,9 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                 input: InitialVpcAllocationFailure::RequestedUnavailable,
                 expect: Yields(InitialVpcAllocationFailureRecord {
                     error_kind: "requested_value_unavailable",
-                    error_message: "resource pool database error: `42` not an available value for resource-pool `initial-vpc-requested`".to_string(),
+                    error_message:
+                        "`42` not an available value for resource-pool `initial-vpc-requested`"
+                            .to_string(),
                     metadata_name: "resource_pool_allocation_failed".to_string(),
                     event_name: Some("resource_pool_allocation_failed".to_string()),
                     metric_name: Some(LIFECYCLE_FAILURES_METRIC.to_string()),
@@ -862,13 +864,23 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
             async move {
                 let source_pool =
                     ResourcePool::<i32>::new(failure.pool_name().to_string(), ValueType::Integer);
-                if matches!(failure, InitialVpcAllocationFailure::RequestedUnavailable) {
-                    let mut txn = db_pool.begin().await.expect("begin seed transaction");
-                    db::resource_pool::populate(&source_pool, &mut txn, vec![43], false)
-                        .await
-                        .expect("seed a different requestable VNI");
-                    txn.commit().await.expect("commit seed transaction");
+                let mut txn = db_pool.begin().await.expect("begin seed transaction");
+                let auto_assign = matches!(failure, InitialVpcAllocationFailure::Exhausted);
+                db::resource_pool::populate(&source_pool, &mut txn, vec![43], auto_assign)
+                    .await
+                    .expect("seed an allocation range");
+                if auto_assign {
+                    db::resource_pool::allocate(
+                        &source_pool,
+                        &mut txn,
+                        model::resource_pool::OwnerType::Vpc,
+                        &VpcId::new().to_string(),
+                        None,
+                    )
+                    .await
+                    .expect("exhaust the configured automatic range");
                 }
+                txn.commit().await.expect("commit seed transaction");
 
                 let vpcs = HashMap::from([(
                     format!("{}-vpc", failure.pool_name()),
@@ -898,7 +910,7 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                 )
                 .await
                 .expect("resolve configured VPC pool");
-                // Keep the empty pool bound so exhaustion comes from the allocator.
+                // Resolve the seeded pool so the failure comes from the allocator.
                 assert!(registry.get(failure.pool_name()).is_some());
                 txn.commit().await.expect("commit pool binding");
                 let metrics = MetricsCapture::start();
@@ -916,18 +928,12 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                             ResourcePoolError::Empty,
                         ),
                     ) => "resource_pool_empty",
-                    crate::CarbideError::ResourcePoolDatabaseError(
-                        db::resource_pool::ResourcePoolDatabaseError::Database(error),
-                    ) if matches!(error.as_ref(), db::DatabaseError::FailedPrecondition(_)) => {
-                        "requested_value_unavailable"
-                    }
+                    crate::CarbideError::FailedPrecondition(_) => "requested_value_unavailable",
                     error => panic!("unexpected initial VPC allocation error: {error:?}"),
                 };
                 let event_logs = logs
                     .iter()
-                    .filter(|log| {
-                        log.field("metric_name") == Some(LIFECYCLE_FAILURES_METRIC)
-                    })
+                    .filter(|log| log.field("metric_name") == Some(LIFECYCLE_FAILURES_METRIC))
                     .collect::<Vec<_>>();
                 assert_eq!(event_logs.len(), 1);
                 let log = event_logs[0];
@@ -950,10 +956,8 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                         .is_some_and(|owner_id| VpcId::from_str(owner_id).is_ok()),
                     pool: log.field("pool").map(str::to_string),
                     error: log.field("error").map(str::to_string),
-                    counter_delta: metrics.counter_delta(
-                        LIFECYCLE_FAILURES_METRIC,
-                        &failure.metric_labels(),
-                    ),
+                    counter_delta: metrics
+                        .counter_delta(LIFECYCLE_FAILURES_METRIC, &failure.metric_labels()),
                 })
             }
         },
