@@ -20730,22 +20730,30 @@ components:
           description: 'Date/time when the Site was last updated'
           format: date-time
         location:
-          $ref: '#/components/schemas/SiteLocation'
-          description: 'Site location information'
+          oneOf:
+            - $ref: '#/components/schemas/SiteLocation'
+            - type: 'null'
+          description: 'Site location information. Null when unset'
         contact:
-          $ref: '#/components/schemas/SiteContact'
-          description: 'Site contact information'
+          oneOf:
+            - $ref: '#/components/schemas/SiteContact'
+            - type: 'null'
+          description: 'Site contact information. Null when unset'
         capabilities:
           $ref: '#/components/schemas/SiteCapabilities'
           description: 'Site capabilities used for feature availability and configuration'
         machineStats:
-          $ref: '#/components/schemas/SiteMachineStats'
-          description: 'Machine counts by status for the Site'
+          oneOf:
+            - $ref: '#/components/schemas/SiteMachineStats'
+            - type: 'null'
+          description: 'Machine counts by status for the Site. Null when statistics are not populated'
         gpuStats:
-          type: array
+          type:
+            - array
+            - 'null'
           items:
             $ref: '#/components/schemas/MachineGPUStats'
-          description: 'GPU counts grouped by GPU type for the Site. Populated when includeGpuStats is set'
+          description: 'GPU counts grouped by GPU type for the Site. Populated on Site list requests when includeGpuStats is true; null otherwise. Sites without GPUs return an empty array when requested'
     SiteSummary:
       title: SiteSummary
       type: object
