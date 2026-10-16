@@ -364,6 +364,20 @@ navigation:
         - page: NVLink Domain Health Reports
           path: operations/nvlink-domain-health-reports.md
 
+    - section: Automation
+      contents:
+        - section: Ansible Collection
+          contents:
+            - page: Getting Started
+              path: automation/ansible/getting-started.md
+            - section: Module Reference
+              contents:
+                - directory: automation/ansible/modules
+        - section: Terraform Provider
+          contents:
+            - page: Getting Started
+              path: automation/terraform/getting-started.md
+
     - section: Reference
       contents:
         - page: Hardware Compatibility List
