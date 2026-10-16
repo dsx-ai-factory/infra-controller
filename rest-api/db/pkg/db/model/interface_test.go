@@ -852,6 +852,79 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 		instance2VpcPrefixes = append(instance2VpcPrefixes, *instance2VpcPrefix)
 	}
 
+	t.Run("VpcID filter includes direct and explicit-prefix attachments", func(t *testing.T) {
+		directInterface, err := ifcd.Create(ctx, nil, InterfaceCreateInput{
+			InstanceID: instances[0].ID,
+			VpcID:      &vpc.ID,
+			Status:     InterfaceStatusPending,
+			CreatedBy:  user.ID,
+		})
+		require.NoError(t, err)
+
+		got, total, err := ifcd.GetAll(ctx, nil, InterfaceFilterInput{VpcID: &vpc.ID}, paginator.PageInput{
+			Limit: cutil.GetPtr(paginator.TotalLimit),
+		}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, totalCount+1, total)
+		assert.Len(t, got, totalCount+1)
+		ids := make(map[uuid.UUID]struct{}, len(got))
+		for _, ifc := range got {
+			ids[ifc.ID] = struct{}{}
+		}
+		assert.Contains(t, ids, directInterface.ID)
+		assert.Contains(t, ids, instance1VpcPrefixes[0].ID)
+		assert.Contains(t, ids, instance2VpcPrefixes[0].ID)
+
+		require.NoError(t, ifcd.Delete(ctx, nil, directInterface.ID))
+	})
+
+	t.Run("pagination uses Interface ID as a stable tie breaker", func(t *testing.T) {
+		otherVpc := testInstanceBuildVpc(t, dbSession, ip, site, tenant, "stablePaginationVpc")
+		first, err := ifcd.Create(ctx, nil, InterfaceCreateInput{
+			InstanceID: instances[0].ID,
+			VpcID:      &otherVpc.ID,
+			Status:     InterfaceStatusPending,
+			CreatedBy:  user.ID,
+		})
+		require.NoError(t, err)
+		second, err := ifcd.Create(ctx, nil, InterfaceCreateInput{
+			InstanceID: instances[1].ID,
+			VpcID:      &otherVpc.ID,
+			Status:     InterfaceStatusPending,
+			CreatedBy:  user.ID,
+		})
+		require.NoError(t, err)
+
+		orderByStatus := &paginator.OrderBy{Field: InterfaceOrderByStatus, Order: paginator.OrderAscending}
+		pageOne, total, err := ifcd.GetAll(ctx, nil, InterfaceFilterInput{VpcID: &otherVpc.ID}, paginator.PageInput{
+			Limit:   cutil.GetPtr(1),
+			Offset:  cutil.GetPtr(0),
+			OrderBy: orderByStatus,
+		}, nil)
+		require.NoError(t, err)
+		require.Len(t, pageOne, 1)
+		assert.Equal(t, 2, total)
+		pageTwo, total, err := ifcd.GetAll(ctx, nil, InterfaceFilterInput{VpcID: &otherVpc.ID}, paginator.PageInput{
+			Limit:   cutil.GetPtr(1),
+			Offset:  cutil.GetPtr(1),
+			OrderBy: orderByStatus,
+		}, nil)
+		require.NoError(t, err)
+		require.Len(t, pageTwo, 1)
+		assert.Equal(t, 2, total)
+
+		expectedFirstID := first.ID
+		expectedSecondID := second.ID
+		if expectedFirstID.String() > expectedSecondID.String() {
+			expectedFirstID, expectedSecondID = expectedSecondID, expectedFirstID
+		}
+		assert.Equal(t, expectedFirstID, pageOne[0].ID)
+		assert.Equal(t, expectedSecondID, pageTwo[0].ID)
+
+		require.NoError(t, ifcd.Delete(ctx, nil, first.ID))
+		require.NoError(t, ifcd.Delete(ctx, nil, second.ID))
+	})
+
 	// OTEL Spanner configuration
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
 	_, err = ifcd.Update(ctx, nil, InterfaceUpdateInput{

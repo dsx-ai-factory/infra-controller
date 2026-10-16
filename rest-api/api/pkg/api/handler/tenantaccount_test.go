@@ -904,6 +904,39 @@ func TestTenantAccountHandler_UpdateSiteCapabilities(t *testing.T) {
 	blockedTenantSite, err := tenantSiteDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, blockedSite.ID, nil)
 	require.NoError(t, err)
 	assert.Equal(t, cutil.GetPtr(false), blockedTenantSite.Config.TargetedInstanceCreation, "a listed Site without a Tenant/Site association can be blocked")
+
+	crossTenantSite := testTenantAccountBuildSite(t, dbSession, ip, "cross-tenant-vpc-site", ipUser)
+	_, response = sendUpdate(model.APITenantAccountSiteCapabilitiesUpdateRequest{
+		{CrossTenantVpcAttachment: cutil.GetPtr(true)},
+		{SiteIDs: []string{crossTenantSite.ID.String()}, CrossTenantVpcAttachment: cutil.GetPtr(false)},
+	})
+	assert.Equal(t, []model.APITenantAccountSiteCapability{
+		{SiteIDs: []string{}, TargetedInstanceCreation: true, CrossTenantVpcAttachment: true},
+		{SiteIDs: []string{blockedSite.ID.String()}, TargetedInstanceCreation: false, CrossTenantVpcAttachment: true},
+		{SiteIDs: []string{crossTenantSite.ID.String()}, TargetedInstanceCreation: true, CrossTenantVpcAttachment: false},
+	}, response.SiteCapabilities)
+
+	updatedTenantAccount, err = tenantAccountDAO.GetByID(ctx, nil, tenantAccount.ID, nil)
+	require.NoError(t, err)
+	assert.True(t, updatedTenantAccount.Config.TargetedInstanceCreation, "cross-Tenant-only update preserves targeted Instance creation")
+	assert.True(t, updatedTenantAccount.Config.CrossTenantVpcAttachment)
+	updatedTenantSite, err = tenantSiteDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, crossTenantSite.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, cutil.GetPtr(false), updatedTenantSite.Config.CrossTenantVpcAttachment)
+	blockedTenantSite, err = tenantSiteDAO.GetByID(ctx, nil, blockedTenantSite.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, cutil.GetPtr(false), blockedTenantSite.Config.TargetedInstanceCreation, "cross-Tenant-only update preserves targeted Instance Site override")
+
+	sendUpdate(model.APITenantAccountSiteCapabilitiesUpdateRequest{
+		{TargetedInstanceCreation: cutil.GetPtr(false)},
+	})
+	updatedTenantAccount, err = tenantAccountDAO.GetByID(ctx, nil, tenantAccount.ID, nil)
+	require.NoError(t, err)
+	assert.False(t, updatedTenantAccount.Config.TargetedInstanceCreation)
+	assert.True(t, updatedTenantAccount.Config.CrossTenantVpcAttachment, "targeted-only update preserves cross-Tenant account default")
+	updatedTenantSite, err = tenantSiteDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, crossTenantSite.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, cutil.GetPtr(false), updatedTenantSite.Config.CrossTenantVpcAttachment, "targeted-only update preserves cross-Tenant Site override")
 }
 
 func TestTenantAccountHandler_GetByID(t *testing.T) {

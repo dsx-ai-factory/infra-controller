@@ -538,7 +538,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Load VPCs only for interfaces using Core-managed prefix selection.
-	interfaceVpcIDMap, interfaceVpcErr := loadInstanceInterfaceVpcs(ctx, &logger, bcih.dbSession, apiRequest.Interfaces, tenant.ID, site.ID)
+	interfaceVpcIDMap, interfaceVpcErr := loadInstanceInterfaceVpcs(ctx, &logger, bcih.dbSession, apiRequest.Interfaces, site.ID)
 	if interfaceVpcErr != nil {
 		logger.Warn().Err(interfaceVpcErr).Msg("failed to validate VPCs specified by batch Instance interfaces")
 		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
@@ -661,11 +661,6 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			vpcPrefix, ok := vpcPrefixIDMap[vpcPrefixUUID]
 			if !ok {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not find VPC Prefix with ID specified in request data", nil)
-			}
-
-			if vpcPrefix.TenantID != tenant.ID {
-				logger.Warn().Msg(fmt.Sprintf("VPC Prefix: %v specified in request is not owned by Tenant", vpcPrefixUUID))
-				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC Prefix: %v specified in request is not owned by Tenant", vpcPrefixUUID), nil)
 			}
 
 			if vpcPrefix.Status != cdbm.VpcPrefixStatusReady {
@@ -812,6 +807,11 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			logger.Error().Msg("one or more Interfaces in request data specify VPC Prefixes that do not belong to VPCs specified in `vpcId` or `secondaryVpcIds`")
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "One or more Interfaces in request data specify VPC Prefixes that do not belong to VPCs specified in `vpcId` or `secondaryVpcIds`", nil)
 		}
+	}
+
+	attachmentErr := authorizeCrossTenantVpcAttachments(ctx, &logger, bcih.dbSession, tenant, site.ID, dbInterfaces, nil)
+	if attachmentErr != nil {
+		return cutil.NewAPIErrorResponse(c, attachmentErr.Code, attachmentErr.Message, attachmentErr.Data)
 	}
 
 	logger.Info().Int("uniqueSubnetCount", len(subnetIDMap)).Int("uniqueVpcPrefixCount", len(vpcPrefixIDMap)).
