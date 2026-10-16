@@ -24,6 +24,7 @@ import (
 // Re-export for convenience
 type ComponentDrift = inventorystore.ComponentDrift
 type FieldDiff = inventorystore.FieldDiff
+type ComponentPatch = inventorystore.ComponentPatch
 
 // Manager defines the interface for inventory management business logic.
 // It wraps InventoryStore and provides a consistent API for the service layer.
@@ -52,7 +53,7 @@ type Manager interface {
 	GetComponentsByExternalIDs(ctx context.Context, externalIDs []string) ([]*component.Component, error)
 	GetListOfComponents(ctx context.Context, info dbquery.StringQueryInfo, manufacturerFilter *dbquery.StringQueryInfo, modelFilter *dbquery.StringQueryInfo, componentTypes []devicetypes.ComponentType, pagination *dbquery.Pagination, orderBy *dbquery.OrderBy) ([]*component.Component, int32, error)
 	AddComponent(ctx context.Context, comp *component.Component) (uuid.UUID, error)
-	PatchComponent(ctx context.Context, comp *component.Component) error
+	PatchComponent(ctx context.Context, patch ComponentPatch) error
 	DeleteComponent(ctx context.Context, id uuid.UUID) error
 	PurgeComponent(ctx context.Context, id uuid.UUID) error
 
@@ -217,8 +218,8 @@ func (m *ManagerImpl) AddComponent(ctx context.Context, comp *component.Componen
 }
 
 // PatchComponent updates a single component's fields in the database.
-func (m *ManagerImpl) PatchComponent(ctx context.Context, comp *component.Component) error {
-	return m.store.PatchComponent(ctx, comp)
+func (m *ManagerImpl) PatchComponent(ctx context.Context, patch ComponentPatch) error {
+	return m.store.PatchComponent(ctx, patch)
 }
 
 // DeleteRack soft-deletes a rack and all its components.
