@@ -4,6 +4,7 @@
 package elektra
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"os"
@@ -46,7 +47,7 @@ func Test_Bootstrap(t *testing.T) {
 			switch tc.descr {
 			case "read":
 				log.Info().Msg("Test Bootstrap read Start")
-				bCfg := bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.Config
+				bCfg := bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.GetConfig()
 				t.Log(bCfg.CACert)
 				t.Log(bCfg.CredsURL)
 				t.Log(bCfg.OTP)
@@ -97,16 +98,18 @@ func Test_Bootstrap(t *testing.T) {
 				assert.NotNil(t, s)
 
 				// Save current values
-				bCfg := bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.Config
+				bootstrapManager := bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap
+				bCfg := bootstrapManager.GetConfig()
 				bCfg.OTP = s.UUID1OTP
 				bCfg.CredsURL = s.MgrURL + "/v1/sitecreds"
 				bCfg.UUID = sitemgr.Testuuid1
+				bootstrapManager.ReplaceConfig(bCfg)
 
 				t.Logf("CredsURL: %s", bCfg.CredsURL)
 
 				state := bootstrap.ManagerAccess.Data.EB.Managers.Workflow.State
 				state.ConnectionAttempted.Store(0)
-				err = bootstrap.ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(nil)
+				err = bootstrap.ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(context.Background(), nil)
 				if err != nil {
 					t.Error(err.Error())
 				}
@@ -137,7 +140,7 @@ func Test_Bootstrap(t *testing.T) {
 				assert.Equal(t, s.UUID1OTP, string(otpBytes))
 
 				// Try to download again, should be skipped since OTP is same
-				err = bootstrap.ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(nil)
+				err = bootstrap.ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(context.Background(), nil)
 				assert.NoError(t, err)
 
 				assert.Equal(t, attemptCount, state.ConnectionAttempted.Load())

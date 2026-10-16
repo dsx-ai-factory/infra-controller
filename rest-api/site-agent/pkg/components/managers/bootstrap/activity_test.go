@@ -39,7 +39,7 @@ type MockBoostrap struct{}
 
 func (m *MockBoostrap) Init()  {}
 func (m *MockBoostrap) Start() {}
-func (m *MockBoostrap) DownloadAndStoreCreds(otpOverride []byte) error {
+func (m *MockBoostrap) DownloadAndStoreCreds(ctx context.Context, otpOverride []byte) error {
 	return nil
 }
 func (m *MockBoostrap) CheckRegistration() error {

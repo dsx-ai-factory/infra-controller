@@ -5,15 +5,22 @@ package bootstrap
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/fsnotify.v1"
 
 	Manager "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
@@ -24,6 +31,65 @@ import (
 
 // testOTP matches what Site Manager issues: 20 random bytes in URL-safe base64.
 const testOTP = "8Nn5Qk0mVQqHqk2hXwfXQz1Yk5A="
+
+func TestReadBootstrapConfigUsesOneProjectedSecretRevision(t *testing.T) {
+	root := t.TempDir()
+	oldRevision := filepath.Join(root, "..old")
+	newRevision := filepath.Join(root, "..new")
+	require.NoError(t, os.Mkdir(oldRevision, 0700))
+	require.NoError(t, os.Mkdir(newRevision, 0700))
+
+	writeConfig := func(dir string, config bootstraptypes.SecretConfig) {
+		t.Helper()
+		for name, contents := range map[string]string{
+			bootstraptypes.TagUUID:     config.UUID,
+			bootstraptypes.TagOTP:      config.OTP,
+			bootstraptypes.TagCredsURL: config.CredsURL,
+			bootstraptypes.TagCACert:   config.CACert,
+		} {
+			require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(contents), 0600))
+		}
+	}
+	oldConfig := bootstraptypes.SecretConfig{
+		UUID:     "old-site",
+		OTP:      "old-otp",
+		CredsURL: "https://old.example.test",
+		CACert:   "old-ca",
+	}
+	newConfig := bootstraptypes.SecretConfig{
+		UUID:     "new-site",
+		OTP:      "new-otp",
+		CredsURL: "https://new.example.test",
+		CACert:   "new-ca",
+	}
+	writeConfig(oldRevision, oldConfig)
+	writeConfig(newRevision, newConfig)
+	require.NoError(t, os.Symlink(filepath.Base(newRevision), filepath.Join(root, kubernetesSecretDataSymlink)))
+
+	for _, tag := range []string{
+		bootstraptypes.TagUUID,
+		bootstraptypes.TagOTP,
+		bootstraptypes.TagCredsURL,
+		bootstraptypes.TagCACert,
+	} {
+		targetRevision := kubernetesSecretDataSymlink
+		if tag == bootstraptypes.TagUUID {
+			// Simulate a symlink view changing between separate key reads.
+			targetRevision = filepath.Base(oldRevision)
+		}
+		require.NoError(t, os.Symlink(filepath.Join(targetRevision, tag), filepath.Join(root, tag)))
+	}
+
+	config, files, err := readBootstrapConfig(root)
+	require.NoError(t, err)
+	assert.Equal(t, newConfig, config)
+	assert.ElementsMatch(t, []string{
+		filepath.Join(root, bootstraptypes.TagUUID),
+		filepath.Join(root, bootstraptypes.TagOTP),
+		filepath.Join(root, bootstraptypes.TagCredsURL),
+		filepath.Join(root, bootstraptypes.TagCACert),
+	}, files)
+}
 
 // TestNewBootstrapConfig guards the startup record every Site Agent
 // initialization emits, which has to identify the Site and the secret it read
@@ -66,13 +132,370 @@ func TestNewBootstrapConfig(t *testing.T) {
 	err := newBootstrapConfig(dir + string(os.PathSeparator))
 	require.NoError(t, err)
 
-	bCfg := ManagerAccess.Data.EB.Managers.Bootstrap.Config
+	bCfg := ManagerAccess.Data.EB.Managers.Bootstrap.GetConfig()
 	assert.Equal(t, testOTP, bCfg.OTP)
 
 	assert.NotContains(t, logged.String(), testOTP)
 	assert.NotContains(t, logged.String(), caCert)
 	assert.Contains(t, logged.String(), siteID)
 	assert.Contains(t, logged.String(), credsURL)
+}
+
+func TestIsBootstrapSecretUpdate(t *testing.T) {
+	dir := t.TempDir()
+	otpFile := filepath.Join(dir, bootstraptypes.TagOTP)
+	files := map[string]bool{otpFile: true}
+	tests := []struct {
+		name  string
+		event fsnotify.Event
+		want  bool
+	}{
+		{
+			name:  "tracked file write",
+			event: fsnotify.Event{Name: otpFile, Op: fsnotify.Write},
+			want:  true,
+		},
+		{
+			name:  "tracked file metadata change",
+			event: fsnotify.Event{Name: otpFile, Op: fsnotify.Chmod},
+			want:  true,
+		},
+		{
+			name:  "projected Secret generation swap",
+			event: fsnotify.Event{Name: filepath.Join(dir, kubernetesSecretDataSymlink), Op: fsnotify.Create},
+			want:  true,
+		},
+		{
+			name:  "projected Secret symlink metadata change",
+			event: fsnotify.Event{Name: filepath.Join(dir, kubernetesSecretDataSymlink), Op: fsnotify.Chmod},
+			want:  false,
+		},
+		{
+			name:  "projected Secret staging directory",
+			event: fsnotify.Event{Name: filepath.Join(dir, "..2026_10_12_20_00_00"), Op: fsnotify.Create},
+			want:  false,
+		},
+		{
+			name:  "unrelated file",
+			event: fsnotify.Event{Name: filepath.Join(dir, "unrelated"), Op: fsnotify.Write},
+			want:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isBootstrapSecretUpdate(tt.event, files, dir))
+		})
+	}
+}
+
+func TestBoostrapAPI_ReloadBootstrapCredentials(t *testing.T) {
+	const (
+		siteID      = "d2f4b0c6-6f1e-4a0e-9f5a-0b6a6f4c1e77"
+		otherSiteID = "5b0e7c1a-2d3f-4e8a-9c6b-7a1d2e3f4a5b"
+		rotatedOTP  = "Zr2pW9xT4mLq8vB1nC6yD0eF3gH="
+	)
+	tests := []struct {
+		name          string
+		updatedSiteID string
+		downloadFails bool
+		wantErr       string
+		wantAttempts  uint64
+	}{
+		{
+			name:          "reloads a same-Site OTP rotation",
+			updatedSiteID: siteID,
+		},
+		{
+			name:          "rejects a Site re-pair",
+			updatedSiteID: otherSiteID,
+			wantErr:       "bootstrap Secret Site ID changed",
+		},
+		{
+			name:          "download failure preserves the active configuration",
+			updatedSiteID: siteID,
+			downloadFails: true,
+			wantErr:       "missing protocol scheme",
+			wantAttempts:  1,
+		},
+	}
+	previousAccess := ManagerAccess
+	t.Cleanup(func() { ManagerAccess = previousAccess })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := make(chan bootstraptypes.SecretReq, 1)
+			var caCert string
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request bootstraptypes.SecretReq
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				requests <- request
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(bootstraptypes.SiteCredsResponse{
+					Key:           "client-key",
+					Certificate:   "client-certificate",
+					CACertificate: caCert,
+				})
+			}))
+			t.Cleanup(server.Close)
+			caCert = string(pem.EncodeToMemory(&pem.Block{
+				Type:  "CERTIFICATE",
+				Bytes: server.Certificate().Raw,
+			}))
+
+			secretDir := t.TempDir()
+			temporalDir := t.TempDir()
+			require.NoError(t, os.Mkdir(filepath.Join(temporalDir, "ca"), 0755))
+			require.NoError(t, os.Mkdir(filepath.Join(temporalDir, "client"), 0755))
+
+			writeConfig := func(config bootstraptypes.SecretConfig) {
+				t.Helper()
+				for name, contents := range map[string]string{
+					bootstraptypes.TagUUID:     config.UUID,
+					bootstraptypes.TagOTP:      config.OTP,
+					bootstraptypes.TagCredsURL: config.CredsURL,
+					bootstraptypes.TagCACert:   config.CACert,
+				} {
+					require.NoError(t, os.WriteFile(filepath.Join(secretDir, name), []byte(contents), 0600))
+				}
+			}
+
+			initialConfig := bootstraptypes.SecretConfig{
+				UUID:     siteID,
+				OTP:      testOTP,
+				CredsURL: "https://old.invalid/v1/sitecreds",
+				CACert:   "old-ca",
+			}
+			writeConfig(initialConfig)
+			ManagerAccess = &Manager.ManagerAccess{
+				Conf: &Manager.ManagerConf{EB: &conftypes.Config{
+					BootstrapSecret: secretDir,
+					RunningIn:       conftypes.RunningInDocker,
+					Temporal: conftypes.TemporalConfig{
+						TemporalCertPath: temporalDir,
+					},
+				}},
+				Data: &Manager.ManagerData{
+					EB: &elektratypes.Elektra{
+						Managers: &managertypes.Managers{
+							Bootstrap: bootstraptypes.NewBootstrapInstance(),
+						},
+					},
+				},
+			}
+			require.NoError(t, newBootstrapConfig(secretDir))
+
+			updatedConfig := bootstraptypes.SecretConfig{
+				UUID:     tt.updatedSiteID,
+				OTP:      rotatedOTP,
+				CredsURL: server.URL,
+				CACert:   caCert,
+			}
+			if tt.downloadFails {
+				updatedConfig.CredsURL = "://invalid"
+			}
+			writeConfig(updatedConfig)
+
+			err := (&BoostrapAPI{}).reloadBootstrapCredentials(secretDir)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				assert.Equal(t, initialConfig, ManagerAccess.Data.EB.Managers.Bootstrap.GetConfig())
+				assert.Equal(t, 0, len(requests))
+				assert.Equal(t, tt.wantAttempts, ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadAttempted.Load())
+				assert.Zero(t, ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadSucceeded.Load())
+				assert.Error(t, ManagerAccess.Data.EB.Managers.Bootstrap.Registration.Check(tt.updatedSiteID, rotatedOTP))
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, updatedConfig, ManagerAccess.Data.EB.Managers.Bootstrap.GetConfig())
+			assert.Equal(t, uint64(1), ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadAttempted.Load())
+			assert.Equal(t, uint64(1), ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadSucceeded.Load())
+			require.NoError(t, ManagerAccess.Data.EB.Managers.Bootstrap.Registration.Check(siteID, rotatedOTP))
+
+			require.Len(t, requests, 1)
+			request := <-requests
+			assert.Equal(t, siteID, request.UUID)
+			assert.Equal(t, rotatedOTP, request.OTP)
+			storedOTP, readErr := os.ReadFile(filepath.Join(temporalDir, "otp"))
+			require.NoError(t, readErr)
+			assert.Equal(t, rotatedOTP, string(storedOTP))
+		})
+	}
+}
+
+func TestBoostrapAPI_DownloadAndStoreCreds(t *testing.T) {
+	const (
+		siteID     = "d2f4b0c6-6f1e-4a0e-9f5a-0b6a6f4c1e77"
+		rotatedOTP = "Zr2pW9xT4mLq8vB1nC6yD0eF3gH="
+		newerOTP   = "Kt7uY2iO5pA9sD4fG8hJ1kL6zXc="
+	)
+	tests := []struct {
+		name         string
+		overrideOTP  string
+		wantErr      string
+		wantAttempts uint64
+	}{
+		{
+			name:        "already applied override skips stale mounted OTP",
+			overrideOTP: rotatedOTP,
+		},
+		{
+			name:         "new override still attempts credential download",
+			overrideOTP:  newerOTP,
+			wantErr:      "missing protocol scheme",
+			wantAttempts: 1,
+		},
+	}
+	previousAccess := ManagerAccess
+	t.Cleanup(func() { ManagerAccess = previousAccess })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			temporalDir := t.TempDir()
+			otpPath := filepath.Join(temporalDir, bootstraptypes.TagOTP)
+			require.NoError(t, os.WriteFile(otpPath, []byte(testOTP), 0600))
+
+			bootstrap := bootstraptypes.NewBootstrapInstance()
+			activeConfig := bootstraptypes.SecretConfig{
+				UUID:     siteID,
+				OTP:      rotatedOTP,
+				CredsURL: "://invalid",
+				CACert:   "active-ca",
+			}
+			bootstrap.ReplaceConfig(activeConfig)
+			ManagerAccess = &Manager.ManagerAccess{
+				Conf: &Manager.ManagerConf{EB: &conftypes.Config{
+					RunningIn: conftypes.RunningInDocker,
+					Temporal: conftypes.TemporalConfig{
+						TemporalCertPath: temporalDir,
+					},
+				}},
+				Data: &Manager.ManagerData{
+					EB: &elektratypes.Elektra{
+						Managers: &managertypes.Managers{
+							Bootstrap: bootstrap,
+						},
+					},
+				},
+			}
+
+			err := (&BoostrapAPI{}).DownloadAndStoreCreds(context.Background(), []byte(tt.overrideOTP))
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+
+			assert.Equal(t, activeConfig, bootstrap.GetConfig())
+			assert.Equal(t, tt.wantAttempts, bootstrap.State.DownloadAttempted.Load())
+			assert.Zero(t, bootstrap.State.DownloadSucceeded.Load())
+			storedOTP, readErr := os.ReadFile(otpPath)
+			require.NoError(t, readErr)
+			assert.Equal(t, testOTP, string(storedOTP))
+		})
+	}
+
+	t.Run("caller cancellation stops stalled credential download", func(t *testing.T) {
+		requestStarted := make(chan struct{})
+		releaseRequest := make(chan struct{})
+		defer close(releaseRequest)
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			close(requestStarted)
+			<-releaseRequest
+		}))
+		t.Cleanup(server.Close)
+		caCert := string(pem.EncodeToMemory(&pem.Block{
+			Type:  "CERTIFICATE",
+			Bytes: server.Certificate().Raw,
+		}))
+
+		temporalDir := t.TempDir()
+		otpPath := filepath.Join(temporalDir, bootstraptypes.TagOTP)
+		require.NoError(t, os.WriteFile(otpPath, []byte(testOTP), 0600))
+
+		bootstrap := bootstraptypes.NewBootstrapInstance()
+		activeConfig := bootstraptypes.SecretConfig{
+			UUID:     siteID,
+			OTP:      rotatedOTP,
+			CredsURL: server.URL,
+			CACert:   caCert,
+		}
+		bootstrap.ReplaceConfig(activeConfig)
+		ManagerAccess = &Manager.ManagerAccess{
+			Conf: &Manager.ManagerConf{EB: &conftypes.Config{
+				RunningIn: conftypes.RunningInDocker,
+				Temporal: conftypes.TemporalConfig{
+					TemporalCertPath: temporalDir,
+				},
+			}},
+			Data: &Manager.ManagerData{
+				EB: &elektratypes.Elektra{
+					Managers: &managertypes.Managers{
+						Bootstrap: bootstrap,
+					},
+				},
+			},
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		downloadDone := make(chan error, 1)
+		go func() {
+			downloadDone <- (&BoostrapAPI{}).DownloadAndStoreCreds(ctx, []byte(newerOTP))
+		}()
+
+		select {
+		case <-requestStarted:
+		case <-time.After(5 * time.Second):
+			t.Fatal("credential request did not start")
+		}
+		cancel()
+		select {
+		case err := <-downloadDone:
+			require.ErrorIs(t, err, context.Canceled)
+		case <-time.After(time.Second):
+			t.Fatal("credential download did not stop after cancellation")
+		}
+		assert.Equal(t, activeConfig, bootstrap.GetConfig())
+		assert.Equal(t, uint64(1), bootstrap.State.DownloadAttempted.Load())
+		assert.Zero(t, bootstrap.State.DownloadSucceeded.Load())
+	})
+}
+
+func TestBootstrap_RunCredentialUpdate(t *testing.T) {
+	initialConfig := bootstraptypes.SecretConfig{UUID: "initial-site", OTP: testOTP}
+	updatedConfig := bootstraptypes.SecretConfig{UUID: "initial-site", OTP: "updated-otp"}
+	bootstrap := bootstraptypes.NewBootstrapInstance()
+	bootstrap.ReplaceConfig(initialConfig)
+
+	updateStarted := make(chan struct{})
+	releaseUpdate := make(chan struct{})
+	updateDone := make(chan error, 1)
+	go func() {
+		updateDone <- bootstrap.RunCredentialUpdate(context.Background(), func(bootstraptypes.SecretConfig) (bootstraptypes.SecretConfig, error) {
+			close(updateStarted)
+			<-releaseUpdate
+			return updatedConfig, nil
+		})
+	}()
+	<-updateStarted
+
+	configRead := make(chan bootstraptypes.SecretConfig, 1)
+	go func() {
+		configRead <- bootstrap.GetConfig()
+	}()
+	select {
+	case config := <-configRead:
+		assert.Equal(t, initialConfig, config)
+	case <-time.After(time.Second):
+		close(releaseUpdate)
+		t.Fatal("GetConfig blocked during credential update")
+	}
+
+	close(releaseUpdate)
+	require.NoError(t, <-updateDone)
+	assert.Equal(t, updatedConfig, bootstrap.GetConfig())
 }
 
 func TestBoostrapAPI_CheckRegistration(t *testing.T) {
