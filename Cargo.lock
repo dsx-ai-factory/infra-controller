@@ -1404,6 +1404,7 @@ dependencies = [
  "carbide-api-test-helper",
  "carbide-dhcp",
  "carbide-health",
+ "carbide-health-report",
  "carbide-kms-provider",
  "carbide-machine-a-tron",
  "carbide-nvlink-manager",
