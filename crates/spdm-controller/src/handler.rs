@@ -89,42 +89,37 @@ impl StateHandler for SpdmAttestationStateHandler {
         &self,
         object_id: &Self::ObjectId,
         snapshot: &mut SpdmDeviceAttestation,
-        controller_state: &SpdmAttestationState,
+        original_controller_state: &SpdmAttestationState,
         ctx: &mut StateHandlerContext<Self::ContextObjects>,
     ) -> Result<StateHandlerOutcome<SpdmAttestationState>, StateHandlerError> {
         // record metrics irrespective of the state of the machine
         self.record_metrics(snapshot, ctx);
 
-        if snapshot.cancelled_at.is_some() && snapshot.evidence_collection_locked {
-            let SpdmAttestationState::PollEvidenceCollection { task_id, .. } = controller_state
-            else {
-                return Ok(StateHandlerOutcome::wait(
-                    "Cannot release evidence collection claim: the BMC task ID was not persisted; inspect the BMC task before recovering this job".to_string(),
-                ));
-            };
-            let redfish_client = redfish_client(&snapshot.bmc_info, ctx).await?;
-            let task = redfish_client
-                .get_task(task_id)
-                .await
-                .map_err(|error| redfish_error("wait for cancelled evidence collection", error))?;
-            if !evidence_collection_task_stopped(task.task_state.as_ref()) {
-                return Ok(StateHandlerOutcome::wait(
-                    "Waiting for BMC evidence collection to stop before cancelling attestation"
-                        .to_string(),
-                ));
+        // cancellation requires a special treatment
+        // - if cancelled and lock held (i.e. trigger or poll)
+        // -- if less than two minutes have elapsed since cancellation - wait
+        // -- if more than two minutes have elapsed since cancellation - just
+        //    move to the cancelled state, where the lock will be released
+        let mut transition_to_cancelled = false;
+        let controller_state: &SpdmAttestationState; // we might need to override the original state
+        if let Some(cancellation_time) = snapshot.cancelled_at {
+            if snapshot.evidence_collection_locked { // i.e. we are in trigger or poll state
+                if chrono::Utc::now() < cancellation_time + chrono::Duration::minutes(2) {
+                    return Ok(StateHandlerOutcome::wait(
+                        "Cancellation waiting two minutes to release the evidence collection lock".to_string(),
+                    ));
+                }
             }
-        }
-
-        let transition_to_cancelled;
-        let controller_state = if snapshot.cancelled_at.is_some()
-            && controller_state != &SpdmAttestationState::Cancelled
-        {
-            transition_to_cancelled = true;
-            &SpdmAttestationState::Cancelled
+            // if no lock is held, this means we are in some other state
+            if original_controller_state != &SpdmAttestationState::Cancelled {
+                transition_to_cancelled = true;
+                controller_state = &SpdmAttestationState::Cancelled;
+            } else {
+                controller_state = original_controller_state;
+            }
         } else {
-            transition_to_cancelled = false;
-            controller_state
-        };
+            controller_state = original_controller_state;
+        }
 
         let SpdmObjectId(machine_id, device_id, job_id) = object_id;
 
@@ -189,18 +184,48 @@ impl StateHandler for SpdmAttestationStateHandler {
                 )
                 .await?;
                 Ok(StateHandlerOutcome::transition(
-                    SpdmAttestationState::TriggerEvidenceCollection { retry_count: 0 },
+                    SpdmAttestationState::TriggerEvidenceCollection {
+                        retry_count: 0,
+                        redfish_retry_count: 0,
+                        last_redfish_failure_tstamp: None,
+                    },
                 )
                 .with_txn(txn))
             }
-            SpdmAttestationState::TriggerEvidenceCollection { retry_count } => {
-                // A retained claim without a task ID means a previous POST may
-                // have reached the BMC. Repeating it could overlap that collection.
-                if snapshot.evidence_collection_locked {
-                    return Ok(StateHandlerOutcome::wait(
-                        "Evidence collection claim is held without a persisted task ID; inspect the BMC task before recovering this job".to_string(),
+            SpdmAttestationState::TriggerEvidenceCollection {
+                retry_count,
+                redfish_retry_count,
+                last_redfish_failure_tstamp,
+            } => {
+                // if last_redfish_failure_tstamp is set - we are retrying due to redfish error
+                // - if retry limit exceeded - move to failed
+                // - if we haven't waited a full minute yet, return waiting
+                // - otherwise let's do the retry, but DON'T acquire the lock as it
+                //   is already acquired
+
+                if let Some(last_failure_time) = last_redfish_failure_tstamp {
+                    if *redfish_retry_count > 5 {
+                        // that's it, we give up, release the lock and move to Failed
+                        let mut txn = ctx.services.db_pool.begin().await?;
+                        db::attestation::spdm::release_evidence_collection_lock(
+                            &mut txn, object_id,
+                        )
+                        .await?;
+                        return Ok(StateHandlerOutcome::transition(
+                            SpdmAttestationState::Failed(
+                                "Exceeded redfish retry limit while attempting to collect evidence"
+                                    .to_string(),
+                            ),
+                        ).with_txn(txn));
+                    }
+                    if chrono::Utc::now() < *last_failure_time + chrono::Duration::minutes(1) {
+                        return Ok(StateHandlerOutcome::wait(
+                        "Collection evidence via redfish has failed, waiting up to one minute to try againt"
+                            .to_string(),
                     ));
-                }
+                    }
+                } 
+                
                 // firmware version and certificate are collected. Let's trigger the
                 // measurement collection now.
                 let redfish_client = redfish_client(&snapshot.bmc_info, ctx).await?;
@@ -212,34 +237,51 @@ impl StateHandler for SpdmAttestationStateHandler {
                         ),
                     ));
                 };
-                let mut txn = ctx.services.db_pool.begin().await?;
-                if !db::attestation::spdm::try_acquire_evidence_collection_lock(
-                    &mut txn,
-                    object_id,
-                    snapshot.state_version,
-                )
-                .await?
-                {
-                    return Ok(StateHandlerOutcome::wait(
-                        "Evidence collection claim is unavailable or attestation state changed"
-                            .to_string(),
-                    ));
+                // only try and obtain the lock if we don't already hold it
+                if !snapshot.evidence_collection_locked {
+                    let mut txn = ctx.services.db_pool.begin().await?;
+                    if !db::attestation::spdm::try_acquire_evidence_collection_lock(
+                        &mut txn,
+                        object_id,
+                        snapshot.state_version,
+                    )
+                    .await?
+                    {
+                        return Ok(StateHandlerOutcome::wait(
+                            "Evidence collection claim is unavailable or attestation state changed"
+                                .to_string(),
+                        ));
+                    }
+                    txn.commit().await?;
                 }
                 // Ownership must survive both this transaction and a process
                 // restart, including an ambiguous failure of the following POST.
-                txn.commit().await?;
+                
                 let nonce = snapshot.nonce_hex();
-                let task = redfish_client
+                match redfish_client
                     .trigger_evidence_collection(url.as_str(), nonce.as_str())
                     .await
-                    .map_err(|error| redfish_error("trigger measurement collection", error))?;
+                    .map_err(|error| redfish_error("trigger measurement collection", error))
+                {
+                    Ok(task) => Ok(StateHandlerOutcome::transition(
+                        SpdmAttestationState::PollEvidenceCollection {
+                            task_id: task.id,
+                            retry_count: *retry_count,
+                        },
+                    )),
+                    Err(_) => {
+                        let txn = ctx.services.db_pool.begin().await?;
 
-                Ok(StateHandlerOutcome::transition(
-                    SpdmAttestationState::PollEvidenceCollection {
-                        task_id: task.id,
-                        retry_count: *retry_count,
-                    },
-                ))
+                        Ok(StateHandlerOutcome::transition(
+                            SpdmAttestationState::TriggerEvidenceCollection {
+                                retry_count: *retry_count,
+                                redfish_retry_count: redfish_retry_count + 1,
+                                last_redfish_failure_tstamp: Some(chrono::Utc::now()),
+                            },
+                        )
+                        .with_txn(txn))
+                    }
+                }
             }
             SpdmAttestationState::PollEvidenceCollection {
                 task_id,
@@ -344,6 +386,8 @@ impl StateHandler for SpdmAttestationStateHandler {
                             Ok(StateHandlerOutcome::transition(
                                 SpdmAttestationState::TriggerEvidenceCollection {
                                     retry_count: retry_count + 1,
+                                    redfish_retry_count: 0,
+                                    last_redfish_failure_tstamp: None,
                                 },
                             )
                             .with_txn(txn))

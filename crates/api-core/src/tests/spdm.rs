@@ -689,7 +689,11 @@ pub(in crate::tests) mod tests {
             assert!(
                 matches!(
                     attestation_state,
-                    SpdmAttestationState::TriggerEvidenceCollection { retry_count: 3 }
+                    SpdmAttestationState::TriggerEvidenceCollection {
+                        retry_count: 3,
+                        redfish_retry_count: 0,
+                        last_redfish_failure_tstamp: None,
+                    }
                 ),
                 "expected Trigger, got: {:?}",
                 attestation_state
@@ -808,7 +812,11 @@ pub(in crate::tests) mod tests {
             .await?;
             assert_eq!(
                 second.state,
-                SpdmAttestationState::TriggerEvidenceCollection { retry_count: 0 }
+                SpdmAttestationState::TriggerEvidenceCollection {
+                    retry_count: 0,
+                    redfish_retry_count: 0,
+                    last_redfish_failure_tstamp: None,
+                }
             );
             assert!(!second.evidence_collection_locked);
             assert!(second.evidence.is_none());

@@ -118,8 +118,15 @@ pub mod spdm {
     pub enum SpdmAttestationState {
         FetchMetadata,
         FetchCertificate,
-        TriggerEvidenceCollection { retry_count: i32 },
-        PollEvidenceCollection { task_id: String, retry_count: i32 },
+        TriggerEvidenceCollection {
+            retry_count: i32,
+            redfish_retry_count: i32,
+            last_redfish_failure_tstamp: Option<DateTime<Utc>>,
+        },
+        PollEvidenceCollection {
+            task_id: String,
+            retry_count: i32,
+        },
         NrasVerification,
         ApplyAppraisalPolicy,
         Passed,
@@ -1233,6 +1240,8 @@ mod test {
             "trigger evidence collection state has no cause" {
                 details_with_state(SpdmAttestationState::TriggerEvidenceCollection {
                     retry_count: 0,
+                    redfish_retry_count: 0,
+                    last_redfish_failure_tstamp: None,
                 }) => None,
             }
 
