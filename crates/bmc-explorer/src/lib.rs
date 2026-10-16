@@ -233,17 +233,30 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     }
     let explored_system = &explored_systems[0];
 
-    let manager = root
+    let mut managers = root
         .managers()
         .await
         .map_err(Error::nv_redfish("managers"))?
         .ok_or_else(Error::bmc_not_provided("managers"))?
         .members()
         .await
-        .map_err(Error::nv_redfish("managers members"))?
-        .into_iter()
-        .next()
-        .ok_or_else(Error::bmc_not_provided("at least one manager"))?;
+        .map_err(Error::nv_redfish("managers members"))?;
+
+    // Prefer the manager whose ManagerForServers links the chosen system; fall
+    // back to the first manager for BMCs that don't populate the link.
+    let manager = match managers.iter().position(|m| {
+        m.raw()
+            .links
+            .as_ref()
+            .and_then(|l| l.manager_for_servers.as_ref())
+            .is_some_and(|servers| servers.iter().any(|s| *s.id() == system.raw().odata_id))
+    }) {
+        Some(i) => managers.swap_remove(i),
+        None => managers
+            .into_iter()
+            .next()
+            .ok_or_else(Error::bmc_not_provided("at least one manager"))?,
+    };
 
     let hw_type = hw_type(&root, explored_system, &explored_chassis);
     let linked_chassis_ids = explored_system.linked_chassis_ids();
