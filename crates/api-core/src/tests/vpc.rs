@@ -2155,7 +2155,18 @@ async fn create_vpc_rejects_allocations_without_external_pool(
     .build();
     let before = vpc_vni_pool_state(&env).await?;
 
-    for requested_vni in [Some(50001u32), None] {
+    // allocate_vpc_vni translates explicit-request preconditions into an unavailable-VNI
+    // message; automatic requests retain the underlying pool configuration error.
+    for (requested_vni, expected_message) in [
+        (
+            Some(50001u32),
+            "VNI `50001` cannot be requested or is already allocated".to_string(),
+        ),
+        (
+            None,
+            format!("resource-pool `{EXTERNAL_VPC_VNI}` has no allocation range"),
+        ),
+    ] {
         let mut request = VpcCreationRequest::builder(tenant_org)
             .metadata(rpc::Metadata {
                 name: "missing-pool-vni".to_string(),
@@ -2171,11 +2182,7 @@ async fn create_vpc_rejects_allocations_without_external_pool(
             .await
             .expect_err("a missing pool must reject both allocation modes");
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-        if requested_vni.is_some() {
-            assert!(error.message().contains("VNI `50001` cannot be requested"));
-        } else {
-            assert!(error.message().contains("has no allocation range"));
-        }
+        assert_eq!(error.message(), expected_message);
         assert_eq!(vpc_vni_pool_state(&env).await?, before);
     }
     let persisted_ids = api
