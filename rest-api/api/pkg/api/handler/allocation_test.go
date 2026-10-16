@@ -2855,6 +2855,59 @@ func TestAllocationHandler_Delete(t *testing.T) {
 			}
 		})
 	}
+
+	cases := []struct {
+		name          string
+		providerGrant bool
+		siteOverride  *bool
+		revokeGrant   bool
+	}{
+		{name: "last allocation preserves provider grant", providerGrant: true},
+		{name: "last allocation preserves site grant", siteOverride: cutil.GetPtr(true)},
+		{name: "last allocation preserves site denial overriding provider grant", providerGrant: true, siteOverride: cutil.GetPtr(false)},
+		{name: "last allocation removes association after provider grant is revoked", providerGrant: true, revokeGrant: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tenant := common.TestBuildTenant(t, dbSession, tc.name, uuid.NewString(), tnu)
+			var account *cdbm.TenantAccount
+			if tc.providerGrant {
+				account = common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tenant.ID, tenant.Org, cdbm.TenantAccountStatusReady, tnu)
+			} else {
+				account = common.TestBuildTenantAccount(t, dbSession, ip, &tenant.ID, tenant.Org, cdbm.TenantAccountStatusReady, tnu)
+			}
+			ts := cdbm.TestBuildTenantSite(t, dbSession, tenant, site, &cdbm.TenantSiteConfig{TargetedInstanceCreation: tc.siteOverride}, tnu)
+			allocation := common.TestBuildAllocation(t, dbSession, site, tenant, tc.name, tnu)
+			if tc.revokeGrant {
+				_, err := cdbm.NewTenantAccountDAO(dbSession).Update(ctx, nil, cdbm.TenantAccountUpdateInput{
+					TenantAccountID: account.ID, Config: &cdbm.TenantAccountConfig{TargetedInstanceCreation: false},
+				})
+				require.NoError(t, err)
+			}
+			e := echo.New()
+			rec := httptest.NewRecorder()
+			ec := e.NewContext(httptest.NewRequest(http.MethodDelete, "/", nil), rec)
+			ec.SetParamNames("orgName", "id")
+			ec.SetParamValues(ipOrg1, allocation.ID.String())
+			ec.Set("user", ipu)
+			handler := DeleteAllocationHandler{dbSession: dbSession, cfg: cfg}
+			err := handler.Handle(ec)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+			_, err = cdbm.NewAllocationDAO(dbSession).GetByID(ctx, nil, allocation.ID, nil)
+			require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			remaining, err := cdbm.NewTenantSiteDAO(dbSession).GetByID(ctx, nil, ts.ID, nil)
+			if tc.revokeGrant {
+				require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+				account, err = cdbm.NewTenantAccountDAO(dbSession).GetByID(ctx, nil, account.ID, nil)
+				require.NoError(t, err)
+				assert.False(t, account.Config.TargetedInstanceCreation)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.siteOverride, remaining.Config.TargetedInstanceCreation)
+		})
+	}
 }
 
 func TestInstanceTypeAllocationForMultipleTenants(t *testing.T) {

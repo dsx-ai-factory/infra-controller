@@ -320,6 +320,24 @@ k8s_resource(
 )
 
 observability_values = tilt_values['observability']
+
+# Mirrors the chart's observability/dashboards/*.json glob, plus the two
+# dashboards that only exist outside the chart.
+grafana_dashboard_paths = [
+    'helm/observability/dashboards/nico-api-performance.json',
+    'helm/observability/dashboards/nico-bmc-performance.json',
+    'helm/observability/dashboards/nico-fleet.json',
+    'helm/observability/dashboards/nico-lifecycle.json',
+    'helm/observability/dashboards/nico-overview.json',
+    'helm/observability/dashboards/nico-site-detail.json',
+    'dev/deployment/tilt/dashboards/nico-site-explorer.json',
+    'helm-prereqs/observability/dashboards/nico-core-health.json',
+]
+grafana_dashboard_data = {}
+for dashboard_path in grafana_dashboard_paths:
+    grafana_dashboard_data[os.path.basename(dashboard_path)] = str(
+        read_file(os.path.join(repo_root, dashboard_path)),
+    )
 grafana_dashboard_object = {
     'apiVersion': 'v1',
     'kind': 'ConfigMap',
@@ -330,28 +348,7 @@ grafana_dashboard_object = {
             'annotations': {'grafana_folder': 'NICo'},
         },
     ),
-    'data': {
-        'nico-api-performance.json': str(read_file(os.path.join(
-            repo_root,
-            'helm/observability/dashboards/nico-api-performance.json',
-        ))),
-        'nico-lifecycle.json': str(read_file(os.path.join(
-            repo_root,
-            'helm/observability/dashboards/nico-lifecycle.json',
-        ))),
-        'nico-overview.json': str(read_file(os.path.join(
-            repo_root,
-            'helm/observability/dashboards/nico-overview.json',
-        ))),
-        'nico-site-explorer.json': str(read_file(os.path.join(
-            repo_root,
-            'dev/deployment/tilt/dashboards/nico-site-explorer.json',
-        ))),
-        'nico-core-health.json': str(read_file(os.path.join(
-            repo_root,
-            'helm-prereqs/observability/dashboards/nico-core-health.json',
-        ))),
-    },
+    'data': grafana_dashboard_data,
 }
 k8s_yaml(encode_yaml(grafana_dashboard_object))
 k8s_resource(

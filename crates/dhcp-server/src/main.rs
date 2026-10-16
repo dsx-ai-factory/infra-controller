@@ -527,8 +527,9 @@ async fn run_dhcp_v6_listener(
     }
 }
 
-/// Initialises the tracing subscriber with per-crate log-level overrides.
-fn setup_tracing() -> Result<(), Box<dyn Error>> {
+/// Initialises the tracing subscriber with per-crate log-level overrides and
+/// OTLP span export. `main` shuts down the returned value to send the last spans.
+fn setup_tracing() -> Result<carbide_instrument::otlp_tracing::Tracing, Box<dyn Error>> {
     let env_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy()
@@ -542,20 +543,28 @@ fn setup_tracing() -> Result<(), Box<dyn Error>> {
         .add_directive("hickory_resolver::name_server=info".parse().unwrap())
         .add_directive("hickory_proto=info".parse().unwrap());
 
+    let (span_layer, tracing) = carbide_instrument::otlp_tracing::setup(
+        carbide_instrument::otlp_tracing::Config::new("nico-dhcp-server"),
+    );
+
     // Counts every log line into carbide_log_events_total from startup; the
-    // counts are exposed once main() installs the meter provider. The env
-    // filter sits on the registry as a global filter so the counting layer
-    // and the logfmt output see exactly the same events.
+    // counts are exposed once main() installs the meter provider. Each log layer
+    // carries the env filter, so the counting layer and the logfmt output see
+    // exactly the same events and RUST_LOG does not limit span export.
     let log_events = carbide_instrument::LogEventsMetric::new("nico-dhcp");
     tracing_subscriber::registry()
-        .with(log_events.layer())
+        .with(log_events.layer().with_filter(env_filter.clone()))
+        .with(span_layer)
         .with(
             logfmt::layer()
-                .with_event_fields([logfmt::EventField::with_default("component", "nico-dhcp")]),
+                .with_event_fields([logfmt::EventField::with_default("component", "nico-dhcp")])
+                .with_filter(env_filter),
         )
-        .with(env_filter)
         .try_init()?;
-    Ok(())
+
+    tracing.report();
+
+    Ok(tracing)
 }
 
 /// Retain the server identity and stage changed settings for a later reload.
@@ -949,7 +958,7 @@ async fn run_control_loop(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    setup_tracing()?;
+    let tracing = setup_tracing()?;
 
     let args = Args::load();
 
@@ -993,11 +1002,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
+    let mut result: Result<(), Box<dyn Error>> = Ok(());
     if let Some(ref addr_str) = args.grpc_listen_addr {
         let grpc_listen_addr: SocketAddr = addr_str
             .parse()
             .map_err(|e| format!("Invalid --grpc-listen-addr '{}': {}", addr_str, e))?;
-        run_with_grpc_control(args, grpc_listen_addr, dhcproto::v6::SERVER_PORT).await?;
+        result = run_with_grpc_control(args, grpc_listen_addr, dhcproto::v6::SERVER_PORT).await;
     } else {
         pin_server_identity(&args).await?;
         let config = init(args.clone()).await?;
@@ -1010,7 +1020,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await;
     }
 
-    Ok(())
+    // Send the spans the exporter has not batched yet, including on a failed run.
+    tracing.shutdown().await;
+
+    result
 }
 
 fn get_mode(args_mode: &ServerMode) -> Box<dyn DhcpMode> {
@@ -1125,7 +1138,8 @@ fn forge_client_config(args: &Args) -> Result<ForgeClientConfig, DhcpError> {
 
 const MINIMUM_DHCP_PKT_SIZE: usize = 236;
 
-#[tracing::instrument(skip_all)]
+// Roots a trace per packet: a DHCP client sends no trace context to continue.
+#[tracing::instrument(skip_all, fields(source_address = %addr, circuit_id = %circuit_id))]
 #[allow(clippy::too_many_arguments)]
 async fn process(
     addr: SocketAddr,
@@ -1189,7 +1203,8 @@ async fn process(
 }
 
 /// Process one DHCPv6 datagram and send its response to the exact UDP source.
-#[tracing::instrument(skip_all)]
+// Roots a trace per packet, as the v4 path does.
+#[tracing::instrument(skip_all, fields(source_address = %source))]
 async fn process_v6(source: SocketAddr, packet: &[u8], mut context: V6ListenerContext) {
     let SocketAddr::V6(source) = source else {
         let error = format!("source address {source} is not IPv6");

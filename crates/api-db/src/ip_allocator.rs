@@ -433,8 +433,8 @@ fn get_network_size(ip_network: &IpNetwork) -> AddressCount {
 // trying to.. well.. allocate.
 //
 // You'll notice this stores values as u128 -- this is
-// just to make it easier for stepping in the search
-// loop, since I can just current_ip += network_size.
+// to make it easier for stepping in the search
+// loop with either address family.
 fn get_network_details(network_segment: &IpNetwork, prefix_length: u8) -> NetworkDetails {
     let (base_ip, network_size, broadcast_ip) = match network_segment {
         IpNetwork::V4(net) => {
@@ -496,8 +496,7 @@ fn next_available_prefix(
     prefix_length: u8,
     allocated_networks: Vec<IpNetwork>,
 ) -> DatabaseResult<Option<IpNetwork>> {
-    // Check the single IPv6 host address directly so an exhausted /128
-    // doesn't advance past `u128::MAX`.
+    // Allow an IPv6 /128 to allocate itself before requiring a longer prefix.
     if network_segment.prefix() == 128 && prefix_length == 128 {
         let is_allocated = allocated_networks
             .iter()
@@ -532,10 +531,11 @@ fn next_available_prefix(
             return Ok(Some(candidate_subnet));
         }
 
-        // Otherwise, jump to the next network based on the
-        // requested prefix_length, and see if the next candidate
-        // subnet is our winner winner chicken dinner.
-        current_ip += network_details.network_size;
+        // Beyond `u128::MAX`, there is no representable next IPv6 subnet.
+        let Some(next_ip) = current_ip.checked_add(network_details.network_size) else {
+            return Ok(None);
+        };
+        current_ip = next_ip;
     }
 
     Ok(None)
@@ -691,7 +691,11 @@ mod tests {
 
         let result = allocator.next().unwrap();
         assert_eq!(result.0, prefix_id);
-        assert!(result.1.is_err());
+        assert!(matches!(
+            result.1,
+            Err(DatabaseError::DhcpError(DhcpError::PrefixExhausted(ip)))
+                if ip == IpAddr::V4(Ipv4Addr::new(10, 1, 1, 0))
+        ));
         assert!(allocator.next().is_none());
     }
     #[test]
@@ -992,6 +996,61 @@ mod tests {
                 vec![] => Some(network),
                 vec![network] => None,
             }
+        );
+    }
+
+    #[test]
+    fn test_ipv6_candidates_at_address_space_end() {
+        struct CandidateSearch {
+            network: IpNetwork,
+            prefix_length: u8,
+            allocated: Vec<IpNetwork>,
+        }
+
+        let final_pair = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe/127"
+            .parse()
+            .unwrap();
+        let first_address = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe/128"
+            .parse()
+            .unwrap();
+        let last_address = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128"
+            .parse()
+            .unwrap();
+
+        check_cases(
+            [
+                Case {
+                    scenario: "last IPv6 address remains available",
+                    input: CandidateSearch {
+                        network: final_pair,
+                        prefix_length: 128,
+                        allocated: vec![first_address],
+                    },
+                    expect: Yields(Some(last_address)),
+                },
+                Case {
+                    scenario: "both addresses in the final /127 are allocated",
+                    input: CandidateSearch {
+                        network: final_pair,
+                        prefix_length: 128,
+                        allocated: vec![first_address, last_address],
+                    },
+                    expect: Yields(None),
+                },
+                Case {
+                    scenario: "both /1 subnets of the full IPv6 space are allocated",
+                    input: CandidateSearch {
+                        network: "::/0".parse().unwrap(),
+                        prefix_length: 1,
+                        allocated: vec!["::/1".parse().unwrap(), "8000::/1".parse().unwrap()],
+                    },
+                    expect: Yields(None),
+                },
+            ],
+            |search| {
+                next_available_prefix(search.network, search.prefix_length, search.allocated)
+                    .map_err(|e| e.to_string())
+            },
         );
     }
 

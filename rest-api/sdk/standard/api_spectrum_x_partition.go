@@ -48,7 +48,7 @@ Create a SpectrumX Partition for the org.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
-The Tenant must be associated with the Site and hold an Allocation on it. Omit `vni` to let the Site allocate one; a requested `vni` that is already allocated or outside the Site's pool is rejected.
+The Tenant must have an Allocation or TargetedInstanceCreation on the Site. Omit `vni` to let the Site allocate one; a requested `vni` that is already allocated or outside the Site's pool is rejected.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org

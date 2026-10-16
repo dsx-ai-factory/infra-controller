@@ -1684,6 +1684,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbide-client-cache"
+version = "0.0.0"
+dependencies = [
+ "carbide-test-support",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "carbide-credential-rotation"
 version = "0.0.0"
 dependencies = [
@@ -1744,6 +1753,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tonic",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2083,6 +2094,7 @@ dependencies = [
  "eyre",
  "futures-util",
  "hex",
+ "http",
  "mockito",
  "regex",
  "reqwest 0.13.4",
@@ -2096,6 +2108,7 @@ dependencies = [
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 
@@ -2302,6 +2315,7 @@ dependencies = [
  "base64",
  "carbide-api-db",
  "carbide-api-model",
+ "carbide-client-cache",
  "carbide-health-report",
  "carbide-ib-fabric",
  "carbide-instrument",
@@ -3099,14 +3113,40 @@ dependencies = [
 name = "carbide-resource-pool"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-macros",
+ "carbide-resource-pool-api",
  "carbide-sqlx-testing",
  "carbide-test-support",
  "ctor",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper-util",
+ "ipnetwork",
+ "libc",
+ "nix 0.31.3",
+ "opentelemetry 0.32.0",
+ "opentelemetry_sdk",
+ "prost",
+ "rcgen",
+ "rustls",
+ "serde",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tower",
+ "trace-propagation",
+ "tracing",
+ "tracing-opentelemetry 0.33.0",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -7020,6 +7060,7 @@ name = "libnmxc"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "carbide-client-cache",
  "carbide-test-support",
  "clap",
  "http",
@@ -7059,7 +7100,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.11#9da4784d22f3719005c8d81491e9ad63f10fc504"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.15#8d0b4d17ccae747b55bb6518be03a90a381094ad"
 dependencies = [
  "chrono",
  "clap",
@@ -7989,9 +8030,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish"
-version = "0.19.0"
+version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3850452342486369c982dbf355445b9ae69bd086dbfa1992dff8a2af9770dca"
+checksum = "dfb7b17e3ebcce520166c370189433d0b7cdd206a88f0c33e054e0284bf7f477"
 dependencies = [
  "futures-core",
  "futures-util",
@@ -8006,9 +8047,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-bmc-http"
-version = "0.19.0"
+version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0e77e0587808eccd0fbbc259f74ee15afb7a3c131ae9ef98be67fc6522df74e"
+checksum = "acfe533f35d8274fc2c9447b3a0f43f00a7fc695c678d0c9f09b25a468cffe5d"
 dependencies = [
  "bytes",
  "futures-core",
@@ -8031,9 +8072,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-core"
-version = "0.19.0"
+version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23e02e66344cddc592b8429be3ea1870052cd119777199f3c25fadb902be1616"
+checksum = "13624ad67162c93aaf4d8784395205f84b7a2d003dcd225d2f7c26237ac0be04"
 dependencies = [
  "futures-core",
  "futures-io",
@@ -8046,9 +8087,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-csdl-compiler"
-version = "0.19.0"
+version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14568ed842171a03cea5213c348cfdc0f048c5544658f8baf0a8702319e8c997"
+checksum = "b65682c938bfd9ddf55c2df72ec8efe899db84f946089fa1328d283cb40d6f9e"
 dependencies = [
  "clap",
  "clap_derive",
@@ -8064,9 +8105,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-dispatcher"
-version = "0.19.0"
+version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63ff755787df394bd500c6af5cd78c4906f23ca866ca3f40bfa7b307be712def"
+checksum = "5842a729b6d030032e11a5e3844809aeb6fd3bf5017d9697dfc8bfc759f737c4"
 dependencies = [
  "futures-core",
  "futures-util",
@@ -8074,9 +8115,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-schema"
-version = "0.19.0"
+version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07d2d08ea3742722874eb0d06a0cd93e30acd344d9bc6d4c856d0a58299f4ba8"
+checksum = "cd5a5489d942c12e3afc166c6a1046cabcbb8ef6a4f84007fca6088fe859585d"
 dependencies = [
  "glob",
 ]

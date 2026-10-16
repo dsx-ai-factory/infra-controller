@@ -189,6 +189,9 @@ type SkuUpdateInput struct {
 	DeviceType           *string
 	AssociatedMachineIds []string
 	Created              *time.Time
+	// ExpectedUpdated requires a matching stored `Updated` when non-nil.
+	// Nil leaves writes unconditional; no-field calls ignore this condition.
+	ExpectedUpdated *time.Time
 }
 
 // SkuFilterInput input parameters for Filter method
@@ -228,8 +231,9 @@ func (s *SKU) BeforeCreateTable(ctx context.Context, query *bun.CreateTableQuery
 type SkuDAO interface {
 	// Create used to create new row
 	Create(ctx context.Context, tx *db.Tx, input SkuCreateInput) (*SKU, error)
-	// Update writes supplied fields and stamps `Updated`. With no fields it returns
-	// the stored row without writing.
+	// Update writes supplied fields and stamps `Updated`, checking `ExpectedUpdated`
+	// when set. A missing row or version mismatch returns `db.ErrDoesNotExist`.
+	// With no fields it returns the stored row without writing or checking the token.
 	Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput) (*SKU, error)
 	// Delete used to delete row
 	Delete(ctx context.Context, tx *db.Tx, skuID string) error
@@ -353,8 +357,9 @@ func (ssd SkuSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SkuFilterInpu
 	return skus, pager.Total, nil
 }
 
-// Update writes supplied fields and stamps `Updated`. With no fields it returns
-// the stored row without writing.
+// Update writes supplied fields and stamps `Updated`, checking `ExpectedUpdated`
+// when set. A missing row or version mismatch returns `db.ErrDoesNotExist`.
+// With no fields it returns the stored row without writing or checking the token.
 func (ssd SkuSQLDAO) Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput) (_ *SKU, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.Update")
@@ -400,9 +405,20 @@ func (ssd SkuSQLDAO) Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput
 
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
-		_, err := db.GetIDB(tx, ssd.dbSession).NewUpdate().Model(sk).Column(updatedFields...).Where("sk.id = ?", input.SkuID).Exec(ctx)
+		query := db.GetIDB(tx, ssd.dbSession).NewUpdate().Model(sk).Column(updatedFields...).Where("sk.id = ?", input.SkuID)
+		if input.ExpectedUpdated != nil {
+			query = query.Where("sk.updated = ?", *input.ExpectedUpdated)
+		}
+		result, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if count == 0 {
+			return nil, db.ErrDoesNotExist
 		}
 	}
 

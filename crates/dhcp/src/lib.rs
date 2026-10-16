@@ -66,6 +66,7 @@ mod metrics;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock_api_server;
 mod tls;
+mod tracing_setup;
 
 static CONFIG: Lazy<RwLock<CarbideDhcpContext>> =
     Lazy::new(|| RwLock::new(CarbideDhcpContext::default()));

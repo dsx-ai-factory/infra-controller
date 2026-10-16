@@ -24,6 +24,7 @@ use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use librms::{RackManagerError, RmsApi};
 use tokio::sync::{Mutex, oneshot};
 
+/// Pauses one simulated power read or write after signaling that it arrived.
 #[derive(Debug)]
 struct BlockedPowerStateCall {
     entered: oneshot::Sender<()>,
@@ -33,6 +34,7 @@ struct BlockedPowerStateCall {
 /// RMS simulation for testing, similar to RedfishSim
 pub struct RmsSim {
     blocked_power_state_call: Arc<Mutex<Option<BlockedPowerStateCall>>>,
+    blocked_power_state_read: Arc<Mutex<Option<BlockedPowerStateCall>>>,
     batch_get_node_device_info_delay: Arc<Mutex<Duration>>,
     fail_create_nodes: Arc<AtomicBool>,
     fail_inventory_get: Arc<AtomicBool>,
@@ -105,6 +107,7 @@ impl Default for RmsSim {
     fn default() -> Self {
         Self {
             blocked_power_state_call: Arc::new(Mutex::new(None)),
+            blocked_power_state_read: Arc::new(Mutex::new(None)),
             batch_get_node_device_info_delay: Arc::new(Mutex::new(Duration::ZERO)),
             fail_create_nodes: Arc::new(AtomicBool::new(false)),
             fail_inventory_get: Arc::new(AtomicBool::new(false)),
@@ -175,6 +178,7 @@ impl RmsSim {
     fn build_mock_client(&self) -> MockRmsClient {
         MockRmsClient {
             blocked_power_state_call: self.blocked_power_state_call.clone(),
+            blocked_power_state_read: self.blocked_power_state_read.clone(),
             batch_get_node_device_info_delay: self.batch_get_node_device_info_delay.clone(),
             fail_create_nodes: self.fail_create_nodes.clone(),
             fail_inventory_get: self.fail_inventory_get.clone(),
@@ -415,6 +419,25 @@ impl RmsSim {
             .push_back(response);
     }
 
+    /// Pauses the next `batch_get_power_state` call after recording its request
+    /// and reserving its queued response. Cancellation discards that response.
+    /// The receiver reports arrival; sending or dropping the sender releases it.
+    /// After arrival, a closed sender means the read was dropped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another power read gate is still waiting for a request.
+    pub async fn block_next_batch_get_power_state(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, arrival) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let mut blocked = self.blocked_power_state_read.lock().await;
+        assert!(blocked.is_none(), "a power read gate is already armed");
+        *blocked = Some(BlockedPowerStateCall { entered, resume });
+        (arrival, release)
+    }
+
     /// Snapshot recorded `BatchGetPowerState` requests in call order.
     pub async fn submitted_batch_get_power_state_requests(
         &self,
@@ -631,6 +654,7 @@ impl RmsSim {
 #[derive(Debug, Clone)]
 pub struct MockRmsClient {
     blocked_power_state_call: Arc<Mutex<Option<BlockedPowerStateCall>>>,
+    blocked_power_state_read: Arc<Mutex<Option<BlockedPowerStateCall>>>,
     batch_get_node_device_info_delay: Arc<Mutex<Duration>>,
     fail_create_nodes: Arc<AtomicBool>,
     fail_inventory_get: Arc<AtomicBool>,
@@ -846,11 +870,23 @@ impl RmsApi for MockRmsClient {
             .await
             .push(cmd);
 
-        self.queued_batch_get_power_state_responses
+        // Reserve this call's response before waiting, so another call cannot
+        // consume it while this read is paused or after it is cancelled.
+        let response = self
+            .queued_batch_get_power_state_responses
             .lock()
             .await
             .pop_front()
-            .unwrap_or(Ok(rms::BatchGetPowerStateResponse::default()))
+            .unwrap_or(Ok(rms::BatchGetPowerStateResponse::default()));
+        let blocked = self.blocked_power_state_read.lock().await.take();
+        if let Some(blocked) = blocked {
+            // Arrival notification is optional; dropping the release sender
+            // also releases the read instead of failing the simulated RPC.
+            blocked.entered.send(()).ok();
+            blocked.resume.await.ok();
+        }
+
+        response
     }
 
     async fn sequence_rack_power(

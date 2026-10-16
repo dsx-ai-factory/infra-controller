@@ -844,6 +844,7 @@ func TestNVLinkLogicalPartitionHandler_GetAll(t *testing.T) {
 
 	ts3 := testBuildTenantSiteAssociation(t, dbSession, tnOrg4, tn2.ID, site3.ID, tnu4.ID)
 	assert.NotNil(t, ts3)
+	testInstanceSiteBuildAllocation(t, dbSession, site3, tn2, "test-allocation-3", ipu)
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}

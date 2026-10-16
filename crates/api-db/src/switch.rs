@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use carbide_uuid::nvlink::NvLinkDomainId;
@@ -512,6 +512,29 @@ pub async fn clear_ready_switch_reprovisioning_requested(
         .await
         .map_err(|e| DatabaseError::new("clear_ready_switch_reprovisioning_requested", e))?;
     Ok(cleared.is_some())
+}
+
+/// `find_maintenance_requests` reads pending requests for the supplied switches.
+/// Missing switches and `NULL` requests are omitted; requests that cannot be
+/// decoded return an error. Read related controller state in the same snapshot
+/// to keep the state and requests consistent.
+pub async fn find_maintenance_requests(
+    txn: impl DbReader<'_>,
+    ids: &[SwitchId],
+) -> DatabaseResult<HashMap<SwitchId, SwitchMaintenanceRequest>> {
+    let requests = sqlx::query_as::<_, (SwitchId, sqlx::types::Json<SwitchMaintenanceRequest>)>(
+        "SELECT id, switch_maintenance_requested FROM switches
+         WHERE id = ANY($1) AND switch_maintenance_requested IS NOT NULL",
+    )
+    .bind(ids)
+    .fetch_all(txn)
+    .await
+    .map_err(|error| DatabaseError::new("switch::find_maintenance_requests", error))?;
+
+    Ok(requests
+        .into_iter()
+        .map(|(id, request)| (id, request.0))
+        .collect())
 }
 
 pub async fn set_switch_maintenance_requested(

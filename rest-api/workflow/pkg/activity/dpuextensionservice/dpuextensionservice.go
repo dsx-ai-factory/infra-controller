@@ -412,21 +412,12 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 		}
 		tenant := &tenants[0]
 
-		tenantSites, _, tenantSiteErr := cdbm.NewTenantSiteDAO(mde.dbSession).GetAll(
-			ctx,
-			transaction,
-			cdbm.TenantSiteFilterInput{
-				TenantIDs: []uuid.UUID{tenant.ID},
-				SiteIDs:   []uuid.UUID{site.ID},
-			},
-			cdbp.PageInput{Limit: cutil.GetPtr(1)},
-			nil,
-		)
-		if tenantSiteErr != nil {
-			return nil, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to validate Tenant access to Site, DB error: %w", tenantSiteErr)
+		hasSiteAccess, accessErr := cdbm.TenantHasSiteAccess(ctx, transaction, mde.dbSession, tenant, site.ID)
+		if accessErr != nil {
+			return nil, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to validate Tenant access to Site, DB error: %w", accessErr)
 		}
 
-		if len(tenantSites) == 0 {
+		if !hasSiteAccess {
 			logger.Warn().Msgf("unable to create DPU Extension Service found on Site: Tenant for org %s does not have access to Site", org)
 
 			return nil, nil

@@ -644,11 +644,10 @@ func (gsh GetSiteHandler) Handle(c echo.Context) error {
 		}
 		if tsCount > 0 {
 			ts = &tss[0]
-			isAssociated = true
 		}
 
 		if !isAssociated {
-			enabled, serr := common.TenantHasTargetedInstanceCreation(ctx, nil, gsh.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &st.ID})
+			enabled, serr := common.TenantHasSiteAccess(ctx, nil, gsh.dbSession, tenant, st.ID)
 			if serr != nil {
 				logger.Error().Err(serr).Msg("error resolving TargetedInstanceCreation for Tenant/Site")
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability for Site, DB error", nil)
@@ -869,18 +868,16 @@ func (gash GetAllSiteHandler) Handle(c echo.Context) error {
 		}
 
 		for _, ts := range tss {
-			siteIDs.Add(ts.SiteID)
 			tsMap[ts.SiteID] = &ts
 		}
 
-		// Add the Sites where the Tenant has effective TargetedInstanceCreation,
-		// honoring per-site TenantSite.config overrides.
-		privilegedSiteIDs, serr := common.GetPrivilegedAccessSiteIDsForTenant(ctx, nil, gash.dbSession, tenant)
+		// Add the Sites the Tenant can access through an Allocation or effective TargetedInstanceCreation.
+		accessibleSiteIDs, serr := getTenantSiteIDs(ctx, gash.dbSession, tenant)
 		if serr != nil {
 			logger.Error().Err(serr).Msg("error resolving privileged Site access for Tenant")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability, DB error", nil)
 		}
-		for _, siteID := range privilegedSiteIDs {
+		for _, siteID := range accessibleSiteIDs {
 			siteIDs.Add(siteID)
 		}
 	}
@@ -1178,25 +1175,12 @@ func (gssdh GetSiteStatusDetailsHandler) Handle(c echo.Context) error {
 	}
 
 	if !isAssociated && tenant != nil {
-		tsDAO := cdbm.NewTenantSiteDAO(gssdh.dbSession)
-
-		_, tsCount, serr := tsDAO.GetAll(ctx, nil, cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{tenant.ID}, SiteIDs: []uuid.UUID{stID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		enabled, serr := common.TenantHasSiteAccess(ctx, nil, gssdh.dbSession, tenant, st.ID)
 		if serr != nil {
-			logger.Error().Err(serr).Msg("error retrieving TenantSite from DB")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant/Site association to determine access to Site, DB error", nil)
+			logger.Error().Err(serr).Msg("error resolving TargetedInstanceCreation for Tenant/Site")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability for Site, DB error", nil)
 		}
-		if tsCount > 0 {
-			isAssociated = true
-		}
-
-		if !isAssociated {
-			enabled, serr := common.TenantHasTargetedInstanceCreation(ctx, nil, gssdh.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &st.ID})
-			if serr != nil {
-				logger.Error().Err(serr).Msg("error resolving TargetedInstanceCreation for Tenant/Site")
-				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability for Site, DB error", nil)
-			}
-			isAssociated = enabled
-		}
+		isAssociated = enabled
 	}
 
 	if !isAssociated {

@@ -50,7 +50,7 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) AS t ON true
 
--- (2) Read the linked BMC interface as JSON
+-- (2) Read the BMC interface selected by topology as JSON
 LEFT JOIN LATERAL (
     SELECT jsonb_strip_nulls(
         COALESCE(t.bmc_info, '{}'::jsonb) ||
@@ -70,6 +70,10 @@ LEFT JOIN LATERAL (
     ) AS bmc_addr ON true
     WHERE bmc_i.machine_id = m.id
       AND bmc_i.interface_type = 'Bmc'
+      AND (
+          t.bmc_info->>'machine_interface_id' IS NULL
+          OR bmc_i.id::text = t.bmc_info->>'machine_interface_id'
+      )
     ORDER BY bmc_i.created ASC
     LIMIT 1
 ) AS bmc ON true

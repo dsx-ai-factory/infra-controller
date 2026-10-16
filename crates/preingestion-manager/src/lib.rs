@@ -3321,7 +3321,11 @@ impl PreingestionManagerStatic {
         if !is_bfb_artifact(&artifact.local_path) {
             match &artifact.source {
                 ResolvedFirmwareArtifactSource::Remote { url, sha256 } => {
-                    match self.downloader.available(&artifact.local_path, url, sha256) {
+                    match self
+                        .downloader
+                        .available(&artifact.local_path, url, sha256)
+                        .await
+                    {
                         ArtifactStatus::Available => {}
                         ArtifactStatus::Downloading => {
                             tracing::debug!(

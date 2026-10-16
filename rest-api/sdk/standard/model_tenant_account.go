@@ -33,8 +33,8 @@ type TenantAccount struct {
 	TenantId NullableString `json:"tenantId,omitempty"`
 	// Org of the Tenant
 	TenantOrg NullableString `json:"tenantOrg,omitempty"`
-	// Contact user for the Tenant
-	TenantContact *User `json:"tenantContact,omitempty"`
+	// Contact user for the Tenant.
+	TenantContact NullableUser `json:"tenantContact,omitempty"`
 	// Number of Allocations for the Tenant Account
 	AllocationCount *int32 `json:"allocationCount,omitempty"`
 	// Status of the Tenant Account
@@ -250,36 +250,47 @@ func (o *TenantAccount) UnsetTenantOrg() {
 	o.TenantOrg.Unset()
 }
 
-// GetTenantContact returns the TenantContact field value if set, zero value otherwise.
+// GetTenantContact returns the TenantContact field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *TenantAccount) GetTenantContact() User {
-	if o == nil || IsNil(o.TenantContact) {
+	if o == nil || IsNil(o.TenantContact.Get()) {
 		var ret User
 		return ret
 	}
-	return *o.TenantContact
+	return *o.TenantContact.Get()
 }
 
 // GetTenantContactOk returns a tuple with the TenantContact field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *TenantAccount) GetTenantContactOk() (*User, bool) {
-	if o == nil || IsNil(o.TenantContact) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TenantContact, true
+	return o.TenantContact.Get(), o.TenantContact.IsSet()
 }
 
 // HasTenantContact returns a boolean if a field has been set.
 func (o *TenantAccount) HasTenantContact() bool {
-	if o != nil && !IsNil(o.TenantContact) {
+	if o != nil && o.TenantContact.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetTenantContact gets a reference to the given User and assigns it to the TenantContact field.
+// SetTenantContact gets a reference to the given NullableUser and assigns it to the TenantContact field.
 func (o *TenantAccount) SetTenantContact(v User) {
-	o.TenantContact = &v
+	o.TenantContact.Set(&v)
+}
+
+// SetTenantContactNil sets the value for TenantContact to be an explicit nil
+func (o *TenantAccount) SetTenantContactNil() {
+	o.TenantContact.Set(nil)
+}
+
+// UnsetTenantContact ensures that no value is present for TenantContact, not even an explicit nil
+func (o *TenantAccount) UnsetTenantContact() {
+	o.TenantContact.Unset()
 }
 
 // GetAllocationCount returns the AllocationCount field value if set, zero value otherwise.
@@ -531,8 +542,8 @@ func (o TenantAccount) ToMap() (map[string]interface{}, error) {
 	if o.TenantOrg.IsSet() {
 		toSerialize["tenantOrg"] = o.TenantOrg.Get()
 	}
-	if !IsNil(o.TenantContact) {
-		toSerialize["tenantContact"] = o.TenantContact
+	if o.TenantContact.IsSet() {
+		toSerialize["tenantContact"] = o.TenantContact.Get()
 	}
 	if !IsNil(o.AllocationCount) {
 		toSerialize["allocationCount"] = o.AllocationCount

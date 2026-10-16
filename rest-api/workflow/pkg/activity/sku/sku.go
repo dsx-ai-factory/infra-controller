@@ -161,6 +161,7 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 			}
 			sku := cdbm.SkuUpdateInput{
 				SkuID:                reported.ID,
+				ExpectedUpdated:      &cur.Updated,
 				Created:              created,
 				Description:          &reported.Description,
 				SchemaVersion:        &reported.SchemaVersion,
@@ -170,6 +171,10 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 			}
 			_, uerr := skuDAO.Update(ctx, nil, sku)
 			if uerr != nil {
+				if errors.Is(uerr, cdb.ErrDoesNotExist) {
+					// A concurrent write or deletion superseded the version we read.
+					continue
+				}
 				logger.Error().Err(uerr).Str("SkuID", reportedSku.Id).Msg("failed to update SKU in DB")
 			}
 		}

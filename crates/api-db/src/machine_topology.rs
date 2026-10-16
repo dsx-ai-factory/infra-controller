@@ -343,13 +343,16 @@ pub async fn find_machine_bmc_pairs(
         .map_err(|e| DatabaseError::new("machine_topologies find_machine_bmc_pairs", e))
 }
 
-/// Find the BMC IP address for each of the given machine IDs.
+/// `find_machine_bmc_pairs_by_machine_id` returns the BMC address for each
+/// requested machine.
 ///
-/// Returns a list of (machine_id, bmc_ip) pairs from BMC interface links.
+/// A topology `bmc_info.machine_interface_id` selects the interface. Without
+/// an ID, the lookup selects an attached BMC interface. If the named interface
+/// no longer exists, is not attached to this machine, or is not a BMC
+/// interface, that machine is omitted instead of using a different BMC.
 ///
-/// The BMC IP is returned as `Option<String>`:
-/// - `Some(ip)` if the topology has a valid BMC IP
-/// - `None` if the linked interface exists but has no BMC IP (caller can log/handle this case)
+/// A returned address is `Some(ip)` when the selected interface has an address,
+/// or `None` when the selected interface exists without one.
 pub async fn find_machine_bmc_pairs_by_machine_id<ID>(
     txn: &mut PgConnection,
     machine_ids: Vec<ID>,
@@ -362,9 +365,14 @@ where
     let query = r#"
         SELECT DISTINCT ON (mi.machine_id) mi.machine_id, host(mia.address)
         FROM machine_interfaces mi
+        LEFT JOIN machine_topologies mt ON mt.machine_id = mi.machine_id
         LEFT JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
         WHERE mi.interface_type = 'Bmc'
             AND mi.machine_id = ANY($1)
+            AND (
+                mt.topology #>> '{bmc_info,machine_interface_id}' IS NULL
+                OR mi.id::text = mt.topology #>> '{bmc_info,machine_interface_id}'
+            )
         ORDER BY mi.machine_id, family(mia.address), mia.address
     "#;
     let results: Vec<(MachineId, Option<String>)> = sqlx::query_as(query)

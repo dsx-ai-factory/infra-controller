@@ -202,15 +202,24 @@ listener, always mounted, answering for every simulated rack with its own
 NVLink domain and partition table. NICo reaches a rack's controller at a
 switch NVOS address on port 9370, so in controller mode `mat-k8s-controller`
 creates a `mat-nvos-<id>` Service per switch that publishes the switch's NVOS
-lease as `externalIPs`, exactly as the BMC Services publish BMC IPs. The NVOS
-network (the `[networks.*]` prefix that `underlayDhcpRelayAddress` belongs to)
-must meet the same [Requirements](#requirements) as the BMC network. Override
-mode has no per-switch routing, so NICo cannot reach the mock there.
+lease as `externalIPs`, exactly as the BMC Services publish BMC IPs. The same
+Service forwards port 443 to the switch's NVUE REST API mock, which answers
+with the switch's NVOS credentials as NICo stores them, rotated password
+included, so hardware health's NVUE collector and the BMC proxy's switch
+targets work against a simulated rack. The NVOS network (the `[networks.*]`
+prefix that `underlayDhcpRelayAddress` belongs to) must meet the same
+[Requirements](#requirements) as the BMC network. Override mode has no
+per-switch routing, so NICo cannot reach either mock there.
 
-Because NICo dials by address, it verifies the mock's certificate against
-`nvlink_config.nmx_c_tls_authority`. Every pod's certificate carries
+Because NICo dials by address, it verifies the NMX-C mock's certificate
+against `nvlink_config.nmx_c_tls_authority`. Every pod's certificate carries
 `certificate.extraDnsNames`, `mat-mock.nvidia.com` by default, for that
-purpose. `helm-prereqs/values/nico-core-simulation.yaml` ships the matching
+purpose. That setting does not cover the NVUE mock on port 443: hardware
+health's NVUE REST collector accepts any server certificate unless its
+`[tls.switch]` profile is configured, in which case it verifies the mock
+against that profile's CA bundle and `tls_server_name`, and the BMC proxy
+accepts any upstream certificate. The simulation profile
+`helm-prereqs/values/nico-core-simulation.yaml` ships the matching
 `[nvlink_config]` block; refer to
 [Machine-a-tron NMX-C Mock](../../../docs/development/machine-a-tron-nmxc-mock.md)
 for what it serves and its limitations. The optional `[nmxc_mock]` section of
@@ -569,8 +578,9 @@ PersistentVolume.
 The chart creates one PersistentVolumeClaim for each configured `pods` entry
 that contains at least one machine group. It mounts the claim at
 `machineATron.persistDir`, which defaults to `/tmp/machine-a-tron-data`.
-Machine-a-tron stores simulated machine identity and installed operating-system
-state there. On a graceful pod restart it restores the devices and resumes them
+Machine-a-tron stores simulated machine identity, installed operating-system
+state, and the credentials each simulated BMC and switch NVOS currently accepts
+there. On a graceful pod restart it restores the devices and resumes them
 powered on. Without persistence, a restart creates new powered-off simulator
 state while Core may still consider the old machines assigned, preventing the
 simulated DPU agents from resuming their reports.

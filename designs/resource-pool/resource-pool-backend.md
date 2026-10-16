@@ -58,7 +58,7 @@ Existing composite database helpers cannot call the new service without creating
 
 Use `ResourcePoolBackend` as an explicit execution choice with Integrated and Remote variants. `ResourcePoolBackend` provides `allocate`, `allocate_exact`, and `release`; its Integrated variant forwards them to the existing SQL functions. Remote execution uses a provider client, initially gRPC. Standalone PostgreSQL and REST use the same execution contract because they commit independently of the entity transaction.
 
-[P02: library foundation](https://github.com/dsx-ai-factory/infra-controller/issues/7131) introduces the Integrated adapter and `ResourcePoolWithBackend<T>`, a borrowed association between a typed pool and its selected backend. It changes no production caller. The association does not resolve configuration or establish persisted authority; [P03](https://github.com/dsx-ai-factory/infra-controller/issues/7132) owns those responsibilities. [P04](https://github.com/dsx-ai-factory/infra-controller/issues/7133) supplies the provider's gRPC schema, generated bindings, and reusable checks. [P05](https://github.com/dsx-ai-factory/infra-controller/issues/7134) adds NICo's client adapter and conversions to its existing pool models.
+[P02: library foundation](https://github.com/dsx-ai-factory/infra-controller/issues/7131) introduces the Integrated adapter and `ResourcePoolWithBackend<T>`, a borrowed association between a typed pool and its selected backend. It changes no production caller. The association does not resolve configuration or establish persisted authority; [P03](https://github.com/dsx-ai-factory/infra-controller/issues/7132) owns those responsibilities. [P04](https://github.com/dsx-ai-factory/infra-controller/issues/7133) supplies the provider's gRPC schema, generated bindings, and reusable checks. [P05](https://github.com/dsx-ai-factory/infra-controller/issues/7134) adds NICo's client adapter; [the conversion library](https://github.com/dsx-ai-factory/infra-controller/issues/7634) connects provider values to its existing pool models.
 
 The operations have different execution contexts:
 
@@ -95,7 +95,7 @@ The binding contract distinguishes these identities:
 | --- | --- |
 | Site ID | Persisted identity shared by replicas of one deployment; not a pod name or process UUID |
 | Backend name | Operator-facing configuration reference |
-| Authority ID | Stable provider identity verified during connection establishment; independent of URL and credentials |
+| Authority ID | Stable provider identity checked against the saved binding; independent of URL and credentials |
 | Provider pool ID | Stable identity of the provider's pool within that authority |
 | Logical pool name | Existing NICo pool identity used by typed handles |
 | Binding identity | Immutable association of site, logical pool, authority, and provider pool; `binding_id` on the wire |
@@ -103,7 +103,7 @@ The binding contract distinguishes these identities:
 
 An omitted pool `backend` selects Integrated. An unknown reference is an error, never a fallback. A named Integrated backend still uses the caller's database transaction. An omitted `remote_pool` resolves to the logical pool name; an explicit alias only changes provider lookup. Empty names are invalid.
 
-Resolve an alias to a stable provider pool ID and persist that identity before allocation. Reconnects must verify the same authority and pool identity. An endpoint or credential update can retain a binding only if this check succeeds. Provider identity checks supplement authenticated TLS; a self-reported ID alone does not authenticate a service.
+Resolve an alias with `Describe`, compare the returned authority and pool with any saved binding, and persist that identity before allocation. P07 and P08 implement these caller checks before remote activation. Every later RPC uses the saved `PoolBinding`, including after a reconnect; the provider must reject an authority or pool it does not serve. The gRPC client does not issue an extra `Describe` behind each method call. An endpoint or credential update must preserve the saved authority and pool. Provider identity checks supplement authenticated TLS; a self-reported ID alone does not authenticate a service.
 
 Retain issuing authority, provider pool, and binding identity on every remote operation and allocation. Lookup and release use those records, even if configuration changes. Removal or redirection of a binding with unresolved operations, attached reservations, retained allocations, or unfinished cleanup is rejected.
 
@@ -144,7 +144,7 @@ The shared contract preserves these value domains and expansion rules:
 
 Wire values use a discriminated value kind, not an unsigned VNI field or a string that every consumer reparses differently. Prefix validation rejects malformed or noncanonical provider values before attachment. Transport encoding must round-trip every supported value without narrowing it.
 
-P05 converts accepted TOML declarations to these wire values. IPv4 and IPv6 address prefixes and delegated-prefix parents use their network address, preserving existing expansion. Prefix-range endpoints with host bits remain invalid. The [provider API README](../../crates/resource-pool-api/README.md#definitions-and-growth) gives a concrete normalization example.
+The [conversion library](https://github.com/dsx-ai-factory/infra-controller/issues/7634) converts accepted TOML declarations to these wire values. IPv4 and IPv6 address prefixes and delegated-prefix parents use their network address, preserving existing expansion. Prefix-range endpoints with host bits remain invalid. The [provider API README](../../crates/resource-pool-api/README.md#definitions-and-growth) gives a concrete normalization example.
 
 Selection is explicit:
 
@@ -283,7 +283,7 @@ A timeout leaves the allocation result unknown; it does not mean the pool is exh
 
 Do not fall back to Integrated when a remote authority is unavailable. Retry only the same immutable operation after an ambiguous outcome. Invalid requests, authentication failures, and capability mismatches require correction rather than blind allocation retries.
 
-[P05: bounded gRPC calls](https://github.com/dsx-ai-factory/infra-controller/issues/7134) owns verified TLS, credential refresh, connection reuse, whole-attempt deadlines including capacity waits, bounded foreground retries, and cancellation. [P07: recovery](https://github.com/dsx-ai-factory/infra-controller/issues/7136) owns bounded durable reconciliation and observable cleanup backlog. These deadlines bound individual work; they do not expire allocations or tombstones.
+[P05: bounded gRPC calls](https://github.com/dsx-ai-factory/infra-controller/issues/7134) owns verified TLS, credential refresh, connection reuse, bounded admission, whole-call deadlines, and cancellation. Each client method makes one attempt: excess calls return `Busy`, and admitted calls share one deadline for credential refresh, connecting, and the complete response. [P07: recovery](https://github.com/dsx-ai-factory/infra-controller/issues/7136) owns retries with the original saved identity, bounded reconciliation, and observable cleanup backlog. These deadlines bound individual work; they do not expire allocations or tombstones.
 
 ## Foreground Completion and Caller Recovery
 
@@ -322,7 +322,7 @@ VPC and subnet inventory reconstruction is not sufficient request recovery. Othe
 
 REST subnet creation also reserves an IPAM prefix before Core creation. The v2.5 P26 task must preserve that hold across an uncertain Core result. Release it only after Core terminally confirms no attached segment and cancellation, or after the attached segment completes normal deletion. Cloud rollback alone does not make the prefix available.
 
-The [REST workflow bounds](../../rest-api/common/pkg/util/workflow.go) at the source revision are 40 seconds for the activity, 45 seconds for workflow execution, and 50 seconds for the handler wait. Fit provider attempts, capacity waits, backoff, local attachment, and response handling inside the remaining activity budget. P05 and P13 must choose and test shorter per-attempt limits together; a provider timeout cannot consume the entire outer budget. Recovery does not keep a timed-out HTTP request alive or expose a new public pending allocation state. Existing REST Pending and Provisioning states retain their meanings.
+The [REST workflow bounds](../../rest-api/common/pkg/util/workflow.go) at the source revision are 40 seconds for the activity, 45 seconds for workflow execution, and 50 seconds for the handler wait. Fit provider attempts, any caller wait or backoff, local attachment, and response handling inside the remaining activity budget. P05 bounds one attempt to 10 seconds, including at most 5 seconds for connection setup, and returns `Busy` immediately when all 32 call slots are occupied. P07 and P13 must budget repeated attempts against the remaining activity time; a provider timeout cannot consume the entire outer budget. Recovery does not keep a timed-out HTTP request alive or expose a new public pending allocation state. Existing REST Pending and Provisioning states retain their meanings.
 
 ## VNI and Route Target Assignment
 

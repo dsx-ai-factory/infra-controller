@@ -1563,6 +1563,10 @@ func (s *managerTaskStore) ListNonTerminalTasksForRacks(
 	panic("managerTaskStore.ListNonTerminalTasksForRacks: not implemented")
 }
 
+func (s *managerTaskStore) ListPowerTasksForRack(_ context.Context, _ uuid.UUID) ([]taskdef.PowerTaskDetails, error) {
+	panic("managerTaskStore.ListPowerTasksForRack: not implemented")
+}
+
 func (s *managerTaskStore) LatestLeakageShutdownTaskStatuses(
 	_ context.Context,
 	_ []uuid.UUID,
