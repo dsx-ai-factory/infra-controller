@@ -253,7 +253,7 @@ fn select_identity(decoded: DecodedV6) -> Result<V6Discovery, V6DecodeError> {
     let api_bound_message = message_kind_for(message_type, has_ia_na).is_some();
 
     // Only IA_NA maps to the single-address NICo API contract. A companion
-    // IA_PD is handled separately by Kea with NoPrefixAvail; it must not
+    // IA_PD is refused separately by the hook with NoPrefixAvail; it must not
     // prevent the client from obtaining its address.
     if api_bound_message && (has_unsupported_ia || ia_na_count > 1 || ia_addrs.len() > 1) {
         return Err(V6DecodeError::UnsupportedMessage(message_type));
