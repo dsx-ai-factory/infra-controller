@@ -5,6 +5,7 @@ package bootstrap
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"encoding/pem"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -321,6 +323,179 @@ func TestBoostrapAPI_ReloadBootstrapCredentials(t *testing.T) {
 			assert.Equal(t, rotatedOTP, string(storedOTP))
 		})
 	}
+}
+
+func TestBoostrapAPI_DownloadAndStoreCreds(t *testing.T) {
+	const (
+		siteID     = "d2f4b0c6-6f1e-4a0e-9f5a-0b6a6f4c1e77"
+		rotatedOTP = "Zr2pW9xT4mLq8vB1nC6yD0eF3gH="
+		newerOTP   = "Kt7uY2iO5pA9sD4fG8hJ1kL6zXc="
+	)
+	tests := []struct {
+		name         string
+		overrideOTP  string
+		wantErr      string
+		wantAttempts uint64
+	}{
+		{
+			name:        "already applied override skips stale mounted OTP",
+			overrideOTP: rotatedOTP,
+		},
+		{
+			name:         "new override still attempts credential download",
+			overrideOTP:  newerOTP,
+			wantErr:      "missing protocol scheme",
+			wantAttempts: 1,
+		},
+	}
+	previousAccess := ManagerAccess
+	t.Cleanup(func() { ManagerAccess = previousAccess })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			temporalDir := t.TempDir()
+			otpPath := filepath.Join(temporalDir, bootstraptypes.TagOTP)
+			require.NoError(t, os.WriteFile(otpPath, []byte(testOTP), 0600))
+
+			bootstrap := bootstraptypes.NewBootstrapInstance()
+			activeConfig := bootstraptypes.SecretConfig{
+				UUID:     siteID,
+				OTP:      rotatedOTP,
+				CredsURL: "://invalid",
+				CACert:   "active-ca",
+			}
+			bootstrap.ReplaceConfig(activeConfig)
+			ManagerAccess = &Manager.ManagerAccess{
+				Conf: &Manager.ManagerConf{EB: &conftypes.Config{
+					RunningIn: conftypes.RunningInDocker,
+					Temporal: conftypes.TemporalConfig{
+						TemporalCertPath: temporalDir,
+					},
+				}},
+				Data: &Manager.ManagerData{
+					EB: &elektratypes.Elektra{
+						Managers: &managertypes.Managers{
+							Bootstrap: bootstrap,
+						},
+					},
+				},
+			}
+
+			err := (&BoostrapAPI{}).DownloadAndStoreCreds(context.Background(), []byte(tt.overrideOTP))
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+
+			assert.Equal(t, activeConfig, bootstrap.GetConfig())
+			assert.Equal(t, tt.wantAttempts, bootstrap.State.DownloadAttempted.Load())
+			assert.Zero(t, bootstrap.State.DownloadSucceeded.Load())
+			storedOTP, readErr := os.ReadFile(otpPath)
+			require.NoError(t, readErr)
+			assert.Equal(t, testOTP, string(storedOTP))
+		})
+	}
+
+	t.Run("caller cancellation stops stalled credential download", func(t *testing.T) {
+		requestStarted := make(chan struct{})
+		releaseRequest := make(chan struct{})
+		defer close(releaseRequest)
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			close(requestStarted)
+			<-releaseRequest
+		}))
+		t.Cleanup(server.Close)
+		caCert := string(pem.EncodeToMemory(&pem.Block{
+			Type:  "CERTIFICATE",
+			Bytes: server.Certificate().Raw,
+		}))
+
+		temporalDir := t.TempDir()
+		otpPath := filepath.Join(temporalDir, bootstraptypes.TagOTP)
+		require.NoError(t, os.WriteFile(otpPath, []byte(testOTP), 0600))
+
+		bootstrap := bootstraptypes.NewBootstrapInstance()
+		activeConfig := bootstraptypes.SecretConfig{
+			UUID:     siteID,
+			OTP:      rotatedOTP,
+			CredsURL: server.URL,
+			CACert:   caCert,
+		}
+		bootstrap.ReplaceConfig(activeConfig)
+		ManagerAccess = &Manager.ManagerAccess{
+			Conf: &Manager.ManagerConf{EB: &conftypes.Config{
+				RunningIn: conftypes.RunningInDocker,
+				Temporal: conftypes.TemporalConfig{
+					TemporalCertPath: temporalDir,
+				},
+			}},
+			Data: &Manager.ManagerData{
+				EB: &elektratypes.Elektra{
+					Managers: &managertypes.Managers{
+						Bootstrap: bootstrap,
+					},
+				},
+			},
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		downloadDone := make(chan error, 1)
+		go func() {
+			downloadDone <- (&BoostrapAPI{}).DownloadAndStoreCreds(ctx, []byte(newerOTP))
+		}()
+
+		select {
+		case <-requestStarted:
+		case <-time.After(5 * time.Second):
+			t.Fatal("credential request did not start")
+		}
+		cancel()
+		select {
+		case err := <-downloadDone:
+			require.ErrorIs(t, err, context.Canceled)
+		case <-time.After(time.Second):
+			t.Fatal("credential download did not stop after cancellation")
+		}
+		assert.Equal(t, activeConfig, bootstrap.GetConfig())
+		assert.Equal(t, uint64(1), bootstrap.State.DownloadAttempted.Load())
+		assert.Zero(t, bootstrap.State.DownloadSucceeded.Load())
+	})
+}
+
+func TestBootstrap_RunCredentialUpdate(t *testing.T) {
+	initialConfig := bootstraptypes.SecretConfig{UUID: "initial-site", OTP: testOTP}
+	updatedConfig := bootstraptypes.SecretConfig{UUID: "initial-site", OTP: "updated-otp"}
+	bootstrap := bootstraptypes.NewBootstrapInstance()
+	bootstrap.ReplaceConfig(initialConfig)
+
+	updateStarted := make(chan struct{})
+	releaseUpdate := make(chan struct{})
+	updateDone := make(chan error, 1)
+	go func() {
+		updateDone <- bootstrap.RunCredentialUpdate(context.Background(), func(bootstraptypes.SecretConfig) (bootstraptypes.SecretConfig, error) {
+			close(updateStarted)
+			<-releaseUpdate
+			return updatedConfig, nil
+		})
+	}()
+	<-updateStarted
+
+	configRead := make(chan bootstraptypes.SecretConfig, 1)
+	go func() {
+		configRead <- bootstrap.GetConfig()
+	}()
+	select {
+	case config := <-configRead:
+		assert.Equal(t, initialConfig, config)
+	case <-time.After(time.Second):
+		close(releaseUpdate)
+		t.Fatal("GetConfig blocked during credential update")
+	}
+
+	close(releaseUpdate)
+	require.NoError(t, <-updateDone)
+	assert.Equal(t, updatedConfig, bootstrap.GetConfig())
 }
 
 func TestBoostrapAPI_CheckRegistration(t *testing.T) {

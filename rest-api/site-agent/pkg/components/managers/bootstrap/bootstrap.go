@@ -53,6 +53,9 @@ const (
 	// Kubernetes projects Secret keys through the ..data symlink and atomically
 	// replaces that symlink on updates, so watching only the key paths misses changes.
 	kubernetesSecretDataSymlink = "..data"
+	// credentialUpdateTimeout leaves 30 seconds of the rotation activity timeout
+	// for certificate readback and expiry publication.
+	credentialUpdateTimeout = credentialRotationActivityTimeout - 30*time.Second
 )
 
 func resolveBootstrapRevision(dir string) (string, error) {
@@ -235,8 +238,10 @@ func isBootstrapSecretUpdate(event fsnotify.Event, files map[string]bool, dir st
 
 func (bs *BoostrapAPI) reloadBootstrapCredentials(dir string) error {
 	bootstrap := ManagerAccess.Data.EB.Managers.Bootstrap
+	ctx, cancel := context.WithTimeout(context.Background(), credentialUpdateTimeout)
+	defer cancel()
 	var publishedConfig bootstraptypes.SecretConfig
-	err := bootstrap.RunCredentialUpdate(func(currentConfig bootstraptypes.SecretConfig) (bootstraptypes.SecretConfig, error) {
+	err := bootstrap.RunCredentialUpdate(ctx, func(currentConfig bootstraptypes.SecretConfig) (bootstraptypes.SecretConfig, error) {
 		candidate, _, err := readBootstrapConfig(dir)
 		if err != nil {
 			return currentConfig, err
@@ -247,7 +252,8 @@ func (bs *BoostrapAPI) reloadBootstrapCredentials(dir string) error {
 			return currentConfig, fmt.Errorf("bootstrap Secret Site ID changed from %s to %s", currentSiteID, candidate.UUID)
 		}
 
-		if err := bs.downloadAndStoreCreds(candidate, true); err != nil {
+		err = bs.downloadAndStoreCreds(ctx, candidate, true)
+		if err != nil {
 			return currentConfig, err
 		}
 
@@ -324,7 +330,7 @@ func (bs *BoostrapAPI) Start() {
 
 	log.Info().Msgf("Bootstrap: trigger workflow")
 	// DownloadAndStoreCreds logs its own failures, and the Site Agent keeps its existing certificates.
-	_ = bs.DownloadAndStoreCreds(nil)
+	_ = bs.DownloadAndStoreCreds(context.Background(), nil)
 	go bs.watchBootstrapFile()
 }
 
@@ -350,15 +356,25 @@ func (bs *BoostrapAPI) CheckRegistration() error {
 }
 
 // DownloadAndStoreCreds - Download and Store Temporal credentials
-func (bs *BoostrapAPI) DownloadAndStoreCreds(otpOverride []byte) error {
+func (bs *BoostrapAPI) DownloadAndStoreCreds(ctx context.Context, otpOverride []byte) error {
+	ctx, cancel := context.WithTimeout(ctx, credentialUpdateTimeout)
+	defer cancel()
 	bootstrap := ManagerAccess.Data.EB.Managers.Bootstrap
-	return bootstrap.RunCredentialUpdate(func(candidate bootstraptypes.SecretConfig) (bootstraptypes.SecretConfig, error) {
+	return bootstrap.RunCredentialUpdate(ctx, func(candidate bootstraptypes.SecretConfig) (bootstraptypes.SecretConfig, error) {
 		if otpOverride != nil {
-			candidate.OTP = string(otpOverride)
+			overrideOTP := string(otpOverride)
+			if candidate.OTP == overrideOTP {
+				// Override rotations publish the OTP only after credential storage
+				// succeeds; the projected OTP file may still be stale.
+				log.Info().Msg("Bootstrap: Credentials already applied for OTP override")
+				return candidate, nil
+			}
+			candidate.OTP = overrideOTP
 			log.Info().Msg("Bootstrap: Using OTP override")
 		}
 
-		if err := bs.downloadAndStoreCreds(candidate, otpOverride == nil); err != nil {
+		err := bs.downloadAndStoreCreds(ctx, candidate, otpOverride == nil)
+		if err != nil {
 			return candidate, err
 		}
 
@@ -369,7 +385,7 @@ func (bs *BoostrapAPI) DownloadAndStoreCreds(otpOverride []byte) error {
 	})
 }
 
-func (bs *BoostrapAPI) downloadAndStoreCreds(config bootstraptypes.SecretConfig, skipIfStored bool) error {
+func (bs *BoostrapAPI) downloadAndStoreCreds(ctx context.Context, config bootstraptypes.SecretConfig, skipIfStored bool) error {
 	otpFilePath := ManagerAccess.Conf.EB.Temporal.GetTemporalCertOTPFullPath()
 	otpBytes, err := os.ReadFile(otpFilePath)
 	if err != nil {
@@ -394,7 +410,6 @@ func (bs *BoostrapAPI) downloadAndStoreCreds(config bootstraptypes.SecretConfig,
 	// Keep track of events
 	bw.DownloadAttempted.Inc()
 
-	ctx := context.Background()
 	ctx, span := cotel.StartSpan(ctx, "Bootstrap")
 	defer span.End()
 

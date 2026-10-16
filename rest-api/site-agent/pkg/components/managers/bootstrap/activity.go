@@ -79,7 +79,7 @@ func (o *OTPHandler) ReceiveAndSaveOTP(ctx context.Context, base64EncodedEncrypt
 	logger.Info().Str("Secret", bootstrapSecretName).Msg("Successfully updated OTP in bootstrap secret")
 
 	// Proceed to download and store credentials, passing the decrypted OTP
-	err = ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(decryptedOtp)
+	err = ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(ctx, decryptedOtp)
 	if err != nil {
 		logger.Error().Err(err).Msg("Failed to download and store credentials")
 		return err
