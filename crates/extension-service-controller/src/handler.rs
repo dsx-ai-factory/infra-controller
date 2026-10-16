@@ -21,7 +21,8 @@ use carbide_dpf::DpfError;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_uuid::extension_service::ExtensionServiceId;
 use model::extension_service::{
-    DpfHelmChartServiceData, ExtensionService, ExtensionServiceLifecycleState,
+    DpfHelmChartServiceData, ExtensionService, ExtensionServiceDeploymentType,
+    ExtensionServiceLifecycleState,
 };
 use state_controller::state_handler::{
     StateHandler, StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -63,8 +64,12 @@ impl StateHandler for ExtensionServiceStateHandler {
                         .to_string(),
                 ))
             }
-            ExtensionServiceLifecycleState::Creating => reconcile_create(*service_id, ctx).await,
-            ExtensionServiceLifecycleState::Updating => reconcile_update(*service_id, ctx).await,
+            ExtensionServiceLifecycleState::Creating => {
+                reconcile_create(*service_id, state.deployment_type, ctx).await
+            }
+            ExtensionServiceLifecycleState::Updating => {
+                reconcile_update(*service_id, state.deployment_type, ctx).await
+            }
             ExtensionServiceLifecycleState::Deleting => reconcile_delete(*service_id, ctx).await,
             // Terminal and converged states have no work. In particular, a
             // periodic scan of a terminal Deleted row must be harmless.
@@ -75,10 +80,11 @@ impl StateHandler for ExtensionServiceStateHandler {
     }
 }
 
-/// Reads the durable V1 desired state, then creates the corresponding detached
+/// Reads the durable V1 desired state, then creates the corresponding
 /// DPUService. The desired-state connection is released before any DPF call.
 async fn reconcile_create(
     service_id: ExtensionServiceId,
+    deployment_type: ExtensionServiceDeploymentType,
     ctx: &mut StateHandlerContext<'_, ExtensionServiceStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ExtensionServiceLifecycleState>, StateHandlerError> {
     let version = {
@@ -96,7 +102,7 @@ async fn reconcile_create(
             ));
         }
     };
-    let service = project_dpu_service(service_id, carbide_dpf::NAMESPACE, &data);
+    let service = project_dpu_service(service_id, carbide_dpf::NAMESPACE, &data, deployment_type);
 
     let Some(dpf_sdk) = ctx.services.dpf_sdk.as_ref() else {
         return Ok(StateHandlerOutcome::wait(
@@ -104,13 +110,16 @@ async fn reconcile_create(
         ));
     };
 
+    // Publish committed intent after releasing the DB connection; baseline creation permits placement.
     match dpf_sdk.create_dpu_service(&service).await {
         Ok(created) => {
+            // Ready confirms CR acceptance and ownership, not workload health on each DPU.
             match verify_dpu_service_ownership(
                 &created,
                 service_id,
                 carbide_dpf::NAMESPACE,
                 service.service_id.as_deref(),
+                deployment_type,
             ) {
                 Ok(()) => Ok(StateHandlerOutcome::transition(
                     ExtensionServiceLifecycleState::Ready,
@@ -126,6 +135,7 @@ async fn reconcile_create(
             verify_existing_created_service(
                 service_id,
                 service.service_id.as_deref(),
+                deployment_type,
                 dpf_sdk.as_ref(),
             )
             .await
@@ -149,6 +159,7 @@ async fn reconcile_create(
 async fn verify_existing_created_service(
     service_id: ExtensionServiceId,
     expected_service_id: Option<&str>,
+    deployment_type: ExtensionServiceDeploymentType,
     dpf_sdk: &dyn DpfOperations,
 ) -> Result<StateHandlerOutcome<ExtensionServiceLifecycleState>, StateHandlerError> {
     let expected_name = model::extension_service::DpfHelmChartIdentity::from_service_id(service_id)
@@ -160,6 +171,7 @@ async fn verify_existing_created_service(
                 service_id,
                 carbide_dpf::NAMESPACE,
                 expected_service_id,
+                deployment_type,
             ) {
                 Ok(()) => Ok(StateHandlerOutcome::transition(
                     ExtensionServiceLifecycleState::Ready,
@@ -195,6 +207,7 @@ async fn verify_existing_created_service(
 /// to load the desired data is released before the DPF read or merge patch.
 async fn reconcile_update(
     service_id: ExtensionServiceId,
+    deployment_type: ExtensionServiceDeploymentType,
     ctx: &mut StateHandlerContext<'_, ExtensionServiceStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ExtensionServiceLifecycleState>, StateHandlerError> {
     let version = {
@@ -212,7 +225,7 @@ async fn reconcile_update(
             ));
         }
     };
-    let service = project_dpu_service(service_id, carbide_dpf::NAMESPACE, &data);
+    let service = project_dpu_service(service_id, carbide_dpf::NAMESPACE, &data, deployment_type);
 
     let Some(dpf_sdk) = ctx.services.dpf_sdk.as_ref() else {
         return Ok(StateHandlerOutcome::wait(
@@ -222,7 +235,7 @@ async fn reconcile_update(
 
     let existing = match dpf_sdk.get_dpu_service(&service.name).await {
         Ok(Some(existing)) => existing,
-        // A Ready service must already have a detached DPUService. Treat a
+        // A Ready service must already have a DPUService. Treat a
         // missing object as an ownership/lifecycle conflict rather than
         // recreating it from the update path.
         Ok(None) => {
@@ -252,6 +265,7 @@ async fn reconcile_update(
         service_id,
         carbide_dpf::NAMESPACE,
         service.service_id.as_deref(),
+        deployment_type,
     ) {
         return Ok(permanent_failure(
             service_id,
@@ -260,6 +274,7 @@ async fn reconcile_update(
         ));
     }
 
+    // Verify ownership and immutable placement before publishing mutable chart changes.
     match dpf_sdk
         .patch_dpu_service(
             &service.name,
@@ -267,6 +282,7 @@ async fn reconcile_update(
         )
         .await
     {
+        // Ready records patch acceptance; workload rollout continues asynchronously in DPF.
         Ok(()) => Ok(StateHandlerOutcome::transition(
             ExtensionServiceLifecycleState::Ready,
         )),

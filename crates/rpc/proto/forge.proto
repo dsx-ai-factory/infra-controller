@@ -9970,6 +9970,16 @@ enum DpuExtensionServiceType {
   DPF_HELM_CHART = 1;
 }
 
+// Immutable policy controlling when and where an extension service is deployed.
+enum DpuExtensionServiceDeploymentType {
+  option (carbide.codegen.v1.enum_derive) = "serde::Serialize";
+  option (carbide.codegen.v1.enum_derive) = "serde::Deserialize";
+  // Default: deploy through instance attachment.
+  DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_DEMAND_DRIVEN = 0;
+  // DPF Helm charts only: creation requests deployment to all DPUs managed by DPF.
+  DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_BASELINE = 1;
+}
+
 // Enumerates the lifecycle states of an extension service registration.
 //
 // This is distinct from DpuExtensionServiceDeploymentStatus, which describes
@@ -10047,13 +10057,19 @@ message DpuExtensionService {
   // independent from deployment status on individual instances.
   LifecycleStatus lifecycle_status = 11;
 
-  // Required primary/all-active/all policy for Helm; absent for Kubernetes Pod services.
+  // Required primary/all-active/all policy for demand-driven Helm; absent for
+  // baseline Helm and Kubernetes Pod services.
   optional DpuExtensionServiceDpuTarget dpu_target = 12;
 
   // Service-facing interface requirements in ordinal order. Empty means the
   // service has no service network. The current API supports at most one
   // requirement.
   repeated ServiceVpcInterfaceRequirement service_vpc_interfaces = 13;
+
+  // Baseline Helm services deploy to all DPUs managed by DPF at creation time.
+  // Demand-driven services deploy through instance attachment. This choice
+  // cannot change after creation.
+  DpuExtensionServiceDeploymentType deployment_type = 14;
 }
 
 // Address family required by a service-facing interface.
@@ -10091,14 +10107,22 @@ message CreateDpuExtensionServiceRequest {
   // metrics collection service that runs on the DPU.
   optional DpuExtensionServiceObservability observability = 8;
 
-  // Required for Helm: PRIMARY, ALL_ACTIVE, or ALL. Immutable; forbidden for Kubernetes Pod.
+  // Required for demand-driven Helm: PRIMARY, ALL_ACTIVE, or ALL. Immutable;
+  // forbidden for baseline Helm and Kubernetes Pod services.
   optional DpuExtensionServiceDpuTarget dpu_target = 9;
 
   // Service-facing interface requirements. Omitted or empty means no
   // service network. The current API accepts at most one requirement and only
-  // for a DPF Helm chart service. A nonempty declaration is accepted but remains
+  // for a demand-driven DPF Helm chart service. A nonempty declaration remains
   // in retryable Creating state until service VPC reconciliation is available.
   repeated ServiceVpcInterfaceRequirement service_vpc_interfaces = 10;
+
+  // Choose deployment at creation to all DPUs managed by DPF (BASELINE), or
+  // deployment through instance attachment (DEMAND_DRIVEN, the default).
+  // BASELINE is valid only for DPF Helm charts with no dpu_target or service VPC
+  // requirements; baseline services cannot be attached to instances. Unknown
+  // enum values are rejected. This choice cannot change after creation.
+  DpuExtensionServiceDeploymentType deployment_type = 11;
 }
 
 // Complete service-facing interface requirements supplied during an update.
@@ -10137,7 +10161,8 @@ message UpdateDpuExtensionServiceRequest {
   // API rejects a change while any active or terminating instance attachment
   // references the service. Without attachments, a change is eligible under
   // the existing service-type and lifecycle update rules. The current API
-  // accepts at most one requirement and only for a DPF Helm chart service.
+  // accepts at most one requirement and only for a demand-driven DPF Helm
+  // chart service.
   optional ServiceVpcInterfaceRequirements service_vpc_interfaces = 8;
 }
 
