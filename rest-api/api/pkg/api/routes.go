@@ -238,6 +238,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewGetAllVPCHandler(dbSession, tc, cfg),
 		},
 		{
+			Path:    apiPathPrefix + "/vpc/:vpcId/attachment",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllVPCAttachmentHandler(dbSession),
+		},
+		{
 			Path:    apiPathPrefix + "/vpc/:id",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetVPCHandler(dbSession, tc, cfg),

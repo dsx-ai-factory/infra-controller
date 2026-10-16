@@ -224,7 +224,7 @@ DeleteVpc Delete a VPC
 
 Delete a specific VPC by ID.
 
-Deletion requires the VPC's Site to be `Registered` and requires that no Subnets, VPC Prefixes, or Instances reference the VPC. Delete those dependent resources first.
+Deletion requires the VPC's Site to be `Registered` and requires that no Subnets, VPC Prefixes, or Instances reference the VPC. Instance checks include direct and prefix-derived Interface attachments owned by other Tenants. Delete those dependent resources first.
 
 First delete all VPC peerings involving this VPC. Wait until each peering's GET endpoint returns `404`; a peering in `Deleting` still prevents VPC deletion. REST returns `412` when Core reports that a peering remains.
 
@@ -573,6 +573,205 @@ func (a *VPCAPIService) GetAllVpcExecute(r ApiGetAllVpcRequest) ([]VPC, *http.Re
 			error: localVarHTTPResponse.Status,
 		}
 		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
+type ApiGetAllVpcAttachmentRequest struct {
+	ctx        context.Context
+	ApiService *VPCAPIService
+	org        string
+	vpcId      string
+	pageNumber *int32
+	pageSize   *int32
+	orderBy    *string
+}
+
+// Page number for pagination query
+func (r ApiGetAllVpcAttachmentRequest) PageNumber(pageNumber int32) ApiGetAllVpcAttachmentRequest {
+	r.pageNumber = &pageNumber
+	return r
+}
+
+// Page size for pagination query
+func (r ApiGetAllVpcAttachmentRequest) PageSize(pageSize int32) ApiGetAllVpcAttachmentRequest {
+	r.pageSize = &pageSize
+	return r
+}
+
+// Ordering for pagination query; defaults to &#x60;CREATED_ASC&#x60;
+func (r ApiGetAllVpcAttachmentRequest) OrderBy(orderBy string) ApiGetAllVpcAttachmentRequest {
+	r.orderBy = &orderBy
+	return r
+}
+
+func (r ApiGetAllVpcAttachmentRequest) Execute() ([]VpcAttachment, *http.Response, error) {
+	return r.ApiService.GetAllVpcAttachmentExecute(r)
+}
+
+/*
+GetAllVpcAttachment Retrieve VPC attachments
+
+Retrieve the current, non-deleted REST Interface rows that explicitly select this VPC, either directly through `vpcId` or through a `vpcPrefixId` whose parent is this VPC. The response reflects REST's persisted desired/current Interface state and status; it is not a Core visibility query.
+
+The caller's organization must own the requested VPC, and the user must have authorization role with `TENANT_ADMIN` suffix. The `crossTenantVpcAttachment` capability is not required. Results include attachments from Instances owned by other Tenants, but expose only opaque attachment, Instance, and consuming-Tenant identity plus device identity and Interface status. Visibility does not grant authority over a foreign Instance or its security policy.
+
+This endpoint does not expose Instance names, Machine or Controller IDs, operating systems, user data, metadata, labels, Network Security Group contents, IP addresses, MAC addresses, or requested IP addresses. Generic VPC and VPC Prefix list, get, and mutation endpoints remain scoped to resources owned by the caller's Tenant.
+
+Results are ordered by `created` ascending by default, with Interface `id` ascending as a stable tie-breaker. `orderBy` supports `status`, `created`, and `updated` in ascending or descending order; Interface `id` ascending remains the tie-breaker. An empty result is returned as `[]`.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Tenant organization
+	@param vpcId ID of the VPC whose attachments are listed
+	@return ApiGetAllVpcAttachmentRequest
+*/
+func (a *VPCAPIService) GetAllVpcAttachment(ctx context.Context, org string, vpcId string) ApiGetAllVpcAttachmentRequest {
+	return ApiGetAllVpcAttachmentRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+		vpcId:      vpcId,
+	}
+}
+
+// Execute executes the request
+//
+//	@return []VpcAttachment
+func (a *VPCAPIService) GetAllVpcAttachmentExecute(r ApiGetAllVpcAttachmentRequest) ([]VpcAttachment, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodGet
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue []VpcAttachment
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "VPCAPIService.GetAllVpcAttachment")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/vpc/{vpcId}/attachment"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"vpcId"+"}", url.PathEscape(parameterValueToString(r.vpcId, "vpcId")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+
+	if r.pageNumber != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
+	} else {
+		var defaultValue int32 = 1
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", defaultValue, "form", "")
+		r.pageNumber = &defaultValue
+	}
+	if r.pageSize != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageSize", r.pageSize, "form", "")
+	} else {
+		var defaultValue int32 = 20
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageSize", defaultValue, "form", "")
+		r.pageSize = &defaultValue
+	}
+	if r.orderBy != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", r.orderBy, "form", "")
+	} else {
+		var defaultValue string = "CREATED_ASC"
+		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", defaultValue, "form", "")
+		r.orderBy = &defaultValue
+	}
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

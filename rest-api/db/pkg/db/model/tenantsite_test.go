@@ -694,11 +694,38 @@ func TestTenantSiteSQLDAO_Update(t *testing.T) {
 
 		tssd := TenantSiteSQLDAO{dbSession: dbSession}
 		got, err := tssd.Update(ctx, nil, TenantSiteUpdateInput{
-			TenantSiteID: tsWithOverride.ID,
-			Config:       &TenantSiteConfig{},
+			TenantSiteID:    tsWithOverride.ID,
+			ClearConfigKeys: []string{TenantSiteConfigKeyTargetedInstanceCreation},
 		})
 		assert.NoError(t, err)
 		assert.Nil(t, got.Config.TargetedInstanceCreation)
+	})
+
+	t.Run("update and clear capabilities independently", func(t *testing.T) {
+		tsWithCapabilities := TestBuildTenantSite(t, dbSession, tn, TestBuildSite(t, dbSession, ip, "Test Site 3", ipu),
+			&TenantSiteConfig{
+				TargetedInstanceCreation: cutil.GetPtr(true),
+				CrossTenantVpcAttachment: cutil.GetPtr(true),
+			}, tnu)
+
+		tssd := TenantSiteSQLDAO{dbSession: dbSession}
+		got, err := tssd.Update(ctx, nil, TenantSiteUpdateInput{
+			TenantSiteID: tsWithCapabilities.ID,
+			Config: &TenantSiteConfig{
+				TargetedInstanceCreation: cutil.GetPtr(false),
+			},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, cutil.GetPtr(false), got.Config.TargetedInstanceCreation)
+		assert.Equal(t, cutil.GetPtr(true), got.Config.CrossTenantVpcAttachment)
+
+		got, err = tssd.Update(ctx, nil, TenantSiteUpdateInput{
+			TenantSiteID:    tsWithCapabilities.ID,
+			ClearConfigKeys: []string{TenantSiteConfigKeyCrossTenantVpcAttachment},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, cutil.GetPtr(false), got.Config.TargetedInstanceCreation)
+		assert.Nil(t, got.Config.CrossTenantVpcAttachment)
 	})
 
 }

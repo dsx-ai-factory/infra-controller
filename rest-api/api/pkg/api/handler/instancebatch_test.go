@@ -290,7 +290,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 	// Tenant 1
 	tnu1 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-2", tnOrg, tnOrgRoles)
 	tn1 := testInstanceBuildTenant(t, dbSession, "test-tenant-1", tnOrg, tnu1)
-	_ = common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn1.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu1)
+	tenantAccount := common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn1.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu1)
 
 	// Tenant-Site association
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn1.ID, st1.ID, tnu1.ID)
@@ -327,6 +327,15 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		mc := testBatchBuildMachineWithNVLinkDomain(t, dbSession, ip.ID, st1.ID, "nvlink-domain-vpc-selection")
 		testInstanceBuildMachineInstanceType(t, dbSession, mc, istVpcSelection)
+	}
+
+	istCrossTenantVpc := testInstanceBuildInstanceType(t, dbSession, ip, "test-instance-type-cross-tenant-vpc", st1, cdbm.InstanceStatusReady)
+	assert.NotNil(t, istCrossTenantVpc)
+	alcCrossTenantVpc := testInstanceSiteBuildAllocationContraints(t, dbSession, al1, cdbm.AllocationResourceTypeInstanceType, istCrossTenantVpc.ID, cdbm.AllocationConstraintTypeReserved, 2, ipu)
+	assert.NotNil(t, alcCrossTenantVpc)
+	for range 2 {
+		mc := testBatchBuildMachineWithNVLinkDomain(t, dbSession, ip.ID, st1.ID, "nvlink-domain-cross-tenant-vpc")
+		testInstanceBuildMachineInstanceType(t, dbSession, mc, istCrossTenantVpc)
 	}
 
 	// Create 15 machines for ist1 (all on same NVLink domain for topology optimization test)
@@ -442,6 +451,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 	tnu2 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg2, tnOrgRoles2)
 	tn2 := testInstanceBuildTenant(t, dbSession, "test-tenant-2", tnOrg2, tnu2)
 	vpcOtherTenant := testInstanceBuildVPC(t, dbSession, "test-vpc-other-tenant", ip, tn2, st1, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, cdbm.VpcStatusReady, tnu2)
+	foreignVpcFNN := testInstanceBuildVPC(t, dbSession, "test-foreign-vpc-fnn", ip, tn2, st1, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu2)
 	subnetOtherTenant := testInstanceBuildSubnet(t, dbSession, "test-subnet-other-tenant", tn2, vpcOtherTenant, cutil.GetPtr(uuid.New()), cdbm.SubnetStatusReady, tnu2)
 
 	// OS owned by different tenant (for OS ownership test)
@@ -555,6 +565,88 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 				respMsg:  "Tenant does not have capability to create Instances using Machine label selector",
 			},
 			wantErr: false,
+		},
+		{
+			name: "batch create rejects a foreign VPC attachment without the capability",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIBatchInstanceCreateRequest{
+					NamePrefix:      "test-batch-cross-tenant-denied",
+					Count:           2,
+					TenantID:        tn1.ID.String(),
+					InstanceTypeID:  istCrossTenantVpc.ID.String(),
+					VpcID:           vpcFNN.ID.String(),
+					SecondaryVpcIDs: []string{foreignVpcFNN.ID.String()},
+					IpxeScript:      cutil.GetPtr("test script"),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpcFNN.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcID:      cutil.GetPtr(foreignVpcFNN.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				reqOrg:   tnOrg,
+				reqUser:  tnu1,
+				respCode: http.StatusForbidden,
+				respMsg:  "Tenant does not have crossTenantVpcAttachment capability enabled",
+			},
+		},
+		{
+			name: "batch create permits a foreign VPC attachment with the capability",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIBatchInstanceCreateRequest{
+					NamePrefix:      "test-batch-cross-tenant-allowed",
+					Count:           2,
+					TenantID:        tn1.ID.String(),
+					InstanceTypeID:  istCrossTenantVpc.ID.String(),
+					VpcID:           vpcFNN.ID.String(),
+					SecondaryVpcIDs: []string{foreignVpcFNN.ID.String()},
+					IpxeScript:      cutil.GetPtr("test script"),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpcFNN.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcID:      cutil.GetPtr(foreignVpcFNN.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				prepareReq: func(t *testing.T, _ *model.APIBatchInstanceCreateRequest) {
+					_, err := cdbm.NewTenantAccountDAO(dbSession).Update(ctx, nil, cdbm.TenantAccountUpdateInput{
+						TenantAccountID: tenantAccount.ID,
+						Config: &cdbm.TenantAccountConfigUpdate{
+							CrossTenantVpcAttachment: cutil.GetPtr(true),
+						},
+					})
+					require.NoError(t, err)
+				},
+				reqOrg:   tnOrg,
+				reqUser:  tnu1,
+				respCode: http.StatusCreated,
+			},
+			expectedControllerVpcIDs: map[string]uuid.UUID{
+				vpcFNN.ID.String():        *vpcFNN.ControllerVpcID,
+				foreignVpcFNN.ID.String(): *foreignVpcFNN.ControllerVpcID,
+			},
 		},
 		{
 			name: "test batch instance create API endpoint preserves IPv6-only and dual-stack VPC selection intent",
