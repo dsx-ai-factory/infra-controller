@@ -90,6 +90,18 @@ async fn spdm_job_migration_restarts_legacy_polling(
         .execute(&pool)
         .await?;
     }
+    // Multiple devices on one machine must share a job, while another machine
+    // needs its own job so job-wide operations cannot affect both machines.
+    sqlx::raw_sql(
+        r#"INSERT INTO spdm_machine_devices_attestation
+               (machine_id, device_id, nonce, state, started_at)
+           SELECT machine_id, device_id, gen_random_uuid(), '"Passed"'::jsonb, now()
+           FROM (VALUES ('spdm-migration-0', 'GPU-1'),
+                        ('spdm-migration-0', 'GPU-2'),
+                        ('spdm-migration-1', 'GPU-1')) AS devices(machine_id, device_id)"#,
+    )
+    .execute(&pool)
+    .await?;
     let mut writer = pool.begin().await?;
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *writer)
@@ -131,6 +143,36 @@ async fn spdm_job_migration_restarts_legacy_polling(
         )
     })
     .await??;
+
+    // The primary key must enforce required job IDs after the backfill.
+    let jobs: Vec<(String, Vec<uuid::Uuid>)> = sqlx::query_as(
+        "SELECT machine_id, array_agg(job_id ORDER BY device_id)
+         FROM spdm_machine_devices_attestation GROUP BY machine_id ORDER BY machine_id",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(jobs.len(), 2);
+    assert_eq!(jobs[0].0, "spdm-migration-0");
+    assert_eq!(jobs[0].1.len(), 2);
+    assert_eq!(jobs[0].1[0], jobs[0].1[1]);
+    assert_eq!(jobs[1].0, "spdm-migration-1");
+    assert_eq!(jobs[1].1.len(), 1);
+    assert_ne!(jobs[0].1[0], jobs[1].1[0]);
+    for (_, job_ids) in &jobs {
+        assert!(job_ids.iter().all(|job_id| !job_id.is_nil()));
+    }
+    let error = sqlx::query(
+        r#"INSERT INTO spdm_machine_devices_attestation
+               (machine_id, device_id, nonce, state, started_at)
+           VALUES ('spdm-migration-0', 'GPU-3', gen_random_uuid(), '"Passed"'::jsonb, now())"#,
+    )
+    .execute(&pool)
+    .await
+    .expect_err("new rows must provide a job ID instead of receiving a default");
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("23502")
+    );
 
     // Check the complete JSON as well as deserialization into the current model.
     for (index, case) in cases.iter().enumerate() {

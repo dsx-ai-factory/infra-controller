@@ -1,7 +1,15 @@
--- Add migration script here
--- add a new column with default value
-ALTER TABLE spdm_machine_devices_attestation ADD COLUMN job_id uuid NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000';
+ALTER TABLE spdm_machine_devices_attestation ADD COLUMN job_id uuid;
 ALTER TABLE spdm_machine_devices_attestation ADD COLUMN evidence_collection_locked BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Each machine held one logical job before this migration, so backfill generate job ids
+UPDATE spdm_machine_devices_attestation AS a
+SET job_id = m.job_id
+FROM (
+    SELECT machine_id, gen_random_uuid() AS job_id
+    FROM spdm_machine_devices_attestation
+    GROUP BY machine_id
+) AS m
+WHERE a.machine_id = m.machine_id;
 
 ALTER TABLE spdm_machine_devices_attestation DROP CONSTRAINT spdm_machine_devices_attestation_pkey;
 ALTER TABLE spdm_machine_devices_attestation ADD PRIMARY KEY (machine_id, device_id, job_id);
