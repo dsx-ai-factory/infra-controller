@@ -1,4 +1,4 @@
-# Operation Rules
+# Operation Rules <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 User-defined operation rules configure power control and firmware operations. Each rule specifies a sequence of steps that determine
 component ordering, parallelism, verification, and retry behavior.

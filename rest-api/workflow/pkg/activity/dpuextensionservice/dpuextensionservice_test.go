@@ -8,11 +8,13 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
@@ -31,7 +33,6 @@ import (
 	"os"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"go.temporal.io/sdk/testsuite"
 )
 
@@ -64,24 +65,29 @@ func testDpuExtensionServiceInitDB(t *testing.T) *cdb.Session {
 }
 
 func testDpuExtensionServiceSetupSchema(t *testing.T, dbSession *cdb.Session) {
+	t.Helper()
+
 	// create Infrastructure Provider table
 	err := dbSession.DB.ResetModel(context.Background(), (*cdbm.InfrastructureProvider)(nil))
-	assert.Nil(t, err)
+	require.NoError(t, err)
 	// create Tenant table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Tenant)(nil))
-	assert.Nil(t, err)
+	require.NoError(t, err)
 	// create Site table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Site)(nil))
-	assert.Nil(t, err)
+	require.NoError(t, err)
 	// create User table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.User)(nil))
-	assert.Nil(t, err)
+	require.NoError(t, err)
+	// create TenantSite table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.TenantSite)(nil))
+	require.NoError(t, err)
 	// create DpuExtensionService table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.DpuExtensionService)(nil))
-	assert.Nil(t, err)
+	require.NoError(t, err)
 	// create StatusDetail table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.StatusDetail)(nil))
-	assert.Nil(t, err)
+	require.NoError(t, err)
 }
 
 func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) {
@@ -110,6 +116,14 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 	st5 := util.TestBuildSite(t, dbSession, ip, "test-site-5", cdbm.SiteStatusRegistered, nil, user)
 	st6 := util.TestBuildSite(t, dbSession, ip, "test-site-6", cdbm.SiteStatusRegistered, nil, user)
 	st7 := util.TestBuildSite(t, dbSession, ip, "test-site-7", cdbm.SiteStatusRegistered, nil, user)
+	st8 := util.TestBuildSite(t, dbSession, ip, "test-site-8", cdbm.SiteStatusRegistered, nil, user)
+	st9 := util.TestBuildSite(t, dbSession, ip, "test-site-9", cdbm.SiteStatusRegistered, nil, user)
+	st10 := util.TestBuildSite(t, dbSession, ip, "test-site-10", cdbm.SiteStatusRegistered, nil, user)
+	st11 := util.TestBuildSite(t, dbSession, ip, "test-site-11", cdbm.SiteStatusRegistered, nil, user)
+	util.TestBuildTenantSiteAssociation(t, dbSession, tenant.Org, tenant.ID, st8.ID, user.ID)
+	util.TestBuildTenantSiteAssociation(t, dbSession, tenant.Org, tenant.ID, st9.ID, user.ID)
+	util.TestBuildTenantSiteAssociation(t, dbSession, tenant.Org, tenant.ID, st10.ID, user.ID)
+	util.TestBuildTenantSiteAssociation(t, dbSession, tenant.Org, tenant.ID, st11.ID, user.ID)
 
 	// Create DPU Extension Services with different statuses
 	version1 := fmt.Sprintf("V1-T%d", time.Now().Unix()*1000000)
@@ -163,6 +177,49 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 	dpfUpdating := util.TestBuildDpuExtensionService(t, dbSession, "test-dpu-extension-service-dpf-updating", st6, tenant, cdbm.DpuExtensionServiceServiceTypeDpfHelmChart, cutil.GetPtr(version1), dpfVersionInfo, []string{version1}, cdbm.DpuExtensionServiceStatusReady, user)
 	dpfDeleted := util.TestBuildDpuExtensionService(t, dbSession, "test-dpu-extension-service-dpf-deleted", st6, tenant, cdbm.DpuExtensionServiceServiceTypeDpfHelmChart, cutil.GetPtr(version1), dpfVersionInfo, []string{version1}, cdbm.DpuExtensionServiceStatusReady, user)
 	dpfNoLifecycle := util.TestBuildDpuExtensionService(t, dbSession, "test-dpu-extension-service-dpf-no-lifecycle", st7, tenant, cdbm.DpuExtensionServiceServiceTypeDpfHelmChart, cutil.GetPtr(version1), dpfVersionInfo, []string{version1}, cdbm.DpuExtensionServiceStatusPending, user)
+
+	dpuExtensionServiceDAO := cdbm.NewDpuExtensionServiceDAO(dbSession)
+
+	recoveredServiceID := uuid.New()
+	recoveredDpfServiceID := uuid.New()
+	terminatingDpfServiceID := uuid.New()
+	terminatedDpfServiceID := uuid.New()
+	recoveredVersion := "V1-T1761856992377000"
+	recoveredDescription := "recovered from Site inventory"
+	staleDescription := "stale pre-deletion description"
+	recoveredVersionCreated := time.Now().UTC().Round(time.Microsecond)
+
+	deletedDpuExtensionService := util.TestBuildDpuExtensionService(
+		t,
+		dbSession,
+		"test-dpu-extension-service-deleted",
+		st9,
+		tenant,
+		cdbm.DpuExtensionServiceServiceTypeKubernetesPod,
+		cutil.GetPtr(version1),
+		&cdbm.DpuExtensionServiceVersionInfo{
+			Version:        version1,
+			Data:           "old-data",
+			HasCredentials: false,
+			Created:        recoveredVersionCreated,
+		},
+		[]string{version1},
+		cdbm.DpuExtensionServiceStatusDeleting,
+		user,
+	)
+	_, err := dpuExtensionServiceDAO.Update(ctx, nil, cdbm.DpuExtensionServiceUpdateInput{
+		DpuExtensionServiceID: deletedDpuExtensionService.ID,
+		Description:           &staleDescription,
+	})
+	require.NoError(t, err)
+	err = dpuExtensionServiceDAO.Delete(ctx, nil, deletedDpuExtensionService.ID)
+	require.NoError(t, err)
+	_, err = dbSession.DB.Exec(
+		"UPDATE dpu_extension_service SET deleted = ? WHERE id = ?",
+		time.Now().Add(-cutil.DefaultInventoryReceiptInterval*2),
+		deletedDpuExtensionService.ID,
+	)
+	require.NoError(t, err)
 
 	// Build DPU Extension Services for paged testing
 	pagedDpuExtensionServices := []*cdbm.DpuExtensionService{}
@@ -236,6 +293,7 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 		expectTimestampParseError   bool
 		expectLifecycleError        bool
 		wantErr                     bool
+		check                       func(t *testing.T)
 	}{
 		{
 			name: "test DPU Extension Service inventory processing error, non-existent Site",
@@ -477,6 +535,227 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 			wantErr:              false,
 		},
 		{
+			name: "test DPU Extension Service inventory auto-creates service found only on Site",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st8.ID,
+				dpuExtensionServiceInventory: &corev1.DpuExtensionServiceInventory{
+					DpuExtensionServices: []*corev1.DpuExtensionService{
+						{
+							ServiceId:            recoveredServiceID.String(),
+							ServiceType:          corev1.DpuExtensionServiceType_KUBERNETES_POD,
+							ServiceName:          "site-only-dpu-extension-service",
+							TenantOrganizationId: tenant.Org,
+							Description:          recoveredDescription,
+							LatestVersionInfo: &corev1.DpuExtensionServiceVersionInfo{
+								Version:       recoveredVersion,
+								Data:          "recovered-data",
+								Created:       recoveredVersionCreated.Format(DpuExtensionServiceTimeFormat),
+								HasCredential: true,
+							},
+							ActiveVersions: []string{recoveredVersion},
+						},
+					},
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				},
+			},
+			check: func(t *testing.T) {
+				t.Helper()
+
+				recovered, rerr := dpuExtensionServiceDAO.GetByID(ctx, nil, recoveredServiceID, nil)
+				require.NoError(t, rerr)
+
+				if !assert.NotNil(t, recovered) {
+					return
+				}
+
+				assert.Equal(t, "site-only-dpu-extension-service", recovered.Name)
+				assert.Equal(t, recoveredDescription, *recovered.Description)
+				assert.Equal(t, cdbm.DpuExtensionServiceServiceTypeKubernetesPod, recovered.ServiceType)
+				assert.Equal(t, st8.ID, recovered.SiteID)
+				assert.Equal(t, tenant.ID, recovered.TenantID)
+				assert.Equal(t, tenant.CreatedBy, recovered.CreatedBy)
+				assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, recovered.Status)
+				assert.Equal(t, recoveredVersion, *recovered.Version)
+				assert.Equal(t, "recovered-data", recovered.VersionInfo.Data)
+				assert.True(t, recovered.VersionInfo.HasCredentials)
+				assert.Equal(t, []string{recoveredVersion}, recovered.ActiveVersions)
+
+				statusDetails, total, rerr := cdbm.NewStatusDetailDAO(dbSession).GetAll(
+					ctx,
+					nil,
+					cdbm.StatusDetailFilterInput{EntityIDs: []string{recoveredServiceID.String()}},
+					cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+				)
+				require.NoError(t, rerr)
+				assert.Equal(t, 1, total)
+
+				if assert.Len(t, statusDetails, 1) {
+					assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, statusDetails[0].Status)
+					assert.Equal(t, dpuExtensionServiceRecoveredMessage, *statusDetails[0].Message)
+				}
+			},
+		},
+		{
+			name: "test DPF Helm chart inventory auto-creates service found only on Site",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st10.ID,
+				dpuExtensionServiceInventory: &corev1.DpuExtensionServiceInventory{
+					DpuExtensionServices: []*corev1.DpuExtensionService{
+						{
+							ServiceId:            recoveredDpfServiceID.String(),
+							ServiceType:          corev1.DpuExtensionServiceType_DPF_HELM_CHART,
+							ServiceName:          "site-only-dpf-extension-service",
+							TenantOrganizationId: tenant.Org,
+							DpuTarget:            cutil.GetPtr(corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL),
+							LatestVersionInfo: &corev1.DpuExtensionServiceVersionInfo{
+								Version: recoveredVersion,
+								Data:    "recovered-dpf-data",
+								Created: recoveredVersionCreated.Format(DpuExtensionServiceTimeFormat),
+							},
+							ActiveVersions:  []string{recoveredVersion},
+							LifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"ready"}`},
+						},
+					},
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				},
+			},
+			check: func(t *testing.T) {
+				t.Helper()
+
+				recovered, rerr := dpuExtensionServiceDAO.GetByID(ctx, nil, recoveredDpfServiceID, nil)
+				require.NoError(t, rerr)
+
+				if !assert.NotNil(t, recovered) {
+					return
+				}
+
+				assert.Equal(t, cdbm.DpuExtensionServiceServiceTypeDpfHelmChart, recovered.ServiceType)
+				require.NotNil(t, recovered.DpuTarget)
+				assert.Equal(t, cdbm.DpuExtensionServiceDpuTargetAll, *recovered.DpuTarget)
+				assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, recovered.Status)
+				assert.Equal(t, st10.ID, recovered.SiteID)
+				assert.Equal(t, tenant.ID, recovered.TenantID)
+				assert.Equal(t, recoveredVersion, *recovered.Version)
+			},
+		},
+		{
+			name: "test DPF Helm chart inventory skips terminal Site-only services",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st11.ID,
+				dpuExtensionServiceInventory: &corev1.DpuExtensionServiceInventory{
+					DpuExtensionServices: []*corev1.DpuExtensionService{
+						{
+							ServiceId:            terminatingDpfServiceID.String(),
+							ServiceType:          corev1.DpuExtensionServiceType_DPF_HELM_CHART,
+							ServiceName:          "terminating-site-only-dpf-service",
+							TenantOrganizationId: tenant.Org,
+							DpuTarget:            cutil.GetPtr(corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL),
+							LifecycleStatus:      &corev1.LifecycleStatus{State: `{"state":"deleting"}`},
+						},
+						{
+							ServiceId:            terminatedDpfServiceID.String(),
+							ServiceType:          corev1.DpuExtensionServiceType_DPF_HELM_CHART,
+							ServiceName:          "terminated-site-only-dpf-service",
+							TenantOrganizationId: tenant.Org,
+							DpuTarget:            cutil.GetPtr(corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL),
+							LifecycleStatus:      &corev1.LifecycleStatus{State: `{"state":"deleted"}`},
+						},
+					},
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				},
+			},
+			check: func(t *testing.T) {
+				t.Helper()
+
+				for _, serviceID := range []uuid.UUID{terminatingDpfServiceID, terminatedDpfServiceID} {
+					_, rerr := dpuExtensionServiceDAO.GetByID(ctx, nil, serviceID, nil)
+					assert.Equal(t, cdb.ErrDoesNotExist, rerr)
+				}
+			},
+		},
+		{
+			name: "test DPU Extension Service inventory restores soft-deleted service",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st9.ID,
+				dpuExtensionServiceInventory: &corev1.DpuExtensionServiceInventory{
+					DpuExtensionServices: []*corev1.DpuExtensionService{
+						{
+							ServiceId:            deletedDpuExtensionService.ID.String(),
+							ServiceType:          corev1.DpuExtensionServiceType_KUBERNETES_POD,
+							ServiceName:          deletedDpuExtensionService.Name,
+							TenantOrganizationId: tenant.Org,
+							Description:          recoveredDescription,
+							LatestVersionInfo: &corev1.DpuExtensionServiceVersionInfo{
+								Version:       recoveredVersion,
+								Data:          "restored-data",
+								Created:       recoveredVersionCreated.Format(DpuExtensionServiceTimeFormat),
+								HasCredential: false,
+							},
+							ActiveVersions: []string{version1, recoveredVersion},
+						},
+					},
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				},
+			},
+			check: func(t *testing.T) {
+				t.Helper()
+
+				restored, rerr := dpuExtensionServiceDAO.GetByID(ctx, nil, deletedDpuExtensionService.ID, nil)
+				require.NoError(t, rerr)
+
+				if !assert.NotNil(t, restored) {
+					return
+				}
+
+				assert.Nil(t, restored.Deleted)
+				assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, restored.Status)
+				assert.False(t, restored.IsMissingOnSite)
+				require.NotNil(t, restored.Description)
+				assert.Equal(t, recoveredDescription, *restored.Description)
+				assert.Equal(t, recoveredVersion, *restored.Version)
+				assert.Equal(t, "restored-data", restored.VersionInfo.Data)
+				assert.Equal(t, []string{version1, recoveredVersion}, restored.ActiveVersions)
+
+				statusDetails, total, rerr := cdbm.NewStatusDetailDAO(dbSession).GetAll(
+					ctx,
+					nil,
+					cdbm.StatusDetailFilterInput{EntityIDs: []string{restored.ID.String()}},
+					cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+				)
+				require.NoError(t, rerr)
+				assert.Equal(t, 1, total)
+
+				if assert.Len(t, statusDetails, 1) {
+					assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, statusDetails[0].Status)
+					assert.Equal(t, dpuExtensionServiceRecoveredMessage, *statusDetails[0].Message)
+				}
+			},
+		},
+		{
 			name: "test DPU Extension Service inventory processing with failed status",
 			fields: fields{
 				dbSession:      dbSession,
@@ -549,15 +828,14 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 
 	// Update dpuExtensionService5 to Deleting status and mark it as missing from inventory
 	// to test the deletion path
-	dpuExtensionServiceDAO := cdbm.NewDpuExtensionServiceDAO(dbSession)
-	_, err := dpuExtensionServiceDAO.Update(ctx, nil, cdbm.DpuExtensionServiceUpdateInput{
+	_, err = dpuExtensionServiceDAO.Update(ctx, nil, cdbm.DpuExtensionServiceUpdateInput{
 		DpuExtensionServiceID: dpuExtensionService5.ID,
 		Status:                cutil.GetPtr(cdbm.DpuExtensionServiceStatusDeleting),
 	})
 	assert.NoError(t, err)
 
 	// Set updated timestamp to be older than the stale inventory threshold so it can be deleted
-	_, err = dbSession.DB.Exec("UPDATE dpu_extension_service SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*2), dpuExtensionService5.ID.String())
+	_, err = dbSession.DB.Exec("UPDATE dpu_extension_service SET updated = ? WHERE id = ?", time.Now().Add(-cutil.DefaultInventoryReceiptInterval*2), dpuExtensionService5.ID.String())
 	assert.NoError(t, err)
 
 	for _, tt := range tests {
@@ -628,6 +906,310 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 			for _, dpuExtService := range tt.deletedDpuExtensionServices {
 				_, err = dpuExtensionServiceDAO.GetByID(ctx, nil, dpuExtService.ID, nil)
 				assert.Equal(t, cdb.ErrDoesNotExist, err)
+			}
+
+			if tt.check != nil {
+				tt.check(t)
+			}
+		})
+	}
+}
+
+//nolint:contextcheck,funlen,maintidx,paralleltest,thelper // DB-backed table cases share schema and builder context.
+func TestManageDpuExtensionService_CreateOrUpdateDpuExtensionServiceFromSite(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testDpuExtensionServiceInitDB(t)
+
+	defer dbSession.Close()
+
+	type recoveryState struct {
+		manager                ManageDpuExtensionService
+		site                   *cdbm.Site
+		tenant                 *cdbm.Tenant
+		tenantSite             *cdbm.TenantSite
+		user                   *cdbm.User
+		controllerService      *corev1.DpuExtensionService
+		dpuExtensionServiceDAO cdbm.DpuExtensionServiceDAO
+		persistedServiceID     uuid.UUID
+	}
+
+	assertRemainsSoftDeleted := func(t *testing.T, state *recoveryState, _ *cdbm.DpuExtensionService) {
+		t.Helper()
+
+		services, _, err := state.dpuExtensionServiceDAO.GetAll(
+			ctx,
+			nil,
+			cdbm.DpuExtensionServiceFilterInput{
+				DpuExtensionServiceIDs: []uuid.UUID{state.persistedServiceID},
+				IncludeDeleted:         true,
+			},
+			cdbp.PageInput{},
+			nil,
+		)
+		require.NoError(t, err)
+
+		if assert.Len(t, services, 1) {
+			assert.NotNil(t, services[0].Deleted)
+		}
+	}
+
+	tests := []struct {
+		name    string
+		setup   func(t *testing.T, state *recoveryState)
+		wantNil bool
+		check   func(t *testing.T, state *recoveryState, got *cdbm.DpuExtensionService)
+	}{
+		{
+			name: "selects another recovered suffix when candidate name is also used",
+			setup: func(t *testing.T, state *recoveryState) {
+				util.TestBuildDpuExtensionService(
+					t,
+					dbSession,
+					state.controllerService.GetServiceName(),
+					state.site,
+					state.tenant,
+					cdbm.DpuExtensionServiceServiceTypeKubernetesPod,
+					nil,
+					nil,
+					[]string{},
+					cdbm.DpuExtensionServiceStatusReady,
+					state.user,
+				)
+				util.TestBuildDpuExtensionService(
+					t,
+					dbSession,
+					fmt.Sprintf(
+						"%s-recovered-%s",
+						state.controllerService.GetServiceName(),
+						state.controllerService.GetServiceId()[:8],
+					),
+					state.site,
+					state.tenant,
+					cdbm.DpuExtensionServiceServiceTypeKubernetesPod,
+					nil,
+					nil,
+					[]string{},
+					cdbm.DpuExtensionServiceStatusReady,
+					state.user,
+				)
+			},
+			check: func(t *testing.T, state *recoveryState, got *cdbm.DpuExtensionService) {
+				if !assert.NotNil(t, got) {
+					return
+				}
+
+				expectedName := fmt.Sprintf(
+					"%s-recovered-%s-2",
+					state.controllerService.GetServiceName(),
+					state.controllerService.GetServiceId()[:8],
+				)
+				assert.Equal(t, expectedName, got.Name)
+			},
+		},
+		{
+			name: "truncates recovered name to API length limit",
+			setup: func(t *testing.T, state *recoveryState) {
+				state.controllerService.ServiceName = strings.Repeat("a", 256)
+				util.TestBuildDpuExtensionService(
+					t,
+					dbSession,
+					state.controllerService.GetServiceName(),
+					state.site,
+					state.tenant,
+					cdbm.DpuExtensionServiceServiceTypeKubernetesPod,
+					nil,
+					nil,
+					[]string{},
+					cdbm.DpuExtensionServiceStatusReady,
+					state.user,
+				)
+			},
+			check: func(t *testing.T, state *recoveryState, got *cdbm.DpuExtensionService) {
+				if !assert.NotNil(t, got) {
+					return
+				}
+
+				assert.Len(t, []rune(got.Name), 256)
+				assert.True(t, strings.HasSuffix(got.Name, "-recovered-"+state.controllerService.GetServiceId()[:8]))
+			},
+		},
+		{
+			name: "defers restore after a recent soft delete",
+			setup: func(t *testing.T, state *recoveryState) {
+				deleted := util.TestBuildDpuExtensionService(
+					t,
+					dbSession,
+					state.controllerService.GetServiceName(),
+					state.site,
+					state.tenant,
+					cdbm.DpuExtensionServiceServiceTypeKubernetesPod,
+					nil,
+					nil,
+					[]string{},
+					cdbm.DpuExtensionServiceStatusDeleting,
+					state.user,
+				)
+				state.controllerService.ServiceId = deleted.ID.String()
+				state.persistedServiceID = deleted.ID
+				err := state.dpuExtensionServiceDAO.Delete(ctx, nil, deleted.ID)
+				require.NoError(t, err)
+			},
+			wantNil: true,
+			check:   assertRemainsSoftDeleted,
+		},
+		{
+			name: "renames restored service when its old name was reused",
+			setup: func(t *testing.T, state *recoveryState) {
+				deleted := util.TestBuildDpuExtensionService(
+					t,
+					dbSession,
+					state.controllerService.GetServiceName(),
+					state.site,
+					state.tenant,
+					cdbm.DpuExtensionServiceServiceTypeKubernetesPod,
+					nil,
+					nil,
+					[]string{},
+					cdbm.DpuExtensionServiceStatusDeleting,
+					state.user,
+				)
+				state.controllerService.ServiceId = deleted.ID.String()
+				state.persistedServiceID = deleted.ID
+				oldDescription := "description that Site has cleared"
+				_, err := state.dpuExtensionServiceDAO.Update(ctx, nil, cdbm.DpuExtensionServiceUpdateInput{
+					DpuExtensionServiceID: deleted.ID,
+					Description:           &oldDescription,
+				})
+				require.NoError(t, err)
+				err = state.dpuExtensionServiceDAO.Delete(ctx, nil, deleted.ID)
+				require.NoError(t, err)
+				_, err = dbSession.DB.Exec(
+					"UPDATE dpu_extension_service SET deleted = ? WHERE id = ?",
+					time.Now().Add(-cutil.DefaultInventoryReceiptInterval*2),
+					deleted.ID,
+				)
+				require.NoError(t, err)
+
+				util.TestBuildDpuExtensionService(
+					t,
+					dbSession,
+					state.controllerService.GetServiceName(),
+					state.site,
+					state.tenant,
+					cdbm.DpuExtensionServiceServiceTypeKubernetesPod,
+					nil,
+					nil,
+					[]string{},
+					cdbm.DpuExtensionServiceStatusReady,
+					state.user,
+				)
+			},
+			check: func(t *testing.T, state *recoveryState, got *cdbm.DpuExtensionService) {
+				if !assert.NotNil(t, got) {
+					return
+				}
+
+				assert.Nil(t, got.Deleted)
+				assert.Nil(t, got.Description)
+				assert.Equal(
+					t,
+					fmt.Sprintf("%s-recovered-%s", state.controllerService.GetServiceName(), state.controllerService.GetServiceId()[:8]),
+					got.Name,
+				)
+			},
+		},
+		{
+			name: "does not restore service owned by a different tenant",
+			setup: func(t *testing.T, state *recoveryState) {
+				otherTenant := util.TestBuildTenant(t, dbSession, "other-tenant", "other-org", nil, state.user)
+				deleted := util.TestBuildDpuExtensionService(
+					t,
+					dbSession,
+					state.controllerService.GetServiceName(),
+					state.site,
+					otherTenant,
+					cdbm.DpuExtensionServiceServiceTypeKubernetesPod,
+					nil,
+					nil,
+					[]string{},
+					cdbm.DpuExtensionServiceStatusDeleting,
+					state.user,
+				)
+				state.controllerService.ServiceId = deleted.ID.String()
+				state.persistedServiceID = deleted.ID
+				err := state.dpuExtensionServiceDAO.Delete(ctx, nil, deleted.ID)
+				require.NoError(t, err)
+				_, err = dbSession.DB.Exec(
+					"UPDATE dpu_extension_service SET deleted = ? WHERE id = ?",
+					time.Now().Add(-cutil.DefaultInventoryReceiptInterval*2),
+					deleted.ID,
+				)
+				require.NoError(t, err)
+			},
+			wantNil: true,
+			check:   assertRemainsSoftDeleted,
+		},
+		{
+			name: "skips service when tenant organization is unknown",
+			setup: func(_ *testing.T, state *recoveryState) {
+				state.controllerService.TenantOrganizationId = "unknown-org"
+			},
+			wantNil: true,
+		},
+		{
+			name: "skips service when tenant does not have Site access",
+			setup: func(t *testing.T, state *recoveryState) {
+				err := cdbm.NewTenantSiteDAO(dbSession).Delete(ctx, nil, state.tenantSite.ID)
+				require.NoError(t, err)
+			},
+			wantNil: true,
+		},
+		{
+			name: "skips service with invalid ID",
+			setup: func(_ *testing.T, state *recoveryState) {
+				state.controllerService.ServiceId = "invalid"
+			},
+			wantNil: true,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			testDpuExtensionServiceSetupSchema(t, dbSession)
+
+			ipOrg := "test-provider-org"
+			ipUser := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{ipOrg}, []string{"FORGE_PROVIDER_ADMIN"})
+			ip := util.TestBuildInfrastructureProvider(t, dbSession, "test-provider", ipOrg, ipUser)
+			user := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{"test-org"}, []string{"ADMIN"})
+			tenant := util.TestBuildTenant(t, dbSession, "test-tenant", "test-org", nil, user)
+			site := util.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, nil, user)
+			tenantSite := util.TestBuildTenantSiteAssociation(t, dbSession, tenant.Org, tenant.ID, site.ID, user.ID)
+
+			serviceID := uuid.New()
+			state := &recoveryState{
+				manager: ManageDpuExtensionService{
+					dbSession: dbSession,
+				},
+				site:                   site,
+				tenant:                 tenant,
+				tenantSite:             tenantSite,
+				user:                   user,
+				dpuExtensionServiceDAO: cdbm.NewDpuExtensionServiceDAO(dbSession),
+				controllerService: &corev1.DpuExtensionService{
+					ServiceId:            serviceID.String(),
+					ServiceType:          corev1.DpuExtensionServiceType_KUBERNETES_POD,
+					ServiceName:          "site-only-service",
+					TenantOrganizationId: tenant.Org,
+				},
+			}
+
+			testCase.setup(t, state)
+
+			got := state.manager.createOrUpdateDpuExtensionServiceFromSite(ctx, state.site, state.controllerService)
+			assert.Equal(t, testCase.wantNil, got == nil)
+
+			if testCase.check != nil {
+				testCase.check(t, state, got)
 			}
 		})
 	}

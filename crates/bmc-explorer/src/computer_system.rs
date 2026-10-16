@@ -38,6 +38,7 @@ use nv_redfish::schema::computer_system::SerialConsoleProtocol;
 use nv_redfish::{Bmc, ResourceProvidesStatus};
 use regex::Regex;
 
+use crate::processors::ExploredProcessor;
 use crate::{
     Config as ExploreConfig, Error, ErrorClass, ExploredChassisCollection, compare_boot_options, hw,
 };
@@ -48,6 +49,11 @@ lazy_static::lazy_static! {
 }
 
 pub(crate) struct Config<'a, B: Bmc> {
+    pub(crate) need_bios: bool,
+    pub(crate) need_boot_options: bool,
+    pub(crate) need_ethernet_interfaces: bool,
+    pub(crate) need_secure_boot: bool,
+    pub(crate) need_processors: bool,
     pub(crate) need_oem_nvidia_bluefield: bool,
     // Temporary workaround for BlueField DPU BMCs that intermittently return
     // HTTP 500 for the BIOS resource while the DPU is in NIC mode.
@@ -63,10 +69,11 @@ pub(crate) struct Config<'a, B: Bmc> {
 pub(crate) struct ExploredComputerSystem<B: Bmc> {
     pub(crate) system: ComputerSystem<B>,
     pub(crate) bios: Option<Bios<B>>,
-    pub(crate) boot_options: Vec<BootOption<B>>,
+    pub(crate) boot_options: Option<Vec<BootOption<B>>>,
     ethernet_interfaces: Vec<EthernetInterface<B>>,
     oem_nvidia_bluefield: Option<NvidiaComputerSystem<B>>,
     secure_boot: Option<SecureBoot<B>>,
+    processors: Option<Vec<ExploredProcessor<B>>>,
 }
 
 impl<B: Bmc> ExploredComputerSystem<B> {
@@ -74,24 +81,42 @@ impl<B: Bmc> ExploredComputerSystem<B> {
         system: ComputerSystem<B>,
         config: &Config<'_, B>,
     ) -> Result<Self, Error<B>> {
-        let boot_options = if let Some(collection) = system
-            .boot_options()
-            .await
-            .map_err(Error::nv_redfish("boot options"))?
-        {
-            collection
-                .members()
-                .await
-                .map_err(Error::nv_redfish("boot options members"))?
+        let processors = if config.need_processors {
+            Some(ExploredProcessor::explore(&system).await)
         } else {
-            vec![]
+            None
+        };
+        let boot_options = if config.need_boot_options {
+            Some(
+                match system
+                    .boot_options()
+                    .await
+                    .map_err(Error::nv_redfish("boot options"))?
+                {
+                    Some(collection) => collection
+                        .members()
+                        .await
+                        .map_err(Error::nv_redfish("boot options members"))?,
+                    None => Vec::new(),
+                },
+            )
+        } else {
+            None
         };
 
-        let bios = Self::fetch_bios(&system, config).await?;
+        let bios = if config.need_bios {
+            Self::fetch_bios(&system, config).await?
+        } else {
+            None
+        };
 
-        let ethernet_interfaces = Self::fetch_eth_interfaces(&system, config)
-            .await
-            .map_err(Error::nv_redfish("system ethernet interfaces"))?;
+        let ethernet_interfaces = if config.need_ethernet_interfaces {
+            Self::fetch_eth_interfaces(&system, config)
+                .await
+                .map_err(Error::nv_redfish("system ethernet interfaces"))?
+        } else {
+            Vec::new()
+        };
 
         let oem_nvidia_bluefield = if config.need_oem_nvidia_bluefield {
             system
@@ -102,10 +127,14 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             None
         };
 
-        let secure_boot = system
-            .secure_boot()
-            .await
-            .map_err(Error::nv_redfish("secure boot"))?;
+        let secure_boot = if config.need_secure_boot {
+            system
+                .secure_boot()
+                .await
+                .map_err(Error::nv_redfish("secure boot"))?
+        } else {
+            None
+        };
 
         Ok(Self {
             system,
@@ -113,6 +142,7 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             boot_options,
             ethernet_interfaces,
             oem_nvidia_bluefield,
+            processors,
             secure_boot,
         })
     }
@@ -196,20 +226,78 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             }
         }
     }
-    pub(crate) fn to_model(
+    /// Converts collected system inventory, using supplied chassis and PCIe data when available.
+    pub(super) fn to_model(
         &self,
         hw_type: Option<hw::HwType>,
-        chassis: &ExploredChassisCollection<B>,
+        chassis: Option<&ExploredChassisCollection<B>>,
         pcie_devices: &[PcieDevice<B>],
     ) -> Result<ModelComputerSystem, Error<B>> {
-        let hw_id = self.system.hardware_id();
+        let system_model = {
+            let hw_id = self.system.hardware_id();
+            let power_state = self
+                .system
+                .power_state()
+                .and_then(|state| match state {
+                    PowerState::On => Some(ModelPowerState::On),
+                    PowerState::Off => Some(ModelPowerState::Off),
+                    PowerState::PoweringOn => Some(ModelPowerState::PoweringOn),
+                    PowerState::PoweringOff => Some(ModelPowerState::PoweringOff),
+                    PowerState::Paused => Some(ModelPowerState::Paused),
+                    PowerState::Hibernating => Some(ModelPowerState::Hibernating),
+                    PowerState::Sleeping => Some(ModelPowerState::Sleeping),
+                    PowerState::UnsupportedValue => None,
+                })
+                .unwrap_or_default();
+            let serial_console_ssh_port = self.system
+            .raw()
+            .serial_console
+            .as_ref()
+            .and_then(|console| console.ssh.as_ref())
+            .map(enabled_serial_console_ssh_port)
+            .transpose()
+            .unwrap_or_else(|invalid_port| {
+                tracing::warn!(system_id = %self.system.raw().id, serial_console_ssh_port = invalid_port,
+                    "Ignoring invalid SSH serial-console port reported by Redfish");
+                None
+            })
+            .flatten();
+
+            ModelComputerSystem {
+                id: self.system.raw().id.clone(),
+                manufacturer: hw_id.manufacturer.map(|value| value.to_string()),
+                model: hw_id.model.map(|value| value.to_string()),
+                serial_number: hw_id
+                    .serial_number
+                    .map(|value| value.into_inner().trim().to_string()),
+                sku: self.system.sku().map(|value| value.to_string()),
+                power_state,
+                bios_version: self
+                    .system
+                    .raw()
+                    .bios_version
+                    .clone()
+                    .flatten()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+                serial_console_ssh_port,
+                ..Default::default()
+            }
+        };
         let is_dpu = hw_type == Some(hw::HwType::Bluefield);
         let ethernet_interfaces = self.ethernet_interfaces(hw_type)?;
 
         let mut base_mac = None;
         let mut nic_mode = None;
-        let mut serial_number = hw_id.serial_number.map(|v| v.into_inner());
-        if is_dpu {
+        let mut serial_number = if chassis.is_some() {
+            self.system
+                .hardware_id()
+                .serial_number
+                .map(|value| value.into_inner())
+        } else {
+            system_model.serial_number.as_deref()
+        };
+        if is_dpu && let Some(chassis) = chassis {
             // This part processes dpu case and do two things such as
             // 1. update system serial_number in case it is empty using chassis serial_number
             // 2. format serial_number data using the same rules as in fetch_chassis()
@@ -248,24 +336,26 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             }
         }
 
-        let boot_order = self.system.boot_order().map(|order| ModelBootOrder {
-            boot_order: order
-                .iter()
-                .filter_map(|boot_ref| {
-                    self.boot_options
-                        .iter()
-                        .find(|opt| opt.boot_reference() == *boot_ref)
-                        .map(|opt| ModelBootOption {
-                            id: opt.raw().id.clone(),
-                            display_name: opt
-                                .display_name()
-                                .map(|v| v.to_string())
-                                .unwrap_or("".into()),
-                            uefi_device_path: opt.uefi_device_path().map(|v| v.to_string()),
-                            boot_option_enabled: opt.enabled(),
-                        })
-                })
-                .collect(),
+        let boot_order = self.boot_options.as_ref().and_then(|boot_options| {
+            self.system.boot_order().map(|order| ModelBootOrder {
+                boot_order: order
+                    .iter()
+                    .filter_map(|boot_ref| {
+                        boot_options
+                            .iter()
+                            .find(|opt| opt.boot_reference() == *boot_ref)
+                            .map(|opt| ModelBootOption {
+                                id: opt.raw().id.clone(),
+                                display_name: opt
+                                    .display_name()
+                                    .map(|v| v.to_string())
+                                    .unwrap_or("".into()),
+                                uefi_device_path: opt.uefi_device_path().map(|v| v.to_string()),
+                                boot_option_enabled: opt.enabled(),
+                            })
+                    })
+                    .collect(),
+            })
         });
 
         let is_infinite_boot_enabled = hw_type
@@ -278,56 +368,16 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             .collect();
 
         let power_state = chassis
-            .liteon_power_state()
+            .and_then(|chassis| chassis.liteon_power_state())
             .map(|v| v.to_model())
-            .unwrap_or_else(|| {
-                self.system
-                    .power_state()
-                    .and_then(|v| match v {
-                        PowerState::On => Some(ModelPowerState::On),
-                        PowerState::Off => Some(ModelPowerState::Off),
-                        PowerState::PoweringOn => Some(ModelPowerState::PoweringOn),
-                        PowerState::PoweringOff => Some(ModelPowerState::PoweringOff),
-                        PowerState::Paused => Some(ModelPowerState::Paused),
-                        PowerState::Hibernating => Some(ModelPowerState::Hibernating),
-                        PowerState::Sleeping => Some(ModelPowerState::Sleeping),
-                        PowerState::UnsupportedValue => None,
-                    })
-                    .unwrap_or_default()
-            });
-
-        let bios_version = self
-            .system
-            .raw()
-            .bios_version
-            .clone()
-            .flatten()
-            .map(|version| version.trim().to_string())
-            .filter(|version| !version.is_empty());
-
-        let serial_console_ssh_port = self
-            .system
-            .raw()
-            .serial_console
-            .as_ref()
-            .and_then(|serial_console| serial_console.ssh.as_ref())
-            .map(enabled_serial_console_ssh_port)
-            .transpose()
-            .unwrap_or_else(|invalid_port| {
-                tracing::warn!(
-                    system_id = %self.system.raw().id,
-                    serial_console_ssh_port = invalid_port,
-                    "Ignoring invalid SSH serial-console port reported by Redfish",
-                );
-                None
-            })
-            .flatten();
+            .unwrap_or(system_model.power_state);
 
         Ok(ModelComputerSystem {
             ethernet_interfaces,
-            id: self.system.raw().id.clone(),
-            manufacturer: hw_id.manufacturer.map(|v| v.to_string()),
-            model: hw_id.model.map(|v| v.to_string()),
+            processors: self
+                .processors
+                .as_ref()
+                .map(|processors| processors.iter().map(ExploredProcessor::to_model).collect()),
             serial_number: serial_number.map(|v| v.to_string()),
             attributes: ComputerSystemAttributes {
                 nic_mode,
@@ -336,10 +386,8 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             pcie_devices,
             base_mac,
             power_state,
-            sku: self.system.sku().map(|v| v.to_string()),
             boot_order,
-            bios_version,
-            serial_console_ssh_port,
+            ..system_model
         })
     }
 
@@ -372,6 +420,7 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             .and_then(|actual_ref| {
                 self.boot_options
                     .iter()
+                    .flatten()
                     .find(|opt| opt.boot_reference() == *actual_ref)
             })
     }
@@ -421,7 +470,7 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             // Find boot option that starts with correponding
             // UEFI device path.
             .and_then(|eth_uefi_device_path| {
-                self.boot_options.iter().find(|opt| {
+                self.boot_options.iter().flatten().find(|opt| {
                     opt.uefi_device_path().is_some_and(|path| {
                         is_uefi_tree_child(eth_uefi_device_path, path)
                             && path.inner().contains("/IPv4(")
@@ -508,6 +557,7 @@ impl<B: Bmc> ExploredComputerSystem<B> {
         // Temporary workaround until oob mac would be possible to get via Redfish
         self.boot_options
             .iter()
+            .flatten()
             .find_map(|boot_opt| {
                 // display_name: "NET-OOB-IPV4"
                 if boot_opt
@@ -727,7 +777,7 @@ fn pcie_device_to_model<B: Bmc>(
 fn enabled_serial_console_ssh_port(ssh: &SerialConsoleProtocol) -> Result<Option<u16>, i64> {
     ssh.service_enabled
         .filter(|enabled| *enabled)
-        .and_then(|_| ssh.port.flatten())
+        .and(ssh.port.flatten())
         .map(|port| {
             let converted = u16::try_from(port).map_err(|_| port)?;
             (converted != 0).then_some(converted).ok_or(port)
@@ -742,6 +792,105 @@ mod tests {
     use super::{
         SerialConsoleProtocol, enabled_serial_console_ssh_port, is_usable_ethernet_mac_address,
     };
+
+    #[tokio::test]
+    async fn exploration_configuration_controls_linked_resources() {
+        use bmc_mock::injection::{Action, Rule, Selector};
+
+        use super::{Config, ExploredComputerSystem};
+        use crate::Config as ExploreConfig;
+
+        for enabled_resource in [
+            None,
+            Some("Bios"),
+            Some("BootOptions"),
+            Some("EthernetInterfaces"),
+            Some("SecureBoot"),
+            Some("Processors"),
+        ] {
+            let h = bmc_mock::test_support::nvidia_dgx_vr_host_bmc().await;
+            h.state.injection.put(
+                [
+                    "Bios",
+                    "BootOptions",
+                    "EthernetInterfaces",
+                    "SecureBoot",
+                    "Processors",
+                ]
+                .into_iter()
+                .map(|resource| Rule {
+                    id: resource.into(),
+                    selector: Selector::Path {
+                        method: Some("GET".into()),
+                        glob: format!("/redfish/v1/Systems/HGX_Baseboard_0/{resource}*"),
+                    },
+                    action: Action::Status(500),
+                    remaining: Some(1),
+                })
+                .collect(),
+            );
+            h.state.injection.upsert(Rule {
+                id: "system-links".into(),
+                selector: Selector::OdataId("/redfish/v1/Systems/HGX_Baseboard_0".into()),
+                action: Action::JsonMerge(serde_json::json!({
+                    "Bios": {"@odata.id": "/redfish/v1/Systems/HGX_Baseboard_0/Bios"},
+                    "EthernetInterfaces": {"@odata.id": "/redfish/v1/Systems/HGX_Baseboard_0/EthernetInterfaces"},
+                    "SecureBoot": {"@odata.id": "/redfish/v1/Systems/HGX_Baseboard_0/SecureBoot"},
+                    "Boot": {"BootOrder": ["Boot0001"], "BootOptions": {"@odata.id": "/redfish/v1/Systems/HGX_Baseboard_0/BootOptions"}}
+                })), remaining: Some(1),
+            });
+            let root = h.service_root.as_ref().clone().restrict_expand();
+            let system = root
+                .systems()
+                .await
+                .unwrap()
+                .unwrap()
+                .members()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|system| system.raw().id == "HGX_Baseboard_0")
+                .unwrap();
+            let explore_config = ExploreConfig {
+                boot_interface_mac: None,
+                error_classifier: &|_| None,
+                retry_timeout: std::time::Duration::ZERO,
+            };
+            let config = Config {
+                need_bios: enabled_resource == Some("Bios"),
+                need_boot_options: enabled_resource == Some("BootOptions"),
+                need_ethernet_interfaces: enabled_resource == Some("EthernetInterfaces"),
+                need_secure_boot: enabled_resource == Some("SecureBoot"),
+                need_processors: enabled_resource == Some("Processors"),
+                need_oem_nvidia_bluefield: false,
+                ignore_500_on_bios_fetch: false,
+                retry_404_on_eth_interfaces: false,
+                explore: &explore_config,
+            };
+            let result = ExploredComputerSystem::explore(system, &config).await;
+            assert_eq!(
+                result.is_ok(),
+                enabled_resource.is_none() || enabled_resource == Some("Processors"),
+                "resource: {enabled_resource:?}"
+            );
+            if let Ok(system) = result {
+                let model = system.to_model(None, None, &[]).unwrap();
+                assert_eq!(model.id, "HGX_Baseboard_0");
+                assert_eq!(
+                    model.processors,
+                    (enabled_resource == Some("Processors")).then(Vec::new)
+                );
+                assert_eq!(model.boot_order, None);
+            }
+            let pending = h.state.injection.list();
+            assert_eq!(
+                pending.len(),
+                if enabled_resource.is_some() { 4 } else { 5 },
+                "resource: {enabled_resource:?}"
+            );
+            assert!(pending.iter().all(|rule| rule.remaining == Some(1)));
+        }
+    }
 
     #[test]
     fn extracts_only_enabled_valid_ssh_serial_console_ports() {

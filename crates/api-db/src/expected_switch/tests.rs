@@ -26,6 +26,73 @@ use super::*;
 use crate as db;
 
 #[crate::sqlx_test]
+async fn bmc_credential_length_migration_preserves_rows(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // The harness applies all migrations; restore the populated predecessor.
+    sqlx::raw_sql(
+        "ALTER TABLE expected_switches
+             ALTER COLUMN bmc_username TYPE VARCHAR(16),
+             ALTER COLUMN bmc_password TYPE VARCHAR(16);
+         INSERT INTO expected_switches
+             (serial_number, bmc_mac_address, bmc_username, bmc_password)
+         VALUES ('existing-switch', '02:00:00:00:01:01', 'admin', repeat('a', 16));",
+    )
+    .execute(&pool)
+    .await?;
+    let snapshot =
+        "SELECT to_jsonb(expected_switches) FROM expected_switches ORDER BY expected_switch_id";
+    let before: Vec<serde_json::Value> = sqlx::query_scalar(snapshot).fetch_all(&pool).await?;
+
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261005160144_expected_switch_bmc_password_length.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    let after: Vec<serde_json::Value> = sqlx::query_scalar(snapshot).fetch_all(&pool).await?;
+    assert_eq!(after, before);
+
+    let mut txn = pool.begin().await?;
+    let existing = find_by_serial_number(&mut txn, "existing-switch")
+        .await?
+        .unwrap();
+    let new_switch = ExpectedSwitch {
+        expected_switch_id: None,
+        bmc_mac_address: expected_switch_bmc_mac_address(1),
+        serial_number: "long-credentials-switch".to_string(),
+        bmc_username: "u".repeat(256),
+        bmc_password: "b".repeat(17),
+        ..existing
+    };
+    let mut switch = create(&mut txn, new_switch).await?;
+    assert_eq!(switch.bmc_username, "u".repeat(256));
+    assert_eq!(switch.bmc_password, "b".repeat(17));
+    switch.bmc_username = "v".repeat(512);
+    switch.bmc_password = "c".repeat(255);
+    update(&mut txn, &switch).await?;
+    txn.commit().await?;
+
+    let mut connection = pool.acquire().await?;
+    let stored = find_by_id(&mut connection, switch.expected_switch_id.unwrap())
+        .await?
+        .unwrap();
+    assert_eq!(stored.bmc_username, "v".repeat(512));
+    assert_eq!(stored.bmc_password, "c".repeat(255));
+    let error =
+        sqlx::query("UPDATE expected_switches SET bmc_password = $1 WHERE expected_switch_id = $2")
+            .bind("d".repeat(256))
+            .bind(switch.expected_switch_id)
+            .execute(&pool)
+            .await
+            .unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("22001")
+    );
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn expected_switch_queries_survive_added_columns(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {

@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,12 +18,53 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
 
 	"go.opentelemetry.io/otel/trace"
 )
 
 var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+type testProjectionQueryHook struct {
+	query string
+}
+
+func (h *testProjectionQueryHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	h.query = event.Query
+	return ctx
+}
+
+func (h *testProjectionQueryHook) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+func testAssertNamedModelColumns(t *testing.T, dbSession *db.Session, model any, projection string) {
+	t.Helper()
+	table := dbSession.DB.Table(reflect.TypeOf(model))
+	columns := make([]string, 0, len(table.Fields))
+	for _, field := range table.Fields {
+		columns = append(columns, string(table.SQLAlias)+"."+string(field.SQLName))
+	}
+	assert.Contains(t, projection, strings.Join(columns, ", "))
+	assert.NotContains(t, projection, "*")
+}
+
+type testPreparedQuery struct {
+	backendPID int
+	name       string
+	preparedAt time.Time
+}
+
+func testGetPreparedQuery(t *testing.T, ctx context.Context, dbSession *db.Session, query string) testPreparedQuery {
+	t.Helper()
+	var prepared testPreparedQuery
+	// Use database/sql directly so inspecting the cache doesn't replace the
+	// DAO statement captured by the Bun hook.
+	err := dbSession.DB.DB.QueryRowContext(ctx,
+		"SELECT pg_backend_pid(), name, prepare_time FROM pg_prepared_statements WHERE statement = $1", query,
+	).Scan(&prepared.backendPID, &prepared.name, &prepared.preparedAt)
+	require.NoError(t, err, "DAO query must remain prepared on the retained backend")
+	return prepared
+}
 
 func testGenerateRandomString(n int) string {
 	var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_1234567890")

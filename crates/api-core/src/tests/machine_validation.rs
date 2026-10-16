@@ -24,8 +24,8 @@ use carbide_machine_controller::config::machine_validation::{
 use carbide_machine_controller::handler::MachineStateHandlerBuilder;
 use carbide_uuid::machine_validation::{MachineValidationId, MachineValidationRunItemId};
 use common::api_fixtures::{
-    TestEnvOverrides, create_host_with_machine_validation, create_test_env,
-    create_test_env_with_overrides, get_config, get_machine_validation_results,
+    TestEnv, TestEnvOverrides, TestManagedHost, create_host_with_machine_validation,
+    create_test_env, create_test_env_with_overrides, get_config, get_machine_validation_results,
     get_machine_validation_runs, on_demand_machine_validation,
 };
 use config_version::ConfigVersion;
@@ -1478,6 +1478,235 @@ async fn test_machine_validation_get_unverified_tests(
     assert!(!test_list[4].verified);
     assert!(!test_list[5].verified);
 
+    Ok(())
+}
+
+/// A validation run of the fixture's `test_id`, started on demand in
+/// `context`, with its run plan materialized by `mh` itself: (its id, its run
+/// items' ids, the selected test).
+async fn on_demand_run(
+    env: &TestEnv,
+    mh: &TestManagedHost,
+    test_id: &str,
+    context: &str,
+) -> (
+    MachineValidationId,
+    Vec<rpc::common::Uuid>,
+    rpc::forge::MachineValidationTest,
+) {
+    let selected_test = env
+        .api
+        .get_machine_validation_tests(tonic::Request::new(
+            rpc::forge::MachineValidationTestsGetRequest {
+                test_id: Some(test_id.to_string()),
+                ..rpc::forge::MachineValidationTestsGetRequest::default()
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .tests
+        .into_iter()
+        .next()
+        .expect("the machine validation fixture should include the test");
+    let validation_id = on_demand_machine_validation(
+        env,
+        mh.host().id.into(),
+        Vec::new(),
+        vec![selected_test.test_id.clone()],
+        true,
+        vec![context.to_string()],
+    )
+    .await
+    .validation_id
+    .unwrap();
+    env.api
+        .update_machine_validation_run(authenticated_machine_request(
+            run_request(validation_id, &selected_test),
+            mh.host().id,
+        ))
+        .await
+        .unwrap();
+    let run_item_ids = env
+        .api
+        .find_machine_validation_run_item_ids(tonic::Request::new(
+            rpc::forge::MachineValidationRunItemSearchFilter {
+                validation_id: Some(validation_id),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .run_item_ids;
+    (validation_id, run_item_ids, selected_test)
+}
+
+fn run_request(
+    validation_id: MachineValidationId,
+    selected_test: &rpc::forge::MachineValidationTest,
+) -> rpc::forge::MachineValidationRunRequest {
+    rpc::forge::MachineValidationRunRequest {
+        validation_id: Some(validation_id),
+        duration_to_complete: Some(rpc::Duration::from(std::time::Duration::from_secs(60))),
+        total: 1,
+        selected_tests: vec![selected_test.clone()],
+    }
+}
+
+fn denied<T>(result: &Result<tonic::Response<T>, tonic::Status>) -> bool {
+    result
+        .as_ref()
+        .is_err_and(|status| status.code() == tonic::Code::PermissionDenied)
+}
+
+/// The machine-validation calls scout makes for a run are allowed only to the
+/// run's own machine: another machine, here the host's own DPU, is denied
+/// each of them, and a lookup that names another host's run items too is
+/// denied to the host. The other host runs a test that sorts after the
+/// host's, so that lookup returns the host's own item first.
+#[crate::sqlx_test(fixtures("create_machine_validation_tests",))]
+async fn machine_validation_calls_are_scoped_to_the_runs_machine(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let mh = create_host_with_machine_validation(&env, None, None).await;
+    let other = create_host_with_machine_validation(&env, None, None).await;
+    let (validation_id, run_item_ids, selected_test) =
+        on_demand_run(&env, &mh, "forge_dcgm_long_test", "OnDemand").await;
+    let (_, others_run_item_ids, _) =
+        on_demand_run(&env, &other, "forge_shoreline_run_book", "Discovery").await;
+    let host = mh.host().id;
+    let dpu = mh.dpu().id;
+
+    let find_ids = || rpc::forge::MachineValidationRunItemSearchFilter {
+        validation_id: Some(validation_id),
+    };
+    let find_items = || rpc::forge::MachineValidationRunItemsByIdsRequest {
+        run_item_ids: run_item_ids.clone(),
+    };
+    let heartbeat = || rpc::forge::MachineValidationHeartbeatRequest {
+        validation_id: Some(validation_id),
+        target: Some(
+            rpc::forge::machine_validation_heartbeat_request::Target::TestId(
+                selected_test.test_id.clone(),
+            ),
+        ),
+    };
+    let result = || rpc::forge::MachineValidationResultPostRequest {
+        result: Some(rpc::forge::MachineValidationResult {
+            validation_id: Some(validation_id),
+            name: selected_test.name.clone(),
+            description: String::new(),
+            command: "echo".to_string(),
+            args: String::new(),
+            std_out: String::new(),
+            std_err: String::new(),
+            context: "OnDemand".to_string(),
+            exit_code: 0,
+            start_time: Some(Timestamp::from(SystemTime::now())),
+            end_time: Some(Timestamp::from(SystemTime::now())),
+            test_id: Some(selected_test.test_id.clone()),
+        }),
+    };
+    let completed = || rpc::forge::MachineValidationCompletedRequest {
+        machine_id: Some(host.into()),
+        validation_id: Some(validation_id),
+        machine_validation_error: None,
+    };
+
+    let api = &env.api;
+    let as_dpu = [
+        denied(
+            &api.find_machine_validation_run_item_ids(authenticated_machine_request(
+                find_ids(),
+                dpu,
+            ))
+            .await,
+        ),
+        denied(
+            &api.find_machine_validation_run_items_by_ids(authenticated_machine_request(
+                find_items(),
+                dpu,
+            ))
+            .await,
+        ),
+        denied(
+            &api.heartbeat_machine_validation_run(authenticated_machine_request(heartbeat(), dpu))
+                .await,
+        ),
+        denied(
+            &api.update_machine_validation_run(authenticated_machine_request(
+                run_request(validation_id, &selected_test),
+                dpu,
+            ))
+            .await,
+        ),
+        denied(
+            &api.persist_validation_result(authenticated_machine_request(result(), dpu))
+                .await,
+        ),
+        denied(
+            &api.machine_validation_completed(authenticated_machine_request(completed(), dpu))
+                .await,
+        ),
+    ];
+    assert_eq!(as_dpu, [true; 6], "every call is denied to another machine");
+
+    // The host's own calls pass the ownership check; whatever else they meet
+    // afterwards, they are not denied.
+    let as_host = [
+        denied(
+            &api.find_machine_validation_run_item_ids(authenticated_machine_request(
+                find_ids(),
+                host,
+            ))
+            .await,
+        ),
+        denied(
+            &api.find_machine_validation_run_items_by_ids(authenticated_machine_request(
+                find_items(),
+                host,
+            ))
+            .await,
+        ),
+        denied(
+            &api.heartbeat_machine_validation_run(authenticated_machine_request(heartbeat(), host))
+                .await,
+        ),
+        denied(
+            &api.update_machine_validation_run(authenticated_machine_request(
+                run_request(validation_id, &selected_test),
+                host,
+            ))
+            .await,
+        ),
+        denied(
+            &api.persist_validation_result(authenticated_machine_request(result(), host))
+                .await,
+        ),
+        denied(
+            &api.machine_validation_completed(authenticated_machine_request(completed(), host))
+                .await,
+        ),
+    ];
+    assert_eq!(
+        as_host, [false; 6],
+        "no call is denied to the run's own machine"
+    );
+
+    let mixed = api
+        .find_machine_validation_run_items_by_ids(authenticated_machine_request(
+            rpc::forge::MachineValidationRunItemsByIdsRequest {
+                run_item_ids: run_item_ids
+                    .iter()
+                    .chain(&others_run_item_ids)
+                    .cloned()
+                    .collect(),
+            },
+            host,
+        ))
+        .await;
+    assert!(denied(&mixed), "another host's run items are denied");
     Ok(())
 }
 

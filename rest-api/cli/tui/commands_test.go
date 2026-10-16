@@ -1492,6 +1492,59 @@ func TestPromptOptionalBool(t *testing.T) {
 	}
 }
 
+func TestReadPromptLineWithLimit(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		maxBytes   int
+		want       string
+		wantError  string
+		wantUnread string
+	}{
+		{
+			name:     "UTF-8 input exactly at byte limit",
+			input:    "éa\n",
+			maxBytes: 3,
+			want:     "éa",
+		},
+		{
+			name:       "overflow stops reading without draining the line",
+			input:      "éa!unread\n",
+			maxBytes:   3,
+			wantError:  "input exceeds limit of 3-bytes",
+			wantUnread: "unread",
+		},
+		{
+			name:  "zero limit preserves ordinary prompt behavior",
+			input: "abcd\n",
+			want:  "abcd",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := withStdin(t, test.input, func() (string, error) {
+				line, readErr := readPromptLineWithLimit(test.maxBytes)
+				if test.wantUnread != "" {
+					unread, remainingErr := readPromptLine()
+					if remainingErr != nil {
+						return "", remainingErr
+					}
+					assert.Equal(t, test.wantUnread, unread)
+				}
+				return line, readErr
+			})
+			if test.wantError != "" {
+				require.EqualError(t, err, test.wantError)
+				require.ErrorIs(t, err, errPromptInputLimitExceeded)
+				assert.Empty(t, result)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.want, result)
+		})
+	}
+}
+
 func TestReadPromptLinePreservesNonEOFReadError(t *testing.T) {
 	oldStdin := os.Stdin
 	reader, writer, err := os.Pipe()

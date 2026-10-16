@@ -31,6 +31,8 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 	model := "M1"
 	description := "primary"
 	bmcIP := "10.0.0.1"
+	nicType := "CX9"
+	fixedIP := "192.0.2.9"
 	var slot, trayIdx, host int32 = 1, 2, 3
 
 	t.Run("nil proto leaves receiver unchanged", func(t *testing.T) {
@@ -75,6 +77,7 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 					{Key: "env", Value: cutil.GetPtr("prod")},
 				},
 			},
+			HostNics: []*corev1.ExpectedHostNic{{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIp: &fixedIP}},
 		}, &linkedMachineID)
 
 		assert.Equal(t, id, em.ID)
@@ -95,6 +98,7 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 		assert.Equal(t, &trayIdx, em.TrayIdx)
 		assert.Equal(t, &host, em.HostID)
 		assert.Equal(t, Labels{"env": "prod"}, em.Labels)
+		assert.Equal(t, []ExpectedMachineInterface{{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIP: &fixedIP}}, em.Interfaces)
 	})
 
 	t.Run("populates dpfEnabled from is_dpf_enabled", func(t *testing.T) {
@@ -258,6 +262,26 @@ func TestExpectedMachine_ToProto(t *testing.T) {
 		}
 		assert.False(t, proto.DpfEnabled)
 	})
+
+	t.Run("forwards interfaces in order", func(t *testing.T) {
+		nicType := "CX9"
+		fixedIP := "192.0.2.9"
+		em := &ExpectedMachine{
+			ID:                  id,
+			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
+			ChassisSerialNumber: "CSN-1",
+			Interfaces: []ExpectedMachineInterface{
+				{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIP: &fixedIP},
+				{MacAddress: "02:00:00:00:00:0a"},
+			},
+		}
+		got := em.ToProto(ExpectedMachineCredentials{}).GetHostNics()
+		require.Len(t, got, 2)
+		assert.Equal(t, "02:00:00:00:00:09", got[0].GetMacAddress())
+		assert.Equal(t, "CX9", got[0].GetNicType())
+		assert.Equal(t, "192.0.2.9", got[0].GetFixedIp())
+		assert.Equal(t, "02:00:00:00:00:0a", got[1].GetMacAddress())
+	})
 }
 
 // reset the tables needed for ExpectedMachine tests
@@ -340,7 +364,12 @@ func TestExpectedMachineSQLDAO_Create(t *testing.T) {
 					BmcMacAddress:            "00:1B:44:11:3A:B7",
 					ChassisSerialNumber:      "CHASSIS123",
 					FallbackDpuSerialNumbers: []string{"DPU001", "DPU002"},
-					BmcIpAddress:             cutil.GetPtr("192.168.1.10"),
+					Interfaces: []ExpectedMachineInterface{{
+						MacAddress: "02:00:00:00:00:09",
+						NicType:    cutil.GetPtr("CX9"),
+						FixedIP:    cutil.GetPtr("192.0.2.9"),
+					}},
+					BmcIpAddress: cutil.GetPtr("192.168.1.10"),
 					Labels: map[string]string{
 						"environment": "test",
 						"location":    "datacenter1",
@@ -422,6 +451,11 @@ func TestExpectedMachineSQLDAO_Create(t *testing.T) {
 					assert.Equal(t, input.ChassisSerialNumber, em.ChassisSerialNumber)
 					assert.Equal(t, input.FallbackDpuSerialNumbers, em.FallbackDpuSerialNumbers)
 					assert.Equal(t, input.BmcIpAddress, em.BmcIpAddress)
+					if input.Interfaces == nil {
+						assert.Empty(t, em.Interfaces)
+					} else {
+						assert.Equal(t, input.Interfaces, em.Interfaces)
+					}
 					assert.Equal(t, Labels(input.Labels), em.Labels)
 				}
 
@@ -1976,6 +2010,9 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 					}
 					if tc.inputs[i].Labels != nil {
 						assert.Equal(t, Labels(tc.inputs[i].Labels), em.Labels)
+					}
+					if tc.inputs[i].Interfaces != nil {
+						assert.Equal(t, tc.inputs[i].Interfaces, em.Interfaces)
 					}
 				}
 			}

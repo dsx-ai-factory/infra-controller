@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Check that every machine-a-tron BMC network in a values file lies outside the cluster ServiceCIDR."""
+"""Check that every machine-a-tron BMC and NVOS network in a values file lies outside the cluster ServiceCIDR."""
 
 import ipaddress
 import os
@@ -18,11 +18,21 @@ try:
 except ImportError:
     raise SystemExit("machine-a-tron ServiceCIDR preflight requires PyYAML in the python3 environment")
 
-# Relay keys per group kind; the second name of each pair is the deprecated alias the chart accepts.
-RELAY_KEYS = {
-    "machines": ("bmcDhcpRelayAddress", "oobDhcpRelayAddress"),
-    "racks": ("bmc_dhcp_relay_address", "oob_dhcp_relay_address"),
-}
+# Relay keys per published network and group kind; the second name of each
+# pair is the deprecated alias the chart accepts. BMC leases are published as
+# Service externalIPs, and so are the NVOS leases of simulated NVLink switches
+# (for the NMX-C mock), which come from the underlay relay's network. The
+# underlay relay is optional in the chart, so its absence is not an error.
+RELAY_KINDS = (
+    ("BMC", True, {
+        "machines": ("bmcDhcpRelayAddress", "oobDhcpRelayAddress"),
+        "racks": ("bmc_dhcp_relay_address", "oob_dhcp_relay_address"),
+    }),
+    ("NVOS", False, {
+        "machines": ("underlayDhcpRelayAddress", "adminDhcpRelayAddress"),
+        "racks": ("underlay_dhcp_relay_address", "admin_dhcp_relay_address"),
+    }),
+)
 
 
 def parse_networks(tokens, source):
@@ -64,7 +74,7 @@ def site_prefixes(site_config):
 
 
 def relay_addresses(values):
-    """Collect the BMC DHCP relay address of every configured machine and rack group."""
+    """Collect the BMC and NVOS DHCP relay addresses of every configured machine and rack group."""
     if values is None:
         values = {}
     if not isinstance(values, dict):
@@ -96,7 +106,7 @@ def relay_addresses(values):
             continue
         if not isinstance(pod, dict):
             raise ValueError(f"pods.{pod_name} must be a mapping")
-        for section, keys in RELAY_KEYS.items():
+        for section in ("machines", "racks"):
             groups = pod.get(section)
             if groups is None:
                 continue
@@ -108,19 +118,23 @@ def relay_addresses(values):
                 if not isinstance(group, dict):
                     raise ValueError(f"pods.{pod_name}.{section}.{group_name} must be a mapping")
                 owner = f"pods.{pod_name}.{section}.{group_name}"
-                relay = next((group[key] for key in keys if group.get(key) is not None), None)
-                if relay is None:
-                    raise ValueError(f"{owner}.{keys[0]} is not set; the chart substitutes its own default, "
-                                     "which this check cannot vouch for")
-                try:
-                    relays.append((owner, ipaddress.ip_address(str(relay).strip())))
-                except ValueError:
-                    raise ValueError(f"{owner}.{keys[0]} {relay!r} is not an IP address") from None
+                for label, required, keys_by_section in RELAY_KINDS:
+                    keys = keys_by_section[section]
+                    relay = next((group[key] for key in keys if group.get(key) is not None), None)
+                    if relay is None:
+                        if required:
+                            raise ValueError(f"{owner}.{keys[0]} is not set; the chart substitutes its own "
+                                             "default, which this check cannot vouch for")
+                        continue
+                    try:
+                        relays.append((owner, ipaddress.ip_address(str(relay).strip()), label))
+                    except ValueError:
+                        raise ValueError(f"{owner}.{keys[0]} {relay!r} is not an IP address") from None
     return relays
 
 
 def check_service_cidr(stream, service_cidrs, bmc_prefixes=(), site_config=""):
-    """Resolve every relay to its BMC network and report overlaps with the Service CIDRs.
+    """Resolve every relay to its BMC or NVOS network and report overlaps with the Service CIDRs.
 
     Return the checked networks and the errors; an empty error list means the deployment is safe.
     """
@@ -132,20 +146,22 @@ def check_service_cidr(stream, service_cidrs, bmc_prefixes=(), site_config=""):
     if not service_networks and not errors:
         errors.append("cannot determine the cluster ServiceCIDR: set SCALE_SERVICE_CIDRS=\"<cidr> ...\"")
     known = site_networks + extra_networks
-    prefixes = set(extra_networks)
-    for owner, relay in relays:
+    # Each checked network with the kinds of lease it carries, for the error text.
+    labels = {network: {"BMC"} for network in extra_networks}
+    for owner, relay, label in relays:
         # A relay sits inside its own segment and inside any wider declared range.
         containing = [network for network in known if relay in network]
         if not containing:
-            errors.append(f"{owner}: cannot determine the BMC network of relay {relay}; "
+            errors.append(f"{owner}: cannot determine the {label} network of relay {relay}; "
                           "declare its [networks.*] prefix in the site config or set SCALE_BMC_PREFIXES")
             continue
-        prefixes.add(max(containing, key=lambda network: network.prefixlen))
-    ordered = sorted(prefixes, key=lambda network: (network.version, int(network.network_address), network.prefixlen))
+        labels.setdefault(max(containing, key=lambda network: network.prefixlen), set()).add(label)
+    ordered = sorted(labels, key=lambda network: (network.version, int(network.network_address), network.prefixlen))
     for prefix in ordered:
         for cidr in service_networks:
             if prefix.overlaps(cidr):
-                errors.append(f"BMC network {prefix} overlaps the cluster ServiceCIDR {cidr}")
+                errors.append(f"{'/'.join(sorted(labels[prefix]))} network {prefix} "
+                              f"overlaps the cluster ServiceCIDR {cidr}")
     return ordered, errors
 
 
@@ -190,7 +206,7 @@ if __name__ == "__main__":
             print(f"ERROR: {error}")
         if errors:
             sys.exit(1)
-        print(f"OK: BMC networks {' '.join(str(prefix) for prefix in prefixes)} "
+        print(f"OK: BMC/NVOS networks {' '.join(str(prefix) for prefix in prefixes)} "
               f"are outside the ServiceCIDR {' '.join(service_cidrs)}")
     except (OSError, ValueError, yaml.YAMLError) as error:
-        raise SystemExit(f"Cannot check the machine-a-tron BMC networks: {error}") from error
+        raise SystemExit(f"Cannot check the machine-a-tron BMC/NVOS networks: {error}") from error

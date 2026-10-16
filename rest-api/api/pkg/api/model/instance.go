@@ -951,6 +951,8 @@ func (bicr APIBatchInstanceCreateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validation.Min(2).Error("Count must be at least 2"),
 			// TODO: the number 18 is a temporary limit until we have a better way to handle topology-optimized allocation. 18 is the largest possible GB200 domain size.
+			// Batch allocation keeps one Postgres subtransaction per allocated Machine until the create commits.
+			// Keep this below 64, past which the per-backend subtransaction cache overflows and slows snapshots on every connection.
 			validation.Max(18).Error("Count cannot exceed 18")),
 		validation.Field(&bicr.Description,
 			validation.When(bicr.Description != nil,

@@ -1641,6 +1641,7 @@ dependencies = [
  "rustls-pemfile",
  "rustls-pki-types",
  "serde",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
@@ -2514,6 +2515,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-ipmi",
  "carbide-network",
+ "carbide-nmxc-mock",
  "carbide-rms-mock",
  "carbide-rpc",
  "carbide-test-support",
@@ -2638,6 +2640,8 @@ dependencies = [
 name = "carbide-macros"
 version = "0.0.0"
 dependencies = [
+ "carbide-test-support",
+ "carbide-uuid",
  "proc-macro2",
  "quote",
  "sqlx-macros-core",
@@ -2683,6 +2687,7 @@ dependencies = [
 name = "carbide-measured-boot"
 version = "0.0.0"
 dependencies = [
+ "carbide-macros",
  "carbide-test-support",
  "carbide-uuid",
  "chrono",
@@ -2772,6 +2777,22 @@ dependencies = [
  "sqlx",
  "state-controller",
  "tracing",
+]
+
+[[package]]
+name = "carbide-nmxc-mock"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "carbide-axum-utils",
+ "carbide-test-support",
+ "libnmxc",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3065,6 +3086,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbide-resource-pool"
+version = "0.0.0"
+dependencies = [
+ "carbide-api-db",
+ "carbide-api-model",
+ "carbide-macros",
+ "carbide-sqlx-testing",
+ "carbide-test-support",
+ "ctor",
+ "sqlx",
+]
+
+[[package]]
 name = "carbide-rms-mock"
 version = "0.0.1"
 dependencies = [
@@ -3317,6 +3351,7 @@ dependencies = [
  "itertools 0.14.0",
  "libredfish",
  "mac_address",
+ "nv-redfish",
  "opentelemetry 0.32.0",
  "opentelemetry-prometheus",
  "opentelemetry_sdk",
@@ -6962,7 +6997,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.8#1ba3499cd53c919990f619966ba911d5d87bb41b"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.10#bcd34e1c8c09c10103c456690eb2cfd32b3c355d"
 dependencies = [
  "chrono",
  "clap",
@@ -10511,6 +10546,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12283,6 +12324,7 @@ dependencies = [
  "getrandom 0.4.2",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

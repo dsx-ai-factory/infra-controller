@@ -363,6 +363,18 @@ if [[ "$(yq '.fnn' "$CONTROL_PLANE_CONFIG")" != "null" ]]; then
         controlPlaneVni vpcVrfLoopbackPrefix \
         commonManagedNodeBmcRouteTarget commonSiteControllerRouteTarget \
         commonAdminNetworkTarget routeTargetsToImport
+    # startupSMN.template renders the KEYS of routeTargetsToImport, so a YAML
+    # sequence passes the key check above and renders as its indexes ("0: {}"),
+    # silently dropping the requested target. Require a map of numeric targets.
+    _rt_type=$(yq '.fnn.routeTargetsToImport | type' "$CONTROL_PLANE_CONFIG")
+    if [[ "$_rt_type" != "!!null" ]]; then
+        [[ "$_rt_type" == "!!map" ]] || \
+            die "'fnn.routeTargetsToImport' must be a map whose keys are full numeric route targets ('<asn>:<n>: {}' per entry), not a ${_rt_type#!!}"
+        while IFS= read -r _rt; do
+            [[ "$_rt" =~ ^[0-9]+:[0-9]+$ ]] || \
+                die "'fnn.routeTargetsToImport': key '$_rt' is not a full numeric route target <asn>:<n>"
+        done < <(yq '.fnn.routeTargetsToImport | keys | .[]' "$CONTROL_PLANE_CONFIG")
+    fi
 fi
 
 # installWithLeafPassword: the leaf-facing BGP sessions (p0_if/p1_if) get a TCP MD5

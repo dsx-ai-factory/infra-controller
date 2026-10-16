@@ -121,7 +121,12 @@ certificate:
   identityNamespace: ""
   dnsNames: []
   uris: []
-  extraDnsNames: []
+  ## Every pod's certificate carries this shared name in addition to its own
+  ## Service names, so NICo can verify the hosted NMX-C mock, which it reaches
+  ## by switch NVOS address rather than by name, with one
+  ## `nvlink_config.nmx_c_tls_authority` across all machine-a-tron pods.
+  extraDnsNames:
+    - mat-mock.nvidia.com
   extraUris: []
 
 command:
@@ -324,7 +329,10 @@ pods:
     # racks:
     #   gb200:
     #     type: wiwynn_gb200_nvl72
-    #     rack_profile_id: NVL72
+    #     # The profile nico-api derives from the rack's expected rack group,
+    #     # which machine-a-tron declares when no group declares the rack yet.
+    #     # The nico-api chart ships the derived profiles for both rack types.
+    #     rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
     #     ids:
     #       - rack-001
     #     dpu_reboot_delay: 20

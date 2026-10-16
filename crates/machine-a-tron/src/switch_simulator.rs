@@ -592,6 +592,34 @@ struct SwitchActorHandle {
 pub(crate) struct SwitchHandle(Arc<SwitchActorHandle>);
 
 impl SwitchHandle {
+    /// A handle for `host_info` with no actor behind it, already holding an
+    /// NVOS lease when `nvos_ip` is given.
+    #[cfg(test)]
+    pub(crate) fn for_control_test(
+        host_info: HostMachineInfo,
+        machine_config_section: &str,
+        nvos_ip: Option<Ipv4Addr>,
+    ) -> Self {
+        let (fsm, _actions) = SwitchFsm::init(true);
+        let mut live_state = SwitchLiveState::new(&fsm);
+        live_state.nvos_ip = nvos_ip;
+        Self(Arc::new(SwitchActorHandle {
+            mailbox: ActorMailbox::detached(),
+            join_handle: Mutex::new(None),
+            mat_id: Uuid::new_v4(),
+            live_state: Arc::new(RwLock::new(live_state)),
+            host_info,
+            machine_config_section: machine_config_section.to_string(),
+            bmc_injection: Arc::new(InjectionStore::new()),
+        }))
+    }
+
+    /// Overrides the switch's NVOS lease for control-router tests.
+    #[cfg(test)]
+    pub(crate) fn set_control_test_nvos_ip(&self, ip: Option<Ipv4Addr>) {
+        self.0.live_state.write().unwrap().nvos_ip = ip;
+    }
+
     pub(crate) fn mat_id(&self) -> Uuid {
         self.0.mat_id
     }

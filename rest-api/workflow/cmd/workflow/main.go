@@ -477,7 +477,7 @@ func run(ctx context.Context) error {
 	}
 
 	if mconfig.Enabled {
-		http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}))
+		http.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}))
 		serve("Prometheus metrics", mconfig.GetListenAddr())
 	}
 

@@ -823,10 +823,13 @@ impl MachineStateHandler {
 
         // Don't update failed state failure cause everytime. Record first failure cause only,
         // otherwise first failure cause will be overwritten.
-        // A reset is a deliberate teardown, so a failure record must not park it.
+        // Reset and force deletion already own teardown. Preserve their state
+        // and failure evidence instead of parking them in Failed.
         if !matches!(
             mh_state,
-            ManagedHostState::Failed { .. } | ManagedHostState::Reset { .. }
+            ManagedHostState::Failed { .. }
+                | ManagedHostState::Reset { .. }
+                | ManagedHostState::ForceDeletion
         ) && let Some((machine_id, details)) = get_failed_state(mh_snapshot)
         {
             let already_relocking_machine_failure = matches!(
@@ -6142,10 +6145,16 @@ async fn trigger_reboot_if_needed_with_policy(
             })
         }
     } else {
-        let h = (current_time - entered_state_at).num_hours();
-        Err(StateHandlerError::ManualInterventionRequired(format!(
-            "Machine has not responded after {h} hours."
-        )))
+        let message = match retry_count {
+            Some(retry_count) => {
+                format!("machine has not responded after {retry_count} reboot attempts")
+            }
+            None => format!(
+                "machine has not responded after {} minutes",
+                time_elapsed_since_state_change
+            ),
+        };
+        Err(StateHandlerError::ManualInterventionRequired(message))
     }
 }
 
@@ -9769,17 +9778,15 @@ impl StateHandler for InstanceStateHandler {
     }
 }
 
-// Process the host's use_admin_network flag change and selectively flag
-// DPUs that undergo an actual network mode change with the
-// use_admin_network_changed flag if restart_ovs_on_use_admin_network_change
-// is true.
-// Not every DPU participates in tenant networking — only those with instance
-// interface configs assigned to them. DPUs without tenant interfaces remain on
-// the admin network regardless of the host-level toggle.
-async fn process_dpu_use_admin_network_state_change(
+/// Requests an OVS restart for DPUs with tenant interfaces when the host changes
+/// between Admin and tenant networking. The caller checks
+/// `restart_ovs_on_use_admin_network_change` and commits these flags in the same
+/// transaction as the network configuration change. DPUs without tenant
+/// interfaces remain on Admin and do not need a restart.
+pub async fn process_dpu_use_admin_network_state_change(
     txn: &mut PgConnection,
     mh_snapshot: &ManagedHostStateSnapshot,
-) -> Result<(), StateHandlerError> {
+) -> Result<(), DatabaseError> {
     tracing::info!(
         machine_id = %mh_snapshot.host_snapshot.id,
         "Request an OVS restart for DPUs switching between Admin and tenant networking"
@@ -9907,13 +9914,47 @@ async fn handle_instance_network_config_update_request(
                 }
             }
 
-            // Update requested network config and increment version.
+            // Service state can change after staging or after this iteration's snapshot.
+            // Lock and reload the instance so promotion preserves its latest endpoints.
+            // Release still completes pending host work before reclaiming its resources.
             let mut txn = ctx.services.db_pool.begin().await?;
+            db::instance::find_by_id_for_update(txn.as_mut(), instance.id)
+                .await?
+                .filter(|current| current.machine_id == instance.machine_id)
+                .ok_or_else(|| {
+                    StateHandlerError::GenericError(eyre::eyre!(
+                        "instance {} is no longer assigned to machine {}",
+                        instance.id,
+                        instance.machine_id
+                    ))
+                })?;
+            // The locking lookup returns a limited projection, so promotion needs a second read.
+            // TODO: Combine both reads in a full-snapshot lookup that locks by ID, accepts
+            // deletion-marked instances, and leaves ordinary find_by_id reads unlocked.
+            let current_instance = db::instance::find_by_id(txn.as_mut(), instance.id)
+                .await?
+                .ok_or_else(|| {
+                    StateHandlerError::GenericError(eyre::eyre!(
+                        "instance {} no longer exists",
+                        instance.id
+                    ))
+                })?;
+            let Some(update_request) = &current_instance.update_network_config_request else {
+                return Err(StateHandlerError::GenericError(eyre::eyre!(
+                    "network config update request is missing from db. instance: {}",
+                    instance.id
+                )));
+            };
+
+            // Legacy pending requests may carry obsolete endpoints. Only live state owns them.
+            let mut new_config = update_request.new_config.clone();
+            new_config.service_interfaces = current_instance.config.network.service_interfaces;
+            // Update requested network config and increment version.
             db::instance::update_network_config(
                 txn.as_mut(),
-                instance.id,
-                instance.network_config_version,
-                &update_request.new_config,
+                current_instance.id,
+                current_instance.network_config_version,
+                &new_config,
                 true,
             )
             .await?;

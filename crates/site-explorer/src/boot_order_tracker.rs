@@ -20,7 +20,6 @@ use std::fmt;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
-use carbide_uuid::machine::MachineId;
 use model::site_explorer::{
     BootOrder, ComputerSystem, EndpointExplorationReport, ExploredManagedHost,
 };
@@ -30,8 +29,7 @@ pub(super) trait BootOrderReporter: Send + Sync {
         &self,
         reason: BootOrderReportReason,
         bmc_ip: IpAddr,
-        machine: &Option<MachineId>,
-        systems: &[ComputerSystem],
+        report: &EndpointExplorationReport,
     );
 }
 
@@ -76,11 +74,12 @@ impl BootOrderReporter for TracingBootOrderReporter {
         &self,
         reason: BootOrderReportReason,
         bmc_ip: IpAddr,
-        machine: &Option<MachineId>,
-        systems: &[ComputerSystem],
+        report: &EndpointExplorationReport,
     ) {
-        let machine_id = machine.as_ref().map(ToString::to_string);
-        let boot_orders = BootOrderDisplayProxy { systems };
+        let machine_id = report.machine_id.as_ref().map(ToString::to_string);
+        let boot_orders = BootOrderDisplayProxy {
+            system: report.primary_system(),
+        };
 
         tracing::info!(
             bmc_ip_address = %bmc_ip,
@@ -136,37 +135,26 @@ impl<R: BootOrderReporter> BootOrderTracker<R> {
         for idx in indices {
             let (h, r) = &reports[idx];
             seen_hosts.insert(h.host_bmc_ip);
+            let primary_system = r.primary_system();
             if let Some(status) = self.cached_boot_order.get_mut(&h.host_bmc_ip) {
-                if status.boot_order_updated(&r.systems) {
-                    self.reporter.report(
-                        BootOrderReportReason::ChangeDetected,
-                        h.host_bmc_ip,
-                        &r.machine_id,
-                        &r.systems,
-                    );
+                if status.boot_order_updated(primary_system) {
+                    self.reporter
+                        .report(BootOrderReportReason::ChangeDetected, h.host_bmc_ip, r);
                     num_reported += 1;
                     status.report_time = now;
                 } else if now - status.report_time > BOOT_ORDER_TRACKER_INTERVAL
                     && num_reported < BOOT_ORDER_MAX_LOGGED_HOST_PER_ITERATION
                 {
-                    self.reporter.report(
-                        BootOrderReportReason::PeriodicUpdate,
-                        h.host_bmc_ip,
-                        &r.machine_id,
-                        &r.systems,
-                    );
+                    self.reporter
+                        .report(BootOrderReportReason::PeriodicUpdate, h.host_bmc_ip, r);
                     num_reported += 1;
                     status.report_time = now;
                 }
-            } else if Self::is_eligible_for_tracking(&r.systems) {
-                self.reporter.report(
-                    BootOrderReportReason::NewHost,
-                    h.host_bmc_ip,
-                    &r.machine_id,
-                    &r.systems,
-                );
+            } else if Self::is_eligible_for_tracking(primary_system) {
+                self.reporter
+                    .report(BootOrderReportReason::NewHost, h.host_bmc_ip, r);
                 num_reported += 1;
-                let status = BootOrderStatus::new(now, &r.systems);
+                let status = BootOrderStatus::new(now, primary_system);
                 self.cached_boot_order.insert(h.host_bmc_ip, status);
             }
         }
@@ -176,94 +164,66 @@ impl<R: BootOrderReporter> BootOrderTracker<R> {
             .retain(|ip, _| seen_hosts.contains(ip));
     }
 
-    // In some cases site explorer cannot find boot order for the
-    // machine. We prevent from tracking these machines and create
-    // additional noise in logs. Eligible for tracking are machines
-    // that have at least one system with at least one boot option in
-    // boot order.
-    fn is_eligible_for_tracking(systems: &[ComputerSystem]) -> bool {
-        systems.iter().any(|s| {
-            s.boot_order
-                .as_ref()
-                .is_some_and(|order| !order.boot_order.is_empty())
-        })
+    // Track hosts only when the primary system has boot order entries.
+    fn is_eligible_for_tracking(system: Option<&ComputerSystem>) -> bool {
+        system
+            .and_then(|system| system.boot_order.as_ref())
+            .is_some_and(|order| !order.boot_order.is_empty())
     }
 }
 
 struct BootOrderStatus {
-    report_time: std::time::Instant,
-    boot_order: HashMap<String, Option<BootOrder>>,
+    report_time: Instant,
+    boot_order: Option<(String, Option<BootOrder>)>,
 }
 
 impl BootOrderStatus {
-    fn new(report_time: std::time::Instant, systems: &[ComputerSystem]) -> Self {
-        BootOrderStatus {
+    fn new(report_time: Instant, system: Option<&ComputerSystem>) -> Self {
+        Self {
             report_time,
-            boot_order: Self::collect_boot_order(systems),
+            boot_order: system.map(|system| (system.id.clone(), system.boot_order.clone())),
         }
     }
 
-    fn boot_order_updated(&mut self, systems: &[ComputerSystem]) -> bool {
-        if systems.len() != self.boot_order.len() {
-            self.boot_order = Self::collect_boot_order(systems);
-            return true;
+    fn boot_order_updated(&mut self, system: Option<&ComputerSystem>) -> bool {
+        let cached = self
+            .boot_order
+            .as_ref()
+            .map(|(id, order)| (id.as_str(), order.as_ref()));
+        let current = system.map(|system| (system.id.as_str(), system.boot_order.as_ref()));
+        if cached == current {
+            return false;
         }
-
-        let mut seen_ids = HashSet::with_capacity(systems.len());
-        for system in systems {
-            // Duplicate IDs mean we cannot reliably compare entries; treat as change.
-            if !seen_ids.insert(system.id.as_str()) {
-                self.boot_order = Self::collect_boot_order(systems);
-                return true;
-            }
-
-            match self.boot_order.get(&system.id) {
-                Some(cached) if cached.as_ref() == system.boot_order.as_ref() => {}
-                _ => {
-                    self.boot_order = Self::collect_boot_order(systems);
-                    return true;
-                }
-            }
-        }
-
-        false
-    }
-
-    fn collect_boot_order(systems: &[ComputerSystem]) -> HashMap<String, Option<BootOrder>> {
-        systems
-            .iter()
-            .map(|system| (system.id.clone(), system.boot_order.clone()))
-            .collect()
+        self.boot_order = system.map(|system| (system.id.clone(), system.boot_order.clone()));
+        true
     }
 }
 
 /// Proxy type used solely for logging/printing boot order without exposing full structs.
 struct BootOrderDisplayProxy<'a> {
-    systems: &'a [ComputerSystem],
+    system: Option<&'a ComputerSystem>,
 }
 
 impl fmt::Debug for BootOrderDisplayProxy<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut per_system: Vec<(&str, Vec<String>)> = Vec::with_capacity(self.systems.len());
-
-        for system in self.systems {
-            let mut entries = Vec::new();
-            if let Some(order) = &system.boot_order {
-                for option in &order.boot_order {
+        let mut map = f.debug_map();
+        if let Some(system) = self.system {
+            let entries: Vec<String> = system
+                .boot_order
+                .iter()
+                .flat_map(|order| &order.boot_order)
+                .map(|option| {
                     let state = match option.boot_option_enabled {
                         Some(true) => "On",
                         Some(false) => "Off",
                         None => "?",
                     };
-                    entries.push(format!("{}:{}:{}", option.id, option.display_name, state));
-                }
-            }
-            per_system.push((system.id.as_str(), entries));
+                    format!("{}:{}:{}", option.id, option.display_name, state)
+                })
+                .collect();
+            map.entry(&system.id, &entries);
         }
-
-        f.debug_map()
-            .entries(per_system.iter().map(|(id, entries)| (id, entries)))
-            .finish()
+        map.finish()
     }
 }
 
@@ -273,6 +233,7 @@ mod tests {
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
 
+    use carbide_uuid::machine::MachineId;
     use model::site_explorer::BootOption;
 
     use super::*;
@@ -301,13 +262,12 @@ mod tests {
             &self,
             reason: BootOrderReportReason,
             bmc_ip: IpAddr,
-            machine: &Option<MachineId>,
-            _systems: &[ComputerSystem],
+            report: &EndpointExplorationReport,
         ) {
             self.events.lock().unwrap().push(BootOrderReport {
                 reason,
                 bmc_ip,
-                machine_id: *machine,
+                machine_id: report.machine_id,
             });
         }
     }
@@ -359,25 +319,20 @@ mod tests {
         };
         let valid_system = sample_system("sys2", true);
 
+        assert!(!BootOrderTracker::<RecordingReporter>::is_eligible_for_tracking(None));
         assert!(
-            !BootOrderTracker::<RecordingReporter>::is_eligible_for_tracking(&[
-                system_without_boot_order
-            ])
+            !BootOrderTracker::<RecordingReporter>::is_eligible_for_tracking(Some(
+                &system_without_boot_order
+            ))
         );
         assert!(
-            !BootOrderTracker::<RecordingReporter>::is_eligible_for_tracking(std::slice::from_ref(
+            !BootOrderTracker::<RecordingReporter>::is_eligible_for_tracking(Some(
                 &system_with_empty_boot_order
             ))
         );
-
-        // Presence of at least one system with boot options makes the host eligible.
         assert!(
-            BootOrderTracker::<RecordingReporter>::is_eligible_for_tracking(&[
-                system_with_empty_boot_order,
-                valid_system.clone()
-            ])
+            BootOrderTracker::<RecordingReporter>::is_eligible_for_tracking(Some(&valid_system))
         );
-        assert!(BootOrderTracker::<RecordingReporter>::is_eligible_for_tracking(&[valid_system]));
     }
 
     #[test]
@@ -444,6 +399,27 @@ mod tests {
         let events = reporter.take();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].reason, BootOrderReportReason::NewHost);
+    }
+
+    #[test]
+    fn adding_and_removing_component_systems_does_not_report_boot_order_changes() {
+        let reporter = RecordingReporter::default();
+        let mut tracker = BootOrderTracker::new(reporter.clone());
+        let now = Instant::now();
+        let (host, report) = make_report(
+            "192.0.2.2".parse().unwrap(),
+            sample_system("System_0", true),
+        );
+        tracker.track_hosts(now, &[(host.clone(), report.clone())]);
+        assert_eq!(reporter.take()[0].reason, BootOrderReportReason::NewHost);
+        let mut expanded = report.clone();
+        expanded.systems.push(ComputerSystem {
+            id: "HGX_Baseboard_0".into(),
+            ..Default::default()
+        });
+        tracker.track_hosts(now + Duration::from_secs(1), &[(host.clone(), expanded)]);
+        tracker.track_hosts(now + Duration::from_secs(2), &[(host, report)]);
+        assert!(reporter.take().is_empty());
     }
 
     #[test]

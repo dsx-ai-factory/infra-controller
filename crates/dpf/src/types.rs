@@ -29,6 +29,13 @@ use crate::crds::dpus_generated::{
     DpuStatusAgentStatus, DpuStatusOperationalConditions, DpuStatusPhase,
 };
 
+/// IPv4 route prefix lengths used to build Astra DPUDevice underlay values.
+#[derive(Debug, Clone, Copy)]
+pub struct AstraRoutePrefixes {
+    pub rail_route_prefix_len: u8,
+    pub software_plane_route_prefix_len: u8,
+}
+
 /// Async provider for BMC passwords used to create and refresh the K8s BMC
 /// secret. Implement this trait to supply credentials dynamically (e.g. from
 /// a vault or credential manager). Return
@@ -686,20 +693,20 @@ impl ServiceDefinition {
 /// Desired definition of a direct, detached DPUService.
 ///
 /// This is deliberately distinct from [`ServiceDefinition`], which produces a
-/// DPUServiceTemplate/DPUServiceConfiguration pair for DPUDeployment. A
-/// detached service has no DPUDeployment, service ID, interfaces, config
-/// ports, or DPU-cluster selector.
+/// DPUServiceTemplate/DPUServiceConfiguration pair for DPUDeployment.
 #[derive(Debug, Clone)]
 pub struct DetachedDpuServiceDefinition {
     pub name: String,
     pub namespace: String,
     pub labels: BTreeMap<String, String>,
     pub helm_chart: DetachedHelmChart,
-    pub deploy_in_cluster: bool,
+    pub deploy_in_cluster: Option<bool>,
     pub security: DetachedDpuServiceSecurity,
     /// Optional DaemonSet settings supplied by the feature using the SDK.
     /// Absence remains absence; the SDK does not impose placement policy.
     pub service_daemon_set: Option<DetachedServiceDaemonSet>,
+    /// Optional stable workload identity projected to the DPUService specification.
+    pub service_id: Option<String>,
 }
 
 /// Security settings for a detached DPUService managed by an SDK caller.

@@ -1,4 +1,4 @@
-# Large Site Sizing and Settings
+# Large Site Sizing and Settings <Badge intent="info">v2.3</Badge> <Badge intent="launch" minimal>New</Badge>
 
 This page records what a 250-rack ingestion measured on a 3-node site controller
 and which settings it needed. Use it to size a site controller and to set the
@@ -117,7 +117,8 @@ base configuration.
 |---|---|---|
 | `[site_explorer]` `explorations_per_run`, `machines_created_per_run`, and `concurrent_explorations` | 2000, 1000, and 300 | 360, 100, and 100: the defaults cap how many endpoints each explorer iteration probes and how many machines it creates, so 13,500 machines would need many more iterations |
 | `[site_explorer]` `switches_created_per_run` and `power_shelves_created_per_run` | 1000 and 1000 | 9 switches and 1 power shelf per iteration. Even at 100 each, 2,250 switches and 2,000 shelves needed more than 20 iterations |
-| `max_database_connections` | 500 | 1000. A site setting of 300 exhausted the pool at 13,500 machines, and 500 was enough for a single nico-api replica |
+| `max_database_connections` | 900 | 1000. The DPU agents poll their network configuration on a shared interval, and at 9,000 DPUs one poll burst can take most of the pool while every other database user in nico-api waits. 900 keeps idle headroom under the Postgres `max_connections` of 1024 that helm-prereqs sets, which nico-api shares with the other services |
+| nico-hardware-health `[rate_limit]` (`CARBIDE_HEALTH__RATE_LIMIT__BUCKET_BURST` and `CARBIDE_HEALTH__RATE_LIMIT__BUCKET_REPLENISH` in the chart's `env`) | `bucket_burst` 100 and `bucket_replenish` 30ms, the limiter's own defaults | Off. Without the limiter every simulated BMC re-authenticates through nico-api every 120 s, about 100 credential mints per second and about 20 percent of the agent request time |
 | nico-api CPU limit | 8 cores | 3 cores: nico-api used 5 to 6 cores at controller concurrency 80 and above. The 32 GiB memory limit is the chart default and was not changed |
 | Postgres CPU and memory limits | 16 cores and 32 GiB | 8 cores and 16 GiB: throttled in 88 percent of CFS periods at 8 cores. The memory raise was headroom only, refer to the sizing section |
 | `[machine_state_controller.controller] max_concurrency` (chart value `machineStateController.maxConcurrency`) | 80 to 120 recommended. The runs covered 10 to 160 | 10, refer to the table above |
@@ -128,16 +129,19 @@ The TOML keys are nico-api configuration: the chart's base file merged with the
 site config overlay `siteConfig.nicoApiSiteConfig`. Set them in the overlay.
 The two settings that name a chart value can be set through the nico-api chart
 instead, and an overlay entry for the same key takes precedence over the chart
-value.
+value. The hardware-health `[rate_limit]` row is that chart's configuration,
+set through its `env` map as `nico-hardware-health.env` in the same values
+file.
 
 To reproduce the fleet, run Machine-a-Tron as ten instances of 25 racks each in
 controller mode behind the protocol gateway. Keep them on one BMC segment with
 the BMC addresses published as Service externalIPs. The fleet needs one BMC
 address per endpoint, 17,750 in total, so the segment must be at least a `/17`.
 Refer to
-[Multi-pod simulation with Controller Mode](machine-a-tron-deployment.md#multi-pod-simulation-with-controller-mode)
-for the deployment steps. Its example segment is a `/18`, which holds 16,384
-addresses, so the runs used one `10.200.0.0/17` segment instead.
+[Replicating the 250-Rack Fleet](machine-a-tron-scale-testing.md#replicating-the-250-rack-fleet)
+for the ordered steps. The simulation overlay's `simulated-oob` segment is a
+`/18`, which holds 16,384 addresses, so the runs used one `10.200.0.0/17`
+segment instead.
 
 ## Reading the Numbers
 

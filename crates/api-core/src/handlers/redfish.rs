@@ -22,7 +22,10 @@ use arc_swap::ArcSwap;
 use carbide_instrument::emit;
 use carbide_secrets::credentials::CredentialReader;
 use carbide_utils::HostPortPair;
-use carbide_utils::redfish::{format_forwarded_host_parameter, parse_uri_host_ip};
+use carbide_utils::redfish::{
+    format_forwarded_host_parameter, log_redfish_http_error, parse_uri_host_ip,
+    redact_redfish_response_body, redfish_basic_authorization_context,
+};
 use chrono::{DateTime, Local};
 use db::redfish_actions::{
     ActionNotClaimed, ApprovalNotRecorded, approve_request, delete_request, fetch_request,
@@ -66,6 +69,9 @@ struct RedfishActionResultPersistenceFailed {
     error: String,
 }
 
+/// Performs a Core-mediated Redfish GET, diagnoses upstream HTTP 4xx/5xx responses,
+/// and redacts known direct-authentication credentials from readable error bodies
+/// while preserving the existing browse-response and RPC-error contracts.
 pub(crate) async fn redfish_browse(
     api: &crate::api::Api,
     request: tonic::Request<::rpc::forge::RedfishBrowseRequest>,
@@ -73,7 +79,8 @@ pub(crate) async fn redfish_browse(
     log_request_data(&request);
 
     let request = request.into_inner();
-    let uri: http::Uri = match request.uri.clone().parse() {
+    let requested_uri = request.uri;
+    let uri: http::Uri = match requested_uri.parse() {
         Ok(uri) => uri,
         Err(err) => {
             return Err(CarbideError::internal(format!("parsing uri failed: {err}")).into());
@@ -109,11 +116,45 @@ pub(crate) async fn redfish_browse(
         .collect::<HashMap<String, String>>();
 
     let status = response.status();
-    let text = response.text().await.map_err(|e| {
-        CarbideError::internal(format!(
-            "error reading response body: {e}, status: {status}"
-        ))
-    })?;
+    let is_http_error = status.is_client_error() || status.is_server_error();
+    let text = match response.text().await {
+        Ok(text) => text,
+        Err(e) => {
+            // The known status remains useful even when no untrusted body can
+            // be read; the shared logger supplies its safe fallback message.
+            if is_http_error {
+                log_redfish_http_error(
+                    "redfish",
+                    "redfish_browse",
+                    &requested_uri,
+                    status.as_u16(),
+                    "",
+                    std::iter::empty(),
+                );
+            }
+            return Err(CarbideError::internal(format!(
+                "error reading response body: {e}, status: {status}"
+            ))
+            .into());
+        }
+    };
+
+    // Keep readable HTTP failures in the browse response contract while
+    // preventing a directly contacted BMC from echoing reusable credentials.
+    let text = if is_http_error {
+        let sensitive_values = auth.http_error_sensitive_values();
+        log_redfish_http_error(
+            "redfish",
+            "redfish_browse",
+            &requested_uri,
+            status.as_u16(),
+            &text,
+            sensitive_values.iter().map(String::as_str),
+        );
+        redact_redfish_response_body(&text, sensitive_values.iter().map(String::as_str))
+    } else {
+        text
+    };
 
     Ok(tonic::Response::new(::rpc::forge::RedfishBrowseResponse {
         text,
@@ -500,6 +541,21 @@ enum PassthroughAuth {
 }
 
 impl PassthroughAuth {
+    /// Returns reusable Basic-auth credential forms only when Core owns them.
+    ///
+    /// The core-proxy path deliberately returns no context because the proxy,
+    /// rather than this handler, owns and applies the upstream credentials.
+    fn http_error_sensitive_values(&self) -> Vec<String> {
+        match self {
+            Self::BmcBasic(metadata) => {
+                let (_, sensitive_values) =
+                    redfish_basic_authorization_context(&metadata.user, Some(&metadata.password));
+                sensitive_values
+            }
+            Self::CoreProxy => Vec::new(),
+        }
+    }
+
     fn apply(
         &self,
         request: reqwest_middleware::RequestBuilder,

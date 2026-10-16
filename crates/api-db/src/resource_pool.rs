@@ -2276,6 +2276,12 @@ mod tests {
                 allocate_exact(&pool_handle, &mut txn, OwnerType::Vpc, "owner", 42).await?;
             assert_eq!(allocated, 42);
 
+            if auto_assign {
+                let result =
+                    allocate_exact(&pool_handle, &mut txn, OwnerType::Vpc, "owner", 42).await;
+                assert!(matches!(result, Err(DatabaseError::FailedPrecondition(_))));
+            }
+
             let rows: Vec<(
                 i32,
                 sqlx::types::Json<ResourcePoolEntryState>,

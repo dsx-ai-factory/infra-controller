@@ -855,9 +855,17 @@ type ForgeClient interface {
 	UpdateMachineHardwareInfo(ctx context.Context, in *UpdateMachineHardwareInfoRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Force deletes a Machine and the associated DPU from NICo databases,
 	// with the intention of rediscovering the host later on.
-	// The command will not stop a running tenant instance. Only a reboot that forces
-	// the NICo PXE boot process again would stop the image and run the discovery
-	// process again.
+	// By default, cleanup does not wait for DPU network acknowledgement. Set
+	// wait_for_instance_dpu to request Admin networking when an Instance exists
+	// and retain the records until every attached DPU acknowledges it. While
+	// waiting, return all_done=false; poll to finish deletion. An unreachable DPU
+	// can block an opted-in deletion indefinitely, and omitting the option on a
+	// retry does not cancel an already-recorded wait.
+	// Only servers supporting this option enforce the recorded wait. An older
+	// server can complete cleanup without acknowledgement, including on a retry.
+	// The request remains in ForceDeletion across API restarts and cannot be canceled.
+	// Returning to Admin stops tenant networking through the DPUs, but does not shut
+	// down or wipe the tenant's operating system. A later PXE boot runs discovery again.
 	//
 	// Due to the not well defined state that hosts are in after calling this command,
 	// it should not be used by Tenants or Site Providers to release instances. Those
@@ -7169,9 +7177,17 @@ type ForgeServer interface {
 	UpdateMachineHardwareInfo(context.Context, *UpdateMachineHardwareInfoRequest) (*emptypb.Empty, error)
 	// Force deletes a Machine and the associated DPU from NICo databases,
 	// with the intention of rediscovering the host later on.
-	// The command will not stop a running tenant instance. Only a reboot that forces
-	// the NICo PXE boot process again would stop the image and run the discovery
-	// process again.
+	// By default, cleanup does not wait for DPU network acknowledgement. Set
+	// wait_for_instance_dpu to request Admin networking when an Instance exists
+	// and retain the records until every attached DPU acknowledges it. While
+	// waiting, return all_done=false; poll to finish deletion. An unreachable DPU
+	// can block an opted-in deletion indefinitely, and omitting the option on a
+	// retry does not cancel an already-recorded wait.
+	// Only servers supporting this option enforce the recorded wait. An older
+	// server can complete cleanup without acknowledgement, including on a retry.
+	// The request remains in ForceDeletion across API restarts and cannot be canceled.
+	// Returning to Admin stops tenant networking through the DPUs, but does not shut
+	// down or wipe the tenant's operating system. A later PXE boot runs discovery again.
 	//
 	// Due to the not well defined state that hosts are in after calling this command,
 	// it should not be used by Tenants or Site Providers to release instances. Those

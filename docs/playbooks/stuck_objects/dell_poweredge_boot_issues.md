@@ -1,4 +1,4 @@
-# Restore a Missing DPU Boot Device on Dell PowerEdge
+# Restore a Missing DPU Boot Device on Dell PowerEdge <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Use this playbook when a Dell PowerEdge server with a DPU no longer lists its
 UEFI HTTP device. This issue has been observed on PowerEdge R750, R760, and

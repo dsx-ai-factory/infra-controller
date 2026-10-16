@@ -1,4 +1,4 @@
-# Operation Runs
+# Operation Runs <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 An operation run executes a firmware rollout over a frozen set of rack targets. Use it to limit concurrency, divide the rollout into phases, and stop further dispatch when safety gates trip. Flow persists the target plan at creation and starts dispatching it in the background.
 

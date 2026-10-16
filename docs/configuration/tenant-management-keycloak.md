@@ -1,4 +1,4 @@
-# Tenant Management with Keycloak
+# Tenant Management with Keycloak <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Keycloak-side administration for onboarding a Tenant: creating the realm roles that
 NICo reads as org membership, creating the Tenant's identity, and granting the

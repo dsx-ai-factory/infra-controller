@@ -433,12 +433,16 @@ func (oscr *APIOperatingSystemCreateRequest) ValidateAndSetUserData(phonehomeUrl
 	}
 
 	userData, err := util.EnablePhoneHomeInUserData(oscr.UserData, phonehomeUrl)
-	if errors.Is(err, util.ErrUnsupportedUserData) {
+	switch {
+	case errors.Is(err, util.ErrUnsupportedUserData):
 		return validation.Errors{
 			"userData": errors.New("userData must be a #cloud-config or #cloud-config-archive document to enable phone home"),
 		}
-	}
-	if err != nil {
+	case errors.Is(err, util.ErrAutoinstallUnmapped):
+		return validation.Errors{"userData": util.ErrAutoinstallUnmapped}
+	case errors.Is(err, util.ErrAutoinstallUserDataUnmapped):
+		return validation.Errors{"userData": util.ErrAutoinstallUserDataUnmapped}
+	case err != nil:
 		return phoneHomeUserDataError(true)
 	}
 
@@ -770,6 +774,10 @@ func (osur *APIOperatingSystemUpdateRequest) ValidateAndSetUserData(phonehomeUrl
 
 		// The UI always sends false when phone-home is unchecked, so user-data
 		// the block cannot be in is left alone rather than rejected.
+	case errors.Is(err, util.ErrAutoinstallUnmapped):
+		return validation.Errors{"userData": util.ErrAutoinstallUnmapped}
+	case errors.Is(err, util.ErrAutoinstallUserDataUnmapped):
+		return validation.Errors{"userData": util.ErrAutoinstallUserDataUnmapped}
 	case err != nil:
 		return phoneHomeUserDataError(*mergedPhoneHomeEnabled)
 	case userData != nil:

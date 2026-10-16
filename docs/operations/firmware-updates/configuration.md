@@ -1,4 +1,4 @@
-# Configure Firmware Versions <Badge intent="info">v2.1</Badge> <Badge intent="launch" minimal>New</Badge>
+# Configure Firmware Versions <Badge intent="info">v2.1</Badge>
 
 NICo needs a site-specific definition of acceptable firmware before it can
 detect drift or choose an upgrade target. Host firmware and DPU NIC firmware
@@ -249,7 +249,7 @@ contain that script.
 Other host models require their own inventory mapping and Scout script. To add
 support for another model:
 
-- Follow the [contributing guide](../../../CONTRIBUTING.md).
+- Follow the [contributing guide](https://github.com/dsx-ai-factory/infra-controller/blob/main/CONTRIBUTING.md).
 - Add the catalog component regex for `FirmwareComponentType::Cx7` to the
   [host firmware inventory mappings](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/handlers/firmware.rs)
   for the model.

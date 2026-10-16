@@ -134,7 +134,7 @@ pods:
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
         bmcDhcpRelayAddress: "10.200.0.1"  # simulated-oob gateway (nico-core-simulation.yaml), outside the ServiceCIDR
-        underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (nico-core-simulation.yaml)
+        underlayDhcpRelayAddress: "10.201.0.1"  # simulated-underlay gateway (nico-core-simulation.yaml)
         dpusInNicMode: false
 
 extraEnv:

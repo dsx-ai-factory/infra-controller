@@ -55,6 +55,7 @@ use carbide_preingestion_manager::PreingestionManager;
 use carbide_rack::bms_client::BmsDsxExchangeHandle;
 use carbide_rack_controller::config::RackConfig;
 use carbide_rack_controller::context::RackStateHandlerServices;
+use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::io::RackStateControllerIO;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
@@ -97,7 +98,9 @@ use tokio_util::sync::CancellationToken;
 use crate::api::Api;
 use crate::api::metrics::ApiMetricsEmitter;
 use crate::bootstrap::{RuntimeInputs, RuntimePrelude};
-use crate::cfg::file::{CarbideConfig, InitialObjectsConfig, ListenMode, VmaasConfig};
+use crate::cfg::file::{
+    CarbideConfig, DpfExtraService, InitialObjectsConfig, ListenMode, VmaasConfig,
+};
 use crate::cfg::load::all_configuration_files;
 use crate::dpa::handler::start_svpc_handler;
 use crate::handlers::machine_validation::apply_config_on_startup;
@@ -657,6 +660,23 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     )
     .await?;
 
+    let default_redirect_policy = reqwest::redirect::Policy::default();
+
+    let firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher> = Arc::new(
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                let initial_origin = attempt.previous().first().map(reqwest::Url::origin);
+
+                if initial_origin == Some(attempt.url().origin()) {
+                    default_redirect_policy.redirect(attempt)
+                } else {
+                    attempt.error("firmware-object redirect changed the configured origin")
+                }
+            }))
+            .build()
+            .wrap_err("failed to build the firmware-object HTTP client")?,
+    );
+
     let api_service = Arc::new(Api {
         certificate_provider,
         common_pools,
@@ -686,6 +706,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         machine_state_handler_enqueuer: Enqueuer::new(db_pool),
         metric_emitter: ApiMetricsEmitter::new(&meter),
         component_manager,
+        firmware_object_fetcher,
         bms_client: std::sync::OnceLock::new(),
         secrets_context,
         console_log_source,
@@ -959,6 +980,22 @@ async fn initialize_dpf_sdk(
             let services = carbide_config
                 .dpf
                 .resolved_services_for(deployment, deployment_type);
+            // Warn when an Astra deployment has Weave services but no ewethers config.
+            if deployment_type == DpuDeploymentType::Bf4Astra
+                && carbide_config.ewethers_config.is_none()
+                && services.extra.keys().any(|service| {
+                    matches!(
+                        service,
+                        DpfExtraService::DocaWeaveDhcpAgent
+                            | DpfExtraService::DocaWeaveFlowController
+                    )
+                })
+            {
+                tracing::warn!(
+                    deployment = %deployment.deployment_name,
+                    "Weave services are configured without ewethers_config; NICo's DPA/Astra paths remain disabled. Configure ewethers with the appropriate enable flags and overlay subnet values"
+                );
+            }
             let interfaces = match deployment_type {
                 DpuDeploymentType::Bf4Astra => &astra_interfaces,
                 DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 => &bf3_interfaces,
@@ -983,6 +1020,7 @@ async fn initialize_dpf_sdk(
                     interfaces,
                     service_vpc_slots,
                     &carbide_config.node_auth,
+                    carbide_config.ewethers_config.as_ref(),
                 ))
                 .num_of_vfs(carbide_config.dpu_config.num_of_vfs)
                 .pf_total_sf_reserved(carbide_config.dpf.pf_total_sf_reserved)
@@ -1102,8 +1140,19 @@ async fn initialize_dpf_sdk(
         tracing::warn!(error = %error, "Failed to clean up obsolete PF1 interfaces");
     }
 
+    // Get astra config route prefixes for dpu device registration.
+    let astra_config = carbide_config
+        .ewethers_config
+        .as_ref()
+        .map(|config| config.astra.clone())
+        .unwrap_or_default();
+
     Ok(Some(Arc::new(DpfSdkOps::new(
         Arc::new(sdk),
+        carbide_dpf::AstraRoutePrefixes {
+            rail_route_prefix_len: astra_config.underlay_rail_route_prefix_len,
+            software_plane_route_prefix_len: astra_config.underlay_software_plane_route_prefix_len,
+        },
         db_pool,
         join_set,
     )?)))
@@ -1367,6 +1416,7 @@ async fn initialize_and_start_controllers<'a>(
         work_lock_manager_handle,
         rms_client,
         component_manager,
+        firmware_object_fetcher,
         dpf_sdk,
         credential_manager,
         ..
@@ -2002,21 +2052,6 @@ async fn initialize_and_start_controllers<'a>(
         .build_and_spawn(join_set, cancel_token.clone())
         .expect("Unable to build PowerShelfStateController");
 
-    let default_redirect_policy = reqwest::redirect::Policy::default();
-
-    let firmware_object_fetcher = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            let initial_origin = attempt.previous().first().map(reqwest::Url::origin);
-
-            if initial_origin == Some(attempt.url().origin()) {
-                default_redirect_policy.redirect(attempt)
-            } else {
-                attempt.error("firmware-object redirect changed the configured origin")
-            }
-        }))
-        .build()
-        .wrap_err("failed to build the firmware-object HTTP client")?;
-
     StateController::<RackStateControllerIO>::builder()
         .database(db_pool.clone(), work_lock_manager_handle.clone())
         .meter("carbide_racks", meter.clone())
@@ -2038,7 +2073,7 @@ async fn initialize_and_start_controllers<'a>(
                     .switch_state_controller
                     .switch_mtls_services
                     .clone(),
-                firmware_object_fetcher: Arc::new(firmware_object_fetcher.clone()),
+                firmware_object_fetcher: firmware_object_fetcher.clone(),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
             }
             .into(),
@@ -2213,7 +2248,7 @@ async fn initialize_and_start_controllers<'a>(
             preingestion_manager.with_rack_firmware(
                 carbide_config.rack_profiles.clone(),
                 manager.compute_tray.clone(),
-                Arc::new(firmware_object_fetcher),
+                firmware_object_fetcher.clone(),
             )
         }
         _ => preingestion_manager,

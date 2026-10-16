@@ -805,12 +805,12 @@ fn bf4_astra_ew_nic_configurations() -> Vec<DpuFlavorEwNicConfigurations> {
                 value: "4".to_string(),
             },
             DpuFlavorEwNicConfigurationsRawNvConfig {
-                name: "NUM_OF_PF".to_string(),
-                value: "4".to_string(),
-            },
-            DpuFlavorEwNicConfigurationsRawNvConfig {
                 name: "LINK_TYPE_P1".to_string(),
                 value: "2".to_string(),
+            },
+            DpuFlavorEwNicConfigurationsRawNvConfig {
+                name: "HIDE_PORT2_PF".to_string(),
+                value: "1".to_string(),
             },
         ]),
         spectrum_x_optimized: Some(DpuFlavorEwNicConfigurationsSpectrumXOptimized {
@@ -1441,6 +1441,11 @@ fn get_bf4_astra_config_files(
                 concat!(
                     "#!/bin/bash\n",
                     "NETPLAN_FILE=\"/etc/netplan/99-cx9-rails.yaml\"\n",
+                    "set -e\n",
+                    "# Preserve the active netplan until every bridge lookup and write succeeds.\n",
+                    "NETPLAN_TMP=\"$(mktemp \"${NETPLAN_FILE}.tmp.XXXXXX\")\"\n",
+                    "# Keep a failed candidate for debugging; successful writes rename it into place.\n",
+                    "trap 'if [ -f \"$NETPLAN_TMP\" ]; then printf \"xplane-bridge.sh: retained failed netplan candidate at %s\\n\" \"$NETPLAN_TMP\" >&2; fi' EXIT\n",
                     "\n",
                     "# interface prefix | PCI address | bridge. The MAC-to-PCI association is read\n",
                     "# from the SmartNIC PF config for each interface prefix's p0 port.\n",
@@ -1501,7 +1506,9 @@ fn get_bf4_astra_config_files(
                     "        echo \"        - to: ${route2}\"\n",
                     "        echo \"          via: ${gateway}\"\n",
                     "    done\n",
-                    "} > \"$NETPLAN_FILE\"\n",
+                    "} > \"$NETPLAN_TMP\"\n",
+                    "# Both files are in the same directory, so replacement is atomic.\n",
+                    "mv -- \"$NETPLAN_TMP\" \"$NETPLAN_FILE\"\n",
                     "\n",
                     "netplan apply\n",
                     "\n",
@@ -1856,6 +1863,78 @@ mod tests {
             .expect("bash must execute synthetic BF4 preflight");
         fs::remove_dir_all(&fixture).expect("synthetic BF4 sysfs fixture must be removed");
         output
+    }
+
+    #[test]
+    fn astra_netplan_preserves_existing_file_on_failed_bridge_lookup() {
+        let fixture =
+            std::env::temp_dir().join(format!("carbide-dpf-netplan-{}", uuid::Uuid::new_v4()));
+        let config = fixture.join("0005:03:00.0/net/A53p0/smart_nic/pf/config");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        // Only the first MAC resolves, so generation fails after writing one bridge.
+        fs::write(config, "00:00:00:00:00:00").unwrap();
+        let netplan = fixture.join("99-cx9-rails.yaml");
+        fs::write(&netplan, "original configuration\n").unwrap();
+        let applied = fixture.join("applied");
+        let mut script = get_bf4_astra_config_files(&None)
+            .unwrap()
+            .into_iter()
+            .find(|file| file.path == "/etc/mellanox/xplane-bridge.sh")
+            .unwrap()
+            .raw
+            .unwrap()
+            .replace(
+                "NETPLAN_FILE=\"/etc/netplan/99-cx9-rails.yaml\"",
+                "NETPLAN_FILE=\"$TEST_NETPLAN\"",
+            )
+            .replace("/sys/bus/pci/devices/", "$TEST_SYSFS/");
+        for index in 0..2 {
+            for (key, value) in [
+                ("mac", format!("00:00:00:00:00:{index:02x}")),
+                ("ip", format!("100.96.0.{}/31", index * 2)),
+                ("gw", format!("100.96.0.{}", index * 2 + 1)),
+                ("route1", "100.96.0.0/16".to_owned()),
+                ("route2", "100.96.0.0/13".to_owned()),
+            ] {
+                script = script.replace(&format!("{{{{ .{key}_{index}_val }}}}"), &value);
+            }
+        }
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "netplan() {{ touch \"$TEST_APPLIED\"; }}\n{script}"
+            ))
+            .env("TEST_NETPLAN", &netplan)
+            .env("TEST_SYSFS", &fixture)
+            .env("TEST_APPLIED", &applied)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert_eq!(
+            fs::read_to_string(&netplan).unwrap(),
+            "original configuration\n"
+        );
+        assert!(!applied.exists());
+        let candidate = fs::read_dir(&fixture)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .contains(".tmp.")
+            })
+            .unwrap();
+        // Prove the lookup failed after a partial write, and that the candidate was retained.
+        assert!(
+            fs::read_to_string(&candidate)
+                .unwrap()
+                .contains("brcx-r1swpln0:")
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(candidate.to_string_lossy().as_ref())
+        );
+        fs::remove_dir_all(&fixture).unwrap();
     }
 
     /// Executes the flavor-provided OVN address script with synthetic `ip` output.

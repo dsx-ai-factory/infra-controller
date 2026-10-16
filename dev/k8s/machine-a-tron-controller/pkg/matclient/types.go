@@ -9,10 +9,15 @@ type MachinesStatusResponse struct {
 	Machines []MachineStatus `json:"machines"`
 }
 
+// DeviceKindSwitch is the DeviceKind of a simulated NVLink switch.
+const DeviceKindSwitch = "switch"
+
 // MachineStatus represents the status of a single machine (host or DPU).
 type MachineStatus struct {
 	// MatID is the machine-a-tron internal identifier (UUID).
 	MatID string `json:"mat_id"`
+	// DeviceKind is what the entry simulates: "machine", "dpu", "switch" or "power_shelf".
+	DeviceKind string `json:"device_kind"`
 	// MachineID is the observed NICo machine ID, if known.
 	MachineID *string `json:"machine_id,omitempty"`
 	// HardwareType is the hardware model (e.g., "GB200", "DGX").
@@ -25,6 +30,8 @@ type MachineStatus struct {
 	PowerState string `json:"power_state"`
 	// MachineIP is the machine's management IP, if known.
 	MachineIP *string `json:"machine_ip,omitempty"`
+	// NvosIP is a switch's NVOS management IP once DHCP has assigned one.
+	NvosIP *string `json:"nvos_ip,omitempty"`
 	// BMC contains BMC endpoint information.
 	BMC BMCStatus `json:"bmc"`
 	// DPUs contains nested DPU statuses for host machines.

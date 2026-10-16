@@ -686,6 +686,37 @@ func TestDpuExtensionServiceSQLDAO_GetAll(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("include deleted returns a soft-deleted object", func(t *testing.T) {
+		err := dessd.Delete(ctx, nil, created[0].ID)
+		require.NoError(t, err)
+
+		active, _, err := dessd.GetAll(
+			ctx,
+			nil,
+			DpuExtensionServiceFilterInput{DpuExtensionServiceIDs: []uuid.UUID{created[0].ID}},
+			paginator.PageInput{},
+			nil,
+		)
+		require.NoError(t, err)
+		assert.Empty(t, active)
+
+		withDeleted, _, err := dessd.GetAll(
+			ctx,
+			nil,
+			DpuExtensionServiceFilterInput{
+				DpuExtensionServiceIDs: []uuid.UUID{created[0].ID},
+				IncludeDeleted:         true,
+			},
+			paginator.PageInput{},
+			nil,
+		)
+		require.NoError(t, err)
+
+		if assert.Len(t, withDeleted, 1) {
+			assert.NotNil(t, withDeleted[0].Deleted)
+		}
+	})
 }
 
 func TestDpuExtensionServiceSQLDAO_GetAll_includeRelations(t *testing.T) {
@@ -956,6 +987,21 @@ func TestDpuExtensionServiceSQLDAO_Clear(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("can clear soft-delete timestamp", func(t *testing.T) {
+		err := dessd.Delete(ctx, nil, dessExp[2].ID)
+		require.NoError(t, err)
+
+		restored, err := dessd.Clear(ctx, nil, DpuExtensionServiceClearInput{
+			DpuExtensionServiceID: dessExp[2].ID,
+			Deleted:               true,
+		})
+		require.NoError(t, err)
+
+		if assert.NotNil(t, restored) {
+			assert.Nil(t, restored.Deleted)
+		}
+	})
 }
 
 func TestDpuExtensionServiceSQLDAO_Delete(t *testing.T) {
@@ -1007,7 +1053,7 @@ func TestDpuExtensionServiceSQLDAO_Delete(t *testing.T) {
 
 			if tc.checkSoftDelete {
 				err = dbSession.DB.NewSelect().Model(&res).Where("des.id = ?", tc.desID).WhereAllWithDeleted().Scan(ctx)
-				assert.NoError(t, err)
+				require.NoError(t, err)
 				assert.NotNil(t, res.Deleted)
 			}
 

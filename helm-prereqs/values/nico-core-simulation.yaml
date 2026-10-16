@@ -7,14 +7,21 @@
 ## domain, VLAN and VNI pools) before use. Differences from nico-core.yaml:
 ##   - allow_insecure_discovery = true, because every simulated machine shares
 ##     the machine-a-tron pod IP. Never use this file with real hardware.
-##   - [site_explorer] throughput knobs for thousands of mock BMCs.
-##   - [machine_state_controller.controller] max_concurrency = 100.
+##   - [site_explorer] budget and [machine_state_controller.controller]
+##     max_concurrency = 80 as measured on a 250-rack fleet. Refer to
+##     docs/development/large-site-sizing-and-settings.md.
+##   - nico-api.resources.limits.cpu = 8, measured on the same fleet.
+##   - max_database_connections = 900, because the fleet's agents exhaust a
+##     500-connection pool in polling waves.
+##   - nico-hardware-health.env enables the collector rate limiter.
 ##   - nico-api.apiAdmissionControl.enabled: false, because every simulated
 ##     agent shares one client identity.
 ##   - [networks.simulated-oob], [networks.simulated-admin] and
 ##     [networks.simulated-underlay]: the DHCP relay targets of the
 ##     machine-a-tron values files in this directory.
 ##   - [pools.lo-ip] and [pools.fnn-asn] sized for 4,500 hosts x 2 DPUs.
+##   - [nvlink_config] pointed at the NMX-C mock machine-a-tron hosts, verified
+##     against the mat-mock.nvidia.com SAN on the machine-a-tron certificates.
 ##   - [dpf] enabled and nico-api.dpf.rbacCreate: true for the DPF simulator
 ##     (dev/k8s/dpf-sim-controller), which replaces the DPF operator here.
 ##   - datacenter_asn declared in the root table, where nico-api reads it.
@@ -30,7 +37,9 @@
 ## from this directory. The simulator install
 ##   make -C dev/k8s/dpf-sim-controller deploy IMG=<registry>/dpf-sim-controller:<tag>
 ## installs the DPF CRDs and creates dpf-operator-system. The Makefile default
-## image is a local name no cluster can pull.
+## image is a local name no cluster can pull. The replication checklist for a
+## 250-rack fleet (site credentials Secret, Postgres limits, rack profile) is
+## in docs/development/machine-a-tron-scale-testing.md.
 ## Image registry and tag are injected at install time via --set flags:
 ##   --set global.image.repository=<your-registry>/nvmetal-carbide
 ##   --set global.image.tag=<tag>
@@ -142,6 +151,12 @@ nico-api:
   apiAdmissionControl:
     enabled: false
 
+  # nico-api used 5 to 6 cores at controller max_concurrency 80 and above
+  # (chart default 3). Refer to docs/development/large-site-sizing-and-settings.md.
+  resources:
+    limits:
+      cpu: 8
+
   siteConfig:
     enabled: true
     nicoApiSiteConfig: |
@@ -159,6 +174,9 @@ nico-api:
       # 4266030000 with your site's value. A root key, so it must stay above
       # the first [table] header.
       datacenter_asn = 4266030000
+      # Agents on a 250-rack fleet exhaust a 500-connection pool in polling
+      # waves. helm-prereqs sets Postgres max_connections to 1024.
+      max_database_connections = 900
 
       # -----------------------------------------------------------------------
       # DHCP servers reachable from this site - REQUIRED: your nico-dhcp VIP(s).
@@ -190,15 +208,19 @@ nico-api:
 
       # -----------------------------------------------------------------------
       # Site explorer - periodic background scan of site inventory.
-      # Throughput knobs for thousands of mock BMCs (build defaults 100 / 360 /
-      # 100). Raise explorations_per_run only with cycle-completion measurements:
-      # identification and machine creation run at the end of a completed cycle.
+      # Budget measured on a 250-rack simulated fleet. Build defaults: 360
+      # explorations, 100 machines, 9 switches, and 1 power shelf per run at
+      # 100 concurrent explorations. Identification and machine creation run
+      # at the end of a completed cycle. Refer to
+      # docs/development/large-site-sizing-and-settings.md.
       # -----------------------------------------------------------------------
       [site_explorer]
       run_interval = "30s"
-      concurrent_explorations = 400
-      explorations_per_run = 360
-      machines_created_per_run = 100
+      concurrent_explorations = 300
+      explorations_per_run = 2000
+      machines_created_per_run = 1000
+      switches_created_per_run = 1000
+      power_shelves_created_per_run = 1000
       # Override and shared-proxy modes route every Redfish call through one
       # machine-a-tron Service. Leave bmc_proxy unset in Controller Mode, where
       # site-explorer dials each BMC Service directly.
@@ -249,10 +271,12 @@ nico-api:
       # The three simulated segments are the DHCP relay targets of the
       # machine-a-tron values files: bmcDhcpRelayAddress is the simulated-oob
       # gateway and underlayDhcpRelayAddress the simulated-underlay gateway.
-      # Demand: simulated-oob and simulated-admin each need hosts x (1 + DPUs
-      # per host) addresses, simulated-underlay needs hosts x DPUs per host plus
-      # one per switch. A /18 leaves 16,382 addresses after the gateway and
-      # reserve_first = 1, enough for 4,500 hosts x 2 DPUs.
+      # Demand: simulated-oob needs one address per BMC, hosts x (1 + DPUs per
+      # host) plus switches and power shelves. 250 GB200 NVL72 racks have
+      # 17,750 BMCs, so widen it to a /17 for that fleet. simulated-admin needs
+      # hosts x (1 + DPUs per host), simulated-underlay hosts x DPUs per host
+      # plus one per switch. A /18 leaves 16,382 addresses after the gateway
+      # and reserve_first = 1, enough for 4,500 hosts x 2 DPUs.
       # In Controller Mode the BMC addresses are Service externalIPs, so the
       # simulated-oob prefix must lie outside the cluster ServiceCIDR, pod CIDR
       # and node network.
@@ -275,10 +299,13 @@ nico-api:
       # predicts DPU OOB interfaces on an underlay-typed segment and rejects
       # DHCP relayed onto any other type, while host admin links stay on the
       # admin segment above.
+      # Outside every default ServiceCIDR (kubeadm 10.96.0.0/12, kind
+      # 10.96.0.0/16, K3s 10.43.0.0/16): switch NVOS leases from this network
+      # are published as Service externalIPs for the NMX-C mock.
       [networks.simulated-underlay]
       type = "underlay"
-      prefix = "10.104.0.0/18"
-      gateway = "10.104.0.1"
+      prefix = "10.201.0.0/18"
+      gateway = "10.201.0.1"
       mtu = 9000
       reserve_first = 1
 
@@ -293,8 +320,25 @@ nico-api:
       # a start-end PKey range. For sharded sites, ensure the range does not
       # overlap any other shard.
       # [ib_fabrics.default]
-      # endpoints = ["https://10.180.126.181:443"]  # EXAMPLE - replace with your UFM endpoint
+      # endpoints = ["https://192.0.2.10:443"]  # EXAMPLE - replace with your UFM endpoint
       # pkeys = [{ start = "9000", end = "11000" }] # EXAMPLE - replace with your site PKey range
+
+      # -----------------------------------------------------------------------
+      # NVLink (NMX-C mock hosted by machine-a-tron)
+      # -----------------------------------------------------------------------
+      # In controller mode NICo reaches each simulated rack's NMX-C mock at a
+      # switch NVOS address (a mat-nvos-* Service externalIP in the
+      # simulated-underlay network). The mock is served with machine-a-tron's
+      # own certificate, which carries mat-mock.nvidia.com as an extra SAN
+      # (nico-machine-a-tron certificate.extraDnsNames) and is issued by the
+      # same CA as nico-roots, so one authority verifies every rack and no
+      # client certificate is needed. Racks are reconciled once their switches
+      # report CONTROL_PLANE_STATE_CONFIGURED through the RMS mock.
+      [nvlink_config]
+      enabled = true
+      allow_insecure = false
+      nmx_c_tls_ca_cert_path = "/var/run/secrets/nico-roots/ca.crt"
+      nmx_c_tls_authority = "mat-mock.nvidia.com"
 
       # -----------------------------------------------------------------------
       # Firmware management
@@ -309,11 +353,12 @@ nico-api:
       [machine_state_controller]
       failure_retry_time = "90m"
 
-      # Parallel host and DPU state-machine tasks (build default 10). Values
-      # above 100 gain nothing: every work unit passes through the work-lock
-      # manager's 100-slot command buffer.
+      # Parallel host and DPU state-machine tasks (build default 10). The
+      # controller takes one work lock per iteration, so the work-lock command
+      # buffer does not bound this value. 80 to 120 measured best on a 250-rack
+      # fleet. Refer to docs/development/large-site-sizing-and-settings.md.
       [machine_state_controller.controller]
-      max_concurrency = 100
+      max_concurrency = 80
 
       # -----------------------------------------------------------------------
       # FNN related configuration
@@ -445,6 +490,17 @@ nico-api:
       # flavor_name     = "carbide-dpu-flavor"
       # deployment_name = "nico-deployment-v2"
       # node_label_key  = "carbide.nvidia.com/controlled.node.v2"
+
+## ---------------------------------------------------------------------------
+## nico-hardware-health - collector rate limiter
+##
+## Off by default. Without it every simulated BMC re-authenticates through
+## nico-api every 120 s. These are the limiter's own defaults.
+## ---------------------------------------------------------------------------
+nico-hardware-health:
+  env:
+    CARBIDE_HEALTH__RATE_LIMIT__BUCKET_BURST: "100"
+    CARBIDE_HEALTH__RATE_LIMIT__BUCKET_REPLENISH: "30ms"
 
 ## ---------------------------------------------------------------------------
 ## Service VIP assignments - MetalLB loadBalancerIPs

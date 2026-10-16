@@ -674,7 +674,7 @@ func (ipbsd IPBlockSQLDAO) LinkSitePrefix(ctx context.Context, tx *db.Tx, id uui
 		Where("id = ?", id).
 		Where("deleted IS NULL").
 		Where("(site_prefix_id IS NULL OR site_prefix_id = ?)", sitePrefixID).
-		Returning("ipb.*").
+		Returning("?TableColumns").
 		Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: IP Block is deleted or linked to another SitePrefix", db.ErrInvalidValue)

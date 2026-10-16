@@ -5,6 +5,11 @@
 # accepted was silently dropped from the rendered startup.yaml and the placement
 # the template read was rejected by the script.
 #
+# Also covers the value's shape (#7187): the template renders the map's
+# KEYS, so a YAML sequence used to pass validation and render as its indexes
+# ("0: {}"), dropping the requested target without any error. The build now
+# rejects anything but a map of numeric <asn>:<n> keys.
+#
 # Renders the real template with gomplate the way build-dpu-install-iso.sh does
 # (context = vars file, datasource "site" = the site yaml) and sources the
 # script's own _check_unknown_keys block for the validation half.
@@ -80,6 +85,17 @@ cat >> "$SITE_TOP" <<EOF
 routeTargetsToImport:
   $DC_ASN:101: {}
 EOF
+SITE_SEQ="$TMP/site-seq.yaml"; base_site "$SITE_SEQ"
+cat >> "$SITE_SEQ" <<EOF
+  routeTargetsToImport:
+    - "$DC_ASN:101"
+EOF
+SITE_BADKEY="$TMP/site-badkey.yaml"; base_site "$SITE_BADKEY"
+cat >> "$SITE_BADKEY" <<EOF
+  routeTargetsToImport:
+    $DC_ASN:101: {}
+    jumphosts: {}
+EOF
 
 # ── template: renders the nested key, ignores the top-level one ─────────────
 echo "=== startupSMN.template: fnn.routeTargetsToImport is rendered ==="
@@ -132,6 +148,15 @@ assert_true  "fnn.routeTargetsToImport passes validation"      "validate '$SITE_
 assert_true  "no routeTargetsToImport passes validation"       "validate '$SITE_NONE'"
 assert_false "top-level routeTargetsToImport fails validation" "validate '$SITE_TOP'"
 assert_true  "the rejection names the key" "grep -q \"Unsupported field in site config (top level): 'routeTargetsToImport'\" '$TMP/err'"
+
+# ── build script validation: the value must be a map of numeric targets ──────
+echo ""
+echo "=== build-dpu-install-iso.sh: routeTargetsToImport shape (#7187) ==="
+assert_false "a YAML sequence fails validation"                "validate '$SITE_SEQ'"
+assert_true  "the rejection asks for a map of numeric targets" "grep -q \"'fnn.routeTargetsToImport' must be a map whose keys are full numeric route targets\" '$TMP/err'"
+assert_true  "the rejection names the shape it got"            "grep -q 'not a seq' '$TMP/err'"
+assert_false "a non-numeric key fails validation"              "validate '$SITE_BADKEY'"
+assert_true  "the rejection names the offending key"           "grep -q \"key 'jumphosts' is not a full numeric route target\" '$TMP/err'"
 
 # ── the shipped sample, with its commented block enabled ─────────────────────
 echo ""

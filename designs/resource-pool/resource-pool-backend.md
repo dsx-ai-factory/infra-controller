@@ -58,6 +58,8 @@ Existing composite database helpers cannot call the new service without creating
 
 Use `ResourcePoolBackend` as an explicit execution choice with Integrated and Remote variants. Integrated contains the adapter for the existing SQL functions. Remote holds a transport-neutral provider interface implemented first by gRPC. Standalone PostgreSQL and REST use the Remote execution contract because they commit independently of the entity transaction.
 
+[P02: library foundation](https://github.com/dsx-ai-factory/infra-controller/issues/7131) introduces the Integrated adapter and `ResourcePoolWithBackend<T>`, a borrowed association between a typed pool and its selected backend. It changes no production caller. The association does not resolve configuration or establish persisted authority; [P03](https://github.com/dsx-ai-factory/infra-controller/issues/7132) owns those responsibilities. The Remote provider interface and gRPC implementation follow in [P04](https://github.com/dsx-ai-factory/infra-controller/issues/7133) and [P05](https://github.com/dsx-ai-factory/infra-controller/issues/7134).
+
 The operations have different execution contexts:
 
 | Execution Path | Inputs | Transaction Ownership |
@@ -391,7 +393,7 @@ The minimum evidence and later implementation owners are:
 
 | Proof | P01 Boundary | Implementation Follow-Up |
 | --- | --- | --- |
-| Integrated call through shared service | Compile actual model, allocator, and transaction types without `api-core`; caller retains commit | [P02](https://github.com/dsx-ai-factory/infra-controller/issues/7131) adds production VPC wiring and rollback tests |
+| Integrated call through shared service | Compile actual model, allocator, and transaction types without `api-core`; caller retains commit | [P02](https://github.com/dsx-ai-factory/infra-controller/issues/7131) proves the library association and borrowed transaction; [P27](https://github.com/dsx-ai-factory/infra-controller/issues/7180) proves production VPC selection and entity rollback after P03 |
 | Delayed Reserve after Unknown and Cancel | Exercise both provider orderings and retained tombstone | [P04](https://github.com/dsx-ai-factory/infra-controller/issues/7133) tests the real protocol provider |
 | Attachment versus cancellation | Assert Attached with an entity when attachment wins, and CancelRequested without an entity when cancellation wins | [P06](https://github.com/dsx-ai-factory/infra-controller/issues/7135) proves SQL races and persistence |
 | Stale release after reuse | Preserve the new allocation under an old handle | [P07](https://github.com/dsx-ai-factory/infra-controller/issues/7136) proves restart and lost replies |
@@ -401,7 +403,7 @@ The minimum evidence and later implementation owners are:
 
 Later PRs must inventory retained tests before adding cases. Put each proof at the narrowest layer that exercises its distinct failure boundary. An in-memory protocol probe does not substitute for SQL fencing, restart persistence, caller rollback, or a real gRPC provider.
 
-The next implementation is [P02](https://github.com/dsx-ai-factory/infra-controller/issues/7131): introduce the shared boundary and preserve the first Integrated VPC allocation/release path. P03, P04, and P06 then implement configuration, protocol, and persistence against this contract. Revisit estimates after the P07 and P11 production-path proofs, before parallel consumer work depends on untested assumptions.
+[P02](https://github.com/dsx-ai-factory/infra-controller/issues/7131) establishes the standalone library. P03, P04, and P06 implement configuration, protocol, and persistence against this contract. [P27](https://github.com/dsx-ai-factory/infra-controller/issues/7180) then routes Integrated VPC allocation and release through P03's resolved per-pool dependencies. P11 uses that production caller for the gated Remote integration. Revisit estimates after the P07 and P11 production-path proofs, before parallel consumer work depends on untested assumptions.
 
 The v2.5 task identifiers used here are planning identifiers, not GitHub issue numbers:
 

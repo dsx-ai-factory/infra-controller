@@ -1,4 +1,4 @@
-# Machine-a-tron Build and Deployment Guide <Badge intent="info">v2.1</Badge> <Badge intent="launch" minimal>New</Badge>
+# Machine-a-tron Build and Deployment Guide <Badge intent="info">v2.1</Badge>
 
 machine-a-tron is a bare-metal simulator for NICo testing. It hosts mock Data
 Processing Units (DPUs) and servers behind Redfish Baseboard Management
@@ -435,6 +435,38 @@ matching `expected_machines` row exists (by BMC MAC). Otherwise it logs
 auto-registers these when `machineATron.registerExpectedMachines: true` (the
 default in the values file). DHCP discovery alone is **not** sufficient.
 
+Racks follow the same rule. For every rack ID under `racks.<group>`,
+machine-a-tron declares an expected rack group only if no group declares the
+rack yet. That group is keyed by the rack ID (one group per rack, listing its
+compute trays, switches, and power shelves) with protocol `NVLINK_V5` and
+topology `gb200_nvl72r1_c2g4` or `gb300_nvl72r1_c2g4`. An existing group that
+declares the rack is used as is, whatever its ID, topology, and members,
+including a group stored before nico-api recorded protocols. A
+group that carries the rack ID without declaring the rack is a configuration
+error. machine-a-tron then declares the expected rack. nico-api derives the
+rack profile from the rack's group, so `rack_profile_id` must name the profile
+derived from the group in effect. For the group machine-a-tron declares that
+is `GB200_NVL72R1_C2G4_WIWYNN` for `wiwynn_gb200_nvl72` and
+`GB300_NVL72R1_C2G4_LENOVO` for `lenovo_gb300_nvl72`; for an existing group it
+is whatever that group's topology, protocol, and members derive. machine-a-tron
+checks this at startup, before it registers anything, and refuses to start on
+a mismatch. The nico-api chart ships both derived profiles, so a site needs no
+profile override for them. Inspect the declarations with
+`nico-admin-cli expected-rack-group show` and
+`nico-admin-cli expected-rack show`.
+
+A site whose racks were registered before this rule stores a different
+profile, and machine-a-tron rejects an existing rack whose profile differs
+from `rack_profile_id`. Before the pods restart, check each rack's group with
+`nico-admin-cli expected-rack-group show <rack-group-id>`. If the group derives
+a profile other than `rack_profile_id` (for example topology `gb200_nvl72`),
+either set `rack_profile_id` to that profile or delete the group with
+`nico-admin-cli expected-rack-group delete <rack-group-id>` so that
+machine-a-tron declares it again. Deleting only the rack keeps the group, and
+the recreated rack would receive the group's profile and fail the next
+restart the same way. Then delete the rack with
+`nico-admin-cli expected-rack delete <rack-id>`.
+
 ## Controller Mode
 
 The chart can shard the simulated fleet across several machine-a-tron pods.
@@ -447,6 +479,7 @@ directly, with no `bmc_proxy`. Validated profiles live in `helm-prereqs/values/`
 | `machine-a-tron-scale.yaml` | 100 hosts x 2 DPUs in one pod |
 | `machine-a-tron-multipod.yaml` | 2 pods x 100 hosts x 2 DPUs |
 | `machine-a-tron-10racks.yaml` | 10 GB200 NVL72 racks, one per pod, behind the protocol gateway (180 hosts x 2 DPUs, 90 switches, 80 power shelves) |
+| `machine-a-tron-250racks.yaml` | 250 GB200 NVL72 racks, 25 per pod across 10 pods, behind the protocol gateway (4,500 hosts x 2 DPUs, 2,250 switches, 2,000 power shelves) |
 | `machine-a-tron-scale-4500.yaml` | 4,500 hosts x 2 DPUs across 3 pods, one BMC segment per pod |
 | `machine-a-tron-scale-4500-proxy.yaml` | 4,500 hosts x 2 DPUs in one pod behind one shared proxy Service, without the controller |
 
@@ -459,7 +492,8 @@ SPIFFE URI). Controller Mode adds the following requirements:
    clusterIPs. All pods can share the same relay address. NICo assigns unique
    IPs from the network. Neither the chart nor the controller checks this, so
    run the preflight before every install. It resolves each
-   `bmcDhcpRelayAddress` to its `[networks.*]` prefix, reads the ServiceCIDR
+   `bmcDhcpRelayAddress`, and each `underlayDhcpRelayAddress` where set, to
+   its `[networks.*]` prefix, reads the ServiceCIDR
    from the cluster (or `SCALE_SERVICE_CIDRS`), and exits nonzero on an
    overlap:
 
@@ -477,13 +511,22 @@ SPIFFE URI). Controller Mode adds the following requirements:
    them: `allow_insecure_discovery = true`, `[networks.simulated-oob]`
    (`10.200.0.0/18`, gateway `10.200.0.1`, the `bmcDhcpRelayAddress` of the
    profiles), `[networks.simulated-admin]`, and `[networks.simulated-underlay]`
-   (`10.104.0.0/18`, gateway `10.104.0.1`, the `underlayDhcpRelayAddress`).
+   (`10.201.0.0/18`, gateway `10.201.0.1`, the `underlayDhcpRelayAddress`).
    The 3-pod 4,500-host profile needs one extra `[networks.mat-bmc-N]` stanza
    per pod, listed in its header. Declare networks before nico-api first
    starts. Refer to [Established Sites](#established-sites) otherwise.
 
 1. **Leave `site_explorer.bmc_proxy` unset.** The Redfish client dials each
    BMC IP directly.
+
+1. **The NVOS network has the same constraints as the BMC network.** The
+   controller publishes each simulated NVLink switch's NVOS lease (from the
+   `underlayDhcpRelayAddress` network, `[networks.simulated-underlay]` in the
+   profiles) as the `externalIPs` of a `mat-nvos-*` Service, through which
+   NICo reaches machine-a-tron's hosted NMX-C mock on port 9370. The preflight
+   checks that network alongside the BMC network. `nico-core-simulation.yaml`
+   ships the matching `[nvlink_config]`; refer to
+   [Machine-a-tron NMX-C Mock](machine-a-tron-nmxc-mock.md).
 
 1. **Keep the BMC passwords pinned.** The chart pins every mock BMC to the
    site root it reads from the site credentials Secret, so install the Secret
@@ -554,7 +597,8 @@ helm upgrade --install nico-machine-a-tron helm/charts/nico-machine-a-tron \
 
 The Core side needs `nico-api.rms.apiUrl` pointed at the gateway Service, as
 described under [Deploying a 250-Rack Site](#deploying-a-250-rack-site). The
-shipped `[rack_profiles.NVL72]` profile covers these racks.
+nico-api chart ships the `GB200_NVL72R1_C2G4_WIWYNN` profile that nico-api
+derives for these racks, so the site needs no profile override.
 
 ### Deploying a 250-Rack Site
 
@@ -563,73 +607,66 @@ switches, and 8 power shelves, 71 BMCs in total. One machine-a-tron pod is
 sized for about 25 racks, so a 250-rack site runs 10 pods behind the protocol
 gateway. The gateway serves one Unified Fabric Manager (UFM) API and one RMS
 API for all of them. Each pod declares its racks under `racks` with rack ids
-that are unique across pods. The values below layer on
-`machine-a-tron-multipod.yaml`, whose 100-host `compute` groups must be nulled
-so they do not deep-merge into the rack pods:
+that are unique across pods. `machine-a-tron-250racks.yaml` ships this fleet,
+10 pods of 25 racks each, in the shape of `machine-a-tron-10racks.yaml`:
 
 ```yaml
-mat-k8s-controller:
-  enabled: true
-  gateway:
-    enabled: true
-  config:
-    insecureSkipVerify: true
-
-persistence:
-  enabled: true  # simulator state survives pod restarts
-
 pods:
-  default: null
   mat-0:
     machines:
       rack-machines: null  # the chart's example group
-      compute: null        # the profile's 100-host group
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
         ids: [rack-001, rack-002, rack-003]  # 25 ids per pod
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-1:
-    machines:
-      compute: null
+    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
         ids: [rack-026, rack-027, rack-028]
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   # mat-2 to mat-9 follow the same pattern
 ```
 
-Install with both files. Check first that the render carries no machine
-group, so the count prints 0:
+Install it like the 10-rack file. Check first that the render carries no
+machine group, so the count prints 0:
 
 ```bash
 helm template nico-machine-a-tron helm/charts/nico-machine-a-tron \
-  -f helm-prereqs/values/machine-a-tron-multipod.yaml -f racks-250.yaml \
+  -f helm-prereqs/values/machine-a-tron-250racks.yaml \
   | grep -c '^ *\[machines\.'
+python3 helm-prereqs/check-mat-service-cidr.py helm-prereqs/values/machine-a-tron-250racks.yaml \
+  --site-config helm-prereqs/values/nico-core-simulation.yaml &&
 helm upgrade --install nico-machine-a-tron helm/charts/nico-machine-a-tron \
   -n nico-mat --create-namespace --qps 15 --burst-limit 30 \
+  --set createNamespace=false \
   --set image.repository="${NICO_IMAGE_REGISTRY}/machine-a-tron" \
   --set image.tag="${TAG}" \
   --set mat-k8s-controller.image.repository="${NICO_IMAGE_REGISTRY}/mat-k8s-controller" \
   --set mat-k8s-controller.image.tag="${CONTROLLER_TAG}" \
-  -f helm-prereqs/values/machine-a-tron-multipod.yaml -f racks-250.yaml
+  -f helm-prereqs/values/machine-a-tron-250racks.yaml
 ```
 
 `helm template` again omits the `host_bmc_password` and `dpu_bmc_password`
 lines. The site credentials lookup adds them when the install renders against
 the cluster.
 
-The `resources` block comes from the multipod profile, which sizes 2Gi of
-memory for 300 BMCs per pod. Raise it for 1,775 BMCs per pod.
-`machine-a-tron-scale-4500.yaml` allots 8Gi to pods of up to 8,100 BMCs.
+The shipped `resources` block limits each pod to 4 CPUs and 6Gi of memory for
+1,775 BMCs (requests 1 CPU and 2Gi). For comparison, `machine-a-tron-multipod.yaml`
+sizes 2Gi for 300 BMCs per pod and `machine-a-tron-scale-4500.yaml` allots 8Gi
+to pods of up to 8,100 BMCs. The profile leaves `persistence.enabled` at the
+chart default, so a restarted pod repeats its 25-rack registration (about
+30 min) and the machines it already created are re-reported, not re-created.
 
 The Core side needs `nico-api.rms.apiUrl` pointed at the gateway Service. The
-shipped `[rack_profiles.NVL72]` profile covers these racks. Refer to
+nico-api chart ships the `GB200_NVL72R1_C2G4_WIWYNN` profile that nico-api
+derives for these racks, so the site needs no profile override. Refer to
 [Machine-a-tron RMS Mock](machine-a-tron-rms-mock.md#pointing-nico-at-it) and
 to [RMS Configuration](../configuration/rms.md). 250 racks need 17,750 BMC
 addresses, more than the shipped `simulated-oob` prefix holds. Refer to
@@ -672,7 +709,7 @@ and pool in the Core values from the fleet:
 |---|---|---|
 | `[networks.simulated-oob]` (BMC DHCP) | hosts x (1 + DPUs per host). A GB200 NVL72 rack needs 71 (18 x 3 + 9 + 8) | `10.200.0.0/18`, 16,382 usable |
 | `[networks.simulated-admin]` (host PF at creation) | hosts x (DPUs per host + 1) | `10.102.0.0/18` |
-| `[networks.simulated-underlay]` (DPU OOB and switch NVOS DHCP) | hosts x DPUs per host + switches | `10.104.0.0/18` |
+| `[networks.simulated-underlay]` (DPU OOB and switch NVOS DHCP) | hosts x DPUs per host + switches | `10.201.0.0/18` |
 | `[pools.lo-ip]` | one per machine: hosts + DPUs | 16,382 addresses |
 | `[pools.fnn-asn]` | one per DPU | 18,000 |
 

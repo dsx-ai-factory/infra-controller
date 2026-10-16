@@ -1067,6 +1067,53 @@ func TestMachineCapabilitySQLDAO_GetAllDistinct(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("distinct results survive an added column", func(t *testing.T) {
+		dbSession.DB.SetMaxOpenConns(1)
+		dbSession.DB.SetMaxIdleConns(1)
+		hook := &testProjectionQueryHook{}
+		dbSession.DB.AddQueryHook(hook)
+		migration := util.GetTestDBSession(t, false)
+		defer migration.Close()
+		var firstQuery string
+		var firstPrepared testPreparedQuery
+		var firstResults []MachineCapability
+		for _, afterColumnAddition := range []bool{false, true} {
+			if afterColumnAddition {
+				_, err := migration.DB.ExecContext(ctx, "ALTER TABLE machine_capability ADD COLUMN test_added_column text")
+				require.NoError(t, err)
+			}
+			got, _, err := mcd.GetAllDistinct(ctx, nil, []string{ms[0].ID, ms[1].ID},
+				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, cutil.GetPtr(paginator.TotalLimit), nil)
+			require.NoError(t, err)
+			require.Len(t, got, len(MachineCapabilityTypeChoiceMap)+1)
+			projection, _, found := strings.Cut(hook.query, " FROM ")
+			require.True(t, found)
+			testAssertNamedModelColumns(t, dbSession, MachineCapability{}, projection)
+			assert.Contains(t, projection, "DISTINCT ON (mc.type, mc.name, mc.frequency, mc.capacity, mc.vendor, mc.count, mc.device_type, mc.inactive_devices)")
+			for _, capability := range got {
+				var expected *MachineCapability
+				for i := range mcs {
+					if mcs[i].ID == capability.ID {
+						expected = &mcs[i]
+						break
+					}
+				}
+				require.NotNil(t, expected)
+				expectedRecord := *expected
+				expectedRecord.InstanceType = nil
+				assert.Equal(t, expectedRecord, capability)
+			}
+			prepared := testGetPreparedQuery(t, ctx, dbSession, hook.query)
+			if afterColumnAddition {
+				assert.Equal(t, firstQuery, hook.query)
+				assert.Equal(t, firstPrepared, prepared)
+				assert.Equal(t, firstResults, got)
+			} else {
+				firstQuery, firstPrepared, firstResults = hook.query, prepared, got
+			}
+		}
+	})
 }
 
 func TestMachineCapabilitySQLDAO_Update(t *testing.T) {

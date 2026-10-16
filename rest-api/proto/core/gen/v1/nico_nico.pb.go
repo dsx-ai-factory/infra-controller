@@ -10725,9 +10725,12 @@ type RuntimeConfig struct {
 	// GetManagedHostNetworkConfig for the tenant-inclusive FNN response, with RBAC
 	// enforced. An explicit list is returned without checking tenant coverage.
 	// Older Core versions omit this field; an empty items list is authoritative.
-	SiteFabricNullRoutes *StringList `protobuf:"bytes,58,opt,name=site_fabric_null_routes,json=siteFabricNullRoutes,proto3,oneof" json:"site_fabric_null_routes,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	SiteFabricNullRoutes         *StringList `protobuf:"bytes,58,opt,name=site_fabric_null_routes,json=siteFabricNullRoutes,proto3,oneof" json:"site_fabric_null_routes,omitempty"`
+	DatabasePoolAcquireTimeoutMs uint64      `protobuf:"varint,59,opt,name=database_pool_acquire_timeout_ms,json=databasePoolAcquireTimeoutMs,proto3" json:"database_pool_acquire_timeout_ms,omitempty"`
+	DatabasePoolIdleTimeoutMs    uint64      `protobuf:"varint,60,opt,name=database_pool_idle_timeout_ms,json=databasePoolIdleTimeoutMs,proto3" json:"database_pool_idle_timeout_ms,omitempty"`
+	DatabasePoolMaxLifetimeMs    uint64      `protobuf:"varint,61,opt,name=database_pool_max_lifetime_ms,json=databasePoolMaxLifetimeMs,proto3" json:"database_pool_max_lifetime_ms,omitempty"`
+	unknownFields                protoimpl.UnknownFields
+	sizeCache                    protoimpl.SizeCache
 }
 
 func (x *RuntimeConfig) Reset() {
@@ -11130,6 +11133,27 @@ func (x *RuntimeConfig) GetSiteFabricNullRoutes() *StringList {
 		return x.SiteFabricNullRoutes
 	}
 	return nil
+}
+
+func (x *RuntimeConfig) GetDatabasePoolAcquireTimeoutMs() uint64 {
+	if x != nil {
+		return x.DatabasePoolAcquireTimeoutMs
+	}
+	return 0
+}
+
+func (x *RuntimeConfig) GetDatabasePoolIdleTimeoutMs() uint64 {
+	if x != nil {
+		return x.DatabasePoolIdleTimeoutMs
+	}
+	return 0
+}
+
+func (x *RuntimeConfig) GetDatabasePoolMaxLifetimeMs() uint64 {
+	if x != nil {
+		return x.DatabasePoolMaxLifetimeMs
+	}
+	return 0
 }
 
 type EchoRequest struct {
@@ -15283,7 +15307,12 @@ type PowerShelfMaintenanceRequest struct {
 	Operation     PowerShelfMaintenanceOperation `protobuf:"varint,2,opt,name=operation,proto3,enum=forge.PowerShelfMaintenanceOperation" json:"operation,omitempty"`
 	// URL of a ticket / issue tracking this maintenance request. Used as the
 	// request initiator in audit logs.
-	Reference     *string `protobuf:"bytes,3,opt,name=reference,proto3,oneof" json:"reference,omitempty"`
+	Reference *string `protobuf:"bytes,3,opt,name=reference,proto3,oneof" json:"reference,omitempty"`
+	// Only meaningful for POWER_OFF: when true, request a graceful OS-ordered
+	// shutdown; when false or omitted, request a forced power-off. Forced is the
+	// default so omission preserves the behavior of clients that predate this
+	// field.
+	Graceful      *bool `protobuf:"varint,4,opt,name=graceful,proto3,oneof" json:"graceful,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -15337,6 +15366,13 @@ func (x *PowerShelfMaintenanceRequest) GetReference() string {
 		return *x.Reference
 	}
 	return ""
+}
+
+func (x *PowerShelfMaintenanceRequest) GetGraceful() bool {
+	if x != nil && x.Graceful != nil {
+		return *x.Graceful
+	}
+	return false
 }
 
 type PowerShelfStateHistoriesRequest struct {
@@ -30348,8 +30384,19 @@ type AdminForceDeleteMachineRequest struct {
 	// marked for preservation so the same MAC can reclaim it on re-ingestion; set
 	// this when a permanent wipe should free those addresses immediately.
 	ReleasePreservedAddresses bool `protobuf:"varint,8,opt,name=release_preserved_addresses,json=releasePreservedAddresses,proto3" json:"release_preserved_addresses,omitempty"`
-	unknownFields             protoimpl.UnknownFields
-	sizeCache                 protoimpl.SizeCache
+	// When true and an Instance exists, request Admin networking and wait for
+	// every attached DPU to acknowledge it before removing the Instance and
+	// Machines. Defaults to false: preserve cleanup without DPU acknowledgement.
+	// A new deletion without an Instance does not wait, even when true. Once
+	// recorded, the wait survives retries, omission of this option, and later
+	// removal of the Instance. An unreachable DPU can leave deletion pending
+	// indefinitely. Only servers supporting this field enforce the recorded wait.
+	// Older servers ignore both this option and a wait saved by a newer server,
+	// so a retry during a rolling upgrade or after a downgrade can delete without
+	// acknowledgement.
+	WaitForInstanceDpu bool `protobuf:"varint,9,opt,name=wait_for_instance_dpu,json=waitForInstanceDpu,proto3" json:"wait_for_instance_dpu,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *AdminForceDeleteMachineRequest) Reset() {
@@ -30434,6 +30481,13 @@ func (x *AdminForceDeleteMachineRequest) GetDeleteRetainedBootInterfaces() bool 
 func (x *AdminForceDeleteMachineRequest) GetReleasePreservedAddresses() bool {
 	if x != nil {
 		return x.ReleasePreservedAddresses
+	}
+	return false
+}
+
+func (x *AdminForceDeleteMachineRequest) GetWaitForInstanceDpu() bool {
+	if x != nil {
+		return x.WaitForInstanceDpu
 	}
 	return false
 }
@@ -30877,10 +30931,12 @@ func (*DecommissionManagedHostResponse) Descriptor() ([]byte, []int) {
 // Response to AdminForceDeleteMachine call
 // Describes which resources have been released
 type AdminForceDeleteMachineResponse struct {
-	state                         protoimpl.MessageState `protogen:"open.v1"`
-	AllDone                       bool                   `protobuf:"varint,1,opt,name=all_done,json=allDone,proto3" json:"all_done,omitempty"`
-	ManagedHostMachineId          string                 `protobuf:"bytes,11,opt,name=managed_host_machine_id,json=managedHostMachineId,proto3" json:"managed_host_machine_id,omitempty"`
-	ManagedHostMachineInterfaceId string                 `protobuf:"bytes,12,opt,name=managed_host_machine_interface_id,json=managedHostMachineInterfaceId,proto3" json:"managed_host_machine_interface_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// True when deletion has completed. False while an opted-in deletion waits for
+	// DPU Admin-network acknowledgement; poll AdminForceDeleteMachine to resume.
+	AllDone                       bool   `protobuf:"varint,1,opt,name=all_done,json=allDone,proto3" json:"all_done,omitempty"`
+	ManagedHostMachineId          string `protobuf:"bytes,11,opt,name=managed_host_machine_id,json=managedHostMachineId,proto3" json:"managed_host_machine_id,omitempty"`
+	ManagedHostMachineInterfaceId string `protobuf:"bytes,12,opt,name=managed_host_machine_interface_id,json=managedHostMachineInterfaceId,proto3" json:"managed_host_machine_interface_id,omitempty"`
 	// Deprecated: Use dpu_machine_ids
 	DpuMachineId string `protobuf:"bytes,13,opt,name=dpu_machine_id,json=dpuMachineId,proto3" json:"dpu_machine_id,omitempty"`
 	// Deprecated: Use dpu_machine_interface_ids
@@ -71133,7 +71189,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x0f_runtime_config\"\x16\n" +
 	"\x14GetRmsVersionRequest\"1\n" +
 	"\x15GetRmsVersionResponse\x12\x18\n" +
-	"\aversion\x18\x01 \x01(\tR\aversion\"\xf2\x18\n" +
+	"\aversion\x18\x01 \x01(\tR\aversion\"\xbe\x1a\n" +
 	"\rRuntimeConfig\x12\x16\n" +
 	"\x06listen\x18\x01 \x01(\tR\x06listen\x12)\n" +
 	"\x10metrics_endpoint\x18\x02 \x01(\tR\x0fmetricsEndpoint\x12!\n" +
@@ -71189,7 +71245,10 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\fsvpc_enabled\x187 \x01(\bR\vsvpcEnabled\x12#\n" +
 	"\rastra_enabled\x188 \x01(\bR\fastraEnabled\x12)\n" +
 	"\x10ewethers_enabled\x189 \x01(\bR\x0fewethersEnabled\x12N\n" +
-	"\x17site_fabric_null_routes\x18: \x01(\v2\x12.common.StringListH\x03R\x14siteFabricNullRoutes\x88\x01\x01\x1aN\n" +
+	"\x17site_fabric_null_routes\x18: \x01(\v2\x12.common.StringListH\x03R\x14siteFabricNullRoutes\x88\x01\x01\x12F\n" +
+	" database_pool_acquire_timeout_ms\x18; \x01(\x04R\x1cdatabasePoolAcquireTimeoutMs\x12@\n" +
+	"\x1ddatabase_pool_idle_timeout_ms\x18< \x01(\x04R\x19databasePoolIdleTimeoutMs\x12@\n" +
+	"\x1ddatabase_pool_max_lifetime_ms\x18= \x01(\x04R\x19databasePoolMaxLifetimeMs\x1aN\n" +
 	" DpuNicFirmwareUpdateVersionEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x16\n" +
@@ -71567,13 +71626,15 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x1eDecommissionPowerShelfResponse\"A\n" +
 	"\x19PowerShelfDeletionRequest\x12$\n" +
 	"\x02id\x18\x01 \x01(\v2\x14.common.PowerShelfIdR\x02id\"\x1a\n" +
-	"\x18PowerShelfDeletionResult\"\xd2\x01\n" +
+	"\x18PowerShelfDeletionResult\"\x80\x02\n" +
 	"\x1cPowerShelfMaintenanceRequest\x12<\n" +
 	"\x0fpower_shelf_ids\x18\x01 \x03(\v2\x14.common.PowerShelfIdR\rpowerShelfIds\x12C\n" +
 	"\toperation\x18\x02 \x01(\x0e2%.forge.PowerShelfMaintenanceOperationR\toperation\x12!\n" +
-	"\treference\x18\x03 \x01(\tH\x00R\treference\x88\x01\x01B\f\n" +
+	"\treference\x18\x03 \x01(\tH\x00R\treference\x88\x01\x01\x12\x1f\n" +
+	"\bgraceful\x18\x04 \x01(\bH\x01R\bgraceful\x88\x01\x01B\f\n" +
 	"\n" +
-	"_reference\"_\n" +
+	"_referenceB\v\n" +
+	"\t_graceful\"_\n" +
 	"\x1fPowerShelfStateHistoriesRequest\x12<\n" +
 	"\x0fpower_shelf_ids\x18\x01 \x03(\v2\x14.common.PowerShelfIdR\rpowerShelfIds\"\xd2\x01\n" +
 	" PowerShelfHealthHistoriesRequest\x12<\n" +
@@ -73006,7 +73067,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x1dDpuAgentUpgradePolicyResponse\x12>\n" +
 	"\ractive_policy\x18\x01 \x01(\x0e2\x19.forge.AgentUpgradePolicyR\factivePolicy\x12\x1d\n" +
 	"\n" +
-	"did_change\x18\x02 \x01(\bR\tdidChange\"\xe2\x03\n" +
+	"did_change\x18\x02 \x01(\bR\tdidChange\"\x95\x04\n" +
 	"\x1eAdminForceDeleteMachineRequest\x12\x1d\n" +
 	"\n" +
 	"host_query\x18\x01 \x01(\tR\thostQuery\x12+\n" +
@@ -73016,7 +73077,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	"#allow_delete_with_orphaned_dpf_crds\x18\x05 \x01(\bR\x1eallowDeleteWithOrphanedDpfCrds\x126\n" +
 	"\x17delete_bmc_suppressions\x18\x06 \x01(\bR\x15deleteBmcSuppressions\x12E\n" +
 	"\x1fdelete_retained_boot_interfaces\x18\a \x01(\bR\x1cdeleteRetainedBootInterfaces\x12>\n" +
-	"\x1brelease_preserved_addresses\x18\b \x01(\bR\x19releasePreservedAddresses\"\x81\x01\n" +
+	"\x1brelease_preserved_addresses\x18\b \x01(\bR\x19releasePreservedAddresses\x121\n" +
+	"\x15wait_for_instance_dpu\x18\t \x01(\bR\x12waitForInstanceDpu\"\x81\x01\n" +
 	"\x0fReservedAddress\x12\x1d\n" +
 	"\n" +
 	"ip_address\x18\x01 \x01(\tR\tipAddress\x12&\n" +

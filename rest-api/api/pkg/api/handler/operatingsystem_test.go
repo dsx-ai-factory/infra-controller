@@ -168,12 +168,22 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 		reqBodyModel                  *model.APIOperatingSystemCreateRequest
 		user                          *cdbm.User
 		expectedErr                   bool
+		expectedUserDataError         string
 		expectedStatus                int
 		expectedOperatingSystemStatus string
 		expectedStatusHistoryCount    int
 		expectedImageURL              bool
 		verifyChildSpanner            bool
 	}{
+		{
+			name:                  "malformed autoinstall user-data returns mapping detail without persistence",
+			reqOrgName:            tnOrg1,
+			reqBody:               `{"name":"invalid-autoinstall-os","ipxeScript":"ipxe","phoneHomeEnabled":true,"userData":"#cloud-config\nautoinstall:\n  user-data: private-value\n"}`,
+			user:                  tnu,
+			expectedErr:           true,
+			expectedStatus:        http.StatusBadRequest,
+			expectedUserDataError: "autoinstall user-data must be a mapping to insert phone-home",
+		},
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     tnOrg1,
@@ -325,6 +335,18 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusCreated)
 			assert.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectedUserDataError != "" {
+				var response struct {
+					Data map[string]string `json:"data"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, map[string]string{"userData": tc.expectedUserDataError}, response.Data)
+				assert.NotContains(t, rec.Body.String(), "private-value")
+				osDAO := cdbm.NewOperatingSystemDAO(dbSession)
+				_, count, queryErr := osDAO.GetAll(ctx, nil, cdbm.OperatingSystemFilterInput{Names: []string{"invalid-autoinstall-os"}}, paginator.PageInput{}, nil)
+				require.NoError(t, queryErr)
+				assert.Zero(t, count)
+			}
 			if !tc.expectedErr {
 				rsp := &model.APIOperatingSystem{}
 				err := json.Unmarshal(rec.Body.Bytes(), rsp)
@@ -1547,14 +1569,15 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 	tsc1.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	tests := []struct {
-		name           string
-		reqOrgName     string
-		user           *cdbm.User
-		reqBody        string
-		reqUpdateModel *model.APIOperatingSystemUpdateRequest
-		osID           string
-		expectedErr    bool
-		expectedStatus int
+		name                  string
+		reqOrgName            string
+		user                  *cdbm.User
+		reqBody               string
+		reqUpdateModel        *model.APIOperatingSystemUpdateRequest
+		osID                  string
+		expectedErr           bool
+		expectedUserDataError string
+		expectedStatus        int
 
 		expectedName             *string
 		expectedDesc             *string
@@ -1568,6 +1591,16 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 		expectedDeactivationNote *string
 		verifyChildSpanner       bool
 	}{
+		{
+			name:                  "malformed autoinstall update returns mapping detail without mutation",
+			reqOrgName:            ipOrg1,
+			user:                  user,
+			reqBody:               `{"name":"rejected-rename","phoneHomeEnabled":true,"userData":"#cloud-config\nautoinstall: private-value\n"}`,
+			osID:                  os1.ID.String(),
+			expectedErr:           true,
+			expectedStatus:        http.StatusBadRequest,
+			expectedUserDataError: "autoinstall must be a mapping to insert phone-home",
+		},
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     ipOrg1,
@@ -1794,10 +1827,28 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 				cfg:       cfg,
 				scp:       scp,
 			}
+			var before *cdbm.OperatingSystem
+			if tc.expectedUserDataError != "" {
+				var readErr error
+				before, readErr = osDAO.GetByID(ctx, nil, uuid.MustParse(tc.osID), nil)
+				require.NoError(t, readErr)
+			}
+
 			err := tah.Handle(ec)
 			assert.Nil(t, err)
 
 			assert.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectedUserDataError != "" {
+				var response struct {
+					Data map[string]string `json:"data"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, map[string]string{"userData": tc.expectedUserDataError}, response.Data)
+				assert.NotContains(t, rec.Body.String(), "private-value")
+				after, readErr := osDAO.GetByID(ctx, nil, before.ID, nil)
+				require.NoError(t, readErr)
+				assert.Equal(t, before, after)
+			}
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
 
 			if !tc.expectedErr {

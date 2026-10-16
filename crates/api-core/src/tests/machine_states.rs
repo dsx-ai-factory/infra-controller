@@ -3580,7 +3580,7 @@ async fn test_ready_boot_config_waits_for_all_dpu_network_config_versions(pool: 
         txn.as_mut(),
         mh.host().id,
         "test",
-        MachineMaintenanceOperation::PowerOff,
+        MachineMaintenanceOperation::PowerOff { graceful: true },
     )
     .await
     .unwrap();
@@ -3593,7 +3593,7 @@ async fn test_ready_boot_config_waits_for_all_dpu_network_config_versions(pool: 
     assert_eq!(
         machine.current_state(),
         &ManagedHostState::Maintenance {
-            operation: MachineMaintenanceOperation::PowerOff,
+            operation: MachineMaintenanceOperation::PowerOff { graceful: true },
             request: machine.machine_maintenance_requested.clone(),
         },
         "maintenance must remain available while Prepare waits",

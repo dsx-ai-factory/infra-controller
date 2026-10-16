@@ -1,4 +1,4 @@
-# Lenovo SR675 V3 Stuck Polling BIOS Setup
+# Lenovo SR675 V3 Stuck Polling BIOS Setup <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Use this playbook when a Lenovo ThinkSystem SR675 V3 OVX remains in
 `Assigned/HostPlatformConfiguration/PollingBiosSetup` and an instance cannot

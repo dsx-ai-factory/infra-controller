@@ -937,16 +937,21 @@ pub async fn update_spx_config(
     .await
 }
 
+/// Stages a host-network replacement without copying service endpoints, whose
+/// ownership and lifetime remain in the live instance configuration.
 pub async fn trigger_update_network_config_request(
     instance_id: &InstanceId,
     current: &InstanceNetworkConfig,
     requested: &InstanceNetworkConfig,
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), DatabaseError> {
-    let network_config_request = InstanceNetworkConfigUpdate {
+    let mut network_config_request = InstanceNetworkConfigUpdate {
         old_config: current.clone(),
         new_config: requested.clone(),
     };
+    // Pending host snapshots must never restore or release service-owned resources.
+    network_config_request.old_config.service_interfaces.clear();
+    network_config_request.new_config.service_interfaces.clear();
     let query = r#"UPDATE instances SET update_network_config_request=$1::json
                         WHERE id = $2::uuid
                           AND update_network_config_request IS NULL

@@ -624,12 +624,9 @@ func (rs *FlowServerImpl) GetListOfRacks(
 		return nil, fmt.Errorf("invalid pagination information: %w", err)
 	}
 
-	var orderBy *dbquery.OrderBy
-	if req.GetOrderBy() != nil {
-		orderBy = protobuf.OrderByFrom(req.GetOrderBy())
-		if err := orderBy.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid order by: %w", err)
-		}
+	orderBy, orderByErr := protobuf.RackOrderByFrom(req.GetOrderBy())
+	if orderByErr != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid order by: %v", orderByErr)
 	}
 
 	// Extract filters from the filters array
@@ -1650,12 +1647,9 @@ func (rs *FlowServerImpl) GetComponents(
 		return nil, fmt.Errorf("invalid pagination information: %w", err)
 	}
 
-	var orderBy *dbquery.OrderBy
-	if req.GetOrderBy() != nil {
-		orderBy = protobuf.OrderByFrom(req.GetOrderBy())
-		if err := orderBy.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid order by: %w", err)
-		}
+	orderBy, orderByErr := protobuf.ComponentOrderByFrom(req.GetOrderBy())
+	if orderByErr != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid order by: %v", orderByErr)
 	}
 
 	// Extract filters from the filters array
@@ -1792,12 +1786,9 @@ func (rs *FlowServerImpl) ValidateComponents(
 		return nil, fmt.Errorf("invalid pagination information: %w", err)
 	}
 
-	var orderBy *dbquery.OrderBy
-	if req.GetOrderBy() != nil {
-		orderBy = protobuf.OrderByFrom(req.GetOrderBy())
-		if err := orderBy.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid order by: %w", err)
-		}
+	orderBy, orderByErr := protobuf.ComponentOrderByFrom(req.GetOrderBy())
+	if orderByErr != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid order by: %v", orderByErr)
 	}
 
 	// Extract filters from the filters array

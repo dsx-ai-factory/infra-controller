@@ -103,6 +103,8 @@ async fn test_machine_a_tron_racks_integration() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Simulates one GB200 and one GB300 rack with machine-a-tron, waits for NICo
+/// to ingest them, and asserts the rack groups, racks and members it registered.
 async fn run_machine_a_tron_racks_test(
     test_env: &IntegrationTestEnvironment,
     bmc_mock_registry: &BmcMockRegistry,
@@ -262,6 +264,7 @@ async fn run_machine_a_tron_racks_test(
         mac_address_pool: None,
         ufm_mock: Default::default(),
         rms_mock: Default::default(),
+        nmxc_mock: Default::default(),
     };
 
     let (provisionable_handles, mat_handle) = api_test_helper::machine_a_tron::run_local(

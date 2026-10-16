@@ -59,6 +59,8 @@ const TEST_DPF_HELM_CHART_SERVICE_DATA: &str = r#"{
   "repoURL": "oci://registry.example.com/charts",
   "chartName": "tenant-service",
   "chartVersion": "1.2.3",
+  "serviceID": "tenant-service-v1",
+  "deployInCluster": false,
   "security": {"privileged": false, "spiffe": {}},
   "values": {"serviceDaemonSet": {"labels": {"chart-path": "preserved"}}},
   "serviceDaemonSet": {
@@ -72,6 +74,8 @@ const TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2: &str = r#"{
   "repoURL": "oci://registry.example.com/charts",
   "chartName": "tenant-service",
   "chartVersion": "2.0.0",
+  "serviceID": "tenant-service-v1",
+  "deployInCluster": false,
   "security": {"privileged": true},
   "values": {"replicas": 2, "serviceDaemonSet": {"labels": {"chart-path": "still-preserved"}}},
   "serviceDaemonSet": {
@@ -228,7 +232,7 @@ fn dpu_service_observation(service: &DetachedDpuServiceDefinition) -> DpuService
             release_name: Some(service.helm_chart.release_name.clone()),
             values: service.helm_chart.values.clone(),
         },
-        deploy_in_cluster: Some(service.deploy_in_cluster),
+        deploy_in_cluster: service.deploy_in_cluster,
         dpu_cluster_selector_present: false,
         interfaces_present: false,
         paused: None,
@@ -277,7 +281,7 @@ fn dpu_service_observation(service: &DetachedDpuServiceDefinition) -> DpuService
                 }),
             }
         }),
-        service_id: None,
+        service_id: service.service_id.clone(),
         config_ports_present: false,
         is_deleting: false,
     }
@@ -544,6 +548,8 @@ async fn test_dpf_helm_chart_create_persists_normalized_creating_state_without_d
     let data = r#"{
         "security": {"privileged": false},
         "chartVersion": "1.2.3",
+        "serviceID": "tenant-service-v1",
+        "deployInCluster": false,
         "repoURL": "oci://registry.example.com/charts",
         "chartName": "tenant-service",
         "serviceDaemonSet": {
@@ -1212,6 +1218,8 @@ async fn test_dpf_interface_requirement_removal_rejects_existing_attachments(
     Ok(())
 }
 
+/// Verifies mutable DPF fields replace stable V1 in place while the immutable
+/// service ID is retained and reconciled onto the existing DPUService.
 #[crate::sqlx_test]
 async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
     db_pool: sqlx::PgPool,
@@ -1220,9 +1228,9 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
     let initial_data =
         model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?;
     let initial_projection = project_dpu_service(service_id, carbide_dpf::NAMESPACE, &initial_data);
-    let updated_data = model::extension_service::DpfHelmChartServiceData::parse(
-        TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2,
-    )?;
+    let updated_data_json = TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2.to_string();
+    let updated_data =
+        model::extension_service::DpfHelmChartServiceData::parse(&updated_data_json)?;
     let updated_projection = project_dpu_service(service_id, carbide_dpf::NAMESPACE, &updated_data);
     let existing = dpu_service_observation(&initial_projection);
     let expected_name = updated_projection.name.clone();
@@ -1265,7 +1273,7 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
     assert_eq!(created.service_id, service_id.to_string());
 
     // The existing create reconciler reaches Ready before this API-only
-    // component accepts a replacement definition.
+    // component accepts replacement data.
     env.run_extension_service_controller_iteration().await;
 
     let stale_update = env
@@ -1291,7 +1299,7 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
             service_id: service_id.to_string(),
             service_name: Some("updated-dpf-service".to_string()),
             description: Some("after update".to_string()),
-            data: TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2.to_string(),
+            data: updated_data_json.clone(),
             credential: None,
             observability: None,
             if_version_ctr_match: Some(1),
@@ -1318,10 +1326,8 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
     );
     assert_eq!(
         latest_version.data,
-        model::extension_service::DpfHelmChartServiceData::parse(
-            TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2
-        )?
-        .normalized_json()?
+        model::extension_service::DpfHelmChartServiceData::parse(&updated_data_json)?
+            .normalized_json()?
     );
 
     let mut txn = env.pool.begin().await?;
@@ -1351,6 +1357,15 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
         ExtensionServiceLifecycleState::Updating
     );
     txn.commit().await?;
+
+    // V1 replacement keeps the immutable ID in its separate column.
+    let stored_dpf_id: Option<String> = sqlx::query_scalar(
+        "SELECT dpf_service_id FROM extension_service_versions WHERE service_id = $1 AND deleted IS NULL",
+    )
+    .bind(service_id)
+    .fetch_one(&env.pool)
+    .await?;
+    assert_eq!(stored_dpf_id.as_deref(), Some("tenant-service-v1"));
 
     // A second data update is rejected before it can change V1 because DPF
     // reconciliation of the first replacement has not completed yet.
@@ -1399,6 +1414,71 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
         ExtensionServiceLifecycleState::Ready
     );
     txn.commit().await?;
+
+    Ok(())
+}
+
+/// Verifies an unchanged DPF service ID does not conflict with its own active
+/// stable V1 while other chart fields are updated.
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_update_skips_uniqueness_for_unchanged_service_id(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let mut mock = MockDpfOperations::new();
+    mock.expect_create_dpu_service()
+        .times(1)
+        .returning(|service| Ok(dpu_service_observation(service)));
+    let env = create_dpf_controller_test_env(db_pool, mock).await;
+    create_test_tenants(&env).await?;
+
+    // Create and reconcile the original identity so its own V1 is visible to
+    // the same uniqueness query used for genuinely changed identities.
+    let created = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
+            dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
+            service_id: None,
+            service_name: "unchanged-service-id".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?
+        .into_inner();
+    env.run_extension_service_controller_iteration().await;
+
+    // Change chart data while retaining tenant-service-v1; this must not run a
+    // uniqueness lookup that would find the service's own current data.
+    let updated = env
+        .api
+        .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
+            service_id: created.service_id,
+            service_name: None,
+            description: None,
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2.to_string(),
+            credential: None,
+            observability: None,
+            if_version_ctr_match: Some(1),
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(updated.version_ctr, 2);
+    assert_eq!(lifecycle_state(&updated), "updating");
+    assert_eq!(
+        updated
+            .latest_version_info
+            .expect("stable V1 is returned")
+            .data,
+        model::extension_service::DpfHelmChartServiceData::parse(
+            TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2
+        )?
+        .normalized_json()?
+    );
 
     Ok(())
 }
@@ -1832,6 +1912,7 @@ async fn test_dpf_helm_chart_create_rejects_unsupported_credentials_and_observab
     Ok(())
 }
 
+/// Verifies invalid or unsupported DPF fields fail before durable state is created.
 #[crate::sqlx_test]
 async fn test_dpf_helm_chart_create_rejects_invalid_data(
     db_pool: sqlx::PgPool,
@@ -1840,6 +1921,7 @@ async fn test_dpf_helm_chart_create_rejects_invalid_data(
     create_test_tenants(&env).await?;
 
     for (name, data, expected_message) in [
+        // Required chart identity must be complete before reconciliation.
         (
             "dpf-missing-chart-version",
             r#"{
@@ -1849,49 +1931,120 @@ async fn test_dpf_helm_chart_create_rejects_invalid_data(
             }"#,
             "missing field `chartVersion`",
         ),
+        // Unknown top-level fields must not silently disappear during normalization.
         (
             "dpf-unknown-field",
             r#"{
                 "repoURL":"oci://registry.example.com/charts",
                 "chartName":"tenant-service",
                 "chartVersion":"1.2.3",
+                "serviceID":"tenant-service-v1",
                 "security":{"privileged":false},
                 "unsupported":true
             }"#,
             "unknown field `unsupported`",
         ),
+        // Helm values cannot bypass NICo's ownership of workload placement.
         (
             "dpf-reserved-node-selector",
             r#"{
                 "repoURL":"oci://registry.example.com/charts",
                 "chartName":"tenant-service",
                 "chartVersion":"1.2.3",
+                "serviceID":"tenant-service-v1",
+                "deployInCluster":false,
                 "security":{"privileged":false},
                 "values":{"serviceDaemonSet":{"nodeSelector":{"tenant":"value"}}}
             }"#,
             "tenant values may not set NICo-owned field serviceDaemonSet.nodeSelector",
         ),
+        // The typed DaemonSet contract excludes direct placement for the same reason.
         (
             "dpf-explicit-node-selector",
             r#"{
                 "repoURL":"oci://registry.example.com/charts",
                 "chartName":"tenant-service",
                 "chartVersion":"1.2.3",
+                "serviceID":"tenant-service-v1",
                 "security":{"privileged":false},
                 "serviceDaemonSet":{"nodeSelector":{}}
             }"#,
             "unknown field `nodeSelector`",
         ),
+        // DPF names this field updateStrategy, so the SDD spelling must not be accepted.
         (
             "dpf-misspelled-upgrade-strategy",
             r#"{
                 "repoURL":"oci://registry.example.com/charts",
                 "chartName":"tenant-service",
                 "chartVersion":"1.2.3",
+                "serviceID":"tenant-service-v1",
                 "security":{"privileged":false},
                 "serviceDaemonSet":{"upgradeStrategy":{"type":"RollingUpdate"}}
             }"#,
             "unknown field `upgradeStrategy`",
+        ),
+        // The workload identity is mandatory even when the rest of the chart is valid.
+        (
+            "dpf-missing-service-id",
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "chartVersion":"1.2.3",
+                "deployInCluster":false,
+                "security":{"privileged":false}
+            }"#,
+            "serviceID must not be empty",
+        ),
+        // An explicitly supplied service identity must contain a usable value.
+        (
+            "dpf-empty-service-id",
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "chartVersion":"1.2.3",
+                "serviceID":"",
+                "security":{"privileged":false}
+            }"#,
+            "serviceID must not be empty",
+        ),
+        // An escaped NUL decodes to a character PostgreSQL cannot store as an identity.
+        (
+            "dpf-nul-service-id",
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "chartVersion":"1.2.3",
+                "serviceID":"tenant\u0000service",
+                "deployInCluster":false,
+                "security":{"privileged":false}
+            }"#,
+            "serviceID must not contain NUL characters",
+        ),
+        // NICo requires the DPF deployment location to be explicit before persistence.
+        (
+            "dpf-missing-deployment-mode",
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "chartVersion":"1.2.3",
+                "serviceID":"tenant-service-v1",
+                "security":{"privileged":false}
+            }"#,
+            "deployInCluster must be explicitly set to false",
+        ),
+        // NICo manages DPU workloads and does not permit host-cluster deployment.
+        (
+            "dpf-host-cluster-deployment",
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "chartVersion":"1.2.3",
+                "serviceID":"tenant-service-v1",
+                "deployInCluster":true,
+                "security":{"privileged":false}
+            }"#,
+            "deployInCluster must be explicitly set to false",
         ),
     ] {
         let service_id = ExtensionServiceId::new();
@@ -1934,6 +2087,7 @@ async fn test_dpf_helm_chart_create_rejects_duplicate_name_for_tenant(
     let env = create_dpf_enabled_test_env(db_pool).await;
     create_test_tenants(&env).await?;
 
+    // Register the original name with one explicit DPF identity.
     env.api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
             dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
@@ -1949,6 +2103,8 @@ async fn test_dpf_helm_chart_create_rejects_duplicate_name_for_tenant(
         }))
         .await?;
 
+    // Reuse the case-insensitive name with a different DPF identity so this
+    // assertion exercises name uniqueness rather than service-ID uniqueness.
     let error = env
         .api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
@@ -1959,13 +2115,142 @@ async fn test_dpf_helm_chart_create_rejects_duplicate_name_for_tenant(
             description: None,
             tenant_organization_id: "best_org".to_string(),
             service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
-            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA
+                .replace("tenant-service-v1", "tenant-service-v2"),
             credential: None,
             observability: None,
         }))
         .await
         .expect_err("DPF Helm service names must be unique within a tenant");
     assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+    Ok(())
+}
+
+/// Verifies extension-service creates across tenants cannot claim one DPF
+/// workload identity, because all detached services share its scope.
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_create_rejects_duplicate_service_id(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_dpf_enabled_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+
+    // Prepare different NICo names and tenants that intentionally claim
+    // case variants of the same explicit DPF serviceID.
+    let first_request = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
+        dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
+        service_id: None,
+        service_name: "first-dpf-service".to_string(),
+        description: None,
+        tenant_organization_id: "best_org".to_string(),
+        service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+        data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+        credential: None,
+        observability: None,
+    };
+    let second_request = rpc::CreateDpuExtensionServiceRequest {
+        service_name: "second-dpf-service".to_string(),
+        tenant_organization_id: "another_org".to_string(),
+        data: TEST_DPF_HELM_CHART_SERVICE_DATA.replace("tenant-service-v1", "TENANT-SERVICE-V1"),
+        ..first_request.clone()
+    };
+
+    // Persist the first service so it owns the shared DPF service ID.
+    env.api
+        .create_dpu_extension_service(Request::new(first_request))
+        .await
+        .expect("the first service must claim the DPF service ID");
+
+    // A second tenant must not be able to claim the same DPF service ID.
+    let rejected = env
+        .api
+        .create_dpu_extension_service(Request::new(second_request))
+        .await
+        .expect_err("the duplicate DPF service ID must be rejected");
+
+    // Match the established database-conflict contract without exposing the
+    // stored chart data.
+    assert_eq!(rejected.code(), tonic::Code::FailedPrecondition);
+    assert!(rejected.message().contains("dpf_service_id"));
+    assert!(rejected.message().contains("TENANT-SERVICE-V1"));
+
+    Ok(())
+}
+
+/// Verifies updates cannot change the DPF workload identity and rejected updates
+/// leave the stable V1 definition and lifecycle state unchanged.
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_update_rejects_changed_service_id(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let service_id = ExtensionServiceId::new();
+    let mut mock = MockDpfOperations::new();
+    mock.expect_create_dpu_service()
+        .times(1)
+        .returning(|service| Ok(dpu_service_observation(service)));
+    let env = create_dpf_controller_test_env(db_pool, mock).await;
+    create_test_tenants(&env).await?;
+
+    // Create and reconcile the original service so data updates are eligible.
+    env.api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
+            dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
+            service_id: Some(service_id.to_string()),
+            service_name: "immutable-service-id".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?;
+    env.run_extension_service_controller_iteration().await;
+
+    // Change mutable chart data together with the service ID; the identity
+    // change must reject the entire request.
+    let changed_identity = TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2
+        .replace("tenant-service-v1", "tenant-service-v2");
+    let error = env
+        .api
+        .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
+            service_id: service_id.to_string(),
+            service_name: None,
+            description: None,
+            data: changed_identity,
+            credential: None,
+            observability: None,
+            if_version_ctr_match: Some(1),
+        }))
+        .await
+        .expect_err("a DPF service ID change must be rejected");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(error.message().contains("serviceID cannot be changed"));
+
+    // Re-read durable state to prove the rejected update had no side effects.
+    let mut txn = env.pool.begin().await?;
+    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+        .await?
+        .pop()
+        .expect("original service remains active");
+    let version =
+        db::extension_service::find_version_info_of_known_service(&mut txn, service_id, None)
+            .await?;
+    assert_eq!(record.version_ctr, 1);
+    assert_eq!(
+        record.status.controller_state.value,
+        ExtensionServiceLifecycleState::Ready
+    );
+    assert_eq!(
+        version.data,
+        model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?
+            .normalized_json()?
+    );
+    txn.commit().await?;
 
     Ok(())
 }
@@ -1999,6 +2284,7 @@ async fn seed_dpf_helm_chart_service_with_id(
         Some("controller fixture"),
         &[],
         TEST_DPF_HELM_CHART_SERVICE_DATA,
+        Some("tenant-service-v1"),
         None,
         false,
     )
@@ -2234,6 +2520,7 @@ async fn test_dpf_helm_chart_controller_queue_scan_and_persistence(
         None,
         &[],
         TEST_SERVICE_DATA,
+        None,
         None,
         false,
     )
@@ -4829,8 +5116,11 @@ async fn test_helm_target_placement_status_and_detach(
         .await?;
     let mut registrations = Vec::new();
     for (name, target) in [
+        // Primary placement covers only the host's primary attached DPU.
         ("primary-policy", 0),
+        // All placement covers every attached DPU, including inactive ones.
         ("all-policy", 2),
+        // All-active placement excludes attached DPUs unused by the instance.
         ("all-active-policy", 1),
     ] {
         let service = env
@@ -4840,7 +5130,8 @@ async fn test_helm_target_placement_status_and_detach(
                 service_type: rpc::DpuExtensionServiceType::DpfHelmChart as i32,
                 dpu_target: Some(target),
                 tenant_organization_id: tenant.clone(),
-                data: TEST_DPF_HELM_CHART_SERVICE_DATA.into(),
+                data: TEST_DPF_HELM_CHART_SERVICE_DATA
+                    .replace("tenant-service-v1", &format!("tenant-service-v{target}")),
                 ..Default::default()
             }))
             .await?

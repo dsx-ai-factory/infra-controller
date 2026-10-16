@@ -15,6 +15,10 @@ Services for mock BMC endpoints.
   yet is skipped until the IP is known
 - Supports Redfish (TCP 443), IPMI (UDP 623), and per-machine SSH ports
 - IPMI and SSH ports are dynamically added when machine-a-tron reports their endpoints in status
+- Creates a Service per simulated NVLink switch once it has an NVOS lease,
+  publishing the NVOS IP as `spec.externalIPs` under the same network
+  requirements as the BMC IPs and forwarding the NMX-C port (TCP 9370) to
+  machine-a-tron's hosted NMX-C mock
 - Multi-pod deployments with pod-specific routing
 - Automatic cleanup of stale Services
 - Publishes the discovered machine-a-tron identities over a pod-local
@@ -191,7 +195,7 @@ Created Services have:
 
 - `app.kubernetes.io/managed-by: mat-k8s-controller`
 - `nvidia-infra-controller/mat-id: <uuid>`
-- `nvidia-infra-controller/mat-machine-type: host|dpu`
+- `nvidia-infra-controller/mat-machine-type: host|dpu|nvos`
 - `nvidia-infra-controller/pod-name: <pod>` (multi-pod)
 
 **Annotations:**
@@ -216,6 +220,19 @@ Created Services have:
   when the BMC network is outside the ServiceCIDR and the pod CIDR a BMC lease
   cannot collide with a dynamically allocated clusterIP or a pod IP, and they
   are mutable, so a lease change is an in-place update
+
+### Switch NVOS Services
+
+A device with `device_kind: switch` and an `nvos_ip` in status additionally
+gets a `mat-nvos-<id>` Service labeled `mat-machine-type: nvos` and annotated
+`nvidia-infra-controller/mat-nvos-ip`, with the NVOS IP published as
+`externalIPs` and an apiserver-allocated clusterIP, exactly like the BMC
+Service. Its single port, `nmxc` (TCP 9370), targets the same bmc-mock listen
+port as the BMC Service: NICo resolves a rack's NMX-C controller from a
+switch's NVOS address, and machine-a-tron's hosted NMX-C mock answers on its
+bmc-mock listener, selecting the rack by the address the request was sent to.
+The NVOS (underlay) network must therefore satisfy the same requirements as
+the BMC network: outside the ServiceCIDR, the pod CIDR, and the node network.
 
 ## Development
 

@@ -18,6 +18,7 @@
 //! Which BMC a request is for: the `Forwarded` header's `host`, `mac`, or
 //! `serial`, resolved to the BMC's IP.
 
+use std::borrow::Cow;
 use std::net::{AddrParseError, IpAddr};
 use std::str::FromStr;
 use std::time::Duration;
@@ -38,11 +39,11 @@ pub(super) type LookupToIpCache = MokaCache<LookupBy, IpAddr>;
 /// How long a resolved BMC IP may be served before the API is asked again.
 pub(super) const IP_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) enum ForwardedTarget<'a> {
     Ip(IpAddr),
     Mac(MacAddress),
-    Serial(&'a str),
+    Serial(Cow<'a, str>),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -51,6 +52,8 @@ pub(super) enum ForwardedHeaderParseError {
     Ip(#[from] AddrParseError),
     #[error("invalid MAC address in forwarded host header: {0}")]
     Mac(#[from] MacParseError),
+    #[error("malformed quoted value in forwarded header")]
+    MalformedQuotedValue,
 }
 
 pub(super) async fn ip_for_forwarded_target(
@@ -127,6 +130,53 @@ pub(super) async fn ip_for_forwarded_target(
     Ok(ip)
 }
 
+/// Reads one value and returns the header after its next unquoted delimiter.
+fn forwarded_parameter_value(
+    value: &str,
+) -> Result<(Cow<'_, str>, &str), ForwardedHeaderParseError> {
+    let value = value.trim_start();
+    let Some(quoted) = value.strip_prefix('"') else {
+        let (plain, remainder) = value.split_once([',', ';']).unwrap_or((value, ""));
+        let plain = plain.trim();
+        if plain.contains('"') {
+            return Err(ForwardedHeaderParseError::MalformedQuotedValue);
+        }
+        return Ok((Cow::Borrowed(plain), remainder));
+    };
+
+    let mut chars = quoted.char_indices();
+    let mut decoded: Option<String> = None;
+    while let Some((index, ch)) = chars.next() {
+        if ch == '"' {
+            let suffix = quoted[index + 1..].trim_start();
+            let remainder = match suffix.strip_prefix([',', ';']) {
+                Some(remainder) => remainder,
+                None if suffix.is_empty() => suffix,
+                None => break,
+            };
+            return Ok((
+                decoded.map_or(Cow::Borrowed(&quoted[..index]), Cow::Owned),
+                remainder,
+            ));
+        }
+
+        let ch = if ch == '\\' {
+            let Some((_, escaped)) = chars.next() else {
+                break;
+            };
+            decoded.get_or_insert_with(|| quoted[..index].to_string());
+            escaped
+        } else {
+            ch
+        };
+        if let Some(decoded) = &mut decoded {
+            decoded.push(ch);
+        }
+    }
+
+    Err(ForwardedHeaderParseError::MalformedQuotedValue)
+}
+
 pub(super) fn forwarded_header_value(
     headers: &HeaderMap,
 ) -> Result<Option<ForwardedTarget<'_>>, ForwardedHeaderParseError> {
@@ -135,23 +185,24 @@ pub(super) fn forwarded_header_value(
         let Ok(raw_value) = raw_value.to_str() else {
             continue;
         };
-        for element in raw_value.split(',') {
-            for pair in element.split(';') {
-                let Some((key, value)) = pair.trim().split_once('=') else {
-                    continue;
-                };
-                let key = key.trim();
-                if key.eq_ignore_ascii_case("host") {
-                    return Ok(Some(ForwardedTarget::Ip(parse_forwarded_host_value(
-                        value.trim(),
-                    )?)));
-                } else if key.eq_ignore_ascii_case("mac") {
-                    return Ok(Some(ForwardedTarget::Mac(MacAddress::from_str(
-                        value.trim(),
-                    )?)));
-                } else if key.eq_ignore_ascii_case("serial") {
-                    return Ok(Some(ForwardedTarget::Serial(value.trim())));
-                }
+        let mut remainder = raw_value;
+        while !remainder.is_empty() {
+            let (pair, next) = remainder.split_once([',', ';']).unwrap_or((remainder, ""));
+            let Some((key, _)) = pair.split_once('=') else {
+                remainder = next;
+                continue;
+            };
+            let (value, next) = forwarded_parameter_value(&remainder[key.len() + 1..])?;
+            remainder = next;
+            let key = key.trim();
+            if key.eq_ignore_ascii_case("host") {
+                return Ok(Some(ForwardedTarget::Ip(parse_forwarded_host_value(
+                    &value,
+                )?)));
+            } else if key.eq_ignore_ascii_case("mac") {
+                return Ok(Some(ForwardedTarget::Mac(MacAddress::from_str(&value)?)));
+            } else if key.eq_ignore_ascii_case("serial") {
+                return Ok(Some(ForwardedTarget::Serial(value)));
             }
         }
     }
@@ -159,8 +210,6 @@ pub(super) fn forwarded_header_value(
 }
 
 fn parse_forwarded_host_value(value: &str) -> Result<IpAddr, AddrParseError> {
-    let value = value.trim_matches('"');
-
     let result = IpAddr::from_str(value);
     if let Ok(ip) = result {
         return Ok(ip);
@@ -205,6 +254,7 @@ mod tests {
         Serial,
         InvalidHost,
         InvalidMac,
+        Value(&'static str),
     }
 
     #[derive(Debug, PartialEq)]
@@ -272,6 +322,12 @@ mod tests {
                     HeaderValue::from_static("mac=not-a-mac-address"),
                 );
             }
+            ForwardedHeaderCase::Value(value) => {
+                headers.insert(
+                    HeaderName::from_static("forwarded"),
+                    HeaderValue::from_static(value),
+                );
+            }
         }
         headers
     }
@@ -286,6 +342,9 @@ mod tests {
             Ok(None) => ForwardedTargetSummary::None,
             Err(super::ForwardedHeaderParseError::Ip(_)) => ForwardedTargetSummary::Error("ip"),
             Err(super::ForwardedHeaderParseError::Mac(_)) => ForwardedTargetSummary::Error("mac"),
+            Err(super::ForwardedHeaderParseError::MalformedQuotedValue) => {
+                ForwardedTargetSummary::Error("quoting")
+            }
         }
     }
 
@@ -305,8 +364,8 @@ mod tests {
                 "2001:db8::1" => Some("2001:db8::1".to_string()),
             }
 
-            "quoted bracketed IPv6 with port" {
-                "\"[2001:db8::1]:443\"" => Some("2001:db8::1".to_string()),
+            "bracketed IPv6 with port" {
+                "[2001:db8::1]:443" => Some("2001:db8::1".to_string()),
             }
 
             "bracketed IPv6 without port" {
@@ -347,16 +406,78 @@ mod tests {
                 ForwardedHeaderCase::QuotedIpv4Host => ForwardedTargetSummary::Ip("10.3.4.5".to_string()),
             }
 
+            "quoted bracketed IPv6 host with port" {
+                ForwardedHeaderCase::Value(r#"host="[2001:db8::1]:443""#)
+                    => ForwardedTargetSummary::Ip("2001:db8::1".to_string()),
+            }
+
             "MAC target" {
                 ForwardedHeaderCase::Mac => ForwardedTargetSummary::Mac("00:11:22:33:44:55".to_string()),
+                ForwardedHeaderCase::Value(r#"proto=https; MAC = "00:11:22:33:44:55" ; serial=ignored"#)
+                    => ForwardedTargetSummary::Mac("00:11:22:33:44:55".to_string()),
             }
 
             "serial target" {
                 ForwardedHeaderCase::Serial => ForwardedTargetSummary::Serial("DGX-A100-0001".to_string()),
+                ForwardedHeaderCase::Value(r#"proto=https; serial = "DGX-A100-0001" ; host=10.0.0.1"#)
+                    => ForwardedTargetSummary::Serial("DGX-A100-0001".to_string()),
+            }
+
+            "quoted serial preserves leading, trailing, and internal whitespace" {
+                ForwardedHeaderCase::Value(r#"serial=" DGX A100 0001 ""#)
+                    => ForwardedTargetSummary::Serial(" DGX A100 0001 ".to_string()),
+            }
+
+            "unbalanced outer quotes fail before address parsing or lookup" {
+                ForwardedHeaderCase::Value(r#"mac="00:11:22:33:44:55"#)
+                    => ForwardedTargetSummary::Error("quoting"),
+                ForwardedHeaderCase::Value(r#"serial=DGX-A100-0001";host=10.0.0.1"#)
+                    => ForwardedTargetSummary::Error("quoting"),
+            }
+
+            "extra outer quotes are malformed header syntax" {
+                ForwardedHeaderCase::Value(r#"mac=""00:11:22:33:44:55"""#)
+                    => ForwardedTargetSummary::Error("quoting"),
+            }
+
+            "quoted delimiters belong to the serial rather than another target" {
+                ForwardedHeaderCase::Value(r#"serial="FOO,BAR-123;host=10.0.0.1";mac=00:11:22:33:44:55"#)
+                    => ForwardedTargetSummary::Serial("FOO,BAR-123;host=10.0.0.1".to_string()),
+            }
+
+            "quoted serial decodes escapes while preserving literal quotes and backslashes" {
+                ForwardedHeaderCase::Value(r#"serial="\"FOO,BAR-123\"\\rack";host=10.0.0.1"#)
+                    => ForwardedTargetSummary::Serial(r#""FOO,BAR-123"\rack"#.to_string()),
+            }
+
+            "quoted pairs decode before MAC validation" {
+                ForwardedHeaderCase::Value(r#"mac="00\:11:22:33:44:55""#)
+                    => ForwardedTargetSummary::Mac("00:11:22:33:44:55".to_string()),
+            }
+
+            "quoted unknown parameters cannot supply a target" {
+                ForwardedHeaderCase::Value(r#"for="node;serial=WRONG,host=10.0.0.1";serial=RIGHT"#)
+                    => ForwardedTargetSummary::Serial("RIGHT".to_string()),
+            }
+
+            "an empty serial is preserved without format validation" {
+                ForwardedHeaderCase::Value(r#"serial="";host=10.0.0.1"#)
+                    => ForwardedTargetSummary::Serial(String::new()),
+            }
+
+            "malformed quoted syntax fails rather than selecting a prefix or later target" {
+                ForwardedHeaderCase::Value(r#"serial="DGX;host=10.0.0.1"#)
+                    => ForwardedTargetSummary::Error("quoting"),
+                ForwardedHeaderCase::Value(r#"serial="FOO"BAR;host=10.0.0.1"#)
+                    => ForwardedTargetSummary::Error("quoting"),
+                ForwardedHeaderCase::Value(r#"serial="DGX\"#)
+                    => ForwardedTargetSummary::Error("quoting"),
             }
 
             "invalid host" {
                 ForwardedHeaderCase::InvalidHost => ForwardedTargetSummary::Error("ip"),
+                ForwardedHeaderCase::Value(r#"host="\"10.0.0.1\"""#)
+                    => ForwardedTargetSummary::Error("ip"),
             }
 
             "invalid MAC" {
@@ -396,16 +517,19 @@ mod tests {
 
     #[tokio::test]
     async fn forwarded_serial_target_resolves_from_ip_cache() {
-        let serial = "DGX-A100-0001";
+        let serial = r#""FOO,BAR-123"\rack"#;
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
         let state =
             test_state_with_ip_cache(HashMap::from([(LookupBy::Serial(serial.to_string()), ip)]))
                 .await;
 
+        let headers = forwarded_headers(ForwardedHeaderCase::Value(
+            r#"serial="\"FOO,BAR-123\"\\rack""#,
+        ));
+        let target = forwarded_header_value(&headers).unwrap().unwrap();
+
         assert_eq!(
-            ip_for_forwarded_target(&ForwardedTarget::Serial(serial), &state)
-                .await
-                .unwrap(),
+            ip_for_forwarded_target(&target, &state).await.unwrap(),
             Some(ip)
         );
     }

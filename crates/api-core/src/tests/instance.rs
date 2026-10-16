@@ -4296,20 +4296,22 @@ async fn test_auto_vpc_prefix_selection_force_delete_marks_generated_segment_del
         .network_segment_id
         .unwrap();
 
+    let request = AdminForceDeleteMachineRequest {
+        host_query: managed_host.id.to_string(),
+        delete_interfaces: false,
+        delete_bmc_interfaces: false,
+        delete_bmc_credentials: false,
+        allow_delete_with_orphaned_dpf_crds: false,
+        delete_bmc_suppressions: false,
+        delete_retained_boot_interfaces: false,
+        release_preserved_addresses: false,
+        wait_for_instance_dpu: false,
+    };
     // Force delete must route automatic intent through generated-resource cleanup.
     let response = fixture
         .env
         .api
-        .admin_force_delete_machine(Request::new(AdminForceDeleteMachineRequest {
-            host_query: managed_host.id.to_string(),
-            delete_interfaces: false,
-            delete_bmc_interfaces: false,
-            delete_bmc_credentials: false,
-            allow_delete_with_orphaned_dpf_crds: false,
-            delete_bmc_suppressions: false,
-            delete_retained_boot_interfaces: false,
-            release_preserved_addresses: false,
-        }))
+        .admin_force_delete_machine(Request::new(request))
         .await
         .unwrap()
         .into_inner();
@@ -5378,8 +5380,8 @@ async fn test_instance_cannot_allocate_requested_ip_with_network_segment(
     );
 }
 
-/// Verifies a tenant-network replacement is persisted as pending work without
-/// dropping service-interface records that only Core can see or submit.
+/// Verifies a tenant-network replacement is persisted as pending host-only work without
+/// dropping live service-interface records that only Core can see or submit.
 #[crate::sqlx_test]
 async fn test_allocate_and_update_network_config_instance(
     _: PgPoolOptions,
@@ -5529,7 +5531,7 @@ async fn test_allocate_and_update_network_config_instance(
         rpc::SyncState::Pending
     );
 
-    // Reload the database row to prove both live and pending network state keep the record.
+    // Reload the database row to prove live state keeps the record and pending work owns only hosts.
     let mut txn = env.db_txn().await;
     let instance = tinstance.db_instance(&mut txn).await;
     txn.rollback().await.unwrap();
@@ -5537,7 +5539,7 @@ async fn test_allocate_and_update_network_config_instance(
     assert!(instance.update_network_config_request.is_some());
     assert_eq!(
         instance.config.network.service_interfaces,
-        vec![service_interface.clone()]
+        vec![service_interface]
     );
     let update_req = instance.update_network_config_request.unwrap();
     let expected = NetworkDetails::NetworkSegment(segment_id2);
@@ -5549,10 +5551,8 @@ async fn test_allocate_and_update_network_config_instance(
             .clone()
             .unwrap(),
     );
-    assert_eq!(
-        update_req.new_config.service_interfaces,
-        vec![service_interface]
-    );
+    assert!(update_req.old_config.service_interfaces.is_empty());
+    assert!(update_req.new_config.service_interfaces.is_empty());
 }
 
 /// Verifies a corrupt service-interface record is reported as an internal error,
@@ -8116,6 +8116,8 @@ const TEST_DPF_HELM_SERVICE_DATA: &str = r#"{
     "repoURL": "oci://registry.example.com/charts",
     "chartName": "tenant-service",
     "chartVersion": "1.2.3",
+    "serviceID": "tenant-service-v1",
+    "deployInCluster": false,
     "security": {"privileged": false}
 }"#;
 
@@ -8593,6 +8595,8 @@ async fn test_update_instance_rejects_new_networked_attachment_before_reconcilia
 /// older clients omit the VPC selection or retries repeat it, while rejecting
 /// moves and new selections that require issue #6125's resource reconciliation,
 /// so caller intent is never silently discarded and live allocations stay owned.
+/// Nested instance networking uses the same filtered public view so the DPU
+/// compatibility payload cannot expose hidden endpoints.
 #[crate::sqlx_test]
 async fn test_update_existing_networked_attachment_preserves_service_interfaces(
     _: PgPoolOptions,
@@ -8646,6 +8650,47 @@ async fn test_update_existing_networked_attachment_preserves_service_interfaces(
         .expect("instance has an extension service")
         .service_configs[0];
     assert_eq!(seeded_attachment.service_vpc_ids, vec![selected_vpc]);
+
+    // The nested compatibility instance must use the same filtered host-network view.
+    let managed_network = env
+        .api
+        .get_managed_host_network_config(Request::new(
+            rpc::forge::ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu_ids[0]),
+            },
+        ))
+        .await?
+        .into_inner();
+    let nested = managed_network.instance.expect("nested instance");
+    let nested_config = nested.config.expect("nested config");
+    let nested_status = nested.status.expect("nested status");
+    // Absolute counts catch endpoint leaks even if both public projections change together.
+    assert_eq!(
+        nested_config
+            .network
+            .as_ref()
+            .expect("nested network config")
+            .interfaces
+            .len(),
+        1,
+    );
+    assert_eq!(
+        nested_status
+            .network
+            .as_ref()
+            .expect("nested network status")
+            .interfaces
+            .len(),
+        1,
+    );
+    assert_eq!(
+        nested_config.network,
+        seeded.config.as_ref().expect("public config").network,
+    );
+    assert_eq!(
+        nested_status.network,
+        seeded.status.as_ref().expect("public status").network,
+    );
 
     // Capture both hidden records and their version counters. Successful
     // compatibility updates and rejected moves must not rewrite either one.

@@ -82,6 +82,9 @@ type FlowGrpcClientConfig struct {
 	ClientKeyPath string
 	// client metrics interface
 	ClientMetrics Metrics
+	// OnRPCFinish observes each completed RPC once, including stream termination.
+	// It must be safe for concurrent calls; nil disables the callback.
+	OnRPCFinish func(error) `json:"-"`
 }
 
 // NewFlowGrpcClient creates a new Flow gRPC client, this is called by Site Agent startup code and cert reload routine
@@ -181,6 +184,10 @@ func NewFlowGrpcClient(config *FlowGrpcClientConfig) (client *FlowGrpcClient, er
 	default:
 		log.Error().Err(ErrFlowGrpcClientInvalidSecureOpts).Msg("FlowGrpcClient: Invalid dial options")
 		return nil, ErrFlowGrpcClientInvalidSecureOpts
+	}
+
+	if config.OnRPCFinish != nil {
+		client.dialOpts = append(client.dialOpts, grpc.WithDefaultCallOptions(grpc.OnFinish(config.OnRPCFinish)))
 	}
 
 	// Configure interceptors

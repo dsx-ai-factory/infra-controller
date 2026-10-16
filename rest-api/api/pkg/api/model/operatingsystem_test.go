@@ -417,7 +417,28 @@ func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData(t *testing.T) {
 		fields       fields
 		phoneHomeUrl *string
 		wantErr      bool
+		wantDetail   string
 	}{
+		{
+			name: "reject scalar autoinstall with mapping detail",
+			fields: fields{
+				UserData:         cutil.GetPtr("#cloud-config\nautoinstall: private-value\n"),
+				PhoneHomeEnabled: cutil.GetPtr(true),
+			},
+			phoneHomeUrl: cutil.GetPtr("http://localhost/local"),
+			wantErr:      true,
+			wantDetail:   "autoinstall must be a mapping to insert phone-home",
+		},
+		{
+			name: "reject scalar autoinstall user-data with mapping detail",
+			fields: fields{
+				UserData:         cutil.GetPtr("#cloud-config\nautoinstall:\n  user-data: private-value\n"),
+				PhoneHomeEnabled: cutil.GetPtr(true),
+			},
+			phoneHomeUrl: cutil.GetPtr("http://localhost/local"),
+			wantErr:      true,
+			wantDetail:   "autoinstall user-data must be a mapping to insert phone-home",
+		},
 		{
 			name: "test valid Operating System PhoneHome enabled create request when userData is nil",
 			fields: fields{
@@ -553,6 +574,13 @@ func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData(t *testing.T) {
 				t.Errorf("APIOperatingSystemCreateRequest.ValidateAndSetUserData() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
 			}
 
+			if tt.wantDetail != "" {
+				require.Error(t, err)
+				encoded, marshalErr := json.Marshal(err)
+				require.NoError(t, marshalErr)
+				assert.JSONEq(t, `{"userData":"`+tt.wantDetail+`"}`, string(encoded))
+				assert.Equal(t, tt.fields.UserData, icr.UserData)
+			}
 			if err != nil {
 				return
 			}
@@ -821,8 +849,33 @@ phone_home:
 		userDataSearches         []string
 		userDataNegativeSearches []string
 		wantErr                  bool
+		wantDetail               string
 		existingOS               *cdbm.OperatingSystem
 	}{
+		{
+			name: "reject stored scalar autoinstall with mapping detail",
+			fields: fields{
+				PhoneHomeEnabled: cutil.GetPtr(true),
+			},
+			phoneHomeUrl: "http://localhost/local",
+			existingOS: &cdbm.OperatingSystem{
+				UserData: cutil.GetPtr("#cloud-config\nautoinstall: private-value\n"),
+			},
+			wantErr:    true,
+			wantDetail: "autoinstall must be a mapping to insert phone-home",
+		},
+		{
+			name: "reject supplied scalar autoinstall user-data with mapping detail",
+			fields: fields{
+				UserData: cutil.GetPtr("#cloud-config\nautoinstall:\n  user-data: private-value\n"),
+			},
+			phoneHomeUrl: "http://localhost/local",
+			existingOS: &cdbm.OperatingSystem{
+				PhoneHomeEnabled: true,
+			},
+			wantErr:    true,
+			wantDetail: "autoinstall user-data must be a mapping to insert phone-home",
+		},
 		{
 			name: "test valid Operating System PhoneHome disabled update request when userData is nil and existing OS has enabled",
 			fields: fields{
@@ -1133,6 +1186,12 @@ phone_home:
 			err := osur.ValidateAndSetUserData(tt.phoneHomeUrl, tt.existingOS)
 			if tt.wantErr {
 				require.Error(t, err)
+				if tt.wantDetail != "" {
+					encoded, marshalErr := json.Marshal(err)
+					require.NoError(t, marshalErr)
+					assert.JSONEq(t, `{"userData":"`+tt.wantDetail+`"}`, string(encoded))
+					assert.Equal(t, tt.fields.UserData, osur.UserData)
+				}
 				return
 			} else {
 				require.NoError(t, err)

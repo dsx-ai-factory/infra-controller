@@ -106,7 +106,12 @@ async fn reconcile_create(
 
     match dpf_sdk.create_dpu_service(&service).await {
         Ok(created) => {
-            match verify_dpu_service_ownership(&created, service_id, carbide_dpf::NAMESPACE) {
+            match verify_dpu_service_ownership(
+                &created,
+                service_id,
+                carbide_dpf::NAMESPACE,
+                service.service_id.as_deref(),
+            ) {
                 Ok(()) => Ok(StateHandlerOutcome::transition(
                     ExtensionServiceLifecycleState::Ready,
                 )),
@@ -118,7 +123,12 @@ async fn reconcile_create(
             }
         }
         Err(error) if is_already_exists(&error) => {
-            verify_existing_created_service(service_id, dpf_sdk.as_ref()).await
+            verify_existing_created_service(
+                service_id,
+                service.service_id.as_deref(),
+                dpf_sdk.as_ref(),
+            )
+            .await
         }
         Err(error) if is_permanent_dpf_error(&error) => Ok(permanent_failure(
             service_id,
@@ -138,13 +148,19 @@ async fn reconcile_create(
 /// validating the UUID-derived ownership and immutable identity contract.
 async fn verify_existing_created_service(
     service_id: ExtensionServiceId,
+    expected_service_id: Option<&str>,
     dpf_sdk: &dyn DpfOperations,
 ) -> Result<StateHandlerOutcome<ExtensionServiceLifecycleState>, StateHandlerError> {
     let expected_name = model::extension_service::DpfHelmChartIdentity::from_service_id(service_id)
         .dpu_service_name;
     match dpf_sdk.get_dpu_service(&expected_name).await {
         Ok(Some(existing)) => {
-            match verify_dpu_service_ownership(&existing, service_id, carbide_dpf::NAMESPACE) {
+            match verify_dpu_service_ownership(
+                &existing,
+                service_id,
+                carbide_dpf::NAMESPACE,
+                expected_service_id,
+            ) {
                 Ok(()) => Ok(StateHandlerOutcome::transition(
                     ExtensionServiceLifecycleState::Ready,
                 )),
@@ -231,8 +247,12 @@ async fn reconcile_update(
         }
     };
 
-    if let Err(error) = verify_dpu_service_ownership(&existing, service_id, carbide_dpf::NAMESPACE)
-    {
+    if let Err(error) = verify_dpu_service_ownership(
+        &existing,
+        service_id,
+        carbide_dpf::NAMESPACE,
+        service.service_id.as_deref(),
+    ) {
         return Ok(permanent_failure(
             service_id,
             "existing DPUService violates NICo ownership contract",

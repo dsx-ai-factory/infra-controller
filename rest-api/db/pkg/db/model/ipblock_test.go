@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -1642,6 +1643,7 @@ func TestIPBlockSQLDAO_LinkSitePrefix(t *testing.T) {
 		sequence++
 		ipBlock, err := dao.Create(ctx, nil, IPBlockCreateInput{
 			Name:                     name,
+			Description:              cutil.GetPtr("SitePrefix link projection"),
 			SiteID:                   site.ID,
 			InfrastructureProviderID: provider.ID,
 			RoutingType:              IPBlockRoutingTypeDatacenterOnly,
@@ -1661,6 +1663,7 @@ func TestIPBlockSQLDAO_LinkSitePrefix(t *testing.T) {
 		requestDifferent       bool
 		deleteBeforeLink       bool
 		deleteAfterUpdate      bool
+		addColumn              bool
 		expectedError          error
 		expectLink             bool
 		expectUpdatedUnchanged bool
@@ -1692,6 +1695,11 @@ func TestIPBlockSQLDAO_LinkSitePrefix(t *testing.T) {
 			deleteBeforeLink: true,
 			expectedError:    db.ErrInvalidValue,
 		},
+		{
+			name:       "returns every model column after an unrelated column is added",
+			addColumn:  true,
+			expectLink: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -1721,6 +1729,13 @@ func TestIPBlockSQLDAO_LinkSitePrefix(t *testing.T) {
 			}
 			var deleteErr error
 			deleteRan := false
+			var projectionHook *testProjectionQueryHook
+			if tc.addColumn {
+				_, err := dbSession.DB.ExecContext(ctx, "ALTER TABLE ip_block ADD COLUMN test_added_column text")
+				require.NoError(t, err)
+				projectionHook = &testProjectionQueryHook{}
+				dbSession.DB.AddQueryHook(projectionHook)
+			}
 			if tc.deleteAfterUpdate {
 				hook := &testIPBlockAfterUpdateHook{
 					afterUpdate: func() {
@@ -1761,6 +1776,19 @@ func TestIPBlockSQLDAO_LinkSitePrefix(t *testing.T) {
 			}
 			if tc.expectUpdatedUnchanged {
 				assert.True(t, got.Updated.Equal(fixedUpdated))
+			}
+			if tc.addColumn {
+				_, projection, found := strings.Cut(projectionHook.query, " RETURNING ")
+				require.True(t, found)
+				testAssertNamedModelColumns(t, dbSession, IPBlock{}, projection)
+				expected := *ipBlock
+				expected.SitePrefixID = &sitePrefixID
+				expected.Updated = got.Updated
+				assert.Equal(t, expected, *got)
+				assert.False(t, got.Updated.Before(ipBlock.Updated))
+				stored, err := dao.GetByID(ctx, nil, ipBlock.ID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, got, stored)
 			}
 		})
 	}

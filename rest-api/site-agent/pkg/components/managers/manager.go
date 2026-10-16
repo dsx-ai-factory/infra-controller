@@ -152,9 +152,8 @@ func (Managers *Manager) Init() {
 			Help:      "health status of the Site Agent",
 		},
 			func() float64 {
-				return float64(ManagerAccess.Data.EB.HealthStatus.Load())
+				return float64(computils.SiteHealth(ManagerAccess.Data.EB))
 			}))
-	ManagerAccess.Data.EB.HealthStatus.Store(uint64(computils.CompUnhealthy))
 
 	Managers.Orchestrator().Init()
 	Managers.Site().Init()
@@ -198,7 +197,7 @@ func (Managers *Manager) Start() {
 
 func newMetricsServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
+	mux.Handle("GET /metrics", promhttp.Handler())
 	return mux
 }
 

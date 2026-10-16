@@ -841,115 +841,190 @@ func TestRackConverterPropagatesDomainToNestedComponents(t *testing.T) {
 	assert.Equal(t, explicitComponentDomainID.String(), toProto.GetComponents()[1].GetNvlDomainId().GetId())
 }
 
-func TestOrderByConverter(t *testing.T) {
+func TestOrderByTo(t *testing.T) {
 	testCases := map[string]struct {
-		source     *pb.OrderBy
 		sourceDB   *dbquery.OrderBy
 		queryType  QueryType // QueryTypeRack or QueryTypeComponent
-		converted  *dbquery.OrderBy
 		convertedP *pb.OrderBy
 	}{
 		"rack name ASC": {
-			source: &pb.OrderBy{
-				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_NAME},
-				Direction: "ASC",
-			},
 			sourceDB: &dbquery.OrderBy{
 				Column:    "name",
 				Direction: dbquery.OrderAscending,
 			},
 			queryType: QueryTypeRack,
-			converted: &dbquery.OrderBy{
-				Column:    "name",
-				Direction: dbquery.OrderAscending,
-			},
 			convertedP: &pb.OrderBy{
 				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_NAME},
 				Direction: "ASC",
 			},
 		},
 		"rack manufacturer DESC": {
-			source: &pb.OrderBy{
-				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MANUFACTURER},
-				Direction: "DESC",
-			},
 			sourceDB: &dbquery.OrderBy{
 				Column:    "manufacturer",
 				Direction: dbquery.OrderDescending,
 			},
 			queryType: QueryTypeRack,
-			converted: &dbquery.OrderBy{
-				Column:    "manufacturer",
-				Direction: dbquery.OrderDescending,
-			},
 			convertedP: &pb.OrderBy{
 				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MANUFACTURER},
 				Direction: "DESC",
 			},
 		},
 		"component name ASC": {
-			source: &pb.OrderBy{
-				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_NAME},
-				Direction: "ASC",
-			},
 			sourceDB: &dbquery.OrderBy{
 				Column:    "name",
 				Direction: dbquery.OrderAscending,
 			},
 			queryType: QueryTypeComponent,
-			converted: &dbquery.OrderBy{
-				Column:    "name",
-				Direction: dbquery.OrderAscending,
-			},
 			convertedP: &pb.OrderBy{
 				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_NAME},
 				Direction: "ASC",
 			},
 		},
 		"component type DESC": {
-			source: &pb.OrderBy{
-				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_TYPE},
-				Direction: "DESC",
-			},
 			sourceDB: &dbquery.OrderBy{
 				Column:    "type",
 				Direction: dbquery.OrderDescending,
 			},
 			queryType: QueryTypeComponent,
-			converted: &dbquery.OrderBy{
-				Column:    "type",
-				Direction: dbquery.OrderDescending,
-			},
 			convertedP: &pb.OrderBy{
 				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_TYPE},
 				Direction: "DESC",
 			},
 		},
-		"nil protobuf": {
-			source:     nil,
-			sourceDB:   nil,
-			queryType:  QueryTypeRack,
-			converted:  nil,
-			convertedP: nil,
-		},
 		"nil dbquery": {
-			source:     nil,
 			sourceDB:   nil,
 			queryType:  QueryTypeRack,
-			converted:  nil,
 			convertedP: nil,
 		},
 	}
 
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
-			// Test OrderByFrom conversion
-			converted := OrderByFrom(tc.source)
-			assert.Equal(t, tc.converted, converted, "OrderByFrom should return expected OrderBy")
-
-			// Test OrderByTo conversion
 			convertedP := OrderByTo(tc.sourceDB, tc.queryType)
 			assert.Equal(t, tc.convertedP, convertedP, "OrderByTo should return expected protobuf OrderBy")
+		})
+	}
+}
+
+func TestRackOrderByFrom(t *testing.T) {
+	tests := []struct {
+		name    string
+		orderBy *pb.OrderBy
+		want    *dbquery.OrderBy
+		wantErr bool
+	}{
+		{
+			name: "omitted order by",
+		},
+		{
+			name: "model expression",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MODEL},
+				Direction: "ASC",
+			},
+			want: &dbquery.OrderBy{
+				Column: "description->>'model'", Direction: dbquery.OrderAscending, IsExpression: true,
+			},
+		},
+		{
+			name: "name descending",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_NAME},
+				Direction: "DESC",
+			},
+			want: &dbquery.OrderBy{
+				Column: "name", Direction: dbquery.OrderDescending,
+			},
+		},
+		{
+			name: "component field rejected for rack query",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_TYPE},
+				Direction: "ASC",
+			},
+			wantErr: true,
+		},
+		{
+			name: "unknown rack field",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField(99)},
+				Direction: "ASC",
+			},
+			wantErr: true,
+		},
+		{
+			name:    "missing field",
+			orderBy: &pb.OrderBy{Direction: "ASC"},
+			wantErr: true,
+		},
+		{
+			name: "invalid direction",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_NAME},
+				Direction: "SIDEWAYS",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := RackOrderByFrom(test.orderBy)
+			if test.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
+func TestComponentOrderByFrom(t *testing.T) {
+	tests := []struct {
+		name    string
+		orderBy *pb.OrderBy
+		want    *dbquery.OrderBy
+		wantErr bool
+	}{
+		{name: "omitted order by"},
+		{
+			name: "type descending",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_TYPE},
+				Direction: "DESC",
+			},
+			want: &dbquery.OrderBy{Column: "type", Direction: dbquery.OrderDescending},
+		},
+		{
+			name: "rack field rejected for component query",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MODEL},
+				Direction: "ASC",
+			},
+			wantErr: true,
+		},
+		{
+			name: "unknown component field",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField(99)},
+				Direction: "ASC",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ComponentOrderByFrom(test.orderBy)
+			if test.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.want, got)
 		})
 	}
 }

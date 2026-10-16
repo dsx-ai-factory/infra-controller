@@ -370,9 +370,17 @@ service Forge {
 
   // Force deletes a Machine and the associated DPU from NICo databases,
   // with the intention of rediscovering the host later on.
-  // The command will not stop a running tenant instance. Only a reboot that forces
-  // the NICo PXE boot process again would stop the image and run the discovery
-  // process again.
+  // By default, cleanup does not wait for DPU network acknowledgement. Set
+  // wait_for_instance_dpu to request Admin networking when an Instance exists
+  // and retain the records until every attached DPU acknowledges it. While
+  // waiting, return all_done=false; poll to finish deletion. An unreachable DPU
+  // can block an opted-in deletion indefinitely, and omitting the option on a
+  // retry does not cancel an already-recorded wait.
+  // Only servers supporting this option enforce the recorded wait. An older
+  // server can complete cleanup without acknowledgement, including on a retry.
+  // The request remains in ForceDeletion across API restarts and cannot be canceled.
+  // Returning to Admin stops tenant networking through the DPUs, but does not shut
+  // down or wipe the tenant's operating system. A later PXE boot runs discovery again.
   //
   // Due to the not well defined state that hosts are in after calling this command,
   // it should not be used by Tenants or Site Providers to release instances. Those
@@ -1984,6 +1992,10 @@ message RuntimeConfig {
   // enforced. An explicit list is returned without checking tenant coverage.
   // Older Core versions omit this field; an empty items list is authoritative.
   optional common.StringList site_fabric_null_routes = 58;
+
+  uint64 database_pool_acquire_timeout_ms = 59;
+  uint64 database_pool_idle_timeout_ms = 60;
+  uint64 database_pool_max_lifetime_ms = 61;
 }
 
 message EchoRequest {
@@ -2744,6 +2756,11 @@ message PowerShelfMaintenanceRequest {
   // URL of a ticket / issue tracking this maintenance request. Used as the
   // request initiator in audit logs.
   optional string reference = 3;
+  // Only meaningful for POWER_OFF: when true, request a graceful OS-ordered
+  // shutdown; when false or omitted, request a forced power-off. Forced is the
+  // default so omission preserves the behavior of clients that predate this
+  // field.
+  optional bool graceful = 4;
 }
 
 message PowerShelfStateHistoriesRequest {
@@ -5708,6 +5725,18 @@ message AdminForceDeleteMachineRequest {
   // marked for preservation so the same MAC can reclaim it on re-ingestion; set
   // this when a permanent wipe should free those addresses immediately.
   bool release_preserved_addresses = 8;
+
+  // When true and an Instance exists, request Admin networking and wait for
+  // every attached DPU to acknowledge it before removing the Instance and
+  // Machines. Defaults to false: preserve cleanup without DPU acknowledgement.
+  // A new deletion without an Instance does not wait, even when true. Once
+  // recorded, the wait survives retries, omission of this option, and later
+  // removal of the Instance. An unreachable DPU can leave deletion pending
+  // indefinitely. Only servers supporting this field enforce the recorded wait.
+  // Older servers ignore both this option and a wait saved by a newer server,
+  // so a retry during a rolling upgrade or after a downgrade can delete without
+  // acknowledgement.
+  bool wait_for_instance_dpu = 9;
 }
 
 // A parked address reservation owned by its MAC with no active interface row.
@@ -5768,6 +5797,8 @@ message DecommissionManagedHostResponse {
 // Response to AdminForceDeleteMachine call
 // Describes which resources have been released
 message AdminForceDeleteMachineResponse {
+  // True when deletion has completed. False while an opted-in deletion waits for
+  // DPU Admin-network acknowledgement; poll AdminForceDeleteMachine to resume.
   bool all_done = 1;
 
   string managed_host_machine_id = 11;

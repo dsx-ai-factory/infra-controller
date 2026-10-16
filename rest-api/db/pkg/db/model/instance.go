@@ -651,7 +651,7 @@ func (isd InstanceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Instance
 
 	var instances []Instance
 
-	query := db.GetIDB(tx, isd.dbSession).NewSelect().Model(&instances).ColumnExpr("i.*")
+	query := db.GetIDB(tx, isd.dbSession).NewSelect().Model(&instances).ColumnExpr("?TableColumns")
 
 	query, err := isd.setQueryWithFilter(filter, query, instanceDAOSpan)
 	if err != nil {

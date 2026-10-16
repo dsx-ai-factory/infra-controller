@@ -75,6 +75,14 @@ func marshalUserData(document *yaml.Node) ([]byte, error) {
 // disabling leaves it alone rather than rewriting it.
 var ErrUnsupportedUserData = errors.New("userData is not a #cloud-config or #cloud-config-archive document")
 
+// ErrAutoinstallUnmapped reports an autoinstall value that cannot contain
+// the target system's phone-home configuration. Its message is safe for clients.
+var ErrAutoinstallUnmapped = errors.New("autoinstall must be a mapping to insert phone-home")
+
+// ErrAutoinstallUserDataUnmapped reports an autoinstall user-data value that
+// cannot contain phone-home configuration. Its message is safe for clients.
+var ErrAutoinstallUserDataUnmapped = errors.New("autoinstall user-data must be a mapping to insert phone-home")
+
 // EnablePhoneHomeInUserData returns userData with a phone-home block reporting
 // to url, replacing the blocks it can edit: one in an archive part left as
 // authored stays, and the block delivered last is the one that takes effect.
@@ -299,7 +307,7 @@ func insertPhoneHome(documentRoot *yaml.Node, url string) error {
 
 	if autoinstallNode := mappingValue(documentRoot, autoinstallName); autoinstallNode != nil {
 		if autoinstallNode.Kind != yaml.MappingNode {
-			return errors.New("autoinstall must be a mapping to insert phone-home")
+			return ErrAutoinstallUnmapped
 		}
 
 		insertionNode = mappingValue(autoinstallNode, autoinstallUserData)
@@ -309,7 +317,7 @@ func insertPhoneHome(documentRoot *yaml.Node, url string) error {
 			autoinstallNode.Content = append(autoinstallNode.Content,
 				scalarNode(autoinstallUserData), insertionNode)
 		case insertionNode.Kind != yaml.MappingNode:
-			return errors.New("autoinstall user-data must be a mapping to insert phone-home")
+			return ErrAutoinstallUserDataUnmapped
 		}
 	}
 

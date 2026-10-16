@@ -43,6 +43,8 @@ const (
 
 	// AnnotationBMCIP is the BMC IP address annotation.
 	AnnotationBMCIP = "nvidia-infra-controller/mat-bmc-ip"
+	// AnnotationNvosIP is the switch NVOS IP address annotation.
+	AnnotationNvosIP = "nvidia-infra-controller/mat-nvos-ip"
 	// AnnotationAPIState is the API state annotation.
 	AnnotationAPIState = "nvidia-infra-controller/mat-api-state"
 	// AnnotationPowerState is the power state annotation.
@@ -60,6 +62,9 @@ const (
 	MachineTypeHost = "host"
 	// MachineTypeDPU is the machine type for DPUs.
 	MachineTypeDPU = "dpu"
+	// MachineTypeNvos is the machine type for a switch's NVOS endpoint, which
+	// NICo reaches for NMX-C rather than for the switch's BMC.
+	MachineTypeNvos = "nvos"
 
 	// PortNameRedfish is the name of the Redfish port.
 	PortNameRedfish = "redfish"
@@ -67,6 +72,11 @@ const (
 	PortNameIPMI = "ipmi"
 	// PortNameSSH is the name of the SSH port.
 	PortNameSSH = "ssh"
+	// PortNameNmxc is the name of the NMX-C gRPC port on an NVOS Service.
+	PortNameNmxc = "nmxc"
+
+	// NmxcPort is the port NICo expects NMX-C on at a switch NVOS address.
+	NmxcPort = 9370
 
 	// DefaultConcurrency is the default number of concurrent workers for K8s API calls.
 	DefaultConcurrency = 50
@@ -92,6 +102,15 @@ func BuildServiceName(machineType, matID string) string {
 		shortID = fmt.Sprintf("%s-%s", matID[:12], shortHash(matID))
 	}
 	return fmt.Sprintf("mat-bmc-%s-%s", machineType, shortID)
+}
+
+// BuildNvosServiceName generates a consistent service name for a switch's NVOS endpoint.
+func BuildNvosServiceName(matID string) string {
+	shortID := matID
+	if len(matID) > 12 {
+		shortID = fmt.Sprintf("%s-%s", matID[:12], shortHash(matID))
+	}
+	return fmt.Sprintf("mat-nvos-%s", shortID)
 }
 
 func shortHash(s string) string {
@@ -201,6 +220,70 @@ func (b *ServiceBuilder) BuildService(machine *matclient.MachineStatus, machineT
 	return svc
 }
 
+// BuildNvosService creates a Kubernetes Service for a switch's NVOS endpoint.
+//
+// NICo reaches a rack's NMX-C at a switch NVOS address on port 9370. The
+// Service publishes the switch's leased NVOS address as an externalIP, as the
+// BMC Service publishes the BMC address, with an apiserver-allocated
+// clusterIP, and forwards that port to machine-a-tron's bmc-mock listener,
+// where the hosted NMX-C mock tells switches apart by the address each
+// request was sent to.
+func (b *ServiceBuilder) BuildNvosService(machine *matclient.MachineStatus, podName string) *corev1.Service {
+	labels := map[string]string{
+		LabelManagedBy:   LabelManagedByValue,
+		LabelMatID:       machine.MatID,
+		LabelMachineType: MachineTypeNvos,
+	}
+
+	annotations := map[string]string{
+		AnnotationAPIState:          machine.APIState,
+		AnnotationPowerState:        machine.PowerState,
+		AnnotationRedfishListenPort: strconv.Itoa(int(machine.BMC.Redfish.ListenPort)),
+		AnnotationNvosIP:            *machine.NvosIP,
+	}
+	if machine.HardwareType != nil {
+		annotations[AnnotationHardwareType] = *machine.HardwareType
+	}
+
+	selector := make(map[string]string)
+	for k, v := range b.BaseSelector {
+		selector[k] = v
+	}
+	if podName != "" {
+		selector[LabelPodName] = podName
+	}
+
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        BuildNvosServiceName(machine.MatID),
+			Namespace:   b.Namespace,
+			Labels:      labels,
+			Annotations: annotations,
+		},
+		Spec: corev1.ServiceSpec{
+			Type:        corev1.ServiceTypeClusterIP,
+			ExternalIPs: []string{*machine.NvosIP},
+			Selector:    selector,
+			Ports: []corev1.ServicePort{
+				{
+					Name:       PortNameNmxc,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       NmxcPort,
+					TargetPort: intstr.FromInt32(int32(machine.BMC.Redfish.ListenPort)),
+				},
+			},
+		},
+	}
+
+	if b.OwnerRefs != nil {
+		if ownerRef, ok := b.OwnerRefs[podName]; ok {
+			svc.OwnerReferences = []metav1.OwnerReference{ownerRef}
+		}
+	}
+
+	return svc
+}
+
 // BuildServicesFromStatus builds Services for all machines in the status response.
 // podName is used to create pod-specific selectors for multi-pod deployments.
 func (b *ServiceBuilder) BuildServicesFromStatus(status *matclient.MachinesStatusResponse, podName string) []*corev1.Service {
@@ -218,6 +301,13 @@ func (b *ServiceBuilder) BuildServicesFromStatus(status *matclient.MachinesStatu
 			if dpu.BMC.IP != nil && *dpu.BMC.IP != "" {
 				services = append(services, b.BuildService(&dpu, MachineTypeDPU, machine.MatID, podName))
 			}
+		}
+
+		// A switch is also reachable at its NVOS address once DHCP has assigned
+		// one; an empty address is withheld like an empty BMC address, so it
+		// never reaches externalIPs or the service diff.
+		if machine.DeviceKind == matclient.DeviceKindSwitch && machine.NvosIP != nil && *machine.NvosIP != "" {
+			services = append(services, b.BuildNvosService(&machine, podName))
 		}
 	}
 
@@ -420,12 +510,14 @@ func needsUpdate(desired, existing *corev1.Service) bool {
 }
 
 // isLegacyClusterIPService reports whether a previous controller version built
-// existing with the BMC IP as clusterIP, which its BMC IP annotation records.
+// existing with the BMC IP, or a switch's NVOS IP, as clusterIP, which the
+// matching address annotation records.
 func isLegacyClusterIPService(existing *corev1.Service) bool {
 	if len(existing.Spec.ExternalIPs) != 0 || existing.Spec.ClusterIP == "" {
 		return false
 	}
-	return existing.Annotations[AnnotationBMCIP] == existing.Spec.ClusterIP
+	return existing.Annotations[AnnotationBMCIP] == existing.Spec.ClusterIP ||
+		existing.Annotations[AnnotationNvosIP] == existing.Spec.ClusterIP
 }
 
 func preserveForeignMetadata(desired, existing *corev1.Service) {
@@ -455,9 +547,11 @@ func isControllerLabel(k string) bool {
 	}
 }
 
+// isControllerAnnotation reports whether k is one of the annotations this
+// controller owns on device Pods.
 func isControllerAnnotation(k string) bool {
 	switch k {
-	case AnnotationBMCIP, AnnotationAPIState, AnnotationPowerState, AnnotationHardwareType, AnnotationRedfishListenPort, AnnotationIPMIListenPort, AnnotationSSHListenPort:
+	case AnnotationBMCIP, AnnotationNvosIP, AnnotationAPIState, AnnotationPowerState, AnnotationHardwareType, AnnotationRedfishListenPort, AnnotationIPMIListenPort, AnnotationSSHListenPort:
 		return true
 	default:
 		return false

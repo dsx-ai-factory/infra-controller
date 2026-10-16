@@ -1,4 +1,4 @@
-# Troubleshoot a BgpPeeringTor Health Alert
+# Troubleshoot a BgpPeeringTor Health Alert <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Use this playbook when a managed host or DPU reports `BgpPeeringTor`. The alert
 can identify an unavailable top-of-rack (ToR) uplink or an established session

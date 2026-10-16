@@ -18,11 +18,14 @@ use ::rpc::forge::{self as rpc, GetMachineValidationExternalConfigResponse};
 use carbide_machine_controller::config::machine_validation::{
     MachineValidationConfig, MachineValidationTestSelectionMode,
 };
-use carbide_uuid::machine_validation::{MachineValidationAttemptId, MachineValidationRunItemId};
+use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine_validation::{
+    MachineValidationAttemptId, MachineValidationId, MachineValidationRunItemId,
+};
 use config_version::ConfigVersion;
 use db::machine_validation::ValidationNotActive;
 use db::machine_validation_execution::HeartbeatNotAccepted;
-use db::{self, ConditionalWrite, machine_validation_suites};
+use db::{self, ConditionalWrite, ObjectColumnFilter, machine_validation_suites};
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
     FailureCause, FailureDetails, FailureSource, MachineValidationContext, MachineValidationFilter,
@@ -70,11 +73,18 @@ pub(crate) async fn mark_machine_validation_complete(
     request: Request<rpc::MachineValidationCompletedRequest>,
 ) -> Result<Response<rpc::MachineValidationCompletedResponse>, Status> {
     log_request_data(&request);
+    let caller = crate::auth::authenticated_machine_id(&request)?;
 
     let req = request.into_inner();
 
     // Extract and check
     let machine_id = convert_and_log_machine_id(req.machine_id.as_ref())?;
+    if caller.is_some_and(|caller| caller != machine_id) {
+        return Err(CarbideError::PermissionDeniedError(
+            "machine identity does not match the requested machine".to_string(),
+        )
+        .into());
+    }
 
     // Extract and check UUID
     let Some(validation_id) = &req.validation_id else {
@@ -250,6 +260,7 @@ pub(crate) async fn persist_validation_result(
     api: &Api,
     request: tonic::Request<rpc::MachineValidationResultPostRequest>,
 ) -> Result<tonic::Response<()>, Status> {
+    let caller = crate::auth::authenticated_machine_id(&request)?;
     let Some(result) = request.into_inner().result else {
         return Err(CarbideError::InvalidArgument("validation result".to_string()).into());
     };
@@ -275,6 +286,12 @@ pub(crate) async fn persist_validation_result(
             return Err(CarbideError::InvalidArgument("wrong validation ID".to_string()).into());
         }
     };
+    if caller.is_some_and(|caller| caller != machine.id) {
+        return Err(CarbideError::PermissionDeniedError(
+            "machine identity does not own this machine validation run".to_string(),
+        )
+        .into());
+    }
     // Acquire the parent-run lock before record_result() touches run-item rows.
     // Heartbeats and stale-attempt reconciliation use the same parent-run ->
     // run-item order. Successful results also serialize with the trigger that
@@ -513,16 +530,44 @@ pub(crate) async fn get_machine_validation_runs(
     Ok(ret)
 }
 
+/// Denies a machine caller any run in `run_ids` owned by another machine.
+/// Callers without a machine identity are unrestricted; unknown ids are
+/// ignored.
+async fn deny_other_machines_runs(
+    api: &Api,
+    caller: Option<MachineId>,
+    run_ids: &[MachineValidationId],
+) -> Result<(), Status> {
+    let Some(caller) = caller else {
+        return Ok(());
+    };
+    let mut db_reader = api.db_reader();
+    let runs = db::machine_validation::find_by(
+        &mut db_reader,
+        ObjectColumnFilter::List(db::machine_validation::IdColumn, run_ids),
+    )
+    .await?;
+    if runs.iter().any(|run| run.machine_id != caller) {
+        return Err(CarbideError::PermissionDeniedError(
+            "machine identity does not own this machine validation run".to_string(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
 pub(crate) async fn find_machine_validation_run_item_ids(
     api: &Api,
     request: tonic::Request<rpc::MachineValidationRunItemSearchFilter>,
 ) -> Result<tonic::Response<rpc::MachineValidationRunItemIdList>, Status> {
     log_request_data(&request);
+    let caller = crate::auth::authenticated_machine_id(&request)?;
     let req = request.into_inner();
     let validation_id = req
         .validation_id
         .as_ref()
         .ok_or(CarbideError::MissingArgument("validation id"))?;
+    deny_other_machines_runs(api, caller, &[*validation_id]).await?;
 
     let mut db_reader = api.db_reader();
     let run_item_ids = db::machine_validation_execution::find_run_item_ids_by_run_id(
@@ -546,6 +591,7 @@ pub(crate) async fn find_machine_validation_run_items_by_ids(
     request: tonic::Request<rpc::MachineValidationRunItemsByIdsRequest>,
 ) -> Result<tonic::Response<rpc::MachineValidationRunItemList>, Status> {
     log_request_data(&request);
+    let caller = crate::auth::authenticated_machine_id(&request)?;
     let req = request.into_inner();
 
     let max_find_by_ids = api.runtime_config.max_find_by_ids as usize;
@@ -574,10 +620,13 @@ pub(crate) async fn find_machine_validation_run_items_by_ids(
     let mut db_reader = api.db_reader();
     let run_items =
         db::machine_validation_execution::find_run_items_by_ids(&mut db_reader, &run_item_ids)
-            .await?
-            .into_iter()
-            .map(rpc::MachineValidationRunItem::from)
-            .collect();
+            .await?;
+    let run_ids: Vec<MachineValidationId> = run_items.iter().map(|item| item.run_id).collect();
+    deny_other_machines_runs(api, caller, &run_ids).await?;
+    let run_items = run_items
+        .into_iter()
+        .map(rpc::MachineValidationRunItem::from)
+        .collect();
 
     Ok(tonic::Response::new(rpc::MachineValidationRunItemList {
         run_items,
@@ -834,11 +883,13 @@ pub(crate) async fn heartbeat_machine_validation_run(
     request: tonic::Request<rpc::MachineValidationHeartbeatRequest>,
 ) -> Result<tonic::Response<rpc::MachineValidationHeartbeatResponse>, Status> {
     log_request_data(&request);
+    let caller = crate::auth::authenticated_machine_id(&request)?;
     let req = request.into_inner();
     let validation_id = req
         .validation_id
         .as_ref()
         .ok_or(CarbideError::MissingArgument("validation id"))?;
+    deny_other_machines_runs(api, caller, &[*validation_id]).await?;
     let mut test_id = None;
     let mut run_item_id = None;
     let mut attempt_id = None;
@@ -1544,12 +1595,13 @@ pub(crate) async fn update_machine_validation_run(
     api: &Api,
     request: tonic::Request<rpc::MachineValidationRunRequest>,
 ) -> Result<tonic::Response<rpc::MachineValidationRunResponse>, Status> {
+    let caller = crate::auth::authenticated_machine_id(&request)?;
     let req = request.into_inner();
-    let mut txn = api.txn_begin().await?;
-
     let validation_id = req
         .validation_id
         .ok_or(CarbideError::MissingArgument("validation id"))?;
+    deny_other_machines_runs(api, caller, &[validation_id]).await?;
+    let mut txn = api.txn_begin().await?;
     let selected_tests = req
         .selected_tests
         .into_iter()

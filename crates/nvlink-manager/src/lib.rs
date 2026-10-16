@@ -72,10 +72,10 @@ use tracing::Instrument;
 /// Default NMX-M instance identifier for credentials and client lookup when none is specified.
 pub const DEFAULT_NMX_M_NAME: &str = "default";
 
-/// Multicast groups limit for new NMX-C partitions. Must be a multiple of 4. Assuming at most 2
-/// partitions per tray and 18 tray default partitions, this is floor(1024 / (36+18)) rounded down
+/// Multicast groups limit for new NMX-C partitions. Must be a multiple of 4. Assuming at most 1
+/// partition per tray and 18 tray default partitions, this is floor(1024 / 18) rounded down
 /// to the nearest multiple of 4.
-const NMX_C_PARTITION_MULTICAST_GROUPS_LIMIT: u32 = 16;
+const NMX_C_PARTITION_MULTICAST_GROUPS_LIMIT: u32 = 56;
 
 fn managed_host_chassis_serial(snapshot: &ManagedHostStateSnapshot) -> Option<String> {
     snapshot
@@ -2103,13 +2103,28 @@ impl NvlPartitionMonitor {
                                 }
                                 None => {
                                     // TODO: should we add the partition NMX-C ID to the status obs?
-                                    if is_nmx_c_default_partition(&nmxc_partition)
+                                    let in_nmx_c_default_partition =
+                                        is_nmx_c_default_partition(&nmxc_partition);
+                                    if in_nmx_c_default_partition
                                         || is_gpu_in_tray_default_partition(
                                             &nmxc_partition,
                                             nvlink_gpu.slot_id,
                                         )
                                     {
-                                        if instance_gpu_config.is_some() {
+                                        let wants_tenant_partition = instance_gpu_config
+                                            .is_some_and(|gpu_config| {
+                                                gpu_config.logical_partition_id.is_some()
+                                            });
+                                        // A GPU leaves its holding partition when the tenant
+                                        // wants it in a logical partition. The NMX-C default
+                                        // partition is also vacated for any configured GPU, but
+                                        // a config that names no logical partition, like an
+                                        // omitted config, leaves the GPU parked in its tray
+                                        // default partition.
+                                        if wants_tenant_partition
+                                            || (in_nmx_c_default_partition
+                                                && instance_gpu_config.is_some())
+                                        {
                                             tracing::info!(
                                                 gpu_guid = nvlink_gpu.guid,
                                                 machine_id = %instance.machine_id,
@@ -2121,8 +2136,6 @@ impl NvlPartitionMonitor {
                                             gpu_ctx.partition_nmx_c_id =
                                                 nmxc_partition.partition_id.unwrap_or_default();
                                         } else {
-                                            // An omitted GPU config means this GPU should remain
-                                            // in its holding partition.
                                             gpu_action = GpuAction::NoOp;
                                         }
                                     } else {
@@ -2148,6 +2161,24 @@ impl NvlPartitionMonitor {
                                 gpu_action = GpuAction::AddToPartition;
                                 gpu_ctx.logical_partition_id = Some(logical_partition_id);
                             } else {
+                                // Neither a tenant partition nor a holding partition claims
+                                // this GPU, so park it in its tray default partition rather
+                                // than leave it outside every partition.
+                                if let Err(error) = partition_ctx
+                                    .ensure_gpu_enqueued_into_tray_partition(
+                                        &mh.host_snapshot.id,
+                                        info.domain_uuid,
+                                        nvlink_gpu,
+                                    )
+                                {
+                                    tracing::warn!(
+                                        gpu_guid = nvlink_gpu.guid,
+                                        machine_id = %instance.machine_id,
+                                        instance_id = %instance.id,
+                                        error = %error,
+                                        "Failed to enqueue unpartitioned instance GPU into its tray default partition",
+                                    );
+                                }
                                 gpu_action = GpuAction::NoOp;
                             }
                         }
