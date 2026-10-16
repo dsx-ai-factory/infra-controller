@@ -382,15 +382,15 @@ GET /v2/org/{org}/nico/sku/{skuId} the `components/tpm` response's property `typ
 PATCH /v2/org/{org}/nico/sku/{skuId} the `components/tpm` request property `type` changed from `array<object>` to `object`
 PATCH /v2/org/{org}/nico/sku/{skuId} the `components/tpm` response's property `type` changed from `array<object>` to `object` for status `200`
 
-# Core IssueCategory defines only Hardware, Network, Performance, and Other, and both validators already required
-# a non-empty summary. The shared MachineHealthIssue schema now documents that contract (1024/8192 caps).
+# Instance deletion maps categories to Core IssueCategory, which defines only Hardware, Network, Performance,
+# and Other. Its validator requires a non-empty summary; online repair requires non-empty summary and details.
 DELETE /v2/org/{org}/nico/instance/{instanceId} the request property `machineHealthIssue/summary` became not nullable
 DELETE /v2/org/{org}/nico/instance/{instanceId} removed the enum value `Software` of the request property `machineHealthIssue/category`
 DELETE /v2/org/{org}/nico/instance/{instanceId} removed the enum value `Storage` of the request property `machineHealthIssue/category`
 DELETE /v2/org/{org}/nico/instance/{instanceId} the `machineHealthIssue/summary` request property's minLength was increased from `0` to `1`
+PATCH /v2/org/{org}/nico/machine/{machineId} the request property `healthIssue/details` became not nullable
 PATCH /v2/org/{org}/nico/machine/{machineId} the request property `healthIssue/summary` became not nullable
-PATCH /v2/org/{org}/nico/machine/{machineId} removed the enum value `Software` of the request property `healthIssue/category`
-PATCH /v2/org/{org}/nico/machine/{machineId} removed the enum value `Storage` of the request property `healthIssue/category`
+PATCH /v2/org/{org}/nico/machine/{machineId} the `healthIssue/details` request property's minLength was increased from `0` to `1`
 PATCH /v2/org/{org}/nico/machine/{machineId} the `healthIssue/summary` request property's minLength was increased from `0` to `1`
 
 # availablePrefixes holds CIDR prefix strings from IPAM, never UUIDs.

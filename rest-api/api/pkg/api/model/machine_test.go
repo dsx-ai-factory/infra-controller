@@ -856,9 +856,31 @@ func TestAPIMachineUpdateRequest_Validate(t *testing.T) {
 					},
 				},
 				HealthIssue: &APIMachineHealthIssue{
-					Category: HealthIssueHardware,
+					Category: HealthIssueStorage,
 					Summary:  cutil.GetPtr("Disk issue"),
 					Details:  cutil.GetPtr("logs and ticket refs"),
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "test valid enter online repair request with Software issue",
+			fields: fields{
+				OnlineRepair: &APIMachineOnlineRepair{
+					Enabled: cutil.GetPtr(true),
+					Policy: &APIMachineOnlineRepairPolicy{
+						AllowAutoInstanceDeletionOnFailure: cutil.GetPtr(false),
+					},
+					Acknowledgments: &APIMachineOnlineRepairAcknowledgments{
+						AcceptDataCorruptionRisk:   cutil.GetPtr(true),
+						AcceptRepairTeamAccess:     cutil.GetPtr(true),
+						AcceptInstanceDeletionRisk: cutil.GetPtr(true),
+					},
+				},
+				HealthIssue: &APIMachineHealthIssue{
+					Category: HealthIssueSoftware,
+					Summary:  cutil.GetPtr("Software issue"),
+					Details:  cutil.GetPtr("driver service failed"),
 				},
 			},
 			wantErr: false,
@@ -970,6 +992,32 @@ func TestAPIMachineUpdateRequest_ToInsertHealthReportProto(t *testing.T) {
 				},
 			},
 			wantCategory: "HARDWARE",
+			wantErr:      false,
+		},
+		{
+			name:      "maps Storage health issue to alert payload with STORAGE issue_category",
+			machineID: "361c4de4-afb3-4839-a5bd-305f9dea8744",
+			fields: fields{
+				HealthIssue: &APIMachineHealthIssue{
+					Category: HealthIssueStorage,
+					Summary:  cutil.GetPtr("storage subsystem degraded"),
+					Details:  cutil.GetPtr("disk SMART errors in slot 2"),
+				},
+			},
+			wantCategory: "STORAGE",
+			wantErr:      false,
+		},
+		{
+			name:      "maps Software health issue to alert payload with SOFTWARE issue_category",
+			machineID: "461c4de4-afb3-4839-a5bd-305f9dea8744",
+			fields: fields{
+				HealthIssue: &APIMachineHealthIssue{
+					Category: HealthIssueSoftware,
+					Summary:  cutil.GetPtr("driver service failed"),
+					Details:  cutil.GetPtr("service exited repeatedly"),
+				},
+			},
+			wantCategory: "SOFTWARE",
 			wantErr:      false,
 		},
 	}

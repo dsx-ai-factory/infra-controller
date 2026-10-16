@@ -54,20 +54,25 @@ const (
 	HealthIssueHardware    = "Hardware"
 	HealthIssueNetwork     = "Network"
 	HealthIssuePerformance = "Performance"
+	HealthIssueStorage     = "Storage"
+	HealthIssueSoftware    = "Software"
 	HealthIssueOther       = "Other"
 )
 
 // ValidHealthIssueCategories lists accepted HealthIssue.category values for online repair.
-// Keep in sync with the Core `IssueCategory` proto enum; categories Core does not define
-// are not accepted at the REST layer.
+// Online repair stores these values as strings in a HealthProbeAlert payload rather
+// than converting them through Core's IssueCategory enum.
 var ValidHealthIssueCategoriesMap = map[string]string{
 	HealthIssueHardware:    "HARDWARE",
 	HealthIssueNetwork:     "NETWORK",
 	HealthIssuePerformance: "PERFORMANCE",
+	HealthIssueStorage:     "STORAGE",
+	HealthIssueSoftware:    "SOFTWARE",
 	HealthIssueOther:       "OTHER",
 }
 
-// APIMachineHealthIssue describes the tenant-reported issue when requesting online repair.
+// APIMachineHealthIssue describes a tenant-reported machine issue.
+// Online repair and Instance deletion apply endpoint-specific validation.
 type APIMachineHealthIssue struct {
 	// Category is the type of the issue
 	Category string `json:"category"`

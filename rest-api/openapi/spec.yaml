@@ -25376,6 +25376,33 @@ components:
           description: Updated set of DPU Extension Services to deploy to the DPUs of this Instance
           items:
             $ref: '#/components/schemas/DpuExtensionServiceDeploymentRequest'
+    InstanceDeleteHealthIssue:
+      title: InstanceDeleteHealthIssue
+      type: object
+      description: Tenant-reported Machine issue that necessitates Instance deletion. Categories match the Core `IssueCategory` values.
+      required:
+        - category
+        - summary
+      properties:
+        category:
+          type: string
+          enum:
+            - Hardware
+            - Network
+            - Performance
+            - Other
+          description: High-level category for the tenant-reported issue.
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Brief description of the issue for operators.
+        details:
+          type:
+            - string
+            - 'null'
+          maxLength: 8192
+          description: Diagnostic information, logs, ticket numbers, etc.
     InstanceDeleteRequest:
       title: InstanceDeleteRequest
       type: object
@@ -25388,7 +25415,7 @@ components:
       description: Request data to delete Instance
       properties:
         machineHealthIssue:
-          $ref: '#/components/schemas/MachineHealthIssue'
+          $ref: '#/components/schemas/InstanceDeleteHealthIssue'
           description: Information regarding issue with the underlying Machine experienced by Tenant
         isRepairTenant:
           type:
@@ -28749,10 +28776,11 @@ components:
     MachineHealthIssue:
       title: MachineHealthIssue
       type: object
-      description: Tenant-reported Machine issue, attached to a Machine online repair request or an Instance delete request. Categories match the Core `IssueCategory` values.
+      description: Tenant-reported Machine issue attached to a Machine online repair request. The category is serialized as `issue_category` in the Core `HealthProbeAlert` payload.
       required:
         - category
         - summary
+        - details
       properties:
         category:
           type: string
@@ -28760,6 +28788,8 @@ components:
             - Hardware
             - Network
             - Performance
+            - Storage
+            - Software
             - Other
           description: High-level category for the tenant-reported issue.
         summary:
@@ -28768,11 +28798,10 @@ components:
           maxLength: 1024
           description: Brief description of the issue for operators.
         details:
-          type:
-            - string
-            - 'null'
+          type: string
+          minLength: 1
           maxLength: 8192
-          description: Diagnostic information, logs, ticket numbers, etc. Required when entering Machine online repair.
+          description: Diagnostic information, logs, ticket numbers, etc.
     MachineOnlineRepairPolicy:
       title: MachineOnlineRepairPolicy
       type: object
