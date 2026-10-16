@@ -169,7 +169,49 @@ The hook adds the `HTTPClient` marker in option 16 only when it returns option 5
 
 The reply preserves the enterprise number from the matching request vendor class and returns the bare `HTTPClient` value. With a hostname or IPv4-literal URL and no IPv6 DNS, the hook still adds option 59 but omits the `HTTPClient` marker. This preserves compatibility with EFI Development Kit II (EDK2) firmware, which can reject a marked offer before trying a firmware-configured URL without IPv6 DNS.
 
-Finishing HTTP boot also requires [firmware support for HTTP boot over IPv6](https://github.com/dsx-ai-factory/infra-controller/issues/7173) and an [embedded iPXE script that works without DHCPv4](https://github.com/dsx-ai-factory/infra-controller/issues/7172).
+## Embedded iPXE Boot Over IPv6
+
+This embedded IPv6 path requires the [embedded IPv6 boot changes in PR #7650](https://github.com/dsx-ai-factory/infra-controller/pull/7650), tracked in [#7172](https://github.com/dsx-ai-factory/infra-controller/issues/7172). Both the embedded script and the HTTP source-selection patch must be compiled into the EFI artifacts. Updating only the DHCP configuration or Core image does not replace an EFI file served separately.
+
+Update the image or volume that serves boot artifacts with the rebuilt `ipxe.efi` at `/public/blobs/internal/<architecture>/ipxe.efi`. Supply each required architecture, `x86_64` or `aarch64`. Rebuild `golan.efi` too if you deploy that variant.
+
+Before using this path, provide the following prerequisites:
+
+- A stateful DHCPv6 lease from NICo. Complete [Prepare the Managed Network](#prepare-the-managed-network) and satisfy the [Network and Identity Requirements](#network-and-identity-requirements). Embedded iPXE uses DUID-UUID, so the relay must supply usable option 79 even if the firmware's DHCPv6 request used DUID-LL or DUID-LLT.
+- Router advertisements on the boot network with the managed-address (`M`) flag set, plus the prefixes and routing needed to reach the boot server. The other-configuration flag alone does not request a stateful lease. Additional prefixes that permit Stateless Address Autoconfiguration (SLAAC) are allowed, but a SLAAC address alone does not satisfy the embedded script.
+- An HTTP or HTTPS boot URL inherited from the EFI boot path. Use the URL from [HTTP Boot Options](#http-boot-options), or an equivalent operator-configured URL. Its server must be reachable over IPv6. A hostname requires working DNS and an AAAA record, including when the name resolves through an alias.
+
+The embedded script tries DHCPv4 first and selects one of two paths:
+
+- **DHCPv4 succeeds:** The script uses `http://${next-server}` on port 80 for the NICo PXE API. IPv4-only and dual-stack clients retain this path. A later HTTP failure does not select IPv6 fallback.
+- **DHCPv4 fails:** The script configures IPv6 and requires a stateful DHCPv6 lease. It binds HTTP and HTTPS requests to that lease's address and interface, even when SLAAC supplies another address on a prefix containing the server. NICo identifies the booting interface by the request's source address.
+
+The first interface that completes IPv6 configuration must have the stateful lease. A SLAAC-only result on that interface does not make the script try another interface.
+
+On the IPv6 path, the script reuses the inherited URL's scheme, server, and port for `/api/v0/pxe/boot` and the menu's `/api/v0/pxe/whoami` request. These paths start at the server root, not the directory containing `ipxe.efi`. For the generated boot URL, the API requests therefore retain port `8080`.
+
+The inherited origin must serve both the EFI file and the NICo PXE API. A static-file server that serves only `ipxe.efi` is insufficient. Preserve the client's source address through the API path. `X-Forwarded-For` does not replace the socket peer address. The embedded script does not discover a second server when the inherited endpoint is unusable.
+
+While the IPv6 source binding is active, HTTP and HTTPS destinations, including redirects and payload URLs, must be reachable over IPv6. A hostname with only an IPv4 address does not trigger IPv4 fallback. Returned boot scripts configure their payload URLs separately; inheriting the EFI origin does not rewrite those URLs. Provide DNS records for those endpoints as described in [DNS Configuration](ip-and-network-configuration.md#3-dns-configuration).
+
+Reentering the embedded script's network configuration clears the binding before trying DHCPv4. Running network commands from a custom script does not clear it automatically.
+
+On either path, iPXE retries a failed one-time custom PXE script if the response marks it retryable. It waits 30 seconds and executes the cached script again without another `/api/v0/pxe/boot` request. Retries continue until execution succeeds or you press `p` during the retry prompt to return to the menu. Payload downloads can repeat.
+
+### Diagnose the Embedded Handoff
+
+If IPv6 configuration fails, iPXE exits before checking for a lease or inherited URL. Check the router advertisements and DHCPv6 exchange through the configured relay. After IPv6 configuration succeeds, either missing prerequisite produces a diagnostic message and exits the script:
+
+| Message | Check |
+| --- | --- |
+| "NICo IPv6 boot requires a stateful DHCPv6 lease." | Confirm that router advertisements set the managed-address flag and that the selected interface has a DHCPv6 lease. Successful SLAAC configuration alone is not enough. |
+| "NICo IPv6 boot requires an inherited HTTP boot URI." | Confirm that the EFI boot path supplies the HTTP or HTTPS URL used to load the rebuilt artifact. Loading an EFI file without that URL does not provide the API endpoint. |
+
+An unusable inherited URL or unreachable API produces a fetch failure rather than selecting another endpoint. Check IPv6 reachability, hostname resolution, the inherited port, and the API paths.
+
+When the API identifies the booting interface, the menu's **Print information about this machine** entry displays its fully qualified domain name (FQDN) and MAC address. It does not display IP addresses, gateways, or DNS settings.
+
+Physical firmware enablement, boot-order selection, and platform qualification remain separate work under [Configure Hosts to HTTP Boot Over IPv6](https://github.com/dsx-ai-factory/infra-controller/issues/7173). Reaching the embedded script or PXE API does not establish a complete Core-managed operating-system boot. Validate the returned boot script and its payload endpoints for the target deployment.
 
 ## Deployment Verification and Metrics
 
