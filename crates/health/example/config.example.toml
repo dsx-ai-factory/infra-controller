@@ -51,6 +51,10 @@ port = 443
 mac = "aa:bb:cc:dd:ee:ff"
 username = "admin"
 password = "secret"
+# To use automatically reloaded files, replace the corresponding inline fields.
+# See crates/health/README.md for file format and reload behavior.
+# username_file = "/run/secrets/bmc-username"
+# password_file = "/run/secrets/bmc-password"
 labels = { site = "dev", cluster = "cluster-01", environment = "development" }
 machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "MN-001", slot_number = 15, tray_index = 5, nvlink_domain_uuid = "00000000-0000-0000-0000-000000000000" }
 

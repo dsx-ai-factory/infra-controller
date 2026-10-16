@@ -359,7 +359,7 @@ struct GnmiCredentialCache {
     generation: AtomicU64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct GnmiUsernamePassword {
     username: Option<String>,
     password: Option<String>,
@@ -667,6 +667,18 @@ impl GnmiCredentialCache {
     }
 
     async fn ensure(&self) -> Result<(GnmiUsernamePassword, u64), HealthError> {
+        if self.credential_provider.reload_before_use() {
+            let credentials =
+                fetch_gnmi_username_password(self.credential_provider.clone(), &self.addr).await?;
+            let mut cached = self.cached.write().map_err(|_| {
+                HealthError::GnmiError("NVUE gNMI credential cache lock poisoned".to_string())
+            })?;
+            if cached.as_ref() != Some(&credentials) {
+                *cached = Some(credentials.clone());
+                self.generation.fetch_add(1, AtomicOrdering::AcqRel);
+            }
+            return Ok((credentials, self.generation.load(AtomicOrdering::Acquire)));
+        }
         if let Some(credentials) = self.cached_credentials()? {
             return Ok(credentials);
         }
@@ -2660,6 +2672,27 @@ mod tests {
 
             assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn gnmi_credential_cache_reloads_files_on_connection() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "first").unwrap();
+        let config = serde_json::from_value(serde_json::json!({
+            "ip": "127.0.0.1", "mac": "00:11:22:33:44:55",
+            "username": "admin", "password_file": file.path(),
+        }))
+        .unwrap();
+        let provider =
+            Arc::new(crate::file_credentials::FileCredentialProvider::from_config(&config));
+        let cache = GnmiCredentialCache::new(provider, test_addr());
+        let (first, generation) = cache.ensure().await.unwrap();
+        assert_eq!(first.password.as_deref(), Some("first"));
+        assert_eq!(cache.ensure().await.unwrap().1, generation);
+        std::fs::write(file.path(), "second").unwrap();
+        let (second, changed_generation) = cache.ensure().await.unwrap();
+        assert_eq!(second.password.as_deref(), Some("second"));
+        assert_eq!(changed_generation, generation + 1);
     }
 
     #[tokio::test]

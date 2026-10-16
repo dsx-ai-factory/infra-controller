@@ -131,6 +131,38 @@ Press Ctrl-C in the hardware-health terminal and then in the `bmc-mock`
 terminal. Mock injection rules are held in memory and are discarded when
 `bmc-mock` exits.
 
+## Static credentials from files
+
+Each entry in `endpoint_sources.static_bmc_endpoints` or
+`endpoint_sources.static_switch_host_endpoints` can read its credentials from
+separate files:
+
+```toml
+[[endpoint_sources.static_bmc_endpoints]]
+ip = "10.0.0.1"
+mac = "aa:bb:cc:dd:ee:ff"
+username_file = "/run/secrets/bmc-username"
+password_file = "/run/secrets/bmc-password"
+```
+
+Provide either `username` or `username_file`. The password is optional; provide
+either `password` or `password_file` when needed. Inline and file sources can
+be mixed across fields, but configuring both sources for the same field is an
+error. File paths must be nonempty; relative paths resolve from the process
+working directory, not the configuration file's directory.
+
+Files contain UTF-8 text. One trailing LF or CRLF is removed; other whitespace
+is preserved. An empty password file supplies an empty password, whereas an
+omitted password supplies no password.
+
+The service rereads the configured paths before each Redfish operation, NVUE
+REST collection pass, and gNMI connection. Changes take effect on the next such
+operation without restarting the service, including atomic file replacements
+and Kubernetes Secret symlink updates. Existing streams use their established
+connection until they reconnect. A file read failure fails the operation or
+skips the REST collection pass, with an error that excludes file contents.
+Redfish credential fetch failures use the existing 60-second retry cooldown.
+
 For the complete configuration surface, including real BMC endpoints,
 additional collectors, OTLP, and NICo API sinks, see
 [`config.example.toml`](example/config.example.toml).
