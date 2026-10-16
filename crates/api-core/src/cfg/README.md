@@ -1126,8 +1126,8 @@ DPU configurations must include the tenant-prefix rendering added in
 [#6388](https://github.com/dsx-ai-factory/infra-controller/pull/6388).
 For a direct upgrade from an API without it, such as `v2.2.0-rc.8`, stop the old
 API processes and drain their requests before starting the new API. The Helm
-and Kustomize `RollingUpdate` deployments do not enforce this ordering, even
-with one replica. Otherwise, an old API can return a new network version
+`RollingUpdate` deployment does not enforce this ordering, even with one
+replica. Otherwise, an old API can return a new network version
 without its tenant-prefix protection, and its DPU acknowledgement can incorrectly
 satisfy readiness. Setting the tenant quota to zero does not prevent recovery of
 existing `Provisioning` roots and is not sufficient for this upgrade.
@@ -1292,9 +1292,8 @@ Before starting an API with this deletion behavior, stop every API process
 without the peering deletion behavior added in
 [#6917](https://github.com/dsx-ai-factory/infra-controller/pull/6917) and drain its
 requests. Scale the API deployment to zero and wait for the old pods to exit
-before starting the new version. The shipped Helm chart and
-Kustomize manifests use `RollingUpdate`, which does not enforce this ordering,
-even with one replica. An old API can return a new network version while still
+before starting the new version. The shipped Helm chart uses
+`RollingUpdate`, which does not enforce this ordering, even with one replica. An old API can return a new network version while still
 including a deleting peering's permissions. Its DPU acknowledgement can then
 let the controller remove the peering too early.
 
@@ -1370,7 +1369,7 @@ for overlap lookups without their former exclusion semantics. It holds table
 locks during that work and may wait for active transactions; new queries can
 queue behind it. Concurrent traffic can deadlock with the migration, aborting
 either the API request or the migration attempt. A failed migration rolls back
-the whole file; the Helm and Kustomize migration Jobs restart failed containers.
+the whole file; the Helm migration Job restarts failed containers.
 An upgrade that also adds the scope columns builds the exclusion indexes under
 table locks as well.
 Cached wildcard queries on the outgoing API's connections can still fail until

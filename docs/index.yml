@@ -173,6 +173,8 @@ navigation:
           path: configuration/host-naming.md
         - page: DNS
           path: configuration/dns.md
+        - page: DNS Service Endpoints
+          path: configuration/dns-service-endpoints.md
         - page: Flow Component Managers
           path: configuration/flow-component-manager.md
           slug: flow-component-managers

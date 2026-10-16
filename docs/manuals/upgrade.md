@@ -519,6 +519,19 @@ described in the [quick start](../getting-started/quick-start.md) and retire the
 Kustomize overlays. The `rest-api/deploy/kustomize` bases that `setup.sh` uses
 for cert-manager, PostgreSQL, and Temporal are not affected.
 
+### 2.3 → 2.4: Kustomize deployment removed
+
+The Kustomize deployment under `deploy/` is removed in 2.4. Install and
+upgrade NICo Core with the Helm charts under `helm/`, either through
+`setup.sh` as described in the [quick start](../getting-started/quick-start.md)
+or directly as described in [`helm/README.md`](../../helm/README.md). Sites
+still running the Kustomize manifests must move to the Helm charts before
+upgrading to 2.4. The annotated site configuration example now lives at
+[`helm/examples/nico-api-site-config.toml`](../../helm/examples/nico-api-site-config.toml),
+and the `.nico` service endpoint reference moved to
+[DNS Service Endpoints](../configuration/dns-service-endpoints.md). The
+`rest-api/deploy/kustomize` bases that `setup.sh` uses are not affected.
+
 ## Rollback
 
 <Warning>

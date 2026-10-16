@@ -269,7 +269,7 @@ nico-api:
       ranges = [{ start = "0", end = "100" }]
 ```
 
-Adjust pool ranges to match your site's address plan. A fully annotated example with all available options is at [`deploy/files/nico-api/nico-api-site-config.toml`](../deploy/files/nico-api/nico-api-site-config.toml).
+Adjust pool ranges to match your site's address plan. A fully annotated example with all available options is at [`helm/examples/nico-api-site-config.toml`](examples/nico-api-site-config.toml).
 
 ### Admin client certificates
 
@@ -338,7 +338,7 @@ Several NICo services require direct network connectivity to bare metal hosts. E
 - **nico-dns** must be reachable by managed machines for DNS resolution. Configure your network so that provisioned hosts use the `nico-dns` service as their DNS server.
 - **NTP**: Managed machines require access to an NTP server for time synchronization. Provide NTP through your existing infrastructure (e.g., datacenter NTP servers, host-level `chronyd`, or a cloud time source). Configure the NTP server address in your DHCP settings (`nico-ntpserver` in the Kea config).
 - **Recursive DNS**: Managed machines need a recursive DNS resolver that can forward internal queries (e.g., `*.nico.local`) to `nico-dns` and external queries to upstream DNS. You can either configure your existing resolver with the appropriate forwarding rules, or enable the bundled `unbound` subchart (`unbound.enabled: true`) which comes pre-configured for this layered DNS architecture.
-- **`.nico` DNS zone**: DPU agents, host PXE loaders, and other in-band components resolve a set of well-known hostnames in the `.nico` zone at runtime. Several of these — including `nico-pxe.nico`, `nico-ntp.nico`, and `socks.nico` — are compiled into DPU agent binaries and cannot be changed without rebuilding. All `.nico` records must resolve from the OOB/admin management network before NICo services are started. See [`.nico` DNS Zone — Service Endpoint Reference](../deploy/DNS.md) for the full list of hostnames, ports, and configuration instructions.
+- **`.nico` DNS zone**: DPU agents, host PXE loaders, and other in-band components resolve a set of well-known hostnames in the `.nico` zone at runtime. Several of these — including `nico-pxe.nico`, `nico-ntp.nico`, and `socks.nico` — are compiled into DPU agent binaries and cannot be changed without rebuilding. All `.nico` records must resolve from the OOB/admin management network before NICo services are started. Refer to [DNS Service Endpoints](../docs/configuration/dns-service-endpoints.md) for the full list of hostnames, ports, and configuration instructions.
 - If you are using **MetalLB** or a similar load balancer for bare metal environments, configure `LoadBalancer` services via the `externalService` settings in each subchart's values. For example:
 
 ```yaml

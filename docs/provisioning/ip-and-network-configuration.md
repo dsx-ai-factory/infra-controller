@@ -563,7 +563,7 @@ A fixed set of NICo service hostnames are resolved by DPU agents, host PXE loade
 Two TLD conventions exist:
 
 - **`.forge`** is the compiled default in `crates/agent/src/util.rs` and the host PXE loader scripts. The agent resolves `carbide-pxe.forge`, `carbide-ntp.forge`, etc. at startup. This is the TLD used by deployments built from the current binaries.
-- **`.nico`** is the rebranded TLD documented in [`deploy/DNS.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md). New deployments may use this convention, but only if the agent and PXE images have been rebuilt with the new TLD.
+- **`.nico`** is the rebranded TLD documented in [DNS Service Endpoints](../configuration/dns-service-endpoints.md). New deployments may use this convention, but only if the agent and PXE images have been rebuilt with the new TLD.
 
 Choose the convention that matches your binaries. The stock names change both the first label and the TLD. For example, the NTP name is exactly `carbide-ntp.forge`, not `nico-ntp.forge`. Verify the name by checking what the agent actually resolves at startup with `kubectl exec -n nico-system <agent-pod> -- getent hosts carbide-ntp.forge`.
 
@@ -578,7 +578,7 @@ The required DNS records are shown with both NTP names where they differ:
 | `unbound.nico` | 53 | `unbound` LoadBalancer VIP | Recursive DNS resolver | Yes — the resolver address itself is distributed via DHCP option 6 |
 | `otel-receiver.nico` | 443 | OTel receiver VIP on the site controller | OTLP ingestion endpoint for DPU otel-collector sidecars | Yes — set in the otel-collector configuration YAML and re-deployed |
 
-One additional `.nico` hostname, `socks.nico`, is hardcoded into the DPU agent as the SOCKS5 outbound proxy for DPU extension-service pods. Add a corresponding A record only if your environment runs a SOCKS5 proxy for that purpose; it is not part of every NICo deployment. For per-endpoint detail (consumers, in-cluster addresses, hardcode locations, and the `unbound`-vs-other-resolver guidance), see [`deploy/DNS.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md). That file is the canonical endpoint reference; the table above is the operator-facing summary.
+One additional `.nico` hostname, `socks.nico`, is hardcoded into the DPU agent as the SOCKS5 outbound proxy for DPU extension-service pods. Add a corresponding A record only if your environment runs a SOCKS5 proxy for that purpose; it is not part of every NICo deployment. For per-endpoint detail (consumers, in-cluster addresses, hardcode locations, and the `unbound`-vs-other-resolver guidance), refer to [DNS Service Endpoints](../configuration/dns-service-endpoints.md). That page is the canonical endpoint reference; the table above is the operator-facing summary.
 
 > **Note:** The `.nico` service zone is private and is not a publicly
 > registered TLD. It can be served on the conventional isolated OOB network or
@@ -741,4 +741,4 @@ When every item is checked, proceed to [Ingesting Hosts](ingesting-hosts.md).
 - [Quick Start Guide](../getting-started/quick-start.md) — the install flow that consumes the configuration described here.
 - [Reference Installation](../getting-started/installation-options/reference-install.md) — pointers to the manual, manifest-level install and troubleshooting references.
 - [Ingesting Hosts](ingesting-hosts.md) — `expected_machines.json` schema and upload commands.
-- [`deploy/DNS.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md) — canonical reference for NICo service hostnames, ports, and hardcoded-vs-configurable status.
+- [DNS Service Endpoints](../configuration/dns-service-endpoints.md) - canonical reference for NICo service hostnames, ports, and hardcoded-vs-configurable status.

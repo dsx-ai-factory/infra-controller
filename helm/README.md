@@ -444,6 +444,7 @@ For reference configurations, see:
 - [`examples/values-minimal.yaml`](./examples/values-minimal.yaml) -- Minimal deployment with only the core services
 - [`examples/values-full.yaml`](./examples/values-full.yaml) -- Full deployment with all services and production settings
 - [`examples/values-shared-external-ips.yaml`](./examples/values-shared-external-ips.yaml) -- Overlay that fits the external Services into eight LoadBalancer IPs
+- [`examples/nico-api-site-config.toml`](./examples/nico-api-site-config.toml) -- Annotated `nico-api` site configuration for `siteConfig.nicoApiSiteConfig`
 
 ## Migrating from Kustomize
 
@@ -609,8 +610,8 @@ Test files live in `tests/` directories within each chart. CI runs these tests a
 ### PXE runtime regression (manual developer test)
 
 Run this regression after changing PXE packaging, artifact init containers, or
-chart serving paths. CI runs Helm unit tests and the PXE Kustomize render check;
-it does not run this kind-based HTTP test. The developer supplies the locally
+chart serving paths. CI runs Helm unit tests but does not run this kind-based
+HTTP test. The developer supplies the locally
 built PXE image and invokes the command below.
 
 The PXE runtime regression requires Docker, kind, kubectl, Helm, curl, jq, and a
@@ -621,9 +622,8 @@ serving as UID 10001 for `0600` artifacts copied with legacy commands and for
 artifacts bundled in the image. A later custom init creates a `0700` tree owned
 by another UID; the permissions init must preserve that owner while granting
 group 10001 access using only `CHOWN`, `FOWNER`, and `DAC_OVERRIDE`, with privilege
-escalation disabled. The test includes a custom serving path and exercises the
-Kustomize artifact-copy component without the optional legacy ConfigMap. It does
-not provision a host or call Core.
+escalation disabled. The test includes a custom serving path. It does not
+provision a host or call Core.
 
 ```bash
 PXE_TEST_IMAGE=nico-pxe:<local-tag> bash helm/tests/runtime/test-pxe-boot-artifacts.sh
