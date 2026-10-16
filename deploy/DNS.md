@@ -24,11 +24,14 @@ by the deployed agent, or serve both aliases during a mixed-image transition.
 |---|---|---|---|---|---|
 | `nico-api.nico` | 443 | gRPC / TLS | DPU agents, admin CLI, PXE service, DHCP plugin, FMDS, health probe | `nico-api` pod | NICo gRPC API |
 | `nico-pxe.nico` | 80 | HTTP | DPU agents, iPXE clients | `nico-pxe` pod | iPXE scripts, cloud-init payloads, boot artifacts, internal APT |
-| `nico-static-pxe.nico` | 80 | HTTP | Host PXE loader (scout) | `nico-static-pxe` pod | Static boot files: `scout.squashfs`, `scout.efi`, BFB images |
+| `carbide-static-pxe.forge` (stock fallback) | 80 | HTTP | Scout loader and update checker | `nico-static-pxe` pod | Full Scout filesystem and update assets; see [Static Boot Asset Server](#nico-static-pxenico--static-boot-asset-server) |
 | `carbide-ntp.forge` (stock) or `nico-ntp.nico` (rebranded image) | 123 | UDP (NTP) | DPU agents, managed hosts (DHCP options 42 and 56) | `nico-ntp` pods or operator NTP service | NTP time synchronisation |
 | `unbound.nico` | 53 | UDP / TCP (DNS) | DPU agents, managed hosts (DHCP option 6) | `nico-unbound` pod | Site-local recursive DNS resolver |
 | `otel-receiver.nico` | 443 | gRPC / TLS (OTLP) | DPU otel-collector sidecars | otel-receiver service | OpenTelemetry ingestion endpoint |
 | `socks.nico` | 1888 | SOCKS5 | DPU agent extension service pods | SOCKS5 proxy service | Outbound HTTP/HTTPS proxy for DPU-hosted workloads |
+
+The static-asset row describes Scout's stock fallback. Boot URL overrides
+select their own host, scheme, port, and destination.
 
 ---
 
@@ -43,6 +46,7 @@ by the deployed agent, or serve both aliases during a mixed-image transition.
 The primary NICo management API. All management-plane components communicate with NICo through this address. Clients on the OOB network connect on port 443; the pod itself listens on port 1079.
 
 **Consumers:**
+
 - `nico-agent` (DPU agent) — phones home for network configuration, workflow state, and provisioning instructions
 - `nico-admin-cli` — operator administration over gRPC
 - `nico-pxe` — fetches machine records to generate per-machine cloud-init and iPXE scripts
@@ -63,6 +67,7 @@ The primary NICo management API. All management-plane components communicate wit
 Serves dynamic per-machine iPXE boot scripts, cloud-init payloads, boot artifacts, and the internal APT package repository to DPU agents and PXE-booting clients.
 
 **Consumers:**
+
 - `nico-agent` (DPU agent) — resolves this hostname at startup to locate boot artifacts and the internal APT repository (paths under `/public/blobs/internal/`)
 - iPXE clients during initial machine network boot
 
@@ -78,14 +83,36 @@ Serves dynamic per-machine iPXE boot scripts, cloud-init payloads, boot artifact
 **Protocol:** HTTP  
 **In-cluster address:** `nico-static-pxe.nico-system.svc.cluster.local`
 
-Serves pre-built, version-controlled boot assets used during host bring-up. Unlike `nico-pxe.nico`, content here is static rather than dynamically generated per machine.
+Serves pre-built, version-controlled boot assets used during host bring-up.
+The service name does not determine the URL used by a booting host. Stock Scout
+scripts use `carbide-static-pxe.forge` as their fallback hostname; a deployment
+using `nico-static-pxe.nico` must supply the appropriate boot URL or resolve the
+stock hostname to the same server.
 
 **Consumers:**
-- Scout host PXE loader — downloads `scout.squashfs` (the initramfs), `scout.efi`, and BFB images used during host network boot and DPU firmware provisioning
 
-**Configurability:** The URL is hardcoded in host boot shell scripts (`pxe/common_files/scout-loader-rclocal`, `pxe/common_files/check-scout-updates.sh`) that are embedded in boot images at build time. The server-side deployment can set `NICO_STATIC_PXE_URL` to override the URL used by the PXE service, but the embedded client scripts that run on hosts **cannot be reconfigured at runtime**.
+- Scout host PXE loader downloads `scout.squashfs`, the full Scout root
+  filesystem. The server also hosts `scout.efi` and BFB images for their boot
+  and provisioning consumers. See the [Scout boot-stage
+  procedure](../docs/development/vm_pxe_client.md#verify-scout-boot-nic-selection).
 
-> **Warning:** `nico-static-pxe.nico` is hardcoded in host boot scripts compiled into boot images (`pxe/common_files/scout-loader-rclocal`, `pxe/common_files/check-scout-updates.sh`). Changing this hostname requires rebuilding all host boot images.
+**Configurability:** The loader accepts a full root-filesystem URL through the
+`newrootfs=` kernel argument. Without it, the loader uses
+`http://carbide-static-pxe.forge/public/blobs/internal/<architecture>/scout.squashfs`,
+where `<architecture>` is the kernel's machine architecture. The
+[boot procedure](../docs/development/vm_pxe_client.md#verify-scout-boot-nic-selection)
+describes URL formats and diagnostic use of `newrootfs=none`.
+
+The update checker separately uses `pxe_uri=` as its base URL, falling back to
+`http://carbide-static-pxe.forge` when that argument is absent or empty. Changing
+these boot arguments does not require rebuilding the images. The static asset
+URL in the iPXE response does not replace the loader's `newrootfs=` fallback URL.
+
+Scout's pre-start script also uses `pxe_uri=` to fetch `/api/v0/tls/root_ca`;
+its fallback when the argument is absent or empty is `http://carbide-pxe.forge`.
+A replacement PXE endpoint must also serve Scout's bootstrap CA bundle at
+that path. Use `newrootfs=` to select a different full-image server while
+preserving the generated `pxe_uri=`.
 
 ---
 
@@ -102,6 +129,7 @@ option 56, also configure one or more AAAA records pointing to reachable IPv6
 NTP endpoints.
 
 **Consumers:**
+
 - `nico-agent` (DPU agent) — stock images resolve `carbide-ntp.forge` at startup to discover NTP server addresses; images rebuilt with the rebranded name resolve `nico-ntp.nico`. IPv4 and IPv6 results are advertised to managed hosts through DHCP options 42 and 56, respectively
 
 **Configurability:** The stock DPU agent resolves `carbide-ntp.forge` directly
@@ -129,6 +157,7 @@ family and select among them.
 The site-local recursive DNS resolver. DPU agents and managed hosts use this resolver for all DNS lookups, including resolution of other `.nico` names. The resolver address is distributed to clients via DHCP option 6.
 
 **Consumers:**
+
 - DPU agents — all DNS resolution during provisioning and normal operation
 - Managed host operating systems — configured as the primary name server via DHCP
 
@@ -144,6 +173,7 @@ The site-local recursive DNS resolver. DPU agents and managed hosts use this res
 Ingests telemetry (metrics, traces, and logs) exported by otel-collector sidecars running on managed BlueField DPUs.
 
 **Consumers:**
+
 - `nico-otelcol` — the otel-collector sidecar deployed on each DPU via the `bluefield/charts/nico-otelcol` Helm chart
 - Site controller otel agents (`bluefield/otel/site-controller/`)
 
@@ -159,6 +189,7 @@ Ingests telemetry (metrics, traces, and logs) exported by otel-collector sidecar
 Provides outbound HTTP/HTTPS connectivity for Kubernetes workloads launched by the DPU agent as extension services. The agent sets `HTTP_PROXY=socks5://socks.nico:1888` and `HTTPS_PROXY=socks5://socks.nico:1888` in the environment of every extension service pod it starts.
 
 **Consumers:**
+
 - Kubernetes pods launched by the DPU agent as extension services (`crates/agent/src/extension_services/k8s_pod_handler.rs`)
 
 **Configurability:** The proxy address and port are **hardcoded in the compiled `nico-agent` binary** (`crates/agent/src/extension_services/k8s_pod_handler.rs`). Changing this address requires rebuilding the DPU agent.
@@ -233,7 +264,7 @@ For both client types:
 |---|---|---|
 | `nico-api.nico` | Default value only (`crates/host-support/src/agent_config.rs`, config defaults across services) | **Yes** — override via `NICO_API_URL` env var or config file |
 | `nico-pxe.nico` | Compiled into `nico-agent` (`crates/agent/src/main_loop.rs`) | **No** — requires rebuilding `nico-agent` |
-| `nico-static-pxe.nico` | Embedded in host boot scripts (`pxe/common_files/scout-loader-rclocal`, `pxe/common_files/check-scout-updates.sh`) | **No** — requires rebuilding host boot images |
+| `carbide-static-pxe.forge` (stock fallback) | Embedded fallback in Scout's loader and update checker | **Yes, at boot.** `newrootfs=` selects the full-image URL; `pxe_uri=` controls update checks. See [Static Boot Asset Server](#nico-static-pxenico--static-boot-asset-server). |
 | `carbide-ntp.forge` (stock) / `nico-ntp.nico` (rebranded image) | Compiled into `nico-agent` (`crates/agent/src/util.rs`) | **No** — requires rebuilding `nico-agent` |
 | `unbound.nico` | Not compiled into binaries; distributed via DHCP option 6 | **Yes** — update DHCP server configuration |
 | `otel-receiver.nico` | otel-collector config YAML (`bluefield/charts/nico-otelcol/files/otel_config.yaml`, etc.) | **Yes** — update otel-collector config files and redeploy |
@@ -270,7 +301,16 @@ hostname queried by the deployed agent when DHCPv6 option 56 is required.
 
 ## Deployment Checklist
 
-After configuring DNS, verify that all records resolve correctly from a host or DPU on the OOB management network:
+After configuring DNS, verify the required records from a host or DPU on the
+OOB management network. The DNS and HTTP examples below assume your deployment
+publishes the listed `.nico` records. For Scout, substitute the hostnames from
+its effective full-image and update URLs for `nico-static-pxe.nico` in the
+DNS loop. Check both hostnames if they differ, and check
+`carbide-static-pxe.forge` for each stock fallback still in use. Omit DNS
+checks for literal IP URLs; an unused `.nico` alias does not need to resolve.
+The loop checks A records; for IPv6 Scout endpoints, check AAAA records for
+the selected hostname instead. The [Static Boot Asset Server reference](#nico-static-pxenico--static-boot-asset-server)
+describes how `newrootfs=` and `pxe_uri=` select the URLs independently.
 
 ```bash
 for name in nico-api.nico nico-pxe.nico nico-static-pxe.nico \
@@ -286,7 +326,12 @@ dig +short AAAA carbide-ntp.forge @<UNBOUND_VIP>
 For an image rebuilt to query `nico-ntp.nico`, replace the complete
 `carbide-ntp.forge` hostname in both commands. Do not replace only its TLD.
 
-Verify reachability on expected ports:
+Verify reachability on expected ports. For Scout, substitute the selected
+server's scheme, hostname, and port in the Static PXE example. Repeat the
+server check for each distinct endpoint selected by the full-image and update
+URLs. That example checks the server root; a failure there does not establish
+that Scout's asset URL is unavailable. The [Scout boot procedure](../docs/development/vm_pxe_client.md#verify-scout-boot-nic-selection)
+checks the actual download.
 
 ```bash
 # NICo gRPC API (TLS handshake)
