@@ -169,7 +169,7 @@ fn admit_one_after_cooldown(since: &mut Instant, cooldown: Duration) -> bool {
 pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 pub trait CredentialProvider: Send + Sync {
-    /// Whether consumers must reread credentials before Redfish operations,
+    /// Whether consumers must retrieve the current provider snapshot before Redfish operations,
     /// REST collection passes, and gNMI connections. Defaults to false.
     /// Fixed and API credentials retain their existing authentication-error refresh policy.
     fn reload_before_use(&self) -> bool {
@@ -377,9 +377,9 @@ impl BmcClient {
         result
     }
 
-    /// Loads initial credentials, or rereads file credentials before use.
-    /// Changed values replace the client's credentials; read failures prevent
-    /// the operation and are retried after the credential-fetch cooldown.
+    /// Loads initial credentials, or the current reloadable provider snapshot.
+    /// Changed values replace the client's credentials. Provider-fetch failures
+    /// prevent the operation and are retried after the credential-fetch cooldown.
     pub async fn ensure_credentials(&self) -> Result<(), HealthError> {
         if self.provider.reload_before_use() {
             let mut applied = self.refresh_lock.lock().await;
@@ -3778,13 +3778,10 @@ mod tests {
         std::fs::write(&username_file, "admin\n").unwrap();
         std::fs::write(&password_file, "first\n").unwrap();
         let config: StaticBmcEndpoint = serde_json::from_value(serde_json::json!({
-            "ip": "127.0.0.1",
-            "mac": "00:11:22:33:44:55",
-            "username_file": username_file,
-            "password_file": password_file,
+            "ip": "127.0.0.1", "mac": "00:11:22:33:44:55",
+            "username_file": username_file, "password_file": password_file,
         }))
         .unwrap();
-
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let base_url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
         let server = std::thread::spawn(move || {
@@ -3835,10 +3832,15 @@ mod tests {
             "unchanged files must not invalidate credential generations"
         );
 
-        let replacement = dir.path().join("replacement");
-        std::fs::write(&replacement, "second \r\n").unwrap();
-        std::fs::rename(&replacement, &password_file).unwrap();
+        std::fs::write(&password_file, "second \r\n").unwrap();
         std::fs::write(&username_file, "rotated\n").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(client.provider.fetch_credentials(&client.addr).await.unwrap(),
+                    BmcCredentials::UsernamePassword { username, password: Some(password) } if username == "rotated" && password == "second ") { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
         client
             .get::<TestEntity>(&ODataId::service_root())
             .await

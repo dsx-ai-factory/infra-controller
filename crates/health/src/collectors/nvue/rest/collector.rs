@@ -2315,27 +2315,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_iterations_reread_credential_files_and_recover() {
+    async fn rest_iterations_use_watched_credentials_and_recover() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("password");
-        std::fs::write(&path, "first").unwrap();
         let config = serde_json::from_value(serde_json::json!({
             "ip": "127.0.0.1", "mac": "00:11:22:33:44:55",
             "username": "admin", "password_file": path,
         }))
         .unwrap();
-        let provider =
-            Arc::new(crate::file_credentials::FileCredentialProvider::from_config(&config));
-        let mut collector = collector_with_provider(provider);
+        let provider = Arc::new(crate::credentials::StaticCredentialProvider::from_config(
+            &config,
+            Duration::from_millis(20),
+        ));
+        let mut collector = collector_with_provider(provider.clone());
+        assert_eq!(
+            collector.run_iteration().await.unwrap().fetch_failures,
+            1,
+            "an initial read failure must skip collection"
+        );
+        std::fs::write(&path, "first").unwrap();
         assert_eq!(collector.run_iteration().await.unwrap().fetch_failures, 0);
-        std::fs::remove_file(&path).unwrap();
-        let failed = collector.run_iteration().await.unwrap();
-        assert_eq!(failed.fetch_failures, 1);
-        assert!(
-            !failed.refresh_triggered,
-            "unreadable files must prevent collection with stale credentials"
+        std::fs::write(&path, b"invalid\xff").unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            collector.run_iteration().await.unwrap().fetch_failures,
+            0,
+            "a reload failure retains the shared provider's last valid snapshot"
         );
         std::fs::write(&path, "second").unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if matches!(provider.fetch_credentials(&collector.addr).await.unwrap(),
+                    BmcCredentials::UsernamePassword { password: Some(password), .. } if password == "second") { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
         assert_eq!(collector.run_iteration().await.unwrap().fetch_failures, 0);
     }
 

@@ -2171,6 +2171,7 @@ dependencies = [
  "carbide-health-report",
  "carbide-instrument",
  "carbide-rpc",
+ "carbide-secrets",
  "carbide-test-support",
  "carbide-tls",
  "carbide-utils",

@@ -29,7 +29,7 @@ mod env;
 mod file;
 
 pub use env::{EnvCredentials, EnvCredentialsConfig};
-pub use file::{FileCredentialsConfig, FileCredentialsWatcher};
+pub use file::{CredentialValue, FileCredentialsConfig, FileCredentialsWatcher};
 
 /// Flat username/password struct for serde compatibility with env vars and
 /// config files, where the externally-tagged `Credentials` enum layout
