@@ -22,14 +22,14 @@ import (
 // checks if the MachineHealthIssue type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &MachineHealthIssue{}
 
-// MachineHealthIssue Tenant-reported Machine issue, attached to a Machine online repair request or an Instance delete request. Categories match the Core `IssueCategory` values.
+// MachineHealthIssue Tenant-reported Machine issue attached to a Machine online repair request. The category is serialized as `issue_category` in the Core `HealthProbeAlert` payload.
 type MachineHealthIssue struct {
 	// High-level category for the tenant-reported issue.
 	Category string `json:"category"`
 	// Brief description of the issue for operators.
 	Summary string `json:"summary"`
-	// Diagnostic information, logs, ticket numbers, etc. Required when entering Machine online repair.
-	Details NullableString `json:"details,omitempty"`
+	// Diagnostic information, logs, ticket numbers, etc.
+	Details string `json:"details"`
 }
 
 type _MachineHealthIssue MachineHealthIssue
@@ -38,10 +38,11 @@ type _MachineHealthIssue MachineHealthIssue
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineHealthIssue(category string, summary string) *MachineHealthIssue {
+func NewMachineHealthIssue(category string, summary string, details string) *MachineHealthIssue {
 	this := MachineHealthIssue{}
 	this.Category = category
 	this.Summary = summary
+	this.Details = details
 	return &this
 }
 
@@ -101,47 +102,28 @@ func (o *MachineHealthIssue) SetSummary(v string) {
 	o.Summary = v
 }
 
-// GetDetails returns the Details field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDetails returns the Details field value
 func (o *MachineHealthIssue) GetDetails() string {
-	if o == nil || IsNil(o.Details.Get()) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Details.Get()
+
+	return o.Details
 }
 
-// GetDetailsOk returns a tuple with the Details field value if set, nil otherwise
+// GetDetailsOk returns a tuple with the Details field value
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineHealthIssue) GetDetailsOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
-	return o.Details.Get(), o.Details.IsSet()
+	return &o.Details, true
 }
 
-// HasDetails returns a boolean if a field has been set.
-func (o *MachineHealthIssue) HasDetails() bool {
-	if o != nil && o.Details.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetDetails gets a reference to the given NullableString and assigns it to the Details field.
+// SetDetails sets field value
 func (o *MachineHealthIssue) SetDetails(v string) {
-	o.Details.Set(&v)
-}
-
-// SetDetailsNil sets the value for Details to be an explicit nil
-func (o *MachineHealthIssue) SetDetailsNil() {
-	o.Details.Set(nil)
-}
-
-// UnsetDetails ensures that no value is present for Details, not even an explicit nil
-func (o *MachineHealthIssue) UnsetDetails() {
-	o.Details.Unset()
+	o.Details = v
 }
 
 func (o MachineHealthIssue) MarshalJSON() ([]byte, error) {
@@ -156,9 +138,7 @@ func (o MachineHealthIssue) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["category"] = o.Category
 	toSerialize["summary"] = o.Summary
-	if o.Details.IsSet() {
-		toSerialize["details"] = o.Details.Get()
-	}
+	toSerialize["details"] = o.Details
 	return toSerialize, nil
 }
 
@@ -169,6 +149,7 @@ func (o *MachineHealthIssue) UnmarshalJSON(data []byte) (err error) {
 	requiredProperties := []string{
 		"category",
 		"summary",
+		"details",
 	}
 
 	allProperties := make(map[string]interface{})
