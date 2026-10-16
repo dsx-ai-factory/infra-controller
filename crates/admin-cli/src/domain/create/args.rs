@@ -47,7 +47,7 @@ pub(crate) struct Args {
     #[clap(
         long,
         value_name = "SECONDS",
-        help = "Default TTL for the zone's records, 30 to 86400 seconds. Omit for the site default"
+        help = "Default TTL for the zone’s records, 30 to 86400 seconds. Omit for the site default"
     )]
     pub(super) default_ttl: Option<u32>,
 }

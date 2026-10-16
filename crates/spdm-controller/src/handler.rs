@@ -223,7 +223,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                     }
                     if chrono::Utc::now() < *last_failure_time + chrono::Duration::minutes(1) {
                         return Ok(StateHandlerOutcome::wait(
-                        "Collection evidence via redfish has failed, waiting up to one minute to try againt"
+                        "Collection evidence via redfish has failed, waiting up to one minute to try again"
                             .to_string(),
                     ));
                     }
@@ -272,17 +272,23 @@ impl StateHandler for SpdmAttestationStateHandler {
                             retry_count: *retry_count,
                         },
                     )),
-                    Err(_) => {
-                        let txn = ctx.services.db_pool.begin().await?;
-
+                    Err(error) => {
+                        tracing::warn!(
+                            %machine_id,
+                            %device_id,
+                            %job_id,
+                            error = %error,
+                            retry_count = *retry_count,
+                            redfish_retry_count = *redfish_retry_count + 1,
+                            "Failed to trigger SPDM evidence collection; scheduling retry"
+                        );
                         Ok(StateHandlerOutcome::transition(
                             SpdmAttestationState::TriggerEvidenceCollection {
                                 retry_count: *retry_count,
                                 redfish_retry_count: redfish_retry_count + 1,
                                 last_redfish_failure_tstamp: Some(chrono::Utc::now()),
                             },
-                        )
-                        .with_txn(txn))
+                        ))
                     }
                 }
             }
