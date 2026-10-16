@@ -24,6 +24,11 @@ var (
 	ErrNoValidKeys = errors.New("JWKS contains no valid keys")
 	// ErrJWKSUpdateInProgress is returned when a JWKS update is already in progress
 	ErrJWKSUpdateInProgress = errors.New("JWKS update already in progress")
+	// ErrJWKSTooLarge is returned when a JWKS response exceeds MaxJWKSResponseBytes
+	ErrJWKSTooLarge = errors.New("JWKS response exceeds the maximum allowed size")
+	// ErrJWKSExpired is returned when the loaded key set has not been confirmed by a
+	// successful fetch recently enough to keep trusting it
+	ErrJWKSExpired = errors.New("JWKS key set is older than the maximum accepted age")
 
 	// --- Token Validation Errors ---
 

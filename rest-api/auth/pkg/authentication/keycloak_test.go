@@ -878,7 +878,7 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 
 	// Setup token origin config with Keycloak token origin
 	toCfg := config.NewTokenOriginConfig()
-	toCfg.AddConfig("keycloak", jwksServer.URL+"/realms/nico", jwksServer.URL+"/realms/nico/protocol/openid-connect/certs", config.TokenOriginKeycloak, true, nil, nil)
+	toCfg.AddConfig(jwksServer.URL+"/realms/nico", jwksServer.URL+"/realms/nico/protocol/openid-connect/certs", config.TokenOriginKeycloak, true, nil, nil)
 
 	// Initialize JWKS data for testing
 	if err := toCfg.UpdateAllJWKS(); err != nil {
@@ -1072,7 +1072,7 @@ func TestAuthProcessor_KeycloakServiceAccountsDisabled(t *testing.T) {
 
 	// Setup token origin config with Keycloak token origin
 	toCfg := config.NewTokenOriginConfig()
-	toCfg.AddConfig("keycloak", jwksServer.URL+"/realms/nico", jwksServer.URL+"/realms/nico/protocol/openid-connect/certs", config.TokenOriginKeycloak, keycloakConfigDisabled.ServiceAccountEnabled, nil, nil)
+	toCfg.AddConfig(jwksServer.URL+"/realms/nico", jwksServer.URL+"/realms/nico/protocol/openid-connect/certs", config.TokenOriginKeycloak, keycloakConfigDisabled.ServiceAccountEnabled, nil, nil)
 
 	// Initialize JWKS data for testing
 	if err := toCfg.UpdateAllJWKS(); err != nil {

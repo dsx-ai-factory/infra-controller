@@ -4,6 +4,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,6 +26,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/google/uuid"
 	"github.com/spf13/viper"
 )
 
@@ -119,6 +121,26 @@ const (
 	// config nor the OTEL environment supplies one
 	DefaultTracingServiceName = "nico-rest-api"
 
+	// ConfigAuthSharedStaticOrgs lets several static claim mappings name the same org.
+	// It is deployment-wide, not per issuer, and never applies to dynamic mappings:
+	// a shared org stays reserved, so no attribute-driven mapping can claim it.
+	ConfigAuthSharedStaticOrgs = "auth.sharedStaticOrgs"
+	// ConfigAuthIssuerReloadInterval is how often every replica rebuilds the
+	// DB-sourced portion of the live auth registry. Go duration string, default 30s.
+	ConfigAuthIssuerReloadInterval = "auth.issuerReloadInterval"
+	// ConfigAuthJWKSRefreshInterval is how often each replica re-fetches every
+	// DB-sourced issuer's key set. Go duration string, default 15m.
+	ConfigAuthJWKSRefreshInterval = "auth.jwksRefreshInterval"
+	// ConfigAuthResolveFlightTimeout is the ceiling for one on-demand issuer
+	// resolution. Go duration string, default 30s.
+	ConfigAuthResolveFlightTimeout = "auth.resolveFlightTimeout"
+	// ConfigAuthAllowInternalIssuerHosts lets API-managed issuers name loopback,
+	// private, link-local, or in-cluster hosts in issuerUrl and jwksUrl. Off by
+	// default: the refresh loop fetches those URLs from inside the cluster network,
+	// so an operator-supplied internal address is an egress path. Turn on only for
+	// local development against an in-cluster identity provider.
+	ConfigAuthAllowInternalIssuerHosts = "auth.allowInternalIssuerHosts"
+
 	// ConfigKeycloakEnabled is a feature flag for Keycloak authentication
 	ConfigKeycloakEnabled = "keycloak.enabled"
 	// ConfigKeycloakBaseURL is the base URL of the Keycloak server
@@ -162,16 +184,14 @@ const (
 // IssuerConfig represents a single issuer configuration entry
 // This is the preferred configuration format that supports claim mappings
 type IssuerConfig struct {
-	Name                         string               `mapstructure:"name"`
-	Origin                       string               `mapstructure:"origin"` // String: "kas-legacy", "kas-ssa", "keycloak", "custom", "kas"
-	JWKS                         string               `mapstructure:"jwks"`
-	Issuer                       string               `mapstructure:"issuer"`
-	ServiceAccount               bool                 `mapstructure:"serviceAccount"`
-	Audiences                    []string             `mapstructure:"audiences"`
-	Scopes                       []string             `mapstructure:"scopes"`
-	JWKSTimeout                  string               `mapstructure:"jwksTimeout"` // e.g. "5s", "1m"
-	ClaimMappings                []cauth.ClaimMapping `mapstructure:"claimMappings"`
-	AllowDuplicateStaticOrgNames bool                 `mapstructure:"allowDuplicateStaticOrgNames"` // When true, allows duplicate static org names across issuers
+	Origin         string               `mapstructure:"origin"` // String: "kas-legacy", "kas-ssa", "keycloak", "custom", "kas"
+	JWKS           string               `mapstructure:"jwks"`
+	Issuer         string               `mapstructure:"issuer"`
+	ServiceAccount bool                 `mapstructure:"serviceAccount"`
+	Audiences      []string             `mapstructure:"audiences"`
+	Scopes         []string             `mapstructure:"scopes"`
+	JWKSTimeout    string               `mapstructure:"jwksTimeout"` // e.g. "5s", "1m"
+	ClaimMappings  []cauth.ClaimMapping `mapstructure:"claimMappings"`
 }
 
 // GetOrigin parses the origin and returns it as a string constant
@@ -179,18 +199,17 @@ func (ic *IssuerConfig) GetOrigin() (string, error) {
 	return ParseOriginString(ic.Origin)
 }
 
+// MaxJWKSTimeout is the largest jwksTimeout an issuer may declare. It is how long a
+// token-path request can wait on that issuer's IdP, so it must stay well inside any
+// client or gateway deadline.
+const MaxJWKSTimeout = 60 * time.Second
+
 // GetJWKSTimeout parses and returns the JWKS timeout duration
 func (ic *IssuerConfig) GetJWKSTimeout() (time.Duration, error) {
 	if ic.JWKSTimeout == "" {
 		return 0, nil // Use default
 	}
 	return time.ParseDuration(ic.JWKSTimeout)
-}
-
-// GetAllowDuplicateStaticOrgNames returns whether duplicate static org names are allowed
-// Defaults to false (duplicates not allowed) if not specified
-func (ic *IssuerConfig) GetAllowDuplicateStaticOrgNames() bool {
-	return ic.AllowDuplicateStaticOrgNames
 }
 
 // ParseOriginString converts a string origin to its string constant
@@ -216,6 +235,36 @@ type RateLimiterConfig struct {
 // Maintain a global config object
 var config *Config
 
+// DynamicIssuerConfig owns the mutable state used to reconcile database-backed
+// issuers with the live authentication registry.
+type DynamicIssuerConfig struct {
+	// mu is intentionally separate from Config.RWMutex. A reload holds this mutex
+	// across a database read and registry reconciliation; sharing Config's mutex
+	// would block unrelated request-path configuration reads during that work.
+	mu sync.Mutex
+
+	// dbURLs and dbSigs hold the managed issuer URLs and their last-seen
+	// fingerprints. dbIDs maps each URL to its row ID so the refresh loop can
+	// persist a fetched key set without re-reading the table.
+	dbURLs map[string]bool
+	dbSigs map[string]string
+	dbIDs  map[string]uuid.UUID
+
+	// stopLoops cancels the issuer reload and JWKS refresh loops. Invoked by Close.
+	stopLoops context.CancelFunc
+	// loops tracks the running loop goroutines so Close can wait for them to exit
+	// before the caller closes the DB pool they use.
+	loops sync.WaitGroup
+}
+
+func newDynamicIssuerConfig() *DynamicIssuerConfig {
+	return &DynamicIssuerConfig{
+		dbURLs: map[string]bool{},
+		dbSigs: map[string]string{},
+		dbIDs:  map[string]uuid.UUID{},
+	}
+}
+
 // Config represents configurations for the service
 type Config struct {
 	sync.RWMutex
@@ -225,6 +274,8 @@ type Config struct {
 	TokenOriginConfig *cauth.TokenOriginConfig
 	SiteConfig        *SiteConfig
 	KeycloakConfig    *cauth.KeycloakConfig
+
+	DynamicIssuerConfig *DynamicIssuerConfig
 }
 
 // NewConfig creates a new config object
@@ -234,7 +285,8 @@ func NewConfig() *Config {
 	}
 
 	c := Config{
-		v: newViper(),
+		v:                   newViper(),
+		DynamicIssuerConfig: newDynamicIssuerConfig(),
 	}
 
 	// Set defaults
@@ -271,6 +323,13 @@ func NewConfig() *Config {
 
 	// SiteConfig default phone home url
 	c.v.SetDefault(ConfigSitePhoneHomeUrl, DefaultSitePhoneHomeUrl)
+
+	// Static org names are owned by one issuer unless sharing is turned on
+	c.v.SetDefault(ConfigAuthSharedStaticOrgs, false)
+	c.v.SetDefault(ConfigAuthIssuerReloadInterval, DefaultIssuerReloadInterval)
+	c.v.SetDefault(ConfigAuthJWKSRefreshInterval, DefaultJWKSRefreshInterval)
+	c.v.SetDefault(ConfigAuthResolveFlightTimeout, cauth.DefaultResolveFlightTimeout)
+	c.v.SetDefault(ConfigAuthAllowInternalIssuerHosts, false)
 
 	// Keycloak needs to be explicitly enabled via config
 	c.v.SetDefault(ConfigKeycloakEnabled, false)
@@ -499,7 +558,6 @@ func (c *Config) GetOrInitTokenOriginConfig() *cauth.TokenOriginConfig {
 			}
 
 			jwksCfg := cauth.NewJwksConfig(
-				issuerCfg.Name,
 				issuerCfg.JWKS,
 				issuerCfg.Issuer,
 				origin,
@@ -512,7 +570,7 @@ func (c *Config) GetOrInitTokenOriginConfig() *cauth.TokenOriginConfig {
 
 			// Only assign reservedOrgNames to configs with dynamic claim mappings
 			if hasDynamicMapping {
-				jwksCfg.ReservedOrgNames = reservedOrgNames
+				jwksCfg.SetReservedOrgNames(reservedOrgNames)
 			}
 
 			c.TokenOriginConfig.AddJwksConfig(jwksCfg)
@@ -542,6 +600,7 @@ func (c *Config) GetOrInitTokenOriginConfig() *cauth.TokenOriginConfig {
 		}
 	}
 
+	c.TokenOriginConfig.SetResolveFlightTimeout(c.GetAuthResolveFlightTimeout())
 	return c.TokenOriginConfig
 }
 
@@ -640,31 +699,39 @@ func (c *Config) GetIssuersConfig() ([]IssuerConfig, error) {
 	return issuersConfig, nil
 }
 
+// ErrIssuerIdentityConflict marks two issuers claiming the same name, issuer URL, or
+// JWKS URL. It is separate from the other validation failures because the request is
+// well formed, so callers answer 409 rather than 400.
+var ErrIssuerIdentityConflict = errors.New("issuer identity conflict")
+
 // ValidateIssuersConfig validates the issuer configurations
 func (c *Config) ValidateIssuersConfig(issuers []IssuerConfig) error {
-	seenNames := make(map[string]bool)
+	seenIssuerURLs := make(map[string]bool)
 	seenURLs := make(map[string]bool)
 	seenStaticOrgs := make(map[string]bool)
+	seenSAOrgs := make(map[string]bool)
 	seenDynamicOrg := false
 	originCounts := make(map[string]int)
+	sharedStaticOrgs := c.GetAuthSharedStaticOrgs()
 
 	for i, issuer := range issuers {
+		// Reset per issuer: sharing an org is a cross-issuer allowance, never
+		// permission to map one org twice inside a single issuer.
+		issuerStaticOrgs := make(map[string]bool)
+
 		// Validate required fields
-		if issuer.Name == "" {
-			return fmt.Errorf("issuer %d: name is required", i)
+		if issuer.Issuer == "" {
+			return fmt.Errorf("issuer %d: issuer is required", i)
 		}
 
-		if seenNames[issuer.Name] {
-			return fmt.Errorf("duplicate issuer name: %s", issuer.Name)
-		}
-		seenNames[issuer.Name] = true
-
+		// Validate origin
 		origin, err := issuer.GetOrigin()
 		if err != nil {
-			return fmt.Errorf("issuer %s: %w", issuer.Name, err)
+			return fmt.Errorf("issuer %s: %w", issuer.Issuer, err)
 		}
 		originCounts[origin]++
 
+		// A kas issuer carries the NGC API base URL, not a JWKS endpoint.
 		if origin == cauth.TokenOriginKas {
 			if err := issuer.ValidateKasOrigin(); err != nil {
 				return err
@@ -673,93 +740,119 @@ func (c *Config) ValidateIssuersConfig(issuers []IssuerConfig) error {
 		}
 
 		if issuer.JWKS == "" {
-			return fmt.Errorf("issuer %s: jwks URL is required", issuer.Name)
+			return fmt.Errorf("issuer %s: jwks URL is required", issuer.Issuer)
 		}
 
-		if issuer.Issuer == "" {
-			return fmt.Errorf("issuer %s: issuer is required", issuer.Name)
+		// The registry is keyed by the token "iss", so two issuers claiming one would
+		// leave whichever registered last owning the trust for both.
+		if seenIssuerURLs[issuer.Issuer] {
+			return fmt.Errorf("%w: duplicate issuer URL: %s", ErrIssuerIdentityConflict, issuer.Issuer)
 		}
+		seenIssuerURLs[issuer.Issuer] = true
 
 		// Check for duplicate JWKS URLs
 		if seenURLs[issuer.JWKS] {
-			return fmt.Errorf("duplicate JWKS URL: %s (issuer: %s)", issuer.JWKS, issuer.Name)
+			return fmt.Errorf("%w: duplicate JWKS URL: %s (issuer: %s)", ErrIssuerIdentityConflict, issuer.JWKS, issuer.Issuer)
 		}
 		seenURLs[issuer.JWKS] = true
 
 		// ClaimMappings are only allowed for custom origin issuers
 		// keycloak, kas-ssa, and kas-legacy have their own predefined claim extraction logic
 		if len(issuer.ClaimMappings) > 0 && origin != cauth.TokenOriginCustom {
-			return fmt.Errorf("issuer %s: claimMappings are only allowed for custom origin issuers (origin: %s)", issuer.Name, origin)
+			return fmt.Errorf("issuer %s: claimMappings are only allowed for custom origin issuers (origin: %s)", issuer.Issuer, origin)
 		}
 
-		// Validate JWKS timeout if specified
+		// Parsing alone is not enough: a non-positive timeout silently becomes the
+		// default, and an unbounded one lets this issuer's IdP hold a request thread.
 		if issuer.JWKSTimeout != "" {
-			if _, err := issuer.GetJWKSTimeout(); err != nil {
-				return fmt.Errorf("issuer %s: invalid jwksTimeout: %w", issuer.Name, err)
+			timeout, err := issuer.GetJWKSTimeout()
+			if err != nil {
+				return fmt.Errorf("issuer %s: invalid jwksTimeout: %w", issuer.Issuer, err)
+			}
+			if timeout <= 0 {
+				return fmt.Errorf("issuer %s: jwksTimeout must be positive, got %s", issuer.Issuer, issuer.JWKSTimeout)
+			}
+			if timeout > MaxJWKSTimeout {
+				return fmt.Errorf("issuer %s: jwksTimeout must not exceed %s, got %s", issuer.Issuer, MaxJWKSTimeout, issuer.JWKSTimeout)
 			}
 		}
 
 		for j, mapping := range issuer.ClaimMappings {
 			if mapping.OrgAttribute == "" && mapping.OrgName == "" {
-				return fmt.Errorf("issuer %s: claimMapping %d: either orgAttribute or orgName must be specified", issuer.Name, j)
+				return fmt.Errorf("issuer %s: claimMapping %d: either orgAttribute or orgName must be specified", issuer.Issuer, j)
 			}
 
 			if mapping.OrgAttribute != "" && mapping.OrgName != "" {
-				return fmt.Errorf("issuer %s: claimMapping %d: cannot specify both orgAttribute and orgName", issuer.Name, j)
+				return fmt.Errorf("issuer %s: claimMapping %d: cannot specify both orgAttribute and orgName", issuer.Issuer, j)
 			}
 
 			// orgDisplayName can only be specified with orgName (static org), not with orgAttribute (dynamic org)
 			if mapping.OrgDisplayName != "" && mapping.OrgName == "" {
-				return fmt.Errorf("issuer %s: claimMapping %d: orgDisplayName can only be specified when orgName is specified", issuer.Name, j)
+				return fmt.Errorf("issuer %s: claimMapping %d: orgDisplayName can only be specified when orgName is specified", issuer.Issuer, j)
 			}
 
 			// roles and rolesAttribute are mutually exclusive
 			if len(mapping.Roles) > 0 && mapping.RolesAttribute != "" {
-				return fmt.Errorf("issuer %s: claimMapping %d: cannot specify both roles and rolesAttribute", issuer.Name, j)
+				return fmt.Errorf("issuer %s: claimMapping %d: cannot specify both roles and rolesAttribute", issuer.Issuer, j)
 			}
 
 			// Service account validation
 			if mapping.IsServiceAccount {
 				if len(mapping.Roles) > 0 {
-					return fmt.Errorf("issuer %s: claimMapping %d: roles cannot be specified when isServiceAccount is true", issuer.Name, j)
+					return fmt.Errorf("issuer %s: claimMapping %d: roles cannot be specified when isServiceAccount is true", issuer.Issuer, j)
 				}
 				if mapping.RolesAttribute != "" {
-					return fmt.Errorf("issuer %s: claimMapping %d: rolesAttribute cannot be specified when isServiceAccount is true", issuer.Name, j)
+					return fmt.Errorf("issuer %s: claimMapping %d: rolesAttribute cannot be specified when isServiceAccount is true", issuer.Issuer, j)
 				}
 				if mapping.OrgAttribute != "" {
-					return fmt.Errorf("issuer %s: claimMapping %d: orgAttribute cannot be specified when isServiceAccount is true", issuer.Name, j)
+					return fmt.Errorf("issuer %s: claimMapping %d: orgAttribute cannot be specified when isServiceAccount is true", issuer.Issuer, j)
 				}
 				if !c.GetEnvDisconnected() {
-					return fmt.Errorf("issuer %s: claimMapping %d: isServiceAccount is only supported in disconnected mode", issuer.Name, j)
+					return fmt.Errorf("issuer %s: claimMapping %d: isServiceAccount is only supported in disconnected mode", issuer.Issuer, j)
 				}
 			}
 
 			// Dynamic org mapping
 			if mapping.OrgAttribute != "" {
 				if seenDynamicOrg {
-					return fmt.Errorf("issuer %s: only one dynamic org mapping is allowed", issuer.Name)
+					return fmt.Errorf("issuer %s: only one dynamic org mapping is allowed", issuer.Issuer)
 				}
 				seenDynamicOrg = true
 			}
 
-			// Static org mapping - check for duplicates unless allowDuplicateStaticOrgNames is true
+			// Static org mapping. One issuer owns an org name unless the deployment
+			// turns on sharing; either way the name is reserved, so a dynamic mapping
+			// can never claim it.
 			if mapping.OrgName != "" {
 				normalizedOrg := strings.ToLower(mapping.OrgName)
-				if seenStaticOrgs[normalizedOrg] && !issuer.GetAllowDuplicateStaticOrgNames() {
-					return fmt.Errorf("issuer %s: duplicate static org: %s", issuer.Name, mapping.OrgName)
+				// GetOrgDataFromClaim serves the first mapping that names the org, so a
+				// second one in the same issuer is unreachable however sharing is set.
+				if issuerStaticOrgs[normalizedOrg] {
+					return fmt.Errorf("issuer %s: duplicate org name: %s (an issuer may map an org at most once)", issuer.Issuer, mapping.OrgName)
+				}
+				issuerStaticOrgs[normalizedOrg] = true
+				if !sharedStaticOrgs && seenStaticOrgs[normalizedOrg] {
+					return fmt.Errorf("issuer %s: duplicate org name: %s (org names must be unique across all issuers unless %s is enabled)", issuer.Issuer, mapping.OrgName, ConfigAuthSharedStaticOrgs)
 				}
 				seenStaticOrgs[normalizedOrg] = true
+				// At most one service-account mapping per org globally, shared or not.
+				if mapping.IsServiceAccount {
+					if seenSAOrgs[normalizedOrg] {
+						return fmt.Errorf("issuer %s: org %s already has a service account mapping", issuer.Issuer, mapping.OrgName)
+					}
+					seenSAOrgs[normalizedOrg] = true
+				}
 			}
 
 			// Validate roles - skip if service account (uses predefined roles)
 			if !mapping.IsServiceAccount && len(mapping.Roles) == 0 && mapping.RolesAttribute == "" {
-				return fmt.Errorf("issuer %s: claimMapping %d: either roles or rolesAttribute must be specified (unless isServiceAccount is true)", issuer.Name, j)
+				return fmt.Errorf("issuer %s: claimMapping %d: either roles or rolesAttribute must be specified (unless isServiceAccount is true)", issuer.Issuer, j)
 			}
 
 			// Validate role values if specified
 			for _, role := range mapping.Roles {
 				if !cauth.IsValidRole(role) {
-					return fmt.Errorf("issuer %s: claimMapping %d: invalid role: %s", issuer.Name, j, role)
+					return fmt.Errorf("issuer %s: claimMapping %d: invalid role: %s", issuer.Issuer, j, role)
 				}
 			}
 		}
@@ -767,7 +860,7 @@ func (c *Config) ValidateIssuersConfig(issuers []IssuerConfig) error {
 		// Service account validation
 		if issuer.ServiceAccount {
 			if !c.GetEnvDisconnected() {
-				return fmt.Errorf("issuer %s: service account is only supported in disconnected mode", issuer.Name)
+				return fmt.Errorf("issuer %s: service account is only supported in disconnected mode", issuer.Issuer)
 			}
 		}
 	}
@@ -810,24 +903,24 @@ func validateOriginCombination(originCounts map[string]int) error {
 // NGC API base URL the processor calls, so it is required rather than defaulted.
 func (ic *IssuerConfig) ValidateKasOrigin() error {
 	if ic.JWKS != "" {
-		return fmt.Errorf("issuer %s: jwks URL is not supported for origin: %s", ic.Name, cauth.TokenOriginKas)
+		return fmt.Errorf("issuer %s: jwks URL is not supported for origin: %s", ic.Issuer, cauth.TokenOriginKas)
 	}
 
 	baseURL, err := url.Parse(ic.Issuer)
 	if err != nil || baseURL.Host == "" || baseURL.Scheme != "https" {
-		return fmt.Errorf("issuer %s: issuer must be an absolute HTTPS NGC API URL for origin: %s", ic.Name, cauth.TokenOriginKas)
+		return fmt.Errorf("issuer %s: issuer must be an absolute HTTPS NGC API URL for origin: %s", ic.Issuer, cauth.TokenOriginKas)
 	}
 
 	if baseURL.User != nil || baseURL.RawQuery != "" || baseURL.Fragment != "" {
-		return fmt.Errorf("issuer %s: issuer must not contain user info, query, or fragment for origin: %s", ic.Name, cauth.TokenOriginKas)
+		return fmt.Errorf("issuer %s: issuer must not contain user info, query, or fragment for origin: %s", ic.Issuer, cauth.TokenOriginKas)
 	}
 
 	if len(ic.ClaimMappings) > 0 {
-		return fmt.Errorf("issuer %s: claimMappings are not supported for origin: %s", ic.Name, cauth.TokenOriginKas)
+		return fmt.Errorf("issuer %s: claimMappings are not supported for origin: %s", ic.Issuer, cauth.TokenOriginKas)
 	}
 
 	if ic.ServiceAccount {
-		return fmt.Errorf("issuer %s: serviceAccount is not supported for origin: %s", ic.Name, cauth.TokenOriginKas)
+		return fmt.Errorf("issuer %s: serviceAccount is not supported for origin: %s", ic.Issuer, cauth.TokenOriginKas)
 	}
 
 	return nil
@@ -1079,6 +1172,57 @@ func (c *Config) GetTracingServiceName() string {
 		return name
 	}
 	return DefaultTracingServiceName
+}
+
+// GetAuthSharedStaticOrgs reports whether several static claim mappings may name
+// the same org. Off by default: an org name is owned by exactly one issuer.
+func (c *Config) GetAuthSharedStaticOrgs() bool {
+	return c.v.GetBool(ConfigAuthSharedStaticOrgs)
+}
+
+// SetAuthSharedStaticOrgs sets whether static claim mappings may share an org name
+func (c *Config) SetAuthSharedStaticOrgs(value bool) {
+	c.v.Set(ConfigAuthSharedStaticOrgs, value)
+}
+
+// GetAuthAllowInternalIssuerHosts reports whether API-managed issuers may point at
+// internal network addresses. Off by default.
+func (c *Config) GetAuthAllowInternalIssuerHosts() bool {
+	return c.v.GetBool(ConfigAuthAllowInternalIssuerHosts)
+}
+
+// SetAuthAllowInternalIssuerHosts sets whether API-managed issuers may point at
+// internal network addresses.
+func (c *Config) SetAuthAllowInternalIssuerHosts(value bool) {
+	c.v.Set(ConfigAuthAllowInternalIssuerHosts, value)
+}
+
+func (c *Config) durationOrDefault(key string, fallback time.Duration) time.Duration {
+	d := c.v.GetDuration(key)
+	if d <= 0 {
+		return fallback
+	}
+	return d
+}
+
+// GetAuthIssuerReloadInterval is how often every replica rebuilds DB-sourced
+// issuers into the live registry. Zero or a missing value falls back to
+// DefaultIssuerReloadInterval (30s).
+func (c *Config) GetAuthIssuerReloadInterval() time.Duration {
+	return c.durationOrDefault(ConfigAuthIssuerReloadInterval, DefaultIssuerReloadInterval)
+}
+
+// GetAuthJWKSRefreshInterval is how often each replica re-fetches every
+// DB-sourced issuer's key set. Zero or a missing value falls back to
+// DefaultJWKSRefreshInterval (15m).
+func (c *Config) GetAuthJWKSRefreshInterval() time.Duration {
+	return c.durationOrDefault(ConfigAuthJWKSRefreshInterval, DefaultJWKSRefreshInterval)
+}
+
+// GetAuthResolveFlightTimeout is the ceiling for one on-demand issuer
+// resolution. Zero or a missing value falls back to DefaultResolveFlightTimeout (30s).
+func (c *Config) GetAuthResolveFlightTimeout() time.Duration {
+	return c.durationOrDefault(ConfigAuthResolveFlightTimeout, cauth.DefaultResolveFlightTimeout)
 }
 
 // Keycloak configuration methods
@@ -1334,6 +1478,17 @@ func (c *Config) WatchConfigFile() {
 func (c *Config) Close() {
 	if c.temporal != nil {
 		c.temporal.Close()
+	}
+	if c.DynamicIssuerConfig != nil {
+		state := c.DynamicIssuerConfig
+		state.mu.Lock()
+		stopLoops := state.stopLoops
+		state.stopLoops = nil
+		state.mu.Unlock()
+		if stopLoops != nil {
+			stopLoops()
+		}
+		state.loops.Wait()
 	}
 }
 

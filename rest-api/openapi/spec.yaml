@@ -353,6 +353,25 @@ tags:
       on the site, or no identity configuration); the two JWKS routes
       additionally return `502 Bad Gateway` when the Core gRPC API
       responds with a body that is not a parseable JWK Set.
+  - name: Auth Issuer
+    description: |-
+      Runtime-managed external JWT Auth Issuers (Provider Admin only, disconnected mode only).
+
+      Allows Provider Admins to register, list, retrieve, and delete external JWT
+      issuers without editing the static `nico-rest-api-config` ConfigMap or rolling
+      pods. All endpoints return `400` when the service is not running in disconnected
+      mode (`env.disconnected: false`). Registered issuers are loaded into the same
+      auth registry as static ConfigMap issuers and take effect within seconds via
+      the periodic reload loop.
+
+      **Availability guard** — the API is disabled while Keycloak is enabled or any
+      static ConfigMap issuer carries a dynamic claim mapping (`orgAttribute`,
+      `orgDisplayAttribute`, or `rolesAttribute`). All endpoints return `400` in that
+      case with a descriptive message.
+
+      **Trust model** — API-created issuers always carry `origin: custom`.
+      Only static org-name claim mappings are accepted; attribute-driven mappings
+      (which let the token pick its own org) remain ConfigMap-only.
   - name: Deprecations
     description: |-
       NICo REST API maintains backward compatibility with the previous versions. Any breaking changes are announced using deprecation notices.
@@ -18306,6 +18325,276 @@ paths:
         '503':
           description: Core gRPC API is unavailable.
           $ref: '#/components/responses/GenericHttpError'
+  '/v2/org/{org}/nico/auth-issuer':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    put:
+      summary: Create or replace an external JWT issuer
+      operationId: create-or-update-auth-issuer
+      description: |-
+        Create or fully replace a runtime-managed external JWT Auth Issuer. Provider Admin only.
+
+        `issuerUrl` is the natural resource key. If no database issuer has that URL,
+        the request creates one and returns `201`. If one exists, the request replaces
+        its complete operator-managed configuration and returns `200`; an identical
+        repeated request is a no-op and returns the same resource. The issuer ID and
+        creation metadata are preserved across replacement. Cached signing keys are
+        preserved unless `jwksUrl` changes.
+
+        Always sets `origin: custom`. Only static org-name claim mappings are accepted;
+        attribute-driven mappings (`orgAttribute`, `orgDisplayAttribute`, `rolesAttribute`)
+        are rejected with `400`.
+
+        The PUT does not contact the identity provider. A newly created issuer, or an
+        existing issuer whose `jwksUrl` changes, therefore returns as `Pending` until
+        signing keys are fetched. Policy-only replacements preserve cached keys and
+        status. Key fetches are retried every 10 seconds until one lands, at which point
+        the issuer reads back as `Ready`. Poll GET until then: tokens from a `Pending`
+        issuer are rejected.
+
+        The Auth Issuer API is available only in disconnected mode, with Keycloak disabled,
+        and with no `keycloak` / `kas-legacy` / `kas-ssa` origin in the ConfigMap
+        `issuers` block. A ConfigMap issuer with a dynamic (`orgAttribute`) mapping
+        does not by itself disable this endpoint.
+      tags:
+        - Auth Issuer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthIssuerCreateOrUpdateRequest'
+      responses:
+        '200':
+          description: Existing Auth Issuer replaced, or an identical request returned unchanged.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthIssuer'
+        '201':
+          description: Auth Issuer created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthIssuer'
+        '400':
+          description: |-
+            The request is malformed, the deployment does not allow issuer management,
+            or the combined ConfigMap plus database issuer set would be invalid.
+
+            `message` is one of:
+
+            - `Auth Issuer management via the API is only supported in disconnected mode`
+            - `Auth Issuer management via the API is unavailable while Keycloak is enabled.`
+            - `Failed to parse request data, potentially invalid structure`
+            - `Error validating Auth Issuer create-or-update request data` — `data` holds field
+              errors. `issuerUrl` is required, must be an absolute HTTP(S) URL,
+              and must not be whitespace. When supplied, `jwksUrl` must also be
+              an absolute HTTP(S) URL. Each
+              `claimMappings` entry must set `orgName` and must not set
+              `orgAttribute`, `orgDisplayAttribute`, or `rolesAttribute`.
+            - `Cannot manage a custom Auth Issuer while keycloak, kas-legacy, or kas-ssa issuers are defined in the static configuration. Remove those issuers from the ConfigMap issuers block first.`
+            - `Invalid issuer configuration: <detail>` — combined-set validation after
+              the advisory lock. `<detail>` is one of:
+              - `issuer <issuerUrl>: invalid jwksTimeout: <parse error>`
+              - `issuer <issuerUrl>: jwksTimeout must be positive, got <value>`
+              - `issuer <issuerUrl>: jwksTimeout must not exceed 1m0s, got <value>`
+              - `issuer <issuerUrl>: duplicate org name: <orgName> (an issuer may map an org at most once)`
+              - `issuer <issuerUrl>: duplicate org name: <orgName> (org names must be unique across all issuers unless auth.sharedStaticOrgs is enabled)`
+              - `issuer <issuerUrl>: org <orgName> already has a service account mapping`
+              - `issuer <issuerUrl>: claimMapping <i>: roles cannot be specified when isServiceAccount is true`
+              - `issuer <issuerUrl>: claimMapping <i>: either roles or rolesAttribute must be specified (unless isServiceAccount is true)`
+              - `issuer <issuerUrl>: claimMapping <i>: invalid role: <role>` (`PROVIDER_ADMIN` and `TENANT_ADMIN` are the allowed values)
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: |-
+            Caller is not a Provider Admin of `org`. `message` is one of:
+
+            - `Failed to validate membership for org: <org>`
+            - `User does not have Provider Admin role with org`
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Infrastructure Provider not found for the org.
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: |-
+            The issuer URL or JWKS URL is claimed by a different resource. `message` is one of:
+
+            - `Issuer URL or JWKS URL is reserved by a statically-configured issuer`
+            - `Issuer conflicts with an existing issuer: duplicate JWKS URL: <jwksUrl> (issuer: <issuerUrl>)`
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: |-
+            Auth Issuer validation or persistence failed. Datastore details are logged
+            server-side and are not returned to the caller. `message` is one of:
+
+            - `Failed to create or update Auth Issuer, could not acquire data store lock on Auth Issuers`
+            - `Failed to retrieve Auth Issuer, DB error`
+            - `Failed to validate Auth Issuer, DB error`
+            - `Failed to create Auth Issuer`
+            - `Failed to update Auth Issuer`
+            - `Failed to create or update Auth Issuer, DB transaction error`
+          $ref: '#/components/responses/GenericHttpError'
+    get:
+      summary: List external JWT issuers
+      operationId: get-all-auth-issuer
+      description: |-
+        List all runtime-managed external JWT issuers for the org's Infrastructure Provider.
+        Provider Admin only.
+      tags:
+        - Auth Issuer
+      parameters:
+        - schema:
+            type: integer
+            minimum: 1
+            default: 1
+          in: query
+          name: pageNumber
+          description: One-based page number.
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          in: query
+          name: pageSize
+          description: Number of issuers per page.
+        - schema:
+            type: string
+            enum:
+              - CREATED_AT_ASC
+              - CREATED_AT_DESC
+              - ISSUER_URL_ASC
+              - ISSUER_URL_DESC
+            default: CREATED_AT_ASC
+          in: query
+          name: orderBy
+          description: Sort field and direction. Equal values are ordered by issuer ID.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuthIssuer'
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+                example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy":"CREATED_AT_ASC"}'
+              description: Pagination result in JSON format.
+        '400':
+          description: |-
+            Auth Issuer management is not available in this deployment. `message` is one of:
+
+            - `Auth Issuer management via the API is only supported in disconnected mode`
+            - `Auth Issuer management via the API is unavailable while Keycloak is enabled.`
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: |-
+            Caller is not a Provider Admin of `org`. `message` is one of:
+
+            - `Failed to validate membership for org: <org>`
+            - `User does not have Provider Admin role with org`
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Infrastructure Provider not found for the org.
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+  '/v2/org/{org}/nico/auth-issuer/{authIssuerId}':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+          format: uuid
+        name: authIssuerId
+        in: path
+        required: true
+        description: ID of the Auth Issuer
+    get:
+      summary: Retrieve an external JWT issuer
+      operationId: get-auth-issuer
+      description: |-
+        Retrieve a runtime-managed external JWT issuer by ID. Provider Admin only.
+      tags:
+        - Auth Issuer
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthIssuer'
+        '400':
+          description: |-
+            Auth Issuer management is not available, or `authIssuerId` is not a UUID. `message` is one of:
+
+            - `Auth Issuer management via the API is only supported in disconnected mode`
+            - `Auth Issuer management via the API is unavailable while Keycloak is enabled.`
+            - `Invalid Auth Issuer ID in URL`
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: |-
+            Caller is not a Provider Admin of `org`. `message` is one of:
+
+            - `Failed to validate membership for org: <org>`
+            - `User does not have Provider Admin role with org`
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Auth Issuer not found. Message is `Auth Issuer not found`.
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+    delete:
+      summary: Delete an external JWT issuer
+      operationId: delete-auth-issuer
+      description: |-
+        Soft-delete a runtime-managed external JWT issuer and withdraw its trust.
+        Provider Admin only. Returns the deleted issuer object.
+
+        To change `issuerUrl`, delete the issuer and re-register it with POST.
+      tags:
+        - Auth Issuer
+      responses:
+        '200':
+          description: Auth Issuer deleted. Returns the deleted Auth Issuer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthIssuer'
+        '400':
+          description: |-
+            Auth Issuer management is not available, or `authIssuerId` is not a UUID. `message` is one of:
+
+            - `Auth Issuer management via the API is only supported in disconnected mode`
+            - `Auth Issuer management via the API is unavailable while Keycloak is enabled.`
+            - `Invalid Auth Issuer ID in URL`
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: |-
+            Caller is not a Provider Admin of `org`. `message` is one of:
+
+            - `Failed to validate membership for org: <org>`
+            - `User does not have Provider Admin role with org`
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Auth Issuer not found. Message is `Auth Issuer not found`.
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
 components:
   schemas:
     PageNumber:
@@ -18314,6 +18603,240 @@ components:
       minimum: 1
       maximum: 21474836
       description: One-indexed page number.
+    AuthIssuer:
+      type: object
+      title: AuthIssuer
+      description: A runtime-managed external JWT Auth Issuer registered via the Provider Admin API.
+      required:
+        - id
+        - origin
+        - issuerUrl
+        - jwksUrl
+        - jwksTimeout
+        - serviceAccount
+        - audiences
+        - scopes
+        - claimMappings
+        - status
+        - jwksFetchedAt
+        - created
+        - updated
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+          description: Unique identifier of the issuer.
+        origin:
+          type: string
+          readOnly: true
+          description: Token processor. Always `custom` for API-created issuers.
+          example: custom
+        issuerUrl:
+          type: string
+          format: uri
+          description: Expected JWT `iss` claim / OIDC issuer URL. Immutable after creation.
+          example: 'https://idp.example.com'
+        jwksUrl:
+          type: string
+          format: uri
+          description: URL from which signing keys are fetched. Defaults to `{issuerUrl}/.well-known/jwks.json`.
+          example: 'https://idp.example.com/.well-known/jwks.json'
+        jwksTimeout:
+          type: string
+          description: JWKS fetch timeout (Go duration string, e.g. `"5s"`).
+          example: '5s'
+        serviceAccount:
+          type: boolean
+          description: Enables client-credentials flow (disconnected mode only).
+        audiences:
+          type: array
+          items:
+            type: string
+          description: Issuer-level allowed audience set; the token must carry at least one.
+        scopes:
+          type: array
+          items:
+            type: string
+          description: Issuer-level required scope set; the token must carry all.
+        claimMappings:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuthIssuerClaimMapping'
+          description: Org/role mapping entries. Only static mappings (`orgName`) are permitted via the API.
+        status:
+          type: string
+          readOnly: true
+          enum:
+            - Pending
+            - Ready
+          description: |-
+            Whether signing keys have been fetched from `jwksUrl`. Registration never
+            contacts the identity provider, so an issuer starts `Pending` and becomes
+            `Ready` once a background fetch succeeds. Tokens from a `Pending` issuer
+            are rejected because there are no keys to verify them with.
+          example: Ready
+        jwksFetchedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          readOnly: true
+          description: When the signing keys were last fetched. Null while the issuer is `Pending`.
+        created:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Creation timestamp.
+        updated:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Last-update timestamp.
+      examples:
+        - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+          origin: custom
+          issuerUrl: https://idp.example.com
+          jwksUrl: https://idp.example.com/.well-known/jwks.json
+          jwksTimeout: 5s
+          serviceAccount: false
+          audiences: [nico-api]
+          scopes: [openid]
+          claimMappings:
+            - orgAttribute: ''
+              orgDisplayAttribute: ''
+              orgName: acme-provider
+              orgDisplayName: ACME Provider
+              rolesAttribute: ''
+              roles: [PROVIDER_ADMIN]
+              audiences: []
+              isServiceAccount: false
+          status: Ready
+          jwksFetchedAt: '2026-08-14T17:00:00Z'
+          created: '2026-08-14T16:00:00Z'
+          updated: '2026-08-14T17:00:00Z'
+    AuthIssuerCreateOrUpdateRequest:
+      type: object
+      title: AuthIssuerCreateOrUpdateRequest
+      description: |-
+        Complete representation used to create or replace an external JWT Auth Issuer.
+
+        `issuerUrl` selects the resource. Repeating the same body is idempotent;
+        changing any other field fully replaces the stored operator configuration.
+        Omitted optional arrays are stored as empty arrays.
+
+        `origin` is ignored — API-managed issuers always receive `origin: custom`.
+        Only static claim mappings (`orgName` + optional `roles`) are accepted.
+      required:
+        - issuerUrl
+      properties:
+        issuerUrl:
+          type: string
+          format: uri
+          description: Expected JWT `iss` claim / OIDC issuer URL and natural upsert key.
+          example: 'https://idp.example.com'
+        jwksUrl:
+          type: string
+          format: uri
+          description: JWKS URL. Defaults to `{issuerUrl}/.well-known/jwks.json` when omitted.
+        jwksTimeout:
+          type: string
+          description: JWKS fetch timeout (Go duration string). Defaults to `"5s"`.
+          example: '5s'
+        serviceAccount:
+          type: boolean
+          description: Enables client-credentials flow (disconnected mode only).
+        audiences:
+          type: array
+          items:
+            type: string
+          description: Issuer-level allowed audience set.
+        scopes:
+          type: array
+          items:
+            type: string
+          description: Issuer-level required scope set.
+        claimMappings:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuthIssuerClaimMapping'
+          description: Org/role mapping entries. Dynamic attribute fields are rejected with `400`.
+      examples:
+        - issuerUrl: https://idp.example.com
+          jwksUrl: https://idp.example.com/.well-known/jwks.json
+          jwksTimeout: 5s
+          serviceAccount: false
+          audiences: [nico-api]
+          scopes: [openid]
+          claimMappings:
+            - orgName: acme-provider
+              orgDisplayName: ACME Provider
+              roles: [PROVIDER_ADMIN]
+              scopes: [nico:admin]
+    AuthIssuerClaimMapping:
+      type: object
+      title: AuthIssuerClaimMapping
+      description: |-
+        One entry in an Auth Issuer's claim mapping array.
+
+        Via the API, only `orgName` (required), `roles` (optional static list),
+        `audiences`, `scopes`, and `isServiceAccount` (disconnected mode only) may be
+        set. Attribute-driven fields
+        (`orgAttribute`, `orgDisplayAttribute`, `rolesAttribute`) are reserved for
+        ConfigMap-defined issuers and will be rejected with `400` if supplied.
+
+        An org name may be mapped at most once per issuer, and by default at most once
+        across all issuers (both ConfigMap and API-created). Deployments that set
+        `auth.sharedStaticOrgs` let several issuers map the same org with different roles;
+        the name stays reserved either way, so no attribute-driven mapping can claim it.
+        At most one `isServiceAccount: true` mapping may exist per org across all issuers,
+        whether or not org names are shared.
+      required:
+        - orgName
+      properties:
+        orgAttribute:
+          type: string
+          description: Dynamic org claim path. Rejected for API-created issuers.
+        orgDisplayAttribute:
+          type: string
+          description: Dynamic org-display claim path. Rejected for API-created issuers.
+        orgName:
+          type: string
+          description: Fixed org name for this mapping (required for API-created issuers). Unique across all issuers unless the deployment sets `auth.sharedStaticOrgs`.
+        orgDisplayName:
+          type: string
+          description: Display name for the org.
+        roles:
+          type: array
+          items:
+            type: string
+          description: Static role list. Omit when `isServiceAccount` is true (auto-assigns PROVIDER_ADMIN + TENANT_ADMIN).
+        rolesAttribute:
+          type: string
+          description: Dynamic roles claim path. Rejected for API-created issuers.
+        audiences:
+          type: array
+          items:
+            type: string
+          description: Optional per-mapping audience filter. The token needs any one of these values.
+        scopes:
+          type: array
+          items:
+            type: string
+          description: Optional per-mapping scope requirement. The token must carry every value, in addition to any issuer-level `scopes`. A token that satisfies the issuer but not this mapping is rejected with `403` for that org only.
+        isServiceAccount:
+          type: boolean
+          description: |-
+            When true, auto-assigns PROVIDER_ADMIN and TENANT_ADMIN roles (disconnected mode only).
+            Cannot be combined with `roles`, `rolesAttribute`, or `orgAttribute`.
+            At most one service-account mapping is permitted per org across all issuers.
+      examples:
+        - orgName: acme-provider
+          orgDisplayName: ACME Provider
+          roles: [PROVIDER_ADMIN]
+          audiences: [nico-api]
+          scopes: [nico:admin]
+          isServiceAccount: false
     MeasuredBootTrustedMachineCreateRequest:
       type: object
       title: MeasuredBootTrustedMachineCreateRequest

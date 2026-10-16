@@ -104,8 +104,7 @@ func TestConfig_GetIssuersConfig(t *testing.T) {
 			name: "claim mapping audiences",
 			config: `
 issuers:
-  - name: custom-issuer
-    issuer: https://auth.example.com
+  - issuer: https://auth.example.com
     jwks: https://auth.example.com/.well-known/jwks.json
     origin: custom
     audiences: [issuer-audience]
@@ -234,13 +233,12 @@ func TestConfig_ValidatePowerProvisioningConfig(t *testing.T) {
 func TestConfig_ValidateIssuersConfig(t *testing.T) {
 	jwtIssuer := func(name, origin string) IssuerConfig {
 		return IssuerConfig{
-			Name:   name,
 			Origin: origin,
 			Issuer: "https://" + name + ".example.com",
 			JWKS:   "https://" + name + ".example.com/jwks",
 		}
 	}
-	kasIssuer := IssuerConfig{Name: "kas-api-key", Origin: cauth.TokenOriginKas, Issuer: "https://ngc-api.example.com"}
+	kasIssuer := IssuerConfig{Origin: cauth.TokenOriginKas, Issuer: "https://ngc-api.example.com"}
 
 	tests := []struct {
 		name    string
@@ -260,12 +258,12 @@ func TestConfig_ValidateIssuersConfig(t *testing.T) {
 		},
 		{
 			name:    "direct KAS over plaintext HTTP",
-			issuers: []IssuerConfig{{Name: "kas-api-key", Origin: cauth.TokenOriginKas, Issuer: "http://ngc-api.example.com"}},
+			issuers: []IssuerConfig{{Origin: cauth.TokenOriginKas, Issuer: "http://ngc-api.example.com"}},
 			wantErr: "issuer must be an absolute HTTPS NGC API URL",
 		},
 		{
 			name:    "direct KAS with URL credentials",
-			issuers: []IssuerConfig{{Name: "kas-api-key", Origin: cauth.TokenOriginKas, Issuer: "https://user:pass@ngc-api.example.com"}},
+			issuers: []IssuerConfig{{Origin: cauth.TokenOriginKas, Issuer: "https://user:pass@ngc-api.example.com"}},
 			wantErr: "issuer must not contain user info, query, or fragment",
 		},
 		{
@@ -319,7 +317,7 @@ func TestConfig_ValidateIssuersConfig(t *testing.T) {
 			name: "multiple direct KAS issuers",
 			issuers: []IssuerConfig{
 				kasIssuer,
-				{Name: "kas-api-key-2", Origin: cauth.TokenOriginKas, Issuer: "https://ngc-api.example.com"},
+				{Origin: cauth.TokenOriginKas, Issuer: "https://ngc-api.example.com"},
 			},
 			wantErr: "only one issuer with origin: kas is allowed",
 		},
@@ -379,6 +377,175 @@ func TestGetOrInitTokenOriginConfig(t *testing.T) {
 		require.NotNil(t, jwksConfig)
 		assert.Nil(t, jwksConfig.GetJWKS())
 	})
+}
+
+// TestValidateIssuersConfigIdentityUniqueness covers the uniqueness rule shared by
+// the ConfigMap, the create path, reload, and the on-demand resolver: no two
+// issuers may claim the same issuer URL or JWKS URL. Each is reported as an
+// identity conflict so callers can answer 409 instead of 400.
+func TestValidateIssuersConfigIdentityUniqueness(t *testing.T) {
+	issuer := func(issuerURL, jwksURL, orgName string) IssuerConfig {
+		return IssuerConfig{
+			Origin:        "custom",
+			Issuer:        issuerURL,
+			JWKS:          jwksURL,
+			ClaimMappings: []cauth.ClaimMapping{{OrgName: orgName, Roles: []string{"TENANT_ADMIN"}}},
+		}
+	}
+	first := issuer("https://first.example.com", "https://first.example.com/jwks", "first-org")
+
+	tests := []struct {
+		name        string
+		second      IssuerConfig
+		wantErrPart string
+	}{
+		{
+			name:   "distinct_identities",
+			second: issuer("https://second.example.com", "https://second.example.com/jwks", "second-org"),
+		},
+		{
+			name:        "duplicate_issuer_url",
+			second:      issuer("https://first.example.com", "https://second.example.com/jwks", "second-org"),
+			wantErrPart: "duplicate issuer URL",
+		},
+		{
+			name:        "duplicate_jwks_url",
+			second:      issuer("https://second.example.com", "https://first.example.com/jwks", "second-org"),
+			wantErrPart: "duplicate JWKS URL",
+		},
+	}
+
+	c := &Config{v: viper.New()}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := c.ValidateIssuersConfig([]IssuerConfig{first, tt.second})
+
+			if tt.wantErrPart == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrPart)
+			assert.ErrorIs(t, err, ErrIssuerIdentityConflict, "callers map this to 409, not 400")
+		})
+	}
+}
+
+// TestValidateIssuersConfigSharedStaticOrgs covers who may own a static org name.
+// By default one issuer owns it; auth.sharedStaticOrgs lets several static mappings
+// name the same org with different issuers or roles. The allowance is deliberately
+// narrow: it never covers a second mapping inside one issuer, and never a second
+// service account for the org.
+func TestValidateIssuersConfigSharedStaticOrgs(t *testing.T) {
+	issuer := func(host string, mappings ...cauth.ClaimMapping) IssuerConfig {
+		return IssuerConfig{
+			Origin:        "custom",
+			Issuer:        "https://" + host + ".example.com",
+			JWKS:          "https://" + host + ".example.com/jwks",
+			ClaimMappings: mappings,
+		}
+	}
+	tenantAdmin := cauth.ClaimMapping{OrgName: "Acme", Roles: []string{"TENANT_ADMIN"}}
+	providerAdmin := cauth.ClaimMapping{OrgName: "acme", Roles: []string{"PROVIDER_ADMIN"}}
+	serviceAccount := cauth.ClaimMapping{OrgName: "acme", IsServiceAccount: true}
+
+	tests := []struct {
+		name         string
+		shared       bool
+		disconnected bool
+		issuers      []IssuerConfig
+		wantErrPart  string
+	}{
+		{
+			name:        "distinct_orgs_need_no_sharing",
+			issuers:     []IssuerConfig{issuer("first", tenantAdmin), issuer("second", cauth.ClaimMapping{OrgName: "beta", Roles: []string{"TENANT_ADMIN"}})},
+			wantErrPart: "",
+		},
+		{
+			name:        "shared_org_rejected_by_default",
+			issuers:     []IssuerConfig{issuer("first", tenantAdmin), issuer("second", providerAdmin)},
+			wantErrPart: "must be unique across all issuers",
+		},
+		{
+			name:    "shared_org_allowed_when_enabled",
+			shared:  true,
+			issuers: []IssuerConfig{issuer("first", tenantAdmin), issuer("second", providerAdmin)},
+		},
+		{
+			name:        "sharing_does_not_permit_two_mappings_in_one_issuer",
+			shared:      true,
+			issuers:     []IssuerConfig{issuer("first", tenantAdmin, providerAdmin)},
+			wantErrPart: "an issuer may map an org at most once",
+		},
+		{
+			name:         "sharing_does_not_permit_a_second_service_account",
+			shared:       true,
+			disconnected: true,
+			issuers:      []IssuerConfig{issuer("first", serviceAccount), issuer("second", serviceAccount)},
+			wantErrPart:  "already has a service account mapping",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Config{v: viper.New()}
+			c.SetAuthSharedStaticOrgs(tt.shared)
+			c.v.Set(ConfigEnvDisconnected, tt.disconnected)
+
+			err := c.ValidateIssuersConfig(tt.issuers)
+
+			if tt.wantErrPart == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrPart)
+		})
+	}
+
+	// A shared org name is still statically owned, so dynamic mappings stay locked out.
+	reserved := computeReservedOrgNames([]IssuerConfig{issuer("first", tenantAdmin), issuer("second", providerAdmin)})
+	assert.True(t, reserved["acme"], "sharing an org name does not release the reservation")
+}
+
+// TestValidateIssuersConfigJWKSTimeout covers the bound on how long one issuer's
+// IdP may hold a token-path request. Parsing alone was not enough: a zero or
+// negative duration silently reverted to the default, and an arbitrarily large
+// one made the timeout meaningless.
+func TestValidateIssuersConfigJWKSTimeout(t *testing.T) {
+	tests := []struct {
+		name        string
+		timeout     string
+		wantErrPart string
+	}{
+		{name: "unset_uses_the_default", timeout: ""},
+		{name: "typical", timeout: "5s"},
+		{name: "at_the_maximum", timeout: MaxJWKSTimeout.String()},
+		{name: "unparseable", timeout: "soon", wantErrPart: "invalid jwksTimeout"},
+		{name: "zero", timeout: "0s", wantErrPart: "must be positive"},
+		{name: "negative", timeout: "-5s", wantErrPart: "must be positive"},
+		{name: "above_the_maximum", timeout: (MaxJWKSTimeout + time.Second).String(), wantErrPart: "must not exceed"},
+	}
+
+	c := &Config{v: viper.New()}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := c.ValidateIssuersConfig([]IssuerConfig{{
+				Origin:        "custom",
+				Issuer:        "https://idp.acme.com",
+				JWKS:          "https://idp.acme.com/jwks",
+				JWKSTimeout:   tt.timeout,
+				ClaimMappings: []cauth.ClaimMapping{{OrgName: "acme", Roles: []string{"TENANT_ADMIN"}}},
+			}})
+
+			if tt.wantErrPart == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrPart)
+		})
+	}
 }
 
 func TestConfig_WatchConfigFile(t *testing.T) {

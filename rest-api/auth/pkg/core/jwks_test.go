@@ -4,6 +4,8 @@
 package core
 
 import (
+	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/rsa"
 	"net/http"
@@ -13,7 +15,9 @@ import (
 	"time"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -254,4 +258,197 @@ func TestJWKS_GetKIDPublicKeyMap_EmptyKeys(t *testing.T) {
 
 	// Verify JWKS has no keys
 	assert.Empty(t, jwks.Set.Keys, "JWKS should have no keys")
+}
+
+const testKeyJSON = `{"kty":"RSA","use":"sig","kid":"key-1","alg":"RS256","n":"test-n-value","e":"AQAB"}`
+
+const testKeySetJSON = `{"keys":[` + testKeyJSON + `]}`
+
+func TestNewJWKSFromBytes(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		wantErr error
+	}{
+		{
+			name: "valid_key_set",
+			raw:  testKeySetJSON,
+		},
+		{
+			name:    "empty_input",
+			raw:     "",
+			wantErr: ErrEmptyKeySet,
+		},
+		{
+			name:    "empty_key_set",
+			raw:     `{"keys":[]}`,
+			wantErr: ErrEmptyKeySet,
+		},
+		{
+			name:    "malformed_json",
+			raw:     `{"keys": [invalid`,
+			wantErr: ErrInvalidJWK,
+		},
+		{
+			// A key whose material go-jose cannot reconstruct must be rejected here
+			// rather than installed as an unusable key set.
+			name:    "key_missing_material",
+			raw:     `{"keys":[{"kty":"RSA","use":"sig","kid":"broken","alg":"RS256"}]}`,
+			wantErr: ErrInvalidJWK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			jwks, err := NewJWKSFromBytes([]byte(tt.raw))
+
+			if tt.wantErr != nil {
+				assert.ErrorIs(t, err, tt.wantErr)
+				assert.Nil(t, jwks)
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, jwks)
+			key, kerr := jwks.GetKeyByID("key-1")
+			require.NoError(t, kerr)
+			assert.Equal(t, "key-1", key.KeyID)
+		})
+	}
+}
+
+func TestJWKSValidate(t *testing.T) {
+	valid, err := NewJWKSFromBytes([]byte(testKeySetJSON))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name    string
+		jwks    JWKS
+		wantErr error
+	}{
+		{name: "nil_set", jwks: JWKS{}, wantErr: ErrEmptyKeySet},
+		{name: "no_keys", jwks: JWKS{Set: &jose.JSONWebKeySet{}}, wantErr: ErrEmptyKeySet},
+		{
+			name:    "all_keys_unusable",
+			jwks:    JWKS{Set: &jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{KeyID: "empty"}}}},
+			wantErr: ErrNoValidKeys,
+		},
+		{name: "usable_key", jwks: *valid},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.jwks.Validate()
+			if tt.wantErr != nil {
+				assert.ErrorIs(t, err, tt.wantErr)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// TestJWKSRoundTrip proves a fetched key set survives serialization to the DB and
+// back, which is the whole premise of the warm-start cache.
+func TestJWKSRoundTrip(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(testKeySetJSON))
+	}))
+	defer server.Close()
+
+	fetched, err := NewJWKSFromURL(server.URL, time.Second)
+	require.NoError(t, err)
+
+	raw, err := fetched.Marshal()
+	require.NoError(t, err)
+
+	restored, err := NewJWKSFromBytes(raw)
+	require.NoError(t, err)
+
+	require.Len(t, restored.Set.Keys, len(fetched.Set.Keys))
+	assert.Equal(t, fetched.Set.Keys[0].KeyID, restored.Set.Keys[0].KeyID)
+	assert.Equal(t, fetched.Set.Keys[0].Algorithm, restored.Set.Keys[0].Algorithm)
+}
+
+// TestNewJWKSFromURLContextHonorsCancellation is the guard for the anti-stall
+// work: a fetch must abandon a hung IdP as soon as the caller gives up, not hold
+// the caller until the fetch timeout expires.
+func TestNewJWKSFromURLContextHonorsCancellation(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := NewJWKSFromURLContext(ctx, server.URL, 30*time.Second)
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.Less(t, elapsed, 5*time.Second, "cancellation must abort the fetch, not wait out the timeout")
+}
+
+// TestNewJWKSFromURLRejectsOversizedResponse covers the bound on operator-supplied
+// endpoints: a JWKS URL that streams without end must fail rather than be read
+// into memory, and the failure must be distinguishable from a transport error so
+// callers can tell a hostile endpoint from an unreachable one.
+func TestNewJWKSFromURLRejectsOversizedResponse(t *testing.T) {
+	filler := bytes.Repeat([]byte("a"), 64*1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		for written := 0; written <= MaxJWKSResponseBytes; written += len(filler) {
+			if _, werr := w.Write(filler); werr != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	jwks, err := NewJWKSFromURL(server.URL, 5*time.Second)
+
+	assert.Nil(t, jwks, "an oversized response yields no key set to install or persist")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrJWKSTooLarge)
+}
+
+// TestNewJWKSFromURLAcceptsResponseAtTheLimit proves the cap is a ceiling rather
+// than an off-by-one that would reject a legitimate large key set.
+func TestNewJWKSFromURLAcceptsResponseAtTheLimit(t *testing.T) {
+	body := largeValidKeySet(t, MaxJWKSResponseBytes)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	jwks, err := NewJWKSFromURL(server.URL, 5*time.Second)
+
+	require.NoError(t, err)
+	require.NotNil(t, jwks)
+	assert.NoError(t, jwks.Validate())
+}
+
+// largeValidKeySet builds a parseable key set padded to exactly size bytes.
+func largeValidKeySet(t *testing.T, size int) []byte {
+	t.Helper()
+
+	const prefix = `{"pad":"`
+	suffix := `","keys":[` + testKeyJSON + `]}`
+	require.Greater(t, size, len(prefix)+len(suffix))
+
+	body := make([]byte, 0, size)
+	body = append(body, prefix...)
+	body = append(body, bytes.Repeat([]byte("a"), size-len(prefix)-len(suffix))...)
+	body = append(body, suffix...)
+	require.Len(t, body, size)
+
+	return body
 }

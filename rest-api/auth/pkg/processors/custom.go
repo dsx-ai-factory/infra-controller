@@ -47,7 +47,7 @@ func (h *CustomProcessor) ProcessToken(c echo.Context, tokenStr string, jwksConf
 	// Use map claims to be able to extract custom claims like scopes
 	claims := jwt.MapClaims{}
 
-	token, err := jwksConfig.ValidateToken(tokenStr, claims)
+	token, err := jwksConfig.ValidateTokenContext(c.Request().Context(), tokenStr, claims)
 	if err != nil {
 		if strings.Contains(err.Error(), jwt.ErrTokenExpired.Error()) {
 			logger.Error().Err(err).Msg("Token expired")
@@ -95,6 +95,9 @@ func (h *CustomProcessor) ProcessToken(c echo.Context, tokenStr string, jwksConf
 		case errors.Is(err, core.ErrInvalidAudience):
 			logger.Warn().Err(err).Str("requested_org", reqOrgFromRoute).Msg("Token audience is not authorized for organization specified in URL")
 			return nil, util.NewAPIError(http.StatusForbidden, "Token audience is not authorized for organization specified in URL", nil)
+		case errors.Is(err, core.ErrInvalidScope):
+			logger.Warn().Err(err).Str("requested_org", reqOrgFromRoute).Msg("Token scopes are not authorized for organization specified in URL")
+			return nil, util.NewAPIError(http.StatusForbidden, "Token scopes are not authorized for organization specified in URL", nil)
 		case errors.Is(err, core.ErrInvalidConfiguration):
 			logger.Warn().Err(err).Str("requested_org", reqOrgFromRoute).Msg("No authorization configuration exists for organization specified in URL")
 			return nil, util.NewAPIError(http.StatusUnauthorized, "No authorization configuration exists for organization specified in URL", nil)
