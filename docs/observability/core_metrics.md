@@ -194,7 +194,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_machines_state_exited_total</td><td>counter</td><td>Number of times objects of type carbide_machines have exited a certain state</td></tr>
 <tr><td>carbide_machines_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_machines have spent in a certain state</td></tr>
 <tr><td>carbide_machines_total</td><td>gauge</td><td>Number of carbide_machines in the system</td></tr>
-<tr><td>carbide_machines_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of state-handling errors for carbide_machines in a given state</td></tr>
+<tr><td>carbide_machines_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of carbide_machines whose most recent state handler run returned an error, by state and error; the error=any series is the total across all errors in that state, so exclude it when summing over error</td></tr>
 <tr><td>carbide_managed_loop_iterations_total</td><td>counter</td><td>Number of managed loop iterations, by manager and outcome; the measured boot metrics collector&#39;s iterations are counted by its latency histogram instead</td></tr>
 <tr><td>carbide_measured_boot_bundles_total</td><td>gauge</td><td>Number of measured boot bundles.</td></tr>
 <tr><td>carbide_measured_boot_collector_iteration_latency_milliseconds</td><td>histogram</td><td>Number of milliseconds a full measured boot metrics collector iteration took, by outcome</td></tr>
@@ -233,7 +233,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_network_segments_state_exited_total</td><td>counter</td><td>Number of times objects of type carbide_network_segments have exited a certain state</td></tr>
 <tr><td>carbide_network_segments_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_network_segments have spent in a certain state</td></tr>
 <tr><td>carbide_network_segments_total</td><td>gauge</td><td>Number of carbide_network_segments in the system</td></tr>
-<tr><td>carbide_network_segments_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of state-handling errors for carbide_network_segments in a given state</td></tr>
+<tr><td>carbide_network_segments_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of carbide_network_segments whose most recent state handler run returned an error, by state and error; the error=any series is the total across all errors in that state, so exclude it when summing over error</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_iteration_latency_milliseconds</td><td>histogram</td><td>Time consumed for one monitor iteration</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_machine_status_updates_count</td><td>gauge</td><td>Number of machines whose NVLink status observation was updated</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_nmxc_changes_applied_total</td><td>counter</td><td>Number of changes requested to NMX-C</td></tr>
@@ -366,7 +366,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_vpc_prefixes_state_exited_total</td><td>counter</td><td>Number of times objects of type carbide_vpc_prefixes have exited a certain state</td></tr>
 <tr><td>carbide_vpc_prefixes_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_vpc_prefixes have spent in a certain state</td></tr>
 <tr><td>carbide_vpc_prefixes_total</td><td>gauge</td><td>Number of carbide_vpc_prefixes in the system</td></tr>
-<tr><td>carbide_vpc_prefixes_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of state-handling errors for carbide_vpc_prefixes in a given state</td></tr>
+<tr><td>carbide_vpc_prefixes_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of carbide_vpc_prefixes whose most recent state handler run returned an error, by state and error; the error=any series is the total across all errors in that state, so exclude it when summing over error</td></tr>
 <tr><td>carbide_work_lock_failures_total</td><td>counter</td><td>Number of work-lock lifecycle failures, by operation and failure kind.</td></tr>
 <tr><td>site_explorer_create_power_shelves_latency_seconds</td><td>histogram</td><td>Duration of power shelf creation</td></tr>
 <tr><td>site_explorer_create_switches_latency_seconds</td><td>histogram</td><td>Duration of switch creation</td></tr>
