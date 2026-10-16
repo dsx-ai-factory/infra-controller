@@ -38,6 +38,7 @@ carbide-api-db = { path = "../api-db", default-features = false, features = [
   "test-support",
 ] }
 carbide-api-model = { path = "../api-model", default-features = false }
+carbide-health-report = { path = "../health-report" }
 bmc-mock = { path = "../bmc-mock" }
 bmc-vendor = { path = "../bmc-vendor" }
 mqttea = { path = "../mqttea" }

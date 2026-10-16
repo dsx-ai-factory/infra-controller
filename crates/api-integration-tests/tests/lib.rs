@@ -42,6 +42,9 @@ use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
 use eyre::{ContextCompat, WrapErr};
 use futures::FutureExt;
 use futures::future::join_all;
+use health_report::{
+    HealthAlertClassification, HealthProbeAlert, HealthReport, HealthReportApplyMode,
+};
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::machine_boot_interface::BootInterfaceSelectionSource;
@@ -115,10 +118,11 @@ async fn test_integration() -> eyre::Result<()> {
         None,
     )
     .await?;
+    let switch_id = SwitchId::new(SwitchIdSource::Tpm, [1u8; 32], SwitchType::NvLink);
     db::switch::create(
         &mut txn,
         &NewSwitch {
-            id: SwitchId::new(SwitchIdSource::Tpm, [1u8; 32], SwitchType::NvLink),
+            id: switch_id,
             config: SwitchConfig {
                 name: "metric-catalogue-switch".to_string(),
                 enable_nmxc: false,
@@ -129,6 +133,30 @@ async fn test_integration() -> eyre::Result<()> {
             rack_id: None,
             slot_number: None,
             tray_index: None,
+        },
+    )
+    .await?;
+    // The per-object classification gauge only exports objects carrying an
+    // opted-in classification, so give the switch an alert classified
+    // `Hardware` (opted in by the test API server config).
+    db::switch::insert_health_report(
+        &mut txn,
+        &switch_id,
+        HealthReportApplyMode::Merge,
+        &HealthReport {
+            source: "metric-catalogue".to_string(),
+            triggered_by: None,
+            observed_at: None,
+            successes: vec![],
+            alerts: vec![HealthProbeAlert {
+                id: "MetricCatalogue".parse()?,
+                target: None,
+                in_alert_since: None,
+                message: "Raised so the metric catalogue scrape includes per-object health"
+                    .to_string(),
+                tenant_message: None,
+                classifications: vec![HealthAlertClassification::hardware()],
+            }],
         },
     )
     .await?;
@@ -466,6 +494,11 @@ async fn test_integration() -> eyre::Result<()> {
             .await?;
         }
     }
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        "# TYPE carbide_object_unhealthy_by_classification_count gauge\n",
+    )
+    .await?;
     generate_core_metric_docs(&test_env.carbide_metrics_addrs);
     drop(mqtt_client);
 

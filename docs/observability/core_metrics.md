@@ -247,6 +247,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_object_manual_intervention_required</td><td>gauge</td><td>Indicates that an object currently requires manual operator intervention. Exposed only on the opt-in per-object endpoint.</td></tr>
 <tr><td>carbide_object_state_entered_timestamp_seconds</td><td>gauge</td><td>Unix timestamp at which an object entered its current state. Exposed only on the opt-in per-object endpoint.</td></tr>
 <tr><td>carbide_object_state_sla_seconds</td><td>gauge</td><td>Resolved SLA in seconds for an objects current state. Exposed only on the opt-in per-object endpoint.</td></tr>
+<tr><td>carbide_object_unhealthy_by_classification_count</td><td>gauge</td><td>Per-object indication that an object (host, switch, rack, ...) is marked with a health alert classification due to being unhealthy. Labeled with object_type and object_id. Only classifications configured via observability.per_object_metrics_for_classifications are emitted, bounding metric cardinality.</td></tr>
 <tr><td>carbide_pending_dpu_nic_firmware_update_count</td><td>gauge</td><td>Number of machines in the system that need a DPU/NIC firmware update</td></tr>
 <tr><td>carbide_pending_host_firmware_update_count</td><td>gauge</td><td>Number of host machines in the system that need a firmware update.</td></tr>
 <tr><td>carbide_power_shelves_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_power_shelves in the system</td></tr>
@@ -349,6 +350,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_switches_state_exited_total</td><td>counter</td><td>Number of times objects of type carbide_switches have exited a certain state</td></tr>
 <tr><td>carbide_switches_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_switches have spent in a certain state</td></tr>
 <tr><td>carbide_switches_total</td><td>gauge</td><td>Number of carbide_switches in the system</td></tr>
+<tr><td>carbide_switches_unhealthy_by_classification_count</td><td>gauge</td><td>Number of objects marked with a certain classification due to being unhealthy</td></tr>
+<tr><td>carbide_switches_unhealthy_by_probe_id_count</td><td>gauge</td><td>Number of objects which reported a certain Health Probe Alert</td></tr>
 <tr><td>carbide_switches_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of state-handling errors for carbide_switches in a given state</td></tr>
 <tr><td>carbide_total_ips_count</td><td>gauge</td><td>Number of IPs per network segment</td></tr>
 <tr><td>carbide_unavailable_dpu_nic_firmware_update_count</td><td>gauge</td><td>Number of machines in the system that need a DPU/NIC firmware update but are unavailable for update</td></tr>

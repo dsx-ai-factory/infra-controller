@@ -1391,6 +1391,7 @@ dependencies = [
  "carbide-api-db",
  "carbide-api-model",
  "carbide-api-test-helper",
+ "carbide-health-report",
  "carbide-kms-provider",
  "carbide-machine-a-tron",
  "carbide-rpc",

@@ -104,6 +104,9 @@ pub async fn start(
         scout_boot_interface_correction_enabled = true
         enable_admin_ui = false
 
+        [observability]
+        per_object_metrics_for_classifications = ["Hardware"]
+
         [ib_config]
         max_partition_per_tenant = 31
         enabled = false
