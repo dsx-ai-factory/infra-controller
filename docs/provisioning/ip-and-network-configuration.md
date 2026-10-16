@@ -611,12 +611,12 @@ The Unbound Deployment declares a ConfigMap Reloader annotation. Where that cont
 
 ### 3.3 `.nico` DNS Service Endpoints
 
-A fixed set of NICo service hostnames are resolved by DPU agents, host PXE loaders, and other in-band management components at runtime. Several of these names are **compiled into binaries or embedded shell scripts** and cannot be overridden via config — DNS is the only way to redirect them.
+A fixed set of NICo service hostnames are resolved by DPU agents, host PXE loaders, and other in-band management components at runtime. Some consumers use compiled hostnames and require DNS to redirect them. Scout's loader and update checker also accept boot URL overrides, as described below.
 
 Two TLD conventions exist:
 
 - **`.forge`** is the compiled default in `crates/agent/src/util.rs` and the host PXE loader scripts. The agent resolves `carbide-pxe.forge`, `carbide-ntp.forge`, etc. at startup. This is the TLD used by deployments built from the current binaries.
-- **`.nico`** is the rebranded TLD documented in [`deploy/DNS.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md). New deployments may use this convention, but only if the agent and PXE images have been rebuilt with the new TLD.
+- **`.nico`** is the rebranded TLD documented in [`deploy/DNS.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md). Consumers with fixed compiled names need rebuilt images to use it. Scout can instead receive explicit boot URL overrides.
 
 Choose the convention that matches your binaries. The stock names change both the first label and the TLD. For example, the NTP name is exactly `carbide-ntp.forge`, not `nico-ntp.forge`. Verify the name by checking what the agent actually resolves at startup with `kubectl exec -n nico-system <agent-pod> -- getent hosts carbide-ntp.forge`.
 
@@ -626,10 +626,13 @@ The required DNS records are shown with both NTP names where they differ:
 |---|---|---|---|---|
 | `nico-api.nico` | 443 | `nico-api` external LoadBalancer VIP | NICo gRPC API | Yes — `NICO_API_URL` env var on most clients |
 | `nico-pxe.nico` | 80 | `nico-pxe` LoadBalancer VIP | iPXE scripts, cloud-init, internal APT, and the legacy bootstrap-CA endpoint | The DNS record remains fixed for general consumers. DPF can separately configure bootstrap CA acquisition through a complete URL override or mounted Secret or ConfigMap. Non-DPF boot instructions include `pxe_uri`. Other consumers retain the compatibility hostname. |
-| `nico-static-pxe.nico` | 80 | Static PXE asset server VIP | `scout.squashfs`, `scout.efi`, BFB images, and other static boot artifacts | **No** — hardcoded in the host boot scripts that ship inside boot images |
+| `carbide-static-pxe.forge` (stock fallback) | 80 | Static PXE asset server VIP | Full Scout filesystem and update assets | **Yes, at boot.** Scout accepts `newrootfs=` for its full-image download and `pxe_uri=` for update checks. Embedded fallback URLs remain; see the [canonical endpoint reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md#nico-static-pxenico--static-boot-asset-server). |
 | `carbide-ntp.forge` (stock) or `nico-ntp.nico` (rebranded image) | 123 | Operator-supplied NTP server IPs — A and AAAA records point at your existing NTP infrastructure, not a NICo-deployed service | Per-family NTP fallback for DPU-agent DHCP when that family has no valid site-configured address | **Fallback only.** Prefer `siteConfig.ntp_servers` for IPv4. Configure the exact hostname queried by the agent with at least one AAAA record for DHCPv6 option 56. |
 | `unbound.nico` | 53 | `unbound` LoadBalancer VIP | Recursive DNS resolver | Yes — the resolver address itself is distributed via DHCP option 6 |
 | `otel-receiver.nico` | 443 | OTel receiver VIP on the site controller | OTLP ingestion endpoint for DPU otel-collector sidecars | Yes — set in the otel-collector configuration YAML and re-deployed |
+
+The static-asset row describes Scout's stock fallback. Boot URL overrides
+select their own host, scheme, port, and destination.
 
 One additional `.nico` hostname, `socks.nico`, is hardcoded into the DPU agent as the SOCKS5 outbound proxy for DPU extension-service pods. Add a corresponding A record only if your environment runs a SOCKS5 proxy for that purpose; it is not part of every NICo deployment. For per-endpoint detail (consumers, in-cluster addresses, hardcode locations, and the `unbound`-vs-other-resolver guidance), see [`deploy/DNS.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md). That file is the canonical endpoint reference; the table above is the operator-facing summary.
 
@@ -717,7 +720,17 @@ dig +short @<nico-dns-vip> <initial_domain_name>
 
 **From a managed physical-network vantage point** (a host BMC console, a
 managed host's BMC web UI shell, or another client on its network), confirm the
-service zone resolves:
+service zone resolves.
+
+The loop below assumes your deployment publishes the listed `.nico` records.
+Before running it, replace `nico-static-pxe.nico` with the hostname from
+Scout's effective full-image URL, and add the hostname from its effective
+update URL if different. The `newrootfs=` and `pxe_uri=` arguments select
+these URLs independently. Check `carbide-static-pxe.forge` for each stock
+fallback still in use. Omit the DNS check for any URL containing a literal IP
+address. An unused `nico-static-pxe.nico` alias does not need to resolve.
+Refer to the [Static Boot Asset Server reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md#nico-static-pxenico--static-boot-asset-server)
+for URL selection.
 
 ```bash
 for name in nico-api.nico nico-pxe.nico nico-static-pxe.nico \
@@ -730,7 +743,18 @@ dig +short A carbide-ntp.forge @<UNBOUND_VIP>
 dig +short AAAA carbide-ntp.forge @<UNBOUND_VIP>
 ```
 
-The loop shows the other rebranded `.nico` service names. NTP is checked separately because stock agents query the exact `carbide-ntp.forge` name. Do not derive it by replacing only the TLD. For an image rebuilt to query `nico-ntp.nico`, replace the complete NTP hostname in both commands. Every applicable name must return a non-empty A record set. For dual-stack NTP service, the explicit AAAA query must also return at least one address. Otherwise, the DPU server has no service-discovered IPv6 NTP address for DHCPv6 option 56. A `FAILED` or empty result means the `local_data.conf` ConfigMap is missing the corresponding record. If your environment also runs a SOCKS5 proxy, extend the loop with `socks.nico`.
+NTP is checked separately because stock agents query the exact
+`carbide-ntp.forge` name. Do not derive it by replacing only the TLD. For an
+image rebuilt to query `nico-ntp.nico`, replace the complete NTP hostname in
+both commands. The loop checks A records; for IPv6 Scout endpoints, check
+AAAA records for the selected hostname instead. For dual-stack NTP service,
+the explicit AAAA query must also return at least one address. Otherwise, the
+DPU server has no service-discovered IPv6 NTP address for DHCPv6 option 56.
+A `FAILED` or empty result for a required record type needs investigation:
+check resolver reachability and the hostname's authoritative records or
+forwarding configuration. Custom Scout hostnames do not necessarily use
+`local_data.conf`. If your environment also runs a SOCKS5 proxy, extend the
+loop with `socks.nico`.
 
 **Confirm reachability on the expected ports:**
 
@@ -772,7 +796,13 @@ expanding the rollout to the rest of the fleet:
       managed DPUs, configured with a DHCP relay pointing to the `nico-dhcp`
       LoadBalancer VIP.
 - [ ] LoadBalancer VIPs assigned for `nico-api`, `nico-dhcp`, `nico-pxe`, `nico-dns` (one per replica), `nico-ssh-console-rs`, and `unbound`.
-- [ ] `unbound`'s `local_data.conf` ConfigMap contains A records for `nico-api`, `nico-pxe`, `nico-static-pxe`, `unbound`, and `otel-receiver` in the `.nico` zone. Include A records for the exact NTP hostname queried by the deployed agent and AAAA records for its DHCPv6 option-56 fallback (`carbide-ntp.forge` for stock agents).
+- [ ] `unbound`'s `local_data.conf` ConfigMap contains A records for `nico-api`,
+      `nico-pxe`, `unbound`, and `otel-receiver` in the deployed `.nico` zone.
+      The resolver can also resolve each hostname used by Scout's effective
+      full-image and update URLs in the required address family. An unused
+      `nico-static-pxe.nico` alias is optional. Include A records for the exact
+      NTP hostname queried by the deployed agent and AAAA records for its
+      DHCPv6 option-56 fallback (`carbide-ntp.forge` for stock agents).
 - [ ] `nico-dns` zone for `initial_domain_name` is delegated from upstream DNS, or `unbound` forwards the zone to the `nico-dns` VIPs.
 - [ ] `unbound.nico` resolves every NICo service hostname (verified with the `dig` loop in [section 3.4](#34-how-to-verify-dns-is-working)).
 - [ ] Select the bootstrap-CA mode intentionally.
