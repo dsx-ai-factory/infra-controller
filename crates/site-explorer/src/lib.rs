@@ -2422,7 +2422,6 @@ impl SiteExplorer {
             .filter(|ep| ep.report.endpoint_type == EndpointType::Bmc && ep.report.is_switch())
             .map(|ep| ExploredManagedSwitch {
                 bmc_ip: ep.address,
-                nv_os_mac_addresses: ep.report.all_mac_addresses(),
                 report: ep.report.clone(),
             })
             .collect::<Vec<_>>();
@@ -2637,11 +2636,11 @@ impl SiteExplorer {
                 .await;
             }
             // NVOS static IP: handler-side validation pairs `nvos_ip_address` with
-            // exactly one `nvos_mac_addresses` entry (the single wired NVOS port).
-            // ...but re-check here just incase, with the failure case being a
+            // exactly one `nvos_interfaces` entry (the single wired NVOS port).
+            // Re-check here, with the failure case being a
             // log and skip for this pass.
             if let Some(nvos_ip) = expected_switch.nvos_ip_address {
-                match expected_switch.nvos_mac_addresses.as_slice() {
+                match expected_switch.nvos_mac_addresses().as_slice() {
                     [nvos_mac] => {
                         try_preallocate_one(
                             &self.database_connection,
@@ -2658,7 +2657,7 @@ impl SiteExplorer {
                             bmc_mac_address = %expected_switch.bmc_mac_address,
                             nvos_ip_address = %nvos_ip,
                             nvos_mac_address_count = macs.len(),
-                            "Skipping NVOS preallocation: nvos_ip_address requires exactly one nvos_mac_addresses entry"
+                            "Skipping NVOS preallocation: nvos_ip_address requires exactly one nvos_interfaces entry"
                         );
                     }
                 }
@@ -2726,8 +2725,7 @@ impl SiteExplorer {
             .chain(
                 expected_switches
                     .iter()
-                    .flat_map(|switch| &switch.nvos_mac_addresses)
-                    .copied(),
+                    .flat_map(|switch| switch.nvos_mac_addresses()),
             )
             // An explicit BMC identity wins if legacy data assigns the same
             // MAC address to both a BMC and an OS interface.

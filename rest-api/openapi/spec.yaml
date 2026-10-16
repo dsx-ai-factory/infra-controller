@@ -194,6 +194,10 @@ tags:
     description: |-
       Expected Switch identifies an NVLink Switch that is expected to be discovered at a Site. Infrastructure Providers can pre-register Expected Switches using BMC, NVOS credentials
       and serial numbers to help with NVLink Switch discovery and ingestion.
+
+      Deprecation history:
+
+      - `nvosMacAddresses` is deprecated in favor of `nvosInterfaces`. Its request value is accepted but ignored on create, replace-all, and PATCH, including empty arrays. PATCH preserves stored ports and primary selection unless `nvosInterfaces` is supplied. Responses continue returning the flat MAC list derived from stored interfaces.
   - name: SKU
     x-displayName: SKU
     description: |-
@@ -6220,9 +6224,11 @@ paths:
                   switchSerialNumber: SWITCH-12345
                   nvOsUsername: nvadmin
                   nvOsPassword: nvpassword123
-                  nvosMacAddresses:
-                    - '00:1A:2B:3C:4D:60'
-                    - '00:1A:2B:3C:4D:61'
+                  nvosInterfaces:
+                    - macAddress: '00:1A:2B:3C:4D:60'
+                      isPrimary: true
+                    - macAddress: '00:1A:2B:3C:4D:61'
+                      isPrimary: false
                   labels:
                     environment: production
                     rack: A1
@@ -6460,9 +6466,11 @@ paths:
                   switchSerialNumber: SWITCH-54321
                   nvOsUsername: newnvadmin
                   nvOsPassword: newnvpassword123
-                  nvosMacAddresses:
-                    - '00:1A:2B:3C:4D:62'
-                    - '00:1A:2B:3C:4D:63'
+                  nvosInterfaces:
+                    - macAddress: '00:1A:2B:3C:4D:62'
+                      isPrimary: true
+                    - macAddress: '00:1A:2B:3C:4D:63'
+                      isPrimary: false
                   labels:
                     environment: staging
                     rack: B2
@@ -31139,6 +31147,21 @@ components:
           type: string
           minLength: 1
           description: Non-blank opaque external device inventory identifier.
+    NvosInterface:
+      title: NvosInterface
+      type: object
+      additionalProperties: false
+      description: One NVOS ethernet port of an Expected Switch.
+      required:
+        - macAddress
+      properties:
+        macAddress:
+          type: string
+          pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
+          description: MAC address of this NVOS ethernet port.
+        isPrimary:
+          type: boolean
+          description: Whether this port is the primary (eth0) NVOS port NICo manages via RMS. At most one port per switch may be primary; when no port is marked, the first port on a multi-port switch defaults to primary and a single-port switch is always its own primary.
     ExpectedSwitch:
       title: ExpectedSwitch
       type: object
@@ -31152,6 +31175,11 @@ components:
           bmcMacAddress: '00:1A:2B:3C:4D:5E'
           bmcIpAddress: '192.168.1.100'
           switchSerialNumber: SWITCH-12345
+          nvosInterfaces:
+            - macAddress: '00:1A:2B:3C:4D:60'
+              isPrimary: true
+            - macAddress: '00:1A:2B:3C:4D:61'
+              isPrimary: false
           nvosMacAddresses:
             - '00:1A:2B:3C:4D:60'
             - '00:1A:2B:3C:4D:61'
@@ -31180,10 +31208,16 @@ components:
         switchSerialNumber:
           type: string
           description: Serial number of the Expected Switch
+        nvosInterfaces:
+          type: array
+          description: NVOS ethernet ports of the Expected Switch, with the primary (eth0) port flagged. Array order is not stable across inventory synchronization; identify ports by MAC and use isPrimary for selection.
+          items:
+            $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
           type: array
           uniqueItems: true
-          description: MAC addresses of the Expected Switch's NvOS management interfaces
+          deprecated: true
+          description: Deprecated flat NVOS MAC list retained for v2 compatibility. Use `nvosInterfaces`. Responses emit both fields, and this array contains the same MACs in the same order as `nvosInterfaces`.
           items:
             type: string
             pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
@@ -31264,9 +31298,11 @@ components:
           switchSerialNumber: SWITCH-12345
           nvOsUsername: nvadmin
           nvOsPassword: nvpassword123
-          nvosMacAddresses:
-            - '00:1A:2B:3C:4D:60'
-            - '00:1A:2B:3C:4D:61'
+          nvosInterfaces:
+            - macAddress: '00:1A:2B:3C:4D:60'
+              isPrimary: true
+            - macAddress: '00:1A:2B:3C:4D:61'
+              isPrimary: false
           rackId: rack-01
           manufacturer: NVIDIA
           labels:
@@ -31307,10 +31343,17 @@ components:
             - string
             - 'null'
           description: NvOS password for the Expected Switch
+        nvosInterfaces:
+          type: array
+          minItems: 1
+          description: Required NVOS ethernet ports of the Expected Switch. Mark one entry primary to choose eth0; when none is marked, the first entry on a multi-port switch defaults to primary and a single-port switch is always its own primary. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
+          items:
+            $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
           type: array
           uniqueItems: true
-          description: MAC addresses of the Expected Switch's NvOS management interfaces
+          deprecated: true
+          description: Deprecated and ignored. This field never configures NVOS ports or primary selection, regardless of its contents. Use `nvosInterfaces`, including in replace-all entries. Supplying both fields is allowed; only `nvosInterfaces` takes effect.
           items:
             type: string
             pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
@@ -31369,6 +31412,7 @@ components:
         - siteId
         - bmcMacAddress
         - switchSerialNumber
+        - nvosInterfaces
     ExpectedSwitchList:
       title: ExpectedSwitchList
       type: object
@@ -31379,8 +31423,9 @@ components:
             - siteId: f97df110-f4de-492e-8849-4a6af68026b0
               bmcMacAddress: '00:1A:2B:3C:4D:60'
               switchSerialNumber: SWITCH-12345
-              nvosMacAddresses:
-                - '00:1A:2B:3C:4D:61'
+              nvosInterfaces:
+                - macAddress: '00:1A:2B:3C:4D:61'
+                  isPrimary: true
               defaultBmcUsername: admin
               defaultBmcPassword: password123
               labels:
@@ -31412,9 +31457,11 @@ components:
           switchSerialNumber: SWITCH-54321
           nvOsUsername: newnvadmin
           nvOsPassword: newnvpassword123
-          nvosMacAddresses:
-            - '00:1A:2B:3C:4D:62'
-            - '00:1A:2B:3C:4D:63'
+          nvosInterfaces:
+            - macAddress: '00:1A:2B:3C:4D:62'
+              isPrimary: true
+            - macAddress: '00:1A:2B:3C:4D:63'
+              isPrimary: false
           rackId: rack-02
           manufacturer: NVIDIA
           labels:
@@ -31475,10 +31522,17 @@ components:
           minLength: 1
           writeOnly: true
           description: NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
+        nvosInterfaces:
+          type: array
+          minItems: 1
+          description: Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array is rejected because a switch must keep at least one NVOS port. Mark one entry primary to choose eth0. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
+          items:
+            $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
           type: array
           uniqueItems: true
-          description: MAC addresses of the Expected Switch's NvOS management interfaces
+          deprecated: true
+          description: Deprecated and ignored. Omitted, null, empty, and nonempty values all leave stored ports and primary selection unchanged. Use `nvosInterfaces` to replace ports. Supplying both fields is allowed; only `nvosInterfaces` takes effect.
           items:
             type: string
             pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'

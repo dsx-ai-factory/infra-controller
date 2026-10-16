@@ -27,8 +27,8 @@ stateDiagram-v2
     [*] --> Created : Switch created
 
     Created --> Initializing : controller processes switch
-    Initializing --> Configuring : all NVOS interfaces associated
-    Initializing --> Error : no NVOS MACs or MAC conflict
+    Initializing --> Configuring : primary NVOS interface associated
+    Initializing --> Error : no NVOS MACs, no primary, or MAC conflict
     Configuring --> FetchInfo : certificate config and password rotation done
     FetchInfo --> Validating : slot and tray lookup complete
     Validating --> BomValidating : validation complete
@@ -57,7 +57,7 @@ stateDiagram-v2
 | State | Description |
 |-------|-------------|
 | **Created** | Switch record exists in NICo; awaiting first controller tick. |
-| **Initializing** | Controller waits for expected switch NVOS MAC associations. Sub-state: `WaitForOsMachineInterface`. |
+| **Initializing** | Controller associates discovered NVOS interfaces and waits for the expected switch's primary NVOS interface. Sub-state: `WaitForOsMachineInterface`. |
 | **Configuring** | Switch is being configured. Sub-states: `ConfigureCertificate` (`Start` → `WaitForComplete { job_id }`), then `RotateOsPassword`. See [Switch Certificate Configuration](switch_configure_certificate.md). |
 | **FetchInfo** | Controller fetches rack placement info (slot and tray) from the component manager backend and persists it on the switch record. Warn-and-continue on lookup failure. |
 | **Validating** | Switch is being validated. Sub-state: `ValidationComplete`. |
@@ -75,8 +75,8 @@ stateDiagram-v2
 |------|-----|----------------------|
 | *(create)* | Created | Switch created |
 | Created | Initializing (`WaitForOsMachineInterface`) | Controller processes switch |
-| Initializing (`WaitForOsMachineInterface`) | Configuring (`ConfigureCertificate` `Start`) | All NVOS interfaces associated for expected switch |
-| Initializing (`WaitForOsMachineInterface`) | Error | Expected switch has empty `nvos_mac_addresses` or MAC owned by another switch |
+| Initializing (`WaitForOsMachineInterface`) | Configuring (`ConfigureCertificate` `Start`) | Primary NVOS interface associated for expected switch |
+| Initializing (`WaitForOsMachineInterface`) | Error | Expected switch declares no NVOS ethernet ports, has no resolvable primary port, or declares a MAC owned by another switch |
 | Configuring (`ConfigureCertificate` `Start`) | Configuring (`ConfigureCertificate` `WaitForComplete`) | Component manager returns RMS job ID (`domain_name` = `rack_id`) |
 | Configuring (`ConfigureCertificate` `Start`) | Configuring (`RotateOsPassword`) | No `rack_id` or no component manager (skip certificate step) |
 | Configuring (`ConfigureCertificate` `WaitForComplete`) | Configuring (`RotateOsPassword`) | RMS job `Completed` |

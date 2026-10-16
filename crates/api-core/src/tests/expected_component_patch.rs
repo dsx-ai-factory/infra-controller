@@ -103,6 +103,37 @@ async fn switch_row(pool: &PgPool, id: Uuid) -> Value {
     .unwrap()
 }
 
+/// The NVOS port MACs persisted for a switch, primary first. Reads the
+/// `expected_switch_nvos_interfaces` table rather than the (legacy) base-row
+/// column, which the data layer no longer writes.
+async fn nvos_interface_macs(pool: &PgPool, id: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT i.mac_address::text
+         FROM expected_switch_nvos_interfaces i
+         JOIN expected_switches s ON s.bmc_mac_address = i.bmc_mac_address
+         WHERE s.expected_switch_id = $1
+         ORDER BY i.is_primary DESC, i.mac_address",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn nvos_interfaces(pool: &PgPool, id: Uuid) -> Vec<(String, bool)> {
+    sqlx::query_as(
+        "SELECT i.mac_address::text, i.is_primary
+         FROM expected_switch_nvos_interfaces i
+         JOIN expected_switches s ON s.bmc_mac_address = i.bmc_mac_address
+         WHERE s.expected_switch_id = $1
+         ORDER BY i.mac_address",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
 async fn power_shelf_row(pool: &PgPool, id: Uuid) -> Value {
     sqlx::query_scalar(
         "SELECT to_jsonb(expected_power_shelves) FROM expected_power_shelves WHERE expected_power_shelf_id=$1",
@@ -685,7 +716,10 @@ async fn patch_expected_switch_preserves_unselected_fields(pool: PgPool) {
             bmc_password: "bmc-password".to_string(),
             nvos_username: Some("nvos-user".to_string()),
             nvos_password: Some("nvos-password".to_string()),
-            nvos_mac_addresses: vec!["02:00:00:01:59:03".to_string()],
+            nvos_interfaces: vec![forge::ExpectedNvosInterface {
+                mac_address: "02:00:00:01:59:03".to_string(),
+                is_primary: true,
+            }],
             switch_serial_number: "SWITCH-003".to_string(),
             bmc_retain_credentials: Some(true),
             ..Default::default()
@@ -797,6 +831,98 @@ async fn patch_expected_switch_preserves_unselected_fields(pool: PgPool) {
 }
 
 #[crate::sqlx_test]
+async fn patch_expected_switch_allows_unrelated_updates_on_a_zero_port_row(pool: PgPool) {
+    let env = create_test_env(pool).await;
+    let id = Uuid::new_v4();
+    // Seed a legacy record directly: new API creates require NVOS ports.
+    let mut txn = env.pool.begin().await.unwrap();
+    db::expected_switch::create(
+        &mut txn,
+        model::expected_switch::ExpectedSwitch {
+            expected_switch_id: Some(id),
+            bmc_mac_address: "02:00:00:00:59:30".parse().unwrap(),
+            bmc_username: "bmc-user".to_string(),
+            bmc_password: "before".to_string(),
+            serial_number: "SWITCH-030".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    env.api
+        .patch_expected_switch(Request::new(forge::PatchExpectedSwitchRequest {
+            expected_switch: Some(forge::ExpectedSwitch {
+                expected_switch_id: rpc_id(id),
+                bmc_password: "after".to_string(),
+                ..Default::default()
+            }),
+            update_mask: mask(&["bmc_password"]),
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(switch_row(&env.pool, id).await["bmc_password"], "after");
+    assert!(nvos_interfaces(&env.pool, id).await.is_empty());
+}
+
+#[crate::sqlx_test]
+async fn patch_expected_switch_moves_primary_to_a_nonfirst_port(pool: PgPool) {
+    let env = create_test_env(pool).await;
+    let id = Uuid::new_v4();
+    let first = "02:00:00:01:59:31";
+    let second = "02:00:00:01:59:32";
+    env.api
+        .add_expected_switch(Request::new(forge::ExpectedSwitch {
+            expected_switch_id: rpc_id(id),
+            bmc_mac_address: "02:00:00:00:59:31".to_string(),
+            bmc_username: "bmc-user".to_string(),
+            bmc_password: "password".to_string(),
+            switch_serial_number: "SWITCH-031".to_string(),
+            nvos_interfaces: vec![
+                forge::ExpectedNvosInterface {
+                    mac_address: first.to_string(),
+                    is_primary: true,
+                },
+                forge::ExpectedNvosInterface {
+                    mac_address: second.to_string(),
+                    is_primary: false,
+                },
+            ],
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+
+    env.api
+        .patch_expected_switch(Request::new(forge::PatchExpectedSwitchRequest {
+            expected_switch: Some(forge::ExpectedSwitch {
+                expected_switch_id: rpc_id(id),
+                nvos_interfaces: vec![
+                    forge::ExpectedNvosInterface {
+                        mac_address: first.to_string(),
+                        is_primary: false,
+                    },
+                    forge::ExpectedNvosInterface {
+                        mac_address: second.to_string(),
+                        is_primary: true,
+                    },
+                ],
+                ..Default::default()
+            }),
+            update_mask: mask(&["nvos_interfaces"]),
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        nvos_interfaces(&env.pool, id).await,
+        vec![(first.to_string(), false), (second.to_string(), true)]
+    );
+}
+
+#[crate::sqlx_test]
 async fn patch_expected_switch_requires_complete_initial_nvos_credentials(pool: PgPool) {
     let env = create_test_env(pool).await;
     let id = Uuid::new_v4();
@@ -807,6 +933,10 @@ async fn patch_expected_switch_requires_complete_initial_nvos_credentials(pool: 
             bmc_username: "bmc-user".to_string(),
             bmc_password: "bmc-password".to_string(),
             switch_serial_number: "SWITCH-004".to_string(),
+            nvos_interfaces: vec![forge::ExpectedNvosInterface {
+                mac_address: "02:00:00:01:59:04".to_string(),
+                is_primary: true,
+            }],
             ..Default::default()
         }))
         .await
@@ -853,7 +983,7 @@ async fn patch_expected_switch_requires_complete_initial_nvos_credentials(pool: 
 }
 
 #[crate::sqlx_test]
-async fn patch_expected_switch_rejects_clearing_macs_for_stored_nvos_ip(pool: PgPool) {
+async fn patch_expected_switch_rejects_dropping_to_zero_nvos_ports(pool: PgPool) {
     let env = create_test_env(pool).await;
     let id = Uuid::new_v4();
     env.api
@@ -862,7 +992,10 @@ async fn patch_expected_switch_rejects_clearing_macs_for_stored_nvos_ip(pool: Pg
             bmc_mac_address: "02:00:00:00:59:08".to_string(),
             bmc_username: "bmc-user".to_string(),
             bmc_password: "bmc-password".to_string(),
-            nvos_mac_addresses: vec!["02:00:00:01:59:08".to_string()],
+            nvos_interfaces: vec![forge::ExpectedNvosInterface {
+                mac_address: "02:00:00:01:59:08".to_string(),
+                is_primary: true,
+            }],
             nvos_ip_address: Some("192.0.2.241".to_string()),
             switch_serial_number: "SWITCH-008".to_string(),
             ..Default::default()
@@ -871,6 +1004,8 @@ async fn patch_expected_switch_rejects_clearing_macs_for_stored_nvos_ip(pool: Pg
         .unwrap();
     let original = switch_row(&env.pool, id).await;
 
+    // A switch must keep at least one NVOS port, so clearing the port set is
+    // rejected -- even though doing so would also orphan the stored nvos_ip.
     let error = env
         .api
         .patch_expected_switch(Request::new(forge::PatchExpectedSwitchRequest {
@@ -878,33 +1013,41 @@ async fn patch_expected_switch_rejects_clearing_macs_for_stored_nvos_ip(pool: Pg
                 expected_switch_id: rpc_id(id),
                 ..Default::default()
             }),
-            update_mask: mask(&["nvos_mac_addresses"]),
+            update_mask: mask(&["nvos_interfaces"]),
         }))
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::InvalidArgument, "{error}");
     assert!(
-        error
-            .message()
-            .contains("nvos_ip_address requires exactly one"),
+        error.message().contains("at least one NVOS ethernet port"),
         "{error}"
     );
     assert_eq!(switch_row(&env.pool, id).await, original);
 
-    env.api
+    // Clearing the port set together with nvos_ip is still rejected: the switch
+    // would be left with zero ports, which create/update/PATCH never allow.
+    let error = env
+        .api
         .patch_expected_switch(Request::new(forge::PatchExpectedSwitchRequest {
             expected_switch: Some(forge::ExpectedSwitch {
                 expected_switch_id: rpc_id(id),
                 ..Default::default()
             }),
-            update_mask: mask(&["nvos_ip_address", "nvos_mac_addresses"]),
+            update_mask: mask(&["nvos_ip_address", "nvos_interfaces"]),
         }))
         .await
-        .unwrap();
-    let mut expected = original;
-    expected["nvos_ip_address"] = Value::Null;
-    expected["nvos_mac_addresses"] = json!([]);
-    assert_eq!(switch_row(&env.pool, id).await, expected);
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument, "{error}");
+    assert!(
+        error.message().contains("at least one NVOS ethernet port"),
+        "{error}"
+    );
+    assert_eq!(switch_row(&env.pool, id).await, original);
+    // The original port survives the rejected clears.
+    assert_eq!(
+        nvos_interface_macs(&env.pool, id).await,
+        vec!["02:00:00:01:59:08".to_string()]
+    );
 }
 
 #[crate::sqlx_test]
@@ -943,7 +1086,14 @@ async fn patch_expected_switch_validates_nvos_ip_against_retained_macs(pool: PgP
                 bmc_mac_address: format!("02:00:00:00:59:{suffix:02x}"),
                 bmc_username: "bmc-user".to_string(),
                 bmc_password: "bmc-password".to_string(),
-                nvos_mac_addresses: nvos_macs.into_iter().map(str::to_string).collect(),
+                nvos_interfaces: nvos_macs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, mac)| forge::ExpectedNvosInterface {
+                        mac_address: mac.to_string(),
+                        is_primary: index == 0,
+                    })
+                    .collect(),
                 switch_serial_number: format!("SWITCH-{suffix:03}"),
                 ..Default::default()
             }))
@@ -1218,6 +1368,10 @@ async fn expected_switch_update_locks_inventory_before_interface(
         bmc_password: "password".to_string(),
         switch_serial_number: "SWITCH-LOCK".to_string(),
         bmc_ip_address: "192.0.2.231".to_string(),
+        nvos_interfaces: vec![forge::ExpectedNvosInterface {
+            mac_address: "02:00:00:01:59:21".to_string(),
+            is_primary: true,
+        }],
         ..Default::default()
     };
     env.api
@@ -1354,7 +1508,10 @@ async fn patch_expected_switch_rolls_back_bmc_allocation_when_nvos_address_is_oc
             bmc_username: "before".to_string(),
             bmc_password: "password".to_string(),
             switch_serial_number: "SWITCH-ROLLBACK".to_string(),
-            nvos_mac_addresses: vec![nvos_mac.to_string()],
+            nvos_interfaces: vec![forge::ExpectedNvosInterface {
+                mac_address: nvos_mac.to_string(),
+                is_primary: true,
+            }],
             ..Default::default()
         }))
         .await?;
