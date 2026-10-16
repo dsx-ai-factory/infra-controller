@@ -222,12 +222,8 @@ async fn hold_is_released_when_every_dpu_is_current(pool: sqlx::PgPool) {
 /// stays outstanding so a later sweep can retry once the DPU is current.
 #[crate::sqlx_test]
 async fn hold_is_kept_while_a_dpu_is_outdated(pool: sqlx::PgPool) {
-    let fixture = provisioned(
-        pool,
-        Arc::new(AtomicBool::new(true)),
-        Arc::new(AtomicBool::new(false)),
-    )
-    .await;
+    let outdated = Arc::new(AtomicBool::new(true));
+    let fixture = provisioned(pool, outdated.clone(), Arc::new(AtomicBool::new(false))).await;
     request_sync(&fixture.pool, &fixture.mh.id).await;
 
     timeout(
@@ -249,6 +245,19 @@ async fn hold_is_kept_while_a_dpu_is_outdated(pool: sqlx::PgPool) {
     assert!(
         is_outstanding(&fixture.pool, &fixture.mh.id).await,
         "deferring must not consume the pending action"
+    );
+    outdated.store(false, Ordering::SeqCst);
+    timeout(
+        TEST_TIMEOUT,
+        fixture.env.run_machine_state_controller_iteration(),
+    )
+    .await
+    .expect("timed out retrying once the DPU is current");
+
+    assert_eq!(fixture.calls.hold_releases.load(Ordering::SeqCst), 1);
+    assert!(
+        !is_outstanding(&fixture.pool, &fixture.mh.id).await,
+        "currency must allow the retained pending action to complete"
     );
 }
 
