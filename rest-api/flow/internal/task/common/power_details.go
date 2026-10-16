@@ -24,3 +24,18 @@ type PowerTaskLimitError struct {
 func (e *PowerTaskLimitError) Error() string {
 	return fmt.Sprintf("rack %s exceeds the limit of %d outstanding power tasks", e.RackID, MaxPowerTasksPerRack)
 }
+
+// MaxTaskContextPerRack bounds metadata rows independently of the power-task
+// count. Exceeding this row limit leaves primary power tasks available; the
+// tray response byte limit removes context references before primary tasks.
+const MaxTaskContextPerRack = 256
+
+// TaskContextLimitError means no complete waiting context can be returned.
+type TaskContextLimitError struct {
+	RackID uuid.UUID
+}
+
+// Error identifies the rack without including stored task data.
+func (e *TaskContextLimitError) Error() string {
+	return fmt.Sprintf("rack %s exceeds the limit of %d tasks for waiting context", e.RackID, MaxTaskContextPerRack)
+}

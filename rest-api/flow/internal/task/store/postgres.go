@@ -275,6 +275,40 @@ func powerTaskDetailsFromDAO(row model.Task) (taskdef.PowerTaskDetails, error) {
 	}, nil
 }
 
+// ListTaskContextForRack reads nearby work without decoding operation payloads.
+func (s *PostgresStore) ListTaskContextForRack(ctx context.Context, rackID uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
+	rows, err := model.ListTaskContextForRack(ctx, s.idb(ctx), rackID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		var limitErr *taskcommon.TaskContextLimitError
+		if stderrors.As(err, &limitErr) {
+			return nil, limitErr
+		}
+		// Scan errors can quote stored attributes. Keep the diagnostic fields
+		// useful for locating the failed read without exposing stored values.
+		event := log.Error().Ctx(ctx).
+			Str("rack_id", rackID.String()).
+			Str("failure_stage", "database_read").
+			Str("error_type", fmt.Sprintf("%T", err))
+		var pgErr *pgconn.PgError
+		if stderrors.As(err, &pgErr) {
+			event = event.Str("sqlstate", pgErr.Code)
+		}
+		event.Msg("Failed to read task context")
+		return nil, errors.GRPCErrorInternal("failed to read task context")
+	}
+	result := make([]taskdef.TaskContextMetadata, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, taskdef.TaskContextMetadata{
+			ID: row.ID, RackID: row.RackID, Type: row.Type,
+			Attributes: row.Attributes, Status: row.Status, CreatedAt: row.CreatedAt,
+		})
+	}
+	return result, nil
+}
+
 // ListNonTerminalTasksForRacks returns Waiting, Pending, and Running tasks for
 // the requested racks.
 func (s *PostgresStore) ListNonTerminalTasksForRacks(

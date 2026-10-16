@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -20,9 +21,11 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
@@ -56,14 +59,18 @@ func (r *powerDetailsCoreReader) GetComponentPowerDetails(ctx context.Context, r
 	return r.read(ctx)
 }
 
-// powerDetailsTaskStore permits only the bounded rack read. An accidental call
-// to an unrelated store method fails the test through the embedded nil store.
+// powerDetailsTaskStore permits only bounded power-task and context reads. An
+// unrelated store call fails the test through the embedded nil store.
 type powerDetailsTaskStore struct {
 	taskstore.Store
-	rackID   uuid.UUID
-	calls    int
-	deadline time.Time
-	read     func(context.Context) ([]taskdef.PowerTaskDetails, error)
+	rackID          uuid.UUID
+	calls           int
+	deadline        time.Time
+	read            func(context.Context) ([]taskdef.PowerTaskDetails, error)
+	contextCalls    int
+	contextRackID   uuid.UUID
+	contextDeadline time.Time
+	contextRead     func(context.Context) ([]taskdef.TaskContextMetadata, error)
 }
 
 // ListPowerTasksForRack counts calls so a skipped query differs from a nil-rack query.
@@ -72,6 +79,17 @@ func (s *powerDetailsTaskStore) ListPowerTasksForRack(ctx context.Context, rackI
 	s.calls++
 	s.deadline, _ = ctx.Deadline()
 	return s.read(ctx)
+}
+
+// ListTaskContextForRack counts the one metadata read shared by waiting tasks.
+func (s *powerDetailsTaskStore) ListTaskContextForRack(ctx context.Context, rackID uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
+	s.contextCalls++
+	s.contextRackID = rackID
+	s.contextDeadline, _ = ctx.Deadline()
+	if s.contextRead == nil {
+		return nil, nil
+	}
+	return s.contextRead(ctx)
 }
 
 // powerDetailsInventory records the resolver's budget before a test delays or
@@ -171,13 +189,25 @@ func TestFlowServerImpl_GetTrayPowerDetails(t *testing.T) {
 							Operation:  operations.PowerControlTaskInfo{Operation: operations.PowerOperationForcePowerOff, Forced: true},
 							Attributes: taskcommon.TaskAttributes{ComponentsByType: operation.ComponentsByType{devicetypes.ComponentTypeCompute: {f.tray.Info.ID}}},
 							Status:     taskcommon.TaskStatusRunning, CreatedAt: created, UpdatedAt: updated, StartedAt: &started},
+						// Filtering this middle entry must not attach the shelf context to it.
+						{ID: uuid.New(), RackID: f.tray.RackID,
+							Operation:  operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn},
+							Attributes: taskcommon.TaskAttributes{ComponentsByType: operation.ComponentsByType{devicetypes.ComponentTypeCompute: {uuid.New()}}},
+							Status:     taskcommon.TaskStatusPending, CreatedAt: created.Add(time.Second), UpdatedAt: updated},
 						{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), RackID: f.tray.RackID,
 							Operation:  operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn},
 							Attributes: taskcommon.TaskAttributes{ComponentsByType: operation.ComponentsByType{devicetypes.ComponentTypePowerShelf: {shelfID}}},
-							Status:     taskcommon.TaskStatusWaiting, CreatedAt: created, UpdatedAt: updated},
-						{ID: uuid.New(), RackID: f.tray.RackID,
-							Operation:  operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn},
-							Attributes: taskcommon.TaskAttributes{ComponentsByType: operation.ComponentsByType{devicetypes.ComponentTypeCompute: {uuid.New()}}}},
+							Status:     taskcommon.TaskStatusWaiting, CreatedAt: created.Add(2 * time.Second), UpdatedAt: updated},
+					}, nil
+				}
+				f.store.contextRead = func(context.Context) ([]taskdef.TaskContextMetadata, error) {
+					// A shelf power task conflicts with firmware across the rack. The
+					// earlier bring-up is only context, not a claimed execution order.
+					return []taskdef.TaskContextMetadata{
+						{ID: uuid.UUID{15: 3}, RackID: f.tray.RackID, Type: taskcommon.TaskTypeFirmwareControl,
+							Status: taskcommon.TaskStatusRunning, Attributes: taskcommon.TaskAttributes{ComponentsByType: operation.ComponentsByType{devicetypes.ComponentTypeCompute: {f.tray.Info.ID}}}},
+						{ID: uuid.UUID{15: 4}, RackID: f.tray.RackID, Type: taskcommon.TaskTypeBringUp,
+							Status: taskcommon.TaskStatusWaiting, CreatedAt: created.Add(-time.Second)},
 					}, nil
 				}
 				f.wantTasks = &pb.PowerTaskDetailsList{Entries: []*pb.PowerTaskDetails{
@@ -189,8 +219,11 @@ func TestFlowServerImpl_GetTrayPowerDetails(t *testing.T) {
 					{Id: &pb.UUID{Id: "00000000-0000-0000-0000-000000000002"}, RackId: &pb.UUID{Id: f.tray.RackID.String()},
 						Operation: &pb.TaskOperation{Operation: &pb.TaskOperation_PowerControl{PowerControl: &pb.PowerControlTaskOperation{Operation: pb.PowerControlOperation_POWER_CONTROL_OPERATION_POWER_ON}}},
 						Targets:   &pb.ComponentsByType{Groups: []*pb.ComponentsForType{{Type: pb.ComponentType_COMPONENT_TYPE_POWERSHELF, ComponentIds: []*pb.UUID{{Id: shelfID.String()}}}}},
-						Status:    pb.TaskStatus_TASK_STATUS_WAITING, CreatedAt: timestamppb.New(created), UpdatedAt: timestamppb.New(updated),
-						Relevance: pb.PowerTaskRelevance_POWER_TASK_RELEVANCE_RACK_AFFECTED},
+						Status:    pb.TaskStatus_TASK_STATUS_WAITING, CreatedAt: timestamppb.New(created.Add(2 * time.Second)), UpdatedAt: timestamppb.New(updated),
+						Relevance: pb.PowerTaskRelevance_POWER_TASK_RELEVANCE_RACK_AFFECTED, WaitingContext: &pb.PowerTaskWaitingContext{
+							ActiveConflicts: []*pb.TaskBrief{{Id: &pb.UUID{Id: (uuid.UUID{15: 3}).String()}, Kind: pb.TaskKind_TASK_KIND_FIRMWARE_CONTROL, Status: pb.TaskStatus_TASK_STATUS_RUNNING}},
+							EarlierWaiting:  []*pb.TaskBrief{{Id: &pb.UUID{Id: (uuid.UUID{15: 4}).String()}, Kind: pb.TaskKind_TASK_KIND_BRING_UP, Status: pb.TaskStatus_TASK_STATUS_WAITING}},
+						}},
 				}}
 				return t.Context(), f.tray.ComponentID
 			},
@@ -203,6 +236,9 @@ func TestFlowServerImpl_GetTrayPowerDetails(t *testing.T) {
 				require.Equal(t, f.tray.ComponentID, f.core.request.GetMachineIds().GetMachineIds()[0].GetId())
 				require.Equal(t, f.tray.RackID.String(), details.GetRackId().GetId())
 				require.Equal(t, f.tray.RackID, f.store.rackID)
+				require.Equal(t, 1, f.store.contextCalls)
+				require.Equal(t, f.tray.RackID, f.store.contextRackID)
+				require.Equal(t, f.store.deadline, f.store.contextDeadline)
 				require.True(t, proto.Equal(f.entry.Actual, details.GetActual().GetValue()))
 				require.True(t, proto.Equal(f.entry.Desired, details.GetDesired().GetValue()))
 				require.NotNil(t, details.GetOperations().GetActions().GetValue())
@@ -476,8 +512,55 @@ func TestFlowServerImpl_GetTrayPowerDetails(t *testing.T) {
 			},
 		},
 		{
-			// A blocked source must finish its cleanup before cancellation returns.
-			name: "caller cancellation joins both reads",
+			// The second read inherits the original budget. Its expiry must leave
+			// already loaded power intent and Core observations available.
+			name: "context deadline preserves tasks and completed Core sections",
+			configure: func(t *testing.T, f *powerDetailsFixture) (context.Context, string) {
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				t.Cleanup(cancel)
+				f.wantDeadline = time.Now().Add(9 * time.Second)
+				created := time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC)
+				taskID := uuid.UUID{15: 1}
+				f.inventory.beforeRead = func(context.Context) error { time.Sleep(2 * time.Second); return nil }
+				f.store.read = func(context.Context) ([]taskdef.PowerTaskDetails, error) {
+					time.Sleep(time.Second)
+					return []taskdef.PowerTaskDetails{{ID: taskID, RackID: f.tray.RackID,
+						Operation:  operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn},
+						Attributes: taskcommon.TaskAttributes{ComponentsByType: operation.ComponentsByType{devicetypes.ComponentTypeCompute: {f.tray.Info.ID}}},
+						Status:     taskcommon.TaskStatusWaiting, CreatedAt: created, UpdatedAt: created,
+					}}, nil
+				}
+				f.store.contextRead = func(ctx context.Context) ([]taskdef.TaskContextMetadata, error) {
+					<-ctx.Done()
+					// A nominally successful late read must still honor the shared deadline.
+					return nil, nil
+				}
+				f.wantTasks = &pb.PowerTaskDetailsList{Entries: []*pb.PowerTaskDetails{{
+					Id: &pb.UUID{Id: taskID.String()}, RackId: &pb.UUID{Id: f.tray.RackID.String()},
+					Operation: &pb.TaskOperation{Operation: &pb.TaskOperation_PowerControl{PowerControl: &pb.PowerControlTaskOperation{Operation: pb.PowerControlOperation_POWER_CONTROL_OPERATION_POWER_ON}}},
+					Targets:   &pb.ComponentsByType{Groups: []*pb.ComponentsForType{{Type: pb.ComponentType_COMPONENT_TYPE_COMPUTE, ComponentIds: []*pb.UUID{{Id: f.tray.Info.ID.String()}}}}},
+					Status:    pb.TaskStatus_TASK_STATUS_WAITING, CreatedAt: timestamppb.New(created), UpdatedAt: timestamppb.New(created),
+					Relevance:      pb.PowerTaskRelevance_POWER_TASK_RELEVANCE_SELECTED,
+					WaitingContext: &pb.PowerTaskWaitingContext{Error: pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_DEADLINE_EXCEEDED.Enum()},
+				}}}
+				return ctx, f.tray.ComponentID
+			},
+			check: func(t *testing.T, f *powerDetailsFixture, response *pb.GetTrayPowerDetailsResponse, err error) {
+				require.NoError(t, err)
+				require.Equal(t, 1, f.store.calls)
+				require.Equal(t, 1, f.store.contextCalls)
+				require.Equal(t, f.tray.RackID, f.store.contextRackID)
+				require.Equal(t, f.wantDeadline, f.store.contextDeadline)
+				require.True(t, proto.Equal(f.wantTasks, response.Details.Operations.Tasks), "context failure must retain complete primary tasks")
+				require.True(t, proto.Equal(f.entry.Actual, response.Details.Actual.GetValue()))
+				require.True(t, proto.Equal(f.entry.Desired, response.Details.Desired.GetValue()))
+				require.True(t, proto.Equal(f.entry.Actions, response.Details.Operations.Actions.GetValue()))
+			},
+		},
+		{
+			// The task read has advanced to metadata; both it and Core must finish
+			// cancellation cleanup before the handler returns.
+			name: "caller cancellation joins Core and metadata reads",
 			configure: func(t *testing.T, f *powerDetailsFixture) (context.Context, string) {
 				return t.Context(), f.tray.ComponentID
 			},
@@ -498,7 +581,13 @@ func TestFlowServerImpl_GetTrayPowerDetails(t *testing.T) {
 					completed <- struct{}{}
 					return nil, ctx.Err()
 				}
-				f.store.read = func(ctx context.Context) ([]taskdef.PowerTaskDetails, error) {
+				f.store.read = func(context.Context) ([]taskdef.PowerTaskDetails, error) {
+					return []taskdef.PowerTaskDetails{{ID: uuid.New(), RackID: f.tray.RackID,
+						Status:     taskcommon.TaskStatusWaiting,
+						Attributes: taskcommon.TaskAttributes{ComponentsByType: operation.ComponentsByType{devicetypes.ComponentTypeCompute: {f.tray.Info.ID}}},
+						Operation:  operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn}}}, nil
+				}
+				f.store.contextRead = func(ctx context.Context) ([]taskdef.TaskContextMetadata, error) {
 					started <- struct{}{}
 					<-ctx.Done()
 					canceled <- struct{}{}
@@ -519,6 +608,10 @@ func TestFlowServerImpl_GetTrayPowerDetails(t *testing.T) {
 				// Wait diagnoses a sequential implementation without an unbounded start wait.
 				synctest.Wait()
 				require.Len(t, started, 2)
+				require.Equal(t, 1, f.store.calls)
+				require.Equal(t, 1, f.store.contextCalls)
+				require.Equal(t, f.tray.RackID, f.store.contextRackID)
+				require.Equal(t, f.store.deadline, f.store.contextDeadline)
 				cancel()
 				synctest.Wait()
 				require.Len(t, canceled, 2)
@@ -526,7 +619,7 @@ func TestFlowServerImpl_GetTrayPowerDetails(t *testing.T) {
 				releaseCore <- struct{}{}
 				synctest.Wait()
 				require.Len(t, completed, 1)
-				require.Empty(t, returned, "RPC must join the task read after the Core read finishes")
+				require.Empty(t, returned, "RPC must join the metadata read after the Core read finishes")
 
 				releaseTasks <- struct{}{}
 				got := <-returned
@@ -796,18 +889,22 @@ func powerDetailsRPCClient(t *testing.T, implementation *FlowServerImpl) pb.Flow
 	return pb.NewFlowClient(connection)
 }
 
-// TestBoundPowerDetailsResponse verifies all-or-nothing task availability at
-// the actual proxy encoding boundary, including JSON's HTML escape expansion.
+// TestBoundPowerDetailsResponse keeps primary tasks when dropping optional
+// context is enough to fit, so callers do not lose useful power operations.
+// The proxy's HTML escaping must count toward the same byte limit.
 func TestBoundPowerDetailsResponse(t *testing.T) {
 	tests := []struct {
-		name           string
-		targetCount    int
-		initiator      string
-		wantTasksError bool
+		name              string
+		targetCount       int
+		initiator         string
+		wantTasksError    bool
+		wantContextErrors bool
 	}{
-		// A small list remains available and is not accidentally suppressed.
+		// Context must remain intact when the full response already fits.
 		{name: "ordinary response", targetCount: 1},
-		// '<' is one protojson byte but six bytes in the proxy's JSON wrapper.
+		// Repeated references can overflow while all primary power tasks still fit.
+		{name: "waiting context exceeds proxy allowance", targetCount: 1, wantContextErrors: true},
+		// Removing context is insufficient: '<' expands sixfold in the wrapper.
 		{name: "HTML expansion exceeds proxy allowance", targetCount: 10000, initiator: strings.Repeat("<", 270000), wantTasksError: true},
 	}
 	for _, test := range tests {
@@ -816,28 +913,98 @@ func TestBoundPowerDetailsResponse(t *testing.T) {
 			for index := range targets {
 				targets[index] = &pb.UUID{Id: fmt.Sprintf("00000000-0000-0000-0000-%012x", index)}
 			}
+			created := timestamppb.New(time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC))
+			active := &pb.TaskBrief{Id: &pb.UUID{Id: "00000000-0000-0000-0000-000000000001"},
+				Kind: pb.TaskKind_TASK_KIND_POWER_CONTROL, Status: pb.TaskStatus_TASK_STATUS_RUNNING}
+			baseTask := &pb.PowerTaskDetails{
+				Id:        &pb.UUID{Id: "00000000-0000-0000-0000-000000000002"},
+				RackId:    &pb.UUID{Id: "00000000-0000-0000-0000-000000000200"},
+				Operation: &pb.TaskOperation{Operation: &pb.TaskOperation_PowerControl{PowerControl: &pb.PowerControlTaskOperation{Operation: pb.PowerControlOperation_POWER_CONTROL_OPERATION_POWER_ON}}},
+				Targets:   &pb.ComponentsByType{Groups: []*pb.ComponentsForType{{Type: pb.ComponentType_COMPONENT_TYPE_COMPUTE, ComponentIds: targets}}},
+				Status:    pb.TaskStatus_TASK_STATUS_WAITING, CreatedAt: created, UpdatedAt: created,
+				Relevance: pb.PowerTaskRelevance_POWER_TASK_RELEVANCE_SELECTED,
+				WaitingContext: &pb.PowerTaskWaitingContext{
+					ActiveConflicts: []*pb.TaskBrief{active},
+					EarlierWaiting: []*pb.TaskBrief{{Id: &pb.UUID{Id: "00000000-0000-0000-0000-000000000099"},
+						Kind: pb.TaskKind_TASK_KIND_BRING_UP, Status: pb.TaskStatus_TASK_STATUS_WAITING}},
+				},
+			}
 			response := &pb.GetTrayPowerDetailsResponse{Details: &pb.TrayPowerDetails{
+				Actual: &pb.PowerActualDetails{Result: &pb.PowerActualDetails_Value{Value: &corev1.ComponentPowerObservation{
+					Outcome: &corev1.ComponentPowerObservation_State{State: corev1.ComponentPowerState_COMPONENT_POWER_STATE_ON},
+				}}},
+				Desired: &pb.PowerDesiredDetails{Result: &pb.PowerDesiredDetails_Value{Value: &corev1.ComponentPowerPolicy{
+					Status: corev1.ComponentPowerPolicyStatus_COMPONENT_POWER_POLICY_STATUS_NOT_APPLICABLE,
+				}}},
 				Operations: &pb.PowerOperations{
 					Actions: &pb.PowerActionDetails{Result: &pb.PowerActionDetails_Value{Value: &corev1.ComponentPowerActionDetails{
 						Actions: []*corev1.ComponentPowerAction{{Initiator: &test.initiator}},
 					}}},
-					Tasks: &pb.PowerTaskDetailsList{Entries: []*pb.PowerTaskDetails{{
-						Targets: &pb.ComponentsByType{Groups: []*pb.ComponentsForType{{ComponentIds: targets}}},
-					}}},
+					Tasks: &pb.PowerTaskDetailsList{Entries: []*pb.PowerTaskDetails{baseTask}},
 				},
 			}}
 
-			err := boundPowerDetailsResponse(response)
+			if test.wantContextErrors {
+				// Repeating earlier submissions across a full rack stays inside
+				// both row limits but exceeds the response byte allowance.
+				entries := make([]*pb.PowerTaskDetails, 0, 256)
+				references := make([]*pb.TaskBrief, 0, 256)
+				for index := range 256 {
+					id := &pb.UUID{Id: fmt.Sprintf("00000000-0000-0000-0000-%012x", index+1)}
+					entry := proto.Clone(baseTask).(*pb.PowerTaskDetails)
+					entry.Id = id
+					entry.WaitingContext = &pb.PowerTaskWaitingContext{EarlierWaiting: references}
+					entries = append(entries, entry)
+					if index > 0 {
+						references = append(references, &pb.TaskBrief{Id: id, Kind: pb.TaskKind_TASK_KIND_POWER_CONTROL, Status: pb.TaskStatus_TASK_STATUS_WAITING})
+					}
+				}
+				// These contexts contain no references to remove. Keep absence,
+				// successful emptiness, and a failed read distinct after fallback.
+				entries[0].Status = pb.TaskStatus_TASK_STATUS_RUNNING
+				entries[0].StartedAt = created
+				entries[0].WaitingContext = nil
+				entries[1].WaitingContext = &pb.PowerTaskWaitingContext{}
+				entries[2].WaitingContext = &pb.PowerTaskWaitingContext{Error: pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_READ_FAILED.Enum()}
+				// An active-only context must be removed too, independently of
+				// the earlier-waiting references on the remaining power tasks.
+				entries[3].WaitingContext = &pb.PowerTaskWaitingContext{ActiveConflicts: []*pb.TaskBrief{active}}
+				response.Details.Operations.Tasks.Entries = entries
+			}
 
+			// Compare the complete response so task order, identities, targets,
+			// operation metadata, and every Core section must survive unchanged.
+			want := proto.Clone(response).(*pb.GetTrayPowerDetailsResponse)
+			if test.wantContextErrors {
+				for _, entry := range want.Details.Operations.Tasks.Entries[3:] {
+					entry.WaitingContext = &pb.PowerTaskWaitingContext{Error: pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED.Enum()}
+				}
+			}
+			if test.wantTasksError {
+				want.Details.Operations.Tasks = &pb.PowerTaskDetailsList{Error: pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED.Enum()}
+			}
+			message, err := protojson.Marshal(response)
 			require.NoError(t, err)
 			if test.wantTasksError {
-				require.Equal(t, pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED, response.Details.Operations.Tasks.GetError())
-				require.Empty(t, response.Details.Operations.Tasks.Entries)
-			} else {
-				require.Nil(t, response.Details.Operations.Tasks.Error)
-				require.Len(t, response.Details.Operations.Tasks.Entries, 1)
+				require.LessOrEqual(t, len(message), powerDetailsResponseBytes, "protojson alone must miss the wrapper expansion")
 			}
-			require.Len(t, response.Details.Operations.Actions.GetValue().Actions, 1)
+			encoded, err := json.Marshal(grpcproxy.Response{ResponseJSON: message})
+			require.NoError(t, err)
+			if test.wantContextErrors || test.wantTasksError {
+				require.Greater(t, len(encoded), powerDetailsResponseBytes, "fixture must exercise overflow")
+			} else {
+				require.LessOrEqual(t, len(encoded), powerDetailsResponseBytes)
+			}
+
+			err = boundPowerDetailsResponse(response)
+
+			require.NoError(t, err)
+			require.True(t, proto.Equal(want, response), "only the expected context or task section may change")
+			message, err = protojson.Marshal(response)
+			require.NoError(t, err)
+			encoded, err = json.Marshal(grpcproxy.Response{ResponseJSON: message})
+			require.NoError(t, err)
+			require.LessOrEqual(t, len(encoded), powerDetailsResponseBytes, "returned proxy response must fit")
 		})
 	}
 }

@@ -239,13 +239,38 @@ func unavailableCorePowerDetails(code pb.PowerDetailsReadError) (*pb.PowerActual
 // readFlowPowerTasks filters the bounded rack read by recorded target membership.
 // A shelf selection also affects other trays on that rack without selecting them.
 func (rs *FlowServerImpl) readFlowPowerTasks(ctx context.Context, tray *component.Component) *pb.PowerTaskDetailsList {
-	result := &pb.PowerTaskDetailsList{}
-	if tray.RackID == uuid.Nil {
-		code := pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_NOT_LINKED
-		result.Error = &code
+	tasks, result := rs.readRackPowerTasks(ctx, tray.RackID)
+	if result.Error != nil {
 		return result
 	}
-	tasks, err := rs.taskStore.ListPowerTasksForRack(ctx, tray.RackID)
+	entries := result.Entries
+	result.Entries = nil
+	for i, task := range tasks {
+		relevance := task.RelevanceFor(tray.Info.ID, tray.Type)
+		if relevance == taskdef.PowerTaskUnrelated {
+			continue
+		}
+		entry := entries[i]
+		entry.Relevance = pb.PowerTaskRelevance_POWER_TASK_RELEVANCE_SELECTED
+		if relevance == taskdef.PowerTaskRackAffected {
+			entry.Relevance = pb.PowerTaskRelevance_POWER_TASK_RELEVANCE_RACK_AFFECTED
+		}
+		result.Entries = append(result.Entries, entry)
+	}
+	return result
+}
+
+// readRackPowerTasks converts one bounded rack read and attaches waiting context.
+// Domain records and protobuf entries retain matching order so the tray caller
+// can apply relevance without reconstructing targets from protobuf values.
+func (rs *FlowServerImpl) readRackPowerTasks(ctx context.Context, rackID uuid.UUID) ([]taskdef.PowerTaskDetails, *pb.PowerTaskDetailsList) {
+	result := &pb.PowerTaskDetailsList{}
+	if rackID == uuid.Nil {
+		code := pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_NOT_LINKED
+		result.Error = &code
+		return nil, result
+	}
+	tasks, err := rs.taskStore.ListPowerTasksForRack(ctx, rackID)
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	}
@@ -256,38 +281,41 @@ func (rs *FlowServerImpl) readFlowPowerTasks(ctx context.Context, tray *componen
 			code = pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED
 		}
 		result.Error = &code
-		return result
+		return nil, result
 	}
 
 	for _, task := range tasks {
-		relevance := task.RelevanceFor(tray.Info.ID, tray.Type)
-		if relevance == taskdef.PowerTaskUnrelated {
-			continue
-		}
-		operation, err := protobuf.TaskOperationTo(&task.Operation)
+		entry, err := powerTaskDetailsToProto(task)
 		if err != nil {
 			code := pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_INVALID_RESPONSE
-			return &pb.PowerTaskDetailsList{Error: &code}
-		}
-		entry := &pb.PowerTaskDetails{
-			Id:        protobuf.UUIDTo(task.ID),
-			RackId:    protobuf.UUIDTo(task.RackID),
-			Operation: operation,
-			Targets:   protobuf.ComponentsByTypeTo(task.Attributes.ComponentsByType),
-			Status:    protobuf.TaskStatusTo(task.Status),
-			CreatedAt: timestamppb.New(task.CreatedAt),
-			UpdatedAt: timestamppb.New(task.UpdatedAt),
-			Relevance: pb.PowerTaskRelevance_POWER_TASK_RELEVANCE_SELECTED,
-		}
-		if relevance == taskdef.PowerTaskRackAffected {
-			entry.Relevance = pb.PowerTaskRelevance_POWER_TASK_RELEVANCE_RACK_AFFECTED
-		}
-		if task.StartedAt != nil {
-			entry.StartedAt = timestamppb.New(*task.StartedAt)
+			return nil, &pb.PowerTaskDetailsList{Error: &code}
 		}
 		result.Entries = append(result.Entries, entry)
 	}
-	return result
+	rs.addPowerTaskWaitingContext(ctx, rackID, tasks, result.Entries)
+	return tasks, result
+}
+
+// powerTaskDetailsToProto retains recorded targets and timestamps without
+// assigning tray relevance, which depends on the member being displayed.
+func powerTaskDetailsToProto(task taskdef.PowerTaskDetails) (*pb.PowerTaskDetails, error) {
+	operation, err := protobuf.TaskOperationTo(&task.Operation)
+	if err != nil {
+		return nil, err
+	}
+	entry := &pb.PowerTaskDetails{
+		Id:        protobuf.UUIDTo(task.ID),
+		RackId:    protobuf.UUIDTo(task.RackID),
+		Operation: operation,
+		Targets:   protobuf.ComponentsByTypeTo(task.Attributes.ComponentsByType),
+		Status:    protobuf.TaskStatusTo(task.Status),
+		CreatedAt: timestamppb.New(task.CreatedAt),
+		UpdatedAt: timestamppb.New(task.UpdatedAt),
+	}
+	if task.StartedAt != nil {
+		entry.StartedAt = timestamppb.New(*task.StartedAt)
+	}
+	return entry, nil
 }
 
 // powerDetailsReadError exposes a bounded category instead of dependency text.
@@ -301,11 +329,12 @@ func powerDetailsReadError(err error) pb.PowerDetailsReadError {
 	return pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_READ_FAILED
 }
 
-// boundPowerDetailsResponse keeps the whole task list or marks it unavailable;
-// it never hides selected targets by truncating a task. JSON wrapper encoding
-// matters because its HTML escaping can expand strings beyond protojson's size.
+// boundPowerDetailsResponse drops waiting-context references before making the
+// task list unavailable, so optional context does not hide primary power tasks.
+// Selected targets are never truncated. JSON wrapper encoding matters because
+// its HTML escaping can expand strings beyond protojson's size.
 func boundPowerDetailsResponse(response *pb.GetTrayPowerDetailsResponse) error {
-	for range 2 {
+	for attempt := range 3 {
 		message, err := protojson.Marshal(response)
 		if err != nil {
 			return status.Error(codes.Internal, "power details could not be encoded")
@@ -318,7 +347,23 @@ func boundPowerDetailsResponse(response *pb.GetTrayPowerDetailsResponse) error {
 			return nil
 		}
 		code := pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED
-		response.Details.Operations.Tasks = &pb.PowerTaskDetailsList{Error: &code}
+		switch attempt {
+		case 0:
+			// Keep the primary tasks while removing optional references. Empty
+			// contexts and earlier read failures still mean what they did before.
+			for _, task := range response.GetDetails().GetOperations().GetTasks().GetEntries() {
+				waitingContext := task.GetWaitingContext()
+				if waitingContext == nil || waitingContext.Error != nil ||
+					(len(waitingContext.ActiveConflicts) == 0 && len(waitingContext.EarlierWaiting) == 0) {
+					continue
+				}
+				task.WaitingContext = &pb.PowerTaskWaitingContext{Error: &code}
+			}
+		case 1:
+			// If primary tasks still do not fit, retain Core facts and report
+			// the task section as unavailable rather than dropping any targets.
+			response.Details.Operations.Tasks = &pb.PowerTaskDetailsList{Error: &code}
+		}
 	}
 	return status.Error(codes.ResourceExhausted, "power details exceed the response size limit")
 }
