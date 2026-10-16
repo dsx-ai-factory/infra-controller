@@ -4,13 +4,17 @@
 package sku
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
@@ -52,6 +56,8 @@ func TestManageSku_UpdateSkusInDB(t *testing.T) {
 		{name: "failed inventory skips reconciliation", run: testManageSkuInventoryStatusFailedSkipsReconciliation},
 		{name: "paged deletion", run: testManageSkuPagedDeletion},
 		{name: "update respects freshness", run: testManageSkuUpdateRespectsStaleInventoryThreshold},
+		{name: "edit committed before update survives", run: testManageSkuEditBeforeUpdateSurvives},
+		{name: "update error allows other updates and a later retry", run: testManageSkuUpdateErrorContinuesAndRetries},
 		{name: "deletion respects freshness", run: testManageSkuDeletionRespectsStaleInventoryThreshold},
 		{name: "edit committed before deletion survives", run: testManageSkuEditBeforeDeletionSurvives},
 		{name: "delete error allows other deletions and a later retry", run: testManageSkuDeleteErrorContinuesAndRetries},
@@ -59,6 +65,184 @@ func TestManageSku_UpdateSkusInDB(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, tc.run)
 	}
+}
+
+// testSkuBeforeUpdateHook acts at the SQL write boundary, after any eligibility
+// reads, so an unprotected reread cannot satisfy the concurrent-edit test.
+type testSkuBeforeUpdateHook struct {
+	rowID        string
+	beforeUpdate func()
+	fired        bool
+	err          error
+}
+
+func (h *testSkuBeforeUpdateHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !h.fired && event.Operation() == "UPDATE" && strings.Contains(event.Query, `UPDATE "sku"`) && strings.Contains(event.Query, h.rowID) {
+		h.fired = true
+		if h.beforeUpdate != nil {
+			h.beforeUpdate()
+		}
+	}
+	return ctx
+}
+
+func (h *testSkuBeforeUpdateHook) AfterQuery(ctx context.Context, event *bun.QueryEvent) {
+	if event.Operation() == "UPDATE" && strings.Contains(event.Query, `UPDATE "sku"`) && strings.Contains(event.Query, h.rowID) {
+		h.err = event.Err
+	}
+}
+
+func testManageSkuEditBeforeUpdateSurvives(t *testing.T) {
+	// Bound the competing write if a regression leaves inventory holding a row lock.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = config.GetTestConfig()
+	dbSession := cwu.TestInitDB(t)
+	defer dbSession.Close()
+	cwu.TestSetupSchema(t, dbSession)
+
+	ipOrg := "test-ip-org"
+	ipu := cwu.TestBuildUser(t, dbSession, uuid.NewString(), []string{ipOrg}, []string{"FORGE_PROVIDER_ADMIN"})
+	ip := cwu.TestBuildInfrastructureProvider(t, dbSession, "test-provider", ipOrg, ipu)
+	site := cwu.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, nil, ipu)
+	dao := cdbm.NewSkuDAO(dbSession)
+	row, err := dao.Create(ctx, nil, cdbm.SkuCreateInput{
+		SkuID:         "sku-concurrent-update",
+		SiteID:        site.ID,
+		Description:   "original description",
+		Created:       cutil.GetPtr(time.Date(2025, time.January, 2, 3, 4, 5, 0, time.UTC)),
+		SchemaVersion: 1,
+		DeviceType:    cutil.GetPtr("gpu-server"),
+		Components: &cdbm.SkuComponents{SkuComponents: &corev1.SkuComponents{
+			Chassis: &corev1.SkuComponentChassis{Model: "DGX"},
+		}},
+		AssociatedMachineIds: []string{"machine-original"},
+	})
+	require.NoError(t, err)
+	companion, err := dao.Create(ctx, nil, cdbm.SkuCreateInput{
+		SkuID: "sku-continue-update", SiteID: site.ID, Description: "original companion description",
+	})
+	require.NoError(t, err)
+	ageSku(ctx, t, dbSession, row.ID)
+	ageSku(ctx, t, dbSession, companion.ID)
+	beforeRead, err := dao.Get(ctx, nil, row.ID)
+	require.NoError(t, err)
+	require.False(t, site.IsTimeWithinStaleInventoryThreshold(beforeRead.Updated))
+
+	var newer *cdbm.SKU
+	var writeErr error
+	hook := &testSkuBeforeUpdateHook{rowID: row.ID, beforeUpdate: func() {
+		newer, writeErr = dao.Update(ctx, nil, cdbm.SkuUpdateInput{
+			SkuID:       row.ID,
+			Description: cutil.GetPtr("saved REST description"),
+		})
+	}}
+	dbSession.DB.AddQueryHook(hook)
+	inventory := &corev1.SkuInventory{
+		InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		Skus: []*corev1.Sku{
+			{
+				Id:            row.ID,
+				Description:   cutil.GetPtr("older inventory description"),
+				Created:       timestamppb.New(row.Created.Add(-time.Hour)),
+				SchemaVersion: 2,
+				DeviceType:    cutil.GetPtr("compute"),
+			},
+			{Id: companion.ID, Description: cutil.GetPtr("inventory companion description")},
+		},
+	}
+	ms := NewManageSku(dbSession, cwu.TestTemporalSiteClientPool(t))
+	err = ms.UpdateSkusInDB(ctx, site.ID, inventory)
+	require.True(t, hook.fired)
+	require.NoError(t, hook.err)
+	require.NoError(t, writeErr)
+	require.NoError(t, err)
+	require.NotNil(t, newer)
+	require.True(t, newer.Updated.After(beforeRead.Updated))
+	stored, err := dao.Get(ctx, nil, row.ID)
+	require.NoError(t, err)
+	assert.Equal(t, newer, stored, "every field and the REST write timestamp must survive")
+	stored, err = dao.Get(ctx, nil, companion.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "inventory companion description", stored.Description)
+}
+
+func testManageSkuUpdateErrorContinuesAndRetries(t *testing.T) {
+	ctx := context.Background()
+	_ = config.GetTestConfig()
+	dbSession := cwu.TestInitDB(t)
+	defer dbSession.Close()
+	cwu.TestSetupSchema(t, dbSession)
+
+	ipOrg := "test-ip-org"
+	ipu := cwu.TestBuildUser(t, dbSession, uuid.NewString(), []string{ipOrg}, []string{"FORGE_PROVIDER_ADMIN"})
+	ip := cwu.TestBuildInfrastructureProvider(t, dbSession, "test-provider", ipOrg, ipu)
+	site := cwu.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, nil, ipu)
+	dao := cdbm.NewSkuDAO(dbSession)
+	row, err := dao.Create(ctx, nil, cdbm.SkuCreateInput{
+		SkuID: "sku-failed-update", SiteID: site.ID, Description: "original description",
+	})
+	require.NoError(t, err)
+	companion, err := dao.Create(ctx, nil, cdbm.SkuCreateInput{
+		SkuID: "sku-continue-update", SiteID: site.ID, Description: "original companion description",
+	})
+	require.NoError(t, err)
+	ageSku(ctx, t, dbSession, row.ID)
+	ageSku(ctx, t, dbSession, companion.ID)
+	beforeUpdate, err := dao.Get(ctx, nil, row.ID)
+	require.NoError(t, err)
+
+	_, err = dbSession.DB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION fail_sku_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected database failure'; END $$`)
+	require.NoError(t, err)
+	defer func() {
+		_, cleanupErr := dbSession.DB.ExecContext(ctx, "DROP FUNCTION fail_sku_update() CASCADE")
+		require.NoError(t, cleanupErr)
+	}()
+	_, err = dbSession.DB.ExecContext(ctx, fmt.Sprintf("CREATE TRIGGER fail_update BEFORE UPDATE ON sku FOR EACH ROW WHEN (OLD.id = '%s') EXECUTE FUNCTION fail_sku_update()", row.ID))
+	require.NoError(t, err)
+	_, err = dao.Update(ctx, nil, cdbm.SkuUpdateInput{
+		SkuID: row.ID, ExpectedUpdated: &beforeUpdate.Updated, Description: cutil.GetPtr("inventory description"),
+	})
+	require.ErrorContains(t, err, "injected database failure")
+	require.NotErrorIs(t, err, cdb.ErrDoesNotExist)
+	hook := &testSkuBeforeUpdateHook{rowID: row.ID}
+	dbSession.DB.AddQueryHook(hook)
+	inventory := &corev1.SkuInventory{
+		InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		Skus: []*corev1.Sku{
+			{Id: row.ID, Description: cutil.GetPtr("inventory description")},
+			{Id: companion.ID, Description: cutil.GetPtr("inventory companion description")},
+		},
+	}
+	ms := NewManageSku(dbSession, cwu.TestTemporalSiteClientPool(t))
+	var logOutput bytes.Buffer
+	originalLogger := log.Logger
+	log.Logger = zerolog.New(&logOutput).Level(zerolog.ErrorLevel)
+	t.Cleanup(func() { log.Logger = originalLogger })
+	err = ms.UpdateSkusInDB(ctx, site.ID, inventory)
+	log.Logger = originalLogger
+	require.NoError(t, err)
+	var failure map[string]any
+	require.NoError(t, json.Unmarshal(logOutput.Bytes(), &failure))
+	assert.Equal(t, "error", failure["level"])
+	assert.Equal(t, "UpdateSkusInDB", failure["Activity"])
+	assert.Contains(t, failure["error"], "injected database failure")
+	require.True(t, hook.fired)
+	require.ErrorContains(t, hook.err, "injected database failure")
+	stored, err := dao.Get(ctx, nil, row.ID)
+	require.NoError(t, err)
+	assert.Equal(t, beforeUpdate, stored)
+	stored, err = dao.Get(ctx, nil, companion.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "inventory companion description", stored.Description)
+
+	// A later inventory retries the row once the database accepts writes.
+	_, err = dbSession.DB.ExecContext(ctx, "DROP TRIGGER fail_update ON sku")
+	require.NoError(t, err)
+	require.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inventory))
+	stored, err = dao.Get(ctx, nil, row.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "inventory description", stored.Description)
 }
 
 func testManageSkuReconcileCreateUpdateDelete(t *testing.T) {

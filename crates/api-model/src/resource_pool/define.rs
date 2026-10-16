@@ -14,6 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::num::ParseIntError;
+
 use serde::{Deserialize, Serialize};
 
 /// `ResourcePoolConfig` adds allocator selection to a pool definition without
@@ -101,6 +103,17 @@ pub struct Range {
     pub auto_assign: bool,
 }
 
+/// `parse_integer_range_bound` reads a signed 64-bit endpoint from a pool
+/// definition. Decimal and case-insensitive `0x` hexadecimal forms preserve
+/// Integrated's accepted syntax, including repeated `0x` prefixes and signs
+/// after those prefixes. Whitespace and values outside `i64` return the parser
+/// error.
+pub fn parse_integer_range_bound(value: &str) -> Result<i64, ParseIntError> {
+    let value = value.to_lowercase();
+    let radix = if value.starts_with("0x") { 16 } else { 10 };
+    i64::from_str_radix(value.trim_start_matches("0x"), radix)
+}
+
 #[derive(Debug, Deserialize, Serialize, Copy, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ResourcePoolType {
@@ -120,6 +133,25 @@ mod tests {
     use carbide_test_support::scenarios;
 
     use super::*;
+
+    #[test]
+    fn integer_range_bounds_preserve_integrated_syntax() {
+        scenarios!(
+            run = |value| parse_integer_range_bound(value).map_err(drop);
+            "accepted hexadecimal spellings" {
+                "0X10" => Yields(16),
+                "0x0x20" => Yields(32),
+                "0x-1" => Yields(-1),
+            }
+            "sign before hexadecimal prefix is invalid" {
+                "-0x1" => Fails,
+            }
+            "whitespace and values outside i64 are invalid" {
+                " 1" => Fails,
+                "9223372036854775808" => Fails,
+            }
+        );
+    }
 
     #[test]
     fn pool_config_accepts_flat_selectors_and_legacy_defaults() {

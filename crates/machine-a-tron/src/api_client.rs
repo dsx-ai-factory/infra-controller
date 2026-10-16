@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 
 use base64::prelude::*;
-use bmc_mock::{DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME, MachineInfo};
+use bmc_mock::{DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME, DUMMY_NVOS_USERNAME, MachineInfo};
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineInterfaceId};
 use carbide_uuid::machine_validation::MachineValidationId;
@@ -57,9 +57,6 @@ pub struct MockDiscoveryData {
     pub machine_interface_id: MachineInterfaceId,
     pub tpm_ek_certificate: Option<Vec<u8>>,
 }
-
-const DUMMY_NVOS_USERNAME: &str = "admin";
-const DUMMY_NVOS_PASSWORD: &str = "factory_password";
 
 #[derive(Debug, Clone)]
 pub struct ApiClient(pub ForgeApiClient);
@@ -558,8 +555,10 @@ impl ApiClient {
                 bmc_username: DUMMY_FACTORY_USERNAME.to_string(),
                 bmc_password: DUMMY_FACTORY_PASSWORD.to_string(),
                 switch_serial_number,
+                // The credentials the simulated switch's NVOS accepts until
+                // NICo rotates them.
                 nvos_username: Some(DUMMY_NVOS_USERNAME.to_string()),
-                nvos_password: Some(DUMMY_NVOS_PASSWORD.to_string()),
+                nvos_password: Some(DUMMY_FACTORY_PASSWORD.to_string()),
                 bmc_ip_address: String::new(),
                 nvos_ip_address: None,
                 metadata: None,

@@ -103,7 +103,13 @@ impl LockdownManager {
         Self { runner }
     }
 
-    // lock_device locks hardware access on the specified device with the provided key.
+    /// lock_device locks hardware access on the specified device with the provided key.
+    ///
+    /// Key validation, dry-run behavior, and command errors follow
+    /// [`FlintRunner::disable_hw_access`]. Returns [`LockStatus::Locked`] on success or
+    /// [`MlxError::AlreadyLocked`] when flint reports access already disabled.
+    /// Returns [`MlxError::InvalidDeviceId`] if the device identifier is empty or
+    /// contains an ASCII space.
     pub fn lock_device(&self, device_id: &str, key: &str) -> MlxResult<LockStatus> {
         FlintRunner::validate_device_id(device_id)?;
 
@@ -112,7 +118,13 @@ impl LockdownManager {
         Ok(LockStatus::Locked)
     }
 
-    // unlock_device unlocks hardware access on the specified device with the provided key.
+    /// unlock_device unlocks hardware access on the specified device with the provided key.
+    ///
+    /// Key validation, dry-run behavior, and command errors follow
+    /// [`FlintRunner::enable_hw_access`]. Returns [`LockStatus::Unlocked`] on success or
+    /// [`MlxError::AlreadyUnlocked`] when flint reports access already enabled.
+    /// Returns [`MlxError::InvalidDeviceId`] if the device identifier is empty or
+    /// contains an ASCII space.
     pub fn unlock_device(&self, device_id: &str, key: &str) -> MlxResult<LockStatus> {
         FlintRunner::validate_device_id(device_id)?;
 
@@ -143,7 +155,11 @@ impl LockdownManager {
         }
     }
 
-    // set_device_key sets a new hardware access key for the device.
+    /// set_device_key sets a new hardware access key for the device.
+    ///
+    /// Key validation, dry-run behavior, and command errors follow [`FlintRunner::set_key`].
+    /// Returns [`MlxError::InvalidDeviceId`] if the device identifier is empty or
+    /// contains an ASCII space. This method does not return [`MlxError::AlreadyLocked`].
     pub fn set_device_key(&self, device_id: &str, key: &str) -> MlxResult<()> {
         FlintRunner::validate_device_id(device_id)?;
         self.runner.set_key(device_id, key)

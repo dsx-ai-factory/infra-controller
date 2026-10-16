@@ -898,6 +898,19 @@ pub struct PersistedDevice {
     /// Portable BMC state. Power shelves do not populate this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bmc_state: Option<bmc_mock::persistence::PersistedBmcState>,
+    /// A switch's NVOS administrator as the last completed password rotation
+    /// left it, so a restart keeps accepting what NICo stores. Only a switch
+    /// whose profile serves an NVOS populates this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nvos_admin: Option<PersistedNvosAdmin>,
+}
+
+/// The NVOS user a switch's NVUE API authenticates, with the password a
+/// rotation last set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedNvosAdmin {
+    pub username: String,
+    pub password: String,
 }
 
 impl PersistedDevice {
@@ -2140,6 +2153,7 @@ server_address = "127.0.0.1:6767""#,
             hw_mac_addr_pool: None,
             active_host_firmware: None,
             bmc_state: None,
+            nvos_admin: None,
         }
     }
 

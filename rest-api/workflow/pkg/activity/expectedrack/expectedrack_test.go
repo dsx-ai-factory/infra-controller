@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -82,6 +83,44 @@ func testExpectedRackSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	assert.Nil(t, err)
 }
 
+type testExpectedRackInventoryContextKey struct{}
+
+type testExpectedRackInventoryHook struct {
+	afterRead    func()
+	afterUpdate  func(error)
+	beforeCommit func()
+	rowID        uuid.UUID
+}
+
+func (h *testExpectedRackInventoryHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if ctx.Value(testExpectedRackInventoryContextKey{}) == h && event.Operation() == "COMMIT" && h.beforeCommit != nil {
+		beforeCommit := h.beforeCommit
+		h.beforeCommit = nil
+		beforeCommit()
+	}
+	return ctx
+}
+
+func (h *testExpectedRackInventoryHook) AfterQuery(ctx context.Context, event *bun.QueryEvent) {
+	if ctx.Value(testExpectedRackInventoryContextKey{}) != h {
+		return
+	}
+	if event.Operation() == "UPDATE" && h.afterUpdate != nil && strings.Contains(event.Query, `UPDATE "expected_rack"`) &&
+		(h.rowID == uuid.Nil || strings.Contains(event.Query, h.rowID.String())) {
+		h.afterUpdate(event.Err)
+	}
+	if h.afterRead == nil || event.Err != nil || event.Operation() != "SELECT" ||
+		strings.HasPrefix(event.Query, "SELECT count(") || !strings.Contains(event.Query, `FROM "expected_rack"`) {
+		return
+	}
+	if h.rowID != uuid.Nil && !strings.Contains(event.Query, h.rowID.String()) {
+		return
+	}
+	afterRead := h.afterRead
+	h.afterRead = nil
+	afterRead()
+}
+
 type testExpectedRackBeforeDeleteHook struct {
 	rowID        uuid.UUID
 	beforeDelete func()
@@ -112,6 +151,321 @@ func TestManageExpectedRack_UpdateExpectedRacksInDB(t *testing.T) {
 	}{
 		{name: "matching inventory preserves Updated", run: testExpectedRackInventoryNoChange},
 		{name: "recent write survives missing inventory", run: testExpectedRackInventoryRecentWrite},
+		{
+			name: "REST write after inventory read preserves the entire newer row",
+			run: func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				dbSession := testExpectedRackInitDB(t)
+				defer dbSession.Close()
+				testExpectedRackSetupSchema(t, dbSession)
+				ipu := cwu.TestBuildUser(t, dbSession, uuid.NewString(), []string{"test-provider-org"}, []string{"FORGE_PROVIDER_ADMIN"})
+				ip := cwu.TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-provider-org", ipu)
+				site := cwu.TestBuildSite(t, dbSession, ip, "concurrent-update-site", cdbm.SiteStatusRegistered, nil, ipu)
+				erDAO := cdbm.NewExpectedRackDAO(dbSession)
+				row, err := erDAO.Create(ctx, nil, cdbm.ExpectedRackCreateInput{
+					ExpectedRackID: uuid.New(),
+					SiteID:         site.ID,
+					RackID:         "concurrent-update",
+					RackProfileID:  "profile-original",
+					RackGroupID:    cutil.GetPtr("group-original"),
+					Name:           "original-name",
+					Description:    "original-description",
+					Labels:         map[string]string{"location": "original"},
+					CreatedBy:      ipu.ID,
+				})
+				require.NoError(t, err)
+				companion, err := erDAO.Create(ctx, nil, cdbm.ExpectedRackCreateInput{
+					ExpectedRackID: uuid.New(),
+					SiteID:         site.ID,
+					RackID:         "continue-update",
+					RackProfileID:  "profile-original",
+					Name:           "original-companion",
+					CreatedBy:      ipu.ID,
+				})
+				require.NoError(t, err)
+				cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedRack)(nil))
+				companion, err = erDAO.Get(ctx, nil, companion.ID, nil, false)
+				require.NoError(t, err)
+				beforeRead, err := erDAO.Get(ctx, nil, row.ID, nil, false)
+				require.NoError(t, err)
+				require.False(t, site.IsTimeWithinStaleInventoryThreshold(beforeRead.Updated))
+
+				// Commit the same metadata write REST makes after inventory has
+				// cached the old row, before it decides whether to update it.
+				var newer *cdbm.ExpectedRack
+				var writeErr error
+				fired := false
+				hook := &testExpectedRackInventoryHook{afterRead: func() {
+					fired = true
+					newer, writeErr = cdb.WithTxResult(ctx, dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedRack, error) {
+						return erDAO.Update(ctx, tx, cdbm.ExpectedRackUpdateInput{
+							ExpectedRackID: row.ID,
+							Name:           cutil.GetPtr("REST-name"),
+							Description:    cutil.GetPtr("REST-description"),
+							Labels:         map[string]string{"location": "REST"},
+						})
+					})
+				}}
+				dbSession.DB.AddQueryHook(hook)
+				inventory := &corev1.ExpectedRackInventory{
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+					ExpectedRacks: []*corev1.ExpectedRack{{
+						RackId:        &corev1.RackId{Id: row.RackID},
+						RackProfileId: &corev1.RackProfileId{Id: "profile-inventory"},
+						RackGroupId:   &corev1.RackGroupId{Id: "group-inventory"},
+						Metadata: &corev1.Metadata{
+							Name:        "inventory-name",
+							Description: "inventory-description",
+							Labels:      []*corev1.Label{{Key: "location", Value: cutil.GetPtr("inventory")}},
+						},
+					}, {
+						RackId:        &corev1.RackId{Id: companion.RackID},
+						RackProfileId: &corev1.RackProfileId{Id: companion.RackProfileID},
+						Metadata:      &corev1.Metadata{Name: "inventory-companion", Description: "inventory-companion-description"},
+					}},
+				}
+				mer := ManageExpectedRack{dbSession: dbSession}
+				err = mer.UpdateExpectedRacksInDB(context.WithValue(ctx, testExpectedRackInventoryContextKey{}, hook), site.ID, inventory)
+				require.NoError(t, err)
+				require.True(t, fired)
+				require.NoError(t, writeErr)
+				require.True(t, newer.Updated.After(beforeRead.Updated))
+				stored, err := erDAO.Get(ctx, nil, row.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, newer, stored, "the complete REST row, including its Updated timestamp, must survive")
+				storedCompanion, err := erDAO.Get(ctx, nil, companion.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, "inventory-companion", storedCompanion.Name)
+				assert.True(t, storedCompanion.Updated.After(companion.Updated))
+			},
+		},
+		{
+			name: "REST write waits until inventory commits",
+			run: func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				dbSession := testExpectedRackInitDB(t)
+				defer dbSession.Close()
+				testExpectedRackSetupSchema(t, dbSession)
+				ipu := cwu.TestBuildUser(t, dbSession, uuid.NewString(), []string{"test-provider-org"}, []string{"FORGE_PROVIDER_ADMIN"})
+				ip := cwu.TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-provider-org", ipu)
+				site := cwu.TestBuildSite(t, dbSession, ip, "locked-update-site", cdbm.SiteStatusRegistered, nil, ipu)
+				erDAO := cdbm.NewExpectedRackDAO(dbSession)
+				row, err := erDAO.Create(ctx, nil, cdbm.ExpectedRackCreateInput{
+					ExpectedRackID: uuid.New(),
+					SiteID:         site.ID,
+					RackID:         "locked-update",
+					RackProfileID:  "profile-original",
+					Name:           "original-name",
+					Description:    "original-description",
+					CreatedBy:      ipu.ID,
+				})
+				require.NoError(t, err)
+				cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedRack)(nil))
+
+				readReached, commitReached := make(chan struct{}), make(chan struct{})
+				continueRead, continueCommit := make(chan struct{}), make(chan struct{})
+				releaseRead := sync.OnceFunc(func() { close(continueRead) })
+				releaseCommit := sync.OnceFunc(func() { close(continueCommit) })
+				var workers sync.WaitGroup
+				defer func() {
+					releaseRead()
+					releaseCommit()
+					cancel()
+					workers.Wait()
+				}()
+				inventoryWritten := false
+				hook := &testExpectedRackInventoryHook{
+					rowID: row.ID,
+					afterUpdate: func(err error) {
+						inventoryWritten = err == nil
+					},
+					afterRead: func() {
+						close(readReached)
+						select {
+						case <-continueRead:
+						case <-ctx.Done():
+						}
+					},
+					beforeCommit: func() {
+						close(commitReached)
+						select {
+						case <-continueCommit:
+						case <-ctx.Done():
+						}
+					},
+				}
+				dbSession.DB.AddQueryHook(hook)
+				inventory := &corev1.ExpectedRackInventory{
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+					ExpectedRacks: []*corev1.ExpectedRack{{
+						RackId:        &corev1.RackId{Id: row.RackID},
+						RackProfileId: &corev1.RackProfileId{Id: row.RackProfileID},
+						Metadata:      &corev1.Metadata{Name: "inventory-name", Description: "inventory-description"},
+					}},
+				}
+				mer := ManageExpectedRack{dbSession: dbSession}
+				var activityErr, writerErr error
+				workers.Go(func() {
+					activityErr = mer.UpdateExpectedRacksInDB(context.WithValue(ctx, testExpectedRackInventoryContextKey{}, hook), site.ID, inventory)
+				})
+				select {
+				case <-readReached:
+				case <-ctx.Done():
+					t.Fatal("inventory did not reach its row reload: ", ctx.Err())
+				}
+
+				writerReady := make(chan int, 1)
+				workers.Go(func() {
+					writerErr = cdb.WithTx(ctx, dbSession, func(tx *cdb.Tx) error {
+						var pid int
+						err := tx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &pid)
+						if err != nil {
+							return err
+						}
+						writerReady <- pid
+						_, err = erDAO.Update(ctx, tx, cdbm.ExpectedRackUpdateInput{
+							ExpectedRackID: row.ID,
+							Name:           cutil.GetPtr("REST-name"),
+						})
+						return err
+					})
+				})
+				var writerPID int
+				select {
+				case writerPID = <-writerReady:
+				case <-ctx.Done():
+					t.Fatal("REST writer did not start: ", ctx.Err())
+				}
+				assertWriterBlocked := func() {
+					t.Helper()
+					require.Eventually(t, func() bool {
+						var blockers int
+						err := dbSession.DB.NewSelect().ColumnExpr("cardinality(pg_blocking_pids(?))", writerPID).Scan(ctx, &blockers)
+						return err == nil && blockers > 0
+					}, 5*time.Second, 10*time.Millisecond, "REST write did not wait for inventory")
+				}
+				assertWriterBlocked()
+				releaseRead()
+				select {
+				case <-commitReached:
+				case <-ctx.Done():
+					t.Fatal("inventory did not reach commit: ", ctx.Err())
+				}
+				require.True(t, inventoryWritten, "inventory must write before committing its row lock")
+				// The lock must still protect the row after inventory writes it.
+				assertWriterBlocked()
+				releaseCommit()
+				workers.Wait()
+				require.NoError(t, activityErr)
+				require.NoError(t, writerErr)
+				stored, err := erDAO.Get(ctx, nil, row.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, "REST-name", stored.Name)
+				assert.Equal(t, "inventory-description", stored.Description)
+			},
+		},
+		{
+			name: "update failure rolls back the row, continues, and retries on later inventory",
+			run: func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				dbSession := testExpectedRackInitDB(t)
+				defer dbSession.Close()
+				testExpectedRackSetupSchema(t, dbSession)
+				ipu := cwu.TestBuildUser(t, dbSession, uuid.NewString(), []string{"test-provider-org"}, []string{"FORGE_PROVIDER_ADMIN"})
+				ip := cwu.TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-provider-org", ipu)
+				site := cwu.TestBuildSite(t, dbSession, ip, "failed-update-site", cdbm.SiteStatusRegistered, nil, ipu)
+				erDAO := cdbm.NewExpectedRackDAO(dbSession)
+				row, err := erDAO.Create(ctx, nil, cdbm.ExpectedRackCreateInput{
+					ExpectedRackID: uuid.New(),
+					SiteID:         site.ID,
+					RackID:         "failed-update",
+					RackProfileID:  "profile-original",
+					RackGroupID:    cutil.GetPtr("group-original"),
+					Name:           "original-name",
+					Description:    "original-description",
+					Labels:         map[string]string{"location": "original"},
+					CreatedBy:      ipu.ID,
+				})
+				require.NoError(t, err)
+				companion, err := erDAO.Create(ctx, nil, cdbm.ExpectedRackCreateInput{
+					ExpectedRackID: uuid.New(),
+					SiteID:         site.ID,
+					RackID:         "continue-after-failure",
+					RackProfileID:  "profile-original",
+					CreatedBy:      ipu.ID,
+				})
+				require.NoError(t, err)
+				cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedRack)(nil))
+				before, err := erDAO.Get(ctx, nil, row.ID, nil, false)
+				require.NoError(t, err)
+
+				// Fail the second DAO UPDATE, after metadata and `Updated` were written.
+				_, err = dbSession.DB.ExecContext(ctx, `CREATE FUNCTION fail_expected_rack_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected rack-group update failure'; END $$`)
+				require.NoError(t, err)
+				defer func() {
+					_, cleanupErr := dbSession.DB.ExecContext(ctx, "DROP FUNCTION fail_expected_rack_update() CASCADE")
+					require.NoError(t, cleanupErr)
+				}()
+				_, err = dbSession.DB.ExecContext(ctx, fmt.Sprintf("CREATE TRIGGER fail_update BEFORE UPDATE OF rack_group_id ON expected_rack FOR EACH ROW WHEN (OLD.id = '%s') EXECUTE FUNCTION fail_expected_rack_update()", row.ID))
+				require.NoError(t, err)
+				var updateErr error
+				successfulUpdates := 0
+				hook := &testExpectedRackInventoryHook{
+					rowID: row.ID,
+					afterUpdate: func(err error) {
+						if err != nil {
+							updateErr = err
+							return
+						}
+						successfulUpdates++
+					},
+				}
+				dbSession.DB.AddQueryHook(hook)
+				inventory := &corev1.ExpectedRackInventory{
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+					ExpectedRacks: []*corev1.ExpectedRack{{
+						RackId:        &corev1.RackId{Id: row.RackID},
+						RackProfileId: &corev1.RackProfileId{Id: "profile-inventory"},
+						RackGroupId:   &corev1.RackGroupId{Id: "group-inventory"},
+						Metadata: &corev1.Metadata{
+							Name:        "inventory-name",
+							Description: "inventory-description",
+							Labels:      []*corev1.Label{{Key: "location", Value: cutil.GetPtr("inventory")}},
+						},
+					}, {
+						RackId:        &corev1.RackId{Id: companion.RackID},
+						RackProfileId: &corev1.RackProfileId{Id: companion.RackProfileID},
+						Metadata:      &corev1.Metadata{Name: "inventory-companion", Description: "inventory-companion-description"},
+					}},
+				}
+				mer := ManageExpectedRack{dbSession: dbSession}
+				inventoryCtx := context.WithValue(ctx, testExpectedRackInventoryContextKey{}, hook)
+				require.NoError(t, mer.UpdateExpectedRacksInDB(inventoryCtx, site.ID, inventory))
+				require.Equal(t, 1, successfulUpdates)
+				require.ErrorContains(t, updateErr, "injected rack-group update failure")
+				stored, err := erDAO.Get(ctx, nil, row.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, before, stored, "the failed group update must roll back metadata and Updated too")
+				storedCompanion, err := erDAO.Get(ctx, nil, companion.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, "inventory-companion", storedCompanion.Name)
+
+				_, err = dbSession.DB.ExecContext(ctx, "DROP TRIGGER fail_update ON expected_rack")
+				require.NoError(t, err)
+				require.NoError(t, mer.UpdateExpectedRacksInDB(inventoryCtx, site.ID, inventory))
+				stored, err = erDAO.Get(ctx, nil, row.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, "profile-inventory", stored.RackProfileID)
+				assert.Equal(t, cutil.GetPtr("group-inventory"), stored.RackGroupID)
+				assert.Equal(t, "inventory-name", stored.Name)
+				assert.Equal(t, "inventory-description", stored.Description)
+				assert.Equal(t, cdbm.Labels{"location": "inventory"}, stored.Labels)
+				assert.True(t, stored.Updated.After(before.Updated))
+			},
+		},
 		{
 			name: "API write after inventory read survives deletion",
 			run: func(t *testing.T) {

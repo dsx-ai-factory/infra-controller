@@ -49,6 +49,17 @@ pub trait RmsInventory: Send + Sync + 'static {
     /// rules as a Redfish request. An `Err` carries the host's reason and
     /// becomes a per-node failure.
     fn set_power(&self, bmc_mac: MacAddress, op: PowerOperation) -> eyre::Result<()>;
+
+    /// Give the NVOS user `username` of the switch whose BMC has this MAC the
+    /// password a completed rotation set, so the host's NVOS accepts it. The
+    /// job has already completed when this runs, so an `Err` is logged by the
+    /// mock rather than reported to the caller.
+    fn set_switch_password(
+        &self,
+        bmc_mac: MacAddress,
+        username: &str,
+        password: &str,
+    ) -> eyre::Result<()>;
 }
 
 /// A device's power as the host reports it; the proto has no intermediate

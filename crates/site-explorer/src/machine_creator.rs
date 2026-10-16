@@ -689,7 +689,11 @@ impl MachineCreator {
             })
             .collect();
         let endpoint_machine_id =
-            db::machine_topology::find_machine_id_by_bmc_mac(&mut *txn, bmc_mac_address).await?;
+            db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(
+                &mut *txn,
+                bmc_mac_address,
+            )
+            .await?;
 
         let mut existing_predicted_host_machine_id: Option<PredictedHostMachineId> = None;
         for mac_address in &mac_addresses {
@@ -703,7 +707,9 @@ impl MachineCreator {
                         return Ok(None);
                     }
                     MachineIdSubtype::PredictedHost(predicted_machine_id) => {
-                        if endpoint_machine_id.as_ref() != Some(&predicted_machine_id) {
+                        if endpoint_machine_id.as_ref()
+                            != Some(predicted_machine_id.as_host_machine_id())
+                        {
                             tracing::warn!(
                                 %mac_address,
                                 predicted_machine_id = %machine.id,
@@ -738,7 +744,9 @@ impl MachineCreator {
                         return Ok(None);
                     }
                     MachineIdSubtype::PredictedHost(predicted_machine_id) => {
-                        if endpoint_machine_id.as_ref() != Some(&predicted_machine_id) {
+                        if endpoint_machine_id.as_ref()
+                            != Some(predicted_machine_id.as_host_machine_id())
+                        {
                             tracing::warn!(
                                 %mac_address,
                                 predicted_machine_id = %prediction.machine_id,

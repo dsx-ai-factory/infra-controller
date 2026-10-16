@@ -20,8 +20,11 @@
 //! [`ResourcePoolRegistry`] saves and checks each pool's backend selection.
 //! [`ResourcePoolWithBackend`] borrows a descriptor and its selected backend.
 //! This association does not resolve configuration or persist which backend is
-//! authoritative for allocations. Callers allocate and release values through
-//! [`ResourcePoolBackend`].
+//! authoritative for allocations. [`ResourcePoolBackend`] executes Integrated
+//! allocations in the caller's transaction. [`grpc::GrpcResourcePoolBackend`]
+//! independently calls a provider using identities and inputs saved by its caller;
+//! remote selection remains separate from the Integrated backend enum.
+//! [`value`] converts Core definitions and typed values to and from provider messages.
 
 #![cfg_attr(test, allow(txn_held_across_await, txn_without_commit))]
 
@@ -30,7 +33,9 @@ mod registry_tests;
 #[cfg(test)]
 mod tests;
 
+pub mod grpc;
 mod registry;
+pub mod value;
 
 use std::str::FromStr;
 

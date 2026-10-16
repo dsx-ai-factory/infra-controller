@@ -495,6 +495,89 @@ func TestSkuSQLDAO_Update(t *testing.T) {
 			assert.True(t, span.SpanContext().IsValid())
 		})
 	}
+
+	t.Run("conditional writes", func(t *testing.T) {
+		row, err := ssd.Create(ctx, nil, SkuCreateInput{
+			SkuID: "guarded-sku", SiteID: site.ID, Description: "original description",
+		})
+		require.NoError(t, err)
+		updated := time.Date(2025, time.January, 1, 0, 0, 0, 123_456_000, time.UTC)
+		older := updated.Add(-time.Hour)
+		newer := updated.Add(time.Hour)
+		description := "inventory description"
+		cases := []struct {
+			name    string
+			input   SkuUpdateInput
+			wantErr bool
+			noWrite bool
+		}{
+			{
+				name:  "matching version writes",
+				input: SkuUpdateInput{SkuID: row.ID, ExpectedUpdated: &updated, Description: &description},
+			},
+			{
+				name:    "same schema version with a stale token is rejected",
+				input:   SkuUpdateInput{SkuID: row.ID, ExpectedUpdated: &older, SchemaVersion: &row.SchemaVersion},
+				wantErr: true,
+			},
+			{
+				name:    "future token is rejected",
+				input:   SkuUpdateInput{SkuID: row.ID, ExpectedUpdated: &newer, Description: &description},
+				wantErr: true,
+			},
+			{
+				name:    "missing ID does not update a row with the same version",
+				input:   SkuUpdateInput{SkuID: "missing-sku", ExpectedUpdated: &updated, Description: &description},
+				wantErr: true,
+			},
+			{
+				name:    "missing ID without a token is rejected",
+				input:   SkuUpdateInput{SkuID: "missing-sku", Description: &description},
+				wantErr: true,
+			},
+			{
+				name:    "stale token without fields performs no write",
+				input:   SkuUpdateInput{SkuID: row.ID, ExpectedUpdated: &older},
+				noWrite: true,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := dbSession.DB.NewUpdate().Model((*SKU)(nil)).
+					Set("updated = ?", updated).Set("description = ?", "original description").Where("id = ?", row.ID).Exec(ctx)
+				require.NoError(t, err)
+				before, err := ssd.Get(ctx, nil, row.ID)
+				require.NoError(t, err)
+				updatesBefore := hook.updates
+				got, err := ssd.Update(ctx, nil, tc.input)
+				if tc.wantErr {
+					require.ErrorIs(t, err, db.ErrDoesNotExist)
+					assert.Nil(t, got)
+				} else {
+					require.NoError(t, err)
+					require.NotNil(t, got)
+				}
+				stored, err := ssd.Get(ctx, nil, row.ID)
+				require.NoError(t, err)
+				if tc.noWrite {
+					assert.Equal(t, updatesBefore, hook.updates, "a token alone must not issue an UPDATE")
+				} else {
+					assert.Equal(t, updatesBefore+1, hook.updates)
+				}
+				if tc.wantErr || tc.noWrite {
+					assert.Equal(t, before, stored)
+				} else {
+					assert.True(t, stored.Updated.After(before.Updated))
+					before.Description = description
+					before.Updated = stored.Updated
+					assert.Equal(t, before, stored)
+				}
+				if got != nil {
+					assert.Equal(t, stored, got)
+				}
+			})
+		}
+	})
 }
 
 func TestSkuSQLDAO_Delete(t *testing.T) {

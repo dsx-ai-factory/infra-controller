@@ -1038,6 +1038,7 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg1, tenant1.ID, site.ID, tnu.ID)
 	assert.NotNil(t, ts1)
+	common.TestBuildAllocation(t, dbSession, site, tenant1, "test-allocation-1", ipu)
 
 	vpc1 := testVpcPrefixBuildVpc(t, dbSession, ip, tenant1, site, tnOrg1, "testVPC", cutil.GetPtr(cdbm.VpcFNN), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
 	vpc2 := testVpcPrefixBuildVpc(t, dbSession, ip, tenant2, site2, tnOrg1, "testVPC", cutil.GetPtr(cdbm.VpcFNN), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))

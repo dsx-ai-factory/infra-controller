@@ -3,7 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+mod desired;
+mod machine;
 mod profile;
+mod site;
 
 use clap::Parser;
 
@@ -19,9 +22,29 @@ List registered NIC firmware profiles:
 Read a profile and its edit version:
     $ nico-admin-cli --format json firmware nic profile show connectx-production
 
+List site-wide profile selections:
+    $ nico-admin-cli firmware nic site list
+
+Inspect saved machine and card selections:
+    $ nico-admin-cli firmware nic machine show fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
+
+Show desired firmware from the stored device report:
+    $ nico-admin-cli firmware nic desired fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
+
 ")]
 pub(crate) enum Cmd {
     #[dispatch]
     #[clap(subcommand, about = "Manage NIC firmware profile definitions in Core")]
     Profile(profile::Cmd),
+    #[dispatch]
+    #[clap(subcommand, about = "Manage site-wide NIC firmware selections")]
+    Site(site::Cmd),
+    #[dispatch]
+    #[clap(
+        subcommand,
+        about = "Manage machine and card NIC firmware configuration"
+    )]
+    Machine(machine::Cmd),
+    #[command(about = "Show desired NIC firmware and selection diagnostics")]
+    Desired(desired::Args),
 }

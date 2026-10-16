@@ -115,19 +115,29 @@ impl FlintRunner {
         Ok("unlocked".to_string())
     }
 
-    // enable_hw_access enables hardware access with the provided key.
+    /// Enable hardware access with a key of 1–16 bare ASCII hexadecimal digits.
+    ///
+    /// Returns [`MlxError::InvalidKey`] before execution for malformed keys, or
+    /// [`MlxError::DryRun`] with the key redacted when dry-run is enabled.
+    /// [`MlxError::AlreadyUnlocked`] takes precedence over exit status when flint
+    /// reports access already enabled. Other launch or exit failures return
+    /// [`MlxError::CommandFailed`] without tool output, which may contain keys.
     pub fn enable_hw_access(&self, device_id: &str, key: &str) -> MlxResult<()> {
-        // Validate key format (should be 8 hex digits for 64-bit key)
         if !Self::is_valid_key(key) {
             return Err(MlxError::InvalidKey);
         }
 
-        let args = ["-d", device_id, "hw_access", "enable", key];
-
         if self.dry_run {
-            return Err(MlxError::DryRun(self.build_command(&args)));
+            return Err(MlxError::DryRun(self.build_command(&[
+                "-d",
+                device_id,
+                "hw_access",
+                "enable",
+                "[REDACTED]",
+            ])));
         }
 
+        let args = ["-d", device_id, "hw_access", "enable", key];
         let output = Command::new(&self.flint_path)
             .args(args)
             .output()
@@ -142,26 +152,38 @@ impl FlintRunner {
         }
 
         if !output.status.success() {
-            let error_msg = format!("stdout: {}\nstderr: {}", stdout.trim(), stderr.trim());
-            return Err(MlxError::CommandFailed(error_msg));
+            return Err(MlxError::CommandFailed(format!(
+                "hw_access enable failed: {}",
+                output.status
+            )));
         }
 
         Ok(())
     }
 
-    // disable_hw_access disables hardware access with the provided key.
+    /// Disable hardware access with a key of 1–16 bare ASCII hexadecimal digits.
+    ///
+    /// Returns [`MlxError::InvalidKey`] before execution for malformed keys, or
+    /// [`MlxError::DryRun`] with the key redacted when dry-run is enabled.
+    /// [`MlxError::AlreadyLocked`] takes precedence over exit status when flint
+    /// reports access already disabled. Other launch or exit failures return
+    /// [`MlxError::CommandFailed`] without tool output, which may contain keys.
     pub fn disable_hw_access(&self, device_id: &str, key: &str) -> MlxResult<()> {
-        // Validate key format (should be 8 hex digits for 64-bit key)
         if !Self::is_valid_key(key) {
             return Err(MlxError::InvalidKey);
         }
 
-        let args = ["-d", device_id, "hw_access", "disable", key];
-
         if self.dry_run {
-            return Err(MlxError::DryRun(self.build_command(&args)));
+            return Err(MlxError::DryRun(self.build_command(&[
+                "-d",
+                device_id,
+                "hw_access",
+                "disable",
+                "[REDACTED]",
+            ])));
         }
 
+        let args = ["-d", device_id, "hw_access", "disable", key];
         let output = Command::new(&self.flint_path)
             .args(args)
             .output()
@@ -176,35 +198,47 @@ impl FlintRunner {
         }
 
         if !output.status.success() {
-            let error_msg = format!("stdout: {}\nstderr: {}", stdout.trim(), stderr.trim());
-            return Err(MlxError::CommandFailed(error_msg));
+            return Err(MlxError::CommandFailed(format!(
+                "hw_access disable failed: {}",
+                output.status
+            )));
         }
 
         Ok(())
     }
 
-    // set_key sets a new hardware access key.
+    /// Set a hardware access key of 1–16 bare ASCII hexadecimal digits.
+    ///
+    /// Returns [`MlxError::InvalidKey`] before execution for malformed keys, or
+    /// [`MlxError::DryRun`] with the key redacted when dry-run is enabled.
+    /// Launch or exit failures return [`MlxError::CommandFailed`] without tool
+    /// output, which may contain keys. This operation does not classify Already
+    /// responses; any successful exit returns `Ok(())`.
     pub fn set_key(&self, device_id: &str, key: &str) -> MlxResult<()> {
         if !Self::is_valid_key(key) {
             return Err(MlxError::InvalidKey);
         }
 
-        let args = ["-d", device_id, "set_key", key];
-
         if self.dry_run {
-            return Err(MlxError::DryRun(self.build_command(&args)));
+            return Err(MlxError::DryRun(self.build_command(&[
+                "-d",
+                device_id,
+                "set_key",
+                "[REDACTED]",
+            ])));
         }
 
+        let args = ["-d", device_id, "set_key", key];
         let output = Command::new(&self.flint_path)
             .args(args)
             .output()
             .map_err(|e| MlxError::CommandFailed(format!("Failed to execute set_key: {e}")))?;
 
         if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let error_msg = format!("stdout: {}\nstderr: {}", stdout.trim(), stderr.trim());
-            return Err(MlxError::CommandFailed(error_msg));
+            return Err(MlxError::CommandFailed(format!(
+                "set_key failed: {}",
+                output.status
+            )));
         }
 
         Ok(())
@@ -302,9 +336,9 @@ impl FlintRunner {
         Ok(stdout)
     }
 
-    // is_valid_key validates that the key is in the correct format (8 hex digits).
+    // Keep the library's bare-hex rule, allowing unpadded values up to 64 bits.
     fn is_valid_key(key: &str) -> bool {
-        key.len() == 8 && key.chars().all(|c| c.is_ascii_hexdigit())
+        (1..=16).contains(&key.len()) && key.bytes().all(|c| c.is_ascii_hexdigit())
     }
 
     // validate_device_id validates device ID format.
@@ -342,10 +376,7 @@ mod coverage_tests {
 
     use super::*;
 
-    // err_kind projects an MlxError onto a stable discriminant string so we can
-    // distinguish *which* error a deterministic path returns without relying on
-    // MlxError being PartialEq (it is not). Only the variants the deterministic
-    // (no-flint-spawn) paths in this file can produce are named here.
+    // Compare error variants without requiring MlxError to implement PartialEq.
     fn err_kind(e: &MlxError) -> &'static str {
         match e {
             MlxError::CommandFailed(_) => "CommandFailed",
@@ -363,13 +394,17 @@ mod coverage_tests {
         }
     }
 
-    // is_valid_key accepts exactly 8 ASCII hex digits; anything else is rejected.
-    // Covers: too short, too long, exactly-8 valid (upper and lower), non-hex
-    // chars, empty, and embedded whitespace.
+    /// Accept full derived keys and shorter tool-supported inputs while keeping
+    /// validation limited to the bare hexadecimal representation of a 64-bit key.
     #[test]
-    fn is_valid_key_requires_eight_hex_digits() {
+    fn is_valid_key_accepts_up_to_sixteen_hex_digits() {
         value_scenarios!(
             run = FlintRunner::is_valid_key;
+            "a single hex digit" {
+                // The minimum accepted width must not require zero padding.
+                "a" => true,
+            }
+
             "eight lowercase hex digits" {
                 "0a1b2c3d" => true,
             }
@@ -382,27 +417,39 @@ mod coverage_tests {
                 "12345678" => true,
             }
 
-            "seven digits is too short" {
-                "1234567" => false,
+            "shorter unpadded keys" {
+                // Callers may pass a key below eight digits without padding it.
+                "1234567" => true,
             }
 
-            "nine digits is too long" {
-                "123456789" => false,
+            "keys longer than eight digits" {
+                // Intermediate widths must work alongside eight and sixteen.
+                "123456789" => true,
+            }
+
+            "a full 64-bit key" {
+                // Derived keys encode all eight bytes as sixteen hex digits.
+                "0123456789abcdef" => true,
+            }
+
+            "seventeen digits exceeds the key width" {
+                // A leading zero must not bypass the representation's width limit.
+                "0123456789abcdef0" => false,
             }
 
             "empty string" {
                 "" => false,
             }
 
-            "right length but non-hex char 'g'" {
+            "a non-hex character is rejected" {
                 "1234567g" => false,
             }
 
-            "right length but contains a space" {
+            "a space is not a hex digit" {
                 "1234 678" => false,
             }
 
-            "0x-prefixed is not bare hex of length 8" {
+            "0x-prefixed is not bare hex" {
                 "0x123456" => false,
             }
         );
@@ -497,10 +544,8 @@ mod coverage_tests {
         assert!(!off.dry_run);
     }
 
-    // In dry-run mode the command-issuing methods short-circuit to MlxError::DryRun
-    // (carrying the would-be command string) before spawning flint, so these are
-    // deterministic. Key-taking methods validate the key FIRST: an invalid key
-    // yields InvalidKey even under dry-run; a valid key yields DryRun.
+    /// Keep dry-run diagnostics useful without exposing keys through either
+    /// error formatter or requiring a flint executable.
     #[test]
     fn dry_run_methods_short_circuit() {
         let runner = FlintRunner::with_path("flint").with_dry_run(true);
@@ -518,7 +563,7 @@ mod coverage_tests {
         assert_eq!(err_kind(&en), "DryRun");
         assert_eq!(
             en.to_string(),
-            "dry run - would have executed: flint -d dev0 hw_access enable 0a1b2c3d"
+            "dry run - would have executed: flint -d dev0 hw_access enable [REDACTED]"
         );
 
         // disable_hw_access: valid key -> DryRun with the disable command string.
@@ -526,7 +571,7 @@ mod coverage_tests {
         assert_eq!(err_kind(&dis), "DryRun");
         assert_eq!(
             dis.to_string(),
-            "dry run - would have executed: flint -d dev0 hw_access disable 0a1b2c3d"
+            "dry run - would have executed: flint -d dev0 hw_access disable [REDACTED]"
         );
 
         // set_key: valid key -> DryRun with the set_key command string.
@@ -534,26 +579,32 @@ mod coverage_tests {
         assert_eq!(err_kind(&sk), "DryRun");
         assert_eq!(
             sk.to_string(),
-            "dry run - would have executed: flint -d dev0 set_key 0a1b2c3d"
+            "dry run - would have executed: flint -d dev0 set_key [REDACTED]"
         );
+
+        for error in [en, dis, sk] {
+            assert!(!format!("{error:?}").contains("0a1b2c3d"));
+        }
     }
 
-    // Key validation precedes the dry-run check in every key-taking method, so an
-    // invalid key short-circuits to InvalidKey regardless of dry-run state.
+    /// Reject malformed keys before dry-run command construction so validation
+    /// errors cannot disclose the rejected input.
     #[test]
     fn invalid_key_takes_precedence_over_dry_run() {
         let runner = FlintRunner::with_path("flint").with_dry_run(true);
 
-        // Each key-taking method, fed a too-short key, must report InvalidKey.
+        // Each key-taking method must reject malformed keys without exposing them.
         value_scenarios!(
             run = |which| {
-                let bad = "xyz"; // not 8 hex digits
+                let bad = "xyz";
                 let e = match which {
                     "enable" => runner.enable_hw_access("dev0", bad).unwrap_err(),
                     "disable" => runner.disable_hw_access("dev0", bad).unwrap_err(),
                     "set_key" => runner.set_key("dev0", bad).unwrap_err(),
                     _ => unreachable!(),
                 };
+                assert!(!e.to_string().contains(bad));
+                assert!(!format!("{e:?}").contains(bad));
                 err_kind(&e)
             };
             "enable_hw_access rejects a bad key" {
@@ -568,6 +619,149 @@ mod coverage_tests {
                 "set_key" => "InvalidKey",
             }
         );
+    }
+
+    /// Forward full keys through the manager without changing argument boundaries,
+    /// while preserving success, Already results, and secret-free failure details.
+    #[cfg(unix)]
+    #[test]
+    fn key_commands_preserve_arguments_and_results() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::lockdown::lockdown::LockdownManager;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flint");
+        let key = "0a1B2c3D4e5F6789";
+
+        value_scenarios!(
+            run = |(operation, status, stdout, stderr): (&str, i32, &str, &str)| {
+                let expected_args: &[&str] = match operation {
+                    "unlock" => &["-d", "dev0", "hw_access", "enable", key],
+                    "lock" => &["-d", "dev0", "hw_access", "disable", key],
+                    "set_key" => &["-d", "dev0", "set_key", key],
+                    _ => unreachable!(),
+                };
+                let argument_checks = expected_args
+                    .iter()
+                    .enumerate()
+                    .map(|(index, arg)| format!("[ \"${}\" = \"{arg}\" ] || exit 99", index + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                // A wrong operation, argument boundary, or key spelling exits 99
+                // before the requested result; echoed output uses both key cases.
+                std::fs::write(
+                    &path,
+                    format!(
+                        "#!/bin/sh\n[ \"$#\" -eq {} ] || exit 99\n{argument_checks}\n\
+                         printf '%s\\n' \"$*\" '{stdout}'\n\
+                         printf '%s\\n' '{}' '{stderr}' >&2\nexit {status}\n",
+                        expected_args.len(),
+                        key.to_uppercase(),
+                    ),
+                )
+                .unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+                let manager =
+                    LockdownManager::with_runner(FlintRunner::with_path(path.to_str().unwrap()));
+                let result = match operation {
+                    "unlock" => manager.unlock_device("dev0", key).map(|_| ()),
+                    "lock" => manager.lock_device("dev0", key).map(|_| ()),
+                    "set_key" => manager.set_device_key("dev0", key),
+                    _ => unreachable!(),
+                };
+                match result {
+                    Ok(()) => ("Ok", String::new()),
+                    Err(error) => {
+                        let display = error.to_string();
+                        let debug = format!("{error:?}");
+                        for rendered in [&display, &debug] {
+                            assert!(!rendered.contains(key));
+                            assert!(!rendered.contains(&key.to_uppercase()));
+                        }
+                        (err_kind(&error), display)
+                    }
+                }
+            };
+            "enable failure" {
+                // Unlock failures can echo the key in either output stream.
+                ("unlock", 42, "", "") =>
+                    ("CommandFailed", "command execution failed: hw_access enable failed: exit status: 42".to_string()),
+            }
+
+            "disable failure" {
+                // Lock failures must preserve status without echoed key text.
+                ("lock", 42, "", "") =>
+                    ("CommandFailed", "command execution failed: hw_access disable failed: exit status: 42".to_string()),
+            }
+
+            "set_key failure" {
+                // Direct key updates have their own command-failure branch.
+                ("set_key", 42, "", "") =>
+                    ("CommandFailed", "command execution failed: set_key failed: exit status: 42".to_string()),
+            }
+
+            "a successful command is not an error" {
+                // Output suppression must not turn a successful key update into failure.
+                ("set_key", 0, "", "") => ("Ok", String::new()),
+            }
+
+            "already disabled on a successful exit" {
+                // Flint's stdout can report an existing lock despite exit zero.
+                ("lock", 0, "already disabled", "") =>
+                    ("AlreadyLocked", "hardware access is already disabled".to_string()),
+            }
+
+            "already enabled takes precedence over a failed exit" {
+                // The semantic stderr result must win over the nonzero exit status.
+                ("unlock", 42, "", "already enabled") =>
+                    ("AlreadyUnlocked", "hardware access is already enabled".to_string()),
+            }
+        );
+    }
+
+    /// Reject malformed keys before starting a non-dry-run executable; a valid
+    /// key proves the same executable would otherwise be invoked.
+    #[cfg(unix)]
+    #[test]
+    fn invalid_keys_do_not_start_the_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::lockdown::lockdown::LockdownManager;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flint");
+        let marker = directory.path().join("flint.invoked");
+        std::fs::write(&path, "#!/bin/sh\nprintf invoked > \"$0.invoked\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let manager = LockdownManager::with_runner(FlintRunner::with_path(path.to_str().unwrap()));
+
+        for operation in [
+            // Locking must reject malformed input before spawn.
+            "lock", // Unlock has an independent gate before its executable call.
+            "unlock",
+            // Setting a key must not invoke the tool with rejected input either.
+            "set_key",
+        ] {
+            let result = match operation {
+                "lock" => manager.lock_device("dev0", "xyz").map(|_| ()),
+                "unlock" => manager.unlock_device("dev0", "xyz").map(|_| ()),
+                "set_key" => manager.set_device_key("dev0", "xyz"),
+                _ => unreachable!(),
+            };
+            assert!(
+                matches!(result, Err(MlxError::InvalidKey)),
+                "{operation}: {result:?}"
+            );
+            assert!(
+                !marker.exists(),
+                "{operation} invoked flint for an invalid key"
+            );
+        }
+
+        // The absence assertions need a runnable fixture, not a missing executable.
+        manager.set_device_key("dev0", "0a1B2c3D4e5F6789").unwrap();
+        assert!(marker.exists());
     }
 
     // burn / verify_image check that the image path exists BEFORE any dry-run or

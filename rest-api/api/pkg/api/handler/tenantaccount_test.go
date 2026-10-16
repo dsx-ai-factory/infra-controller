@@ -799,8 +799,13 @@ func TestTenantAccountHandler_UpdateSiteCapabilities(t *testing.T) {
 	)
 	site := testTenantAccountBuildSite(t, dbSession, ip, "test-capabilities-site", ipUser)
 	tenantSite := cdbm.TestBuildTenantSite(t, dbSession, tenant, site, nil, ipUser)
+	unusedSite := testTenantAccountBuildSite(t, dbSession, ip, "unused-site", ipUser)
+	unusedTenantSite := cdbm.TestBuildTenantSite(t, dbSession, tenant, unusedSite, nil, ipUser)
+	allocatedSite := testTenantAccountBuildSite(t, dbSession, ip, "allocated-site", ipUser)
+	allocatedTenantSite := cdbm.TestBuildTenantSite(t, dbSession, tenant, allocatedSite, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(true)}, ipUser)
+	testTenantAccountBuildAllocation(t, dbSession, allocatedSite, tenant, "retained-allocation", ipUser)
 
-	handler := NewUpdateTenantAccountHandler(dbSession, &tmocks.Client{}, common.GetTestConfig())
+	handler := NewUpdateTenantAccountHandler(dbSession, nil, &tmocks.Client{}, common.GetTestConfig())
 	sendUpdate := func(caps model.APITenantAccountSiteCapabilitiesUpdateRequest) (*httptest.ResponseRecorder, *model.APITenantAccount) {
 		t.Helper()
 
@@ -857,6 +862,8 @@ func TestTenantAccountHandler_UpdateSiteCapabilities(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, updatedTenantSite.Config.TargetedInstanceCreation)
 	assert.False(t, *updatedTenantSite.Config.TargetedInstanceCreation)
+	_, err = tenantSiteDAO.GetByID(ctx, nil, unusedTenantSite.ID, nil)
+	require.NoError(t, err)
 
 	accountOnlyCaps := model.APITenantAccountSiteCapabilitiesUpdateRequest{
 		{
@@ -872,9 +879,31 @@ func TestTenantAccountHandler_UpdateSiteCapabilities(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, updatedTenantAccount.Config.TargetedInstanceCreation)
 
-	updatedTenantSite, err = tenantSiteDAO.GetByID(ctx, nil, tenantSite.ID, nil)
+	_, err = tenantSiteDAO.GetByID(ctx, nil, tenantSite.ID, nil)
+	assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	_, err = tenantSiteDAO.GetByID(ctx, nil, unusedTenantSite.ID, nil)
+	assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	updatedTenantSite, err = tenantSiteDAO.GetByID(ctx, nil, allocatedTenantSite.ID, nil)
 	require.NoError(t, err)
 	assert.Nil(t, updatedTenantSite.Config.TargetedInstanceCreation)
+
+	overrideTenantSite := cdbm.TestBuildTenantSite(t, dbSession, tenant, unusedSite, nil, ipUser)
+	sendUpdate(model.APITenantAccountSiteCapabilitiesUpdateRequest{
+		{TargetedInstanceCreation: cutil.GetPtr(false)},
+		{SiteIDs: []string{unusedSite.ID.String()}, TargetedInstanceCreation: cutil.GetPtr(false)},
+	})
+	updatedTenantSite, err = tenantSiteDAO.GetByID(ctx, nil, overrideTenantSite.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, cutil.GetPtr(false), updatedTenantSite.Config.TargetedInstanceCreation, "explicit site override is retained without allocations")
+
+	blockedSite := testTenantAccountBuildSite(t, dbSession, ip, "blocked-site", ipUser)
+	sendUpdate(model.APITenantAccountSiteCapabilitiesUpdateRequest{
+		{TargetedInstanceCreation: cutil.GetPtr(true)},
+		{SiteIDs: []string{blockedSite.ID.String()}, TargetedInstanceCreation: cutil.GetPtr(false)},
+	})
+	blockedTenantSite, err := tenantSiteDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, blockedSite.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, cutil.GetPtr(false), blockedTenantSite.Config.TargetedInstanceCreation, "a listed Site without a Tenant/Site association can be blocked")
 }
 
 func TestTenantAccountHandler_GetByID(t *testing.T) {
@@ -1845,6 +1874,9 @@ func TestTenantAccountHandler_Delete(t *testing.T) {
 	ta4 := testTenantAccountBuildTenantAccount(t, dbSession, uuid.New().String(), ip2, tn4, tnOrg4, cdbm.TenantAccountStatusInvited, ipUser.ID, uuid.Nil)
 	assert.NotNil(t, ta4)
 	testTenantAccountBuildStatusDetail(t, dbSession, ta4.ID, ta4.Status)
+	otherProviderSite := testTenantAccountBuildSite(t, dbSession, ip1, "Other Provider Site", ipUser)
+	tn4Site := cdbm.TestBuildTenantSite(t, dbSession, tn4, site, nil, ipUser)
+	tn4OtherProviderSite := cdbm.TestBuildTenantSite(t, dbSession, tn4, otherProviderSite, nil, ipUser)
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
@@ -1860,6 +1892,7 @@ func TestTenantAccountHandler_Delete(t *testing.T) {
 		expectedErr        bool
 		expectedStatus     int
 		verifyChildSpanner bool
+		contendLock        bool
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -1933,6 +1966,7 @@ func TestTenantAccountHandler_Delete(t *testing.T) {
 			taID:           ta4.ID.String(),
 			expectedErr:    false,
 			expectedStatus: http.StatusAccepted,
+			contendLock:    true,
 		},
 	}
 	for _, tc := range tests {
@@ -1960,6 +1994,21 @@ func TestTenantAccountHandler_Delete(t *testing.T) {
 				tc:        tempClient,
 				cfg:       cfg,
 			}
+			if tc.contendLock {
+				lockKey := fmt.Sprintf("tenant-account-capabilities-%s-%s", tn4.ID, ip2.ID)
+				testWithAdvisoryLocks(t, ctx, dbSession, []string{lockKey}, func(_ *cdb.Tx) error {
+					err := tah.Handle(ec)
+					assert.NoError(t, err)
+					assert.Equal(t, http.StatusInternalServerError, rec.Code)
+					_, err = cdbm.NewTenantAccountDAO(dbSession).GetByID(ctx, nil, ta4.ID, nil)
+					assert.NoError(t, err, "lock contention preserves the TenantAccount")
+					_, err = cdbm.NewTenantSiteDAO(dbSession).GetByID(ctx, nil, tn4Site.ID, nil)
+					assert.NoError(t, err, "lock contention preserves the Tenant/Site association")
+					return nil
+				})
+				rec = httptest.NewRecorder()
+				ec.SetResponse(echo.NewResponse(rec, e))
+			}
 			err := tah.Handle(ec)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusAccepted)
@@ -1976,4 +2025,12 @@ func TestTenantAccountHandler_Delete(t *testing.T) {
 			}
 		})
 	}
+
+	_, err := cdbm.NewTenantAccountDAO(dbSession).GetByID(ctx, nil, ta4.ID, nil)
+	assert.ErrorIs(t, err, cdb.ErrDoesNotExist, "deleting the TenantAccount succeeds after releasing the lock")
+	tsDAO := cdbm.NewTenantSiteDAO(dbSession)
+	_, err = tsDAO.GetByID(ctx, nil, tn4Site.ID, nil)
+	assert.ErrorIs(t, err, cdb.ErrDoesNotExist, "deleting the TenantAccount removes associations with the Provider's Sites")
+	_, err = tsDAO.GetByID(ctx, nil, tn4OtherProviderSite.ID, nil)
+	assert.NoError(t, err, "associations with other Providers' Sites are kept")
 }

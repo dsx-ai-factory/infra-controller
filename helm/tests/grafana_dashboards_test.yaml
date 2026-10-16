@@ -10,15 +10,22 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: packages all dashboards for the default Grafana sidecar
+  - it: packages one ConfigMap per dashboard
     set:
       grafanaDashboards.enabled: true
     asserts:
+      - hasDocuments:
+          count: 6
       - isKind:
           of: ConfigMap
-      - equal:
-          path: metadata.name
-          value: nico-system-test-nico-grafana-dashboards
+
+  - it: packages the overview dashboard for the default Grafana sidecar
+    set:
+      grafanaDashboards.enabled: true
+    documentSelector:
+      path: metadata.name
+      value: nico-system-test-nico-nico-overview
+    asserts:
       - equal:
           path: metadata.namespace
           value: nico-system
@@ -33,14 +40,56 @@ tests:
           value: NICo
       - isNotEmpty:
           path: data["nico-overview.json"]
-      - isNotEmpty:
+      - notExists:
           path: data["nico-lifecycle.json"]
-      - isNotEmpty:
+
+  - it: keeps each dashboard in its own ConfigMap
+    set:
+      grafanaDashboards.enabled: true
+    asserts:
+      - exists:
+          path: data["nico-lifecycle.json"]
+        documentSelector:
+          path: metadata.name
+          value: nico-system-test-nico-nico-lifecycle
+      - exists:
           path: data["nico-api-performance.json"]
+        documentSelector:
+          path: metadata.name
+          value: nico-system-test-nico-nico-api-performance
+      - exists:
+          path: data["nico-bmc-performance.json"]
+        documentSelector:
+          path: metadata.name
+          value: nico-system-test-nico-nico-bmc-performance
+      - exists:
+          path: data["nico-fleet.json"]
+        documentSelector:
+          path: metadata.name
+          value: nico-system-test-nico-nico-fleet
+      - exists:
+          path: data["nico-site-detail.json"]
+        documentSelector:
+          path: metadata.name
+          value: nico-system-test-nico-nico-site-detail
+
+  - it: stores each dashboard as parseable JSON
+    set:
+      grafanaDashboards.enabled: true
+    documentSelector:
+      path: metadata.name
+      value: nico-system-test-nico-nico-overview
+    asserts:
+      - matchRegex:
+          path: data["nico-overview.json"]
+          pattern: '^\{'
 
   - it: supports a Grafana namespace and sidecar-specific metadata
     values:
       - fixtures/grafana-custom-values.yaml
+    documentSelector:
+      path: metadata.name
+      value: nico-system-test-nico-nico-overview
     asserts:
       - equal:
           path: metadata.namespace
@@ -61,6 +110,9 @@ tests:
     set:
       grafanaDashboards.enabled: true
       grafanaDashboards.folderAnnotation: ""
+    documentSelector:
+      path: metadata.name
+      value: nico-system-test-nico-nico-overview
     asserts:
       - notExists:
           path: metadata.annotations

@@ -242,6 +242,15 @@ pub async fn start(
         metric_emission_interval = "1s"
         metric_hold_time = "2s"
 
+        [switch_state_controller.controller]
+        metric_emission_interval = "1s"
+
+        [rack_state_controller.controller]
+        metric_emission_interval = "1s"
+
+        [power_shelf_state_controller.controller]
+        metric_emission_interval = "1s"
+
         [host_models]
 
         [rack_profiles.GB200_NVL72_WIWYNN]

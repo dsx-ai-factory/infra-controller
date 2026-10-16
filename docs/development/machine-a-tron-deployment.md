@@ -523,7 +523,8 @@ SPIFFE URI). Controller Mode adds the following requirements:
    controller publishes each simulated NVLink switch's NVOS lease (from the
    `underlayDhcpRelayAddress` network, `[networks.simulated-underlay]` in the
    profiles) as the `externalIPs` of a `mat-nvos-*` Service, through which
-   NICo reaches machine-a-tron's hosted NMX-C mock on port 9370. The preflight
+   NICo reaches machine-a-tron's hosted NMX-C mock on port 9370 and the
+   switch's NVUE REST API mock on port 443. The preflight
    checks that network alongside the BMC network. `nico-core-simulation.yaml`
    ships the matching `[nvlink_config]`; refer to
    [Machine-a-tron NMX-C Mock](machine-a-tron-nmxc-mock.md).

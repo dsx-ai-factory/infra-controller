@@ -118,6 +118,9 @@ pub(super) mod liteon_power_shelf;
 /// Support of Delta Energy Systems Power Shelf.
 pub(super) mod delta_power_shelf;
 
+/// The NVOS the NVLink switch trays run, as their NVUE REST API shows it.
+pub(super) mod nvos;
+
 /// Support of NVIDIA Switch ND5200_LD.
 pub(super) mod nvidia_switch_nd5200_ld;
 

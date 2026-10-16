@@ -157,13 +157,26 @@ func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteI
 			if cur.Labels != nil && labels == nil {
 				labels = map[string]string{}
 			}
-			_, uerr := erDAO.Update(ctx, nil, cdbm.ExpectedRackUpdateInput{
-				ExpectedRackID: cur.ID,
-				RackProfileID:  &reported.RackProfileID,
-				RackGroupID:    reported.RackGroupID,
-				Name:           &reported.Name,
-				Description:    &reported.Description,
-				Labels:         labels,
+			uerr := cdb.WithTx(ctx, mer.dbSession, func(tx *cdb.Tx) error {
+				// Recheck `Updated` under the row lock to preserve REST edits since
+				// our initial read, and keep the lock until the inventory update commits.
+				locked, err := erDAO.Get(ctx, tx, cur.ID, nil, true)
+				if err != nil {
+					return err
+				}
+				if !locked.Updated.Equal(cur.Updated) {
+					return nil
+				}
+
+				_, uerr := erDAO.Update(ctx, tx, cdbm.ExpectedRackUpdateInput{
+					ExpectedRackID: cur.ID,
+					RackProfileID:  &reported.RackProfileID,
+					RackGroupID:    reported.RackGroupID,
+					Name:           &reported.Name,
+					Description:    &reported.Description,
+					Labels:         labels,
+				})
+				return uerr
 			})
 			if uerr != nil {
 				logger.Error().Err(uerr).Str("ExpectedRackID", cur.ID.String()).Str("RackID", rackID).Msg("failed to update ExpectedRack in DB")

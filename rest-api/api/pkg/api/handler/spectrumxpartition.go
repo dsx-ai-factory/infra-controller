@@ -110,26 +110,14 @@ func (csxph CreateSpectrumXPartitionHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to create SpectrumX Partition, Site: %s specified in request is not in Registered state", site.ID.String()), nil)
 	}
 
-	// Determine if the Tenant has access to the requested Site
-	tsDAO := cdbm.NewTenantSiteDAO(csxph.dbSession)
-	_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, orgTenant.ID, site.ID, nil)
-	if err != nil {
-		if err == cdb.ErrDoesNotExist {
-			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant is not associated with Site specified in query", nil)
-		}
-		logger.Warn().Err(err).Msg("error retrieving Tenant Site association from DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to determine if Tenant has access to Site specified in query, DB error", nil)
-	}
-
-	// Ensure that the Tenant has an Allocation with the specified Site
-	aDAO := cdbm.NewAllocationDAO(csxph.dbSession)
-	aCount, serr := aDAO.GetCount(ctx, nil, cdbm.AllocationFilterInput{TenantIDs: []uuid.UUID{orgTenant.ID}, SiteIDs: []uuid.UUID{site.ID}})
+	// Ensure that the Tenant has access to the specified Site
+	hasSiteAccess, serr := common.TenantHasSiteAccess(ctx, nil, csxph.dbSession, orgTenant, site.ID)
 	if serr != nil {
-		logger.Error().Err(serr).Msg("error retrieving Allocations count from DB for Tenant and Site")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site Allocations count for Tenant", nil)
+		logger.Error().Err(serr).Msg("error checking Tenant access to Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant access to Site, DB error", nil)
 	}
-	if aCount == 0 {
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have any Allocations with Site specified in request data", nil)
+	if !hasSiteAccess {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have access to Site specified in request data", nil)
 	}
 
 	// A Tenant cannot have two SpectrumX Partitions with the same name on one Site.
@@ -311,7 +299,6 @@ func (gasxph GetAllSpectrumXPartitionHandler) Handle(c echo.Context) error {
 
 	// Get Site IDs from query param. The parameter repeats to filter on more than one Site,
 	// and the Tenant has to have access to every one of them.
-	tsDAO := cdbm.NewTenantSiteDAO(gasxph.dbSession)
 	var siteIDs []uuid.UUID
 	siteIDStrs := qParams["siteId"]
 	if len(siteIDStrs) > 0 {
@@ -323,7 +310,7 @@ func (gasxph GetAllSpectrumXPartitionHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to retrieve Site %v specified in query param, invalid ID or DB error", siteIDStr), nil)
 			}
 
-			_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, site.ID, nil)
+			err = common.ValidateTenantSiteAccess(ctx, nil, gasxph.dbSession, tenant, site.ID)
 			if err != nil {
 				if err == cdb.ErrDoesNotExist {
 					return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Tenant does not have access to Site %v", siteIDStr), nil)

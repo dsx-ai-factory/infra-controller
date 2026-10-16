@@ -250,12 +250,22 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_pending_dpu_nic_firmware_update_count</td><td>gauge</td><td>Number of machines in the system that need a DPU/NIC firmware update</td></tr>
 <tr><td>carbide_pending_host_firmware_update_count</td><td>gauge</td><td>Number of host machines in the system that need a firmware update.</td></tr>
 <tr><td>carbide_power_shelves_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_power_shelves in the system</td></tr>
+<tr><td>carbide_power_shelves_handler_latency_in_state_milliseconds</td><td>histogram</td><td>The amount of time it took to invoke the state handler for objects of type carbide_power_shelves in a certain state</td></tr>
 <tr><td>carbide_power_shelves_health_overrides_count</td><td>gauge</td><td>Number of health overrides configured in the site</td></tr>
 <tr><td>carbide_power_shelves_health_status_count</td><td>gauge</td><td>Number of power shelves in the system that have reported either a healthy or not healthy status - based on the presence of health probe alerts</td></tr>
 <tr><td>carbide_power_shelves_iteration_latency_milliseconds</td><td>histogram</td><td>Elapsed time of each completed state processor iteration for objects of type carbide_power_shelves</td></tr>
+<tr><td>carbide_power_shelves_object_tasks_completed_total</td><td>counter</td><td>Number of object handling tasks completed for objects of type carbide_power_shelves</td></tr>
+<tr><td>carbide_power_shelves_object_tasks_dispatched_total</td><td>counter</td><td>Number of object handling tasks dequeued and dispatched for processing for objects of type carbide_power_shelves</td></tr>
 <tr><td>carbide_power_shelves_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_power_shelves</td></tr>
+<tr><td>carbide_power_shelves_object_tasks_requeued_total</td><td>counter</td><td>Number of object handling tasks requeued for objects of type carbide_power_shelves</td></tr>
 <tr><td>carbide_power_shelves_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_power_shelves</td></tr>
+<tr><td>carbide_power_shelves_per_state</td><td>gauge</td><td>Number of carbide_power_shelves in the system with a given state</td></tr>
+<tr><td>carbide_power_shelves_per_state_above_sla</td><td>gauge</td><td>Number of carbide_power_shelves currently in a state longer than the SLA allows</td></tr>
+<tr><td>carbide_power_shelves_state_entered_total</td><td>counter</td><td>Number of times objects of type carbide_power_shelves have entered a certain state</td></tr>
+<tr><td>carbide_power_shelves_state_exited_total</td><td>counter</td><td>Number of times objects of type carbide_power_shelves have exited a certain state</td></tr>
+<tr><td>carbide_power_shelves_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_power_shelves have spent in a certain state</td></tr>
 <tr><td>carbide_power_shelves_total</td><td>gauge</td><td>Number of carbide_power_shelves in the system</td></tr>
+<tr><td>carbide_power_shelves_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of state-handling errors for carbide_power_shelves in a given state</td></tr>
 <tr><td>carbide_preingestion_bfb_copy_duration_seconds</td><td>histogram</td><td>Duration of preingestion BFB copies to a DPU rshim, by outcome; the _count series, split by outcome, is the copy and failure rate.</td></tr>
 <tr><td>carbide_preingestion_firmware_upgrade_tasks_total</td><td>counter</td><td>Number of preingestion firmware upgrade Redfish tasks reaching a terminal state, by firmware component, final task state, and outcome.</td></tr>
 <tr><td>carbide_preingestion_firmware_upload_total</td><td>counter</td><td>Number of preingestion firmware uploads to a BMC, by upload method and outcome.</td></tr>
@@ -266,12 +276,19 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_pxe_boot_outcomes_total</td><td>counter</td><td>Number of PXE boot-path outcomes served, by endpoint and reason.</td></tr>
 <tr><td>carbide_rack_maintenance_access_token_cleanup_failures_total</td><td>counter</td><td>Number of rack maintenance access token cleanup failures</td></tr>
 <tr><td>carbide_racks_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_racks in the system</td></tr>
+<tr><td>carbide_racks_handler_latency_in_state_milliseconds</td><td>histogram</td><td>The amount of time it took to invoke the state handler for objects of type carbide_racks in a certain state</td></tr>
 <tr><td>carbide_racks_health_overrides_count</td><td>gauge</td><td>Number of health overrides configured in the site</td></tr>
 <tr><td>carbide_racks_health_status_count</td><td>gauge</td><td>Number of racks in the system that have reported either a healthy or not healthy status - based on the presence of health probe alerts</td></tr>
 <tr><td>carbide_racks_iteration_latency_milliseconds</td><td>histogram</td><td>Elapsed time of each completed state processor iteration for objects of type carbide_racks</td></tr>
+<tr><td>carbide_racks_object_tasks_completed_total</td><td>counter</td><td>Number of object handling tasks completed for objects of type carbide_racks</td></tr>
+<tr><td>carbide_racks_object_tasks_dispatched_total</td><td>counter</td><td>Number of object handling tasks dequeued and dispatched for processing for objects of type carbide_racks</td></tr>
 <tr><td>carbide_racks_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_racks</td></tr>
+<tr><td>carbide_racks_object_tasks_requeued_total</td><td>counter</td><td>Number of object handling tasks requeued for objects of type carbide_racks</td></tr>
 <tr><td>carbide_racks_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_racks</td></tr>
+<tr><td>carbide_racks_per_state</td><td>gauge</td><td>Number of carbide_racks in the system with a given state</td></tr>
+<tr><td>carbide_racks_per_state_above_sla</td><td>gauge</td><td>Number of carbide_racks currently in a state longer than the SLA allows</td></tr>
 <tr><td>carbide_racks_total</td><td>gauge</td><td>Number of carbide_racks in the system</td></tr>
+<tr><td>carbide_racks_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of state-handling errors for carbide_racks in a given state</td></tr>
 <tr><td>carbide_reboot_attempts_in_booting_with_discovery_image</td><td>histogram</td><td>Reboot attempts per machine in BootingWithDiscoveryImage, recorded when a machine is rebooted again after no response from the host.</td></tr>
 <tr><td>carbide_redfish_action_result_persistence_failures_total</td><td>counter</td><td>Number of detached Redfish action results that failed to persist</td></tr>
 <tr><td>carbide_reserved_ips_count</td><td>gauge</td><td>Number of reserved IPs per network segment</td></tr>
@@ -297,8 +314,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_site_explorer_boot_interface_selections_total</td><td>counter</td><td>Number of successful Site Explorer boot interface selections for hosts with more than one explored DPU and effective DPU policy Manage, by selection mechanism.</td></tr>
 <tr><td>carbide_site_explorer_create_machines</td><td>gauge</td><td>Whether site-explorer machine creation is enabled (1) or disabled (0)</td></tr>
 <tr><td>carbide_site_explorer_create_machines_latency_milliseconds</td><td>histogram</td><td>The time it took to perform create_machines inside site-explorer</td></tr>
-<tr><td>carbide_site_explorer_created_machines_count</td><td>gauge</td><td>Number of machine pairs created by Site Explorer after identification</td></tr>
-<tr><td>carbide_site_explorer_created_power_shelves_count</td><td>gauge</td><td>Number of power shelves created by Site Explorer after identification</td></tr>
+<tr><td>carbide_site_explorer_created_machines_count</td><td>gauge</td><td>Number of machine pairs created by Site Explorer after identification in the last SiteExplorer run</td></tr>
+<tr><td>carbide_site_explorer_created_power_shelves_count</td><td>gauge</td><td>Number of power shelves created by Site Explorer after identification in the last SiteExplorer run</td></tr>
 <tr><td>carbide_site_explorer_dpu_migration_signals_count</td><td>gauge</td><td>Number of DPU NIC-mode migration signals by signal type -- mode-mismatch found, set_nic_mode issued, reset requested, and zero-DPU registered for a host whose DPU policy is nic.</td></tr>
 <tr><td>carbide_site_explorer_enabled</td><td>gauge</td><td>Whether site-explorer is enabled (1) or paused (0)</td></tr>
 <tr><td>carbide_site_explorer_iteration_latency_milliseconds</td><td>histogram</td><td>The time it took to perform one site explorer iteration</td></tr>
@@ -317,12 +334,22 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_static_credential_watcher_failures_total</td><td>counter</td><td>Number of static credential watcher failures, by operation.</td></tr>
 <tr><td>carbide_switch_slot_tray_enrichment_failures_total</td><td>counter</td><td>Number of switch slot and tray enrichment failures, by failure stage.</td></tr>
 <tr><td>carbide_switches_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_switches in the system</td></tr>
+<tr><td>carbide_switches_handler_latency_in_state_milliseconds</td><td>histogram</td><td>The amount of time it took to invoke the state handler for objects of type carbide_switches in a certain state</td></tr>
 <tr><td>carbide_switches_health_overrides_count</td><td>gauge</td><td>Number of health overrides configured in the site</td></tr>
 <tr><td>carbide_switches_health_status_count</td><td>gauge</td><td>Number of switches in the system that have reported either a healthy or not healthy status - based on the presence of health probe alerts</td></tr>
 <tr><td>carbide_switches_iteration_latency_milliseconds</td><td>histogram</td><td>Elapsed time of each completed state processor iteration for objects of type carbide_switches</td></tr>
+<tr><td>carbide_switches_object_tasks_completed_total</td><td>counter</td><td>Number of object handling tasks completed for objects of type carbide_switches</td></tr>
+<tr><td>carbide_switches_object_tasks_dispatched_total</td><td>counter</td><td>Number of object handling tasks dequeued and dispatched for processing for objects of type carbide_switches</td></tr>
 <tr><td>carbide_switches_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_switches</td></tr>
+<tr><td>carbide_switches_object_tasks_requeued_total</td><td>counter</td><td>Number of object handling tasks requeued for objects of type carbide_switches</td></tr>
 <tr><td>carbide_switches_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_switches</td></tr>
+<tr><td>carbide_switches_per_state</td><td>gauge</td><td>Number of carbide_switches in the system with a given state</td></tr>
+<tr><td>carbide_switches_per_state_above_sla</td><td>gauge</td><td>Number of carbide_switches currently in a state longer than the SLA allows</td></tr>
+<tr><td>carbide_switches_state_entered_total</td><td>counter</td><td>Number of times objects of type carbide_switches have entered a certain state</td></tr>
+<tr><td>carbide_switches_state_exited_total</td><td>counter</td><td>Number of times objects of type carbide_switches have exited a certain state</td></tr>
+<tr><td>carbide_switches_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_switches have spent in a certain state</td></tr>
 <tr><td>carbide_switches_total</td><td>gauge</td><td>Number of carbide_switches in the system</td></tr>
+<tr><td>carbide_switches_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of state-handling errors for carbide_switches in a given state</td></tr>
 <tr><td>carbide_total_ips_count</td><td>gauge</td><td>Number of IPs per network segment</td></tr>
 <tr><td>carbide_unavailable_dpu_nic_firmware_update_count</td><td>gauge</td><td>Number of machines in the system that need a DPU/NIC firmware update but are unavailable for update</td></tr>
 <tr><td>carbide_vpc_prefixes_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_vpc_prefixes in the system</td></tr>

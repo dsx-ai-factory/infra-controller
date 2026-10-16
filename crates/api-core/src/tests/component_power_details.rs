@@ -204,6 +204,8 @@ fn observation_error(actual: &rpc::ComponentPowerObservation) -> &rpc::Component
 /// Gates lookups and records admissions and drops without timing-based absence checks.
 struct GatedPowerCredentialReader {
     gates: Vec<(MacAddress, Notify)>,
+    // Anchor read-budget assertions after snapshot I/O, before credential waits.
+    first_started_at: Mutex<Option<tokio::time::Instant>>,
     started: AtomicUsize,
     active: AtomicUsize,
     peak: AtomicUsize,
@@ -216,6 +218,7 @@ impl GatedPowerCredentialReader {
     fn new(hosts: &[(HostMachineId, MacAddress)]) -> Self {
         Self {
             gates: hosts.iter().map(|(_, mac)| (*mac, Notify::new())).collect(),
+            first_started_at: Mutex::new(None),
             started: AtomicUsize::new(0),
             active: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
@@ -269,6 +272,10 @@ impl CredentialReader for GatedPowerCredentialReader {
             .iter()
             .position(|(mac, _)| mac == bmc_mac_address)
             .unwrap();
+        self.first_started_at
+            .lock()
+            .expect("first credential admission lock")
+            .get_or_insert_with(tokio::time::Instant::now);
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         let mut guard = ActivePowerRead {
             reader: self,
@@ -283,10 +290,11 @@ impl CredentialReader for GatedPowerCredentialReader {
     }
 }
 
-/// Returns valid credentials after a chosen lookup is released. Recording every
-/// key distinguishes the guard after BMC credentials from the later NVOS guard.
+/// Holds one credential result until released, leaving other keys valid.
+/// Recording keys distinguishes BMC expiry from the later NVOS check.
 struct ExpiringPowerCredentialReader {
     blocked_key: CredentialKey,
+    blocked_result: Mutex<Option<Result<Option<Credentials>, SecretsError>>>,
     started: Notify,
     release: Notify,
     requested_keys: Mutex<Vec<String>>,
@@ -303,8 +311,17 @@ impl CredentialReader for ExpiringPowerCredentialReader {
             .unwrap()
             .push(key.to_key_str().into_owned());
         if key.to_key_str() == self.blocked_key.to_key_str() {
+            // Take the result before waiting so a duplicate lookup fails immediately.
+            // Drop the mutex guard before the gate suspends this lookup.
+            let result = self
+                .blocked_result
+                .lock()
+                .expect("blocked credential result lock")
+                .take()
+                .expect("blocked credential lookup is requested once");
             self.started.notify_one();
             self.release.notified().await;
+            return result;
         }
         Ok(Some(Credentials::new("power-reader", "test-password")))
     }
@@ -459,7 +476,8 @@ async fn later_targets_start_before_first_credential_lookup_finishes(
     Ok(())
 }
 
-/// Delayed admission shares the original deadline; expiry and caller drop own pending work.
+/// Delayed admission shares the fifteen-second budget, so it must neither cut
+/// earlier reads short nor extend them. Expiry and caller drop release pending work.
 #[crate::sqlx_test]
 async fn read_deadline_and_caller_cancellation_drop_unfinished_work(
     pool: sqlx::PgPool,
@@ -494,8 +512,14 @@ async fn read_deadline_and_caller_cancellation_drop_unfinished_work(
     .await
     .expect("snapshot and initial credential reads must complete");
     assert_eq!(reader.started.load(Ordering::SeqCst), (1 << 9) - 1);
+
     // Database setup and snapshot I/O finish before time is paused.
     tokio::time::pause();
+    let first_started_at = reader
+        .first_started_at
+        .lock()
+        .expect("first credential admission lock")
+        .expect("the initial credential reads have started");
     tokio::time::advance(Duration::from_secs(4)).await;
     reader.release(1);
     tokio::time::timeout(Duration::from_millis(1), async {
@@ -508,9 +532,31 @@ async fn read_deadline_and_caller_cancellation_drop_unfinished_work(
     .expect("the tenth lookup must start when the second lookup releases its slot");
     assert_eq!(reader.started.load(Ordering::SeqCst), (1 << 10) - 1);
     assert_eq!(reader.active.load(Ordering::SeqCst), 8);
-    // The newly admitted lookup has eleven seconds left, not a fresh fifteen.
-    // Allow one millisecond for Tokio's timer rounding at the original deadline.
-    tokio::time::advance(Duration::from_secs(11) + Duration::from_millis(1)).await;
+
+    // Fourteen seconds after the first admission, even the earlier reads must
+    // remain pending. Account for time spent admitting work before the pause.
+    tokio::time::advance(
+        (first_started_at + Duration::from_secs(14))
+            .checked_duration_since(tokio::time::Instant::now())
+            .expect("the fourteen-second checkpoint is still ahead"),
+    )
+    .await;
+    assert!(
+        futures::poll!(&mut request).is_pending(),
+        "the shared budget must not expire before fifteen seconds"
+    );
+    assert_eq!(reader.started.load(Ordering::SeqCst), (1 << 10) - 1);
+    assert_eq!(reader.active.load(Ordering::SeqCst), 8);
+    assert_eq!(reader.cancelled.load(Ordering::SeqCst), 0);
+
+    // Delayed admission must not restart the original fifteen-second budget.
+    // Allow one millisecond for Tokio's timer rounding when checking expiry.
+    tokio::time::advance(
+        (first_started_at + Duration::from_secs(15) + Duration::from_millis(1))
+            .checked_duration_since(tokio::time::Instant::now())
+            .expect("the expiry checkpoint follows the pending assertion"),
+    )
+    .await;
     let response = tokio::time::timeout(Duration::from_millis(1), &mut request).await;
     tokio::time::resume();
     let response = response
@@ -565,8 +611,9 @@ async fn read_deadline_and_caller_cancellation_drop_unfinished_work(
     Ok(())
 }
 
-/// Ready credential futures must not start the next operation after expiry.
-/// A switch exercises both the shared BMC guard and the separate NVOS guard.
+/// The deadline takes precedence over ready credential results, so an expired
+/// lookup neither starts more work nor reports a credential failure instead.
+/// A switch exercises both the shared BMC check and the separate NVOS check.
 #[crate::sqlx_test]
 async fn credentials_finishing_after_deadline_do_not_start_more_work(
     pool: sqlx::PgPool,
@@ -594,12 +641,40 @@ async fn credentials_finishing_after_deadline_do_not_start_more_work(
     let nvos_key = CredentialKey::SwitchNvosAdmin { bmc_mac_address };
     let mut api = api_with_rms(&env, pool, power_profiles(0, 1, 0), PowerRole::Switch);
 
-    for (blocked_key, expected_keys) in [
+    // Lookup errors and absence share a failure branch. One form at each lookup
+    // protects both expiry checks without repeating every failure combination.
+    for (scenario, blocked_key, blocked_result, expected_keys) in [
         // The first guard must stop before even asking for NVOS credentials.
-        (bmc_key.clone(), vec![bmc_key.to_key_str().into_owned()]),
+        (
+            "expired BMC success",
+            bmc_key.clone(),
+            Ok(Some(Credentials::new("power-reader", "test-password"))),
+            vec![bmc_key.to_key_str().into_owned()],
+        ),
         // The second guard must stop before the completed endpoint reaches RMS.
         (
+            "expired NVOS success",
             nvos_key.clone(),
+            Ok(Some(Credentials::new("power-reader", "test-password"))),
+            vec![
+                bmc_key.to_key_str().into_owned(),
+                nvos_key.to_key_str().into_owned(),
+            ],
+        ),
+        // A BMC lookup error must not replace the expired shared deadline.
+        (
+            "expired BMC lookup error",
+            bmc_key.clone(),
+            Err(SecretsError::GenericError(eyre::eyre!(
+                "injected credential read failure"
+            ))),
+            vec![bmc_key.to_key_str().into_owned()],
+        ),
+        // The deadline also takes precedence over missing NVOS credentials.
+        (
+            "expired missing NVOS credentials",
+            nvos_key.clone(),
+            Ok(None),
             vec![
                 bmc_key.to_key_str().into_owned(),
                 nvos_key.to_key_str().into_owned(),
@@ -608,6 +683,7 @@ async fn credentials_finishing_after_deadline_do_not_start_more_work(
     ] {
         let reader = Arc::new(ExpiringPowerCredentialReader {
             blocked_key,
+            blocked_result: Mutex::new(Some(blocked_result)),
             started: Notify::new(),
             release: Notify::new(),
             requested_keys: Mutex::new(Vec::new()),
@@ -626,9 +702,11 @@ async fn credentials_finishing_after_deadline_do_not_start_more_work(
         tokio::time::timeout(Duration::from_secs(10), async {
             tokio::select! {
                 _ = reader.started.notified() => {}
-                result = &mut request => panic!("request completed before gated credentials: {result:?}"),
+                result = &mut request => panic!("{scenario}: request completed before gated credentials: {result:?}"),
             }
-        }).await.expect("snapshot must finish before pausing the clock");
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{scenario}: snapshot must finish before pausing the clock"));
 
         // Leave the request unpolled until the credential is ready after expiry.
         // `timeout_at` polls that ready inner future before checking its timer.
@@ -638,36 +716,185 @@ async fn credentials_finishing_after_deadline_do_not_start_more_work(
         let response = tokio::time::timeout(Duration::from_millis(1), &mut request).await;
         tokio::time::resume();
         let response = response
-            .expect("ready credential must finish within the expired budget")?
+            .unwrap_or_else(|_| panic!("{scenario}: ready credential must finish"))
+            .unwrap_or_else(|error| panic!("{scenario}: power details failed: {error}"))
             .into_inner();
         drop(request);
 
-        assert_eq!(response.entries.len(), 1);
-        assert_eq!(response.entries[0].component_id, switch.id.to_string());
-        let actual = response.entries[0]
+        assert_eq!(response.entries.len(), 1, "{scenario}");
+        let entry = &response.entries[0];
+        assert_eq!(entry.component_id, switch.id.to_string(), "{scenario}");
+        assert_eq!(
+            entry.desired,
+            Some(rpc::ComponentPowerPolicy {
+                status: rpc::ComponentPowerPolicyStatus::NotApplicable as i32,
+                ..Default::default()
+            }),
+            "{scenario}"
+        );
+        let actual = entry
             .actual
             .as_ref()
-            .expect("deadline observation");
-        assert_eq!(
-            observation_error(actual).code,
-            rpc::ComponentPowerErrorCode::DeadlineExceeded as i32
+            .unwrap_or_else(|| panic!("{scenario}: missing actual power observation"));
+        assert!(
+            matches!(actual.outcome.as_ref(), Some(Outcome::Error(error))
+                if error.code == rpc::ComponentPowerErrorCode::DeadlineExceeded as i32),
+            "{scenario}: expected a deadline error, received {actual:?}"
         );
-        assert_eq!(actual.source, Some(rpc::ComponentPowerSource::Rms as i32));
-        assert_eq!(actual.observed_at, None);
-        assert_eq!(*reader.requested_keys.lock().unwrap(), expected_keys);
+        assert_eq!(
+            actual.source,
+            Some(rpc::ComponentPowerSource::Rms as i32),
+            "{scenario}"
+        );
+        assert_eq!(actual.observed_at, None, "{scenario}");
+        assert_eq!(
+            *reader.requested_keys.lock().unwrap(),
+            expected_keys,
+            "{scenario}"
+        );
         assert!(
             env.rms_sim
                 .submitted_batch_get_power_state_requests()
                 .await
-                .is_empty()
+                .is_empty(),
+            "{scenario}"
         );
     }
 
     Ok(())
 }
 
-/// A policy change committed between the machine and policy queries must not
-/// replace the policy from the request's original database snapshot.
+/// The deadline takes precedence over ready successful and failed RMS reads.
+/// Keep the independently loaded policy so callers can still see desired power.
+#[crate::sqlx_test]
+async fn backend_result_finishing_after_deadline_preserves_policy(
+    pool: sqlx::PgPool,
+) -> TestResult {
+    let env = create_test_env(pool.clone()).await;
+    let rack_id = RackId::new("power-details-backend-expiry");
+    let mut txn = pool.begin().await?;
+    TestRackDbBuilder::new()
+        .with_rack_id(rack_id.clone())
+        .persist(&mut txn)
+        .await?;
+    let host = create_host(&mut txn, 62, Some(rack_id), Some(PowerState::Off)).await?;
+    txn.commit().await?;
+
+    env.api
+        .credential_manager
+        .set_credentials(
+            &CredentialKey::BmcCredentials {
+                credential_type: BmcCredentialType::BmcRoot {
+                    bmc_mac_address: host.1,
+                },
+            },
+            &Credentials::new("power-reader", "test-password"),
+        )
+        .await
+        .expect("seed compute power-read BMC credentials");
+    let api = api_with_rms(&env, pool, power_profiles(1, 0, 0), PowerRole::Compute);
+
+    for (index, (scenario, rms_response)) in [
+        // Valid evidence must not become a fresh observation after expiry.
+        (
+            "expired RMS success",
+            Ok(rms::BatchGetPowerStateResponse {
+                response: Some(rms::NodeBatchResponse {
+                    status: rms::ReturnCode::Success as i32,
+                    node_results: vec![rms::NodeOperationResult {
+                        node_id: host.0.to_string(),
+                        status: rms::ReturnCode::Success as i32,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                node_power_states: vec![rms::NodePowerState {
+                    node_id: host.0.to_string(),
+                    pstate: "ON".into(),
+                }],
+            }),
+        ),
+        // Failure must also report expiry, protecting the check before error conversion.
+        (
+            "expired RMS failure",
+            Err(librms::RackManagerError::ApiInvocationError(
+                tonic::Status::unavailable("injected power read failure"),
+            )),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        env.rms_sim
+            .queue_batch_get_power_state_response(rms_response)
+            .await;
+        let (entered, release) = env.rms_sim.block_next_batch_get_power_state().await;
+
+        // Finish the snapshot, credentials and RMS identity lookup before pausing time.
+        let mut request = Box::pin(api.get_component_power_details(host_request(&[host])));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                result = entered => result.unwrap_or_else(|_| panic!("{scenario}: RMS read was dropped before arrival")),
+                result = &mut request => panic!("{scenario}: request completed before gated RMS read: {result:?}"),
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{scenario}: RMS read must start before pausing the clock"));
+
+        // The handler's fifteen-second timeout and RMS's ten-second timeout poll
+        // ready inner results first. Keep the request unpolled until the queued
+        // RMS response is ready after both deadlines, then use a short watchdog.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(15) + Duration::from_millis(1)).await;
+        release
+            .send(())
+            .unwrap_or_else(|_| panic!("{scenario}: RMS read must remain pending"));
+        let response = tokio::time::timeout(Duration::from_millis(1), &mut request).await;
+        tokio::time::resume();
+        let response = response
+            .unwrap_or_else(|_| panic!("{scenario}: ready RMS response must finish"))
+            .unwrap_or_else(|error| panic!("{scenario}: power details failed: {error}"))
+            .into_inner();
+
+        assert_eq!(response.entries.len(), 1, "{scenario}");
+        let entry = &response.entries[0];
+        assert_eq!(entry.component_id, host.0.to_string(), "{scenario}");
+        assert_eq!(
+            entry.desired,
+            Some(stored_policy(rpc::PowerState::Off)),
+            "{scenario}"
+        );
+        let actual = entry
+            .actual
+            .as_ref()
+            .unwrap_or_else(|| panic!("{scenario}: missing actual power observation"));
+        assert!(
+            matches!(actual.outcome.as_ref(), Some(Outcome::Error(error))
+                if error.code == rpc::ComponentPowerErrorCode::DeadlineExceeded as i32),
+            "{scenario}: expected a deadline error, received {actual:?}"
+        );
+        assert_eq!(
+            actual.source,
+            Some(rpc::ComponentPowerSource::Rms as i32),
+            "{scenario}"
+        );
+        assert_eq!(actual.observed_at, None, "{scenario}");
+        assert_eq!(
+            env.rms_sim
+                .submitted_batch_get_power_state_requests()
+                .await
+                .len(),
+            index + 1,
+            "{scenario}: each request sends one RMS power read"
+        );
+    }
+    Ok(())
+}
+
+/// Policy must match the initially read machine even after a concurrent write.
+/// A fresh request must see the new maintenance, proving the original absence
+/// was meaningful rather than a reader that always omits pending requests.
+/// Successful snapshots must also return their healthy connection for reuse.
 #[crate::sqlx_test]
 async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
     pool: sqlx::PgPool,
@@ -691,8 +918,8 @@ async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
     )
     .build();
 
-    // A table lock blocks the plain policy SELECT; a row lock would not. The
-    // machine query does not access this table, so it establishes the snapshot.
+    // A table lock blocks the plain policy SELECT; a row lock would not.
+    // Snapshot setup and identity reads precede this blocked policy read.
     let mut writer = pool.begin().await?;
     sqlx::query("LOCK TABLE power_options IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *writer)
@@ -710,7 +937,15 @@ async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
     };
     assert_eq!(blocked_pid, reader_pid);
 
-    // Commit a different desired state while the request retains its snapshot.
+    // Maintenance was already read with the machine. The blocked policy query
+    // must retain that snapshot even after these writes commit.
+    db::machine::set_machine_maintenance_requested(
+        &mut writer,
+        host.0,
+        "concurrent request",
+        model::machine::MachineMaintenanceOperation::PowerOn,
+    )
+    .await?;
     db::power_options::update_desired_state(
         &host.0,
         PowerState::On,
@@ -731,6 +966,42 @@ async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
         response.entries[0].desired,
         Some(stored_policy(rpc::PowerState::Off))
     );
+    assert_eq!(
+        response.entries[0].actions,
+        Some(rpc::ComponentPowerActionDetails::default()),
+        "maintenance saved after the snapshot must not appear in this response",
+    );
+
+    // The same handler must observe the pending request in a later snapshot.
+    let fresh = api
+        .get_component_power_details(host_request(&[host]))
+        .await?
+        .into_inner();
+    assert_eq!(fresh.entries.len(), 1);
+    let actions = fresh.entries[0].actions.as_ref().expect("action details");
+    let submitted_at = actions
+        .actions
+        .first()
+        .expect("new pending request")
+        .requested_at;
+    assert!(
+        submitted_at.is_some(),
+        "the new request records submission time"
+    );
+    assert_eq!(
+        actions,
+        &rpc::ComponentPowerActionDetails {
+            actions: vec![rpc::ComponentPowerAction {
+                status: rpc::ComponentPowerActionStatus::Pending as i32,
+                operation: rpc::ComponentPowerActionOperation::PowerOn as i32,
+                requested_at: submitted_at,
+                initiator: Some("concurrent request".into()),
+                ..Default::default()
+            }],
+            error: None,
+        }
+    );
+
     let policy_after = db::power_options::get_by_ids(&[host.0], pool.acquire().await?.as_mut())
         .await?
         .pop()
@@ -740,6 +1011,11 @@ async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
         policy_after.desired_power_state_version,
         policy_before.desired_power_state_version
     );
+    // A completed snapshot should return its healthy connection for reuse.
+    let reused_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&reader_pool)
+        .await?;
+    assert_eq!(reused_pid, reader_pid);
     reader_pool.close().await;
 
     Ok(())
@@ -816,9 +1092,135 @@ async fn snapshot_deadline_aborts_before_live_reads(pool: sqlx::PgPool) -> TestR
     Ok(())
 }
 
-/// Disabled management preserves policy distinctions and still rejects invalid request shapes.
+/// Cancelling a blocked snapshot must release its pool slot synchronously, so
+/// further requests can proceed without waiting for SQLx cleanup.
 #[crate::sqlx_test]
-async fn persisted_policy_remains_visible_when_component_manager_is_disabled(
+async fn blocked_snapshots_release_pool_capacity(pool: sqlx::PgPool) -> TestResult {
+    /// Exercises caller cancellation during setup and reads, plus the RPC deadline.
+    #[derive(Clone, Copy, Debug)]
+    enum Cancellation {
+        Deadline,
+        CallerDrop,
+        SetupCallerDrop,
+    }
+
+    let env = create_test_env(pool.clone()).await;
+    let mut txn = pool.begin().await?;
+    let host = create_host(&mut txn, 62, None, Some(PowerState::Off)).await?;
+    txn.commit().await?;
+
+    for cancellation in [
+        // The RPC's own timeout must also release the database capacity.
+        Cancellation::Deadline,
+        // A disconnected caller has no response path to perform cleanup.
+        Cancellation::CallerDrop,
+        // Setup must release its slot before the server cap has been installed.
+        Cancellation::SetupCallerDrop,
+    ] {
+        let reader_pool = single_connection_pool(&pool).await?;
+        // Remove any shorter inherited timeout that could rescue SQLx cleanup.
+        let configured_timeout: String =
+            sqlx::query_scalar("SELECT set_config('statement_timeout', '0', false)")
+                .fetch_one(&reader_pool)
+                .await?;
+        assert_eq!(configured_timeout, "0");
+        let reader_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&reader_pool)
+            .await?;
+
+        let credentials = Arc::new(CountingCredentialReader::default());
+        let mut api = api_with_rms(
+            &env,
+            reader_pool.clone(),
+            power_profiles(0, 0, 0),
+            PowerRole::Compute,
+        );
+        api.credential_manager = Arc::new(CompositeCredentialManager::new(
+            credentials.clone(),
+            env.test_credential_manager.clone(),
+        ));
+
+        // The setup case blocks inside `begin`, before it can install the
+        // server cap. The other cases stop an inventory read after setup.
+        let (lock_statement, query_fragment) = match cancellation {
+            Cancellation::SetupCallerDrop => (
+                "LOCK TABLE pg_settings IN ACCESS EXCLUSIVE MODE",
+                "FROM pg_settings",
+            ),
+            Cancellation::Deadline | Cancellation::CallerDrop => (
+                "LOCK TABLE power_options IN ACCESS EXCLUSIVE MODE",
+                "FROM power_options",
+            ),
+        };
+        let mut blocker = pool.begin().await?;
+        sqlx::query(lock_statement).execute(&mut *blocker).await?;
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
+        let mut request = Box::pin(api.get_component_power_details(host_request(&[host])));
+        let blocked_pid = tokio::select! {
+            result = tokio::time::timeout(
+                Duration::from_secs(2),
+                wait_for_blocked_query(&pool, blocker_pid, query_fragment),
+            ) => result.expect("snapshot query must block before its deadline"),
+            result = &mut request => panic!("request completed before the query blocked: {result:?}"),
+        };
+        assert_eq!(blocked_pid, reader_pid, "{cancellation:?}");
+
+        match cancellation {
+            Cancellation::Deadline => {
+                // Require completion immediately after advancing the client
+                // deadline, rather than letting paused time reach a later timer.
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(5)).await;
+                let expired_at = tokio::time::Instant::now();
+                let response = tokio::time::timeout(Duration::from_millis(1), &mut request).await;
+                let finished_at = tokio::time::Instant::now();
+                tokio::time::resume();
+                assert!(finished_at <= expired_at + Duration::from_millis(1));
+                let error = response
+                    .expect("snapshot must finish at its five-second deadline")
+                    .expect_err("an incomplete snapshot must abort the RPC");
+                assert_eq!(error.code(), tonic::Code::Internal);
+                assert_eq!(
+                    error.message(),
+                    "internal error: power details database snapshot failed"
+                );
+            }
+            Cancellation::CallerDrop | Cancellation::SetupCallerDrop => {}
+        }
+        drop(request);
+        // Detachment releases capacity synchronously, before any cleanup task
+        // or server timeout has a chance to return a connection to this pool.
+        assert_eq!(reader_pool.size(), 0, "{cancellation:?}");
+
+        // Keep the table lock held until this independent query either finishes
+        // or times out. Releasing it earlier would hide SQLx's blocked cleanup.
+        let recovered = tokio::time::timeout(
+            Duration::from_secs(2),
+            sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&reader_pool),
+        )
+        .await;
+        blocker.rollback().await?;
+        reader_pool.close().await;
+
+        // Every hardware read needs this credential lookup first, so zero
+        // admissions also proves that no backend read started.
+        assert_eq!(credentials.0.load(Ordering::SeqCst), 0, "{cancellation:?}");
+        assert_eq!(
+            recovered.expect("cancelled snapshot must release its pool slot")?,
+            1,
+            "{cancellation:?}"
+        );
+    }
+
+    Ok(())
+}
+
+/// Disabled management preserves saved policy and action availability while
+/// still rejecting invalid requests before trying to read hardware.
+#[crate::sqlx_test]
+async fn persisted_policy_and_actions_remain_visible_when_component_manager_is_disabled(
     pool: sqlx::PgPool,
 ) -> TestResult {
     let env = create_test_env(pool.clone()).await;
@@ -917,6 +1319,16 @@ async fn persisted_policy_remains_visible_when_component_manager_is_disabled(
     ]) {
         assert_eq!(entry.component_id, id.to_string());
         assert_eq!(entry.desired.as_ref(), Some(&desired));
+        let actions = entry
+            .actions
+            .as_ref()
+            .expect("supporting servers always provide action details");
+        assert!(actions.actions.is_empty());
+        // A missing identity is unavailable, not confirmed absence of maintenance.
+        assert_eq!(
+            actions.error.as_ref().map(|error| error.code),
+            (id == absent_host).then_some(rpc::ComponentPowerErrorCode::NotFound as i32)
+        );
         let actual = entry.actual.as_ref().expect("actual result");
         assert_eq!(observation_error(actual).code, error as i32);
         assert_eq!(actual.source, None);
@@ -1715,6 +2127,17 @@ async fn rms_switch_and_shelf_reads_use_their_roles_without_host_policy(
                     ..Default::default()
                 })
             );
+            // Deleted and endpointless rows remain managed; only absent IDs
+            // have unavailable action details instead of a confirmed empty list.
+            let actions = entry.actions.as_ref().expect("action details");
+            assert!(actions.actions.is_empty(), "{id}");
+            assert_eq!(
+                actions.error.as_ref().map(|error| error.code),
+                (*error == Some(rpc::ComponentPowerErrorCode::NotFound))
+                    .then_some(rpc::ComponentPowerErrorCode::NotFound as i32),
+                "{id}"
+            );
+
             let actual = entry.actual.as_ref().expect("actual component state");
             if let Some(code) = error {
                 assert_eq!(observation_error(actual).code, *code as i32);
@@ -1915,5 +2338,255 @@ async fn rms_switch_and_shelf_reads_use_their_roles_without_host_policy(
             .await
             .is_empty()
     );
+    Ok(())
+}
+
+/// Saved maintenance remains readable without live power support. Strict
+/// request decoding must distinguish corrupt storage from confirmed no work.
+#[crate::sqlx_test]
+async fn tracked_actions_are_independent_of_live_reads_and_reject_invalid_storage(
+    pool: sqlx::PgPool,
+) -> TestResult {
+    let env = create_test_env(pool.clone()).await;
+    let mut txn = pool.begin().await?;
+    let (host_id, _) = create_host(&mut txn, 71, None, Some(PowerState::Off)).await?;
+    let switch_id = SwitchId::from(uuid::Uuid::new_v4());
+    let shelf_id = PowerShelfId::from(uuid::Uuid::new_v4());
+    db::switch::create(
+        &mut txn,
+        &NewSwitch {
+            id: switch_id,
+            config: SwitchConfig {
+                name: "power-actions".into(),
+                enable_nmxc: false,
+                fabric_manager_config: None,
+            },
+            bmc_mac_address: None,
+            metadata: None,
+            rack_id: None,
+            slot_number: None,
+            tray_index: None,
+        },
+    )
+    .await?;
+    db::power_shelf::create(
+        &mut txn,
+        &NewPowerShelf {
+            id: shelf_id,
+            config: power_shelf_config("power-actions"),
+            bmc_mac_address: None,
+            metadata: None,
+            rack_id: None,
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    // There is no Component Manager, and the switch/shelf have no endpoints.
+    // These limitations must not hide stored maintenance from administrators.
+    let api = TestApiBuilder::new(
+        pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .build();
+    // The replacement phase separately exercises all three disabled routing
+    // flags. Empty credentials stop the standalone host before live BMC work.
+    let routing_disabled_api = TestApiBuilder::new(
+        pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_component_manager(Arc::new(ComponentManager::new(
+        Arc::new(MockNvSwitchManager::default()),
+        Arc::new(MockPowerShelfManager),
+        Arc::new(MockComputeTrayManager),
+        false,
+        false,
+        false,
+    )))
+    .with_credential_manager(Arc::new(CompositeCredentialManager::new(
+        Arc::new(CountingCredentialReader::default()),
+        env.test_credential_manager.clone(),
+    )))
+    .build();
+    let requested_at: chrono::DateTime<chrono::Utc> = "2026-10-01T00:00:00Z".parse()?;
+    let pending = serde_json::json!({
+        "requested_at": requested_at, "initiator": "operator",
+        "operation": { "operation": "poweroff", "graceful": true },
+    });
+    let active = serde_json::json!({
+        "state": "maintenance", "operation": pending["operation"], "request": pending,
+    });
+    let active_action = rpc::ComponentPowerAction {
+        status: rpc::ComponentPowerActionStatus::Active as i32,
+        operation: rpc::ComponentPowerActionOperation::PowerOff as i32,
+        requested_at: Some(requested_at.into()),
+        initiator: Some("operator".into()),
+        graceful: Some(true),
+        chassis_id: None,
+    };
+    let replacement_at = requested_at + chrono::Duration::seconds(1);
+    let mut replacement = pending.clone();
+    replacement["requested_at"] = serde_json::to_value(replacement_at)?;
+    // An unknown recognized variant reaches the serde error. An unknown outer
+    // property would be ignored and would not establish the disclosure risk.
+    let mut malformed = pending.clone();
+    malformed["operation"]["operation"] = "private-operation-sentinel".into();
+
+    for (kind, update, id, target, actual_error) in [
+        // Compute exercises the strict JSON snapshot reader and disabled manager.
+        (
+            "compute",
+            "UPDATE machines SET controller_state = $1, machine_maintenance_requested = $2 WHERE id::text = $3",
+            host_id.to_string(),
+            Target::MachineIds(::rpc::common::HostMachineIdList {
+                machine_ids: vec![host_id],
+            }),
+            rpc::ComponentPowerErrorCode::Disabled,
+        ),
+        // Switch needs a strict pending read despite its permissive shared decoder.
+        (
+            "switch",
+            "UPDATE switches SET controller_state = $1, switch_maintenance_requested = $2 WHERE id::text = $3",
+            switch_id.to_string(),
+            Target::SwitchIds(rpc::SwitchIdList {
+                ids: vec![switch_id],
+            }),
+            rpc::ComponentPowerErrorCode::EndpointUnavailable,
+        ),
+        // Shelf has a separate SQL path with the same potential silent decode loss.
+        (
+            "shelf",
+            "UPDATE power_shelves SET controller_state = $1, power_shelf_maintenance_requested = $2 WHERE id::text = $3",
+            shelf_id.to_string(),
+            Target::PowerShelfIds(rpc::PowerShelfIdList {
+                ids: vec![shelf_id],
+            }),
+            rpc::ComponentPowerErrorCode::EndpointUnavailable,
+        ),
+    ] {
+        // First establish that the selected decoder exposes the private value;
+        // the RPC's fixed error below must then prevent that disclosure.
+        let decode_error = match &target {
+            Target::MachineIds(_) => serde_json::from_value::<
+                model::machine::MachineMaintenanceRequest,
+            >(malformed.clone())
+            .unwrap_err(),
+            Target::SwitchIds(_) => {
+                serde_json::from_value::<model::switch::SwitchMaintenanceRequest>(malformed.clone())
+                    .unwrap_err()
+            }
+            Target::PowerShelfIds(_) => serde_json::from_value::<
+                model::power_shelf::PowerShelfMaintenanceRequest,
+            >(malformed.clone())
+            .unwrap_err(),
+        };
+        assert!(
+            decode_error
+                .to_string()
+                .contains("private-operation-sentinel"),
+            "{kind}"
+        );
+        let request = rpc::GetComponentPowerDetailsRequest {
+            target: Some(target),
+        };
+
+        let before = api
+            .get_component_power_details(Request::new(request.clone()))
+            .await?
+            .into_inner();
+
+        assert_eq!(before.entries.len(), 1, "{kind}");
+        assert_eq!(
+            before.entries[0].actions,
+            Some(rpc::ComponentPowerActionDetails::default()),
+            "{kind}"
+        );
+
+        // Admission leaves the identical pending request set until completion;
+        // the response must show the admitted action only once.
+        sqlx::query(update)
+            .bind(&active)
+            .bind(&pending)
+            .bind(&id)
+            .execute(&pool)
+            .await?;
+
+        let response = api
+            .get_component_power_details(Request::new(request.clone()))
+            .await?
+            .into_inner();
+
+        assert_eq!(response.entries.len(), 1, "{kind}");
+        let entry = &response.entries[0];
+        assert_eq!(entry.component_id, id, "{kind}");
+        assert_eq!(
+            entry.actions,
+            Some(rpc::ComponentPowerActionDetails {
+                actions: vec![active_action.clone()],
+                error: None,
+            }),
+            "{kind}"
+        );
+        assert_eq!(
+            observation_error(entry.actual.as_ref().unwrap()).code,
+            actual_error as i32,
+            "{kind}"
+        );
+
+        // A later submission of the same operation is distinct work. Exercise
+        // each pending reader with routing disabled, keeping admitted metadata.
+        sqlx::query(update)
+            .bind(&active)
+            .bind(&replacement)
+            .bind(&id)
+            .execute(&pool)
+            .await?;
+
+        let response = routing_disabled_api
+            .get_component_power_details(Request::new(request.clone()))
+            .await?
+            .into_inner();
+
+        assert_eq!(response.entries.len(), 1, "{kind}");
+        assert_eq!(response.entries[0].component_id, id, "{kind}");
+        assert_eq!(
+            response.entries[0].actions,
+            Some(rpc::ComponentPowerActionDetails {
+                actions: vec![
+                    active_action.clone(),
+                    rpc::ComponentPowerAction {
+                        status: rpc::ComponentPowerActionStatus::Pending as i32,
+                        requested_at: Some(replacement_at.into()),
+                        ..active_action.clone()
+                    }
+                ],
+                error: None,
+            }),
+            "{kind}"
+        );
+
+        // The active state stays valid; only the pending payload is corrupt.
+        // The RPC must fail instead of returning a falsely complete action list.
+        sqlx::query(update)
+            .bind(&active)
+            .bind(&malformed)
+            .bind(&id)
+            .execute(&pool)
+            .await?;
+
+        let error = api
+            .get_component_power_details(Request::new(request))
+            .await
+            .expect_err(kind);
+
+        assert_eq!(error.code(), tonic::Code::Internal, "{kind}");
+        assert_eq!(
+            error.message(),
+            "internal error: power details database snapshot failed",
+            "{kind}"
+        );
+    }
     Ok(())
 }

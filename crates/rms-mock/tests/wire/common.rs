@@ -56,10 +56,16 @@ pub(crate) async fn serve_with(nodes: Vec<SimNode>) -> String {
 
 /// Serve the mock on an ephemeral port and return its base URL.
 pub(crate) async fn serve_with_config(nodes: Vec<SimNode>, config: RmsMockConfig) -> String {
-    let mock = Arc::new(RmsMock::new(
-        Arc::new(StaticInventory::new(nodes.into())),
-        config,
-    ));
+    serve_inventory(Arc::new(StaticInventory::new(nodes.into())), config).await
+}
+
+/// Serve the mock over `inventory`, which the test keeps to observe what
+/// completed jobs did to it.
+pub(crate) async fn serve_inventory(
+    inventory: Arc<StaticInventory>,
+    config: RmsMockConfig,
+) -> String {
+    let mock = Arc::new(RmsMock::new(inventory, config));
     let router = rms_mock::router(mock);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

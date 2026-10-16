@@ -144,8 +144,7 @@ func (cibph CreateNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 	}
 
 	// Determine if tenant has access to requested site
-	tsDAO := cdbm.NewTenantSiteDAO(cibph.dbSession)
-	_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, orgTenant.ID, site.ID, nil)
+	err = common.ValidateTenantSiteAccess(ctx, nil, cibph.dbSession, orgTenant, site.ID)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant is not associated with Site specified in query", nil)
@@ -420,7 +419,6 @@ func (gaibph GetAllNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 	}
 
 	// Get site ID from query param
-	tsDAO := cdbm.NewTenantSiteDAO(gaibph.dbSession)
 	var siteIDs []uuid.UUID
 	siteIDStr := c.QueryParam("siteId")
 	if siteIDStr != "" {
@@ -432,7 +430,7 @@ func (gaibph GetAllNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 		siteIDs = append(siteIDs, site.ID)
 
 		// Check Site association with Tenant
-		_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, site.ID, nil)
+		err = common.ValidateTenantSiteAccess(ctx, nil, gaibph.dbSession, tenant, site.ID)
 		if err != nil {
 			if err == cdb.ErrDoesNotExist {
 				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have access to this Site", nil)

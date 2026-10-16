@@ -183,6 +183,10 @@ func (m *mockTaskStore) ListNonTerminalTasksForRacks(_ context.Context, _ []uuid
 	panic("mockTaskStore.ListNonTerminalTasksForRacks: not implemented")
 }
 
+func (m *mockTaskStore) ListPowerTasksForRack(_ context.Context, _ uuid.UUID) ([]taskdef.PowerTaskDetails, error) {
+	panic("mockTaskStore.ListPowerTasksForRack: not implemented")
+}
+
 func (m *mockTaskStore) LatestLeakageShutdownTaskStatuses(
 	_ context.Context,
 	_ []uuid.UUID,
