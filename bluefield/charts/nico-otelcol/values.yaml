@@ -53,8 +53,9 @@ nodeExporter:
 # alongside otelcol-contrib (see bluefield/containers/transceiver-exporter).
 transceiverExporter:
   image:
-    repository: nvcr.io/0837451325059433/carbide-dev/transceiver-exporter
-    # Defaults to the otelcol-contrib image tag (built in the same CI run).
+    # Empty: the sibling `transceiver-exporter` path next to image.repository.
+    repository: ""
+    # Empty: the otelcol-contrib image tag.
     tag: ""
     pullPolicy: IfNotPresent
   # Must match the prometheus/transceiver scrape target (localhost:9300) in otel_config.yaml.
