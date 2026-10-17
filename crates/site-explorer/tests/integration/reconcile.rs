@@ -99,7 +99,7 @@ async fn test_site_explorer_reconcile_preallocates_host_nic_fixed_ip(
     let fixed_ip = "10.99.0.20";
     let parsed_fixed_ip: IpAddr = fixed_ip.parse().unwrap();
     let expected_interface = model::expected_machine::ExpectedInterface {
-        mac_address: nic_mac,
+        mac_address: Some(nic_mac),
         nic_type: Some("onboard".into()),
         fixed_ip: Some(parsed_fixed_ip),
         ..Default::default()

@@ -40187,7 +40187,7 @@ func (x *IpxeTemplateList) GetTemplates() []*IpxeTemplate {
 
 type ExpectedHostNic struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
-	MacAddress string                 `protobuf:"bytes,1,opt,name=mac_address,json=macAddress,proto3" json:"mac_address,omitempty"`
+	MacAddress *string                `protobuf:"bytes,1,opt,name=mac_address,json=macAddress,proto3,oneof" json:"mac_address,omitempty"`
 	// Legacy free-form segment hint (bf3, onboard, oob, ...). Kept for backward
 	// compatibility; declare `network_segment_type` instead, which wins.
 	NicType      *string `protobuf:"bytes,2,opt,name=nic_type,json=nicType,proto3,oneof" json:"nic_type,omitempty"`
@@ -40227,7 +40227,13 @@ type ExpectedHostNic struct {
 	// `network_segment_type`, may instead fall back to `static-assignments`; only
 	// the legacy Host case leaves `network_segment_type` as a first-DHCP
 	// selection hint.
-	IpAllocation  *ExpectedInterfaceIpAllocation `protobuf:"varint,9,opt,name=ip_allocation,json=ipAllocation,proto3,enum=forge.ExpectedInterfaceIpAllocation,oneof" json:"ip_allocation,omitempty"`
+	IpAllocation *ExpectedInterfaceIpAllocation `protobuf:"varint,9,opt,name=ip_allocation,json=ipAllocation,proto3,enum=forge.ExpectedInterfaceIpAllocation,oneof" json:"ip_allocation,omitempty"`
+	// Physical interface identifier (for example C1-1-L1), as named in the
+	// Cerebro database.
+	// At least one of mac_address or physical_ifname must be supplied.
+	PhysicalIfname *string `protobuf:"bytes,10,opt,name=physical_ifname,json=physicalIfname,proto3,oneof" json:"physical_ifname,omitempty"`
+	// Optional logical interface name; stored for inventory consumers.
+	LogicalIfname *string `protobuf:"bytes,11,opt,name=logical_ifname,json=logicalIfname,proto3,oneof" json:"logical_ifname,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -40263,8 +40269,8 @@ func (*ExpectedHostNic) Descriptor() ([]byte, []int) {
 }
 
 func (x *ExpectedHostNic) GetMacAddress() string {
-	if x != nil {
-		return x.MacAddress
+	if x != nil && x.MacAddress != nil {
+		return *x.MacAddress
 	}
 	return ""
 }
@@ -40323,6 +40329,20 @@ func (x *ExpectedHostNic) GetIpAllocation() ExpectedInterfaceIpAllocation {
 		return *x.IpAllocation
 	}
 	return ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_UNSPECIFIED
+}
+
+func (x *ExpectedHostNic) GetPhysicalIfname() string {
+	if x != nil && x.PhysicalIfname != nil {
+		return *x.PhysicalIfname
+	}
+	return ""
+}
+
+func (x *ExpectedHostNic) GetLogicalIfname() string {
+	if x != nil && x.LogicalIfname != nil {
+		return *x.LogicalIfname
+	}
+	return ""
 }
 
 // Per-host lifecycle profile for settings that affect state-machine progression.
@@ -40426,6 +40446,10 @@ type ExpectedMachine struct {
 	// host_nics, including `[]`; older clients leave it false so an unknown
 	// nested HostBmc is not removed by a read-modify-write.
 	ReplaceHostNics bool `protobuf:"varint,19,opt,name=replace_host_nics,json=replaceHostNics,proto3" json:"replace_host_nics,omitempty"`
+	// The server_name field is optional and is used to identify the machine. This
+	// name will be presented to the switches in LLDP responses and is potentially
+	// used for cable validation, etc.
+	ServerName *string `protobuf:"bytes,20,opt,name=server_name,json=serverName,proto3,oneof" json:"server_name,omitempty"`
 	// WARNING: Following fields are not present in Core, but added directly in REST snapshot
 	Name            *string `protobuf:"bytes,21,opt,name=name,proto3,oneof" json:"name,omitempty"`
 	Manufacturer    *string `protobuf:"bytes,22,opt,name=manufacturer,proto3,oneof" json:"manufacturer,omitempty"`
@@ -40601,6 +40625,13 @@ func (x *ExpectedMachine) GetReplaceHostNics() bool {
 		return x.ReplaceHostNics
 	}
 	return false
+}
+
+func (x *ExpectedMachine) GetServerName() string {
+	if x != nil && x.ServerName != nil {
+		return *x.ServerName
+	}
+	return ""
 }
 
 func (x *ExpectedMachine) GetName() string {
@@ -76241,19 +76272,24 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\v2\x16.common.IpxeTemplateIdR\x02id\"\x1a\n" +
 	"\x18ListIpxeTemplatesRequest\"E\n" +
 	"\x10IpxeTemplateList\x121\n" +
-	"\ttemplates\x18\x01 \x03(\v2\x13.forge.IpxeTemplateR\ttemplates\"\xb3\x04\n" +
-	"\x0fExpectedHostNic\x12\x1f\n" +
-	"\vmac_address\x18\x01 \x01(\tR\n" +
-	"macAddress\x12\x1e\n" +
-	"\bnic_type\x18\x02 \x01(\tH\x00R\anicType\x88\x01\x01\x12\x1e\n" +
-	"\bfixed_ip\x18\x03 \x01(\tH\x01R\afixedIp\x88\x01\x01\x12\"\n" +
+	"\ttemplates\x18\x01 \x03(\v2\x13.forge.IpxeTemplateR\ttemplates\"\xc9\x05\n" +
+	"\x0fExpectedHostNic\x12$\n" +
+	"\vmac_address\x18\x01 \x01(\tH\x00R\n" +
+	"macAddress\x88\x01\x01\x12\x1e\n" +
+	"\bnic_type\x18\x02 \x01(\tH\x01R\anicType\x88\x01\x01\x12\x1e\n" +
+	"\bfixed_ip\x18\x03 \x01(\tH\x02R\afixedIp\x88\x01\x01\x12\"\n" +
 	"\n" +
-	"fixed_mask\x18\x04 \x01(\tH\x02R\tfixedMask\x88\x01\x01\x12(\n" +
-	"\rfixed_gateway\x18\x05 \x01(\tH\x03R\ffixedGateway\x88\x01\x01\x12\x1d\n" +
-	"\aprimary\x18\x06 \x01(\bH\x04R\aprimary\x88\x01\x01\x12P\n" +
-	"\x14network_segment_type\x18\a \x01(\x0e2\x19.forge.NetworkSegmentTypeH\x05R\x12networkSegmentType\x88\x01\x01\x125\n" +
-	"\x04role\x18\b \x01(\x0e2\x1c.forge.ExpectedInterfaceRoleH\x06R\x04role\x88\x01\x01\x12N\n" +
-	"\rip_allocation\x18\t \x01(\x0e2$.forge.ExpectedInterfaceIpAllocationH\aR\fipAllocation\x88\x01\x01B\v\n" +
+	"fixed_mask\x18\x04 \x01(\tH\x03R\tfixedMask\x88\x01\x01\x12(\n" +
+	"\rfixed_gateway\x18\x05 \x01(\tH\x04R\ffixedGateway\x88\x01\x01\x12\x1d\n" +
+	"\aprimary\x18\x06 \x01(\bH\x05R\aprimary\x88\x01\x01\x12P\n" +
+	"\x14network_segment_type\x18\a \x01(\x0e2\x19.forge.NetworkSegmentTypeH\x06R\x12networkSegmentType\x88\x01\x01\x125\n" +
+	"\x04role\x18\b \x01(\x0e2\x1c.forge.ExpectedInterfaceRoleH\aR\x04role\x88\x01\x01\x12N\n" +
+	"\rip_allocation\x18\t \x01(\x0e2$.forge.ExpectedInterfaceIpAllocationH\bR\fipAllocation\x88\x01\x01\x12,\n" +
+	"\x0fphysical_ifname\x18\n" +
+	" \x01(\tH\tR\x0ephysicalIfname\x88\x01\x01\x12*\n" +
+	"\x0elogical_ifname\x18\v \x01(\tH\n" +
+	"R\rlogicalIfname\x88\x01\x01B\x0e\n" +
+	"\f_mac_addressB\v\n" +
 	"\t_nic_typeB\v\n" +
 	"\t_fixed_ipB\r\n" +
 	"\v_fixed_maskB\x10\n" +
@@ -76262,10 +76298,12 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\b_primaryB\x17\n" +
 	"\x15_network_segment_typeB\a\n" +
 	"\x05_roleB\x10\n" +
-	"\x0e_ip_allocation\"[\n" +
+	"\x0e_ip_allocationB\x12\n" +
+	"\x10_physical_ifnameB\x11\n" +
+	"\x0f_logical_ifname\"[\n" +
 	"\x14HostLifecycleProfile\x12.\n" +
 	"\x10disable_lockdown\x18\x01 \x01(\bH\x00R\x0fdisableLockdown\x88\x01\x01B\x13\n" +
-	"\x11_disable_lockdown\"\x8e\f\n" +
+	"\x11_disable_lockdown\"\xc4\f\n" +
 	"\x0fExpectedMachine\x12&\n" +
 	"\x0fbmc_mac_address\x18\x01 \x01(\tR\rbmcMacAddress\x12!\n" +
 	"\fbmc_username\x18\x02 \x01(\tR\vbmcUsername\x12!\n" +
@@ -76287,16 +76325,18 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\bdpu_mode\x18\x10 \x01(\x0e2\x0e.forge.DpuModeH\aR\adpuMode\x88\x01\x01\x12V\n" +
 	"\x16host_lifecycle_profile\x18\x11 \x01(\v2\x1b.forge.HostLifecycleProfileH\bR\x14hostLifecycleProfile\x88\x01\x01\x12K\n" +
 	"\x11bmc_ip_allocation\x18\x12 \x01(\x0e2\x1a.forge.BmcIpAllocationTypeH\tR\x0fbmcIpAllocation\x88\x01\x01\x12*\n" +
-	"\x11replace_host_nics\x18\x13 \x01(\bR\x0freplaceHostNics\x12\x17\n" +
-	"\x04name\x18\x15 \x01(\tH\n" +
-	"R\x04name\x88\x01\x01\x12'\n" +
-	"\fmanufacturer\x18\x16 \x01(\tH\vR\fmanufacturer\x88\x01\x01\x12\x19\n" +
-	"\x05model\x18\x17 \x01(\tH\fR\x05model\x88\x01\x01\x12%\n" +
-	"\vdescription\x18\x18 \x01(\tH\rR\vdescription\x88\x01\x01\x12.\n" +
-	"\x10firmware_version\x18\x19 \x01(\tH\x0eR\x0ffirmwareVersion\x88\x01\x01\x12\x1c\n" +
-	"\aslot_id\x18\x1a \x01(\x05H\x0fR\x06slotId\x88\x01\x01\x12\x1e\n" +
-	"\btray_idx\x18\x1b \x01(\x05H\x10R\atrayIdx\x88\x01\x01\x12\x1c\n" +
-	"\ahost_id\x18\x1c \x01(\x05H\x11R\x06hostId\x88\x01\x01B\t\n" +
+	"\x11replace_host_nics\x18\x13 \x01(\bR\x0freplaceHostNics\x12$\n" +
+	"\vserver_name\x18\x14 \x01(\tH\n" +
+	"R\n" +
+	"serverName\x88\x01\x01\x12\x17\n" +
+	"\x04name\x18\x15 \x01(\tH\vR\x04name\x88\x01\x01\x12'\n" +
+	"\fmanufacturer\x18\x16 \x01(\tH\fR\fmanufacturer\x88\x01\x01\x12\x19\n" +
+	"\x05model\x18\x17 \x01(\tH\rR\x05model\x88\x01\x01\x12%\n" +
+	"\vdescription\x18\x18 \x01(\tH\x0eR\vdescription\x88\x01\x01\x12.\n" +
+	"\x10firmware_version\x18\x19 \x01(\tH\x0fR\x0ffirmwareVersion\x88\x01\x01\x12\x1c\n" +
+	"\aslot_id\x18\x1a \x01(\x05H\x10R\x06slotId\x88\x01\x01\x12\x1e\n" +
+	"\btray_idx\x18\x1b \x01(\x05H\x11R\atrayIdx\x88\x01\x01\x12\x1c\n" +
+	"\ahost_id\x18\x1c \x01(\x05H\x12R\x06hostId\x88\x01\x01B\t\n" +
 	"\a_sku_idB\x05\n" +
 	"\x03_idB\n" +
 	"\n" +
@@ -76307,7 +76347,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x17_bmc_retain_credentialsB\v\n" +
 	"\t_dpu_modeB\x19\n" +
 	"\x17_host_lifecycle_profileB\x14\n" +
-	"\x12_bmc_ip_allocationB\a\n" +
+	"\x12_bmc_ip_allocationB\x0e\n" +
+	"\f_server_nameB\a\n" +
 	"\x05_nameB\x0f\n" +
 	"\r_manufacturerB\b\n" +
 	"\x06_modelB\x0e\n" +

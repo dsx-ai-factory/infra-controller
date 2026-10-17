@@ -27,6 +27,7 @@ use carbide_dpf::{DpfError, DpuDeploymentType, DpuPhase, dpu_node_cr_name};
 use carbide_libmlx_model::nvconfig::DpuNvConfigProfile;
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
 use libredfish::SystemPowerControl;
+use model::expected_machine::ExpectedMachine;
 use model::hardware_info::HardwareInfo;
 use model::machine::{
     DpfState, DpuInitState, DpuMachine, DpuReprovisionStates, FailureCause, FailureDetails,
@@ -415,6 +416,7 @@ async fn create_and_register_dpudevices_and_dpunode(
     state: &ManagedHostStateSnapshot,
     dpf_sdk: &dyn DpfOperations,
     deployment_type: DpuDeploymentType,
+    expected_machine: Option<&ExpectedMachine>,
 ) -> Result<(), DpfResourceRegistrationError> {
     let primary_dpu_id = state
         .host_snapshot
@@ -428,20 +430,14 @@ async fn create_and_register_dpudevices_and_dpunode(
             missing: "primary_dpu",
         })?;
 
-    // Currently, we don't have dual DPU systems with Astra NICs
-    // attached to them.
-    let astra_nics = state.astra_nics();
-    let astra_underlay_nics =
-        (deployment_type == DpuDeploymentType::Bf4Astra).then(|| astra_nics.clone());
-    if state.dpu_snapshots.len() > 1 && !astra_nics.is_empty() {
+    // Astra underlay configuration currently supports a single DPU per host.
+    if state.dpu_snapshots.len() > 1 && deployment_type == DpuDeploymentType::Bf4Astra {
         return Err(StateHandlerError::InvalidState(format!(
             "dual DPU systems with Astra NICs are not supported (host {})",
             state.host_snapshot.id
         ))
         .into());
     }
-
-    tracing::info!(host = %state.host_snapshot.id, num_astra_nics = %astra_nics.len(), "Astra NICs");
 
     if !state
         .dpu_snapshots
@@ -479,7 +475,7 @@ async fn create_and_register_dpudevices_and_dpunode(
             is_primary: dpu.id == primary_dpu_id,
         };
         dpf_sdk
-            .register_dpu_device(device_info, astra_underlay_nics.clone())
+            .register_dpu_device(device_info, expected_machine.cloned(), deployment_type)
             .await
             .map_err(classify_dpf_registration_error)?;
     }
@@ -595,8 +591,16 @@ async fn handle_dpf_provisioning(
     state: &ManagedHostStateSnapshot,
     dpf_sdk: &dyn DpfOperations,
     deployment_type: DpuDeploymentType,
+    expected_machine: Option<&ExpectedMachine>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    match create_and_register_dpudevices_and_dpunode(state, dpf_sdk, deployment_type).await {
+    match create_and_register_dpudevices_and_dpunode(
+        state,
+        dpf_sdk,
+        deployment_type,
+        expected_machine,
+    )
+    .await
+    {
         Ok(()) => {}
         Err(DpfResourceRegistrationError::CredentialUnavailable(error)) => {
             return Ok(StateHandlerOutcome::wait(format!(
@@ -911,7 +915,16 @@ pub(super) async fn handle_dpf_deployment_migration(
         ));
     }
 
-    let astra_nics = machine_has_astra_nics(state, ctx).await?;
+    let expected_machine = super::get_expected_machine_for_mh(state, ctx).await?;
+    // This boolean tells deployment selection whether expected inventory has CX9 NICs,
+    // so migration checks use the appropriate Astra or generic deployment type.
+    let astra_nics = expected_machine.as_ref().is_some_and(|machine| {
+        machine
+            .data
+            .interfaces
+            .iter()
+            .any(|nic| nic.nic_type.as_deref() == Some("CX9"))
+    });
     let deployment_types = deployment_types_for_host(state, ctx, dpf_sdk, astra_nics).await?;
     let desired_deployment = match consistent_deployment_type(&deployment_types) {
         Ok(deployment_type) => deployment_type,
@@ -985,6 +998,7 @@ async fn handle_dpf_reprovisioning(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     dpf_sdk: &dyn DpfOperations,
     deployment_type: DpuDeploymentType,
+    expected_machine: Option<&ExpectedMachine>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let dpu_machine_id = dpu_snapshot.id;
     let node_name = dpu_node_cr_name(&dpf_id(&state.host_snapshot)?);
@@ -997,7 +1011,14 @@ async fn handle_dpf_reprovisioning(
             machine_id = %state.host_snapshot.id,
             "DPUDevice/DPUNode CRs do not exist, creating them before reprovisioning"
         );
-        match create_and_register_dpudevices_and_dpunode(state, dpf_sdk, deployment_type).await {
+        match create_and_register_dpudevices_and_dpunode(
+            state,
+            dpf_sdk,
+            deployment_type,
+            expected_machine,
+        )
+        .await
+        {
             Ok(()) => {}
             Err(DpfResourceRegistrationError::CredentialUnavailable(error)) => {
                 return Ok(StateHandlerOutcome::wait(format!(
@@ -1033,73 +1054,6 @@ async fn handle_dpf_reprovisioning(
     Ok(StateHandlerOutcome::transition(next))
 }
 
-// Early in machine ingestion, the dpa_intetrfaces objects for the host are not populated.
-// So we will have to check the expected_machine table for the given host to see if it has
-// any NICs of type CX9. If so, return true. Otherwise, return false.
-async fn machine_has_astra_nics(
-    state: &ManagedHostStateSnapshot,
-    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-) -> Result<bool, StateHandlerError> {
-    // its unlikely we got here without a bmc mac
-    let Some(bmc_mac_address) = state.host_snapshot.status.bmc_info.mac else {
-        tracing::error!(
-            machine_id = %state.host_snapshot.id,
-            "machine_has_astra_nics: No BMC MAC address configured"
-        );
-        return Err(StateHandlerError::MissingData {
-            object_id: state.host_snapshot.id.to_string(),
-            missing: "bmc_mac_address",
-        });
-    };
-
-    let mut txn = ctx.services.db_pool.begin().await?;
-
-    // Retrieve the expected_machines table entry for this managed host.
-    let expected_machine = db::expected_machine::find_by_bmc_mac_address(
-        txn.as_mut(),
-        bmc_mac_address,
-    )
-    .await
-    .map_err(|err| {
-        tracing::error!(
-            machine_id = %state.host_snapshot.id,
-            %bmc_mac_address,
-            error = %err,
-            "machine_has_astra_nics: Failed to look up expected machine for Astra enablement"
-        );
-        StateHandlerError::DBError(Box::new(err))
-    })?;
-
-    txn.commit().await?;
-
-    // No expected-machine entry means there are no declared host NICs to act on.
-    let Some(expected_machine) = expected_machine else {
-        tracing::info!(
-            machine_id = %state.host_snapshot.id,
-            "machine_has_astra_nics: No expected-machine entry found"
-        );
-        return Ok(false);
-    };
-
-    let host_nics = expected_machine.data.interfaces;
-    if host_nics.is_empty() {
-        tracing::info!(
-            machine_id = %state.host_snapshot.id,
-            "machine_has_astra_nics: No host NICs found"
-        );
-        return Ok(false);
-    }
-
-    // At this point, we need to use Redfish to get all the CX cards in the host.
-    // The end point to explore is /redfish/v1/Chassis/CX_$i
-
-    let has_cx9 = host_nics
-        .iter()
-        .any(|nic| nic.nic_type.as_deref() == Some("CX9"));
-
-    Ok(has_cx9)
-}
-
 /// Handle DPF state transitions.
 ///
 /// Provisioning registers all DPUs at once and moves them to WaitingForReady
@@ -1117,7 +1071,16 @@ pub(super) async fn handle_dpf_state(
     let dpu_machine_id = dpu_snapshot.id;
     let node_name = dpu_node_cr_name(&dpf_id(&state.host_snapshot)?);
 
-    let astra_nics = machine_has_astra_nics(state, ctx).await?;
+    // Use expected inventory before discovered DPA interfaces are populated.
+    // Keep this credential-bearing entry out of tracing and Debug-derived structs.
+    let expected_machine = super::get_expected_machine_for_mh(state, ctx).await?;
+    let astra_nics = expected_machine.as_ref().is_some_and(|machine| {
+        machine
+            .data
+            .interfaces
+            .iter()
+            .any(|nic| nic.nic_type.as_deref() == Some("CX9"))
+    });
 
     let deployment_types = deployment_types_for_host(state, ctx, dpf_sdk, astra_nics).await?;
     let mut deployment_type = match consistent_deployment_type(&deployment_types) {
@@ -1208,7 +1171,10 @@ pub(super) async fn handle_dpf_state(
     }
 
     match dpf_state {
-        DpfState::Provisioning => handle_dpf_provisioning(state, dpf_sdk, deployment_type).await,
+        DpfState::Provisioning => {
+            handle_dpf_provisioning(state, dpf_sdk, deployment_type, expected_machine.as_ref())
+                .await
+        }
         DpfState::WaitingForReady { phase_detail } => {
             handle_dpf_waiting_for_ready(
                 state,
@@ -1234,7 +1200,15 @@ pub(super) async fn handle_dpf_state(
         }
         DpfState::DeviceReady => handle_dpf_device_ready(state),
         DpfState::Reprovisioning => {
-            handle_dpf_reprovisioning(state, dpu_snapshot, ctx, dpf_sdk, deployment_type).await
+            handle_dpf_reprovisioning(
+                state,
+                dpu_snapshot,
+                ctx,
+                dpf_sdk,
+                deployment_type,
+                expected_machine.as_ref(),
+            )
+            .await
         }
         DpfState::Unknown => {
             tracing::warn!(dpu_machine_id = %dpu_snapshot.id, "unknown DPF state in DB, transitioning to provisioning");

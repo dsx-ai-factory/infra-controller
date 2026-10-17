@@ -68,6 +68,7 @@ type ExpectedMachine struct {
 	Manufacturer             *string                    `bun:"manufacturer"`
 	Model                    *string                    `bun:"model"`
 	Description              *string                    `bun:"description"`
+	ServerName               *string                    `bun:"server_name"`
 	SlotID                   *int32                     `bun:"slot_id"`
 	TrayIdx                  *int32                     `bun:"tray_idx"`
 	HostID                   *int32                     `bun:"host_id"`
@@ -82,7 +83,9 @@ type ExpectedMachine struct {
 // ExpectedMachineInterface is host NIC intent persisted by REST and forwarded
 // to Core's ExpectedMachine.host_nics field.
 type ExpectedMachineInterface struct {
-	MacAddress         string                               `json:"mac_address"`
+	MacAddress         *string                              `json:"mac_address,omitempty"`
+	PhysicalName       *string                              `json:"physical_name,omitempty"`
+	LogicalName        *string                              `json:"logical_name,omitempty"`
 	NicType            *string                              `json:"nic_type,omitempty"`
 	FixedIP            *string                              `json:"fixed_ip,omitempty"`
 	FixedMask          *string                              `json:"fixed_mask,omitempty"`
@@ -96,12 +99,14 @@ type ExpectedMachineInterface struct {
 // ToProto converts persisted REST interface intent to Core's wire shape.
 func (i ExpectedMachineInterface) ToProto() *corev1.ExpectedHostNic {
 	result := &corev1.ExpectedHostNic{
-		MacAddress:   i.MacAddress,
-		NicType:      i.NicType,
-		FixedIp:      i.FixedIP,
-		FixedMask:    i.FixedMask,
-		FixedGateway: i.FixedGateway,
-		Primary:      i.Primary,
+		MacAddress:     i.MacAddress,
+		PhysicalIfname: i.PhysicalName,
+		LogicalIfname:  i.LogicalName,
+		NicType:        i.NicType,
+		FixedIp:        i.FixedIP,
+		FixedMask:      i.FixedMask,
+		FixedGateway:   i.FixedGateway,
+		Primary:        i.Primary,
 	}
 	if i.NetworkSegmentType != nil {
 		result.NetworkSegmentType = i.NetworkSegmentType.ToProto().Enum()
@@ -122,6 +127,8 @@ func (i *ExpectedMachineInterface) FromProto(proto *corev1.ExpectedHostNic) {
 		return
 	}
 	i.MacAddress = proto.MacAddress
+	i.PhysicalName = proto.PhysicalIfname
+	i.LogicalName = proto.LogicalIfname
 	i.NicType = proto.NicType
 	i.FixedIP = proto.FixedIp
 	i.FixedMask = proto.FixedMask
@@ -222,6 +229,9 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *corev1.Exp
 	if em.Description != nil {
 		proto.Description = em.Description
 	}
+	if em.ServerName != nil {
+		proto.ServerName = em.ServerName
+	}
 	if em.SlotID != nil {
 		proto.SlotId = em.SlotID
 	}
@@ -302,6 +312,7 @@ func (em *ExpectedMachine) FromProto(proto *corev1.ExpectedMachine, linkedMachin
 	em.Manufacturer = proto.Manufacturer
 	em.Model = proto.Model
 	em.Description = cutil.GetPtrIfNotZero(proto.Metadata.GetDescription())
+	em.ServerName = proto.ServerName
 	em.SlotID = proto.SlotId
 	em.TrayIdx = proto.TrayIdx
 	em.HostID = proto.HostId
@@ -326,6 +337,7 @@ type ExpectedMachineCreateInput struct {
 	Manufacturer             *string
 	Model                    *string
 	Description              *string
+	ServerName               *string
 	SlotID                   *int32
 	TrayIdx                  *int32
 	HostID                   *int32
@@ -350,6 +362,7 @@ type ExpectedMachineUpdateInput struct {
 	Manufacturer             *string
 	Model                    *string
 	Description              *string
+	ServerName               *string
 	SlotID                   *int32
 	TrayIdx                  *int32
 	HostID                   *int32
@@ -370,6 +383,7 @@ type ExpectedMachineClearInput struct {
 	Manufacturer             bool
 	Model                    bool
 	Description              bool
+	ServerName               bool
 	SlotID                   bool
 	TrayIdx                  bool
 	HostID                   bool
@@ -501,6 +515,7 @@ func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx,
 			Manufacturer:             input.Manufacturer,
 			Model:                    input.Model,
 			Description:              input.Description,
+			ServerName:               input.ServerName,
 			SlotID:                   input.SlotID,
 			TrayIdx:                  input.TrayIdx,
 			HostID:                   input.HostID,
@@ -909,6 +924,10 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 			em.Description = input.Description
 			columnsSet["description"] = true
 		}
+		if input.ServerName != nil {
+			em.ServerName = input.ServerName
+			columnsSet["server_name"] = true
+		}
 		if input.SlotID != nil {
 			em.SlotID = input.SlotID
 			columnsSet["slot_id"] = true
@@ -1073,6 +1092,10 @@ func (emsd ExpectedMachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Ex
 	if input.Description {
 		em.Description = nil
 		updatedFields = append(updatedFields, "description")
+	}
+	if input.ServerName {
+		em.ServerName = nil
+		updatedFields = append(updatedFields, "server_name")
 	}
 	if input.SlotID {
 		em.SlotID = nil

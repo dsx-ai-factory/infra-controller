@@ -245,11 +245,11 @@ async fn machine_flags_select_only_supplied_fields() {
                 id: Some(rpc_id()),
                 host_nics: vec![
                     forge::ExpectedInterface {
-                        mac_address: "00:11:22:33:44:66".to_string(),
+                        mac_address: Some("00:11:22:33:44:66".to_string()),
                         ..Default::default()
                     },
                     forge::ExpectedInterface {
-                        mac_address: "00:11:22:33:44:77".to_string(),
+                        mac_address: Some("00:11:22:33:44:77".to_string()),
                         role: Some(forge::ExpectedInterfaceRole::Unspecified as i32),
                         ip_allocation: Some(
                             forge::ExpectedInterfaceIpAllocation::Unspecified as i32,
@@ -1384,7 +1384,7 @@ fn stored_machine() -> forge::ExpectedMachine {
         dpu_mode: Some(forge::DpuMode::NoDpu as i32),
         is_dpf_enabled: Some(true),
         host_nics: vec![forge::ExpectedInterface {
-            mac_address: "00:11:22:33:44:66".to_string(),
+            mac_address: Some("00:11:22:33:44:66".to_string()),
             ..Default::default()
         }],
         ..Default::default()

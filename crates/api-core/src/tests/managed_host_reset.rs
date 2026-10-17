@@ -46,7 +46,8 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Expectations for the initial provisioning flow, shared by every env below.
 fn provisioning_mock() -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));

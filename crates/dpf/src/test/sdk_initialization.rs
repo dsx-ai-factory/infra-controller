@@ -1768,7 +1768,9 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
     assert!(astra_ovs.contains("_ovs-vsctl --may-exist add-br 'br-vf4'"));
     let resolution = astra_ovs.find("resolve_dpf_pf 'c2pf3'").unwrap();
     let fixed_ovs_setup = astra_ovs.find("/etc/mellanox/ovs-script.sh").unwrap();
-    let fixed_xplane_setup = astra_ovs.find("/etc/mellanox/xplane-bridge.sh").unwrap();
+    let fixed_xplane_setup = astra_ovs
+        .find("/usr/local/sbin/configure-xplane-network.sh")
+        .unwrap();
     let intercept_bridge_setup = astra_ovs
         .find("_ovs-vsctl --may-exist add-br 'br-pf3'")
         .unwrap();

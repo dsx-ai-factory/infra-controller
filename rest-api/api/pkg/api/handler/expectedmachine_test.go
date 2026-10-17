@@ -2457,8 +2457,8 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 			requestBody: []model.APIExpectedMachineCreateRequest{{
 				SiteID: site.ID.String(), BmcMacAddress: "00:11:22:33:44:09", ChassisSerialNumber: "INVALID-PRIMARY",
 				Interfaces: model.APIExpectedMachineInterfaces{
-					{MacAddress: "02:00:00:00:00:01", Primary: cutil.GetPtr(true)},
-					{MacAddress: "02:00:00:00:00:02", Primary: cutil.GetPtr(true)},
+					{MacAddress: cutil.GetPtr("02:00:00:00:00:01"), Primary: cutil.GetPtr(true)},
+					{MacAddress: cutil.GetPtr("02:00:00:00:00:02"), Primary: cutil.GetPtr(true)},
 				},
 			}},
 			setupContext: func(c echo.Context) {
@@ -2477,13 +2477,13 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 			requestBody: []model.APIExpectedMachineCreateRequest{{
 				SiteID: site.ID.String(), BmcMacAddress: "00:11:22:33:44:09", ChassisSerialNumber: "ZERO-MAC-A",
 				Interfaces: model.APIExpectedMachineInterfaces{
-					{MacAddress: "00:00:00:00:00:00", NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.9")},
-					{MacAddress: "00:00:00:00:00:00", NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.10")},
+					{MacAddress: cutil.GetPtr("00:00:00:00:00:00"), NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.9")},
+					{MacAddress: cutil.GetPtr("00:00:00:00:00:00"), NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.10")},
 				},
 			}, {
 				SiteID: site.ID.String(), BmcMacAddress: "00:11:22:33:44:0A", ChassisSerialNumber: "ZERO-MAC-B",
 				Interfaces: model.APIExpectedMachineInterfaces{
-					{MacAddress: "00:00:00:00:00:00", NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.11")},
+					{MacAddress: cutil.GetPtr("00:00:00:00:00:00"), NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.11")},
 				},
 			}},
 			setupContext: func(c echo.Context) {
@@ -2510,7 +2510,7 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 						assert.Equal(t, "00:00:00:00:00:00", nics[index].GetMacAddress())
 						assert.Equal(t, "CX9", nics[index].GetNicType())
 						assert.Equal(t, ip, nics[index].GetFixedIp())
-						assert.Equal(t, "00:00:00:00:00:00", stored.Interfaces[index].MacAddress)
+						assert.Equal(t, cutil.GetPtr("00:00:00:00:00:00"), stored.Interfaces[index].MacAddress)
 						assert.Equal(t, cutil.GetPtr(ip), stored.Interfaces[index].FixedIP)
 						assert.Equal(t, model.NewAPIExpectedMachineInterface(stored.Interfaces[index]), response[machineIndex].Interfaces[index])
 					}
@@ -2528,7 +2528,7 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 					ChassisSerialNumber:      "BATCH-CHASSIS-001",
 					FallbackDPUSerialNumbers: []string{"DPU001"},
 					Interfaces: []model.APIExpectedMachineInterface{{
-						MacAddress: "02-aa-bb-cc-dd-ee",
+						MacAddress: cutil.GetPtr("02-aa-bb-cc-dd-ee"),
 						NicType:    cutil.GetPtr("CX9"),
 						FixedIP:    cutil.GetPtr("192.0.2.9"),
 					}},
@@ -2565,7 +2565,7 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 				require.Len(t, batchRequest.ExpectedMachines.ExpectedMachines[0].HostNics, 1)
 				assert.Equal(t, "02:AA:BB:CC:DD:EE", batchRequest.ExpectedMachines.ExpectedMachines[0].HostNics[0].GetMacAddress())
 				require.Len(t, response[0].Interfaces, 1)
-				assert.Equal(t, "02:AA:BB:CC:DD:EE", response[0].Interfaces[0].MacAddress)
+				assert.Equal(t, cutil.GetPtr("02:AA:BB:CC:DD:EE"), response[0].Interfaces[0].MacAddress)
 				assert.Equal(t, "CX9", batchRequest.ExpectedMachines.ExpectedMachines[0].HostNics[0].GetNicType())
 				assert.Contains(t, fields[0], "id")
 				assert.NotContains(t, fields[0], "Labels")
@@ -2863,11 +2863,11 @@ func TestCreateExpectedMachineHandler_DpfEnabledForwardedToWorkflow(t *testing.T
 	assert.Nil(t, err)
 	assert.False(t, apiResponse.IsDpfEnabled)
 	require.Len(t, apiResponse.Interfaces, 1)
-	assert.Equal(t, "02:AA:BB:CC:DD:EE", apiResponse.Interfaces[0].MacAddress)
+	assert.Equal(t, cutil.GetPtr("02:AA:BB:CC:DD:EE"), apiResponse.Interfaces[0].MacAddress)
 	stored, err := cdbm.NewExpectedMachineDAO(dbSession).Get(context.Background(), nil, apiResponse.ID, nil, false)
 	require.NoError(t, err)
 	require.Len(t, stored.Interfaces, 1)
-	assert.Equal(t, "02:AA:BB:CC:DD:EE", stored.Interfaces[0].MacAddress)
+	assert.Equal(t, cutil.GetPtr("02:AA:BB:CC:DD:EE"), stored.Interfaces[0].MacAddress)
 }
 
 // Each REST credential field must reach the encrypted Core PATCH request;
@@ -3073,6 +3073,10 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 		{
 			name:     "description",
 			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.Description = cutil.GetPtr("test") },
+		},
+		{
+			name:     "server name",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.ServerName = cutil.GetPtr("server-1") },
 		},
 		{
 			name:     "slot ID",

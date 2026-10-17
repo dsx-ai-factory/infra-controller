@@ -139,7 +139,10 @@ fn parse_add_with_new_and_legacy_interface_flags() {
     }
 
     assert_eq!(parsed_interfaces[0], parsed_interfaces[1]);
-    assert_eq!(parsed_interfaces[0][0].mac_address, "00:11:22:33:44:55");
+    assert_eq!(
+        parsed_interfaces[0][0].mac_address.as_deref(),
+        Some("00:11:22:33:44:55")
+    );
 }
 
 // parse_add_without_password ensures add parses when --bmc-password is omitted.

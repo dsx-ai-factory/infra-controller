@@ -117,6 +117,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .type_attribute(".dns", "#[derive(serde::Serialize)]")
         .type_attribute("forge.DhcpDiscovery", derive_prost_builder)
         .field_attribute(
+            "ExpectedHostNic.mac_address",
+            "#[serde(default)]",
+        )
+        .field_attribute(
+            "ExpectedHostNic.physical_ifname",
+            "#[serde(default, skip_serializing_if = \"Option::is_none\")]",
+        )
+        .field_attribute(
+            "ExpectedHostNic.logical_ifname",
+            "#[serde(default, skip_serializing_if = \"Option::is_none\")]",
+        )
+        .field_attribute(
             "ExpectedHostNic.role",
             "#[serde(default, skip_serializing_if = \"Option::is_none\", deserialize_with = \"ExpectedInterfaceRole::deserialize_optional\", serialize_with = \"ExpectedInterfaceRole::serialize_optional\")]",
         )

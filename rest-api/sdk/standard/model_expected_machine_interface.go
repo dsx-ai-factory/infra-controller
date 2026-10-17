@@ -14,9 +14,7 @@ API version: 2.0.0
 package standard
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
 )
 
 // checks if the ExpectedMachineInterface type satisfies the MappedNullable interface at compile time
@@ -24,8 +22,11 @@ var _ MappedNullable = &ExpectedMachineInterface{}
 
 // ExpectedMachineInterface Expected interface declaration. Each supplied list entry replaces the corresponding declaration, so preserve all returned attributes when editing it. Core validates role, primary selection, and allocation against the Site configuration.
 type ExpectedMachineInterface struct {
-	// MAC address of the expected interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
-	MacAddress string `json:"macAddress" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
+	// Identifies the interface by MAC address or by its Astra names. Required unless the deprecated `macAddress` is supplied.
+	Identifier NullableExpectedMachineInterfaceIdentifier `json:"identifier,omitempty"`
+	// Deprecated in favor of `identifier.macAddress`. Identifies the interface by MAC address when `identifier` is omitted. When both are supplied they must name the same MAC address, and this field cannot be combined with `identifier.astra`. Responses return the interface's MAC address here when it has one, in uppercase colon-separated form.
+	// Deprecated
+	MacAddress NullableString `json:"macAddress,omitempty" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
 	// Optional NIC type. Use `CX9` for ConnectX-9 interfaces on Astra hosts.
 	NicType NullableString `json:"nicType,omitempty"`
 	// Optional fixed IPv4 or IPv6 address for the interface. It must not be unspecified, multicast, or IPv4 limited broadcast. REST preserves repeated MAC declarations without enforcing uniqueness by MAC and address family; Core applies allocation validation.
@@ -44,15 +45,12 @@ type ExpectedMachineInterface struct {
 	IpAllocation NullableString `json:"ipAllocation,omitempty"`
 }
 
-type _ExpectedMachineInterface ExpectedMachineInterface
-
 // NewExpectedMachineInterface instantiates a new ExpectedMachineInterface object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewExpectedMachineInterface(macAddress string) *ExpectedMachineInterface {
+func NewExpectedMachineInterface() *ExpectedMachineInterface {
 	this := ExpectedMachineInterface{}
-	this.MacAddress = macAddress
 	return &this
 }
 
@@ -64,28 +62,93 @@ func NewExpectedMachineInterfaceWithDefaults() *ExpectedMachineInterface {
 	return &this
 }
 
-// GetMacAddress returns the MacAddress field value
-func (o *ExpectedMachineInterface) GetMacAddress() string {
+// GetIdentifier returns the Identifier field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *ExpectedMachineInterface) GetIdentifier() ExpectedMachineInterfaceIdentifier {
+	if o == nil || IsNil(o.Identifier.Get()) {
+		var ret ExpectedMachineInterfaceIdentifier
+		return ret
+	}
+	return *o.Identifier.Get()
+}
+
+// GetIdentifierOk returns a tuple with the Identifier field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *ExpectedMachineInterface) GetIdentifierOk() (*ExpectedMachineInterfaceIdentifier, bool) {
 	if o == nil {
+		return nil, false
+	}
+	return o.Identifier.Get(), o.Identifier.IsSet()
+}
+
+// HasIdentifier returns a boolean if a field has been set.
+func (o *ExpectedMachineInterface) HasIdentifier() bool {
+	if o != nil && o.Identifier.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetIdentifier gets a reference to the given NullableExpectedMachineInterfaceIdentifier and assigns it to the Identifier field.
+func (o *ExpectedMachineInterface) SetIdentifier(v ExpectedMachineInterfaceIdentifier) {
+	o.Identifier.Set(&v)
+}
+
+// SetIdentifierNil sets the value for Identifier to be an explicit nil
+func (o *ExpectedMachineInterface) SetIdentifierNil() {
+	o.Identifier.Set(nil)
+}
+
+// UnsetIdentifier ensures that no value is present for Identifier, not even an explicit nil
+func (o *ExpectedMachineInterface) UnsetIdentifier() {
+	o.Identifier.Unset()
+}
+
+// GetMacAddress returns the MacAddress field value if set, zero value otherwise (both if not set or set to explicit null).
+// Deprecated
+func (o *ExpectedMachineInterface) GetMacAddress() string {
+	if o == nil || IsNil(o.MacAddress.Get()) {
 		var ret string
 		return ret
 	}
-
-	return o.MacAddress
+	return *o.MacAddress.Get()
 }
 
-// GetMacAddressOk returns a tuple with the MacAddress field value
+// GetMacAddressOk returns a tuple with the MacAddress field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+// Deprecated
 func (o *ExpectedMachineInterface) GetMacAddressOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
-	return &o.MacAddress, true
+	return o.MacAddress.Get(), o.MacAddress.IsSet()
 }
 
-// SetMacAddress sets field value
+// HasMacAddress returns a boolean if a field has been set.
+func (o *ExpectedMachineInterface) HasMacAddress() bool {
+	if o != nil && o.MacAddress.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetMacAddress gets a reference to the given NullableString and assigns it to the MacAddress field.
+// Deprecated
 func (o *ExpectedMachineInterface) SetMacAddress(v string) {
-	o.MacAddress = v
+	o.MacAddress.Set(&v)
+}
+
+// SetMacAddressNil sets the value for MacAddress to be an explicit nil
+func (o *ExpectedMachineInterface) SetMacAddressNil() {
+	o.MacAddress.Set(nil)
+}
+
+// UnsetMacAddress ensures that no value is present for MacAddress, not even an explicit nil
+func (o *ExpectedMachineInterface) UnsetMacAddress() {
+	o.MacAddress.Unset()
 }
 
 // GetNicType returns the NicType field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -442,7 +505,12 @@ func (o ExpectedMachineInterface) MarshalJSON() ([]byte, error) {
 
 func (o ExpectedMachineInterface) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	toSerialize["macAddress"] = o.MacAddress
+	if o.Identifier.IsSet() {
+		toSerialize["identifier"] = o.Identifier.Get()
+	}
+	if o.MacAddress.IsSet() {
+		toSerialize["macAddress"] = o.MacAddress.Get()
+	}
 	if o.NicType.IsSet() {
 		toSerialize["nicType"] = o.NicType.Get()
 	}
@@ -468,42 +536,6 @@ func (o ExpectedMachineInterface) ToMap() (map[string]interface{}, error) {
 		toSerialize["ipAllocation"] = o.IpAllocation.Get()
 	}
 	return toSerialize, nil
-}
-
-func (o *ExpectedMachineInterface) UnmarshalJSON(data []byte) (err error) {
-	// This validates that all required properties are included in the JSON object
-	// by unmarshalling the object into a generic map with string keys and checking
-	// that every required field exists as a key in the generic map.
-	requiredProperties := []string{
-		"macAddress",
-	}
-
-	allProperties := make(map[string]interface{})
-
-	err = json.Unmarshal(data, &allProperties)
-
-	if err != nil {
-		return err
-	}
-
-	for _, requiredProperty := range requiredProperties {
-		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
-			return fmt.Errorf("no value given for required property %v", requiredProperty)
-		}
-	}
-
-	varExpectedMachineInterface := _ExpectedMachineInterface{}
-
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	err = decoder.Decode(&varExpectedMachineInterface)
-
-	if err != nil {
-		return err
-	}
-
-	*o = ExpectedMachineInterface(varExpectedMachineInterface)
-
-	return err
 }
 
 type NullableExpectedMachineInterface struct {
