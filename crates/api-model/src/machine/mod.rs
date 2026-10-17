@@ -5409,7 +5409,7 @@ mod tests {
                         reprovision_state: HostReprovisionState::CheckingFirmware,
                         retry_count: 0,
                     }),
-                    expect: (seconds(2_400), true),
+                    expect: (seconds(5_400), true),
                 },
                 Check {
                     scenario: "pre-assignment measurement collection uses the measurement SLA",
