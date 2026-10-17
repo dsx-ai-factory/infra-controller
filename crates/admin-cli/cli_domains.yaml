@@ -71,6 +71,7 @@ tenant:
   - expected-power-shelf
   - expected-rack
   - expected-rack-group
+  - expected-nvlink-domain
   - expected-switch
   - operating-system
   - os-image

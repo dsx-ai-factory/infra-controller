@@ -15,6 +15,10 @@ async fn expected_rack_group_migration_requires_empty_table(
     use sqlx::Acquire;
 
     let mut txn = pool.begin().await?;
+    // Reconstruct the predecessor schema before tables depending on rack groups existed.
+    sqlx::raw_sql("DROP TABLE expected_nvlink_domain_members; DROP TABLE expected_nvlink_domains;")
+        .execute(&mut *txn)
+        .await?;
     sqlx::query("DROP TABLE expected_rack_groups")
         .execute(&mut *txn)
         .await?;

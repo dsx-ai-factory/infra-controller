@@ -957,6 +957,11 @@ impl InternalRBACRules {
             "DeleteAllExpectedRacks",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
+        x.perm("CreateExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("DeleteExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("GetExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("FindExpectedNvLinkDomainIds", vec![ForgeAdminCLI, Flow]);
+        x.perm("FindExpectedNvLinkDomainsByIds", vec![ForgeAdminCLI, Flow]);
         x.perm(
             "AddExpectedRackGroup",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
@@ -1511,6 +1516,37 @@ mod rbac_rule_tests {
                 None,
             ))],
         ));
+    }
+
+    #[test]
+    fn expected_nvlink_domain_inventory_allows_admin_and_flow() {
+        use carbide_test_support::{Check, check_values};
+
+        let principals = [
+            Principal::ExternalUser(ExternalUserInfo::new(None, "nico-admin-cli".into(), None)),
+            Principal::SpiffeServiceIdentifier("nico-flow".into()),
+            Principal::SpiffeServiceIdentifier("elektra-site-agent".into()),
+            Principal::SpiffeServiceIdentifier("unlisted".into()),
+        ];
+        check_values(
+            [
+                "CreateExpectedNvLinkDomain",
+                "DeleteExpectedNvLinkDomain",
+                "GetExpectedNvLinkDomain",
+                "FindExpectedNvLinkDomainIds",
+                "FindExpectedNvLinkDomainsByIds",
+            ]
+            .map(|method| Check {
+                scenario: method,
+                input: method,
+                expect: [true, true, false, false],
+            }),
+            |method| {
+                principals.each_ref().map(|principal| {
+                    InternalRBACRules::allowed_from_static(method, std::slice::from_ref(principal))
+                })
+            },
+        );
     }
 
     #[test]
