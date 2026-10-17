@@ -71,6 +71,9 @@ reference. Confirm hardware support against the deployed RMS release.
 
 NICo needs to be loaded with the expected rack equipment inventory to be managed. In most cases, the information should be available from a DCIM service.
 
+See [Expected Inventory](../provisioning/expected-inventory.md) for resource
+relationships, registration, reconciliation, and removal workflows.
+
 The expected inventory often contains the following information:
 
 - **NVLink Domain**
