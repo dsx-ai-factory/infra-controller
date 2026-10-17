@@ -674,11 +674,9 @@ struct PrefixAllocationWork {
     automatic: bool,
 }
 
-/// Per-request mutable network config and tenant organization used for VPC
-/// ownership checks.
+/// Per-request mutable network config.
 struct NetworkAllocationTarget<'a> {
     network_config: &'a mut InstanceNetworkConfig,
-    tenant_organization_id: &'a TenantOrganizationId,
 }
 
 /// Owned discovery results used by synchronous allocation planning.
@@ -691,7 +689,7 @@ struct PrefixAllocationContext {
     explicit_prefixes: HashMap<VpcPrefixId, VpcPrefix>,
     // Active-at-discovery candidates frozen by VPC/family in ascending ID order.
     automatic_candidates: BTreeMap<(VpcId, AllocationAddressFamily), Arc<[VpcPrefixId]>>,
-    // Referenced VPCs verified to exist for ownership and capability checks.
+    // Referenced VPCs verified to exist for capability checks.
     vpcs: HashMap<VpcId, model::vpc::Vpc>,
 }
 
@@ -1072,7 +1070,7 @@ async fn load_prefix_allocation_context(
         db::vpc_prefix::find_allocation_candidates(txn, &automatic_candidate_vpc_ids).await?
     };
 
-    // Load every referenced VPC once for ownership and capability validation.
+    // Load every referenced VPC once for capability validation.
     let mut referenced_vpc_ids = automatic_vpc_ids.clone();
     referenced_vpc_ids.extend(explicit_prefixes.values().map(|prefix| prefix.vpc_id));
     let referenced_vpc_ids = referenced_vpc_ids.into_iter().collect_vec();
@@ -1163,12 +1161,6 @@ fn plan_prefix_allocations(
                 })?;
                 target_vpc_ids.insert(vpc.id);
 
-                if vpc.config.tenant_organization_id != target.tenant_organization_id.to_string() {
-                    return Err(CarbideError::FailedPrecondition(format!(
-                        "VPC `{}` is not owned by tenant `{}`",
-                        vpc.id, target.tenant_organization_id,
-                    )));
-                }
                 if vpc.config.network_virtualization_type != VpcVirtualizationType::Fnn {
                     return Err(CarbideError::FailedPrecondition(format!(
                         "automatic VPC-prefix selection requires an FNN VPC; VPC `{}` uses {}",
@@ -1268,15 +1260,6 @@ fn plan_prefix_allocations(
                 ))
             })?;
             target_vpc_ids.insert(primary_vpc.id);
-            if primary_vpc.config.tenant_organization_id
-                != target.tenant_organization_id.to_string()
-            {
-                return Err(CarbideError::FailedPrecondition(format!(
-                    "VPC prefix `{primary_prefix_id}` belongs to VPC `{}`, which is not owned by tenant `{}`",
-                    primary_vpc.id, target.tenant_organization_id,
-                )));
-            }
-
             let primary_family =
                 AllocationAddressFamily::from_network(primary_prefix.config.prefix);
             let primary_allocation_prefix_len = instance_prefix_len(
@@ -1599,17 +1582,9 @@ async fn allocate_networks(
 /// Allocates generated network resources for one instance network config.
 pub(crate) async fn allocate_network(
     network_config: &mut InstanceNetworkConfig,
-    tenant_organization_id: &TenantOrganizationId,
     txn: &mut PgConnection,
 ) -> CarbideResult<()> {
-    allocate_networks(
-        &mut [NetworkAllocationTarget {
-            network_config,
-            tenant_organization_id,
-        }],
-        txn,
-    )
-    .await
+    allocate_networks(&mut [NetworkAllocationTarget { network_config }], txn).await
 }
 
 pub(crate) fn allocate_ib_port_guid(
@@ -2359,14 +2334,8 @@ pub(crate) async fn batch_allocate_instances(
     {
         let mut network_allocation_targets = requests
             .iter_mut()
-            .map(|request| {
-                let InstanceConfig {
-                    network, tenant, ..
-                } = &mut request.config;
-                NetworkAllocationTarget {
-                    network_config: network,
-                    tenant_organization_id: &tenant.tenant_organization_id,
-                }
+            .map(|request| NetworkAllocationTarget {
+                network_config: &mut request.config.network,
             })
             .collect_vec();
         allocate_networks(&mut network_allocation_targets, &mut txn).await?;

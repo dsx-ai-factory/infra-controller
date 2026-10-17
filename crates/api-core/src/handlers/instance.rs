@@ -57,7 +57,6 @@ use model::machine::{
 use model::metadata::Metadata;
 use model::network_segment::{NetworkSegmentSearchConfig, NetworkSegmentType};
 use model::os::OperatingSystem;
-use model::tenant::TenantOrganizationId;
 use model::vpc::{FabricInterfaceType, VpcVirtualizationTypeCapabilities};
 use serde_json::json;
 use sqlx::PgConnection;
@@ -1801,12 +1800,7 @@ async fn update_instance_network_config(
     // Preserve caller intent long enough to enforce prefix family and VPC allocation policy.
     // Resource reuse below deliberately restores stored requested addresses for matching explicit
     // prefixes, which must not erase a newly requested address before validation.
-    validate_primary_address_update_intent_before_resource_reuse(
-        network,
-        &instance.config.tenant.tenant_organization_id,
-        txn,
-    )
-    .await?;
+    validate_primary_address_update_intent_before_resource_reuse(network, txn).await?;
 
     // This is the use case of adding/removing new VF.
     // Copy the resources if same interface and network are mentioned.
@@ -1814,7 +1808,7 @@ async fn update_instance_network_config(
 
     // Resolve resources associated with network prefixes before validating the generated
     // segment IDs.
-    allocate_network(network, &instance.config.tenant.tenant_organization_id, txn).await?;
+    allocate_network(network, txn).await?;
     network
         .validate(
             runtime_config
@@ -1865,7 +1859,6 @@ async fn update_instance_network_config(
 /// allocation validator without this earlier check.
 async fn validate_primary_address_update_intent_before_resource_reuse(
     network: &InstanceNetworkConfig,
-    tenant_organization_id: &TenantOrganizationId,
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), CarbideError> {
     let requested_prefixes: Vec<(VpcPrefixId, IpAddr)> = network
@@ -1931,12 +1924,6 @@ async fn validate_primary_address_update_intent_before_resource_reuse(
         let Some(vpc) = vpcs.get(&prefix.vpc_id) else {
             continue;
         };
-        if vpc.config.tenant_organization_id != tenant_organization_id.to_string() {
-            return Err(CarbideError::FailedPrecondition(format!(
-                "VPC prefix `{vpc_prefix_id}` belongs to VPC `{}`, which is not owned by tenant `{tenant_organization_id}`",
-                vpc.id,
-            )));
-        }
         if prefix.config.prefix.is_ipv6() != requested_ip_addr.is_ipv6() {
             return Err(CarbideError::InvalidArgument(format!(
                 "requested IP address `{requested_ip_addr}` does not match VPC prefix `{vpc_prefix_id}`",
