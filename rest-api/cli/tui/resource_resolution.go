@@ -97,14 +97,11 @@ func GeneratedPathResourceDescriptor(commandName, parameter string) GeneratedRes
 		descriptor.ParentParameter = "machineId"
 	}
 
-	if descriptor.ResourceType == "rule" || descriptor.ResourceType == "task-run" {
+	if descriptor.ResourceType == "rule" || descriptor.ResourceType == "task-run" || descriptor.ResourceType == "domain" {
 		descriptor.ScopeParameter = "siteId"
 	}
 	if descriptor.ResourceType == "task" {
 		descriptor.FreeFormReason = "task IDs come from prior lifecycle actions; no site-wide task list API exists"
-	}
-	if descriptor.ResourceType == "domain" && strings.Contains(commandName, "nvlink-domain") {
-		descriptor.FreeFormReason = "NVLink domain IDs come from prior lifecycle actions; no list API exists"
 	}
 	if strings.HasPrefix(commandName, "measured-boot") && strings.EqualFold(parameter, "id") {
 		descriptor.FreeFormReason = "measured-boot approvals and their selected machine or profile IDs share this parameter; enter the ID that matches --selector"
@@ -251,6 +248,16 @@ func (s *Session) GeneratedResourceItems(
 		}
 		items, err := s.fetchRunsForSite(ctx, siteID)
 		return items, true, err
+	case "domain":
+		siteID := strings.TrimSpace(resolvedValues[descriptor.ScopeParameter])
+		if siteID == "" {
+			siteID = strings.TrimSpace(s.Scope.SiteID)
+		}
+		if siteID == "" {
+			return nil, true, fmt.Errorf("siteId must be resolved before NVLink domains")
+		}
+		items, err := s.fetchNVLinkDomainsForSite(ctx, siteID)
+		return items, true, err
 	default:
 		if s.Resolver == nil || !s.Resolver.HasFetcher(descriptor.ResourceType) {
 			return nil, false, nil
@@ -258,6 +265,58 @@ func (s *Session) GeneratedResourceItems(
 		items, err := s.Resolver.Fetch(ctx, descriptor.ResourceType)
 		return items, true, err
 	}
+}
+
+func (s *Session) fetchExpectedRackGroups(_ context.Context) ([]NamedItem, error) {
+	query := map[string]string{}
+	if s.Scope.SiteID != "" {
+		query["siteId"] = s.Scope.SiteID
+	}
+	groups, err := s.fetchAll(apiPath(s, "expected-rack-group"), query)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]NamedItem, len(groups))
+	for i, group := range groups {
+		name := strings.TrimSpace(str(group, "name"))
+		if name == "" {
+			name = str(group, "id")
+		}
+		items[i] = NamedItem{
+			Name: name, ID: str(group, "id"),
+			Extra: map[string]string{"siteId": str(group, "siteId")},
+			Raw:   group,
+		}
+	}
+	return items, nil
+}
+
+func (s *Session) fetchNVLinkDomains(ctx context.Context) ([]NamedItem, error) {
+	siteID := strings.TrimSpace(s.Scope.SiteID)
+	if siteID == "" {
+		return nil, fmt.Errorf("siteId must be resolved before NVLink domains")
+	}
+	return s.fetchNVLinkDomainsForSite(ctx, siteID)
+}
+
+func (s *Session) fetchNVLinkDomainsForSite(_ context.Context, siteID string) ([]NamedItem, error) {
+	domains, err := s.fetchAll(apiPath(s, "domain/nvlink"), map[string]string{"siteId": siteID})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]NamedItem, len(domains))
+	for i, domain := range domains {
+		name := strings.TrimSpace(str(domain, "name"))
+		if name == "" {
+			name = str(domain, "id")
+		}
+		items[i] = NamedItem{
+			Name: name, ID: str(domain, "id"),
+			Extra: map[string]string{"siteId": siteID},
+			Raw:   domain,
+		}
+	}
+	return items, nil
 }
 
 func requiredResolvedValue(descriptor GeneratedResourceDescriptor, resolvedValues map[string]string) (string, error) {

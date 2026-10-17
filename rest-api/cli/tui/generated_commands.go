@@ -104,7 +104,10 @@ func runGeneratedTUICommand(s *Session, info appcli.GeneratedCommandInfo, args [
 	if err := validateGeneratedBodyArguments(info, flagArgs); err != nil {
 		return err
 	}
-	persistGeneratedSiteScopeFromArgs(s, info, flagArgs)
+	flagArgs, err = persistGeneratedSiteScopeFromArgs(s, info, flagArgs)
+	if err != nil {
+		return err
+	}
 	flagArgs, err = addRequiredGeneratedQueryFlags(s, info, flagArgs)
 	if err != nil {
 		return err
@@ -350,10 +353,33 @@ func persistGeneratedSiteScopeFromArgs(
 	s *Session,
 	info appcli.GeneratedCommandInfo,
 	args []string,
-) {
+) ([]string, error) {
 	if siteID, ok := generatedOptionValue(info, args, "site-id"); ok {
 		setGeneratedSiteScopeFromID(s, siteID)
 	}
+	if _, accepted := generatedRootBodyProperty(info, "site-id"); !accepted {
+		return args, nil
+	}
+	for _, parameter := range info.PathParameters {
+		if GeneratedPathResourceDescriptor(info.Name, parameter).ScopeParameter != "siteId" {
+			continue
+		}
+		out, err := materializeGeneratedDataFile(info, args)
+		if err != nil {
+			return nil, err
+		}
+		if data, ok := generatedOptionValue(info, out, "data"); ok {
+			var body struct {
+				SiteID string `json:"siteId"`
+			}
+			if err := json.Unmarshal([]byte(data), &body); err != nil {
+				return nil, fmt.Errorf("reading request site: %w", err)
+			}
+			setGeneratedSiteScopeFromID(s, body.SiteID)
+		}
+		return out, nil
+	}
+	return args, nil
 }
 
 func setGeneratedSiteScopeFromID(s *Session, siteID string) {

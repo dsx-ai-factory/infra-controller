@@ -638,8 +638,8 @@ func TestGeneratedPathResourcePolicy_CoversEveryParameter(t *testing.T) {
 		"measured-boot profile remove|id",
 		"measured-boot-trusted-machine delete|id",
 		"measured-boot-trusted-profile delete|id",
-		"domain firmware-update-nvlink-domain firmware-update-nvlink-domain|id",
-		"domain power-control-nvlink-domain|id",
+		"rack health-report delete|source",
+		"tray health-report delete|source",
 		"task cancel|id",
 		"task cancel cancel-task|id",
 		"task get|id",
@@ -689,15 +689,26 @@ func TestCanonicalGeneratedResourceType_NormalizesSelectorKeys(t *testing.T) {
 	}
 }
 
-func TestResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) {
+func TestResolveGeneratedPathParameters_UsesListSurfaces(t *testing.T) {
 	tests := []struct {
 		name         string
 		command      string
+		site         string
 		cache        map[string][]NamedItem
 		listPath     string
 		listResponse string
 		want         []string
 	}{
+		{
+			name: "expected rack group", command: "expected-rack-group get", site: "site-1",
+			listPath: "/v2/org/acme/nico/expected-rack-group", listResponse: `[{"id":"group-1","name":"Group One","siteId":"site-1"}]`,
+			want: []string{"group-1"},
+		},
+		{
+			name: "NVLink domain", command: "domain get", site: "site-1",
+			listPath: "/v2/org/acme/nico/domain/nvlink", listResponse: `[{"id":"domain-1","name":"Domain One"}]`,
+			want: []string{"domain-1"},
+		},
 		{
 			name:    "allocation constraint",
 			command: "allocation constraint update",
@@ -768,6 +779,7 @@ func TestResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) 
 			requestPath := make(chan string, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requestPath <- r.URL.Path
+				assert.Equal(t, test.site, r.URL.Query().Get("siteId"))
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.WriteString(w, test.listResponse)
 			}))
@@ -778,6 +790,7 @@ func TestResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) 
 				"acme",
 				"",
 			)
+			session.Scope.SiteID = test.site
 			for resourceType, items := range test.cache {
 				session.Cache.Set(resourceType, items)
 			}
