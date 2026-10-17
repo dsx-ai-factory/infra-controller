@@ -242,7 +242,7 @@ func (gsh GetSkuHandler) Handle(c echo.Context) error {
 
 	// Get Site for the SKU
 	siteDAO := cdbm.NewSiteDAO(gsh.dbSession)
-	site, err := siteDAO.GetByID(ctx, nil, sku.SiteID, nil, false)
+	site, err := siteDAO.GetByID(ctx, nil, sku.SiteID, nil, false, false)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Site from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for SKU, DB error", nil)

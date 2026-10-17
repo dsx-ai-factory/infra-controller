@@ -444,7 +444,7 @@ func (gerh GetExpectedRackGroupHandler) Handle(c echo.Context) error {
 	site := expectedRackGroup.Site
 	if site == nil {
 		siteDAO := cdbm.NewSiteDAO(gerh.dbSession)
-		site, err = siteDAO.GetByID(ctx, nil, expectedRackGroup.SiteID, nil, false)
+		site, err = siteDAO.GetByID(ctx, nil, expectedRackGroup.SiteID, nil, false, false)
 		if err != nil {
 			logger.Error().Err(err).Msg("error retrieving Site from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for Expected Rack Group due to DB error", nil)

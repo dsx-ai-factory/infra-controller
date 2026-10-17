@@ -26,6 +26,8 @@ type IpBlockSummary struct {
 	Id *string `json:"id,omitempty"`
 	// Name of the IP Block, only lowercase characters, digits, hyphens and cannot begin/end with hyphen
 	Name *string `json:"name,omitempty"`
+	// Always present. True for Site fabric/root/overlay blocks and blocks allocated to a Tenant by the Infrastructure Provider; false for blocks created by a Tenant. This classification is independent of the Tenant assignment and cannot be changed by clients.
+	Managed *bool `json:"managed,omitempty"`
 	// RoutingType of the IP Block
 	RoutingType *string `json:"routingType,omitempty"`
 	// Either IPv4 or IPv6 address
@@ -115,6 +117,38 @@ func (o *IpBlockSummary) HasName() bool {
 // SetName gets a reference to the given string and assigns it to the Name field.
 func (o *IpBlockSummary) SetName(v string) {
 	o.Name = &v
+}
+
+// GetManaged returns the Managed field value if set, zero value otherwise.
+func (o *IpBlockSummary) GetManaged() bool {
+	if o == nil || IsNil(o.Managed) {
+		var ret bool
+		return ret
+	}
+	return *o.Managed
+}
+
+// GetManagedOk returns a tuple with the Managed field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *IpBlockSummary) GetManagedOk() (*bool, bool) {
+	if o == nil || IsNil(o.Managed) {
+		return nil, false
+	}
+	return o.Managed, true
+}
+
+// HasManaged returns a boolean if a field has been set.
+func (o *IpBlockSummary) HasManaged() bool {
+	if o != nil && !IsNil(o.Managed) {
+		return true
+	}
+
+	return false
+}
+
+// SetManaged gets a reference to the given bool and assigns it to the Managed field.
+func (o *IpBlockSummary) SetManaged(v bool) {
+	o.Managed = &v
 }
 
 // GetRoutingType returns the RoutingType field value if set, zero value otherwise.
@@ -260,6 +294,9 @@ func (o IpBlockSummary) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.Name) {
 		toSerialize["name"] = o.Name
+	}
+	if !IsNil(o.Managed) {
+		toSerialize["managed"] = o.Managed
 	}
 	if !IsNil(o.RoutingType) {
 		toSerialize["routingType"] = o.RoutingType

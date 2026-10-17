@@ -77,8 +77,8 @@ var (
 )
 
 // SiteFabricIPBlockLockID returns the advisory lock shared by Site Config
-// prefix import and root IP Block creation for one Site. Later SitePrefix
-// inventory reconciliation can use the same lock when linking these records.
+// prefix import, root IP Block creation, and SitePrefix inventory reconciliation
+// for one Site.
 // The key keeps its DatacenterOnly suffix, so an upgrade doesn't change the ID
 // that processes from the previous release still take.
 func SiteFabricIPBlockLockID(infrastructureProviderID, siteID uuid.UUID) uint64 {
@@ -88,6 +88,23 @@ func SiteFabricIPBlockLockID(infrastructureProviderID, siteID uuid.UUID) uint64 
 		siteID.String(),
 		IPBlockRoutingTypeDatacenterOnly,
 	))
+}
+
+// GetSiteFabricIPBlockRoutingType returns DatacenterOnly for a prefix entirely
+// inside RFC 1918 or RFC 4193 space, and Public otherwise. Testing only the
+// starting address would misclassify ranges such as 192.168.0.0/15.
+func GetSiteFabricIPBlockRoutingType(prefix netip.Prefix) string {
+	for _, privatePrefix := range []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("192.168.0.0/16"),
+		netip.MustParsePrefix("fc00::/7"),
+	} {
+		if privatePrefix.Bits() <= prefix.Bits() && privatePrefix.Contains(prefix.Addr()) {
+			return IPBlockRoutingTypeDatacenterOnly
+		}
+	}
+	return IPBlockRoutingTypePublic
 }
 
 // IPBlock is REST's local record for an IPv4 or IPv6 address pool associated
@@ -106,16 +123,18 @@ type IPBlock struct {
 	TenantID                 *uuid.UUID              `bun:"tenant_id,type:uuid"`
 	Tenant                   *Tenant                 `bun:"rel:belongs-to,join:tenant_id=id"`
 	SitePrefixID             *uuid.UUID              `bun:"site_prefix_id,type:uuid"`
-	RoutingType              string                  `bun:"routing_type,notnull"`
-	Prefix                   string                  `bun:"prefix,notnull"`
-	PrefixLength             int                     `bun:"prefix_length,notnull"`
-	ProtocolVersion          string                  `bun:"protocol_version,notnull"`
-	FullGrant                bool                    `bun:"full_grant,notnull"`
-	Status                   string                  `bun:"status,notnull"`
-	Created                  time.Time               `bun:"created,nullzero,notnull,default:current_timestamp"`
-	Updated                  time.Time               `bun:"updated,nullzero,notnull,default:current_timestamp"`
-	Deleted                  *time.Time              `bun:"deleted,soft_delete"`
-	CreatedBy                *uuid.UUID              `bun:"created_by,type:uuid"`
+	// Managed is true for Site fabric/root/overlay blocks and blocks allocated to Tenants by the Provider, false for blocks created by Tenants.
+	Managed         bool       `bun:"managed,notnull"`
+	RoutingType     string     `bun:"routing_type,notnull"`
+	Prefix          string     `bun:"prefix,notnull"`
+	PrefixLength    int        `bun:"prefix_length,notnull"`
+	ProtocolVersion string     `bun:"protocol_version,notnull"`
+	FullGrant       bool       `bun:"full_grant,notnull"`
+	Status          string     `bun:"status,notnull"`
+	Created         time.Time  `bun:"created,nullzero,notnull,default:current_timestamp"`
+	Updated         time.Time  `bun:"updated,nullzero,notnull,default:current_timestamp"`
+	Deleted         *time.Time `bun:"deleted,soft_delete"`
+	CreatedBy       *uuid.UUID `bun:"created_by,type:uuid"`
 }
 
 // ContainsPrefix reports whether prefix belongs to this IPBlock.
@@ -155,11 +174,10 @@ type IPBlockCreateInput struct {
 	SiteID                   uuid.UUID
 	InfrastructureProviderID uuid.UUID
 	TenantID                 *uuid.UUID
-	// SitePrefixID identifies the related Core SitePrefix. When TenantID is also
-	// set, the pair identifies a private IP Block linked to a TenantManaged
-	// SitePrefix. Without TenantID, SitePrefixID identifies a Site fabric root
-	// linked to an OperatorManaged SitePrefix.
-	SitePrefixID    *uuid.UUID
+	// SitePrefixID identifies the related Core SitePrefix, independently of management.
+	SitePrefixID *uuid.UUID
+	// Managed defaults to true. Tenant-created IP Blocks explicitly set false.
+	Managed         *bool
 	RoutingType     string
 	Prefix          string
 	PrefixLength    int
@@ -190,11 +208,14 @@ type IPBlockClearInput struct {
 	IPBlockID   uuid.UUID
 	Description bool
 	TenantID    bool
+	// Deleted clears the soft-delete timestamp (undelete).
+	Deleted bool
 }
 
 // IPBlockFilterInput input parameters for Filter method
 type IPBlockFilterInput struct {
 	IPBlockIDs                []uuid.UUID
+	SitePrefixIDs             []uuid.UUID
 	Names                     []string
 	SiteIDs                   []uuid.UUID
 	InfrastructureProviderIDs []uuid.UUID
@@ -206,7 +227,7 @@ type IPBlockFilterInput struct {
 	FullGrant                 *bool
 	Statuses                  []string
 	ExcludeDerived            bool
-	ExcludeTenantSitePrefixes bool
+	Managed                   *bool
 	// CoreLinkedOnly limits the result to IP Blocks linked to a Core SitePrefix.
 	CoreLinkedOnly bool
 	SearchQuery    *string
@@ -217,7 +238,7 @@ type IPBlockFilterInput struct {
 // ProviderVisible applies the provider's IPBlock visibility rules to the filter.
 func (filter *IPBlockFilterInput) ProviderVisible(infrastructureProviderID uuid.UUID) {
 	filter.InfrastructureProviderIDs = []uuid.UUID{infrastructureProviderID}
-	filter.ExcludeTenantSitePrefixes = true
+	filter.Managed = new(true)
 }
 
 // SiteFabric applies the provider's Site fabric root rules to the filter.
@@ -229,7 +250,7 @@ func (filter *IPBlockFilterInput) SiteFabric(infrastructureProviderID uuid.UUID)
 // TenantAllocated applies the tenant's Allocation IPBlock rules to the filter.
 func (filter *IPBlockFilterInput) TenantAllocated(tenantID uuid.UUID) {
 	filter.TenantIDs = []uuid.UUID{tenantID}
-	filter.ExcludeTenantSitePrefixes = true
+	filter.Managed = new(true)
 }
 
 var _ bun.BeforeAppendModelHook = (*IPBlock)(nil)
@@ -302,6 +323,10 @@ func (ipbsd IPBlockSQLDAO) Create(ctx context.Context, tx *db.Tx, input IPBlockC
 	if input.IPBlockID != nil {
 		id = *input.IPBlockID
 	}
+	managed := true
+	if input.Managed != nil {
+		managed = *input.Managed
+	}
 
 	ipb := &IPBlock{
 		ID:                       id,
@@ -311,6 +336,7 @@ func (ipbsd IPBlockSQLDAO) Create(ctx context.Context, tx *db.Tx, input IPBlockC
 		InfrastructureProviderID: input.InfrastructureProviderID,
 		TenantID:                 input.TenantID,
 		SitePrefixID:             input.SitePrefixID,
+		Managed:                  managed,
 		RoutingType:              input.RoutingType,
 		Prefix:                   input.Prefix,
 		PrefixLength:             input.PrefixLength,
@@ -493,11 +519,8 @@ func (ipbsd IPBlockSQLDAO) setQueryWithFilter(query *bun.SelectQuery, filter IPB
 	if filter.ExcludeDerived {
 		query = query.Where("ipb.tenant_id IS NULL")
 	}
-	if filter.ExcludeTenantSitePrefixes {
-		// An OperatorManaged SitePrefix may have SitePrefixID without TenantID.
-		// Only both fields identify a private IP Block linked to a
-		// TenantManaged SitePrefix.
-		query = query.Where("(ipb.tenant_id IS NULL OR ipb.site_prefix_id IS NULL)")
+	if filter.Managed != nil {
+		query = query.Where("ipb.managed = ?", *filter.Managed)
 	}
 	if filter.CoreLinkedOnly {
 		query = query.Where("ipb.site_prefix_id IS NOT NULL")
@@ -513,6 +536,9 @@ func (ipbsd IPBlockSQLDAO) setQueryWithFilter(query *bun.SelectQuery, filter IPB
 	}
 	if filter.IPBlockIDs != nil {
 		query = query.Where("ipb.id IN (?)", bun.In(filter.IPBlockIDs))
+	}
+	if filter.SitePrefixIDs != nil {
+		query = query.Where("ipb.site_prefix_id IN (?)", bun.In(filter.SitePrefixIDs))
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -709,11 +735,19 @@ func (ipbsd IPBlockSQLDAO) Clear(ctx context.Context, tx *db.Tx, input IPBlockCl
 		ipb.TenantID = nil
 		updatedFields = append(updatedFields, "tenant_id")
 	}
+	if input.Deleted {
+		ipb.Deleted = nil
+		updatedFields = append(updatedFields, "deleted")
+	}
 
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, ipbsd.dbSession).NewUpdate().Model(ipb).Column(updatedFields...).Where("id = ?", input.IPBlockID).Exec(ctx)
+		query := db.GetIDB(tx, ipbsd.dbSession).NewUpdate().Model(ipb).Column(updatedFields...).Where("id = ?", input.IPBlockID)
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}
