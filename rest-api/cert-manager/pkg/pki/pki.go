@@ -37,7 +37,6 @@ type CA struct {
 
 // CRL represents a Certificate Revocation List
 type CRL struct {
-	list    *x509.RevocationList
 	listPEM string
 	mu      sync.RWMutex
 }

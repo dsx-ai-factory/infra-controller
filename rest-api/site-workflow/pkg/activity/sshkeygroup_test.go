@@ -85,7 +85,7 @@ func TestManageSSHKeyGroupInventory_DiscoverSSHKeyGroupInventory(t *testing.T) {
 			})
 
 			ctx := context.Background()
-			ctx = context.WithValue(ctx, "wantCount", tt.args.wantTotalItems)
+			ctx = context.WithValue(ctx, cClient.MockWantCount, tt.args.wantTotalItems)
 
 			totalPages := tt.args.wantTotalItems / tt.fields.cloudPageSize
 			if tt.args.wantTotalItems%tt.fields.cloudPageSize > 0 {
