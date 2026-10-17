@@ -439,7 +439,7 @@ impl LibvirtBackend {
         use ResourceResetType::*;
         // Only a cold start loads the saved domain XML. Reboot and reset keep
         // the running domain's boot configuration and their existing semantics.
-        if matches!(reset_type, On | ForceOn | PowerCycle) {
+        if matches!(reset_type, On | ForceOn | PowerCycle | FullPowerCycle) {
             self.reapply_effective_boot_order().await?;
         }
         for command in VirshCommand::power(reset_type)? {

@@ -106,7 +106,11 @@ impl GenericAmi<'_> {
                 memory: None,
                 base_bios: Some(
                     redfish::bios::builder(&redfish::bios::resource(system_id))
-                        .attributes(json!({"EndlessBoot":""}))
+                        .attributes(json!({
+                            "EndlessBoot": "",
+                            "KCSACP": "Allow All",
+                            "USB000": "Enabled",
+                        }))
                         .build(),
                 ),
                 serial_console: None,
@@ -162,6 +166,51 @@ impl GenericAmi<'_> {
             host_bmc_inventory_id: Some("HostBMC_0".to_string()),
             host_uefi_inventory_id: Some("HostBIOS_0".to_string()),
             ..Default::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use libredfish::{EnabledDisabled, Endpoint, RedfishClientPool};
+
+    use crate::test_support::{TestBmcConfig, create_test_bmc, host_info, serve_https};
+    use crate::{HardwareType, MachineRouterOptions};
+
+    #[tokio::test]
+    async fn generic_ami_reports_and_updates_lockdown_policy() {
+        let (router, state) = create_test_bmc(
+            &host_info(HardwareType::GenericAmi),
+            TestBmcConfig::default(),
+            "generic-lockdown".to_string(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        let (_server, url) = serve_https("generic-lockdown", router);
+        let client = RedfishClientPool::builder()
+            .danger_accept_invalid_certs()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .create_client(Endpoint {
+                host: url.host_str().unwrap().to_owned(),
+                port: url.port(),
+                user: None,
+                password: None,
+            })
+            .await
+            .unwrap();
+        assert!(client.lockdown_status().await.unwrap().is_fully_disabled());
+        for mode in [EnabledDisabled::Enabled, EnabledDisabled::Disabled] {
+            client.lockdown(mode).await.unwrap();
+            state.on_event(&crate::bmc_state::BmcEvent::PowerOn);
+            let status = client.lockdown_status().await.unwrap();
+            match mode {
+                EnabledDisabled::Enabled => assert!(status.is_fully_enabled()),
+                EnabledDisabled::Disabled => assert!(status.is_fully_disabled()),
+            }
         }
     }
 }

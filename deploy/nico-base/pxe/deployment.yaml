@@ -72,9 +72,6 @@ spec:
             runAsNonRoot: true
             runAsUser: 10001
             runAsGroup: 10001
-            capabilities:
-              add:
-                - SYS_PTRACE
           livenessProbe:
             failureThreshold: 3
             initialDelaySeconds: 20

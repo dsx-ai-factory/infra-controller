@@ -21,6 +21,7 @@ kubectl kustomize "${repo_root}/deploy/nico-base/pxe" \
             and ($main[0].securityContext.runAsNonRoot == true)
             and ($main[0].securityContext.runAsUser == 10001)
             and ($main[0].securityContext.runAsGroup == 10001)
+            and ($main[0].securityContext.capabilities.add? == null)
             and ([$pod.volumes[] | select(.name == "config" and .configMap.name == "nico-pxe-config" and .configMap.optional == true)] | length) == 1
             and ([$pod.volumes[] | select(.name == "boot-artifacts")] | length) == 0
             and ([$main[0].volumeMounts[] | select(.name == "boot-artifacts")] | length) == 0
@@ -48,6 +49,7 @@ kubectl kustomize "${repo_root}/deploy/tests/pxe-with-boot-artifacts" \
         and ($pxe_main.securityContext.runAsNonRoot == true)
         and ($pxe_main.securityContext.runAsUser == 10001)
         and ($pxe_main.securityContext.runAsGroup == 10001)
+        and ($pxe_main.securityContext.capabilities.add? == null)
         and ([$pxe.volumes[] | select(.name == "boot-artifacts" and .emptyDir == {})] | length) == 1
         and ([$pxe_main.volumeMounts[] | select(.name == "boot-artifacts" and .mountPath == "/forge-boot-artifacts/blobs/internal")] | length) == 1
         and ([$pxe_artifacts[].name] | sort) == $artifact_names
