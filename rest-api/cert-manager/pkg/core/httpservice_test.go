@@ -59,6 +59,8 @@ func TestHTTPServiceRoutes(t *testing.T) {
 
 	body, code = run("GET", "/metrics", "")
 	assert.Contains(t, body, "testroutes_http_duration_seconds")
+	assert.Contains(t, body, `testroutes_http_requests_total{method="GET",path="/healthz",status_code="200"} 1`)
+	assert.NotContains(t, body, "testroutes_http_request_counts")
 	assert.Equal(t, http.StatusOK, code)
 
 	assert.Equal(t, logrus.InfoLevel, GetLogger(ctx).Logger.GetLevel())

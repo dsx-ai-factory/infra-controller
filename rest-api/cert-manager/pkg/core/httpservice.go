@@ -532,8 +532,8 @@ func metricsMiddleware(latencyMetricsName string) mux.MiddlewareFunc {
 			Help: "Duration of HTTP requests.",
 		}, []string{"path", "method"})
 		count = promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: fmt.Sprintf("%s_http_request_counts", latencyMetricsName),
-			Help: "Counter of HTTP requests.",
+			Name: fmt.Sprintf("%s_http_requests_total", latencyMetricsName),
+			Help: "Number of HTTP requests.",
 		}, []string{"path", "method", "status_code"})
 	}
 
