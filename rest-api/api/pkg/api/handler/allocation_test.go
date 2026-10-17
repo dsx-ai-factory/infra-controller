@@ -2097,6 +2097,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 	ipb := common.TestBuildIPBlock(t, dbSession, "test-ip-block", site, &tenant1.ID, cdbm.IPBlockRoutingTypePublic, "192.168.1.0", 24, cdbm.IPBlockProtocolVersionV4, ipu)
 
 	parentPref, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipb.Prefix, ipb.PrefixLength, ipb.RoutingType, ipb.InfrastructureProviderID.String(), ipb.SiteID.String())
+	require.NoError(t, err)
 	assert.NotNil(t, parentPref)
 
 	acGoodIT := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: it1.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 2}

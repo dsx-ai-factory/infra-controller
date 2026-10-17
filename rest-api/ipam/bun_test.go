@@ -357,6 +357,7 @@ func TestBundbReadAllPrefixes(t *testing.T) {
 	require.Equal(t, 0, len(ps))
 
 	err = tx.Commit()
+	require.NoError(t, err)
 	_, err = apiDbSession.CreatePrefix(ctx, prefix, prefix.Namespace)
 	require.NotNil(t, err)
 	_, err = apiDbSession.DeletePrefix(ctx, prefix, prefix.Namespace)
