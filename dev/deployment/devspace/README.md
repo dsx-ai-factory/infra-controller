@@ -12,7 +12,7 @@ The intent is that the app deploy path stays the same whether the prerequisites 
 - installed by the provided bootstrap script, or
 - brought by the developer from elsewhere.
 
-On Apple Silicon, see [Running DevSpace on macOS with vfkit](#running-devspace-on-macos-with-vfkit) for a single Ubuntu VM that hosts Docker, kind, and MAT.
+On Apple Silicon, see [Running DevSpace on macOS with vfkit](#running-devspace-on-macos-with-vfkit) for a single Ubuntu VM that hosts Docker, kind, and MAT. For application-independent guest attachment and isolated networks, see the [vfkit and lab guide](vfkit/README.md).
 
 ## Prerequisites Bootstrap
 
