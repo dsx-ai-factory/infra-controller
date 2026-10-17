@@ -174,7 +174,11 @@ in the gateway README.
 The controller image ships both binaries: `dev/k8s/machine-a-tron-controller/Dockerfile`
 builds the Go controller and `mat-protocol-gateway` from the repository root,
 and the `mat-k8s-controller` image published by this repository's CI is built
-from it. The gateway's listener certificate is issued through
+from it. By default, both containers use that image. To use a separate gateway
+image, set `mat-k8s-controller.gateway.image.repository` and `.tag`; each omitted
+or empty field inherits the corresponding controller image field. Both containers
+use `mat-k8s-controller.image.pullPolicy`. Tilt sets a separate gateway image.
+The gateway's listener certificate is issued through
 `global.certificate.issuerRef`. The gateway re-reads the mounted certificate
 and key every 30 seconds, so a renewed certificate is served without a
 container restart. For its inventory, rack status, and RMS requests to the
