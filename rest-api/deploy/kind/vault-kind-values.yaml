@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# HashiCorp Vault — single-node standalone, production mode, TLS disabled.
+# Used when KIND_CORE=true. Not for production deployments.
+#
+# TLS is disabled on the listener because all traffic is in-cluster and
+# cert-manager/Vault TLS bootstrapping is not needed for Kind e2e.
+
+global:
+  tlsDisable: true
+
+injector:
+  enabled: false
+
+csi:
+  enabled: false
+
+server:
+  ha:
+    enabled: false
+
+  standalone:
+    enabled: true
+    config: |
+      storage "file" {
+        path = "/vault/data"
+      }
+      listener "tcp" {
+        address     = "0.0.0.0:8200"
+        tls_disable = true
+      }
+      api_addr = "http://$(POD_IP):8200"
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  dataStorage:
+    enabled: true
+    size: 1Gi
+    ## Kind's default storage class (local-path).
+    storageClass: standard
+
+  readinessProbe:
+    enabled: true
+    path: "/v1/sys/health?standbyok=true&uninitcode=204&sealedcode=204"
+  livenessProbe:
+    enabled: true
+    path: "/v1/sys/health?standbyok=true&uninitcode=204&sealedcode=204"
+    initialDelaySeconds: 10

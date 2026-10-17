@@ -307,6 +307,9 @@ spec:
             - name: boot-artifacts
               mountPath: /forge-boot-artifacts/blobs/internal
             {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
@@ -342,4 +345,7 @@ spec:
         {{- if .Values.bootArtifactContainers }}
         - name: boot-artifacts
           emptyDir: {}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}

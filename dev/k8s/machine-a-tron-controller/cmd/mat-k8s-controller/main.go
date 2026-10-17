@@ -66,6 +66,7 @@ type options struct {
 	syncInterval           time.Duration
 	kubeconfig             string
 	targetSelector         string
+	caCertFile             string
 	insecureSkipVerify     bool
 	logLevel               string
 	sourceListAddr         string
@@ -119,6 +120,8 @@ func parseOptions(args []string, lookupEnv func(string) (string, bool)) (*option
 		"Path to kubeconfig file (uses in-cluster config if empty, development only)")
 	fs.StringVar(&opts.targetSelector, "target-selector", envOrDefault("TARGET_SELECTOR", "app.kubernetes.io/name=nico-machine-a-tron"),
 		"Pod selector for Services (comma-separated key=value pairs)")
+	fs.StringVar(&opts.caCertFile, "ca-cert", envOrDefault("CA_CERT_FILE", ""),
+		"Path to a PEM CA certificate file used to verify the machine-a-tron server TLS certificate")
 	fs.BoolVar(&opts.insecureSkipVerify, "insecure-skip-verify", envBoolOrDefault("INSECURE_SKIP_VERIFY", false),
 		"Skip TLS certificate verification (use only for development with self-signed certs)")
 	fs.StringVar(&opts.logLevel, "log-level", envOrDefault("LOG_LEVEL", "info"),
@@ -195,6 +198,7 @@ func main() {
 		Str("discovery_selector", opts.discoverySelector).
 		Dur("sync_interval", opts.syncInterval).
 		Str("target_selector", opts.targetSelector).
+		Str("ca_cert_file", opts.caCertFile).
 		Bool("insecure_skip_verify", opts.insecureSkipVerify).
 		Str("source_list_addr", opts.sourceListAddr).
 		Dur("source_list_debounce", opts.sourceListDebounce).
@@ -225,6 +229,9 @@ func main() {
 
 	// Create machine-a-tron client options
 	clientOpts := []matclient.Option{matclient.WithLogger(logger)}
+	if opts.caCertFile != "" {
+		clientOpts = append(clientOpts, matclient.WithRootCA(opts.caCertFile))
+	}
 	if opts.insecureSkipVerify {
 		clientOpts = append(clientOpts, matclient.WithInsecureSkipVerify())
 	}

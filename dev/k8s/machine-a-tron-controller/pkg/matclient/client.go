@@ -7,11 +7,13 @@ package matclient
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -31,6 +33,7 @@ type Client struct {
 	httpClient         *http.Client
 	logger             zerolog.Logger
 	insecureSkipVerify bool
+	rootCAFile         string
 }
 
 // Option configures a Client.
@@ -55,6 +58,15 @@ func WithLogger(logger zerolog.Logger) Option {
 func WithInsecureSkipVerify() Option {
 	return func(client *Client) {
 		client.insecureSkipVerify = true
+	}
+}
+
+// WithRootCA sets a PEM-encoded CA certificate file used to verify the
+// machine-a-tron server's TLS certificate. Takes precedence over the
+// system root CA pool.
+func WithRootCA(caFile string) Option {
+	return func(client *Client) {
+		client.rootCAFile = caFile
 	}
 }
 
@@ -99,12 +111,43 @@ func NewClient(baseURL string, opts ...Option) (*Client, error) {
 		opt(c)
 	}
 
-	// Apply insecure TLS after all options to preserve existing transport settings
+	// Apply TLS configuration after all options.
+	if c.rootCAFile != "" {
+		if err := c.applyRootCA(); err != nil {
+			return nil, fmt.Errorf("loading root CA %q: %w", c.rootCAFile, err)
+		}
+	}
 	if c.insecureSkipVerify {
 		c.applyInsecureTLS()
 	}
 
 	return c, nil
+}
+
+// applyRootCA loads the PEM CA file and configures the transport to use it
+// as the sole trusted root for server certificate verification.
+func (c *Client) applyRootCA() error {
+	pem, err := os.ReadFile(c.rootCAFile)
+	if err != nil {
+		return err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return fmt.Errorf("no valid PEM certificates found in %q", c.rootCAFile)
+	}
+
+	transport, ok := c.httpClient.Transport.(*http.Transport)
+	if !ok || transport == nil {
+		transport = http.DefaultTransport.(*http.Transport).Clone()
+	} else {
+		transport = transport.Clone()
+	}
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	transport.TLSClientConfig.RootCAs = pool
+	c.httpClient.Transport = transport
+	return nil
 }
 
 // applyInsecureTLS configures the client to skip TLS verification while preserving

@@ -417,6 +417,12 @@ rms:
 
 extraEnv: []
 
+## Extra volumes and mounts injected into the nico-api container.
+## Used in Kind e2e to mount an emptyDir over the SA token path so Core
+## uses VAULT_TOKEN instead of Kubernetes service-account auth.
+extraVolumes: []
+extraVolumeMounts: []
+
 ## Authentication for the /admin WebUI. CARBIDE_WEB_AUTH_TYPE in extraEnv
 ## takes precedence for compatibility with existing installations.
 webAuth:
