@@ -59,16 +59,18 @@ pub async fn create(
                 id,
                 name,
                 description,
+                labels,
                 tenant_organization_id,
                 vni,
                 config_version)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING row_to_json(spx_partitions.*)";
 
     let partition: SpxPartitionSnapshotPgJson = sqlx::query_as(query)
         .bind(value.id)
         .bind(&value.name)
         .bind(&value.description)
+        .bind(sqlx::types::Json(&value.labels))
         .bind(&value.tenant_organization_id)
         .bind(vni)
         .bind(config_version)
@@ -214,6 +216,49 @@ pub async fn final_delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[crate::sqlx_test]
+    async fn spx_labels_migration_preserves_existing_rows_and_old_writers(pool: sqlx::PgPool) {
+        // The harness applies all migrations first. Restore this table's predecessor schema.
+        sqlx::query("ALTER TABLE spx_partitions DROP COLUMN labels")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let old_insert = "INSERT INTO spx_partitions
+            (name, description, tenant_organization_id, vni, config_version)
+            VALUES ('partition', 'existing metadata', 'tenant-org-123', $1, 'V1-T0')
+            RETURNING row_to_json(spx_partitions.*)";
+        let before: serde_json::Value = sqlx::query_scalar(old_insert)
+            .bind(40001)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261016170411_spx_partition_labels.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut after: serde_json::Value =
+            sqlx::query_scalar("SELECT row_to_json(p.*) FROM spx_partitions p")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(after["labels"], serde_json::json!({}));
+        after.as_object_mut().unwrap().remove("labels");
+        assert_eq!(after, before);
+
+        let old_writer_row: SpxPartitionSnapshotPgJson = sqlx::query_as(old_insert)
+            .bind(40002)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let partition = SpxPartition::try_from(old_writer_row).unwrap();
+        assert!(partition.labels.is_empty());
+        assert_eq!(partition.name, "partition");
+        assert_eq!(partition.description, "existing metadata");
+    }
 
     #[crate::sqlx_test]
     async fn missing_partition_delete_preserves_row_not_found(pool: sqlx::PgPool) {

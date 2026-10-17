@@ -41,6 +41,112 @@ async fn create_partition(env: &TestEnv, name: &str) -> rpc::forge::SpxPartition
         .into_inner()
 }
 
+#[crate::sqlx_test]
+async fn spx_partition_metadata_survives_creation_and_lookup(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let metadata = rpc::forge::Metadata {
+        name: "labeled partition".to_string(),
+        description: "partition metadata round trip".to_string(),
+        labels: vec![
+            rpc::forge::Label {
+                key: "environment".to_string(),
+                value: Some("test".to_string()),
+            },
+            rpc::forge::Label {
+                key: "reserved".to_string(),
+                value: None,
+            },
+        ],
+    };
+    let expected = model::metadata::Metadata::try_from(metadata.clone()).unwrap();
+    let created = env
+        .api
+        .create_spx_partition(Request::new(SpxPartitionCreationRequest {
+            metadata: Some(metadata),
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .expect("create labeled SPX partition")
+        .into_inner();
+    assert_eq!(
+        model::metadata::Metadata::try_from(created.metadata.unwrap()).unwrap(),
+        expected
+    );
+
+    let partitions = env
+        .api
+        .find_spx_partitions_by_ids(Request::new(rpc::forge::SpxPartitionsByIdsRequest {
+            spx_partition_ids: vec![created.id.unwrap()],
+        }))
+        .await
+        .expect("read persisted SPX partition")
+        .into_inner()
+        .spx_partitions;
+    assert_eq!(partitions.len(), 1);
+    assert_eq!(
+        model::metadata::Metadata::try_from(partitions[0].metadata.clone().unwrap()).unwrap(),
+        expected
+    );
+}
+
+#[crate::sqlx_test]
+async fn spx_partition_validation_preserves_existing_partitions(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let partition = create_partition(&env, "existing partition").await;
+    let id = partition.id.unwrap();
+    // Represent a partition persisted before create-time metadata validation.
+    let legacy_name = "分区";
+    sqlx::query("UPDATE spx_partitions SET name=$1 WHERE id=$2")
+        .bind(legacy_name)
+        .bind(id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    let before = deletion_records(&env, id).await;
+
+    let error = env
+        .api
+        .create_spx_partition(Request::new(SpxPartitionCreationRequest {
+            metadata: Some(rpc::forge::Metadata {
+                name: legacy_name.to_string(),
+                ..Default::default()
+            }),
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(error.message().contains("ASCII"));
+    let partition_count: i64 = sqlx::query_scalar("SELECT count(*) FROM spx_partitions")
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(partition_count, 1);
+    assert_eq!(deletion_records(&env, id).await, before);
+
+    let partitions = env
+        .api
+        .find_spx_partitions_by_ids(Request::new(rpc::forge::SpxPartitionsByIdsRequest {
+            spx_partition_ids: vec![id],
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .spx_partitions;
+    assert_eq!(partitions.len(), 1);
+    assert_eq!(partitions[0].metadata.as_ref().unwrap().name, legacy_name);
+
+    env.api
+        .delete_spx_partition(Request::new(SpxPartitionDeletionRequest { id: Some(id) }))
+        .await
+        .expect("delete partition with legacy metadata");
+    let after = deletion_records(&env, id).await;
+    assert!(after["partition"]["deleted"].is_string());
+    assert_eq!(after["allocation"]["state"]["state"], "free");
+}
+
 async fn deletion_records(env: &TestEnv, id: SpxPartitionId) -> serde_json::Value {
     sqlx::query_scalar(
         "SELECT jsonb_build_object('partition', to_jsonb(p), 'allocation', to_jsonb(r))
