@@ -11171,7 +11171,11 @@ message ListComponentFirmwareVersionsResponse {
 }
 
 message SpxPartitionCreationRequest {
-  // Required. Invalid metadata returns INVALID_ARGUMENT.
+  // Required. Omitted or invalid metadata returns INVALID_ARGUMENT.
+  // Name: 2-256 ASCII characters. Description: at most 1024 UTF-8 bytes.
+  // Labels: at most 16, with unique ASCII keys of 1-255 characters and values
+  // of at most 255 UTF-8 bytes. Omitted descriptions and label values are empty
+  // strings; omitted labels are an empty list.
   Metadata metadata = 1;
   optional common.SpxPartitionId id = 2;
   optional uint32 vni = 3;
