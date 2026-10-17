@@ -105,7 +105,7 @@ hkdf = { workspace = true }
 hostname = { workspace = true }
 http = { workspace = true }
 hyper = { workspace = true, features = ["full"] }
-hyper-util = { workspace = true }
+hyper-util = { workspace = true, features = ["server-graceful"] }
 ipnetwork = { workspace = true, features = ["serde"] }
 itertools = { workspace = true }
 jsonwebtoken = { workspace = true, features = ["rust_crypto"] }
