@@ -1459,15 +1459,10 @@ func TestSSHKeyAssociationNoPaginator(t *testing.T) {
 
 	// Build number of ssh keys paginator + 1.
 	expectedKeysNumber := cdbp.DefaultLimit + 1
-	expectedPublicKeys := []*corev1.TenantPublicKey{}
 	for i := 0; i < expectedKeysNumber; i++ {
 		name := fmt.Sprintf("test%v", i)
 		sshKey := util.TestBuildSSHKey(t, dbSession, name, tn, name, tnu)
 		assert.NotNil(t, sshKey)
-		expectedPublicKeys = append(expectedPublicKeys, &corev1.TenantPublicKey{
-			PublicKey: name,
-			Comment:   &name,
-		})
 		ska := util.TestBuildSSHKeyAssociation(t, dbSession, skg.ID, sshKey.ID, tnu.ID)
 		assert.NotNil(t, ska)
 	}
