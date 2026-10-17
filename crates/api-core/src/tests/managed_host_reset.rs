@@ -25,6 +25,7 @@ use carbide_dpf::types::{DpuDeviceSummary, DpuNodeSummary, HostDpfSnapshot};
 use carbide_dpf::{DpuDeploymentType, DpuPhase};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
 use carbide_uuid::machine::MachineId;
+use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
     CleanupContext, CleanupState, DpuDiscoveringState, FailureDetails, ManagedHostState, ResetState,
 };
@@ -34,6 +35,7 @@ use rpc::forge::{ManagedHostResetListRequest, ManagedHostResetRequest, UpdateIni
 use tokio::time::timeout;
 use tonic::{Code, Request};
 
+use crate::tests::common::api_fixtures::instance::seed_service_vpc_endpoint;
 use crate::tests::common::api_fixtures::test_managed_host::TestManagedHost;
 use crate::tests::common::api_fixtures::{
     TestEnv, TestEnvOverrides, create_managed_host, create_managed_host_with_dpf,
@@ -883,4 +885,97 @@ async fn reset_retains_instance_until_every_dpu_acknowledges_admin(pool: sqlx::P
             .await;
         }
     }
+}
+
+/// Verifies reset applies Admin networking before retained service endpoints block Instance
+/// deletion, allowing dataplane removal without releasing endpoint ownership.
+#[crate::sqlx_test]
+async fn reset_applies_admin_before_waiting_for_service_vpc_cleanup(pool: sqlx::PgPool) {
+    // Create a reset-capable host whose instance has durable endpoint ownership.
+    let env = dpf_test_env(pool).await;
+    let managed_host = dpf_ingested_host(&env).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let instance = managed_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    let endpoint =
+        seed_service_vpc_endpoint(&env, instance.id, managed_host.dpu_ids[0], segment_id).await;
+
+    // Capture the tenant generation so the test proves reset publishes a distinct Admin generation.
+    let mut txn = env.db_txn().await;
+    let tenant_version = managed_host
+        .snapshot(&mut txn)
+        .await
+        .host_snapshot
+        .network_config
+        .version;
+    txn.commit().await.unwrap();
+
+    // Record an acknowledged reset and enter its instance-deletion substate.
+    managed_host.mark_machine_for_updates().await;
+    env.api
+        .trigger_managed_host_reset(reset_request_allowing_instance(managed_host.id.into()))
+        .await
+        .unwrap();
+    let deleting_instance = ManagedHostState::Reset {
+        reset_state: ResetState::DeletingInstance,
+    };
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &managed_host.host().id,
+        3,
+        deleting_instance.clone(),
+    )
+    .await;
+
+    // Reset requests Admin networking while retaining the endpoint and Instance.
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let snapshot = managed_host.snapshot(&mut txn).await;
+    assert_eq!(snapshot.managed_state, deleting_instance);
+    assert!(snapshot.use_admin_network());
+    assert!(!snapshot.managed_host_network_config_version_synced());
+    assert_ne!(
+        snapshot.host_snapshot.network_config.version,
+        tenant_version
+    );
+    assert!(
+        matches!(
+            &snapshot.host_snapshot.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::Wait { reason, .. }) if reason
+                == "waiting for DPUs to apply Admin networking before deleting the Instance"
+        ),
+        "expected the Admin-network acknowledgement wait, got {:?}",
+        snapshot.host_snapshot.controller_state_outcome
+    );
+    let persisted = snapshot.instance.expect("instance remains assigned");
+    assert!(persisted.deleted.is_none());
+    assert_eq!(
+        persisted.config.network.service_interfaces,
+        vec![endpoint.clone()]
+    );
+    txn.commit().await.unwrap();
+
+    // Acknowledging Admin advances reset to the cleanup guard without releasing ownership.
+    network_configured_with_health(&env, &managed_host.dpu_ids[0], None).await;
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let snapshot = managed_host.snapshot(&mut txn).await;
+    assert_eq!(snapshot.managed_state, deleting_instance);
+    assert!(snapshot.use_admin_network());
+    assert!(snapshot.managed_host_network_config_version_synced());
+    assert!(
+        matches!(
+            &snapshot.host_snapshot.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::Wait { reason, .. }) if reason
+                == "waiting for service VPC network cleanup before deleting the Instance"
+        ),
+        "expected the service-network cleanup wait, got {:?}",
+        snapshot.host_snapshot.controller_state_outcome
+    );
+    let persisted = snapshot.instance.expect("instance remains assigned");
+    assert!(persisted.deleted.is_none());
+    assert_eq!(persisted.config.network.service_interfaces, vec![endpoint]);
+    txn.commit().await.unwrap();
 }

@@ -30834,7 +30834,10 @@ type AdminForceDeleteMachineRequest struct {
 	// Should we delete the BMC credentials? Please note, this will depend on if site explore configured
 	// credentials for this machine.
 	DeleteBmcCredentials bool `protobuf:"varint,4,opt,name=delete_bmc_credentials,json=deleteBmcCredentials,proto3" json:"delete_bmc_credentials,omitempty"`
-	// Allow force delete of machine with orphaned dpf crds
+	// Allow force deletion to discard Core-owned service VPC resources and
+	// continue when DPF resources cannot be removed. This may leave orphaned
+	// DPF CRDs. The option is request-scoped and must be repeated on polling
+	// retries until force deletion completes.
 	AllowDeleteWithOrphanedDpfCrds bool `protobuf:"varint,5,opt,name=allow_delete_with_orphaned_dpf_crds,json=allowDeleteWithOrphanedDpfCrds,proto3" json:"allow_delete_with_orphaned_dpf_crds,omitempty"`
 	// Delete Site Explorer and DHCP BMC suppressions for the host/DPU BMC MACs
 	// and underlay (OOB) interface MACs. Without this, rediscovery may stay
@@ -59301,9 +59304,13 @@ func (x *DpuExtensionServiceVersionInfoList) GetVersionInfos() []*DpuExtensionSe
 }
 
 type FindInstancesByDpuExtensionServiceRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ServiceId     string                 `protobuf:"bytes,1,opt,name=service_id,json=serviceId,proto3" json:"service_id,omitempty"`
-	Version       *string                `protobuf:"bytes,2,opt,name=version,proto3,oneof" json:"version,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	ServiceId string                 `protobuf:"bytes,1,opt,name=service_id,json=serviceId,proto3" json:"service_id,omitempty"`
+	// If set, return instances retaining this exact active or terminating
+	// version. If omitted, return one entry per matching instance: the active
+	// attachment when present, otherwise one retained terminating attachment.
+	// Set this field to select a particular retained historical version.
+	Version       *string `protobuf:"bytes,2,opt,name=version,proto3,oneof" json:"version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -59353,7 +59360,11 @@ func (x *FindInstancesByDpuExtensionServiceRequest) GetVersion() string {
 }
 
 type FindInstancesByDpuExtensionServiceResponse struct {
-	state         protoimpl.MessageState             `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// One entry per matching instance. Matching instances include soft-deleted
+	// instances until physical deletion removes the stored attachment. Entries
+	// have no defined order. When version is omitted and no active attachment
+	// remains, which retained terminating attachment is reported is unspecified.
 	Instances     []*InstanceDpuExtensionServiceInfo `protobuf:"bytes,1,rep,name=instances,proto3" json:"instances,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -59397,11 +59408,14 @@ func (x *FindInstancesByDpuExtensionServiceResponse) GetInstances() []*InstanceD
 }
 
 type InstanceDpuExtensionServiceInfo struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	InstanceId    string                 `protobuf:"bytes,1,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
-	ServiceId     string                 `protobuf:"bytes,2,opt,name=service_id,json=serviceId,proto3" json:"service_id,omitempty"`
-	Version       string                 `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`
-	Removed       *string                `protobuf:"bytes,4,opt,name=removed,proto3,oneof" json:"removed,omitempty"` // Signals that this service is being removed from instance config and is terminating
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	InstanceId string                 `protobuf:"bytes,1,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	ServiceId  string                 `protobuf:"bytes,2,opt,name=service_id,json=serviceId,proto3" json:"service_id,omitempty"`
+	Version    string                 `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`
+	// Attachment-removal timestamp. For an active attachment on a soft-deleted
+	// instance, this falls back to the instance-deletion timestamp. It is unset
+	// only while both the attachment and instance remain active.
+	Removed       *string `protobuf:"bytes,4,opt,name=removed,proto3,oneof" json:"removed,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

@@ -1570,7 +1570,10 @@ pub(crate) async fn update_instance_config(
         }
     }
 
-    update_instance_extension_services_config(
+    // Resolve and lock service/version rows before network allocation, matching
+    // initial allocation and extension-only updates. Network allocation then
+    // locks the address table before either path mutates the Instance.
+    let prepared_extension_services_config = prepare_instance_extension_services_config(
         &mh_snapshot,
         initial_instance,
         &config.extension_services,
@@ -1589,6 +1592,30 @@ pub(crate) async fn update_instance_config(
         needs_overlap_check,
     )
     .await?;
+
+    // Every required resource lock is now held. Persist against the original
+    // attachment version so any concurrent cleanup defeats the entire update.
+    if let Some(new_extension_services_config) = prepared_extension_services_config {
+        match db::instance::update_extension_services_config(
+            &mut txn,
+            initial_instance.id,
+            initial_instance.extension_services_config_version,
+            &initial_instance.config.extension_services,
+            &new_extension_services_config,
+            true,
+        )
+        .await?
+        {
+            ConditionalWrite::Applied(()) => {}
+            ConditionalWrite::NotApplied(InstanceExtensionServicesNotCurrent) => {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "extension-service attachments for instance {} changed or the instance no longer exists; read the instance again before updating",
+                    initial_instance.id,
+                ))
+                .into());
+            }
+        }
+    }
 
     // Complete config requests acquire shared resource locks and perform any
     // network change above. An IB change then locks and rereads the Instance
@@ -1675,6 +1702,8 @@ pub(crate) async fn update_instance_config(
 
     db::instance::update_config(&mut txn, instance.id, expected_version, config, metadata).await?;
 
+    // Reload the managed-host snapshot before committing so the response matches
+    // the Instance state published by this transaction.
     let mh_snapshot = db::managed_host::load_snapshot(
         &mut txn,
         &instance.machine_id,
@@ -2056,19 +2085,20 @@ async fn update_instance_infiniband_config(
     Ok(())
 }
 
-/// Applies a requested extension-service attachment change.
+/// Prepares and validates a requested extension-service attachment change.
 ///
 /// `extension_services` is the caller-visible view: the services the instance
 /// should be running. It is merged with the durable config, which additionally
 /// carries attachments that are still terminating, and the merged result is
-/// what gets validated and persisted.
-async fn update_instance_extension_services_config(
+/// validated while service/version rows are locked. Persistence is deferred so
+/// network allocation can take its address lock before the Instance is mutated.
+async fn prepare_instance_extension_services_config(
     mh_snapshot: &ManagedHostStateSnapshot,
     instance: &InstanceSnapshot,
     extension_services: &InstanceExtensionServicesConfig,
     requested_extension_services: &RequestedInstanceExtensionServicesConfig,
     txn: &mut db::Transaction<'_>,
-) -> Result<(), CarbideError> {
+) -> Result<Option<InstanceExtensionServicesConfig>, CarbideError> {
     let current = &instance.config.extension_services;
 
     // A client may repeat the current VPC selection, but creating service-interface
@@ -2121,7 +2151,7 @@ async fn update_instance_extension_services_config(
     }
 
     if !current.is_extension_services_config_update_requested(extension_services) {
-        return Ok(());
+        return Ok(None);
     }
 
     if !matches!(
@@ -2180,24 +2210,7 @@ async fn update_instance_extension_services_config(
         &existing_active_service_ids,
     )?;
 
-    match db::instance::update_extension_services_config(
-        txn,
-        instance.id,
-        instance.extension_services_config_version,
-        current,
-        &new_extension_services_config,
-        true,
-    )
-    .await?
-    {
-        ConditionalWrite::Applied(()) => Ok(()),
-        ConditionalWrite::NotApplied(InstanceExtensionServicesNotCurrent) => {
-            Err(CarbideError::FailedPrecondition(format!(
-                "extension-service attachments for instance {} changed or the instance no longer exists; read the instance again before updating",
-                instance.id,
-            )))
-        }
-    }
+    Ok(Some(new_extension_services_config))
 }
 
 /// Extracts the RPC representation of Instances from a ManagedHost snapshot
@@ -2257,6 +2270,7 @@ pub(super) async fn force_delete_instance(
     instance_id: InstanceId,
     api: &Api,
     response: &mut AdminForceDeleteMachineResponse,
+    allow_delete_with_orphaned_dpf_crds: bool,
 ) -> CarbideResult<()> {
     // The caller has already committed the Machine ForceDeletion state. Lock
     // and reread the Instance in a separate transaction; IB updates lock the
@@ -2270,6 +2284,18 @@ pub(super) async fn force_delete_instance(
         txn.commit().await?;
         return Ok(());
     };
+
+    // Without explicit orphan consent, retain service-owned addresses and
+    // DPU/VPC loopbacks until observed cleanup removes every endpoint.
+    if !allow_delete_with_orphaned_dpf_crds
+        && !db::instance::find_service_vpc_memberships(&mut txn, instance_id)
+            .await?
+            .is_empty()
+    {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "instance {instance_id} retains service VPC endpoints; wait for observed service-network cleanup before force deletion",
+        )));
+    }
 
     if locked_instance.deleted.is_none() {
         db::instance::mark_as_deleted(instance_id, txn.as_mut()).await?;
@@ -2297,7 +2323,11 @@ pub(super) async fn force_delete_instance(
     }
     // Preserve the cleanup order: addresses, Instance, then Machine. An unmet
     // acknowledgement requirement rolls back these deletions together.
-    db::instance::delete(instance_id, &mut txn).await?;
+    if allow_delete_with_orphaned_dpf_crds {
+        db::instance::force_delete(instance_id, &mut txn).await?;
+    } else {
+        db::instance::delete(instance_id, &mut txn).await?;
+    }
     db::machine::find_one(
         &mut txn,
         &instance.machine_id,
@@ -2360,6 +2390,15 @@ pub(super) async fn force_delete_instance(
             .interfaces
             .iter()
             .filter_map(|x| x.generated_network_segment_id()),
+    );
+
+    network_segment_ids_with_vpc.extend(
+        instance
+            .config
+            .network
+            .service_interfaces
+            .iter()
+            .map(|interface| interface.network_segment_id),
     );
 
     let network_segments_set: std::collections::HashSet<::carbide_uuid::network::NetworkSegmentId> =
