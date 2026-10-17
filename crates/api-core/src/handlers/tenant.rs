@@ -105,7 +105,8 @@ pub(crate) async fn create(
 
     let response =
         db::tenant::create_and_persist(organization_id, metadata, routing_profile_type, &mut txn)
-            .await?
+            .await
+            .map_err(CarbideError::from)?
             .try_into()
             .map(Response::new)
             .map_err(CarbideError::from)?;
