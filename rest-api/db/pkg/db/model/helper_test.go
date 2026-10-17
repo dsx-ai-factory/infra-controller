@@ -22,6 +22,7 @@ import (
 	"github.com/uptrace/bun/extra/bundebug"
 
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
@@ -453,7 +454,7 @@ func testGenerateMacAddress(t *testing.T) string {
 // testCommonTraceProviderSetup creates a test provider and spanner
 func testCommonTraceProviderSetup(t *testing.T, ctx context.Context) (trace.Tracer, trace.SpanContext, context.Context) {
 	// OTEL spanner configuration
-	provider := trace.NewNoopTracerProvider()
+	provider := noop.NewTracerProvider()
 	sc := trace.NewSpanContext(trace.SpanContextConfig{
 		TraceID: trace.TraceID{0x01},
 		SpanID:  trace.SpanID{0x01},

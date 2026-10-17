@@ -1130,11 +1130,9 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 	}
 
 	// Create 25 test Instances
-	insts2 := []*cdbm.Instance{}
 	for i := 0; i < 25; i++ {
 		inst := testInstanceBuildInstance(t, dbSession, fmt.Sprintf("test-instance-%d", i), tn2.ID, ip.ID, st2.ID, &ist2.ID, vpc3.ID, cutil.GetPtr(ms2[i].ID), &os3.ID, nil, cdbm.InstanceStatusReady)
 		assert.NotNil(t, inst)
-		insts2 = append(insts2, inst)
 	}
 
 	// Tenant 3

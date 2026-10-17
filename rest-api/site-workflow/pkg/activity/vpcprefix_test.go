@@ -85,8 +85,8 @@ func TestManageVpcPrefixInventory_DiscoverVpcPrefixInventory(t *testing.T) {
 			})
 
 			ctx := context.Background()
-			ctx = context.WithValue(ctx, "wantCount", tt.args.wantTotalItems)
-			ctx = context.WithValue(ctx, "wantDeletedFilter", corev1.DeletedFilter_DELETED_FILTER_INCLUDE)
+			ctx = context.WithValue(ctx, cClient.MockWantCount, tt.args.wantTotalItems)
+			ctx = context.WithValue(ctx, cClient.MockWantDeletedFilter, corev1.DeletedFilter_DELETED_FILTER_INCLUDE)
 
 			totalPages := tt.args.wantTotalItems / tt.fields.cloudPageSize
 			if tt.args.wantTotalItems%tt.fields.cloudPageSize > 0 {

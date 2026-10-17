@@ -1449,11 +1449,6 @@ func generateES256KeyMaterial() (*identityKeyMaterial, error) {
 	}, nil
 }
 
-// jwksDocumentForKey returns a one-key JWKS JSON document.
-func jwksDocumentForKey(km *identityKeyMaterial, use string) (string, error) {
-	return jwksDocumentForKeys([]*identityKeyMaterial{km}, use)
-}
-
 // jwksDocumentForKeys returns a JWKS JSON document for the supplied keys
 // (two during a rotation overlap window; one in steady state).
 func jwksDocumentForKeys(kms []*identityKeyMaterial, use string) (string, error) {
