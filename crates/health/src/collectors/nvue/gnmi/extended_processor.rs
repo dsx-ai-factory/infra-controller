@@ -588,6 +588,11 @@ mod tests {
 
         processor.process_notification(&ordinary);
         processor.process_notification(&event);
+
+        let live = manager.export_telemetry().unwrap();
+
+        assert!(!live.contains("interface_name=\"42\""), "{live}");
+
         processor.reconciliation.republish();
 
         let exposition = manager.export_telemetry().unwrap();
