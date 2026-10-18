@@ -55,6 +55,14 @@ func UnimplementedOrDeniedErrTypes() []string {
 	}
 }
 
+// AlreadyExistsErrTypes returns the error types treated as "already exists"
+// from a Site Agent gRPC call. Both NICo and legacy Carbide names are listed
+// so that REST can recognise errors from older site-workflow deployments.
+// Remove the Carbide entry once the rollout window has closed.
+func AlreadyExistsErrTypes() []string {
+	return []string{ErrTypeNICoAlreadyExists, ErrTypeCarbideAlreadyExists}
+}
+
 // FailedPreconditionErrTypes returns the error types treated as
 // "failed precondition" from a Site Agent gRPC call. Both NICo and legacy
 // Carbide names are listed so that REST can recognise errors from older
