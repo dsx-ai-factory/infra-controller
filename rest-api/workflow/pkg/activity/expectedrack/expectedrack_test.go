@@ -151,6 +151,51 @@ func TestManageExpectedRack_UpdateExpectedRacksInDB(t *testing.T) {
 		{name: "matching inventory preserves Updated", run: testExpectedRackInventoryNoChange},
 		{name: "recent write survives missing inventory", run: testExpectedRackInventoryRecentWrite},
 		{
+			name: "nil metadata clears stored strings and labels while preserving an omitted group",
+			run: func(t *testing.T) {
+				ctx := context.Background()
+				dbSession := testExpectedRackInitDB(t)
+				defer dbSession.Close()
+				testExpectedRackSetupSchema(t, dbSession)
+				ipu := cwu.TestBuildUser(t, dbSession, uuid.NewString(), []string{"test-provider-org"}, []string{"FORGE_PROVIDER_ADMIN"})
+				ip := cwu.TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-provider-org", ipu)
+				site := cwu.TestBuildSite(t, dbSession, ip, "clear-metadata-site", cdbm.SiteStatusRegistered, nil, ipu)
+				erDAO := cdbm.NewExpectedRackDAO(dbSession)
+				row, err := erDAO.Create(ctx, nil, cdbm.ExpectedRackCreateInput{
+					ExpectedRackID: uuid.New(),
+					SiteID:         site.ID,
+					RackID:         "rack-clear-metadata",
+					RackProfileID:  "profile-original",
+					RackGroupID:    cutil.GetPtr("group-original"),
+					Name:           "original-name",
+					Description:    "original-description",
+					Labels:         map[string]string{"location": "original"},
+					CreatedBy:      ipu.ID,
+				})
+				require.NoError(t, err)
+				cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedRack)(nil))
+
+				inventory := &corev1.ExpectedRackInventory{
+					ExpectedRacks: []*corev1.ExpectedRack{{
+						RackId:        &corev1.RackId{Id: row.RackID},
+						RackProfileId: &corev1.RackProfileId{Id: "profile-reported"},
+						Metadata:      nil,
+					}},
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				}
+				mer := ManageExpectedRack{dbSession: dbSession}
+				require.NoError(t, mer.UpdateExpectedRacksInDB(ctx, site.ID, inventory))
+
+				persisted, err := erDAO.Get(ctx, nil, row.ID, nil, false)
+				require.NoError(t, err)
+				assert.Empty(t, persisted.Name)
+				assert.Empty(t, persisted.Description)
+				assert.Empty(t, persisted.Labels)
+				assert.Equal(t, cutil.GetPtr("group-original"), persisted.RackGroupID)
+				assert.Equal(t, "profile-reported", persisted.RackProfileID)
+			},
+		},
+		{
 			name: "REST write after inventory read preserves the entire newer row",
 			run: func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -748,6 +793,7 @@ func TestManageExpectedRack_UpdateExpectedRacksInDB(t *testing.T) {
 		args                  args
 		expectedRacksToUpdate []*cdbm.ExpectedRack
 		expectedRacksToDelete []*cdbm.ExpectedRack
+		wantRackIDs           []string // nil skips the exact-set check
 		wantErr               bool
 	}{
 		{
@@ -924,6 +970,7 @@ func TestManageExpectedRack_UpdateExpectedRacksInDB(t *testing.T) {
 			},
 			expectedRacksToUpdate: []*cdbm.ExpectedRack{},
 			expectedRacksToDelete: []*cdbm.ExpectedRack{},
+			wantRackIDs:           []string{"rack-new-1", "rack-new-nil-meta"},
 		},
 	}
 
@@ -951,6 +998,14 @@ func TestManageExpectedRack_UpdateExpectedRacksInDB(t *testing.T) {
 			racksByRackID := map[string]*cdbm.ExpectedRack{}
 			for i := range allRacks {
 				racksByRackID[allRacks[i].RackID] = &allRacks[i]
+			}
+			// Exact membership also rejects rows from invalid inventory entries.
+			if tt.wantRackIDs != nil {
+				actualRackIDs := make([]string, 0, len(allRacks))
+				for _, rack := range allRacks {
+					actualRackIDs = append(actualRackIDs, rack.RackID)
+				}
+				assert.ElementsMatch(t, tt.wantRackIDs, actualRackIDs)
 			}
 
 			for _, er := range tt.expectedRacksToUpdate {
@@ -999,33 +1054,27 @@ func TestManageExpectedRack_UpdateExpectedRacksInDB(t *testing.T) {
 				assert.Nil(t, deleted, fmt.Sprintf("ExpectedRack %v should have been deleted", er.RackID))
 			}
 
-			// Verify newly created racks have correct fields/labels and that nil/empty-id entries
-			// were ignored.
+			// Every valid reported rack must persist with its reported profile and metadata.
 			for _, cer := range tt.args.expectedRackInventory.ExpectedRacks {
 				if cer == nil || cer.RackId == nil || cer.RackId.Id == "" {
 					continue
 				}
-				created := racksByRackID[cer.RackId.Id]
-				if created != nil {
-					reportedName := ""
-					reportedDescription := ""
-					if cer.Metadata != nil {
-						reportedName = cer.Metadata.Name
-						reportedDescription = cer.Metadata.Description
-					}
-					assert.Equal(t, reportedName, created.Name,
-						fmt.Sprintf("ExpectedRack %v Name should match on creation", cer.RackId.Id))
-					assert.Equal(t, reportedDescription, created.Description,
-						fmt.Sprintf("ExpectedRack %v Description should match on creation", cer.RackId.Id))
+				persisted := racksByRackID[cer.RackId.Id]
+				require.NotNil(t, persisted, "ExpectedRack %v should exist", cer.RackId.Id)
+				assert.Equal(t, cer.GetRackProfileId().GetId(), persisted.RackProfileID,
+					"ExpectedRack %v RackProfileID should match reported inventory", cer.RackId.Id)
+				assert.Equal(t, cer.GetMetadata().GetName(), persisted.Name,
+					"ExpectedRack %v Name should match reported inventory", cer.RackId.Id)
+				assert.Equal(t, cer.GetMetadata().GetDescription(), persisted.Description,
+					"ExpectedRack %v Description should match reported inventory", cer.RackId.Id)
 
-					var expectedLabels cdbm.Labels
-					expectedLabels.FromProto(cer.Metadata.GetLabels())
-					if len(expectedLabels) == 0 && len(created.Labels) == 0 {
-						// Both effectively empty, which is correct
-					} else {
-						assert.Equal(t, expectedLabels, created.Labels,
-							fmt.Sprintf("ExpectedRack %v labels should match on creation", cer.RackId.Id))
-					}
+				var expectedLabels cdbm.Labels
+				expectedLabels.FromProto(cer.Metadata.GetLabels())
+				if len(expectedLabels) == 0 {
+					assert.Empty(t, persisted.Labels)
+				} else {
+					assert.Equal(t, expectedLabels, persisted.Labels,
+						"ExpectedRack %v labels should match reported inventory", cer.RackId.Id)
 				}
 			}
 		})
