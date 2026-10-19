@@ -29012,6 +29012,10 @@ components:
       title: MachineMetadata
       type: object
       description: Describes metadata for various Machine components
+      required:
+        - gpus
+        - networkInterfaces
+        - infinibandInterfaces
       examples:
         - dmiData:
             boardName: 7Z23CTOLWB

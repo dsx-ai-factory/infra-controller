@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the MachineMetadata type satisfies the MappedNullable interface at compile time
@@ -27,23 +29,28 @@ type MachineMetadata struct {
 	// BMC Info of the machine
 	BmcInfo *MachineBMCInfo `json:"bmcInfo,omitempty"`
 	// GPU inventory reported for the Machine
-	Gpus []MachineGPUInfo `json:"gpus,omitempty"`
+	Gpus []MachineGPUInfo `json:"gpus"`
 	// List of Ethernet interfaces of the machine
-	NetworkInterfaces []MachineNetworkInterface `json:"networkInterfaces,omitempty"`
+	NetworkInterfaces []MachineNetworkInterface `json:"networkInterfaces"`
 	// List of InfiniBand interfaces of the machine
-	InfinibandInterfaces []MachineInfiniBandInterface `json:"infinibandInterfaces,omitempty"`
+	InfinibandInterfaces []MachineInfiniBandInterface `json:"infinibandInterfaces"`
 	// Lifecycle state details for the Machine
 	LifecycleState NullableMachineLifecycleState `json:"lifecycleState,omitempty"`
 	// LLDP neighbors observed on the machine NICs, as last reported by the machine (scout or DPU agent). Empty when the machine has not reported any neighbors.
 	LldpNeighbors []MachineLldpNeighbor `json:"lldpNeighbors,omitempty"`
 }
 
+type _MachineMetadata MachineMetadata
+
 // NewMachineMetadata instantiates a new MachineMetadata object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineMetadata() *MachineMetadata {
+func NewMachineMetadata(gpus []MachineGPUInfo, networkInterfaces []MachineNetworkInterface, infinibandInterfaces []MachineInfiniBandInterface) *MachineMetadata {
 	this := MachineMetadata{}
+	this.Gpus = gpus
+	this.NetworkInterfaces = networkInterfaces
+	this.InfinibandInterfaces = infinibandInterfaces
 	return &this
 }
 
@@ -119,98 +126,74 @@ func (o *MachineMetadata) SetBmcInfo(v MachineBMCInfo) {
 	o.BmcInfo = &v
 }
 
-// GetGpus returns the Gpus field value if set, zero value otherwise.
+// GetGpus returns the Gpus field value
 func (o *MachineMetadata) GetGpus() []MachineGPUInfo {
-	if o == nil || IsNil(o.Gpus) {
+	if o == nil {
 		var ret []MachineGPUInfo
 		return ret
 	}
+
 	return o.Gpus
 }
 
-// GetGpusOk returns a tuple with the Gpus field value if set, nil otherwise
+// GetGpusOk returns a tuple with the Gpus field value
 // and a boolean to check if the value has been set.
 func (o *MachineMetadata) GetGpusOk() ([]MachineGPUInfo, bool) {
-	if o == nil || IsNil(o.Gpus) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Gpus, true
 }
 
-// HasGpus returns a boolean if a field has been set.
-func (o *MachineMetadata) HasGpus() bool {
-	if o != nil && !IsNil(o.Gpus) {
-		return true
-	}
-
-	return false
-}
-
-// SetGpus gets a reference to the given []MachineGPUInfo and assigns it to the Gpus field.
+// SetGpus sets field value
 func (o *MachineMetadata) SetGpus(v []MachineGPUInfo) {
 	o.Gpus = v
 }
 
-// GetNetworkInterfaces returns the NetworkInterfaces field value if set, zero value otherwise.
+// GetNetworkInterfaces returns the NetworkInterfaces field value
 func (o *MachineMetadata) GetNetworkInterfaces() []MachineNetworkInterface {
-	if o == nil || IsNil(o.NetworkInterfaces) {
+	if o == nil {
 		var ret []MachineNetworkInterface
 		return ret
 	}
+
 	return o.NetworkInterfaces
 }
 
-// GetNetworkInterfacesOk returns a tuple with the NetworkInterfaces field value if set, nil otherwise
+// GetNetworkInterfacesOk returns a tuple with the NetworkInterfaces field value
 // and a boolean to check if the value has been set.
 func (o *MachineMetadata) GetNetworkInterfacesOk() ([]MachineNetworkInterface, bool) {
-	if o == nil || IsNil(o.NetworkInterfaces) {
+	if o == nil {
 		return nil, false
 	}
 	return o.NetworkInterfaces, true
 }
 
-// HasNetworkInterfaces returns a boolean if a field has been set.
-func (o *MachineMetadata) HasNetworkInterfaces() bool {
-	if o != nil && !IsNil(o.NetworkInterfaces) {
-		return true
-	}
-
-	return false
-}
-
-// SetNetworkInterfaces gets a reference to the given []MachineNetworkInterface and assigns it to the NetworkInterfaces field.
+// SetNetworkInterfaces sets field value
 func (o *MachineMetadata) SetNetworkInterfaces(v []MachineNetworkInterface) {
 	o.NetworkInterfaces = v
 }
 
-// GetInfinibandInterfaces returns the InfinibandInterfaces field value if set, zero value otherwise.
+// GetInfinibandInterfaces returns the InfinibandInterfaces field value
 func (o *MachineMetadata) GetInfinibandInterfaces() []MachineInfiniBandInterface {
-	if o == nil || IsNil(o.InfinibandInterfaces) {
+	if o == nil {
 		var ret []MachineInfiniBandInterface
 		return ret
 	}
+
 	return o.InfinibandInterfaces
 }
 
-// GetInfinibandInterfacesOk returns a tuple with the InfinibandInterfaces field value if set, nil otherwise
+// GetInfinibandInterfacesOk returns a tuple with the InfinibandInterfaces field value
 // and a boolean to check if the value has been set.
 func (o *MachineMetadata) GetInfinibandInterfacesOk() ([]MachineInfiniBandInterface, bool) {
-	if o == nil || IsNil(o.InfinibandInterfaces) {
+	if o == nil {
 		return nil, false
 	}
 	return o.InfinibandInterfaces, true
 }
 
-// HasInfinibandInterfaces returns a boolean if a field has been set.
-func (o *MachineMetadata) HasInfinibandInterfaces() bool {
-	if o != nil && !IsNil(o.InfinibandInterfaces) {
-		return true
-	}
-
-	return false
-}
-
-// SetInfinibandInterfaces gets a reference to the given []MachineInfiniBandInterface and assigns it to the InfinibandInterfaces field.
+// SetInfinibandInterfaces sets field value
 func (o *MachineMetadata) SetInfinibandInterfaces(v []MachineInfiniBandInterface) {
 	o.InfinibandInterfaces = v
 }
@@ -306,15 +289,9 @@ func (o MachineMetadata) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.BmcInfo) {
 		toSerialize["bmcInfo"] = o.BmcInfo
 	}
-	if !IsNil(o.Gpus) {
-		toSerialize["gpus"] = o.Gpus
-	}
-	if !IsNil(o.NetworkInterfaces) {
-		toSerialize["networkInterfaces"] = o.NetworkInterfaces
-	}
-	if !IsNil(o.InfinibandInterfaces) {
-		toSerialize["infinibandInterfaces"] = o.InfinibandInterfaces
-	}
+	toSerialize["gpus"] = o.Gpus
+	toSerialize["networkInterfaces"] = o.NetworkInterfaces
+	toSerialize["infinibandInterfaces"] = o.InfinibandInterfaces
 	if o.LifecycleState.IsSet() {
 		toSerialize["lifecycleState"] = o.LifecycleState.Get()
 	}
@@ -322,6 +299,44 @@ func (o MachineMetadata) ToMap() (map[string]interface{}, error) {
 		toSerialize["lldpNeighbors"] = o.LldpNeighbors
 	}
 	return toSerialize, nil
+}
+
+func (o *MachineMetadata) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"gpus",
+		"networkInterfaces",
+		"infinibandInterfaces",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varMachineMetadata := _MachineMetadata{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varMachineMetadata)
+
+	if err != nil {
+		return err
+	}
+
+	*o = MachineMetadata(varMachineMetadata)
+
+	return err
 }
 
 type NullableMachineMetadata struct {

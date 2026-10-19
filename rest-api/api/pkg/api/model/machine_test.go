@@ -582,6 +582,32 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 	})
 }
 
+func TestAPIMachineMetadata_FromProto(t *testing.T) {
+	metadata := APIMachineMetadata{
+		DMIData:              &APIDMIData{},
+		BMCInfo:              &APIBMCInfo{},
+		GPUs:                 []APIMachineGPUInfo{{}},
+		NetworkInterfaces:    []APIMachineNetworkInterface{{}},
+		InfiniBandInterfaces: []APIMachineInfiniBandInterface{{}},
+		LifecycleState:       &APIMachineLifecycleState{},
+		LldpNeighbors:        []APIMachineLldpNeighbor{{}},
+	}
+
+	metadata.FromProto(nil)
+
+	assert.Nil(t, metadata.DMIData)
+	assert.Nil(t, metadata.BMCInfo)
+	assert.NotNil(t, metadata.GPUs)
+	assert.Empty(t, metadata.GPUs)
+	assert.NotNil(t, metadata.NetworkInterfaces)
+	assert.Empty(t, metadata.NetworkInterfaces)
+	assert.NotNil(t, metadata.InfiniBandInterfaces)
+	assert.Empty(t, metadata.InfiniBandInterfaces)
+	assert.Nil(t, metadata.LifecycleState)
+	assert.NotNil(t, metadata.LldpNeighbors)
+	assert.Empty(t, metadata.LldpNeighbors)
+}
+
 // TestMachine_NewAPIMachineLldpNeighborsJSON proves the wire contract of
 // metadata.lldpNeighbors: present as [] when the machine has reported no
 // neighbors, and absent only when metadata itself is not rendered.

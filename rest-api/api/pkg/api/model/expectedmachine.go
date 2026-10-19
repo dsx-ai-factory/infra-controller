@@ -596,9 +596,9 @@ type APIExpectedMachine struct {
 	// ChassisSerialNumber is the serial number of the expected machine's chassis
 	ChassisSerialNumber string `json:"chassisSerialNumber"`
 	// FallbackDPUSerialNumbers is the serial numbers of the expected machine's fallback DPUs
-	FallbackDPUSerialNumbers APIList[string] `json:"fallbackDPUSerialNumbers"`
+	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers"`
 	// Interfaces are the Expected Machine interface declarations stored by REST.
-	Interfaces APIList[APIExpectedMachineInterface] `json:"interfaces"`
+	Interfaces []APIExpectedMachineInterface `json:"interfaces"`
 	// SkuID is the ID of the SKU
 	SkuID *string `json:"skuId"`
 	// Sku is the SKU information
@@ -641,7 +641,10 @@ type APIExpectedMachine struct {
 
 // NewAPIExpectedMachine accepts a DB layer ExpectedMachine object and returns an API object
 func NewAPIExpectedMachine(dibp *cdbm.ExpectedMachine) *APIExpectedMachine {
-	interfaces := make(APIList[APIExpectedMachineInterface], 0, len(dibp.Interfaces))
+	fallbackDPUSerialNumbers := make([]string, len(dibp.FallbackDpuSerialNumbers))
+	copy(fallbackDPUSerialNumbers, dibp.FallbackDpuSerialNumbers)
+
+	interfaces := make([]APIExpectedMachineInterface, 0, len(dibp.Interfaces))
 	for _, expectedInterface := range dibp.Interfaces {
 		interfaces = append(interfaces, NewAPIExpectedMachineInterface(expectedInterface))
 	}
@@ -650,7 +653,7 @@ func NewAPIExpectedMachine(dibp *cdbm.ExpectedMachine) *APIExpectedMachine {
 		BmcMacAddress:            dibp.BmcMacAddress,
 		SiteID:                   dibp.SiteID,
 		ChassisSerialNumber:      dibp.ChassisSerialNumber,
-		FallbackDPUSerialNumbers: dibp.FallbackDpuSerialNumbers,
+		FallbackDPUSerialNumbers: fallbackDPUSerialNumbers,
 		Interfaces:               interfaces,
 		SkuID:                    dibp.SkuID,
 		MachineID:                dibp.MachineID,
