@@ -169,6 +169,13 @@ fn admit_one_after_cooldown(since: &mut Instant, cooldown: Duration) -> bool {
 pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 pub trait CredentialProvider: Send + Sync {
+    /// Whether consumers should check the provider's in-memory snapshot before
+    /// Redfish operations, REST collection passes, and gNMI connections.
+    /// Defaults to false.
+    fn reload_before_use(&self) -> bool {
+        false
+    }
+
     fn fetch_credentials<'a>(
         &'a self,
         endpoint: &'a BmcAddr,
@@ -253,7 +260,7 @@ pub struct BmcClient {
     provider: Arc<dyn CredentialProvider>,
     credential_generation: AtomicU64,
     init: OnceCell<()>,
-    refresh_lock: Mutex<()>,
+    refresh_lock: Mutex<Option<BmcCredentials>>,
 
     circuit: StdMutex<CircuitState>,
     /// Lock-free fast-path hint mirroring `circuit`: `false` iff the circuit is
@@ -318,7 +325,7 @@ impl BmcClient {
             provider,
             credential_generation: AtomicU64::new(0),
             init: OnceCell::new(),
-            refresh_lock: Mutex::new(()),
+            refresh_lock: Mutex::new(None),
             circuit: StdMutex::new(CircuitState::Closed),
             circuit_tripped: AtomicBool::new(false),
             known_bad_credentials: StdMutex::new(None),
@@ -371,6 +378,16 @@ impl BmcClient {
     }
 
     pub async fn ensure_credentials(&self) -> Result<(), HealthError> {
+        if self.provider.reload_before_use() {
+            let mut applied = self.refresh_lock.lock().await;
+            let credentials = self.fetch_credentials().await?;
+            if applied.as_ref() != Some(&credentials) {
+                self.inner.set_credentials(credentials.clone().into());
+                self.credential_generation.fetch_add(1, Ordering::AcqRel);
+                *applied = Some(credentials);
+            }
+            return Ok(());
+        }
         self.init
             .get_or_try_init(|| async {
                 // The cell runs one initializer at a time, so a fan-out that
@@ -399,7 +416,7 @@ impl BmcClient {
         error: &HealthError,
         observed_generation: Option<u64>,
     ) -> Result<(), HealthError> {
-        let _guard = self.refresh_lock.lock().await;
+        let mut applied = self.refresh_lock.lock().await;
         if observed_generation.is_some_and(|generation| {
             generation != self.credential_generation.load(Ordering::Acquire)
         }) {
@@ -421,7 +438,8 @@ impl BmcClient {
                 "failed to refresh BMC credentials after auth error {error}: {refresh_error}"
             ))
         })?;
-        self.inner.set_credentials(credentials.into());
+        self.inner.set_credentials(credentials.clone().into());
+        *applied = Some(credentials);
         self.credential_generation.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
@@ -3740,6 +3758,101 @@ mod tests {
         ];
 
         check_values(cases, |error| error.error_class());
+    }
+
+    #[tokio::test]
+    async fn static_file_rotation_updates_public_request_authorization() {
+        use base64::Engine;
+
+        use crate::endpoint::{EndpointSource, StaticEndpointSource};
+        use crate::static_credentials::test_support::{
+            provider_for_credentials_file, wait_for_password, write_credentials,
+        };
+
+        let recorded = Arc::new(StdMutex::new(Vec::new()));
+        let captured = recorded.clone();
+        let router = axum::Router::new().route(
+            "/redfish/v1",
+            axum::routing::get(move |headers: HeaderMap| {
+                let captured = captured.clone();
+                async move {
+                    captured
+                        .lock()
+                        .unwrap()
+                        .push(headers[header::AUTHORIZATION].to_str().unwrap().to_owned());
+                    axum::Json(serde_json::json!({"@odata.id": "/redfish/v1"}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let password = dir.path().join("password");
+        write_credentials(&password, "first");
+        let config = serde_json::from_value(serde_json::json!({
+            "ip": "127.0.0.1", "mac": "00:11:22:33:44:55",
+            "username": "admin",
+        }))
+        .unwrap();
+        let provider = provider_for_credentials_file(
+            BmcAddr {
+                ip: "127.0.0.1".parse().unwrap(),
+                port: None,
+                mac: Some("00:11:22:33:44:55".parse().unwrap()),
+            },
+            password.clone(),
+        )
+        .await;
+        let source = StaticEndpointSource::from_config_with_request_concurrency(
+            &[config],
+            &reqwest(),
+            Some(&base_url),
+            0,
+            std::num::NonZeroUsize::MIN,
+            None,
+            Some(provider),
+        );
+        let endpoints = source.fetch_bmc_hosts().await.unwrap();
+        let endpoint = &endpoints[0];
+        endpoint
+            .bmc
+            .get::<TestEntity>(&ODataId::service_root())
+            .await
+            .unwrap();
+        endpoint.bmc.ensure_credentials().await.unwrap();
+        assert_eq!(
+            endpoint.bmc.credential_generation.load(Ordering::Acquire),
+            1
+        );
+        write_credentials(&password, "second");
+        wait_for_password(
+            &*endpoint.bmc.credential_provider(),
+            &endpoint.addr,
+            "second",
+        )
+        .await;
+        endpoint
+            .bmc
+            .get::<TestEntity>(&ODataId::service_root())
+            .await
+            .unwrap();
+        assert_eq!(
+            endpoint.bmc.credential_generation.load(Ordering::Acquire),
+            2
+        );
+        assert_eq!(
+            *recorded.lock().unwrap(),
+            ["admin:first", "admin:second"].map(|value| {
+                format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode(value)
+                )
+            })
+        );
+        server.abort();
     }
 
     #[tokio::test]

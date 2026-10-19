@@ -32,6 +32,10 @@ endpoint_discovery_interval = "5m"
 # Endpoint Sources: Where to discover BMC endpoints from
 # ==============================================================================
 
+[endpoint_sources]
+# Named profiles and per-MAC overrides; see credentials.example.json.
+# static_credentials_file = "/run/secrets/bmc/credentials.json"
+
 [endpoint_sources.nico_api]
 root_ca = "/var/run/secrets/spiffe.io/ca.crt"
 client_cert = "/var/run/secrets/spiffe.io/tls.crt"
@@ -49,6 +53,7 @@ api_url = "https://nico-api.nico-system.svc.cluster.local:1079"
 ip = "10.0.0.1"
 port = 443
 mac = "aa:bb:cc:dd:ee:ff"
+# credentials_profile = "bmc" # Requires static_credentials_file above.
 username = "admin"
 password = "secret"
 labels = { site = "dev", cluster = "cluster-01", environment = "development" }

@@ -28,7 +28,8 @@ use url::Url;
 
 use crate::HealthError;
 use crate::bmc::{
-    BmcClient, BmcLatencyInstrumentation, FixedCredentialProvider, bmc_latency_endpoint_labels,
+    BmcClient, BmcLatencyInstrumentation, CredentialProvider, FixedCredentialProvider,
+    bmc_latency_endpoint_labels,
 };
 use crate::config::{StaticBmcEndpoint, StaticSwitchEndpointRole};
 use crate::endpoint::{
@@ -37,6 +38,7 @@ use crate::endpoint::{
     SwitchEndpointRole,
 };
 use crate::metrics::BmcLatencyMetrics;
+use crate::static_credentials::StaticCredentialProvider;
 
 fn parse_static_nvlink_domain_uuid(
     value: Option<&str>,
@@ -83,6 +85,7 @@ impl StaticEndpointSource {
             cache_size,
             NonZeroUsize::MIN,
             bmc_latency_metrics,
+            None,
         )
     }
 
@@ -93,9 +96,9 @@ impl StaticEndpointSource {
         cache_size: usize,
         bmc_request_concurrency: NonZeroUsize,
         bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
+        file_provider: Option<Arc<StaticCredentialProvider>>,
     ) -> Self {
         let mut endpoints = Vec::with_capacity(configs.len());
-
         for cfg in configs {
             let mac = match MacAddress::from_str(&cfg.mac) {
                 Ok(mac) => mac,
@@ -228,11 +231,18 @@ impl StaticEndpointSource {
                 port: cfg.port,
                 mac: Some(mac),
             };
-            let credentials = BmcCredentials::UsernamePassword {
-                username: cfg.username.clone(),
-                password: cfg.password.clone(),
+            let provider: Arc<dyn CredentialProvider> = if let Some(provider) = &file_provider {
+                provider.clone()
+            } else if let Some(username) = &cfg.username {
+                Arc::new(FixedCredentialProvider::new(
+                    BmcCredentials::UsernamePassword {
+                        username: username.clone(),
+                        password: cfg.password.clone(),
+                    },
+                ))
+            } else {
+                continue;
             };
-            let provider = Arc::new(FixedCredentialProvider::new(credentials));
             let rack_id = cfg.rack_id.as_ref().map(|id| RackId::new(id.as_str()));
             let bmc_latency_instrumentation = bmc_latency_metrics.clone().map(|metrics| {
                 BmcLatencyInstrumentation::new(
@@ -398,7 +408,8 @@ mod tests {
                 ip: ip("10.0.0.1"),
                 port: Some(443),
                 mac: "00:11:22:33:44:55".to_string(),
-                username: "admin".to_string(),
+                credentials_profile: None,
+                username: Some("admin".to_string()),
                 password: Some("pass".to_string()),
                 machine: None,
                 power_shelf: None,
@@ -410,7 +421,8 @@ mod tests {
                 ip: ip("10.0.0.2"),
                 port: Some(443),
                 mac: "not-a-mac".to_string(),
-                username: "admin".to_string(),
+                credentials_profile: None,
+                username: Some("admin".to_string()),
                 password: Some("pass".to_string()),
                 machine: None,
                 power_shelf: None,
@@ -439,7 +451,8 @@ mod tests {
             ip: ip("10.0.1.1"),
             port: Some(443),
             mac: "11:22:33:44:55:66".to_string(),
-            username: "cumulus".to_string(),
+            credentials_profile: None,
+            username: Some("cumulus".to_string()),
             password: Some("pass".to_string()),
             machine: None,
             power_shelf: None,
@@ -494,7 +507,8 @@ mod tests {
                 ip: ip(ip_address),
                 port: Some(443),
                 mac: mac_address.to_string(),
-                username: "cumulus".to_string(),
+                credentials_profile: None,
+                username: Some("cumulus".to_string()),
                 password: Some("pass".to_string()),
                 machine: None,
                 power_shelf: None,
@@ -534,7 +548,8 @@ mod tests {
             ip: ip("10.0.2.1"),
             port: Some(443),
             mac: "22:33:44:55:66:77".to_string(),
-            username: "admin".to_string(),
+            credentials_profile: None,
+            username: Some("admin".to_string()),
             password: Some("pass".to_string()),
             machine: None,
             power_shelf: Some(StaticPowerShelfEndpoint {
@@ -568,7 +583,8 @@ mod tests {
             ip: ip("10.0.2.2"),
             port: Some(443),
             mac: "22:33:44:55:66:88".to_string(),
-            username: "admin".to_string(),
+            credentials_profile: None,
+            username: Some("admin".to_string()),
             password: Some("pass".to_string()),
             machine: None,
             power_shelf: Some(StaticPowerShelfEndpoint {
@@ -607,7 +623,8 @@ mod tests {
             ip: ip("10.0.1.2"),
             port: Some(443),
             mac: "11:22:33:44:55:11".to_string(),
-            username: "admin".to_string(),
+            credentials_profile: None,
+            username: Some("admin".to_string()),
             password: Some("pass".to_string()),
             machine: Some(StaticMachineEndpoint {
                 id: Some("fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0".to_string()),
@@ -657,7 +674,8 @@ mod tests {
             ip: ip("10.0.1.3"),
             port: Some(443),
             mac: "11:22:33:44:55:12".to_string(),
-            username: "admin".to_string(),
+            credentials_profile: None,
+            username: Some("admin".to_string()),
             password: Some("pass".to_string()),
             machine: Some(StaticMachineEndpoint {
                 id: Some("fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0".to_string()),
@@ -691,7 +709,8 @@ mod tests {
             ip: ip("10.0.0.1"),
             port: Some(443),
             mac: "aa:bb:cc:dd:ee:ff".to_string(),
-            username: "admin".to_string(),
+            credentials_profile: None,
+            username: Some("admin".to_string()),
             password: Some("pass".to_string()),
             machine: None,
             power_shelf: None,

@@ -275,7 +275,7 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
     async fn run_iteration(&mut self) -> Result<IterationResult, HealthError> {
         self.client.ensure_http_client().await?;
 
-        if !self.client.has_credentials()
+        if (self.provider.reload_before_use() || !self.client.has_credentials())
             && let Err(error) = self.refresh_rest_credentials().await
         {
             tracing::warn!(
@@ -2312,6 +2312,64 @@ mod tests {
             summarize_iteration_response,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn rest_iterations_apply_rotated_reader_credentials_on_the_wire() {
+        use base64::Engine;
+
+        use crate::static_credentials::test_support::{
+            provider_for_credentials_file, wait_for_password, write_credentials,
+        };
+
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let headers = captured.clone();
+        let router = axum::Router::new().route(
+            "/nvue_v1/system/health",
+            axum::routing::get(move |request: http::HeaderMap| {
+                let headers = headers.clone();
+                async move {
+                    headers.lock().unwrap().push(
+                        request[http::header::AUTHORIZATION]
+                            .to_str()
+                            .unwrap()
+                            .to_owned(),
+                    );
+                    axum::Json(serde_json::json!({"status": "OK"}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url =
+            url::Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let file = tempfile::NamedTempFile::new().unwrap();
+        write_credentials(file.path(), "first");
+        let provider = provider_for_credentials_file(test_addr(), file.path().to_owned()).await;
+        let mut collector = collector_with_provider(provider.clone());
+        collector.client = RestClient::new_with_base_url_for_test(
+            "test-switch".into(),
+            base_url,
+            Duration::from_secs(1),
+            IterationEndpoint::SystemHealth.paths(),
+        )
+        .unwrap();
+        assert_eq!(collector.run_iteration().await.unwrap().fetch_failures, 0);
+        write_credentials(file.path(), "second");
+        wait_for_password(&*provider, &test_addr(), "second").await;
+        assert_eq!(collector.run_iteration().await.unwrap().fetch_failures, 0);
+        assert_eq!(
+            *captured.lock().unwrap(),
+            ["admin:first", "admin:second"].map(|value| {
+                format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode(value)
+                )
+            })
+        );
+        server.abort();
     }
 
     #[tokio::test]

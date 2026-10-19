@@ -110,6 +110,7 @@ x509-parser = { workspace = true }
 # [local-dependencies]
 carbide-health-report = { path = "../health-report" }
 carbide-rpc = { path = "../rpc" }
+carbide-secrets = { path = "../secrets" }
 carbide-tls = { path = "../tls" }
 carbide-version = { path = "../version" }
 carbide-utils = { path = "../utils" }
