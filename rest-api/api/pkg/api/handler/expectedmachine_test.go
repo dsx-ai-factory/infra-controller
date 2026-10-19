@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
@@ -24,6 +25,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swutil "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
@@ -104,19 +106,21 @@ func testExpectedMachineSetupTestData(t *testing.T, dbSession *cdb.Session, org 
 	_, err = dbSession.DB.NewInsert().Model(site).Exec(ctx)
 	assert.Nil(t, err)
 
-	// Create multiple test SKUs in the database linked to the site
+	// Keep SKU 1 older than SKU 2 so later-SKU requests expose site-wide lookups limited to one result.
 	sku1ID := "test-sku-uuid-1"
 	sku1 := &cdbm.SKU{
-		ID:     sku1ID,
-		SiteID: site.ID,
+		ID:      sku1ID,
+		SiteID:  site.ID,
+		Created: time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC),
 	}
 	_, err = dbSession.DB.NewInsert().Model(sku1).Exec(ctx)
 	assert.Nil(t, err)
 
 	sku2ID := "test-sku-uuid-2"
 	sku2 := &cdbm.SKU{
-		ID:     sku2ID,
-		SiteID: site.ID,
+		ID:      sku2ID,
+		SiteID:  site.ID,
+		Created: time.Date(2026, time.January, 2, 0, 0, 0, 0, time.UTC),
 	}
 	_, err = dbSession.DB.NewInsert().Model(sku2).Exec(ctx)
 	assert.Nil(t, err)
@@ -2368,6 +2372,19 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 	// Create test data first to get the site ID
 	org := "test-org"
 	infraProv, site := testExpectedMachineSetupTestData(t, dbSession, org)
+	ctx := context.Background()
+	site2 := &cdbm.Site{
+		ID:                       uuid.New(),
+		Name:                     "test-site-2",
+		Org:                      org,
+		InfrastructureProviderID: infraProv.ID,
+		Status:                   cdbm.SiteStatusRegistered,
+	}
+	_, err := dbSession.DB.NewInsert().Model(site2).Exec(ctx)
+	require.NoError(t, err)
+	otherSiteSKU := &cdbm.SKU{ID: "test-sku-other-site", SiteID: site2.ID}
+	_, err = dbSession.DB.NewInsert().Model(otherSiteSKU).Exec(ctx)
+	require.NoError(t, err)
 
 	// Add mock temporal client for the site
 	mockTemporalClient := &tmocks.Client{}
@@ -2449,6 +2466,7 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 		requestBody    []model.APIExpectedMachineCreateRequest
 		setupContext   func(c echo.Context)
 		expectedStatus int
+		rejectsSKU     bool
 		validateResp   func(t *testing.T, body []byte)
 		workflowErrors map[int]string
 	}{
@@ -2609,6 +2627,36 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 			},
 		},
 		{
+			name: "batch creation with only the later SKU",
+			requestBody: []model.APIExpectedMachineCreateRequest{
+				{
+					SiteID:              site.ID.String(),
+					BmcMacAddress:       "00:11:22:33:44:07",
+					ChassisSerialNumber: "BATCH-CHASSIS-LATER-SKU",
+					SkuID:               cutil.GetPtr("test-sku-uuid-2"),
+				},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusCreated,
+			validateResp: func(t *testing.T, body []byte) {
+				var response []model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(body, &response))
+				require.Len(t, response, 1)
+				assert.Equal(t, cutil.GetPtr("test-sku-uuid-2"), response[0].SkuID)
+				stored, err := cdbm.NewExpectedMachineDAO(dbSession).Get(context.Background(), nil, response[0].ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, cutil.GetPtr("test-sku-uuid-2"), stored.SkuID)
+				batchRequest, ok := capturedRequest.(*corev1.BatchExpectedMachineOperationRequest)
+				require.True(t, ok)
+				require.Len(t, batchRequest.ExpectedMachines.ExpectedMachines, 1)
+				assert.Equal(t, "test-sku-uuid-2", batchRequest.ExpectedMachines.ExpectedMachines[0].GetSkuId())
+			},
+		},
+		{
 			name:        "empty batch should fail",
 			requestBody: []model.APIExpectedMachineCreateRequest{},
 			setupContext: func(c echo.Context) {
@@ -2655,14 +2703,32 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 				c.SetParamValues(org)
 			},
 			expectedStatus: http.StatusBadRequest,
+			rejectsSKU:     true,
+		},
+		{
+			name: "SKU from another site should fail",
+			requestBody: []model.APIExpectedMachineCreateRequest{
+				{
+					SiteID:              site.ID.String(),
+					BmcMacAddress:       "00:11:22:33:44:08",
+					ChassisSerialNumber: "BATCH-CHASSIS-OTHER-SITE-SKU",
+					SkuID:               cutil.GetPtr(otherSiteSKU.ID),
+				},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusBadRequest,
+			rejectsSKU:     true,
 		},
 	}
-
-	_ = infraProv // Ensure infraProv is used to avoid compiler warning
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			workflowFailures = tt.workflowErrors
+			workflowCallsBefore := len(mockTemporalClient.Calls)
 			// Create request
 			reqBody, _ := json.Marshal(tt.requestBody)
 			req := httptest.NewRequest(http.MethodPost, "/v2/org/test-org/nico/expected-machine/batch", bytes.NewReader(reqBody))
@@ -2683,6 +2749,21 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 			assert.Equal(t, tt.expectedStatus, rec.Code)
 			if tt.expectedStatus != rec.Code {
 				t.Errorf("Response: %v", rec.Body.String())
+			}
+
+			if tt.rejectsSKU {
+				var response struct {
+					Data map[string]map[string]string `json:"data"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, "the SkuID specified for Expected Machine does not exist in DB: "+*tt.requestBody[0].SkuID, response.Data["0"]["skuID"])
+				assert.Len(t, mockTemporalClient.Calls, workflowCallsBefore)
+				machines, _, readErr := cdbm.NewExpectedMachineDAO(dbSession).GetAll(ctx, nil, cdbm.ExpectedMachineFilterInput{
+					SiteIDs:         []uuid.UUID{site.ID},
+					BmcMacAddresses: []string{tt.requestBody[0].BmcMacAddress},
+				}, paginator.PageInput{}, nil)
+				require.NoError(t, readErr)
+				assert.Empty(t, machines, "rejected SKU must not create a cloud row")
 			}
 
 			// Validate response if provided
@@ -3211,6 +3292,9 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 	}
 	_, err := dbSession.DB.NewInsert().Model(site2).Exec(ctx)
 	assert.Nil(t, err)
+	otherSiteSKU := &cdbm.SKU{ID: "test-sku-other-site", SiteID: site2.ID}
+	_, err = dbSession.DB.NewInsert().Model(otherSiteSKU).Exec(ctx)
+	require.NoError(t, err)
 
 	// Create a Site outside the caller's provider relationship so identity
 	// validation cannot reveal data before the access check.
@@ -3324,6 +3408,7 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 		setupContext       func(c echo.Context)
 		expectedStatus     int
 		rejectsCredentials bool
+		rejectsSKU         bool
 		validateResp       func(t *testing.T, body []byte)
 	}{
 		{
@@ -3416,6 +3501,35 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 				assert.JSONEq(t, `{}`, string(fields[1]["labels"]))
 				assert.Contains(t, fields[0], "id")
 				assert.NotContains(t, fields[0], "Labels")
+			},
+		},
+		{
+			name: "batch update with only the later SKU",
+			requestBody: []model.APIExpectedMachineUpdateRequest{
+				{
+					ID:    cutil.GetPtr(testEM1.ID.String()),
+					SkuID: cutil.GetPtr("test-sku-uuid-2"),
+				},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusOK,
+			validateResp: func(t *testing.T, body []byte) {
+				var response []model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(body, &response))
+				require.Len(t, response, 1)
+				assert.Equal(t, testEM1.ID, response[0].ID)
+				assert.Equal(t, cutil.GetPtr("test-sku-uuid-2"), response[0].SkuID)
+				stored, err := emDAO.Get(ctx, nil, testEM1.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, cutil.GetPtr("test-sku-uuid-2"), stored.SkuID)
+				require.NotNil(t, capturedRequest)
+				require.Len(t, capturedRequest.Patches, 1)
+				assert.Equal(t, "test-sku-uuid-2", capturedRequest.Patches[0].ExpectedMachine.GetSkuId())
+				assert.Equal(t, []string{"sku_id"}, capturedRequest.Patches[0].UpdateMask.Paths)
 			},
 		},
 		{
@@ -3606,6 +3720,23 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 				c.SetParamValues(org)
 			},
 			expectedStatus: http.StatusBadRequest,
+			rejectsSKU:     true,
+		},
+		{
+			name: "SKU from another site should fail",
+			requestBody: []model.APIExpectedMachineUpdateRequest{
+				{
+					ID:    cutil.GetPtr(testEM2.ID.String()),
+					SkuID: cutil.GetPtr(otherSiteSKU.ID),
+				},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusBadRequest,
+			rejectsSKU:     true,
 		},
 		{
 			name: "duplicate IDs in request should fail",
@@ -3721,7 +3852,7 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 			// Create request
 			workflowCallsBefore := len(mockTemporalClient.Calls)
 			var before []*cdbm.ExpectedMachine
-			if tt.rejectsCredentials {
+			if tt.rejectsCredentials || tt.rejectsSKU {
 				for _, machine := range []*cdbm.ExpectedMachine{testEM1, testEM2} {
 					stored, readErr := emDAO.Get(ctx, nil, machine.ID, nil, false)
 					require.NoError(t, readErr)
@@ -3750,13 +3881,20 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 			}
 
 			// Validate response if provided
-			if tt.rejectsCredentials {
+			if tt.rejectsCredentials || tt.rejectsSKU {
 				assert.Len(t, mockTemporalClient.Calls, workflowCallsBefore)
 				for _, machine := range before {
 					after, readErr := emDAO.Get(ctx, nil, machine.ID, nil, false)
 					require.NoError(t, readErr)
-					assert.Equal(t, machine, after, "invalid credentials must not mutate any cloud row")
+					assert.Equal(t, machine, after, "rejected request must not mutate any cloud row")
 				}
+			}
+			if tt.rejectsSKU {
+				var response struct {
+					Data map[string]map[string]string `json:"data"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, "the SkuID specified for Expected Machine does not exist in DB: "+*tt.requestBody[0].SkuID, response.Data["0"]["skuID"])
 			}
 			if tt.validateResp != nil && rec.Code == tt.expectedStatus {
 				tt.validateResp(t, rec.Body.Bytes())
@@ -3764,7 +3902,7 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 		})
 	}
 
-	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 4)
+	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 5)
 	storedEM1, err := emDAO.Get(ctx, nil, testEM1.ID, nil, false)
 	require.NoError(t, err)
 	storedEM2, err := emDAO.Get(ctx, nil, testEM2.ID, nil, false)
