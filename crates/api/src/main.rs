@@ -24,8 +24,16 @@ use clap::CommandFactory;
 use sqlx::PgPool;
 use sqlx::postgres::PgSslMode;
 
-#[tokio::main]
-async fn main() -> eyre::Result<()> {
+fn main() -> eyre::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        // Our code needs pretty large stacks...
+        .thread_stack_size(8 * 1024 * 1024)
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> eyre::Result<()> {
     let options = Options::load();
     if options.version {
         println!("{}", carbide_version::version!());

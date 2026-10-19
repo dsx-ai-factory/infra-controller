@@ -719,6 +719,16 @@ func testManageSubnetUpdateSubnetsInDBAutoCreatesAndRestores(t *testing.T) {
 	statusDetailDAO := cdbm.NewStatusDetailDAO(dbSession)
 
 	controllerSegmentID := uuid.MustParse("abcdef01-2345-4678-9abc-def012345678")
+	legacySegmentID := uuid.MustParse("abcdef02-2345-4678-9abc-def012345678")
+	fnnLinknetSegmentID := uuid.MustParse("abcdef03-2345-4678-9abc-def012345678")
+	fnnLinknetCIDR := "10.20.40.0/31"
+	// Core owns the FNN allocation before inventory reports it; recovery must not
+	// attempt to claim the same prefix for a REST Subnet.
+	_, err = ipam.AcquireSpecificChildIpamEntryForIPBlock(
+		ctx, nil, dbSession, ipamStorage, ipBlock, fnnLinknetCIDR,
+	)
+	require.NoError(t, err)
+
 	gateway := "10.20.30.1"
 	controllerSegment := &corev1.NetworkSegment{
 		Id: &corev1.NetworkSegmentId{Value: controllerSegmentID.String()},
@@ -734,13 +744,41 @@ func testManageSubnetUpdateSubnetsInDBAutoCreatesAndRestores(t *testing.T) {
 		},
 		Status: &corev1.NetworkSegmentStatus{
 			TenantState: corev1.TenantState_READY,
+			Flags:       []corev1.NetworkSegmentFlag{corev1.NetworkSegmentFlag_CAN_STRETCH},
+		},
+	}
+	legacySegment := &corev1.NetworkSegment{
+		Id: &corev1.NetworkSegmentId{Value: legacySegmentID.String()},
+		Config: &corev1.NetworkSegmentConfig{
+			VpcId:       &corev1.VpcId{Value: controllerVpcID.String()},
+			SegmentType: corev1.NetworkSegmentType_TENANT,
+			Prefixes: []*corev1.NetworkPrefix{
+				{Prefix: "10.20.32.0/24", Gateway: cutil.GetPtr("10.20.32.1")},
+			},
+		},
+		Metadata: &corev1.Metadata{Name: "legacy-site-created-subnet"},
+		Status:   &corev1.NetworkSegmentStatus{TenantState: corev1.TenantState_READY},
+	}
+	fnnLinknetSegment := &corev1.NetworkSegment{
+		Id: &corev1.NetworkSegmentId{Value: fnnLinknetSegmentID.String()},
+		Config: &corev1.NetworkSegmentConfig{
+			VpcId:       &corev1.VpcId{Value: controllerVpcID.String()},
+			SegmentType: corev1.NetworkSegmentType_TENANT,
+			Prefixes: []*corev1.NetworkPrefix{
+				{Prefix: fnnLinknetCIDR, Gateway: cutil.GetPtr("10.20.40.0")},
+			},
+		},
+		Metadata: &corev1.Metadata{Name: "vpc_prefix_10.20.40.0"},
+		Status: &corev1.NetworkSegmentStatus{
+			TenantState: corev1.TenantState_READY,
+			Flags:       []corev1.NetworkSegmentFlag{corev1.NetworkSegmentFlag_NO_OP},
 		},
 	}
 	inventory := &corev1.SubnetInventory{
-		Segments: []*corev1.NetworkSegment{controllerSegment},
+		Segments: []*corev1.NetworkSegment{controllerSegment, legacySegment, fnnLinknetSegment},
 	}
 
-	if !t.Run("auto creates Subnet from inventory", func(t *testing.T) {
+	if !t.Run("auto creates recoverable Subnets and skips FNN linknets", func(t *testing.T) {
 		var logOutput bytes.Buffer
 		originalLogger := log.Logger
 		log.Logger = zerolog.New(&logOutput)
@@ -751,6 +789,7 @@ func testManageSubnetUpdateSubnetsInDBAutoCreatesAndRestores(t *testing.T) {
 		_, err := manager.UpdateSubnetsInDB(ctx, site.ID, inventory)
 		require.NoError(t, err)
 		assert.Contains(t, logOutput.String(), "created or undeleted Subnet from Site inventory")
+		assert.NotContains(t, logOutput.String(), "failed to recover Subnet from Site inventory")
 
 		created, err := subnetDAO.GetByID(ctx, nil, controllerSegmentID, nil)
 		require.NoError(t, err)
@@ -772,11 +811,19 @@ func testManageSubnetUpdateSubnetsInDBAutoCreatesAndRestores(t *testing.T) {
 		require.NotNil(t, created.ControllerNetworkSegmentID)
 		assert.Equal(t, controllerSegmentID, *created.ControllerNetworkSegmentID)
 
+		legacy, err := subnetDAO.GetByID(ctx, nil, legacySegmentID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "legacy-site-created-subnet", legacy.Name)
+
+		_, err = subnetDAO.GetByID(ctx, nil, fnnLinknetSegmentID, nil)
+		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+
 		ipamer := cipam.NewWithStorage(ipamStorage)
 		ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(
 			ctx, ipBlock.RoutingType, ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
 		))
 		assert.NotNil(t, ipamer.PrefixFrom(ctx, controllerSegment.Config.Prefixes[0].Prefix))
+		assert.NotNil(t, ipamer.PrefixFrom(ctx, fnnLinknetCIDR))
 
 		statusDetails, _, statusErr := statusDetailDAO.GetAll(
 			ctx,

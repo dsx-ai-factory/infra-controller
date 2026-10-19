@@ -2589,7 +2589,10 @@ where
     }
 
     if let Some(ovrrd_str) = &search_config.only_with_health_alert {
-        qb.push(" AND health_reports->'merges' ? ");
+        // Match the machine_health_source_keys_gin_idx index.
+        qb.push(
+            " AND jsonb_path_query_array(health_reports, '$.merges.keyvalue().key'::jsonpath) ? ",
+        );
         qb.push_bind(ovrrd_str.clone());
         qb.push(" AND jsonb_array_length(health_reports->'merges'->");
         qb.push_bind(ovrrd_str);
@@ -3958,6 +3961,118 @@ mod test {
     use model::resource_pool::define::{Range, ResourcePoolDef, ResourcePoolType};
     use model::resource_pool::{ResourcePool, ValueType};
     use tokio::sync::oneshot;
+
+    #[crate::sqlx_test]
+    async fn health_alert_search_uses_source_keys(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let source = "future.source with 'quotes' and \"double quotes\"";
+        let populated = serde_json::json!({
+            "merges": {
+                source: {"alerts": [{"id": "leak", "message": "nested payload"}]},
+                "empty": {"alerts": []}
+            }
+        });
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        sqlx::query("UPDATE machines SET health_reports = $1 WHERE id = $2")
+            .bind(&populated)
+            .bind(machine_id)
+            .execute(txn.as_mut())
+            .await?;
+        txn.commit().await?;
+
+        // Reconstruct the predecessor index with populated data, then apply the
+        // shipped replacement outside a transaction, as the migrator does.
+        sqlx::raw_sql(
+            "DROP INDEX machine_health_source_keys_gin_idx;
+             CREATE INDEX machine_health_reports_merges_gin_idx ON machines
+             USING gin ((health_reports->'merges'));",
+        )
+        .execute(&pool)
+        .await?;
+        for migration in [
+            include_str!("../migrations/20261013175247_machine_health_source_keys_gin.sql"),
+            include_str!("../migrations/20261013175248_drop_machine_health_reports_merges_gin.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await?;
+        }
+
+        for (scenario, reports, searched_source, expected) in [
+            ("arbitrary source", Some(populated.clone()), source, true),
+            ("empty alerts", Some(populated.clone()), "empty", false),
+            (
+                "nested value is not a source",
+                Some(populated),
+                "leak",
+                false,
+            ),
+            ("absent reports", None, source, false),
+            ("absent merges", Some(serde_json::json!({})), source, false),
+        ] {
+            sqlx::query("UPDATE machines SET health_reports = $1 WHERE id = $2")
+                .bind(reports)
+                .bind(machine_id)
+                .execute(&pool)
+                .await?;
+            let ids: Vec<HostMachineId> = super::find_machine_ids(
+                &pool,
+                MachineSearchConfig {
+                    only_with_health_alert: Some(searched_source.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            assert_eq!(ids.contains(&machine_id), expected, "{scenario}");
+        }
+
+        // A generic prepared plan must match the expression index even when
+        // the report source is supplied as a parameter.
+        let mut txn = pool.begin().await?;
+        sqlx::raw_sql(
+            "SET LOCAL enable_seqscan = off; SET LOCAL plan_cache_mode = force_generic_plan",
+        )
+        .execute(txn.as_mut())
+        .await?;
+        let _: Vec<HostMachineId> = super::find_machine_ids(
+            txn.as_mut(),
+            MachineSearchConfig {
+                only_with_health_alert: Some(source.to_string()),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let statement: String = sqlx::query_scalar(
+            "SELECT statement FROM pg_prepared_statements
+             WHERE statement LIKE 'SELECT id FROM machines%'
+             AND statement LIKE '%jsonb_array_length%'",
+        )
+        .fetch_one(txn.as_mut())
+        .await?;
+        let plan: Vec<String> =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("EXPLAIN {statement}")))
+                .bind(source)
+                .bind(source)
+                .fetch_all(txn.as_mut())
+                .await?;
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("machine_health_source_keys_gin_idx")),
+            "source-key index missing from plan: {plan:?}"
+        );
+        txn.rollback().await?;
+        Ok(())
+    }
 
     #[crate::sqlx_test]
     async fn dpu_agent_upgrade_status_reads_current_attached_host_data(

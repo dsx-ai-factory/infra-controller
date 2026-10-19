@@ -35,7 +35,6 @@ import (
 	cwu "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -185,8 +184,8 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 
 		// Update creation and update timestamp to be earlier than inventory processing interval
 		_, uerr := dbSession.DB.Exec("UPDATE expected_switch SET created = ?, updated = ? WHERE id = ?",
-			time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval*2)),
-			time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval*2)),
+			time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)),
+			time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)),
 			es.ID.String())
 		assert.NoError(t, uerr)
 
@@ -223,7 +222,8 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 		}
 
 		// Test label updates: add/modify labels for some switches
-		if i == 1 {
+		switch i {
+		case 1:
 			// Add labels to a switch that didn't have them before
 			ctrlExpectedSwitch.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{
@@ -231,14 +231,14 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 				},
 			}
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
-		} else if i == 2 {
+		case 2:
 			// Report NVOS MAC addresses for a switch that didn't have them before
 			ctrlExpectedSwitch.NvosMacAddresses = []string{"aa:bb:cc:dd:ee:02", "aa:bb:cc:dd:ee:03"}
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
-		} else if i == 4 {
+		case 4:
 			// NVOS MACs cleared on the Site: reported without any, DB has one
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
-		} else if i == 5 {
+		case 5:
 			// Modify existing labels
 			ctrlExpectedSwitch.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{
@@ -248,13 +248,13 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 				},
 			}
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
-		} else if i == 10 {
+		case 10:
 			// Remove labels (set to empty labels array)
 			ctrlExpectedSwitch.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{},
 			}
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
-		} else if i == 15 {
+		case 15:
 			// Remove labels (set metadata to nil)
 			ctrlExpectedSwitch.Metadata = nil
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])

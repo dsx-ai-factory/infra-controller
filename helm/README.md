@@ -147,8 +147,10 @@ They are disabled by default because this chart does not install Grafana.
 The source JSON files live in [`observability/dashboards/`](./observability/dashboards/) and can also be
 imported into Grafana directly.
 
-The fleet dashboard groups every panel by a site label, which defaults to
+Most fleet dashboard panels group by a site label, which defaults to
 `forge_site`, the external label the NICo observability bundle sets per site.
+Fleet-wide totals, such as Distinct API versions and the Fleet BMC connection
+panels, aggregate across all sites.
 A Prometheus that serves only its own site leaves that label empty, because
 Prometheus attaches external labels only when data leaves the server; set the
 dashboard's `site_label` variable to `job` there.

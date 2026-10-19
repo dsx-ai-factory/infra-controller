@@ -5,7 +5,6 @@ package model
 
 import (
 	"errors"
-	"net"
 	"regexp"
 	"strings"
 	"time"
@@ -48,13 +47,7 @@ func (i APIExpectedMachineInterface) Validate() error {
 				validation.Match(util.NotAllWhitespaceRegexp).Error("NicType consists only of whitespace"))),
 		validation.Field(&i.FixedIP,
 			validation.NilOrNotEmpty.Error("FixedIP cannot be empty"),
-			validation.When(i.FixedIP != nil, validation.By(func(value interface{}) error {
-				fixedIP, ok := value.(*string)
-				if !ok || fixedIP == nil || net.ParseIP(*fixedIP) == nil {
-					return errors.New("FixedIP must be a valid IPv4 or IPv6 address")
-				}
-				return nil
-			}))),
+			validation.When(i.FixedIP != nil, validation.By(util.ValidateExpectedFixedIPAddress))),
 		validation.Field(&i.FixedGateway, validationis.IP),
 		validation.Field(&i.NetworkSegmentType, validation.NilOrNotEmpty, validation.In(
 			cdbm.ExpectedInterfaceNetworkSegmentTypeTenant, cdbm.ExpectedInterfaceNetworkSegmentTypeAdmin,

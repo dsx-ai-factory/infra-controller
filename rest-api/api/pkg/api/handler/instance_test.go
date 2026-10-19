@@ -35,7 +35,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdmu "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
@@ -67,13 +66,13 @@ const (
 )
 
 func phoneHomeLocationIn(userData map[string]interface{}) phoneHomeLocation {
-	_, atRoot := userData[util.SitePhoneHomeName]
+	_, atRoot := userData[cdmu.SitePhoneHomeName]
 	inAutoinstall := false
 	autoinstall, ok := userData["autoinstall"].(map[string]interface{})
 	if ok {
 		targetUserData, ok := autoinstall["user-data"].(map[string]interface{})
 		if ok {
-			_, inAutoinstall = targetUserData[util.SitePhoneHomeName]
+			_, inAutoinstall = targetUserData[cdmu.SitePhoneHomeName]
 		}
 	}
 
@@ -2075,7 +2074,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				reqUser:              tnu1,
 				respCode:             http.StatusCreated,
 				respMessage:          "",
-				respUserDataContains: cutil.GetPtr(util.SiteCloudConfig),
+				respUserDataContains: cutil.GetPtr(cdmu.SiteCloudConfig),
 			},
 			wantErr: false,
 		},
@@ -2107,7 +2106,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				reqUser:              tnu1,
 				respCode:             http.StatusCreated,
 				respMessage:          "",
-				respUserDataContains: cutil.GetPtr(util.SiteCloudConfig),
+				respUserDataContains: cutil.GetPtr(cdmu.SiteCloudConfig),
 			},
 			wantErr: false,
 		},
@@ -4493,8 +4492,8 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 					if tt.args.reqData.OperatingSystemID != nil {
 						lines := strings.Split(*rst.UserData, "\n")
 						// ensure first line is always #cloud-config
-						assert.Equal(t, util.SiteCloudConfig, lines[0])
-						assert.NotEqual(t, util.SiteCloudConfig, lines[1])
+						assert.Equal(t, cdmu.SiteCloudConfig, lines[0])
+						assert.NotEqual(t, cdmu.SiteCloudConfig, lines[1])
 					}
 				} else {
 					assert.Equal(t, phoneHomeAbsent, phoneHomeLocationIn(instUserData))
@@ -8166,8 +8165,8 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 
 				if tt.args.reqData.PhoneHomeEnabled != nil && *tt.args.reqData.PhoneHomeEnabled && tt.args.reqData.OperatingSystemID != nil {
 					lines := strings.Split(*rst.UserData, "\n")
-					assert.Equal(t, util.SiteCloudConfig, lines[0])
-					assert.NotEqual(t, util.SiteCloudConfig, lines[1])
+					assert.Equal(t, cdmu.SiteCloudConfig, lines[0])
+					assert.NotEqual(t, cdmu.SiteCloudConfig, lines[1])
 				}
 			}
 
@@ -8292,7 +8291,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 					cdbp.PageInput{OrderBy: &cdbp.OrderBy{Field: cdbm.InterfaceOrderByCreated, Order: cdbp.OrderAscending}},
 					[]string{cdbm.SubnetRelationName})
 				assert.Equal(t, len(ifcs), len(tt.args.reqData.Interfaces))
-				for i, _ := range ifcs {
+				for i := range ifcs {
 					if ifcs[i].SubnetID != nil && tt.args.reqData.Interfaces[i].SubnetID != nil {
 						assert.Equal(t, ifcs[i].SubnetID.String(), *tt.args.reqData.Interfaces[i].SubnetID)
 					}
@@ -8455,7 +8454,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 					cdbp.PageInput{OrderBy: &cdbp.OrderBy{Field: cdbm.InfiniBandInterfaceOrderByCreated, Order: cdbp.OrderAscending}},
 					[]string{cdbm.InfiniBandPartitionRelationName})
 				assert.Equal(t, len(ibifcs), len(tt.args.reqData.InfiniBandInterfaces))
-				for i, _ := range ibifcs {
+				for i := range ibifcs {
 					assert.Equal(t, tt.args.reqData.InfiniBandInterfaces[i].InfiniBandPartitionID, ibifcs[i].InfiniBandPartitionID.String())
 					assert.Equal(t, cdbm.InfiniBandInterfaceStatusPending, ibifcs[i].Status)
 				}

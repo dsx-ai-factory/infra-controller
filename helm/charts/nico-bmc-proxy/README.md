@@ -72,7 +72,10 @@ configFiles:
     additional_issuer_cns = []
 
     [auth.acls]
-    "spiffe-service-id/nico-api" = ["/**"]
+    "spiffe-service-id/nico-api" = [
+      "GET /redfish/v1/Registries/%23*",
+      "/**",
+    ]
     "spiffe-service-id/nv-dps" = [
       "GET /redfish/v1",
       "GET,POST /redfish/v1/Managers/BMC/NodeManager/Domains",
@@ -111,6 +114,20 @@ Path wildcards:
 - A single `*` may be the whole component, or appear at the beginning or end.
 - `foo*bar` is not valid.
 - Only one `**` is allowed per path pattern.
+
+By default, allow wildcards do not consume percent escapes; each `%HH` must be written
+explicitly, with case-insensitive hexadecimal digits. Structured allow entries can opt in
+with `{ pattern = "/nvue_v1/**", allow_escapes = ["%2F", "%3A"] }`; omitted or empty
+`allow_escapes` keeps the strict default. `["*"]` permits unrestricted wildcard escape
+matching after path validation. This exception is scoped to the entry and accepts upstream
+path-interpretation risks; existing shipped principals have no opt-in. Escapes stay encoded
+during matching, so `%4A` and `%4a` match each other while literals remain distinct from `J`.
+Deny wildcards remain broad.
+Ambiguous request paths return `400` before ACL evaluation; other escaped paths need an explicit
+allow or receive `403`. `allow_escapes` never overrides the pre-ACL path guard.
+The chart's default API ACL includes `GET /redfish/v1/Registries/%23*` for escaped registry names.
+Overrides in `configFiles.nicoBmcProxyConfig` must supply their own exceptions. See the
+[complete path and ACL contract](../../../crates/bmc-proxy/README.md#authacls).
 
 When converting Redfish-style documented endpoints to ACLs, replace templated path components
 like `{id}` or `{session_id}` with `*`.

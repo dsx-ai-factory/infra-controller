@@ -2001,7 +2001,7 @@ var queryTagCache sync.Map // map[reflect.Type][]string
 // Results are cached per type.
 func QueryTagsFor(v any) []string {
 	t := reflect.TypeOf(v)
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if cached, ok := queryTagCache.Load(t); ok {

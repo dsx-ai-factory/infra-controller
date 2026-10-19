@@ -3373,6 +3373,157 @@ esac
         Ok(())
     }
 
+    /// An IPv6-only admin response still uses an IPv4 DPU underlay. Its SVI, RA, and host
+    /// route must render without an empty IPv4 static route or BGP network entry.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn stateful_ipv6_only_admin_renders_without_ipv4()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut network_config = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        network_config.use_admin_network = true;
+        network_config.network_virtualization_type = Some(rpc::VpcVirtualizationType::Fnn.into());
+        network_config.admin_interface = Some(rpc::FlatInterfaceConfig {
+            function_type: rpc::InterfaceFunctionType::Physical.into(),
+            vlan_id: 123,
+            vni: 5555,
+            vpc_vni: 7777,
+            is_l2_segment: true,
+            ipv6_interface_config: Some(rpc::FlatInterfaceIpv6Config {
+                ip: "2001:db8:9::3".to_string(),
+                interface_prefix: "2001:db8:9::3/128".to_string(),
+                svi_ip: Some("2001:db8:9::2/64".to_string()),
+            }),
+            addresses: vec![rpc::InterfaceAddressConfig {
+                address_family: rpc::AddressFamily::V6.into(),
+                ip: "2001:db8:9::3".to_string(),
+                interface_prefix: "2001:db8:9::3/128".to_string(),
+                prefix: "2001:db8:9::/64".to_string(),
+                svi_ip: Some("2001:db8:9::2/64".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let tempdir = tempfile::tempdir()?;
+        let hbn_root = tempdir.path();
+        fs::create_dir_all(hbn_root.join("var/support"))?;
+        fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
+
+        assert!(
+            super::update_nvue(
+                VpcVirtualizationType::Fnn,
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                },
+                &network_config,
+                &test_service_addresses(),
+                HBNDeviceNames::hbn_23(),
+                None,
+            )
+            .await?
+        );
+        let output = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+        let docs: serde_yaml::Value = serde_yaml::from_str(&output)?;
+        // Compare the full NVUE configuration without pinning insignificant template whitespace.
+        let expected =
+            include_str!("../templates/tests/nvue_startup_fnn_ipv6_only_admin.yaml.expected");
+        assert_eq!(docs, serde_yaml::from_str::<serde_yaml::Value>(expected)?);
+        let set = &docs.as_sequence().expect("two YAML documents")[1]["set"];
+        assert_eq!(
+            set["nve"]["vxlan"]["source"]["address"].as_str(),
+            Some("10.217.5.39")
+        );
+        let vlan = &set["interface"]["vlan123"];
+        assert_eq!(
+            vlan["ip"]["address"],
+            serde_yaml::from_str::<serde_yaml::Value>("2001:db8:9::2/64: {}\n")?
+        );
+        assert_eq!(
+            vlan["ip"]["vrr"]["address"],
+            serde_yaml::from_str::<serde_yaml::Value>("2001:db8:9::/64: {}\n")?
+        );
+
+        let admin_router = &set["vrf"]["vpc_7777"]["router"];
+        assert_eq!(
+            admin_router["static"]["2001:db8:9::3/128"],
+            serde_yaml::from_str::<serde_yaml::Value>(
+                "address-family: ipv6-unicast\nvia:\n  vlan123:\n    type: interface\n"
+            )?
+        );
+        assert!(admin_router["bgp"]["address-family"]["ipv4-unicast"]["network"].is_null());
+        assert_eq!(
+            admin_router["bgp"]["address-family"]["ipv6-unicast"]["network"],
+            serde_yaml::from_str::<serde_yaml::Value>("2001:db8:9::3/128: {}\n")?
+        );
+
+        // DHCPv6 assigns the host /128; RA advertises its containing segment on the SVI.
+        let snippet = set["system"]["config"]["snippet"]["frr.conf"]
+            .as_str()
+            .expect("IPv6-only admin must render RA");
+        assert!(snippet.contains("interface vlan123 vrf vpc_7777"));
+        assert!(snippet.contains("ipv6 nd prefix 2001:db8:9::/64 no-autoconfig"));
+        assert!(
+            snippet
+                .lines()
+                .any(|line| line.trim() == "ipv6 nd managed-config-flag")
+        );
+        assert!(
+            snippet
+                .lines()
+                .any(|line| line.trim() == "ipv6 nd other-config-flag")
+        );
+        assert!(snippet.contains("ipv6 nd rdnss 2001:db8::53 1800"));
+        assert!(snippet.contains("ipv6 nd rdnss 2001:db8::54 1800"));
+
+        // DHCP keeps its IPv4 transport configuration without requiring an IPv4 host binding.
+        let prepared = prepare_dhcp_server_config(
+            &network_config,
+            &test_service_addresses(),
+            &HBNDeviceNames::hbn_23(),
+        )?;
+        assert_eq!(
+            prepared.dhcp.carbide_dhcp_server,
+            Some("10.217.5.39".parse()?)
+        );
+        assert_eq!(
+            prepared.dhcp.carbide_provisioning_server_ipv4,
+            Some("192.0.2.10".parse()?)
+        );
+        let host_config: HostConfig = serde_yaml::from_str(&prepared.host)?;
+        assert_eq!(
+            host_config
+                .host_ip_addresses
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["vlan123"]
+        );
+        let admin_host = &host_config.host_ip_addresses["vlan123"];
+        assert_eq!(
+            (
+                admin_host.address,
+                admin_host.gateway,
+                admin_host.prefix.as_deref()
+            ),
+            (None, None, None)
+        );
+        let admin_ipv6 = admin_host
+            .ipv6
+            .as_ref()
+            .expect("admin DHCP IPv6 host binding");
+        assert_eq!(admin_ipv6.address, Some("2001:db8:9::3".parse()?));
+        assert_eq!(admin_ipv6.prefix, "2001:db8:9::3/128");
+        Ok(())
+    }
+
     /// Verifies a realistic dual-stack admin response drives the existing SVI,
     /// explicit RA target, resolver changes, and complete IPv6 withdrawal.
     /// Host routes must be originated and withdrawn with that state so routed reachability follows it.

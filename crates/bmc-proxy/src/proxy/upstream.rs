@@ -457,9 +457,13 @@ fn redirect_policy(mode: RedirectMode) -> reqwest::redirect::Policy {
 }
 
 /// Classifies a resolved HTTP(S) redirect target against the given origin.
-/// Other schemes are invalid; matching compares scheme, host, and effective port.
+/// Other schemes and URL credentials are invalid. Matching compares scheme,
+/// host, and effective port only after these checks.
 pub(super) fn classify_redirect_target(origin: &Url, target: &Url) -> RedirectTarget {
-    if !matches!(target.scheme(), "http" | "https") {
+    if !matches!(target.scheme(), "http" | "https")
+        || !target.username().is_empty()
+        || target.password().is_some()
+    {
         return RedirectTarget::Invalid;
     }
     if target.scheme() == origin.scheme()
@@ -598,6 +602,15 @@ mod tests {
                 ("https://bmc.example/redfish/v1", "ftp://bmc.example/Systems")
                     => RedirectTarget::Invalid,
             }
+
+            "URL credentials are invalid regardless of origin" {
+                ("https://bmc.example/redfish/v1", "https://user@bmc.example/Systems")
+                    => RedirectTarget::Invalid,
+                ("https://bmc.example/redfish/v1", "https://:password@bmc.example/Systems")
+                    => RedirectTarget::Invalid,
+                ("https://bmc.example/redfish/v1", "https://user@other.example/Systems")
+                    => RedirectTarget::Invalid,
+            }
         );
     }
 
@@ -644,6 +657,55 @@ mod tests {
         assert_eq!(destination_hits.load(Ordering::SeqCst), 0);
         drop(response);
         stop_http(&mut servers, &shutdown).await;
+    }
+
+    #[tokio::test]
+    async fn upstream_client_does_not_follow_redirect_userinfo() {
+        let mut servers = JoinSet::new();
+        let shutdown = CancellationToken::new();
+        let _shutdown_guard = shutdown.clone().drop_guard();
+        let destination_hits = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route(
+                "/start",
+                get(|headers: HeaderMap| async move {
+                    let host = headers
+                        .get(http::header::HOST)
+                        .expect("request host")
+                        .to_str()
+                        .expect("ASCII host");
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [(
+                            http::header::LOCATION,
+                            format!("http://redirect-user:redirect-password@{host}/target"),
+                        )],
+                    )
+                }),
+            )
+            .route(
+                "/target",
+                get(|State(hits): State<Arc<AtomicUsize>>| async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::OK
+                }),
+            )
+            .with_state(destination_hits.clone());
+        let address = spawn_http(app, &mut servers, shutdown.clone()).await;
+        let response = build_http_client(RedirectMode::FollowSameOrigin)
+            .expect("HTTP client builds")
+            .get(format!("http://{address}/start"))
+            .basic_auth("original-user", Some("original-password"))
+            .header("x-auth-token", "original-token")
+            .send()
+            .await
+            .expect("source response returned");
+
+        let status = response.status();
+        drop(response);
+        stop_http(&mut servers, &shutdown).await;
+        assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(destination_hits.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

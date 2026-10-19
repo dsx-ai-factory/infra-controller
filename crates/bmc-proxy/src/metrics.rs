@@ -100,6 +100,7 @@ impl From<&Method> for MethodLabel {
 enum AuthorizationLayer {
     PrincipalAllowList,
     RequestAcl,
+    RequestPath,
 }
 
 /// The one metric the Events below record.
@@ -114,6 +115,73 @@ pub(crate) struct BmcProxyAuthorizationDenied {
     authorization_layer: AuthorizationLayer,
     #[label(name = "method")]
     method_label: MethodLabel,
+}
+
+/// Why a path was rejected before ACL evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathRejectionReason {
+    /// The upstream URL parser cannot parse the path.
+    InvalidPath,
+    /// The upstream URL parser changes the path's spelling or structure.
+    RewrittenPath,
+    /// A percent escape does not contain two hexadecimal digits.
+    MalformedEscape,
+    /// An escape encodes a path separator.
+    EncodedSeparator,
+    /// An escape encodes another percent sign.
+    NestedEncoding,
+    /// An escape encodes an ASCII control character or DEL.
+    EncodedControl,
+}
+
+/// Preserve the diagnostic spellings operators already use.
+impl std::fmt::Display for PathRejectionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidPath => "invalid_path",
+            Self::RewrittenPath => "rewritten_path",
+            Self::MalformedEscape => "malformed_escape",
+            Self::EncodedSeparator => "encoded_separator",
+            Self::NestedEncoding => "nested_encoding",
+            Self::EncodedControl => "encoded_control",
+        })
+    }
+}
+
+/// An ambiguous or structurally unsafe path rejected before ACL evaluation.
+/// Paths are log context; the counter uses only bounded layer and method labels.
+#[derive(Event)]
+#[event(
+    event_name = "bmc_proxy_request_path_rejected",
+    metric_family = BmcProxyAuthorizationDenied,
+    log = info,
+    message = "Request refused: the path cannot be safely authorized"
+)]
+pub(crate) struct RequestPathRejected {
+    #[label]
+    authorization_layer: AuthorizationLayer,
+    #[label]
+    method_label: MethodLabel,
+    #[context]
+    path: String,
+    #[context]
+    reason: PathRejectionReason,
+    #[context]
+    method: String,
+}
+
+impl RequestPathRejected {
+    /// Creates a path rejection event with bounded method and layer labels.
+    /// The original method, path, and rejection reason are retained as log context.
+    pub(crate) fn new(method: &Method, path: String, reason: PathRejectionReason) -> Self {
+        Self {
+            authorization_layer: AuthorizationLayer::RequestPath,
+            method_label: method.into(),
+            path,
+            reason,
+            method: method.as_str().to_string(),
+        }
+    }
 }
 
 /// The request reached the per-principal ACL, but no configured rule allowed

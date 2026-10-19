@@ -17,8 +17,8 @@ fetching artifacts, selecting hardware, or starting updates. The returned \
 profile includes its new edit version.
 
 Use --format ascii-table (default), csv, json, or yaml and --output PATH before \
-the firmware subcommand. JSON/YAML returns a one-element array containing id, \
-config, and version. Table/CSV shows one row per entry. The command does not \
+the firmware subcommand. JSON and YAML output is a one-element array containing id, \
+config, and version. Table and CSV output has one row per entry. The command does not \
 retry creation; after a connection error, use show to inspect whether it committed.
 
 Output defaults to stdout. --output requires a path that does not exist; the \

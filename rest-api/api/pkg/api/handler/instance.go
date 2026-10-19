@@ -346,7 +346,8 @@ func (cih CreateInstanceHandler) buildInstanceCreateRequestOsConfig(c echo.Conte
 	// Options below should all have been set by the
 	// earlier call to ValidateAndSetOperatingSystemData
 
-	if os.Type == cdbm.OperatingSystemTypeIPXE {
+	switch os.Type {
+	case cdbm.OperatingSystemTypeIPXE:
 		return &corev1.InstanceOperatingSystemConfig{
 			RunProvisioningInstructionsOnEveryBoot: *apiRequest.AlwaysBootWithCustomIpxe,
 			PhoneHomeEnabled:                       *apiRequest.PhoneHomeEnabled,
@@ -357,7 +358,7 @@ func (cih CreateInstanceHandler) buildInstanceCreateRequestOsConfig(c echo.Conte
 			},
 			UserData: apiRequest.UserData,
 		}, osID, nil
-	} else if os.Type == cdbm.OperatingSystemTypeTemplatedIPXE {
+	case cdbm.OperatingSystemTypeTemplatedIPXE:
 		if apiErr := validateTemplatedIpxeOsForSite(ctx, cih.dbSession, logger, os, site.ID); apiErr != nil {
 			return nil, nil, apiErr
 		}
@@ -371,7 +372,7 @@ func (cih CreateInstanceHandler) buildInstanceCreateRequestOsConfig(c echo.Conte
 			},
 			UserData: apiRequest.UserData,
 		}, osID, nil
-	} else {
+	default:
 		return &corev1.InstanceOperatingSystemConfig{
 			PhoneHomeEnabled: *apiRequest.PhoneHomeEnabled,
 			Variant: &corev1.InstanceOperatingSystemConfig_OsImageId{
@@ -1978,7 +1979,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create DPU Extension Service Deployment for Instance, DB error", nil)
 			}
 
-			des, _ := desIDMap[desdID]
+			des := desIDMap[desdID]
 			desd.DpuExtensionService = des
 
 			desds = append(desds, *desd)
@@ -2267,10 +2268,7 @@ func (uih UpdateInstanceHandler) handleReboot(c echo.Context, logger *zerolog.Lo
 		powerStatusMessage := cutil.GetPtr("received Instance reboot request, processing")
 
 		// Check if instance request for rebooting with ipxe
-		rebootWithCustomIpxe := false
-		if apiRequest.RebootWithCustomIpxe != nil && *apiRequest.RebootWithCustomIpxe {
-			rebootWithCustomIpxe = true
-		}
+		rebootWithCustomIpxe := apiRequest.RebootWithCustomIpxe != nil && *apiRequest.RebootWithCustomIpxe
 
 		// Check if instance request for updating before reboot
 		applyUpdatesOnReboot := false
@@ -2590,7 +2588,8 @@ func (uih UpdateInstanceHandler) buildInstanceUpdateRequestOsConfig(c echo.Conte
 	}
 
 	if os != nil {
-		if os.Type == cdbm.OperatingSystemTypeIPXE {
+		switch os.Type {
+		case cdbm.OperatingSystemTypeIPXE:
 			return &corev1.InstanceOperatingSystemConfig{
 				RunProvisioningInstructionsOnEveryBoot: alwaysBootWithCustomIpxe,
 				PhoneHomeEnabled:                       phoneHomeEnabled,
@@ -2601,7 +2600,7 @@ func (uih UpdateInstanceHandler) buildInstanceUpdateRequestOsConfig(c echo.Conte
 				},
 				UserData: userData,
 			}, osID, nil
-		} else if os.Type == cdbm.OperatingSystemTypeTemplatedIPXE {
+		case cdbm.OperatingSystemTypeTemplatedIPXE:
 			if apiErr := validateTemplatedIpxeOsForSite(ctx, uih.dbSession, logger, os, site.ID); apiErr != nil {
 				return nil, nil, apiErr
 			}
@@ -2615,7 +2614,7 @@ func (uih UpdateInstanceHandler) buildInstanceUpdateRequestOsConfig(c echo.Conte
 				},
 				UserData: userData,
 			}, osID, nil
-		} else if os.Type == cdbm.OperatingSystemTypeImage {
+		case cdbm.OperatingSystemTypeImage:
 			return &corev1.InstanceOperatingSystemConfig{
 				PhoneHomeEnabled: phoneHomeEnabled,
 				Variant: &corev1.InstanceOperatingSystemConfig_OsImageId{
@@ -2808,10 +2807,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Check for reboot request
-	instanceRebootRequest := false
-	if apiRequest.TriggerReboot != nil && *apiRequest.TriggerReboot {
-		instanceRebootRequest = true
-	}
+	instanceRebootRequest := apiRequest.TriggerReboot != nil && *apiRequest.TriggerReboot
 
 	// If this was only a reboot request, handle it and return.
 	if instanceRebootRequest {
@@ -3990,11 +3986,12 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 						existingReadyIbIfcsCount++
 					} else {
 						if mostRecentIbIfc.Updated.After(time.Now().Add(-InfiniBandInterfaceStatusSyncGraceWindow)) {
-							if mostRecentIbIfc.Status == cdbm.InfiniBandInterfaceStatusPending {
+							switch mostRecentIbIfc.Status {
+							case cdbm.InfiniBandInterfaceStatusPending:
 								existingPendingIbIfcsCount++
-							} else if mostRecentIbIfc.Status == cdbm.InfiniBandInterfaceStatusDeleting {
+							case cdbm.InfiniBandInterfaceStatusDeleting:
 								existingDeletingIbIfcsCount++
-							} else if mostRecentIbIfc.Status == cdbm.InfiniBandInterfaceStatusError {
+							case cdbm.InfiniBandInterfaceStatusError:
 								reIssueInfiniBandInterfaces = true
 							}
 						} else {
@@ -4256,7 +4253,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 						logger.Error().Err(serr).Msg("error creating Instance DpuExtensionServiceDeployment record in DB")
 						return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create DPU Extension Service Deployment for Instance, DB error", nil)
 					}
-					des, _ := desIDMap[desdID]
+					des := desIDMap[desdID]
 					newDesd.DpuExtensionService = des
 					updateDesds = append(updateDesds, *newDesd)
 					updatedDesdMap[desvID] = newDesd
@@ -4327,11 +4324,12 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 						existingReadyNvlIfcsCount++
 					} else {
 						if mostRecentNvlIfc.Updated.After(time.Now().Add(-NVLinkInterfaceStatusSyncGraceWindow)) {
-							if mostRecentNvlIfc.Status == cdbm.NVLinkInterfaceStatusPending {
+							switch mostRecentNvlIfc.Status {
+							case cdbm.NVLinkInterfaceStatusPending:
 								existingPendingNvlIfcsCount++
-							} else if mostRecentNvlIfc.Status == cdbm.NVLinkInterfaceStatusDeleting {
+							case cdbm.NVLinkInterfaceStatusDeleting:
 								existingDeletingNvlIfcsCount++
-							} else if mostRecentNvlIfc.Status == cdbm.NVLinkInterfaceStatusError {
+							case cdbm.NVLinkInterfaceStatusError:
 								reIssueNVLinkInterfaces = true
 							}
 						} else {

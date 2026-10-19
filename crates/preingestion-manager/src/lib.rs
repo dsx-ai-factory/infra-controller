@@ -3321,13 +3321,17 @@ impl PreingestionManagerStatic {
         if !is_bfb_artifact(&artifact.local_path) {
             match &artifact.source {
                 ResolvedFirmwareArtifactSource::Remote { url, sha256 } => {
-                    match self.downloader.available(&artifact.local_path, url, sha256) {
+                    match self
+                        .downloader
+                        .available(&artifact.local_path, url, sha256)
+                        .await
+                    {
                         ArtifactStatus::Available => {}
                         ArtifactStatus::Downloading => {
                             tracing::debug!(
                                 bmc_ip_address = %endpoint_clone.address,
                                 path = %artifact.local_path.display(),
-                                "Firmware artifact is being downloaded; update deferred"
+                                "Waiting for firmware artifact availability; update deferred"
                             );
                             return Ok(false);
                         }

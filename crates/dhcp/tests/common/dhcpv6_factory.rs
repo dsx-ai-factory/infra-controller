@@ -277,10 +277,18 @@ impl DHCPv6Factory {
         Self::relay_wrap(message, true)
     }
 
-    /// Build a SOLICIT carrying supported IA_NA plus unsupported IA_PD.
+    /// Build a SOLICIT requesting both an address and a delegated prefix.
     pub(crate) fn solicit_with_ia_na_and_ia_pd(idx: u8) -> Vec<u8> {
-        // Keep IA_NA present to exercise mixed-container rejection.
+        // Prefix refusal must preserve the requested address.
         let mut message = Self::stateful_solicit_message(idx);
+        Self::add_ia_pd(&mut message, idx);
+        Self::relay_wrap(message, true)
+    }
+
+    /// Add a prefix request to a relayed address exchange.
+    pub(crate) fn with_ia_pd(packet: Vec<u8>, idx: u8) -> Vec<u8> {
+        let payload = Self::relay_msg_payload(&packet).expect("relayed test packet");
+        let mut message = Message::decode(&mut Decoder::new(payload)).unwrap();
         Self::add_ia_pd(&mut message, idx);
         Self::relay_wrap(message, true)
     }

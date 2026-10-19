@@ -644,10 +644,24 @@ service Forge {
   // Delete all expected racks in site
   rpc DeleteAllExpectedRacks(google.protobuf.Empty) returns (google.protobuf.Empty);
 
+  // Administrator-managed expected NVLink domain inventory
+  // Declare immutable expected membership. This does not configure hardware or validate
+  // physical NVLink connectivity. Unknown/ambiguous members and wrong-group racks are rejected.
+  rpc CreateExpectedNvLinkDomain(CreateExpectedNvLinkDomainRequest) returns (ExpectedNvLinkDomain);
+  // Delete only the declaration and release its MAC claims; no hardware operations occur.
+  // Missing declarations return NOT_FOUND. Observed domains and health reports are untouched.
+  rpc DeleteExpectedNvLinkDomain(ExpectedNvLinkDomainRequest) returns (google.protobuf.Empty);
+  rpc GetExpectedNvLinkDomain(ExpectedNvLinkDomainRequest) returns (ExpectedNvLinkDomain);
+  rpc FindExpectedNvLinkDomainIds(ExpectedNvLinkDomainSearchFilter) returns (ExpectedNvLinkDomainIdList);
+  rpc FindExpectedNvLinkDomainsByIds(ExpectedNvLinkDomainsByIdsRequest) returns (ExpectedNvLinkDomainList);
+
   // Expected Rack Group Management
   rpc AddExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
+  // Fails with FAILED_PRECONDITION if expected NVLink domains reference this group.
   rpc DeleteExpectedRackGroup(ExpectedRackGroupRequest) returns (google.protobuf.Empty);
   // Replace the full record, including both lists and metadata.
+  // With expected NVLink domains, racks must remain unchanged.
+  // Topology, protocol, and metadata changes are accepted.
   rpc UpdateExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
   rpc GetExpectedRackGroup(ExpectedRackGroupRequest) returns (ExpectedRackGroup);
   // Return all declarations ordered by rack group ID; an empty site returns an empty list.
@@ -655,7 +669,9 @@ service Forge {
   rpc FindExpectedRackGroupIds(ExpectedRackGroupSearchFilter) returns (ExpectedRackGroupIdList);
   rpc FindExpectedRackGroupsByIds(ExpectedRackGroupsByIdsRequest) returns (ExpectedRackGroupList);
   // Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
+  // Fails with FAILED_PRECONDITION while any expected NVLink domain references a group.
   rpc ReplaceAllExpectedRackGroups(ExpectedRackGroupList) returns (google.protobuf.Empty);
+  // Fails with FAILED_PRECONDITION while any expected NVLink domain references a group.
   rpc DeleteAllExpectedRackGroups(google.protobuf.Empty) returns (google.protobuf.Empty);
 
   // Perform Attestation Procedure for Measured Boot
@@ -12536,4 +12552,54 @@ message GetDesiredNicFirmwareResponse {
   // do not fail the request or remove saved selections. Ambiguous matches and
   // multiple selections for a device are reported in that device's result.error.
   repeated string warnings = 3;
+}
+
+// Administrator-managed desired inventory, separate from an NMX-C observed domain.
+// Membership and attributes are immutable; delete and recreate to change them.
+message ExpectedNvLinkDomain {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Core-generated declaration UUID, not an NMX-C domain UUID.
+  common.UUID id = 1;
+  common.RackGroupId rack_group_id = 2;
+  // Absent when no name was supplied. Names are not unique.
+  optional string name = 3;
+  // Canonical BMC MACs sorted by address; every MAC belongs to at most one declaration.
+  repeated string member_bmc_mac_addresses = 4;
+}
+
+message CreateExpectedNvLinkDomainRequest {
+  // Required existing group ID, nonblank and at most 128 characters.
+  common.RackGroupId rack_group_id = 1;
+  // Optional nonblank name, at most 256 characters. Omission stores NULL.
+  optional string name = 2;
+  // Required distinct six-byte BMC MACs. Each must resolve to exactly one expected
+  // machine or switch whose rack is in the group. At least one of each type is required.
+  // Discovery is not required. Order is ignored. Claimed MACs return ALREADY_EXISTS.
+  // Membership records intent; subsequent device inventory changes do not rewrite it.
+  repeated string member_bmc_mac_addresses = 3;
+}
+
+message ExpectedNvLinkDomainRequest {
+  // Required non-nil declaration UUID.
+  common.UUID id = 1;
+}
+
+message ExpectedNvLinkDomainSearchFilter {
+  // Optional group filter; omission lists all declaration IDs, sorted by UUID.
+  common.RackGroupId rack_group_id = 1;
+}
+
+message ExpectedNvLinkDomainIdList {
+  repeated common.UUID ids = 1;
+}
+
+message ExpectedNvLinkDomainsByIdsRequest {
+  // Nonempty batch of non-nil UUIDs, limited by max_find_by_ids. Missing IDs are
+  // omitted and duplicates collapsed; results are sorted by UUID.
+  repeated common.UUID ids = 1;
+}
+
+message ExpectedNvLinkDomainList {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  repeated ExpectedNvLinkDomain domains = 1;
 }

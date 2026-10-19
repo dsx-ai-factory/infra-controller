@@ -27,9 +27,9 @@ the same request.
 
 This changes the live definition used by existing selections, without fetching \
 artifacts or starting firmware updates. Use --format ascii-table (default), \
-csv, json, or yaml and --output PATH before the firmware subcommand. JSON/YAML \
-returns a one-element array containing the stored id, config, and new version. \
-Table/CSV shows one row per entry.
+csv, json, or yaml and --output PATH before the firmware subcommand. JSON and YAML \
+output is a one-element array containing the stored id, config, and new version. \
+Table and CSV output has one row per entry.
 
 Output defaults to stdout. --output requires a path that does not exist; the \
 file is created before the operation, even if the operation later fails. \

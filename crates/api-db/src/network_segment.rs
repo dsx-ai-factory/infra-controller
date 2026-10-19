@@ -747,7 +747,10 @@ where
     for<'db> &'db mut DB: DbReader<'db>,
 {
     for record in all_records.iter_mut().filter(|s| !s.prefixes.is_empty()) {
-        if !record.config.segment_type.is_tenant() {
+        // Admin, Underlay, and HostInband capacity follows host address ownership.
+        // HostInband instances reuse host NIC addresses; their stored instance
+        // prefixes describe the shared subnet, not exclusive allocations.
+        if record.config.segment_type != NetworkSegmentType::Tenant {
             let used_ips = UsedAdminNetworkIpResolver {
                 segment_id: record.id,
             }
@@ -765,8 +768,8 @@ where
                 busy_ips.push(svi_ip);
             }
         }
-        // Tenant and HostInband counts use `instance_addresses.prefix`,
-        // which can reserve more than one host address per allocation.
+        // Tenant counts use `instance_addresses.prefix`, which can reserve
+        // more than one host address per allocation.
         let allocator = IpAllocator::new(
             &mut *conn,
             record,
@@ -1343,7 +1346,7 @@ mod tests {
             (NetworkSegmentType::Admin, 0),
             (NetworkSegmentType::Underlay, 0),
             (NetworkSegmentType::Tenant, 1),
-            (NetworkSegmentType::HostInband, 1),
+            (NetworkSegmentType::HostInband, 0),
         ] {
             let mut txn = pool.begin().await?;
             let segment = persist(
@@ -1378,6 +1381,65 @@ mod tests {
             );
             txn.rollback().await?;
         }
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn tenant_free_counts_preserve_allocated_prefix_width(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let vpc_id = crate::test_support::vpc::insert_vpc(txn.as_mut(), "tenant-free-counts").await;
+        let segment = persist(
+            NewNetworkSegment {
+                vpc_id: Some(vpc_id),
+                segment_type: NetworkSegmentType::Tenant,
+                ..crate::test_support::network_segment::admin_segment(
+                    "tenant-free-counts",
+                    "192.0.2.0/29",
+                    "192.0.2.1",
+                    1,
+                )
+            },
+            &mut txn,
+            NetworkSegmentControllerState::Ready,
+        )
+        .await?;
+        let machine_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+            .bind(machine_id)
+            .execute(txn.as_mut())
+            .await?;
+        let instance_id: uuid::Uuid =
+            sqlx::query_scalar("INSERT INTO instances (machine_id) VALUES ($1) RETURNING id")
+                .bind(machine_id)
+                .fetch_one(txn.as_mut())
+                .await?;
+        sqlx::query(
+            "INSERT INTO instance_addresses (instance_id, address, prefix, segment_id, vpc_id) \
+             VALUES ($1, '192.0.2.2'::inet, '192.0.2.0/30'::cidr, $2, $3)",
+        )
+        .bind(instance_id)
+        .bind(segment.id)
+        .bind(vpc_id)
+        .execute(txn.as_mut())
+        .await?;
+
+        let found = find_by(
+            txn.as_mut(),
+            ObjectColumnFilter::One(IdColumn, &segment.id),
+            NetworkSegmentSearchConfig {
+                include_num_free_ips: true,
+                ..Default::default()
+            },
+        )
+        .await?;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].prefixes.len(), 1);
+        // The stored /30 includes the reserved .0 and gateway .1. Only
+        // .4 through .6 remain free; .7 is the broadcast address.
+        assert_eq!(found[0].prefixes[0].num_free_ips, Some(3));
 
         Ok(())
     }

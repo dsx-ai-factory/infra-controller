@@ -26,8 +26,8 @@ use db::{self};
 use mac_address::MacAddress;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
-    DpuInitState, FailureCause, FailureDetails, HostReprovisionState, InstanceState,
-    ManagedHostState, MeasuringState, ReprovisionState, ValidationState,
+    DpuInitState, FailureCause, FailureDetails, InstanceState, ManagedHostState, MeasuringState,
+    ReprovisionState, ValidationState,
 };
 use sqlx::PgConnection;
 
@@ -521,7 +521,8 @@ exit ||
             | ManagedHostState::Validation {
                 validation_state: ValidationState::MachineValidation { .. },
             }
-            | ManagedHostState::WaitingForCleanup { .. } => Self::get_pxe_instruction_for_arch(
+            | ManagedHostState::WaitingForCleanup { .. }
+            | ManagedHostState::HostReprovision { .. } => Self::get_pxe_instruction_for_arch(
                 target.arch,
                 target.interface_id,
                 interface.mac_address,
@@ -659,16 +660,6 @@ exit ||
 
                 _ => error_instructions(machine_id, target.interface_id, machine.current_state()),
             },
-            ManagedHostState::HostReprovision {
-                reprovision_state: HostReprovisionState::WaitingForManualUpgrade { .. },
-                ..
-            } => PxeInstructions::get_pxe_instruction_for_arch(
-                target.arch,
-                target.interface_id,
-                interface.mac_address,
-                console,
-                machine.id.machine_type(),
-            ),
             x => error_instructions(machine_id, target.interface_id, x),
         };
 

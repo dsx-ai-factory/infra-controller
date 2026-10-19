@@ -57,6 +57,7 @@ use model::resource_pool::common::CommonPools;
 use sqlx::PgTransaction;
 use state_controller::controller::Enqueuer;
 use tokio_stream::Stream;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, Streaming};
 
 use self::metrics::ApiMetricsEmitter;
@@ -116,6 +117,7 @@ pub struct Api {
     /// listener.
     pub(crate) node_jwt_validator: Option<Arc<crate::node_auth::NodeJwtValidator>>,
     pub(crate) console_log_source: Arc<dyn crate::console_logs::ConsoleLogSource>,
+    pub(crate) cancel_token: CancellationToken,
 }
 
 pub(crate) type ScoutStreamType =
@@ -2091,6 +2093,41 @@ impl Forge for Api {
         request: Request<()>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::expected_rack::delete_all_expected_racks(self, request).await
+    }
+
+    async fn create_expected_nv_link_domain(
+        &self,
+        request: Request<rpc::CreateExpectedNvLinkDomainRequest>,
+    ) -> Result<Response<rpc::ExpectedNvLinkDomain>, Status> {
+        crate::handlers::expected_nvlink_domain::create(self, request).await
+    }
+
+    async fn delete_expected_nv_link_domain(
+        &self,
+        request: Request<rpc::ExpectedNvLinkDomainRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_nvlink_domain::delete(self, request).await
+    }
+
+    async fn get_expected_nv_link_domain(
+        &self,
+        request: Request<rpc::ExpectedNvLinkDomainRequest>,
+    ) -> Result<Response<rpc::ExpectedNvLinkDomain>, Status> {
+        crate::handlers::expected_nvlink_domain::get(self, request).await
+    }
+
+    async fn find_expected_nv_link_domain_ids(
+        &self,
+        request: Request<rpc::ExpectedNvLinkDomainSearchFilter>,
+    ) -> Result<Response<rpc::ExpectedNvLinkDomainIdList>, Status> {
+        crate::handlers::expected_nvlink_domain::find_ids(self, request).await
+    }
+
+    async fn find_expected_nv_link_domains_by_ids(
+        &self,
+        request: Request<rpc::ExpectedNvLinkDomainsByIdsRequest>,
+    ) -> Result<Response<rpc::ExpectedNvLinkDomainList>, Status> {
+        crate::handlers::expected_nvlink_domain::find_by_ids(self, request).await
     }
 
     async fn add_expected_rack_group(

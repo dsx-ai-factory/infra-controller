@@ -66,7 +66,10 @@ spiffe_machine_base_path = "/nico-system/machine/"
 additional_issuer_cns = []
 
 [auth.acls]
-"spiffe-service-id/dpf" = ["/redfish/v1/**"]
+"spiffe-service-id/dpf" = [
+  "GET /redfish/v1/Registries/%23*",
+  "/redfish/v1/**",
+]
 ```
 
 ### Inbound TLS
@@ -114,9 +117,11 @@ cross-origin redirect is rejected instead of being followed.
 `return_to_client` disables automatic following and returns safe redirects using the same rewrite
 so the caller can make a separately authorized request. This mode is experimental.
 
-Both modes reject non-HTTP(S), malformed, ambiguous, credential-bearing, and other cross-origin
-redirect targets. On a non-redirect response such as a Redfish session creation `201`, the proxy
-rewrites a safe same-BMC `Location` and omits an unsafe one without changing the response status.
+Both modes reject redirect URLs with a non-empty username or any password before following
+or rewriting them. Non-HTTP(S), malformed, ambiguous, other cross-origin targets, and returned
+Locations containing known upstream credentials are also rejected. On a non-redirect response
+such as a Redfish session creation `201`, the proxy rewrites a safe same-BMC `Location` and omits
+an unsafe one without changing the response status.
 
 `NICO_BMC_PROXY__REDIRECTS__MODE` overrides the TOML value because environment providers are merged
 after the configuration file. The Helm chart always sets that variable from
@@ -128,7 +133,10 @@ after the configuration file. The Helm chart always sets that variable from
 
 ```toml
 [auth.acls]
-"spiffe-service-id/nico-api" = ["/**"]
+"spiffe-service-id/nico-api" = [
+  "GET /redfish/v1/Registries/%23*",
+  "/**",
+]
 "spiffe-service-id/nv-dps" = [
   "GET /redfish/v1",
   "GET,POST /redfish/v1/Managers/BMC/NodeManager/Domains",
@@ -136,10 +144,43 @@ after the configuration file. The Helm chart always sets that variable from
 ]
 ```
 
-Each ACL entry has the form:
+Each ACL entry is a string with this form, or a table with the same string in `pattern`:
 
 ```text
 [!]VERB[,VERB...] /path/pattern
+```
+
+Structured allow entries can also set `allow_escapes` to let their wildcards consume specific
+percent escapes. Entries of both forms can appear in the same principal's ordered list:
+
+```toml
+[auth.acls]
+"spiffe-service-id/nvue-admin" = [
+  { pattern = "/nvue_v1/**", allow_escapes = ["%2F", "%3A"] },
+]
+```
+
+`allow_escapes` applies only to that entry, with these values:
+
+- Omitted or `[]`: wildcards consume no percent escapes, as with string entries.
+- A list of exact `%HH` spellings: wildcards may consume any number of those octets, ignoring
+  hexadecimal case. Order and duplicates have no effect; other escapes must be literal in
+  `pattern`. For example, `["%2F"]` accepts additional encoded slashes in a variable ID.
+- `["*"]`: wildcards may consume any escape that passes the path guard below. This is an
+  explicit unrestricted escape-matching grant; `"*"` must be the sole list element.
+
+The list affects only wildcard matching; literals still distinguish encoded and plain forms.
+Non-empty `allow_escapes` on a deny entry, unknown table fields, and invalid list values are
+configuration errors. Existing shipped principal ACLs retain the default strict policy.
+For an unrestricted escape-matching grant to the API principal, an operator can replace its
+ACL with the following; authentication, target lookup, path validation, and class limits still
+apply:
+
+```toml
+[auth.acls]
+"spiffe-service-id/nico-api" = [
+  { pattern = "/**", allow_escapes = ["*"] },
+]
 ```
 
 Rules:
@@ -166,13 +207,69 @@ Path matching syntax:
   Valid: `/redfish/v1/Systems/*Boot/SecureBoot`
   Invalid: `/redfish/v1/Systems/sys*tem/SecureBoot`
 - At most one `**` is allowed in an ACL path.
+- By default, allow wildcards cannot consume percent escapes: each `%HH` (case-ignored) must
+  appear in the matching rule. `allow_escapes` opts individual entries into wildcard escape
+  matching. Ordinary path letters remain case-sensitive. Without opt-in, `%23*` allows
+  `%23Resource` but not `%23Resource%20Name`.
+- Deny wildcards continue to match percent escapes. The first matching rule wins.
+- An incomplete or non-hexadecimal escape in an ACL entry is a configuration error.
+
+Ambiguous paths return `400` before ACL evaluation: dot segments (including encoded forms),
+raw backslashes, malformed escapes, encoded `\`, ASCII controls or `%`, and characters the
+upstream URL parser would rewrite, such as braces. Other escapes reach the ACL encoded and
+receive `403` unless a matching allow rule spells the escapes literally or permits their
+consumption with `allow_escapes`. Even `["*"]` cannot bypass these pre-ACL rejections.
+The proxy forwards the original path and query spelling to the BMC; query parameters are
+outside path matching.
+
+Encoded slashes (`%2F`) reach the ACL encoded.
+For example, Cumulus/NVUE API can contain `changeset/<user>/<timestamp>` paths. A rule such as
+`GET,PATCH /nvue_v1/revision/changeset%2Fadmin%2F*` allows revisions for `admin`, with both
+encoded slashes spelled literally. The final wildcard cannot consume additional escapes;
+`GET /nvue_v1/**` alone does not authorize the encoded ID. The proxy preserves the encoded
+slashes on the upstream request.
+
+Alternatively, `allow_escapes = ["%2F"]` on a rule for `/nvue_v1/revision/*` accommodates
+variable IDs with additional encoded slashes. The broader NVUE example above also lists
+`%3A` for clients that encode colons in IPv6 CIDR values.
+The `allow_escapes` opt-in is to support non-Redfish APIs. DMTF URI restrictions apply to
+Redfish resources, not to arbitrary upstream HTTP endpoints. Therefore, the more restrictive DMTF
+spec can be problematic there. The `allow_escapes`, therefore, is to accommodate the non-Redfish
+targets via the bmc-proxy, without the guarantee that the encoded path components will be
+interpreted by the upstream correctly (the upstream is responsible for this).
+
+[RFC 3986 section 2.3](https://www.rfc-editor.org/rfc/rfc3986.html#section-2.3) treats an encoded
+unreserved character such as `%4A` as URI-equivalent to `J`. By default, the ACL requires
+explicit encoded resource exceptions. This bounded support avoids the
+additional decoding rules and maintenance cost of general URI canonicalization. ACL matching
+therefore keeps escapes encoded: a rule for `J*` does not allow `%4AResource`, and a rule for
+`%4A*` does not allow `JResource`.
+
+Nested encoding is outside this compatibility boundary: `%252e%252e` becomes `%2e%2e` after
+one full decoding pass and `..` after a second. The proxy rejects `%25` (encoded `%`) with
+`400` before ACL evaluation, even when an ACL explicitly names it. This keeps the supported
+encoding depth explicit. Normalization limited to unreserved characters would leave `%25`
+encoded; [RFC 3986 section 2.4](https://www.rfc-editor.org/rfc/rfc3986.html#section-2.4) describes
+the interpretation risks of repeated decoding.
+
+The chart and dev configurations include `GET /redfish/v1/Registries/%23*` for escaped registry
+names. Add similarly narrow rules for other required Redfish resources. These exceptions are
+compatibility accommodations: [Redfish URI rules](https://redfish.dmtf.org/schemas/DSP0266_1.20.1.html#universal-resource-identifiers)
+forbid percent encoding outside query parameters.
+
+Class matching never changes the ACL decision. Class limits can still reject an authorized
+request—for example, with `429` when its queue is full.
+
+Path rejections increment `carbide_bmc_proxy_authorization_denied_total` with
+`authorization_layer="request_path"` and a bounded HTTP method label. Diagnostic logs include
+`event_name="bmc_proxy_request_path_rejected"`, the path, and a bounded rejection reason.
 
 Examples:
 
 - `"/**"`
-  Allow a principal to access any path with any method.
+  Allow any method on paths without percent escapes.
 - `"GET /redfish/v1/**"`
-  Allow only `GET` requests anywhere under `/redfish/v1`.
+  Allow `GET` below `/redfish/v1` on paths without percent escapes.
 - `"!POST,PATCH /redfish/v1/Systems/*/SecureBoot/**"`
   Deny writes below any system's `SecureBoot` subtree.
 - `"GET,POST /redfish/v1/Managers/BMC/NodeManager/Domains"`

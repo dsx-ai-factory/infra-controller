@@ -15,7 +15,10 @@
  * limitations under the License.
  */
 
+use std::sync::atomic::Ordering;
+
 use carbide_utils::test_support::test_meter::TestMeter;
+use config_version::ConfigVersion;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use super::*;
@@ -289,6 +292,164 @@ impl StateHandler for WaitingHandler {
         self.started.add_permits(1);
         std::future::pending().await
     }
+}
+
+/// Returns an immediate-requeue Wait so processor tests can verify queue scheduling without a state
+/// transition.
+#[derive(Debug)]
+struct RequeueingHandler;
+
+#[async_trait::async_trait]
+impl StateHandler for RequeueingHandler {
+    type ObjectId = String;
+    type State = TestObject;
+    type ControllerState = TestObjectControllerState;
+    type ContextObjects = TestStateControllerContextObjects;
+
+    async fn handle_object_state(
+        &self,
+        _object_id: &String,
+        _state: &mut TestObject,
+        _controller_state: &TestObjectControllerState,
+        _ctx: &mut StateHandlerContext<Self::ContextObjects>,
+    ) -> Result<StateHandlerOutcome<TestObjectControllerState>, StateHandlerError> {
+        Ok(StateHandlerOutcome::wait_and_requeue(
+            "external progress requires another pass".to_string(),
+        ))
+    }
+}
+
+/// Requeues a committed Wait without advancing the controller version or writing state history,
+/// proving queue scheduling remains independent of durable state transitions.
+#[carbide_macros::sqlx_test]
+async fn immediate_requeue_wait_preserves_state_version_and_history(
+    pool: sqlx::PgPool,
+) -> eyre::Result<()> {
+    // Create and queue one object so the processor owns the complete claim and finalization path.
+    create_test_state_controller_tables(&pool).await;
+    let mut txn = pool.begin().await?;
+    create_test_object("host".to_string(), &mut txn).await;
+    db::queue_objects(
+        &mut txn,
+        TestStateControllerIO::DB_QUEUED_OBJECTS_TABLE_NAME,
+        &["host".to_string()],
+    )
+    .await?;
+    txn.commit().await?;
+    let original_version: ConfigVersion =
+        sqlx::query_scalar("SELECT controller_state_version FROM test_objects WHERE id = 'host'")
+            .fetch_one(&pool)
+            .await?;
+
+    // Run the handler through normal dispatch so requeue occurs only after its Wait outcome
+    // commits.
+    let mut processor = processor(pool.clone());
+    let io = Arc::new(TestStateControllerIO::default());
+    processor.io = Arc::clone(&io);
+    processor.state_handler = Arc::new(RequeueingHandler);
+    assert_eq!(
+        processor
+            .dequeue_and_dispatch_object_handling_tasks()
+            .await?,
+        1
+    );
+    let result = processor.object_tasks.join_next().await.unwrap()?;
+    assert!(result.metrics.common.requeue_immediately);
+    processor.process_object_handling_task_result(result, true, Instant::now());
+    processor.finalize_completed_objects().await?;
+
+    // Confirm scheduling changed only the queue while controller state and history remained
+    // untouched.
+    let queued: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM test_state_controller_queued_objects")
+            .fetch_one(&pool)
+            .await?;
+    let version: ConfigVersion =
+        sqlx::query_scalar("SELECT controller_state_version FROM test_objects WHERE id = 'host'")
+            .fetch_one(&pool)
+            .await?;
+    let outcome: sqlx::types::Json<PersistentStateHandlerOutcome> =
+        sqlx::query_scalar("SELECT controller_state_outcome FROM test_objects WHERE id = 'host'")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(queued, 1);
+    assert_eq!(version, original_version);
+    assert_eq!(io.history_writes.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        outcome.0,
+        PersistentStateHandlerOutcome::Wait { ref reason, .. }
+            if reason == "external progress requires another pass"
+    ));
+    Ok(())
+}
+
+/// Verifies a failed Wait-outcome commit cannot request immediate requeue, preventing queue
+/// scheduling from escaping rolled-back controller state.
+#[carbide_macros::sqlx_test]
+async fn immediate_requeue_wait_requires_committed_outcome(pool: sqlx::PgPool) -> eyre::Result<()> {
+    // Create and queue one object before installing the commit-time failure used by this case.
+    create_test_state_controller_tables(&pool).await;
+    let mut txn = pool.begin().await?;
+    create_test_object("host".to_string(), &mut txn).await;
+    db::queue_objects(
+        &mut txn,
+        TestStateControllerIO::DB_QUEUED_OBJECTS_TABLE_NAME,
+        &["host".to_string()],
+    )
+    .await?;
+    txn.commit().await?;
+
+    // Reject the persisted Wait only at commit so the handler's outcome write itself succeeds.
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_wait_outcome_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.controller_state_outcome->>'outcome' = 'wait' THEN
+                RAISE EXCEPTION 'reject committed Wait outcome';
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+        CREATE CONSTRAINT TRIGGER reject_wait_outcome_commit
+            AFTER UPDATE ON test_objects
+            DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+            EXECUTE FUNCTION reject_wait_outcome_commit();",
+    )
+    .execute(&pool)
+    .await?;
+
+    // Run the immediate-requeue handler through the same transaction and queue-finalization path as
+    // production.
+    let mut processor = processor(pool.clone());
+    processor.state_handler = Arc::new(RequeueingHandler);
+    assert_eq!(
+        processor
+            .dequeue_and_dispatch_object_handling_tasks()
+            .await?,
+        1
+    );
+    let result = processor.object_tasks.join_next().await.unwrap()?;
+
+    // Require the commit failure to suppress requeue before the processor finalizes the claim.
+    assert!(matches!(
+        &result.metrics.common.error,
+        Some(StateHandlerError::TransactionError(_))
+    ));
+    assert!(!result.metrics.common.requeue_immediately);
+    processor.process_object_handling_task_result(result, true, Instant::now());
+    processor.finalize_completed_objects().await?;
+
+    // Confirm queue finalization removes the claim while the rejected Wait outcome remains absent.
+    let queued: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM test_state_controller_queued_objects")
+            .fetch_one(&pool)
+            .await?;
+    let outcome: Option<sqlx::types::Json<PersistentStateHandlerOutcome>> =
+        sqlx::query_scalar("SELECT controller_state_outcome FROM test_objects WHERE id = 'host'")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(queued, 0);
+    assert!(outcome.is_none());
+    Ok(())
 }
 
 #[carbide_macros::sqlx_test]

@@ -103,6 +103,7 @@ pub async fn start(
         allow_insecure_discovery = {insecure_discovery}
         scout_boot_interface_correction_enabled = true
         enable_admin_ui = false
+        panic_on_early_task_return = true
 
         [ib_config]
         max_partition_per_tenant = 31
@@ -241,6 +242,15 @@ pub async fn start(
         max_concurrency = 10
         metric_emission_interval = "1s"
         metric_hold_time = "2s"
+
+        [switch_state_controller.controller]
+        metric_emission_interval = "1s"
+
+        [rack_state_controller.controller]
+        metric_emission_interval = "1s"
+
+        [power_shelf_state_controller.controller]
+        metric_emission_interval = "1s"
 
         [host_models]
 

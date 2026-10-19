@@ -535,6 +535,70 @@ async fn test_create_update_external_config(
 }
 
 #[crate::sqlx_test]
+async fn test_remove_external_config_decode_failure_rolls_back(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let name = "invalid-version-config";
+    let description = "validation parameters";
+    let config = b"{\"iterations\":7}";
+    let version = "not-a-config-version";
+
+    sqlx::query(
+        "INSERT INTO machine_validation_external_config (name, description, config, version)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(name)
+    .bind(description)
+    .bind(config.as_slice())
+    .bind(version)
+    .execute(&env.pool)
+    .await?;
+
+    let status = env
+        .api
+        .remove_machine_validation_external_config(tonic::Request::new(
+            rpc::forge::RemoveMachineValidationExternalConfigRequest {
+                name: name.to_string(),
+            },
+        ))
+        .await
+        .expect_err("invalid persisted version must fail removal");
+    assert_eq!(status.code(), tonic::Code::Internal);
+    assert!(
+        status
+            .message()
+            .contains("DELETE FROM machine_validation_external_config"),
+        "{status}"
+    );
+    assert!(
+        status.message().contains("decoding column \"version\""),
+        "{status}"
+    );
+
+    // PostgreSQL deletes the row before SQLx decodes `RETURNING`, so the
+    // handler must return without committing even though the statement succeeded.
+    let retained = sqlx::query_as::<_, (String, Option<String>, Vec<u8>, String)>(
+        "SELECT name, description, config, version
+         FROM machine_validation_external_config WHERE name = $1",
+    )
+    .bind(name)
+    .fetch_one(&env.pool)
+    .await?;
+    assert_eq!(
+        retained,
+        (
+            name.to_string(),
+            Some(description.to_string()),
+            config.to_vec(),
+            version.to_string(),
+        )
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn test_machine_validation_test_on_demand_filter(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {

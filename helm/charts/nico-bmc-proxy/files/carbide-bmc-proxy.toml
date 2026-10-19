@@ -35,7 +35,15 @@ additional_issuer_cns = []
 # `prefix*` and `*suffix` match one component by prefix or suffix. `**` matches
 # zero or more path components. Replace templated components like `{id}` with
 # `*` when deriving ACLs from endpoint documentation.
-"spiffe-service-id/{{ .Values.auth.apiPrincipal }}" = ["/**"]
+# By default, allow wildcards cannot consume percent escapes; spell them literally.
+# Structured allow entries may opt in, for example:
+#   { pattern = "/nvue_v1/**", allow_escapes = ["%2F", "%3A"] }
+# Use ["*"] for unrestricted wildcard escapes, still subject to path validation.
+# Deny wildcards remain broad. This GET rule permits escaped registry names.
+"spiffe-service-id/{{ .Values.auth.apiPrincipal }}" = [
+  "GET /redfish/v1/Registries/%23*",
+  "/**",
+]
 "spiffe-service-id/nv-dps" = [
   "GET /redfish/v1",
   "POST /redfish/v1/SessionService/Sessions",

@@ -110,8 +110,22 @@ impl ServiceVpcSlots {
     }
 
     /// Returns whether no service-VPC slots are configured.
-    pub(crate) const fn is_empty(self) -> bool {
+    pub const fn is_empty(self) -> bool {
         self.count == 0
+    }
+
+    /// Returns the validated number of fixed service-VPC slots.
+    /// Dynamic registration uses this same inventory so its dormant parents cannot drift from
+    /// provisioning.
+    pub const fn len(self) -> u32 {
+        self.count
+    }
+
+    /// Iterates validated slot ordinals with their existing local bridge names.
+    /// Registration callers consume this pair so their dynamic patch inventory cannot outgrow
+    /// provisioning.
+    pub fn bridges(self) -> impl Iterator<Item = (u32, String)> {
+        self.slots().map(|slot| (slot.0, slot.bridge_name()))
     }
 
     /// Appends this feature's HBN interfaces to the caller's base HBN inventory.

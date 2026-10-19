@@ -27,6 +27,9 @@ use crate::metrics::{CollectorRegistry, GaugeMetrics, GaugeReading, MetricsManag
 
 /// Publishes metric samples to the Prometheus telemetry registry.
 ///
+/// Individual gNMI event records are excluded. Other sinks, including OTLP,
+/// still receive those samples.
+///
 /// In dynamic label names, characters other than ASCII letters, digits, and
 /// `_` become `_`; an initial ASCII digit gains an `_` prefix, and an empty
 /// name becomes `_`. A sample is rejected when normalization collides with
@@ -293,6 +296,24 @@ impl DataSink for PrometheusSink {
         }
     }
 
+    fn try_handle_classified_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        is_event_record: bool,
+    ) -> Result<(), HealthError> {
+        if is_event_record {
+            // An excluded event can replace a hardware source for the same key.
+            if let CollectorEvent::Metric(sample) = event {
+                self.prune_metric_key(context, &sample.key, &sample.metric_type, &sample.unit);
+            }
+
+            return Ok(());
+        }
+
+        self.try_handle_event(context, event)
+    }
+
     fn try_handle_event(
         &self,
         context: &EventContext,
@@ -312,6 +333,12 @@ impl DataSink for PrometheusSink {
                         return Err(error);
                     }
                 }
+            }
+            // Per-event IDs and creation times turn retained system-event history
+            // into distinct series. Filter only these rows at the Prometheus sink
+            // so OTLP delivery and aggregate event counters remain unchanged.
+            CollectorEvent::Metric(sample) if sample.name == "nvue_gnmi_events" => {
+                return Ok(());
             }
             CollectorEvent::Metric(sample) => match self.get_or_create_stream_metrics(context) {
                 Ok(stream_metrics) => {
@@ -749,7 +776,7 @@ mod tests {
                         .expect("test MAC address should parse"),
                 ),
             },
-            collector_type: "nvue_gnmi_events",
+            collector_type: "test_dynamic_labels",
             labels: [("site".to_string(), "test".to_string())].into(),
             metadata: None,
             rack_id: None,
@@ -759,7 +786,7 @@ mod tests {
             &context,
             &CollectorEvent::Metric(Box::new(MetricSample {
                 key: "event:42".to_string(),
-                name: "nvue_gnmi_events".to_string(),
+                name: "test_dynamic_labels".to_string(),
                 metric_type: "on_change_row".to_string(),
                 unit: "severity".to_string(),
                 value: 1.0,
@@ -802,7 +829,7 @@ mod tests {
         for (scenario, names) in collision_cases {
             let sample = CollectorEvent::Metric(Box::new(MetricSample {
                 key: scenario.to_string(),
-                name: "nvue_gnmi_events".to_string(),
+                name: "test_dynamic_labels".to_string(),
                 metric_type: "on_change_row".to_string(),
                 unit: "severity".to_string(),
                 value: 1.0,

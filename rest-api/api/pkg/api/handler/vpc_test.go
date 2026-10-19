@@ -2457,8 +2457,8 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 
 			var lastUpdateVPCReq *corev1.VpcUpdateRequest
 			if tt.expectedNVLinkPartitionValue != nil || tt.expectNVLinkPartitionNil || tt.expectedNetworkSecurityGroupValue != nil || tt.expectNetworkSecurityGroupNil || tt.expectedRoutingProfileOverrides != nil {
-				for i := len(tsc.Mock.Calls) - 1; i >= 0; i-- {
-					call := tsc.Mock.Calls[i]
+				for i := len(tsc.Calls) - 1; i >= 0; i-- {
+					call := tsc.Calls[i]
 					if call.Method == "ExecuteWorkflow" && len(call.Arguments) >= 4 {
 						if wfName, ok := call.Arguments[2].(string); ok && wfName == "UpdateVPC" {
 							lastUpdateVPCReq, _ = call.Arguments[3].(*corev1.VpcUpdateRequest)

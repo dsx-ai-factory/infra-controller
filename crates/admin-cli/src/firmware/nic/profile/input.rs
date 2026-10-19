@@ -24,7 +24,7 @@ part_number, psid, and exact version strings; image with url and sha256; and \
 approach set to the case-sensitive string \"Scout\". Part numbers, PSIDs, and \
 firmware versions are literal, nonempty strings without surrounding whitespace \
 or control characters. An older firmware version is a valid target. The optional \
-device_config is omitted or null when absent, or has the same url/sha256 fields \
+device_config is omitted or null when absent, or has the same url and sha256 fields \
 as image. Hardware selection and resolution support at most 256 UTF-8 bytes \
 per part number or PSID; catalog registration accepts longer strings.
 

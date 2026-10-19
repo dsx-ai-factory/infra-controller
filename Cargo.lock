@@ -1190,6 +1190,7 @@ dependencies = [
  "carbide-redfish",
  "carbide-resource-pool",
  "carbide-rpc",
+ "carbide-rpc-utils",
  "carbide-secrets",
  "carbide-site-explorer",
  "carbide-spdm-controller",
@@ -1929,6 +1930,7 @@ dependencies = [
  "hex",
  "http",
  "hyper",
+ "json-patch",
  "k8s-openapi",
  "kopium",
  "kube",
@@ -2071,6 +2073,8 @@ dependencies = [
  "carbide-machine-controller",
  "carbide-uuid",
  "config-version",
+ "futures",
+ "json-patch",
  "kube",
  "serde",
  "serde_json",
@@ -2094,6 +2098,7 @@ dependencies = [
  "eyre",
  "futures-util",
  "hex",
+ "http",
  "mockito",
  "regex",
  "reqwest 0.13.4",
@@ -2107,6 +2112,7 @@ dependencies = [
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 
@@ -7098,7 +7104,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.15#8d0b4d17ccae747b55bb6518be03a90a381094ad"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.16#a51ffb1ffeae15d8f9471224cb799d54007098a2"
 dependencies = [
  "chrono",
  "clap",

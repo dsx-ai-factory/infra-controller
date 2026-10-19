@@ -1099,12 +1099,13 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 
 				expectedCaps := machineInfo1.Machine.GetStatus().GetCapabilities()
 				for _, mc := range mc1s {
-					if mc.Type == cdbm.MachineCapabilityTypeCPU {
+					switch mc.Type {
+					case cdbm.MachineCapabilityTypeCPU:
 						// 9 Core CPU
 						assert.Equal(t, 2, *mc.Count)
 						assert.Equal(t, 3, *mc.Cores)
 						assert.Equal(t, 6, *mc.Threads)
-					} else if mc.Type == cdbm.MachineCapabilityTypeNetwork {
+					case cdbm.MachineCapabilityTypeNetwork:
 						if mc.DeviceType != nil && *mc.DeviceType == cdbm.MachineCapabilityDeviceTypeSpectrumX {
 							assert.Equal(t, 4, *mc.Count)
 						} else {
@@ -1113,7 +1114,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 						if strings.Contains(mc.Name, "BlueField") {
 							assert.Equal(t, *mc.DeviceType, cdbm.MachineCapabilityDeviceTypeDPU)
 						}
-					} else if mc.Type == cdbm.MachineCapabilityTypeStorage {
+					case cdbm.MachineCapabilityTypeStorage:
 						// 6 Storage Devices
 						if mc.Name == "Dell Ent NVMe CM6 RI 1.92TB" {
 							assert.Equal(t, 4, *mc.Count)
@@ -1124,7 +1125,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 						if mc.Name == "SSDPF2KE016T9L" {
 							assert.Equal(t, 1, *mc.Count)
 						}
-					} else if mc.Type == cdbm.MachineCapabilityTypeGPU {
+					case cdbm.MachineCapabilityTypeGPU:
 
 						if strings.Contains(mc.Name, "NVIDIA GB200") {
 							assert.Equal(t, cdbm.MachineCapabilityDeviceTypeNVLink, *mc.DeviceType)
@@ -1144,7 +1145,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 							assert.Equal(t, *expectedCaps.Gpu[0].Frequency, *mc.Frequency)
 							assert.Equal(t, *expectedCaps.Gpu[0].Capacity, *mc.Capacity)
 						}
-					} else if mc.Type == cdbm.MachineCapabilityTypeMemory {
+					case cdbm.MachineCapabilityTypeMemory:
 						// 1 Memory
 
 						if mc.Name != "UNKNOWN" {
@@ -1164,7 +1165,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 							assert.Nil(t, mc.Capacity)
 						}
 
-					} else if mc.Type == cdbm.MachineCapabilityTypeInfiniBand {
+					case cdbm.MachineCapabilityTypeInfiniBand:
 						// 2 InfiniBand interfaces
 						assert.Equal(t, 2, *mc.Count)
 

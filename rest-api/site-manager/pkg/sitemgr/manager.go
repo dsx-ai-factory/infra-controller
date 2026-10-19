@@ -10,7 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -256,7 +256,7 @@ func (s *SiteMgr) roundTrip(req *http.Request) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode > http.StatusIMUsed {
-		content, _ := ioutil.ReadAll(resp.Body)
+		content, _ := io.ReadAll(resp.Body)
 		err = fmt.Errorf("%s, %s", resp.Status, content)
 		return nil, err
 	}
@@ -265,7 +265,7 @@ func (s *SiteMgr) roundTrip(req *http.Request) ([]byte, error) {
 		return nil, nil
 	}
 
-	return ioutil.ReadAll(resp.Body)
+	return io.ReadAll(resp.Body)
 }
 
 func (s *SiteMgr) siteCreateHandler() http.Handler {

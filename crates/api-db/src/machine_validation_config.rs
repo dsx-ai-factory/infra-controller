@@ -22,6 +22,8 @@ use sqlx::PgConnection;
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
+/// `find_config_by_name` loads a named external configuration. Only a missing
+/// row returns `NotFoundError`; other failures retain their SQLx source and query.
 pub async fn find_config_by_name(
     txn: impl DbReader<'_>,
     name: &str,
@@ -30,16 +32,17 @@ pub async fn find_config_by_name(
         "SELECT {} FROM machine_validation_external_config WHERE name=$1",
         MachineValidationExternalConfig::db_table_columns(),
     );
-    match sqlx::query_as(sqlx::AssertSqlSafe(query))
+    match sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(name)
         .fetch_one(txn)
         .await
     {
         Ok(val) => Ok(val),
-        Err(_) => Err(DatabaseError::NotFoundError {
+        Err(sqlx::Error::RowNotFound) => Err(DatabaseError::NotFoundError {
             kind: "machine_validation_external_config",
             id: name.to_owned(),
         }),
+        Err(error) => Err(DatabaseError::query(&query, error)),
     }
 }
 
@@ -109,6 +112,10 @@ pub async fn find_configs(
     Ok(names)
 }
 
+/// `remove_config` deletes and returns a named external configuration. Only a
+/// missing row returns `NotFoundError`; other failures retain their SQLx source
+/// and query. Run this in a transaction and roll it back on error: PostgreSQL
+/// deletes the row before SQLx decodes the returned configuration.
 pub async fn remove_config(
     txn: &mut PgConnection,
     name: &str,
@@ -117,15 +124,16 @@ pub async fn remove_config(
         "DELETE FROM machine_validation_external_config WHERE name=$1 RETURNING {}",
         MachineValidationExternalConfig::db_table_columns(),
     );
-    match sqlx::query_as(sqlx::AssertSqlSafe(query))
+    match sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(name)
         .fetch_one(txn)
         .await
     {
         Ok(val) => Ok(val),
-        Err(_) => Err(DatabaseError::NotFoundError {
+        Err(sqlx::Error::RowNotFound) => Err(DatabaseError::NotFoundError {
             kind: "machine_validation_external_config",
             id: name.to_owned(),
         }),
+        Err(error) => Err(DatabaseError::query(&query, error)),
     }
 }

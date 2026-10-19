@@ -293,7 +293,7 @@ an explicit site security decision.
 
 ## 2. DHCP Configuration
 
-IPv6 deployments are opt-in and use a separate Kea6 workload and relay VIP. [Deploy DHCPv6](dhcpv6-deployment.md) describes network requirements, stable server identity, values, and deployment verification.
+DHCPv6 for relay-facing physical networks is opt-in and uses a separate Kea6 workload and relay VIP. [Deploy DHCPv6](dhcpv6-deployment.md) describes network requirements, stable server identity, values, and deployment verification. IPv6-only FNN admin networks use the DPU-local DHCPv6 service described in [Initial Network Configuration](#initial-network-configuration).
 
 ### 2.1 How `nico-dhcp` Works
 
@@ -351,9 +351,62 @@ as `192.0.2.0/24` for IPv4 or `2001:db8:1::/64` for IPv6. An IPv4-only segment
 has one IPv4 prefix; an IPv6-only segment has one IPv6 prefix. A dual-stack
 segment has one prefix of each address family.
 
-DPU provisioning requires an `admin` segment with an IPv4 prefix and gateway.
-NICo can create an IPv6-only admin segment, but DPU network configuration fails
-because it has no IPv4 admin prefix.
+Forge Native Networking (FNN) admin networks support IPv4-only, dual-stack, and
+IPv6-only prefixes. Without FNN, an `admin` segment requires an IPv4 prefix and
+gateway. Before configuring IPv6-only admin networking, deploy Core and
+DPU-agent builds containing [PR #7651](https://github.com/dsx-ai-factory/infra-controller/pull/7651),
+tracked in [IPv6-only FNN admin networking](https://github.com/dsx-ai-factory/infra-controller/issues/7178).
+
+IPv6-only admin networking changes the host-facing overlay. Retain IPv4 DPU
+loopback addresses and IPv4 VXLAN tunnel endpoints. This transport requirement
+does not restrict the address families of physical `underlay` segments.
+
+The following example defines a new admin segment on an existing FNN-configured
+site. Update the existing `[fnn.admin_vpc]` table in `siteConfig` and add the new
+network definition; do not duplicate existing TOML tables. Retain the physical
+networks, resource pools, site routing configuration, and any existing
+`[fnn.admin_vpc.routing_profile]`. Keep the admin VNI and route-target settings
+aligned with your fabric configuration.
+
+Replace the prefix and admin VPC VNI with your site allocations. Keep the fixed
+admin VNI outside the `vpc-vni` and `external-vpc-vni` allocation pools,
+including later pool growth. Apply the following settings:
+
+```toml
+[fnn.admin_vpc]
+enabled = true
+vpc_vni = 10000
+
+[networks.admin]
+type = "admin"
+prefix = "2001:db8:9::/64"
+mtu = 1500
+reserve_first = 3
+```
+
+When `[fnn.admin_vpc]` is present, `enabled` is required. Set it to `true` to
+select FNN for admin networking. Omitting the table or setting `enabled = false`
+leaves admin FNN disabled. When enabled, `vpc_vni` is required. Startup fails if
+it is omitted or another VPC already uses the value. NICo attaches all admin
+segments, including existing ones, to the admin VPC. Startup attempts to
+allocate missing switch virtual interface (SVI) addresses.
+
+On each enabled startup, NICo reconciles `vpc_vni` with the existing admin VPC.
+Changing it updates that VPC's requested and active VNI; coordinate the change
+with your fabric configuration. This differs from the seed-only behavior of
+`[networks.*]` definitions: existing segment prefixes are not migrated.
+
+This IPv6-only example omits `gateway`, `prefix_v6`, and `dhcpv6_link_address`.
+Host admin address allocation during discovery does not require relay metadata.
+Use a DPU-backed primary admin interface for this path. The DPU attached to that
+interface serves stateful DHCPv6 and router advertisements (RA); other DPUs do
+not serve admin DHCPv6 or RA. Use a DHCPv6 client for the admin address; SLAAC is
+disabled on this path. The IPv6 host route is `/128`; RA advertises the containing
+segment prefix with managed address configuration enabled and autonomous
+address configuration disabled.
+
+This DPU-local service does not require enabling the central Kea6 workload.
+This configuration does not qualify IPv6 boot support in host firmware or iPXE.
 
 The prefix and relay fields have the following contract:
 

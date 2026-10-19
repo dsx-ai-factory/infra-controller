@@ -29721,7 +29721,7 @@ components:
             - string
             - 'null'
           minLength: 1
-          description: Optional fixed IPv4 or IPv6 address for the interface. REST preserves repeated MAC declarations without enforcing uniqueness by MAC and address family; Core applies allocation validation.
+          description: Optional fixed IPv4 or IPv6 address for the interface. It must not be unspecified, multicast, or IPv4 limited broadcast. REST preserves repeated MAC declarations without enforcing uniqueness by MAC and address family; Core applies allocation validation.
         fixedMask:
           type: [string, 'null']
           description: Optional legacy mask string, forwarded unchanged. Omission or null clears it when replacing the declaration.

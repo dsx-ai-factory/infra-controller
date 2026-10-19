@@ -1358,6 +1358,7 @@ impl MachineCreator {
                 txn,
                 Some(&dpu_hw_info),
                 explored_dpu.report.machine_id.as_ref().unwrap(),
+                self.config.admin_fnn_enabled,
                 self.config.retained_boot_interface_window,
             )
             .await?;

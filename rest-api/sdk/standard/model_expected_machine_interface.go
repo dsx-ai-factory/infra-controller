@@ -28,7 +28,7 @@ type ExpectedMachineInterface struct {
 	MacAddress string `json:"macAddress" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
 	// Optional NIC type. Use `CX9` for ConnectX-9 interfaces on Astra hosts.
 	NicType NullableString `json:"nicType,omitempty"`
-	// Optional fixed IPv4 or IPv6 address for the interface. REST preserves repeated MAC declarations without enforcing uniqueness by MAC and address family; Core applies allocation validation.
+	// Optional fixed IPv4 or IPv6 address for the interface. It must not be unspecified, multicast, or IPv4 limited broadcast. REST preserves repeated MAC declarations without enforcing uniqueness by MAC and address family; Core applies allocation validation.
 	FixedIp NullableString `json:"fixedIp,omitempty"`
 	// Optional legacy mask string, forwarded unchanged. Omission or null clears it when replacing the declaration.
 	FixedMask NullableString `json:"fixedMask,omitempty"`

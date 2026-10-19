@@ -935,10 +935,7 @@ func (uibph UpdateNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "NVLink Logical Partition is not owned by current org's Tenant", nil)
 	}
 
-	needsUpdate := false
-	if apiRequest.Name != nil && *apiRequest.Name != nvllp.Name {
-		needsUpdate = true
-	}
+	needsUpdate := apiRequest.Name != nil && *apiRequest.Name != nvllp.Name
 
 	if apiRequest.Description != nil && (nvllp.Description == nil || *apiRequest.Description != *nvllp.Description) {
 		needsUpdate = true

@@ -16,6 +16,7 @@
  */
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
+use carbide_extension_service_controller::interface_mac::ensure_interface_mac;
 use carbide_instrument::{Event, LabelValue, emit};
 use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_utils::none_if_empty::NoneIfEmpty;
@@ -129,7 +130,8 @@ fn service_vpc_interfaces_from_rpc(
     Ok(requirements)
 }
 
-/// Creates a new extension service with an initial version.
+/// Persists a new extension service, its initial version, and any required interface identity
+/// atomically so controllers cannot observe partial desired state.
 pub(crate) async fn create(
     api: &Api,
     request: Request<rpc::CreateDpuExtensionServiceRequest>,
@@ -251,11 +253,14 @@ pub(crate) async fn create(
         .await?;
     }
 
-    // Finally, create the extension in the database. If this fails, the vault credential will be removed.
+    // Commit the service, initial version, and optional MAC identity together; remove the Vault
+    // credential if the transaction fails.
     let (service, version) = match api
         .with_txn(|txn| {
             async {
-                extension_service::create(
+                // Persist the declaration before its FK-backed identity, but keep both writes
+                // atomic.
+                let created = extension_service::create(
                     txn,
                     initial_version,
                     &service_id,
@@ -270,7 +275,11 @@ pub(crate) async fn create(
                     observability,
                     req.credential.is_some(),
                 )
-                .await
+                .await?;
+                if !service_vpc_interfaces.is_empty() {
+                    ensure_interface_mac(txn, service_id, 0).await?;
+                }
+                Ok(created)
             }
             .boxed()
         })
@@ -462,6 +471,8 @@ pub(crate) async fn update(
                     &req,
                 )
                 .await?;
+                // Publish the definition, MAC identity, and Updating state atomically before
+                // returning success.
                 txn.commit().await?;
                 result
             }
@@ -471,14 +482,13 @@ pub(crate) async fn update(
         }
     };
 
+    // Reload active version IDs after the selected update path commits so the response reflects
+    // durable state.
     updated_extension_service_response(api, service_id, updated_service, latest_version_row).await
 }
 
-/// Updates the mutable V1 data of a DPF Helm chart service and requests
-/// asynchronous reconciliation of its stable DPUService.
-///
-/// Networked definitions remain immutable until issue #6123 adds the resource
-/// reconciliation needed to advance them safely out of `Updating`.
+/// Updates mutable V1 DPF Helm chart data, restores any required MAC identity, and requests
+/// asynchronous reconciliation of the stable DPUService.
 async fn update_dpf_helm_chart(
     txn: &mut db::Transaction<'_>,
     service_id: ExtensionServiceId,
@@ -538,15 +548,10 @@ async fn update_dpf_helm_chart(
         .into());
     }
 
-    // The controller cannot reconcile service network resources on update
-    // before issue #6123. Reject the transition instead of persisting an
-    // `Updating` registration with no recovery path other than deletion.
+    // Re-adding ordinal zero must recover its prior identity, while first-time networked updates
+    // allocate it now.
     if !service_vpc_interfaces.is_empty() {
-        return Err(CarbideError::FailedPrecondition(
-            "networked DPF helm chart extension-service definitions cannot be updated until network resource reconciliation is implemented"
-                .to_string(),
-        )
-        .into());
+        ensure_interface_mac(txn, service_id, 0).await?;
     }
 
     let desired_data = desired_data
@@ -559,6 +564,7 @@ async fn update_dpf_helm_chart(
         .version
         .incremental_change();
 
+    // Stage the new definition and Updating state only after any required MAC identity exists.
     Ok(extension_service::update_dpf_helm_chart_in_place(
         txn,
         service_id,
@@ -801,6 +807,8 @@ pub(crate) async fn delete(
     match &current_service.service_type {
         ExtensionServiceType::DpfHelmChart => {
             delete_dpf_helm_chart(&mut txn, service_id, current_service, &versions).await?;
+            // Commit Deleting before returning so the controller observes durable intent before
+            // starting Kubernetes cleanup.
             txn.commit().await?;
         }
         ExtensionServiceType::KubernetesPod => {

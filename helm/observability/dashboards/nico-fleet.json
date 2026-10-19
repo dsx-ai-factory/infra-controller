@@ -4318,7 +4318,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count by ($site_label) (${metric_prefix}_hosts_alerts_suppressed_count{job=~\"$job\",fresh=\"true\"} == 1)",
+          "expr": "count by ($site_label) (max by ($site_label, machine_id) (${metric_prefix}_hosts_alerts_suppressed_count{job=~\"$job\",fresh=\"true\"} == 1))",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
