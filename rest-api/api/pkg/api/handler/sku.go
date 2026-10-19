@@ -518,9 +518,9 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 
 	apiReq.SkuID = skuID
 
-	updatedSKU := &corev1.Sku{}
+	coreSKU := &corev1.Sku{}
 	if apiReq.Components == nil {
-		updatedSKU = apiReq.ApplyMetadataToProto(response.Skus[0])
+		coreSKU = response.Skus[0]
 		logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("updating SKU metadata via Core proxy")
 		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_UpdateSkuMetadata_FullMethodName, apiReq.ToMetadataProto(), nil, siteID)
 		if apiErr != nil {
@@ -530,18 +530,27 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 	} else {
 		updatedReq := apiReq.ToReplacementProto(response.Skus[0])
 		logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("updating SKU via Core proxy")
-		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceSku_FullMethodName, updatedReq, updatedSKU, siteID)
+		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceSku_FullMethodName, updatedReq, coreSKU, siteID)
 		if apiErr != nil {
 			logAPIError(logger, apiErr, "failed to update SKU via Core proxy")
 			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 		}
 	}
 
-	if updatedSKU == nil || updatedSKU.Id == "" {
+	if coreSKU == nil || coreSKU.Id == "" {
 		err = errors.New("cannot persist an empty Core SKU")
 	} else {
 		projected := &cdbm.SKU{}
-		projected.FromProto(updatedSKU, savedSKU.SiteID)
+		projected.FromProto(coreSKU, savedSKU.SiteID)
+		description := &projected.Description
+		deviceType := projected.DeviceType
+		if apiReq.Components == nil {
+			// Another writer may have changed omitted metadata since the Core read.
+			// Save only supplied metadata; nonmetadata still refreshes from Core.
+			// Component replacement uses the metadata returned by ReplaceSku.
+			description = apiReq.Description
+			deviceType = apiReq.DeviceType
+		}
 
 		err = cdb.WithTx(ctx, ush.dbSession, func(tx *cdb.Tx) error {
 			err := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(projected.ID), nil)
@@ -570,11 +579,16 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 				associatedMachineIDs = []string{}
 			}
 			createdMatches := projected.Created.IsZero() || existing.Created.Equal(projected.Created)
-			if createdMatches && existing.Description == projected.Description &&
+			descriptionMatches := description == nil || existing.Description == *description
+			deviceTypeMatches := reflect.DeepEqual(existing.DeviceType, deviceType)
+			if apiReq.Components == nil && deviceType == nil {
+				deviceTypeMatches = true
+			}
+			if createdMatches && descriptionMatches && deviceTypeMatches &&
 				existing.SchemaVersion == projected.SchemaVersion &&
 				existing.Components.Equal(components) &&
-				reflect.DeepEqual(existing.DeviceType, projected.DeviceType) &&
 				reflect.DeepEqual(existing.AssociatedMachineIds, associatedMachineIDs) {
+				savedSKU = existing
 				return nil
 			}
 
@@ -582,13 +596,13 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 			if !createdMatches {
 				created = &projected.Created
 			}
-			_, err = skuDAO.Update(ctx, tx, cdbm.SkuUpdateInput{
+			savedSKU, err = skuDAO.Update(ctx, tx, cdbm.SkuUpdateInput{
 				SkuID:                projected.ID,
 				Created:              created,
-				Description:          &projected.Description,
+				Description:          description,
 				SchemaVersion:        &projected.SchemaVersion,
 				Components:           components,
-				DeviceType:           projected.DeviceType,
+				DeviceType:           deviceType,
 				AssociatedMachineIds: associatedMachineIDs,
 			})
 			return err
@@ -600,7 +614,14 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "SKU was updated in Core but failed to update REST DB", nil)
 	}
 
-	return c.JSON(http.StatusOK, model.NewAPISkuFromProto(updatedSKU, siteID))
+	apiResponse := model.NewAPISkuFromProto(coreSKU, siteID)
+	if apiReq.Components == nil {
+		// Keep Core's Created nanoseconds and leave it unset when Core omits it.
+		// The REST row supplies metadata, including on the no-op path.
+		apiResponse.Description = savedSKU.Description
+		apiResponse.DeviceType = savedSKU.DeviceType
+	}
+	return c.JSON(http.StatusOK, apiResponse)
 }
 
 // DeleteSkuHandler deletes one unused SKU from a Site's Core service.
