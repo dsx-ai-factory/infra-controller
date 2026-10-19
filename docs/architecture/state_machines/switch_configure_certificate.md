@@ -106,8 +106,9 @@ the state advances to `ConfigureCertificate` `Start`.
 | RMS job and every child it declares `Completed` | Advance to `ConfigureCertificate` `Start`. |
 | RMS job (or any child) `Failed` | Transition to `Error`; certificate configuration is not submitted. |
 
-If certificate installation fails after the disable step, the `Error` cause
-states that mTLS restoration is incomplete.
+If certificate installation fails during bring-up, the `Error` cause states
+that mTLS restoration is incomplete. The cause includes this text even when the
+disable step was skipped.
 
 ### Sub-states (`ConfigureCertificateState`)
 
@@ -501,6 +502,7 @@ single-switch, single-job certificate operation.
 |-------|----------|
 | State types | `crates/api-model/src/switch/mod.rs` — `DisableMtlsState`, `ConfigureCertificateState`, `ConfiguringState` |
 | Job status enum | `crates/api-model/src/component_manager.rs` — `ConfigureSwitchCertificateState` |
+| mTLS-disable job status enum | `crates/component-manager/src/nv_switch_manager.rs` — `SwitchMtlsDisableState` |
 | Shared certificate logic | `crates/switch-controller/src/certificate.rs` |
 | Bring-up handler | `crates/switch-controller/src/configuring.rs` |
 | Maintenance handler | `crates/switch-controller/src/maintenance.rs` |

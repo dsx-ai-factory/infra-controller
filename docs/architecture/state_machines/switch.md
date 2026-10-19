@@ -30,6 +30,7 @@ stateDiagram-v2
     Initializing --> Configuring : primary NVOS interface associated
     Initializing --> Error : no NVOS MACs, no primary, or MAC conflict
     Configuring --> FetchInfo : mTLS reset, certificate config and password rotation done
+    Configuring --> Error : mTLS disable or certificate job failed
     FetchInfo --> Validating : slot and tray lookup complete
     Validating --> BomValidating : validation complete
     BomValidating --> Ready : BOM validation complete
@@ -58,7 +59,7 @@ stateDiagram-v2
 |-------|-------------|
 | **Created** | Switch record exists in NICo; awaiting first controller tick. |
 | **Initializing** | Controller associates discovered NVOS interfaces and waits for the expected switch's primary NVOS interface. Sub-state: `WaitForOsMachineInterface`. |
-| **Configuring** | Switch is being configured. Sub-states: `DisableMtls` (`Start` → `WaitForComplete { job_id }`), `ConfigureCertificate` (`Start` → `WaitForComplete { job_id }`), then `RotateOsPassword`. See [Switch Certificate Configuration](switch_configure_certificate.md). |
+| **Configuring** | Switch is being configured. Sub-states: `DisableMtls` (`Start` → `WaitForComplete { job_id }`), `ConfigureCertificate` (`Start` → `WaitForComplete { job_id }`), then `RotateOsPassword`. Refer to [Switch Certificate Configuration](switch_configure_certificate.md). |
 | **FetchInfo** | Controller fetches rack placement info (slot and tray) from the component manager backend and persists it on the switch record. Warn-and-continue on lookup failure. |
 | **Validating** | Switch is being validated. Sub-state: `ValidationComplete`. |
 | **BomValidating** | BOM (Bill of Materials) validation. Sub-state: `BomValidationComplete`. |
