@@ -7018,6 +7018,54 @@ async fn test_machine_validation_repairs_drifted_boot_order(pool: sqlx::PgPool) 
     );
 }
 
+/// A malformed persisted run must fail before the controller requests a restart.
+#[crate::sqlx_test]
+async fn test_validation_reboot_rejects_unknown_run_state_before_power(pool: sqlx::PgPool) {
+    let env = create_zero_dpu_test_env(pool).await;
+    let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
+    let validation_id = MachineValidationId::new();
+    // Typed writers cannot produce this unknown persisted state.
+    sqlx::query(
+        "INSERT INTO machine_validation (id, machine_id, name, state)
+         VALUES ($1, $2, 'unknown-state', 'Unknown')",
+    )
+    .bind(validation_id)
+    .bind(mh.host().id)
+    .execute(&env.pool)
+    .await
+    .expect("insert validation with an unknown state");
+    let state = ManagedHostState::Validation {
+        validation_state: ValidationState::MachineValidation {
+            machine_validation: MachineValidatingState::RebootHost { validation_id },
+        },
+    };
+    set_host_controller_state_stuck_in(&env, mh.host().id, &state, 0).await;
+    let previous_reboot = load_test_host(&env, &mh).await.status.last_reboot_requested;
+    let checkpoint = env.redfish_sim.timepoint();
+
+    env.run_machine_state_controller_iteration().await;
+
+    let host = load_test_host(&env, &mh).await;
+    assert_eq!(host.current_state(), &state);
+    assert!(
+        matches!(host.controller_state_outcome.as_ref(),
+            Some(PersistentStateHandlerOutcome::Error { err, .. })
+                if err.contains("invalid machine_validation.state: Unknown")
+        ),
+        "expected the persisted decoding error, got: {:?}",
+        host.controller_state_outcome
+    );
+    assert_eq!(host.status.last_reboot_requested, previous_reboot);
+    let actions = env.redfish_sim.actions_since(&checkpoint).all_hosts();
+    assert!(
+        actions.iter().all(|action| !matches!(
+            action,
+            RedfishSimAction::Power(_) | RedfishSimAction::PowerFailed(_)
+        )),
+        "an unreadable validation run must not request power control: {actions:?}"
+    );
+}
+
 /// Exhausting the shared BIOS recovery budget during validation is terminal
 /// for both the host repair and the active validation run.
 #[crate::sqlx_test]
