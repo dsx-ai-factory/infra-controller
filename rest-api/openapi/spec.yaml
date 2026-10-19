@@ -20803,7 +20803,7 @@ components:
           oneOf:
             - $ref: '#/components/schemas/SiteMachineStats'
             - type: 'null'
-          description: 'Machine counts by status for the Site. Null when statistics are not populated'
+          description: 'Machine counts by status for the Site. Populated on Site list requests when includeMachineStats is true; null otherwise. Sites with no Machines or Allocations return zeroed statistics when requested'
         gpuStats:
           type:
             - array

@@ -914,8 +914,13 @@ func (gash GetAllSiteHandler) Handle(c echo.Context) error {
 	apiSites := []model.APISite{}
 	for _, site := range sites {
 		apiSite := model.NewAPISite(site, ssdMap[site.ID.String()], tsMap[site.ID])
-		// Attach machine stats for the site if they exist.
-		apiSite.MachineStats = machineStats[site.ID]
+		// Requested stats are populated even when the Site has nothing to count.
+		if includeMachineStats {
+			apiSite.MachineStats = machineStats[site.ID]
+			if apiSite.MachineStats == nil {
+				apiSite.MachineStats = model.NewAPISiteMachineStats()
+			}
+		}
 		// Attach GPU stats when requested. Sites with no GPUs get an empty
 		// array (not null), matching the single-site GPU stats endpoint.
 		if includeGpuStats {

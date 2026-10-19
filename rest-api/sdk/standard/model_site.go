@@ -67,7 +67,7 @@ type Site struct {
 	Contact NullableSiteContact `json:"contact,omitempty"`
 	// Site capabilities used for feature availability and configuration
 	Capabilities *SiteCapabilities `json:"capabilities,omitempty"`
-	// Machine counts by status for the Site. Null when statistics are not populated
+	// Machine counts by status for the Site. Populated on Site list requests when includeMachineStats is true; null otherwise. Sites with no Machines or Allocations return zeroed statistics when requested
 	MachineStats NullableSiteMachineStats `json:"machineStats,omitempty"`
 	// GPU counts grouped by GPU type for the Site. Populated on Site list requests when includeGpuStats is true; null otherwise. Sites without GPUs return an empty array when requested
 	GpuStats []MachineGPUStats `json:"gpuStats,omitempty"`
