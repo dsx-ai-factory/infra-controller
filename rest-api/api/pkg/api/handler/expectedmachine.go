@@ -221,6 +221,7 @@ func (cemh CreateExpectedMachineHandler) Handle(c echo.Context) error {
 				TrayIdx:                  apiRequest.TrayIdx,
 				HostID:                   apiRequest.HostID,
 				IsDpfEnabled:             apiRequest.IsDpfEnabled,
+				BmcRetainCredentials:     apiRequest.BmcRetainCredentials,
 				Labels:                   apiRequest.Labels,
 				HostLifecycleProfile:     apiRequest.HostLifecycleProfile.ToDBModel(),
 				CreatedBy:                dbUser.ID,
@@ -756,6 +757,7 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 				HostID:                   apiRequest.HostID,
 				Labels:                   apiRequest.Labels,
 				IsDpfEnabled:             apiRequest.IsDpfEnabled,
+				BmcRetainCredentials:     apiRequest.BmcRetainCredentials,
 				HostLifecycleProfile:     apiRequest.HostLifecycleProfile.ToDBModelPtr(),
 			},
 		)
@@ -1114,6 +1116,7 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 			HostID:                   machineReq.HostID,
 			Labels:                   machineReq.Labels,
 			IsDpfEnabled:             machineReq.IsDpfEnabled,
+			BmcRetainCredentials:     machineReq.BmcRetainCredentials,
 			HostLifecycleProfile:     machineReq.HostLifecycleProfile.ToDBModel(),
 			CreatedBy:                dbUser.ID,
 		})
@@ -1442,6 +1445,7 @@ type expectedMachineUpdateFieldSet struct {
 	trayIdx                  bool
 	hostID                   bool
 	isDpfEnabled             bool
+	bmcRetainCredentials     bool
 	labels                   bool
 	hostLifecycleProfile     bool
 }
@@ -1469,6 +1473,7 @@ func expectedMachineUpdateFields(req model.APIExpectedMachineUpdateRequest) expe
 		trayIdx:                  req.TrayIdx != nil,
 		hostID:                   req.HostID != nil,
 		isDpfEnabled:             req.IsDpfEnabled != nil,
+		bmcRetainCredentials:     req.BmcRetainCredentials != nil,
 		labels:                   req.Labels != nil,
 		hostLifecycleProfile:     req.HostLifecycleProfile.ToDBModelPtr() != nil,
 	}
@@ -1713,6 +1718,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 			HostID:                   machineReq.HostID,
 			Labels:                   machineReq.Labels,
 			IsDpfEnabled:             machineReq.IsDpfEnabled,
+			BmcRetainCredentials:     machineReq.BmcRetainCredentials,
 			HostLifecycleProfile:     machineReq.HostLifecycleProfile.ToDBModelPtr(),
 		})
 	}
@@ -1974,7 +1980,8 @@ func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
 			RackID:     machine.RackID, Name: machine.Name, Manufacturer: machine.Manufacturer,
 			Model: machine.Model, Description: machine.Description, ServerName: machine.ServerName, SlotID: machine.SlotID,
 			TrayIdx: machine.TrayIdx, HostID: machine.HostID, IsDpfEnabled: machine.IsDpfEnabled,
-			Labels: machine.Labels, HostLifecycleProfile: machine.HostLifecycleProfile.ToDBModel(), CreatedBy: dbUser.ID,
+			BmcRetainCredentials: machine.BmcRetainCredentials, Labels: machine.Labels,
+			HostLifecycleProfile: machine.HostLifecycleProfile.ToDBModel(), CreatedBy: dbUser.ID,
 		})
 	}
 

@@ -76,6 +76,7 @@ type ExpectedMachine struct {
 	TrayIdx                  *int32                     `bun:"tray_idx"`
 	HostID                   *int32                     `bun:"host_id"`
 	IsDpfEnabled             *bool                      `bun:"is_dpf_enabled"`
+	BmcRetainCredentials     *bool                      `bun:"bmc_retain_credentials"`
 	Labels                   Labels                     `bun:"labels,type:jsonb"`
 	HostLifecycleProfile     HostLifecycleProfile       `bun:"host_lifecycle_profile,type:jsonb,notnull"`
 	Created                  time.Time                  `bun:"created,nullzero,notnull,default:current_timestamp"`
@@ -257,6 +258,8 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *corev1.Exp
 	if em.IsDpfEnabled != nil {
 		proto.IsDpfEnabled = em.IsDpfEnabled
 	}
+	// A NULL value stays omitted.
+	proto.BmcRetainCredentials = em.BmcRetainCredentials
 	proto.HostLifecycleProfile = em.HostLifecycleProfile.ToProto()
 
 	if creds.Username != nil {
@@ -285,6 +288,12 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *corev1.Exp
 	proto.Metadata = metadata
 
 	return proto
+}
+
+// RetainsBmcCredentials reports the effective setting. A NULL value is
+// treated as false, matching Core.
+func (em *ExpectedMachine) RetainsBmcCredentials() bool {
+	return em.BmcRetainCredentials != nil && *em.BmcRetainCredentials
 }
 
 // FromProto populates this ExpectedMachine from a workflow proto reported
@@ -331,6 +340,7 @@ func (em *ExpectedMachine) FromProto(proto *corev1.ExpectedMachine, linkedMachin
 	em.HostID = proto.HostId
 	em.Labels.FromProto(proto.Metadata.GetLabels())
 	em.IsDpfEnabled = proto.IsDpfEnabled
+	em.BmcRetainCredentials = proto.BmcRetainCredentials
 	em.HostLifecycleProfile.FromProto(proto.GetHostLifecycleProfile())
 }
 
@@ -357,8 +367,9 @@ type ExpectedMachineCreateInput struct {
 	HostID                   *int32                     `json:"HostID"`
 	Labels                   map[string]string          `json:"Labels"`
 	IsDpfEnabled             *bool                      `json:"IsDpfEnabled"`
-	HostLifecycleProfile     HostLifecycleProfile       `json:"HostLifecycleProfile"`
-	CreatedBy                uuid.UUID                  `json:"CreatedBy"`
+	BmcRetainCredentials     *bool
+	HostLifecycleProfile     HostLifecycleProfile `json:"HostLifecycleProfile"`
+	CreatedBy                uuid.UUID            `json:"CreatedBy"`
 }
 
 // ToExpectedMachine constructs the nonsecret record sent to Core or stored after confirmation.
@@ -410,6 +421,7 @@ type ExpectedMachineUpdateInput struct {
 	HostID                   *int32
 	Labels                   map[string]string
 	IsDpfEnabled             *bool
+	BmcRetainCredentials     *bool
 	HostLifecycleProfile     *HostLifecycleProfile
 }
 
@@ -543,6 +555,8 @@ func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx,
 	// NOTE: since Expected Machine can be created by NICo or Cloud API the caller MUST provide the ID.
 	for _, input := range inputs {
 		em := input.ToExpectedMachine()
+		// Default omitted create inputs to false.
+		em.BmcRetainCredentials = cutil.GetPtr(input.BmcRetainCredentials != nil && *input.BmcRetainCredentials)
 		expectedMachines = append(expectedMachines, em)
 		ids = append(ids, em.ID)
 	}
@@ -882,6 +896,9 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 	bmcIPUpdates := make([]*ExpectedMachine, 0, len(inputs))
 	// Server names have the same omission semantics: update only supplied rows.
 	serverNameUpdates := make([]*ExpectedMachine, 0, len(inputs))
+	// `bmc_retain_credentials` is applied only to rows that provide it, for the
+	// same reason as `bmc_ip_address`.
+	retainCredentialsUpdates := make([]*ExpectedMachine, 0, len(inputs))
 	// host_lifecycle_profile is applied in its own bulk update scoped to only the
 	// rows that set it (see below), so rows that omit it keep their existing value.
 	hlpUpdates := make([]*ExpectedMachine, 0, len(inputs))
@@ -967,6 +984,12 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 			em.IsDpfEnabled = input.IsDpfEnabled
 			columnsSet["is_dpf_enabled"] = true
 		}
+		if input.BmcRetainCredentials != nil {
+			retainCredentialsUpdates = append(retainCredentialsUpdates, &ExpectedMachine{
+				ID:                   input.ExpectedMachineID,
+				BmcRetainCredentials: input.BmcRetainCredentials,
+			})
+		}
 
 		expectedMachines = append(expectedMachines, em)
 		ids = append(ids, input.ExpectedMachineID)
@@ -1001,6 +1024,9 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 		}
 		if len(serverNameUpdates) > 0 {
 			traceColumns = append(traceColumns, "server_name")
+		}
+		if len(retainCredentialsUpdates) > 0 {
+			traceColumns = append(traceColumns, "bmc_retain_credentials")
 		}
 		if len(hlpUpdates) > 0 {
 			traceColumns = append(traceColumns, "host_lifecycle_profile")
@@ -1037,6 +1063,17 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 		_, err = db.GetIDB(tx, emsd.dbSession).NewUpdate().
 			Model(&serverNameUpdates).
 			Column("server_name").
+			Bulk().
+			Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if len(retainCredentialsUpdates) > 0 {
+		_, err = db.GetIDB(tx, emsd.dbSession).NewUpdate().
+			Model(&retainCredentialsUpdates).
+			Column("bmc_retain_credentials").
 			Bulk().
 			Exec(ctx)
 		if err != nil {
