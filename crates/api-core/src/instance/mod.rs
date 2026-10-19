@@ -1770,6 +1770,25 @@ pub(crate) async fn allocate_instance(
         .ok_or_else(|| CarbideError::internal("instance allocation returned no result".to_string()))
 }
 
+/// Rejects new SPX attachment intent when a tenant NIC firmware profile is selected.
+/// Remove this guard when tenant firmware preparation is implemented by
+/// https://github.com/dsx-ai-factory/infra-controller/issues/6686.
+///
+/// The selection visible to this read decides applicability. Missing tenants and
+/// unset selections do not require preparation; later selections affect later requests.
+pub(crate) async fn validate_tenant_nic_firmware_preparation(
+    txn: &mut PgConnection,
+    tenant_organization_id: &TenantOrganizationId,
+) -> CarbideResult<()> {
+    let config = db::tenant::find_nic_firmware_config(txn, tenant_organization_id).await?;
+    if config.is_some_and(|config| config.profile_id.is_some()) {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "tenant {tenant_organization_id} requires NIC firmware preparation for SPX attachments, which is not supported"
+        )));
+    }
+    Ok(())
+}
+
 /// Loads and locks the extension-service rows and their live versions for
 /// `service_ids`, keyed by service ID. Soft-deleted services and versions are
 /// left out, so a missing entry reads as "does not exist" to callers.
@@ -1953,11 +1972,12 @@ fn not_allocatable_error(
 ///
 /// ## Flow:
 /// 1. Validate machine types and metadata (in-memory)
-/// 2. Batch query machines (FOR UPDATE), load snapshots, validate usability
-/// 3. Validate shared resources: NSG, extension services, OS images, IB partitions, DPA
-/// 4. Network allocation + config validation (sequential)
-/// 5. Batch persist instances, process configs (IPs, IB GUIDs), batch update
-/// 6. Load final instances, assemble snapshots, commit
+/// 2. Reject applicable tenant NIC firmware requirements and check allocation limits
+/// 3. Batch query machines (FOR UPDATE), load snapshots, validate usability
+/// 4. Validate shared resources: NSG, extension services, OS images, IB partitions, DPA
+/// 5. Network allocation + config validation (sequential)
+/// 6. Batch persist instances, process configs (IPs, IB GUIDs), batch update
+/// 7. Load final instances, assemble snapshots, commit
 pub(crate) async fn batch_allocate_instances(
     api: &Api,
     mut requests: Vec<InstanceAllocationRequest>,
@@ -1999,6 +2019,16 @@ pub(crate) async fn batch_allocate_instances(
         // Take the overlap lock before Machine, NSG, or prefix locks so a
         // waiting allocation reads the policy committed by the prior writer.
         db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    }
+
+    let spx_tenants: Vec<_> = requests
+        .iter()
+        .filter(|request| !request.config.spxconfig.spx_attachments.is_empty())
+        .map(|request| request.config.tenant.tenant_organization_id.clone())
+        .unique()
+        .collect();
+    for tenant_organization_id in spx_tenants {
+        validate_tenant_nic_firmware_preparation(txn.as_mut(), &tenant_organization_id).await?;
     }
 
     // ==== Phase 2: Check against allocations for tenants in requests ====

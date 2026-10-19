@@ -161,6 +161,30 @@ pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
     MIGRATION_LAYOUT.run(pool, applied_versions).await
 }
 
+/// Rebuild a test database at the predecessor of `version`, applying the current
+/// epoch's squash before filtering its post-squash migrations.
+#[cfg(test)]
+pub(crate) async fn migrate_before(pool: &PgPool, version: i64) {
+    sqlx::raw_sql("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+        .execute(pool)
+        .await
+        .unwrap();
+    let epoch = MIGRATION_LAYOUT.epochs.last().unwrap();
+    epoch.squash.run(pool).await.unwrap();
+    Migrator::with_migrations(
+        epoch
+            .post_squash
+            .iter()
+            .filter(|migration| migration.version < version)
+            .cloned()
+            .collect(),
+    )
+    .ignoring_missing()
+    .run(pool)
+    .await
+    .unwrap();
+}
+
 async fn load_and_validate_history(
     pool: &PgPool,
     layout: &MigrationLayout,

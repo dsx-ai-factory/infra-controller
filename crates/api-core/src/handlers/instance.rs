@@ -73,7 +73,7 @@ use crate::instance::{
     load_extension_services, load_ib_partition_pkeys, requests_implicit_vf_allocation,
     validate_ib_partition_ownership, validate_instance_extension_services,
     validate_instance_vfs_against_effective_dpu_inventory, validate_os_definition_usable,
-    validate_spx_partition_ownership,
+    validate_spx_partition_ownership, validate_tenant_nic_firmware_preparation,
 };
 use crate::{CarbideError, CarbideResult};
 
@@ -1678,6 +1678,19 @@ pub(crate) async fn update_instance_config(
             kind: "instance",
             id: instance_id.to_string(),
         })?;
+
+    if !config.spxconfig.spx_attachments.is_empty()
+        && instance
+            .config
+            .spxconfig
+            .is_spx_config_update_requested(&config.spxconfig)
+    {
+        validate_tenant_nic_firmware_preparation(
+            txn.as_mut(),
+            &instance.config.tenant.tenant_organization_id,
+        )
+        .await?;
+    }
 
     // Checks if the instance IB configuration was updated
     // If yes - assign devices (GUIDs) to the new configuration, update

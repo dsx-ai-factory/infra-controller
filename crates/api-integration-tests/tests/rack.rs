@@ -48,8 +48,16 @@ fn setup() {
     api_test_helper::setup_logging()
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_machine_a_tron_racks_integration() -> eyre::Result<()> {
+/// Runs rack ingestion checks with the Core binary's worker stack size.
+#[test]
+fn test_machine_a_tron_racks_integration() -> eyre::Result<()> {
+    utils::api_server_runtime_builder()
+        .build()?
+        .block_on(run_machine_a_tron_racks_integration())
+}
+
+/// Starts Core and the BMC mock for rack ingestion checks.
+async fn run_machine_a_tron_racks_integration() -> eyre::Result<()> {
     let Some(mut test_env) = IntegrationTestEnvironment::try_from_environment(
         1,
         "api_server_test_machine_a_tron_rack_integration",

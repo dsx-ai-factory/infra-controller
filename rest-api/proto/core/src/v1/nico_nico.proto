@@ -928,6 +928,10 @@ service Forge {
   rpc FindNicFirmwareSiteSelectionsByIds(FindNicFirmwareSiteSelectionsByIdsRequest) returns (FindNicFirmwareSiteSelectionsByIdsResponse);
   // Set or clear the operator's machine and card selections using Machine.version.
   rpc SetMachineNicFirmwareConfig(SetMachineNicFirmwareConfigRequest) returns (google.protobuf.Empty);
+  // Only operators may read the tenant selection; the response includes the shared Tenant.version.
+  rpc GetTenantNicFirmwareConfig(GetTenantNicFirmwareConfigRequest) returns (GetTenantNicFirmwareConfigResponse);
+  // Set or clear the operator's tenant selection using the shared Tenant.version.
+  rpc SetTenantNicFirmwareConfig(SetTenantNicFirmwareConfigRequest) returns (SetTenantNicFirmwareConfigResponse);
   // Get desired firmware for each device using stored host observations.
   rpc GetDesiredNicFirmware(GetDesiredNicFirmwareRequest) returns (GetDesiredNicFirmwareResponse);
 
@@ -6605,7 +6609,8 @@ message LinkData {
 message Tenant {
   string organization_id = 1;
   Metadata metadata = 2;
-  // this string is used to verify that the client has the most updated "view" of a keyset when attempting to modify it
+  // Complete concurrency token shared by tenant, identity-configuration and
+  // operator NIC firmware selection updates.
   string version = 3;
   reserved 4;
   optional string routing_profile_type = 5;
@@ -6628,6 +6633,8 @@ message UpdateTenantRequest {
 
   // if this field is set and non-empty, the request will only update the tenant if the version matches the server's view,
   // otherwise it will return a concurrency related error.
+  // Identity-configuration and operator NIC firmware selection updates also
+  // advance this shared Tenant.version token.
   optional string if_version_match = 3;
 
   reserved 4;
@@ -11883,6 +11890,7 @@ message UpdateNicFirmwareProfileRequest {
   // continues to report that device's error.
   // Managed-DPU devices and incomplete or invalid observations do not constrain
   // the profile. Compatibility checks precede the stored-version check.
+  // Tenant selections have no bound hardware and do not constrain profile edits.
   NicFirmwareProfileConfig config = 2;
   // Required edit-version token from a previous read. Missing or malformed
   // tokens return INVALID_ARGUMENT; stale tokens return FAILED_PRECONDITION
@@ -11892,7 +11900,7 @@ message UpdateNicFirmwareProfileRequest {
 
 message DeleteNicFirmwareProfileRequest {
   // Profile name; follows the NicFirmwareProfile.id contract. A profile selected
-  // at site, machine or card scope cannot be deleted
+  // at site, machine, card or tenant scope cannot be deleted
   // (FAILED_PRECONDITION), including card selectors no longer found in inventory.
   string id = 1;
   // Required edit-version token from a previous read. Missing or malformed
@@ -12059,6 +12067,73 @@ message SetMachineNicFirmwareConfigRequest {
   // lock. Clearing cards does not require inventory, though a supplied machine
   // profile still must satisfy the machine compatibility rules above.
   NicFirmwareCardSelections card_selections = 5;
+}
+
+// The operator-managed NIC firmware selection of an existing tenant.
+message TenantNicFirmwareConfig {
+  // Organization ID of the tenant whose selection was read or committed.
+  string tenant_organization_id = 1;
+  // Selected live profile, not a pinned catalog revision. Absence means the tenant
+  // has no NIC firmware requirement. Tenant selections do not change machine,
+  // card or site selections.
+  optional string profile_id = 2;
+  // Complete shared Tenant.version token in V<number>-T<timestamp> format,
+  // including when profile_id is absent. Tenant, identity-configuration and
+  // NIC firmware selection updates advance it.
+  string config_version = 3;
+}
+
+// Only operators may read a tenant's NIC firmware selection.
+message GetTenantNicFirmwareConfigRequest {
+  // Required nonempty organization ID containing only ASCII letters, digits, '_'
+  // and '-'. Missing or malformed IDs return INVALID_ARGUMENT; unknown tenants
+  // return NOT_FOUND. An existing tenant with no selection returns an absent
+  // profile_id and its current shared version.
+  string tenant_organization_id = 1;
+}
+
+// The tenant's NIC firmware selection and current shared version.
+message GetTenantNicFirmwareConfigResponse {
+  // Always present on success, including when no profile is selected.
+  TenantNicFirmwareConfig firmware_config = 1;
+}
+
+// Only operators may set or clear tenant NIC firmware selections. This stores
+// intent without updating hardware or changing existing allocations. Until NIC
+// firmware preparation is implemented (https://github.com/dsx-ai-factory/infra-controller/issues/6686),
+// Core rejects allocations with nonempty SPX attachments for a tenant with a
+// selected profile, and rejects attachment additions or changes that leave a
+// nonempty SPX list on its existing allocations. Unchanged or cleared attachments
+// remain allowed. Each attempt uses the selection visible to the guard's database
+// read; an attempt already past that read may finish after a selection is committed.
+// Complete the Core upgrade before using tenant selections, and do not roll back
+// to allocators that ignore them. Ordinary tenant updates preserve the selection.
+message SetTenantNicFirmwareConfigRequest {
+  // Required organization ID following GetTenantNicFirmwareConfigRequest validation.
+  // The tenant must already exist; an unknown tenant returns NOT_FOUND.
+  string tenant_organization_id = 1;
+  // Required complete current Tenant.version token in V<number>-T<timestamp> format.
+  // Missing or malformed tokens return INVALID_ARGUMENT; stale tokens return
+  // FAILED_PRECONDITION. Every successful set or clear advances the shared token,
+  // including unchanged values. The response contains the committed new token.
+  string if_version_match = 2;
+  // Required action. Omission returns INVALID_ARGUMENT without changing the tenant.
+  oneof action {
+    // Select a live profile following NicFirmwareProfile.id validation. Invalid
+    // IDs return INVALID_ARGUMENT and missing profiles return NOT_FOUND. Profile
+    // existence is checked before tenant existence and the tenant version token.
+    // No hardware is bound here, so this does not validate device compatibility.
+    string profile_id = 3;
+    // Remove the tenant selection without deleting the tenant or profile. Succeeds
+    // when already unset; does not require the previously selected profile.
+    google.protobuf.Empty clear = 4;
+  }
+}
+
+// The committed tenant NIC firmware selection and new shared version.
+message SetTenantNicFirmwareConfigResponse {
+  // Always present on success, including after clearing the selection.
+  TenantNicFirmwareConfig firmware_config = 1;
 }
 
 // A host and optional allocation profile for looking up desired firmware.

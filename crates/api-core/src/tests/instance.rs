@@ -7306,7 +7306,10 @@ async fn test_fnn_vrf_loopback_release_is_exact_across_dpus_and_vpcs(pool: sqlx:
     // Keep DPU 1/VPC 1 as valid caller intent while the service selection
     // independently retains DPU 0/VPC 2.
     let requested_config = rpc::InstanceConfig {
-        tenant: Some(fixture_tenant_config()),
+        tenant: Some(rpc::TenantConfig {
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+            ..default_tenant_config()
+        }),
         os: Some(default_os_config()),
         network: Some(rpc::InstanceNetworkConfig {
             interfaces: vec![network_interface(

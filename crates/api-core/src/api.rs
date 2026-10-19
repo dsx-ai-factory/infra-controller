@@ -886,6 +886,20 @@ impl Forge for Api {
         crate::handlers::tenant::update(self, request).await
     }
 
+    async fn get_tenant_nic_firmware_config(
+        &self,
+        request: Request<rpc::GetTenantNicFirmwareConfigRequest>,
+    ) -> Result<Response<rpc::GetTenantNicFirmwareConfigResponse>, Status> {
+        crate::handlers::tenant::get_nic_firmware_config(self, request).await
+    }
+
+    async fn set_tenant_nic_firmware_config(
+        &self,
+        request: Request<rpc::SetTenantNicFirmwareConfigRequest>,
+    ) -> Result<Response<rpc::SetTenantNicFirmwareConfigResponse>, Status> {
+        crate::handlers::tenant::set_nic_firmware_config(self, request).await
+    }
+
     async fn find_tenants_by_organization_ids(
         &self,
         request: Request<rpc::TenantByOrganizationIdsRequest>,

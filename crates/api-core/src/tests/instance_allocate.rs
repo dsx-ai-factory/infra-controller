@@ -20,13 +20,17 @@ use std::ops::DerefMut;
 use ::rpc::forge::ManagedHostNetworkConfigRequest;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::machine::StableHostMachineId;
+use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use forge::forge_server::Forge;
 use ipnetwork::IpNetwork;
 use itertools::Itertools;
+use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
     InstanceState, ManagedHostState, ManagedHostStateSnapshot, NetworkConfigUpdateState,
 };
+use model::nic_firmware::NicFirmwareProfileId;
+use model::tenant::TenantOrganizationId;
 use model::test_support::ManagedHostConfig;
 use rpc::{Metadata, forge};
 
@@ -36,6 +40,9 @@ use crate::test_support::mac_address_pool::HOST_NON_DPU_MAC_ADDRESS_POOL;
 use crate::test_support::network_segment::{FIXTURE_TENANT_ORG_ID, create_default_flat_vpc};
 use crate::tests::common;
 use crate::tests::common::api_fixtures;
+use crate::tests::common::api_fixtures::instance::{
+    default_os_config, default_tenant_config, single_interface_network_config,
+};
 use crate::tests::common::api_fixtures::network_segment::{
     FIXTURE_ADMIN_NETWORK_SEGMENT_GATEWAY, FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY,
     FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY_2, FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY_3,
@@ -43,8 +50,321 @@ use crate::tests::common::api_fixtures::network_segment::{
     create_admin_network_segment, create_host_inband_network_segment, create_network_segment,
     create_tenant_network_segment, create_underlay_network_segment,
 };
-use crate::tests::common::api_fixtures::{TestEnv, TestEnvOverrides};
+use crate::tests::common::api_fixtures::tenant::create_fixture_tenant;
+use crate::tests::common::api_fixtures::{TestEnv, TestEnvOverrides, TestManagedHost};
+use crate::tests::common::postgres::wait_for_blocked_query;
 use crate::tests::common::rpc_builder::{DhcpDiscovery, VpcCreationRequest};
+
+pub(super) const TENANT_FIRMWARE_DPA_MAC: &str = "02:11:22:33:44:55";
+
+/// Build a valid ordinary request so tests can vary SPX intent without changing
+/// the tenant, network, or OS prerequisites for allocation.
+fn tenant_firmware_allocation_request(
+    host: &TestManagedHost,
+    segment_id: NetworkSegmentId,
+    tenant_organization_id: &str,
+) -> forge::InstanceAllocationRequest {
+    forge::InstanceAllocationRequest {
+        machine_id: Some(host.host().id),
+        config: Some(forge::InstanceConfig {
+            tenant: Some(forge::TenantConfig {
+                tenant_organization_id: tenant_organization_id.to_string(),
+                ..default_tenant_config()
+            }),
+            os: Some(default_os_config()),
+            network: Some(single_interface_network_config(segment_id)),
+            ..Default::default()
+        }),
+        metadata: Some(Metadata {
+            name: "tenant-firmware-instance".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Use the shared fixture tenant and MAC for single-tenant allocation and update proofs.
+pub(super) async fn create_spx_allocation_request(
+    env: &TestEnv,
+    host: &TestManagedHost,
+    segment_id: NetworkSegmentId,
+) -> forge::InstanceAllocationRequest {
+    create_spx_allocation_request_for_tenant(
+        env,
+        host,
+        segment_id,
+        FIXTURE_TENANT_ORG_ID,
+        TENANT_FIRMWARE_DPA_MAC,
+    )
+    .await
+}
+
+/// Create a real DPA and tenant-owned partition so clearing the firmware guard
+/// can prove the same request binds, including in multi-tenant batches.
+pub(super) async fn create_spx_allocation_request_for_tenant(
+    env: &TestEnv,
+    host: &TestManagedHost,
+    segment_id: NetworkSegmentId,
+    tenant_organization_id: &str,
+    mac_address: &str,
+) -> forge::InstanceAllocationRequest {
+    let device = "NVIDIA ConnectX-7";
+    env.api
+        .create_dpa_interface(tonic::Request::new(forge::DpaInterfaceCreationRequest {
+            mac_addr: mac_address.to_string(),
+            machine_id: Some(*host.host().id),
+            device_type: "ConnectX7".to_string(),
+            pci_name: "0000:cc:00.0".to_string(),
+            device_description: Some(device.to_string()),
+            interface_type: forge::DpaInterfaceType::Svpc.into(),
+        }))
+        .await
+        .unwrap();
+    let partition = env
+        .api
+        .create_spx_partition(tonic::Request::new(forge::SpxPartitionCreationRequest {
+            metadata: Some(Metadata {
+                name: "tenant-firmware-partition".to_string(),
+                ..Default::default()
+            }),
+            tenant_organization_id: tenant_organization_id.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut request = tenant_firmware_allocation_request(host, segment_id, tenant_organization_id);
+    request.config.as_mut().unwrap().spxconfig = Some(forge::InstanceSpxConfig {
+        spx_attachments: vec![forge::InstanceSpxAttachment {
+            device: device.to_string(),
+            device_instance: 0,
+            spx_partition_id: partition.id,
+            attachment_type: forge::SpxAttachmentType::Physical.into(),
+            attachment_vf: None,
+            attachment_ovs: None,
+        }],
+    });
+    request
+}
+
+/// Change only the guard's tenant selection, creating its catalog prerequisites
+/// as needed so allocation tests do not depend on operator API validation.
+pub(super) async fn set_tenant_nic_firmware_profile(env: &TestEnv, profile_id: Option<&str>) {
+    let tenant_id: TenantOrganizationId = FIXTURE_TENANT_ORG_ID.parse().unwrap();
+    if db::tenant::find_nic_firmware_config(&env.pool, &tenant_id)
+        .await
+        .unwrap()
+        .is_none()
+    {
+        create_fixture_tenant(env, FIXTURE_TENANT_ORG_ID)
+            .await
+            .unwrap();
+    }
+    let profile_id: Option<NicFirmwareProfileId> = profile_id.map(|id| id.parse().unwrap());
+    if let Some(profile_id) = &profile_id
+        && db::nic_firmware::find_by_ids(&env.pool, std::slice::from_ref(profile_id))
+            .await
+            .unwrap()
+            .is_empty()
+    {
+        env.api
+            .create_nic_firmware_profile(tonic::Request::new(
+                forge::CreateNicFirmwareProfileRequest {
+                    id: profile_id.to_string(),
+                    config: Some(forge::NicFirmwareProfileConfig {
+                        entries: vec![forge::NicFirmwareProfileEntry {
+                            firmware: Some(rpc::protos::mlx_device::FirmwareSpec {
+                                part_number: "MCX75310AAS-NEAT".to_string(),
+                                psid: "MT_0000000838".to_string(),
+                                version: "28.43.1014".to_string(),
+                            }),
+                            image: Some(forge::NicFirmwareArtifact {
+                                url: "https://firmware.invalid/image.bin".to_string(),
+                                sha256: "ab".repeat(32),
+                            }),
+                            device_config: None,
+                            approach: forge::NicFirmwareApproach::Scout.into(),
+                        }],
+                    }),
+                },
+            ))
+            .await
+            .unwrap();
+    }
+    let mut txn = env.db_txn().await;
+    let config = db::tenant::find_nic_firmware_config(txn.as_mut(), &tenant_id)
+        .await
+        .unwrap()
+        .unwrap();
+    db::tenant::set_nic_firmware_config(
+        txn.as_mut(),
+        &tenant_id,
+        profile_id.as_ref(),
+        config.version,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+}
+
+/// A rejected allocation must disclose the preparation requirement, not the
+/// operator's profile ID, and the same request must bind after clearing it.
+#[crate::sqlx_test]
+async fn tenant_nic_firmware_selection_rejects_spx_allocation(pool: sqlx::PgPool) {
+    let env = api_fixtures::create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let host = api_fixtures::create_managed_host(&env).await;
+    let request = create_spx_allocation_request(&env, &host, segment_id).await;
+    let profile_id = "spx-allocation-profile";
+    set_tenant_nic_firmware_profile(&env, Some(profile_id)).await;
+
+    let error = env
+        .api
+        .allocate_instance(tonic::Request::new(request.clone()))
+        .await
+        .expect_err("tenant firmware selection blocks SPX allocation");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("NIC firmware preparation"));
+    assert!(!error.message().contains(profile_id));
+    assert!(
+        db::instance::find_id_by_machine_id(&env.pool, &host.host().id.into())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Reusing the request proves the partition and DPA can actually be bound.
+    set_tenant_nic_firmware_profile(&env, None).await;
+    let allocated = env
+        .api
+        .allocate_instance(tonic::Request::new(request))
+        .await
+        .unwrap()
+        .into_inner();
+    let persisted = db::instance::find_by_id(&env.pool, allocated.id.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.config.spxconfig.spx_attachments.len(), 1);
+    assert_eq!(
+        persisted.config.spxconfig.spx_attachments[0]
+            .mac_address
+            .as_deref(),
+        Some(TENANT_FIRMWARE_DPA_MAC)
+    );
+}
+
+/// Applicability follows requested attachments, not merely the tenant selection
+/// or the presence of DPA inventory on the allocated host.
+#[crate::sqlx_test]
+async fn tenant_nic_firmware_selection_allows_allocations_without_spx(pool: sqlx::PgPool) {
+    let env = api_fixtures::create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    set_tenant_nic_firmware_profile(&env, Some("unused-tenant-profile")).await;
+
+    for (scenario, has_dpa) in [
+        // A selected tenant can still allocate ordinary hosts.
+        ("ordinary host", false),
+        // Discovering a DPA alone does not request tenant firmware preparation.
+        ("DPA without attachments", true),
+    ] {
+        let host = api_fixtures::create_managed_host(&env).await;
+        let mut request = if has_dpa {
+            create_spx_allocation_request(&env, &host, segment_id).await
+        } else {
+            tenant_firmware_allocation_request(&host, segment_id, FIXTURE_TENANT_ORG_ID)
+        };
+        request.config.as_mut().unwrap().spxconfig = None;
+        let allocated = env
+            .api
+            .allocate_instance(tonic::Request::new(request))
+            .await
+            .expect(scenario)
+            .into_inner();
+        let persisted = db::instance::find_by_id(&env.pool, allocated.id.unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            persisted.config.spxconfig.spx_attachments.is_empty(),
+            "{scenario}"
+        );
+    }
+}
+
+/// Creating and selecting a tenant after the guard's read must not retroactively
+/// reject that allocation, while the next request must see the selection.
+#[crate::sqlx_test]
+async fn tenant_nic_firmware_selection_is_read_before_machine_lock_wait(pool: sqlx::PgPool) {
+    let env = api_fixtures::create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let host = api_fixtures::create_managed_host(&env).await;
+    let request = create_spx_allocation_request(&env, &host, segment_id).await;
+    let tenant_id = FIXTURE_TENANT_ORG_ID.parse().unwrap();
+    assert!(
+        db::tenant::find_nic_firmware_config(&env.pool, &tenant_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let mut blocker = env.db_txn().await;
+    db::machine::find_one(
+        blocker.as_mut(),
+        &host.host().id,
+        MachineSearchConfig {
+            for_update: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(blocker.as_mut())
+        .await
+        .unwrap();
+
+    // Waiting on the Machine proves allocation has already read tenant intent.
+    // Creating the tenant and selecting a profile must not change that decision.
+    let selection = async {
+        wait_for_blocked_query(&env.pool, blocker_pid, "SELECT row_to_json").await;
+        set_tenant_nic_firmware_profile(&env, Some("later-tenant-profile")).await;
+        blocker.commit().await.unwrap();
+    };
+    let (allocated, ()) = tokio::join!(
+        env.api
+            .allocate_instance(tonic::Request::new(request.clone())),
+        selection
+    );
+    let allocated = allocated.unwrap().into_inner();
+    let persisted = db::instance::find_by_id(&env.pool, allocated.id.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        persisted.config.spxconfig.spx_attachments[0]
+            .mac_address
+            .as_deref(),
+        Some(TENANT_FIRMWARE_DPA_MAC)
+    );
+    let selected = db::tenant::find_nic_firmware_config(&env.pool, &tenant_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        selected.profile_id.unwrap().to_string(),
+        "later-tenant-profile"
+    );
+
+    let error = env
+        .api
+        .allocate_instance(tonic::Request::new(request))
+        .await
+        .expect_err("later attempts see the committed tenant selection");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("NIC firmware preparation"));
+}
 
 #[derive(Debug, Default)]
 struct TestEnvOptions {
