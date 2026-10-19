@@ -82,7 +82,9 @@ pub use redfish::{BmcAccess, EstablishedBmc, ProxiedPools};
 mod boot_order_tracker;
 use boot_order_tracker::BootOrderTracker;
 mod machine_creator;
+mod machine_location_reconciler;
 pub use machine_creator::MachineCreator;
+pub use machine_location_reconciler::MachineLocationReconciler;
 mod power_shelf_creator;
 pub use power_shelf_creator::PowerShelfCreator;
 pub mod explored_endpoint_index;
@@ -590,6 +592,7 @@ pub struct SiteExplorer {
     endpoint_exploration_service: Arc<EndpointExplorationService>,
     work_lock_manager_handle: WorkLockManagerHandle,
     machine_creator: MachineCreator,
+    machine_location_reconciler: MachineLocationReconciler,
     power_shelf_creator: PowerShelfCreator,
     switch_creator: SwitchCreator,
     boot_order_tracker: BootOrderTracker,
@@ -641,13 +644,18 @@ impl SiteExplorer {
         let endpoint_explorer = endpoint_exploration_service.endpoint_explorer();
 
         SiteExplorer {
+            machine_location_reconciler: MachineLocationReconciler::new(
+                database_connection.clone(),
+                rack_profiles.clone(),
+                machine_info_provider.clone(),
+                credential_manager,
+            ),
             machine_creator: MachineCreator::new(
                 database_connection.clone(),
                 explorer_config.clone(),
                 common_pools,
                 rack_profiles,
                 machine_info_provider,
-                credential_manager,
                 dpf_enabled_at_site,
             ),
             power_shelf_creator: PowerShelfCreator::new(
@@ -1312,7 +1320,7 @@ impl SiteExplorer {
             .map(|identified| identified.explored_host.host_bmc_ip)
             .collect::<Vec<_>>();
         if let Err(error) = self
-            .machine_creator
+            .machine_location_reconciler
             .reconcile_machine_locations(&host_bmc_ips)
             .await
         {
