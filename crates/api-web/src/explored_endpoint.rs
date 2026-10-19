@@ -144,6 +144,7 @@ struct ExploredManagedHostDisplay {
 }
 
 struct ExploredEndpointDisplay {
+    exploration_paused_for_dpf: bool,
     address: String,
     endpoint_type: String,
     last_exploration_latency: Option<i64>,
@@ -161,6 +162,7 @@ impl From<&ExploredEndpoint> for ExploredEndpointDisplay {
     fn from(ep: &ExploredEndpoint) -> Self {
         let report_ref = ep.report.as_ref();
         Self {
+            exploration_paused_for_dpf: ep.exploration_paused_for_dpf,
             address: ep.address.clone(),
             endpoint_type: report_ref
                 .map(|report| report.endpoint_type.clone())
@@ -1452,5 +1454,29 @@ mod tests {
         assert!(rendered.contains("192.0.2.20"));
         assert!(rendered.contains("192.0.2.21"));
         assert_eq!(rendered.matches("clearlasterror_action").count(), 1);
+    }
+    #[test]
+    fn provisioning_pause_disables_exploration_controls() {
+        for paused in [false, true] {
+            let mut ep = endpoint("192.0.2.10", None);
+            ep.exploration_paused_for_dpf = paused;
+            let html = ExploredEndpointDetail::from(ExploredEndpointInfo {
+                endpoint: ep,
+                credentials_set: "Configured".to_string(),
+                has_machine: true,
+            })
+            .render()
+            .unwrap();
+            assert_eq!(html.contains("Explore (paused)"), paused);
+            assert_eq!(
+                html.contains("resume automatically when provisioning suppression is cleared"),
+                paused
+            );
+            assert_eq!(
+                html.contains("disabled title=\"Exploration paused during DPU provisioning\""),
+                paused
+            );
+            assert_eq!(html.contains("<a id=\"refresh-endpoint\""), !paused);
+        }
     }
 }

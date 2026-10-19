@@ -43,6 +43,49 @@ use super::{handler_host_power_control, host_power_state};
 use crate::context::MachineStateHandlerContextObjects;
 use crate::dpf::DpfOperations;
 
+/// Keep suppression and the controller transition in the same transaction, including
+/// exits through reset, restart, and failure handling outside the DPF handlers.
+pub(super) async fn update_exploration_suppression(
+    outcome: StateHandlerOutcome<ManagedHostState>,
+    state: &ManagedHostStateSnapshot,
+    suppress: bool,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    use futures_util::FutureExt;
+    use model::bmc_suppression::{
+        BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression,
+    };
+
+    // Provisioning does not wait for acknowledgement or cancel in-flight Redfish
+    // exploration requests. Site Explorer skips these BMCs from its next cycle.
+    // This behavior is agreed with the DPF team.
+    let mut macs = state
+        .dpu_snapshots
+        .iter()
+        .filter_map(|dpu| dpu.status.bmc_info.mac)
+        .chain(state.host_snapshot.status.bmc_info.mac)
+        .collect::<Vec<_>>();
+    macs.sort_unstable();
+    macs.dedup();
+    outcome.in_transaction(&ctx.services.db_pool, move |txn| async move {
+        for mac in macs {
+            if suppress {
+                db::bmc_suppression::upsert(txn, &NewBmcSuppression {
+                    bmc_mac_address: mac,
+                    subsystem: BmcSuppressionSubsystem::SiteExplorer,
+                    source: BmcSuppressionSource::DpfProvisioning,
+                    reason: "DPU provisioning in progress; exploration resumes automatically when provisioning suppression is cleared".to_string(),
+                }).await?;
+            } else {
+                db::bmc_suppression::delete(txn, mac,
+                    BmcSuppressionSubsystem::SiteExplorer,
+                    BmcSuppressionSource::DpfProvisioning).await?;
+            }
+        }
+        Ok::<(), StateHandlerError>(())
+    }.boxed()).await?
+}
+
 // `deployment_type_for_dpu_profile` currently refines exactly one deployment:
 // generic BF3 becomes GB200 BF3. Only that forward migration is supported.
 const DEPLOYMENT_MIGRATION_SOURCE: DpuDeploymentType = DpuDeploymentType::Bf3;
@@ -1252,6 +1295,83 @@ mod tests {
     use model::test_support::machine_snapshot::managed_host_state_snapshot;
 
     use super::*;
+
+    #[test]
+    fn exploration_pause_tracks_all_dpus_and_allocation_modes() {
+        use model::machine::{DpuInitStates, DpuReprovisionStates};
+        use model::test_support::machine_snapshot::dpu_machine_id;
+        let waiting = DpfState::WaitingForReady { phase_detail: None };
+        let init = |second: DpfState| ManagedHostState::DPUInit {
+            dpu_states: DpuInitStates {
+                states: [
+                    (
+                        dpu_machine_id(0),
+                        DpuInitState::DpfStates {
+                            state: DpfState::DeviceReady,
+                        },
+                    ),
+                    (dpu_machine_id(1), DpuInitState::DpfStates { state: second }),
+                ]
+                .into(),
+            },
+        };
+        let reprovision = DpuReprovisionStates {
+            states: [
+                (dpu_machine_id(0), ReprovisionState::NotUnderReprovision),
+                (
+                    dpu_machine_id(1),
+                    ReprovisionState::DpfStates {
+                        substate: waiting.clone(),
+                    },
+                ),
+            ]
+            .into(),
+        };
+        check_values(
+            [
+                Check {
+                    scenario: "one ready DPU does not release another waiting DPU",
+                    input: init(waiting),
+                    expect: true,
+                },
+                Check {
+                    scenario: "host reboot stays protected",
+                    input: init(DpfState::HandleReboot {
+                        op: PerformPowerOperation::Off,
+                        retry_count: 0,
+                    }),
+                    expect: true,
+                },
+                Check {
+                    scenario: "every DPU ready releases suppression",
+                    input: init(DpfState::DeviceReady),
+                    expect: false,
+                },
+                Check {
+                    scenario: "unassigned reprovision",
+                    input: ManagedHostState::DPUReprovision {
+                        dpu_states: reprovision.clone(),
+                    },
+                    expect: true,
+                },
+                Check {
+                    scenario: "assigned reprovision",
+                    input: ManagedHostState::Assigned {
+                        instance_state: InstanceState::DPUReprovision {
+                            dpu_states: reprovision,
+                        },
+                    },
+                    expect: true,
+                },
+                Check {
+                    scenario: "outside DPF provisioning",
+                    input: ManagedHostState::Ready,
+                    expect: false,
+                },
+            ],
+            |state| state.suppresses_exploration_for_dpf(),
+        );
+    }
 
     fn hardware_info(part_number: &str) -> HardwareInfo {
         HardwareInfo {

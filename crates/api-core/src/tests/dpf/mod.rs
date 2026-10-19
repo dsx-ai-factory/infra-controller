@@ -63,3 +63,28 @@ async fn get_host_state(env: &TestEnv, mh: &TestManagedHost) -> ManagedHostState
     let machine = mh.host().db_machine(&mut txn).await;
     machine.state.value
 }
+
+async fn assert_provisioning_suppressed(env: &TestEnv, mh: &TestManagedHost, expected: bool) {
+    use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem};
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&mut txn).await;
+    for mac in [
+        host.status.bmc_info.mac.unwrap(),
+        dpu.status.bmc_info.mac.unwrap(),
+    ] {
+        let row = db::bmc_suppression::find(
+            txn.as_mut(),
+            mac,
+            BmcSuppressionSubsystem::SiteExplorer,
+            BmcSuppressionSource::DpfProvisioning,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            row.is_some(),
+            expected,
+            "provisioning suppression for {mac}"
+        );
+    }
+}

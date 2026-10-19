@@ -72,6 +72,7 @@ pub use endpoint_exploration_service::{
 mod credentials;
 mod endpoint_lock;
 mod metrics;
+pub mod suppression;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub use metrics::{SiteExplorationMetrics, site_explorer_latency_histogram_view};
@@ -604,6 +605,7 @@ pub struct SiteExplorer {
 /// State captured once and applied throughout a Site Explorer iteration.
 struct SiteExplorerRunContext {
     suppressed_bmc_macs: HashSet<MacAddress>,
+    dpf_provisioning_bmc_macs: HashSet<MacAddress>,
 }
 
 impl SiteExplorer {
@@ -1138,10 +1140,7 @@ impl SiteExplorer {
         &self,
         metrics: &mut SiteExplorationMetrics,
     ) -> SiteExplorerResult<SiteIdentifiedHosts> {
-        let suppressed_bmc_macs = self.acknowledge_site_explorer_suppressions().await?;
-        let run_context = SiteExplorerRunContext {
-            suppressed_bmc_macs,
-        };
+        let run_context = self.acknowledge_site_explorer_suppressions().await?;
         self.check_preconditions(metrics).await?;
 
         let update_explored_endpoints_start = Instant::now();
@@ -2231,7 +2230,7 @@ impl SiteExplorer {
     /// Acknowledges pending Site Explorer suppressions and returns all site explorer suppressed BMC MAC addresses.
     async fn acknowledge_site_explorer_suppressions(
         &self,
-    ) -> SiteExplorerResult<HashSet<MacAddress>> {
+    ) -> SiteExplorerResult<SiteExplorerRunContext> {
         let suppressions = db::bmc_suppression::find_all_by_subsystem(
             &self.database_connection,
             BmcSuppressionSubsystem::SiteExplorer,
@@ -2242,11 +2241,20 @@ impl SiteExplorer {
             .map(|suppression| suppression.bmc_mac_address)
             .collect();
 
+        let dpf_provisioning_bmc_macs = suppressions
+            .iter()
+            .filter(|s| s.source == model::bmc_suppression::BmcSuppressionSource::DpfProvisioning)
+            .map(|s| s.bmc_mac_address)
+            .collect();
         let mut guards = Vec::new();
         let mut acknowledgements = Vec::new();
         for suppression in suppressions
             .iter()
-            .filter(|suppression| suppression.acknowledged_at.is_none())
+            .filter(|suppression| {
+                suppression.acknowledged_at.is_none()
+                    && suppression.source
+                        != model::bmc_suppression::BmcSuppressionSource::DpfProvisioning
+            })
             .unique_by(|suppression| suppression.bmc_mac_address)
         {
             let bmc_ips = db::machine_interface::lookup_bmc_ip_by_mac_address(
@@ -2282,7 +2290,10 @@ impl SiteExplorer {
         }
         drop(guards);
 
-        Ok(suppressed_bmc_macs)
+        Ok(SiteExplorerRunContext {
+            suppressed_bmc_macs,
+            dpf_provisioning_bmc_macs,
+        })
     }
 
     /// Returns the endpoint index and the addresses explored in this run.
@@ -2579,6 +2590,15 @@ impl SiteExplorer {
             match index.underlay_interface(address) {
                 Some(iface) => {
                     if run_context.suppressed_bmc_macs.contains(&iface.mac_address) {
+                        if run_context
+                            .dpf_provisioning_bmc_macs
+                            .contains(&iface.mac_address)
+                        {
+                            suppression::record_deferred(
+                                *address,
+                                suppression::ExplorationRequest::Periodic,
+                            );
+                        }
                         tracing::info!(bmc_ip_address = %address, bmc_mac_address = %iface.mac_address, "Skipping exploration of suppressed BMC");
                         continue;
                     }
@@ -2621,6 +2641,9 @@ impl SiteExplorer {
                     .suppressed_bmc_macs
                     .contains(&iface.mac_address)
                 {
+                    if run_context.dpf_provisioning_bmc_macs.contains(&iface.mac_address) {
+                        suppression::record_deferred(*address, suppression::ExplorationRequest::Periodic);
+                    }
                     tracing::info!(bmc_ip_address = %address, bmc_mac_address = %iface.mac_address, "Skipping exploration of suppressed BMC");
                     return false;
                 }

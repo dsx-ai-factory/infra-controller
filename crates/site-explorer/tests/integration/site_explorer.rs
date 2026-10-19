@@ -4259,3 +4259,64 @@ async fn test_site_explorer_backfills_boot_interface_id_onto_machine_interface(
 
     Ok(())
 }
+
+#[sqlx_test]
+async fn test_dpf_suppression_preserves_report_and_resumes(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let metrics = carbide_instrument::testing::MetricsCapture::start();
+    let env = Env::new(pool).await;
+    let mut machines = vec![env.new_machine("02:00:00:00:10:31", "Vendor1")];
+    machines.discover_dhcp(env.api()).await?;
+    let address = machines[0].ip.parse()?;
+    let mut txn = env.pool.begin().await?;
+    db::explored_endpoints::insert(
+        address,
+        &cached_suppression_report("cached"),
+        false,
+        txn.as_mut(),
+    )
+    .await?;
+    db::explored_endpoints::request_exploration_for_addresses(&[address], txn.as_mut()).await?;
+    let mut input = suppression_input(machines[0].mac, BmcSuppressionSubsystem::SiteExplorer);
+    input.source = BmcSuppressionSource::DpfProvisioning;
+    db::bmc_suppression::upsert(txn.as_mut(), &input).await?;
+    let before = db::explored_endpoints::find_all_by_ip(address, txn.as_mut()).await?;
+    txn.commit().await?;
+    let explorer = env.test_site_explorer(suppression_test_config(1));
+    explorer.run_single_iteration().await?;
+    assert!(
+        explorer
+            .endpoint_explorer()
+            .explore_endpoint_calls
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        db::explored_endpoints::find_by_ips(&env.pool, vec![address]).await?,
+        before
+    );
+    assert!(
+        metrics.counter_delta(
+            "carbide_site_explorer_dpf_explorations_deferred_total",
+            &[("request", "periodic")],
+        ) >= 1.0
+    );
+    let mut txn = env.pool.begin().await?;
+    db::bmc_suppression::delete(txn.as_mut(), machines[0].mac, input.subsystem, input.source)
+        .await?;
+    txn.commit().await?;
+    explorer.insert_endpoints(vec![(address, EndpointExplorationReport::default())]);
+    explorer.run_single_iteration().await?;
+    assert_eq!(
+        explorer
+            .endpoint_explorer()
+            .explore_endpoint_calls
+            .lock()
+            .unwrap()
+            .len(),
+        1
+    );
+    Ok(())
+}

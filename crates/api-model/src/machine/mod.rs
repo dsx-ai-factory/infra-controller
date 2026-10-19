@@ -1886,6 +1886,28 @@ impl std::fmt::Display for ValidationState {
 pub const MAX_FIRMWARE_UPGRADE_RETRIES: u32 = 5;
 
 impl ManagedHostState {
+    /// Whether any DPU is waiting for DPF provisioning or handling its requested reboot.
+    /// Site Explorer must stay paused until every DPU leaves these states.
+    pub fn suppresses_exploration_for_dpf(&self) -> bool {
+        let active = |state: &DpfState| {
+            matches!(
+                state,
+                DpfState::WaitingForReady { .. } | DpfState::HandleReboot { .. }
+            )
+        };
+        match self {
+            Self::DPUInit { dpu_states } => dpu_states
+                .states
+                .values()
+                .any(|state| matches!(state, DpuInitState::DpfStates { state } if active(state))),
+            _ => self.dpu_reprovision_states().is_some_and(|states| {
+                states.states.values().any(|state| {
+                    matches!(state, ReprovisionState::DpfStates { substate } if active(substate))
+                })
+            }),
+        }
+    }
+
     /// Starts `Maintenance` with the requested operation and saves the full
     /// request so completion can check whether it is still pending.
     pub fn maintenance_for_request(request: MachineMaintenanceRequest) -> Self {

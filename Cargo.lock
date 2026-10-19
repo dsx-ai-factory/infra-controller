@@ -1396,6 +1396,7 @@ dependencies = [
  "carbide-machine-a-tron",
  "carbide-rpc",
  "carbide-secrets",
+ "carbide-tls",
  "carbide-utils",
  "carbide-uuid",
  "ctor",

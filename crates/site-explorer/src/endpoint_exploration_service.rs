@@ -24,7 +24,6 @@ use carbide_redfish::boot_interface::BootInterfaceTarget;
 use db::ConditionalWrite;
 use db::explored_endpoints::EndpointReportNotCurrent;
 use mac_address::MacAddress;
-use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::expected_entity::ExpectedEntity;
 use model::machine::MachineInterfaceSnapshot;
 use model::site_explorer::{EndpointExplorationError, EndpointExplorationReport, ExploredEndpoint};
@@ -46,6 +45,14 @@ pub enum EndpointExplorationServiceError {
 
     #[error("endpoint exploration is suppressed for BMC {bmc_mac_address} at {bmc_ip}")]
     Suppressed {
+        bmc_ip: IpAddr,
+        bmc_mac_address: MacAddress,
+    },
+
+    #[error(
+        "exploration of BMC {bmc_mac_address} at {bmc_ip} is paused during DPU provisioning; resumes automatically when provisioning suppression is cleared"
+    )]
+    DpfProvisioning {
         bmc_ip: IpAddr,
         bmc_mac_address: MacAddress,
     },
@@ -164,18 +171,13 @@ impl EndpointExplorationService {
                 id: bmc_ip.to_string(),
             })?;
 
-        if db::bmc_suppression::is_suppressed(
+        crate::suppression::check_exploration_allowed(
             txn.as_pgconn(),
+            bmc_ip,
             bmc_interface.mac_address,
-            BmcSuppressionSubsystem::SiteExplorer,
+            crate::suppression::ExplorationRequest::Refresh,
         )
-        .await?
-        {
-            return Err(EndpointExplorationServiceError::Suppressed {
-                bmc_ip,
-                bmc_mac_address: bmc_interface.mac_address,
-            });
-        }
+        .await?;
 
         let expected_machine =
             db::expected_machine::find_by_bmc_mac_address(&mut txn, bmc_interface.mac_address)

@@ -77,6 +77,11 @@ message ExploredEndpoint {
   string last_redfish_powercycle = 9;
   // Flag to prevent site explorer from taking remediation actions on redfish errors
   bool pause_remediation = 10;
+  // Periodic exploration, re-exploration, and immediate report refresh are paused
+  // while any DPU waits for DPF readiness or handles a DPF-requested reboot.
+  // Exploration resumes automatically when provisioning suppression is cleared.
+  // Ad-hoc Explore is unaffected. False when no DPF suppression exists.
+  bool exploration_paused_for_dpf = 11;
 }
 
 // Information about explored DPU that was discovered via Site Exploration
