@@ -8,7 +8,7 @@ A small authenticated HTTP/2 proxy for BMC access:
 - fetches the BMC's credentials from nico-api over gRPC
 - proxies the HTTP request to the target BMC
 
-The same path serves a switch's NVOS management interface: an address nico-api knows as one is proxied to the switch's NVUE REST API with the switch's NVOS admin credentials, so a caller reaches `/nvue_v1/` paths exactly as it reaches `/redfish/v1/` paths on a BMC.
+The same path serves a switch's NVOS management interface. When nico-api identifies an address as a switch's NVOS interface, the proxy forwards the request to the switch's NVUE REST API with the switch's NVOS admin credentials. A caller reaches `/nvue_v1/` paths the same way it reaches `/redfish/v1/` paths on a BMC.
 
 The point is to keep BMC authentication and credential handling in one place, while allowing multiple higher-level systems to coexist as peers.
 
@@ -147,9 +147,9 @@ after the configuration file. The Helm chart always sets that variable from
 ]
 ```
 
-Entries match the request's path whatever the address is, so a principal
-that reaches switches lists the `/nvue_v1/` paths of their NVUE REST API
-alongside its `/redfish/v1/` paths.
+ACL entries match only the request path, not the target type. A principal
+that reaches switches lists the `/nvue_v1/` paths of the switches' NVUE REST
+API alongside its `/redfish/v1/` paths.
 
 Each ACL entry is a string with this form, or a table with the same string in `pattern`:
 
@@ -659,7 +659,7 @@ An alternative approach is to have nico-api be the only service that talks to BM
 
 nico-api routes its own eligible BMC Redfish traffic through nico-bmc-proxy when its static `[bmc_proxy]` configuration section is enabled: machine-lifecycle traffic and the credentialed exploration of endpoints whose stored root credential is established. Credential-subject operations (credential setup, BMC session minting, password rotation, UEFI password management) and the other documented exceptions stay direct, so nico-api still holds BMC credentials. The routing contract, including every direct-path exception, is in [`crates/api-core/src/cfg/README.md`](../api-core/src/cfg/README.md#bmcproxyconfig--bmc_proxy).
 
-We soon expect that [DPS] will support configuration of an authenticating proxy like this one, to manage power configuration on BMC's, and on NVLink switch trays through their NVUE REST API. DPS is a standalone service that should not have a direct dependency on nico-api. So nico-bmc-proxy serves an implementation of such a proxy, although any proxy that implements similar functionality can work.
+We soon expect that [DPS] will support configuration of an authenticating proxy like this one, to manage power configuration on BMCs, and on NVLink switch trays through their NVUE REST API. DPS is a standalone service that should not have a direct dependency on nico-api. So nico-bmc-proxy serves an implementation of such a proxy, although any proxy that implements similar functionality can work.
 
 Future work can move the remaining direct paths behind the proxy so that nico-api no longer holds BMC credentials at all.
 
@@ -742,8 +742,10 @@ sequenceDiagram
 
 The resolved credentials are cached by address, so the three lookups run
 once per address until the upstream rejects the credentials or the entry
-idles out. A nico-api that denies `FindSwitchIds` predates the proxy's
-switch support, and the proxy then takes every address for a BMC's.
+idles out. If nico-api denies `FindSwitchIds`, because it predates the
+proxy's switch support or lost the proxy's grant for that method, the proxy
+treats every address as a BMC for five minutes and then probes again.
+`carbide_bmc_proxy_switch_probe_denied_total` counts each denial.
 
 ## Future Direction
 
