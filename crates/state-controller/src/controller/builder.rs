@@ -24,9 +24,9 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::IterationConfig;
-use crate::controller::StateController;
 use crate::controller::periodic_enqueuer::{EnqueuerMetricsEmitter, PeriodicEnqueuer};
 use crate::controller::processor::{ProcessorMetricsEmitter, StateProcessor};
+use crate::controller::{LiveObjectSet, StateController};
 use crate::io::StateControllerIO;
 use crate::metrics::MetricHolder;
 use crate::per_object::PerObjectStateRecorder;
@@ -68,6 +68,7 @@ pub struct Builder<IO: StateControllerIO> {
     state_change_emitter: Arc<StateChangeEmitter<IO::ObjectId, IO::ControllerState>>,
     processor_id: Option<String>,
     per_object_state_metrics: Option<PerObjectStateRecorder>,
+    aggregate_live_set_reconciliation_enabled: bool,
 }
 
 impl<IO: StateControllerIO> Default for Builder<IO> {
@@ -90,6 +91,7 @@ impl<IO: StateControllerIO> Default for Builder<IO> {
             state_change_emitter: Arc::new(StateChangeEmitter::default()),
             processor_id: None,
             per_object_state_metrics: None,
+            aggregate_live_set_reconciliation_enabled: false,
         }
     }
 }
@@ -184,6 +186,15 @@ impl<IO: StateControllerIO> Builder<IO> {
 
         let per_object_state_metrics = self.per_object_state_metrics.take();
 
+        // Aggregate reconciliation uses a latest-value channel because only the
+        // newest complete live-set observation is relevant to metric emission.
+        let (live_object_ids_sender, live_object_ids_receiver) = self
+            .aggregate_live_set_reconciliation_enabled
+            .then(|| tokio::sync::watch::channel::<Option<LiveObjectSet<IO::ObjectId>>>(None))
+            .map_or((None, None), |(sender, receiver)| {
+                (Some(sender), Some(receiver))
+            });
+
         let enqueuer = PeriodicEnqueuer::<IO> {
             pool: database.clone(),
             work_lock_manager_handle,
@@ -194,6 +205,7 @@ impl<IO: StateControllerIO> Builder<IO> {
             per_object_state: per_object_state_metrics.clone(),
             known_object_ids: Default::default(),
             pending_clears: Default::default(),
+            live_object_ids: live_object_ids_sender,
         };
 
         let processor_metric_emitter =
@@ -218,6 +230,7 @@ impl<IO: StateControllerIO> Builder<IO> {
             stats_since_last_log: Default::default(),
             last_metric_emission_time: std::time::Instant::now(),
             processor_id,
+            live_object_ids: live_object_ids_receiver,
         };
 
         let controller = StateController::<IO> {
@@ -303,6 +316,16 @@ impl<IO: StateControllerIO> Builder<IO> {
         self
     }
 
+    /// Reconciles retained aggregate measurements against complete live-object
+    /// observations so an object identity change cannot count both IDs.
+    ///
+    /// This is opt-in because every controller replica performs the live-set
+    /// read, including replicas that do not acquire the global queue lock.
+    pub fn reconcile_aggregate_metrics_with_live_set(mut self) -> Self {
+        self.aggregate_live_set_reconciliation_enabled = true;
+        self
+    }
+
     /// Sets the state change emitter for broadcasting state transitions to hooks
     pub fn state_change_emitter(
         mut self,
@@ -310,5 +333,25 @@ impl<IO: StateControllerIO> Builder<IO> {
     ) -> Self {
         self.state_change_emitter = Arc::new(emitter);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Builder;
+    use crate::tests::TestStateControllerIO;
+
+    /// Verifies that live-set reconciliation changes controller behavior only
+    /// when a caller explicitly opts in, keeping every other controller unchanged.
+    #[test]
+    fn aggregate_live_set_reconciliation_is_opt_in() {
+        // Assertion: the generic builder preserves the existing default.
+        let default_builder = Builder::<TestStateControllerIO>::default();
+        assert!(!default_builder.aggregate_live_set_reconciliation_enabled);
+
+        // Action and assertion: the dedicated method enables reconciliation.
+        let opted_in_builder =
+            Builder::<TestStateControllerIO>::default().reconcile_aggregate_metrics_with_live_set();
+        assert!(opted_in_builder.aggregate_live_set_reconciliation_enabled);
     }
 }

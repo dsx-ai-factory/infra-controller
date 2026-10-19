@@ -208,6 +208,12 @@ pub(in crate::tests) struct TestEnvOverrides {
     pub(in crate::tests) prevent_allocations_on_stale_dpu_agent_version: Option<bool>,
     pub(in crate::tests) network_segments_drain_period: Option<chrono::Duration>,
     pub(in crate::tests) power_manager_enabled: Option<bool>,
+    /// Enables machine aggregate live-set reconciliation only for tests that
+    /// need to verify the production controller wiring.
+    pub(in crate::tests) machine_aggregate_live_set_reconciliation: Option<bool>,
+    /// Overrides the machine controller's metric prefix when a test needs to
+    /// isolate its aggregate series from other fixture controllers.
+    pub(in crate::tests) machine_metric_prefix: Option<&'static str>,
     pub(in crate::tests) dpf_sdk: Option<Arc<dyn DpfOperations>>,
     pub(in crate::tests) fnn_config: Option<FnnConfig>,
     pub(in crate::tests) nmxc_default_partition: Option<bool>,
@@ -625,6 +631,18 @@ impl TestEnv {
             .run_single_iteration()
             .boxed()
             .await;
+    }
+
+    /// Reports aggregate live-set membership so integration tests can verify
+    /// that the machine controller published the identity selected by discovery.
+    pub(in crate::tests) async fn machine_aggregate_live_set_contains(
+        &self,
+        machine_id: &HostMachineId,
+    ) -> Option<bool> {
+        self.machine_state_controller
+            .lock()
+            .await
+            .aggregate_live_set_contains_for_test(machine_id)
     }
 
     /// Runs one iteration of the network state controller handler with the services
@@ -1629,10 +1647,24 @@ async fn create_test_env_with_overrides_inner(
         std::time::Duration::from_secs(60),
     );
 
-    let machine_controller = StateController::<MachineStateControllerIO>::builder()
+    let machine_controller_builder = StateController::<MachineStateControllerIO>::builder()
         .database(db_pool.clone(), api.work_lock_manager_handle.clone())
-        .meter("carbide_machines", test_meter.meter())
-        .processor_id(state_controller_id.clone())
+        .meter(
+            overrides
+                .machine_metric_prefix
+                .unwrap_or("carbide_machines"),
+            test_meter.meter(),
+        )
+        .processor_id(state_controller_id.clone());
+    let machine_controller_builder = if overrides
+        .machine_aggregate_live_set_reconciliation
+        .unwrap_or(false)
+    {
+        machine_controller_builder.reconcile_aggregate_metrics_with_live_set()
+    } else {
+        machine_controller_builder
+    };
+    let machine_controller = machine_controller_builder
         .services(
             MachineStateHandlerServices {
                 db_pool: db_pool.clone(),
