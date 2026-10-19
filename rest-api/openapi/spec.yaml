@@ -31161,7 +31161,7 @@ components:
           description: MAC address of this NVOS ethernet port.
         isPrimary:
           type: boolean
-          description: Whether this port is the primary (eth0) NVOS port NICo manages via RMS. At most one port per switch may be primary; when no port is marked, the first port on a multi-port switch defaults to primary and a single-port switch is always its own primary.
+          description: Whether this port is the primary (eth0) NVOS port that NICo manages through RMS. At most one port per switch can be primary; when no port is marked, the first port on a multi-port switch defaults to primary and a single-port switch is always its own primary.
     ExpectedSwitch:
       title: ExpectedSwitch
       type: object

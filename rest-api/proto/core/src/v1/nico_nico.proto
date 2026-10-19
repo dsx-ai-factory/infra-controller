@@ -2988,8 +2988,9 @@ message Switch {
   reserved 12, 13;
   bool is_primary = 14;
 
-  // Deprecated: use status.nvos_ports. A resolved endpoint is retained here
-  // for compatibility, preferring IPv4 and then the lowest-MAC port.
+  // Deprecated: use status.nvos_ports. Retains the discovered primary port,
+  // preferring IPv4 within that port. Absent if the primary is not discovered;
+  // ip is absent if that port has no address. Never falls back to a secondary.
   SwitchNvosInfo nvos_info = 15 [deprecated = true];
 
   // NVLink domain UUID

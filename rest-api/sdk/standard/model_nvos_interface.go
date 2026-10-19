@@ -26,7 +26,7 @@ var _ MappedNullable = &NvosInterface{}
 type NvosInterface struct {
 	// MAC address of this NVOS ethernet port.
 	MacAddress string `json:"macAddress" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
-	// Whether this port is the primary (eth0) NVOS port NICo manages via RMS. At most one port per switch may be primary; when no port is marked, the first port on a multi-port switch defaults to primary and a single-port switch is always its own primary.
+	// Whether this port is the primary (eth0) NVOS port that NICo manages through RMS. At most one port per switch can be primary; when no port is marked, the first port on a multi-port switch defaults to primary and a single-port switch is always its own primary.
 	IsPrimary *bool `json:"isPrimary,omitempty"`
 }
 

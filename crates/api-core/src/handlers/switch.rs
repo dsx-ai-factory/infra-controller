@@ -108,15 +108,9 @@ async fn load_switch_nvos_info(
 }
 
 fn legacy_switch_nvos_info(nvos_ports: &[rpc::SwitchNvosPortInfo]) -> Option<rpc::SwitchNvosInfo> {
-    let nvos_port = nvos_ports
-        .iter()
-        .find(|port| {
-            port.addresses
-                .iter()
-                .any(|address| address.address_family == i32::from(rpc::AddressFamily::V4))
-        })
-        .or_else(|| nvos_ports.iter().find(|port| !port.addresses.is_empty()))
-        .or_else(|| nvos_ports.first())?;
+    // These are discovered ports, so a lone secondary must not become primary
+    // merely because the declared primary has not been discovered yet.
+    let nvos_port = nvos_ports.iter().find(|port| port.is_primary)?;
     let address = nvos_port
         .addresses
         .iter()
@@ -804,6 +798,7 @@ async fn remove_switch_health_report_by_source(
 #[cfg(test)]
 mod switch_nvos_info_tests {
     use ::rpc::forge as rpc;
+    use carbide_test_support::{Check, check_values};
 
     use super::{legacy_switch_nvos_info, populate_switch_nvos_info};
 
@@ -824,41 +819,68 @@ mod switch_nvos_info_tests {
     }
 
     #[test]
-    fn returns_none_without_discovered_ports() {
-        assert!(legacy_switch_nvos_info(&[]).is_none());
-    }
-
-    #[test]
-    fn skips_an_unresolved_port_when_a_later_port_has_an_address() {
-        let ports = vec![
-            port("44:44:33:33:01:00", Vec::new()),
-            port(
-                "44:44:33:33:01:01",
-                vec![address(rpc::AddressFamily::V6, "2001:db8::10")],
-            ),
-        ];
-
-        let info = legacy_switch_nvos_info(&ports).expect("NVOS info");
-        assert_eq!(info.mac.as_deref(), Some("44:44:33:33:01:01"));
-        assert_eq!(info.ip.as_deref(), Some("2001:db8::10"));
-    }
-
-    #[test]
-    fn prefers_ipv4_across_resolved_ports() {
-        let ports = vec![
-            port(
-                "44:44:33:33:01:00",
-                vec![address(rpc::AddressFamily::V6, "2001:db8::10")],
-            ),
-            port(
-                "44:44:33:33:01:01",
-                vec![address(rpc::AddressFamily::V4, "10.2.14.52")],
-            ),
-        ];
-
-        let info = legacy_switch_nvos_info(&ports).expect("NVOS info");
-        assert_eq!(info.mac.as_deref(), Some("44:44:33:33:01:01"));
-        assert_eq!(info.ip.as_deref(), Some("10.2.14.52"));
+    fn selects_only_the_primary_port_then_prefers_ipv4() {
+        let secondary = port(
+            "44:44:33:33:01:00",
+            vec![address(rpc::AddressFamily::V4, "10.2.14.52")],
+        );
+        let primary = rpc::SwitchNvosPortInfo {
+            is_primary: true,
+            ..port("44:44:33:33:01:01", Vec::new())
+        };
+        let primary_info = rpc::SwitchNvosInfo {
+            mac: primary.mac.clone(),
+            ip: None,
+            port: None,
+        };
+        check_values(
+            [
+                Check {
+                    scenario: "no discovered ports",
+                    input: vec![],
+                    expect: None,
+                },
+                Check {
+                    scenario: "only the secondary is discovered",
+                    input: vec![secondary.clone()],
+                    expect: None,
+                },
+                Check {
+                    scenario: "an addressed secondary cannot replace an unaddressed primary",
+                    input: vec![secondary.clone(), primary.clone()],
+                    expect: Some(primary_info.clone()),
+                },
+                Check {
+                    scenario: "primary IPv6 wins over secondary IPv4 and lower MAC",
+                    input: vec![
+                        secondary,
+                        rpc::SwitchNvosPortInfo {
+                            addresses: vec![address(rpc::AddressFamily::V6, "2001:db8::10")],
+                            ..primary.clone()
+                        },
+                    ],
+                    expect: Some(rpc::SwitchNvosInfo {
+                        ip: Some("2001:db8::10".into()),
+                        ..primary_info.clone()
+                    }),
+                },
+                Check {
+                    scenario: "prefer IPv4 within the primary regardless of address order",
+                    input: vec![rpc::SwitchNvosPortInfo {
+                        addresses: vec![
+                            address(rpc::AddressFamily::V6, "2001:db8::10"),
+                            address(rpc::AddressFamily::V4, "10.2.14.53"),
+                        ],
+                        ..primary
+                    }],
+                    expect: Some(rpc::SwitchNvosInfo {
+                        ip: Some("10.2.14.53".into()),
+                        ..primary_info
+                    }),
+                },
+            ],
+            |ports| legacy_switch_nvos_info(&ports),
+        );
     }
 
     #[test]
@@ -868,6 +890,7 @@ mod switch_nvos_info_tests {
             vec![address(rpc::AddressFamily::V4, "10.2.14.52")],
         );
         nvos_port.service_port = Some(8443);
+        nvos_port.is_primary = true;
 
         let info = legacy_switch_nvos_info(&[nvos_port]).expect("NVOS info");
         assert_eq!(info.port, Some(8443));
@@ -877,7 +900,10 @@ mod switch_nvos_info_tests {
     #[allow(deprecated)]
     fn populates_mac_only_legacy_and_repeated_ports_without_ips() {
         let ports = vec![
-            port("44:44:33:33:01:00", Vec::new()),
+            rpc::SwitchNvosPortInfo {
+                is_primary: true,
+                ..port("44:44:33:33:01:00", Vec::new())
+            },
             port("44:44:33:33:01:01", Vec::new()),
         ];
         let mut rpc_switch = rpc::Switch {

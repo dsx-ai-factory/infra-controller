@@ -124,10 +124,8 @@ internal UUIDs that are used to associate instances.
 Static IP for the single wired NVOS port. The updated switch must have
 exactly one NVOS port. When Core supports PATCH or masked updates, omit
 --nvos-interface only if the stored set already contains exactly one
-port; otherwise, supply exactly one --nvos-interface to replace the set.
-Older servers that support NVOS IPs but replace the full record require
-exactly one --nvos-interface in this command; omitted fields can be
-cleared. Servers without NVOS IP support ignore this field
+port; otherwise, supply exactly one --nvos-interface to replace the set. 
+Servers without NVOS IP support ignore this field
 
 `--bmc-retain-credentials <BMC_RETAIN_CREDENTIALS>`
 

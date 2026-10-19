@@ -16883,8 +16883,9 @@ type Switch struct {
 	RackId          *RackId          `protobuf:"bytes,10,opt,name=rack_id,json=rackId,proto3,oneof" json:"rack_id,omitempty"`
 	PlacementInRack *PlacementInRack `protobuf:"bytes,11,opt,name=placement_in_rack,json=placementInRack,proto3,oneof" json:"placement_in_rack,omitempty"`
 	IsPrimary       bool             `protobuf:"varint,14,opt,name=is_primary,json=isPrimary,proto3" json:"is_primary,omitempty"`
-	// Deprecated: use status.nvos_ports. A resolved endpoint is retained here
-	// for compatibility, preferring IPv4 and then the lowest-MAC port.
+	// Deprecated: use status.nvos_ports. Retains the discovered primary port,
+	// preferring IPv4 within that port. Absent if the primary is not discovered;
+	// ip is absent if that port has no address. Never falls back to a secondary.
 	//
 	// Deprecated: Marked as deprecated in nico_nico.proto.
 	NvosInfo *SwitchNvosInfo `protobuf:"bytes,15,opt,name=nvos_info,json=nvosInfo,proto3" json:"nvos_info,omitempty"`
