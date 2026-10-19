@@ -22,12 +22,13 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use carbide_instrument::{Event, LabelValue, emit};
 use notify::{PollWatcher, RecommendedWatcher, RecursiveMode, Watcher};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use super::CredentialSnapshot;
 use crate::SecretsError;
-use crate::credentials::{CredentialKey, CredentialReader, Credentials};
+use crate::credentials::CredentialReader;
 
 const DEFAULT_FILE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_CREDENTIALS_FILE_PATH: &str = "secrets.yaml";
@@ -183,17 +184,37 @@ fn start_primary_watcher(path: &Path, tx: WatchEventSender) -> notify::Result<Re
     Ok(primary)
 }
 
-pub struct FileCredentialsWatcher {
-    credentials: Arc<ArcSwap<CredentialSnapshot>>,
+/// File reader for the core API's existing credential schema.
+pub type FileCredentialsWatcher = StructuredCredentialReader<CredentialSnapshot>;
+
+#[derive(Clone, Copy)]
+enum FileFormat {
+    JsonOrYaml,
+    Json,
+}
+
+/// Watches one credential file and publishes complete, cached snapshots.
+/// Initial load failures prevent construction; failed reloads retain the last
+/// valid snapshot. Values and parser details are redacted from parse errors.
+pub struct StructuredCredentialReader<T> {
+    credentials: Arc<ArcSwap<T>>,
     /// `None` when the kernel-backed watcher could not be armed at startup;
     /// the poll watcher then detects every change on its own.
     _primary_watcher: Option<RecommendedWatcher>,
     _secondary_watcher: PollWatcher,
 }
 
-impl FileCredentialsWatcher {
+impl<T: DeserializeOwned + Send + Sync + 'static> StructuredCredentialReader<T> {
+    /// Loads JSON or YAML; reloads when the existing watchers report changes.
     pub async fn new(config: FileCredentialsConfig) -> Result<Self, SecretsError> {
-        Self::new_with_primary_watcher(config, start_primary_watcher).await
+        Self::new_with_primary_watcher(config, start_primary_watcher, FileFormat::JsonOrYaml).await
+    }
+
+    /// Loads JSON only and also rereads every poll interval, including after
+    /// atomic replacement or Kubernetes Secret symlink rotation. Incomplete JSON
+    /// and trailing content reject the update, retaining the last good snapshot.
+    pub async fn new_json(config: FileCredentialsConfig) -> Result<Self, SecretsError> {
+        Self::new_with_primary_watcher(config, start_primary_watcher, FileFormat::Json).await
     }
 
     /// `start_primary` arms the kernel-backed watcher. Its failure is not
@@ -206,6 +227,7 @@ impl FileCredentialsWatcher {
     async fn new_with_primary_watcher(
         config: FileCredentialsConfig,
         start_primary: impl FnOnce(&Path, WatchEventSender) -> notify::Result<RecommendedWatcher>,
+        format: FileFormat,
     ) -> Result<Self, SecretsError> {
         let path = config.path();
         let poll_interval = config.poll_interval();
@@ -248,7 +270,7 @@ impl FileCredentialsWatcher {
         // replacement between the read and watcher registration could remain
         // invisible until the file changes again. Events received while this
         // read is in flight remain queued for the reload task below.
-        let initial = match Self::load_file(&path).await {
+        let initial = match Self::load_file(&path, format).await {
             Ok(initial) => initial,
             Err(error) => {
                 // Close the receiver before dropping the watchers so callbacks
@@ -271,16 +293,21 @@ impl FileCredentialsWatcher {
         let watched_path = path.clone();
         let credentials_clone = credentials.clone();
         tokio::spawn(async move {
-            while let Some(event) = rx.recv().await {
-                if !event
-                    .paths
-                    .iter()
-                    .any(|event_path| event_path.file_name() == watched_path.file_name())
-                {
-                    continue;
+            let mut retry = tokio::time::interval_at(
+                tokio::time::Instant::now() + poll_interval,
+                poll_interval,
+            );
+            retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    event = rx.recv() => {
+                        let Some(event) = event else { break; };
+                        if !event.paths.iter().any(|p| p.file_name() == watched_path.file_name()) { continue; }
+                    }
+                    _ = retry.tick(), if matches!(format, FileFormat::Json) => {}
                 }
 
-                match Self::load_file(&watched_path).await {
+                match Self::load_file(&watched_path, format).await {
                     Ok(updated) => {
                         credentials_clone.store(Arc::new(updated));
                     }
@@ -300,16 +327,30 @@ impl FileCredentialsWatcher {
         })
     }
 
-    async fn load_file(path: &Path) -> Result<CredentialSnapshot, SecretsError> {
+    async fn load_file(path: &Path, format: FileFormat) -> Result<T, SecretsError> {
         let content = tokio::fs::read(path)
             .await
             .map_err(|err| SecretsError::GenericError(err.into()))?;
 
-        if let Ok(parsed) = serde_json::from_slice::<CredentialSnapshot>(&content) {
+        if matches!(format, FileFormat::Json) {
+            let mut deserializer = serde_json::Deserializer::from_slice(&content);
+            let parsed = serde_path_to_error::deserialize(&mut deserializer).map_err(|err| {
+                SecretsError::GenericError(eyre::eyre!(
+                    "failed to parse credentials JSON field {} at line {}, column {}; parse details redacted",
+                    err.path(), err.inner().line(), err.inner().column()
+                ))
+            })?;
+            deserializer.end().map_err(|err| SecretsError::GenericError(eyre::eyre!(
+                "invalid credentials JSON document at line {}, column {}; parse details redacted", err.line(), err.column()
+            )))?;
             return Ok(parsed);
         }
 
-        let parsed = serde_yaml::from_slice::<CredentialSnapshot>(&content).map_err(|err| {
+        if let Ok(parsed) = serde_json::from_slice::<T>(&content) {
+            return Ok(parsed);
+        }
+
+        let parsed = serde_yaml::from_slice::<T>(&content).map_err(|err| {
             let message = match err.location() {
                 Some(location) => format!(
                     "failed to parse static credential file as JSON or YAML at line {}, column {}; parse details redacted",
@@ -326,11 +367,13 @@ impl FileCredentialsWatcher {
 }
 
 #[async_trait]
-impl CredentialReader for FileCredentialsWatcher {
-    async fn get_credentials(
-        &self,
-        key: &CredentialKey,
-    ) -> Result<Option<Credentials>, SecretsError> {
+impl<K, V, T> CredentialReader<K, V> for StructuredCredentialReader<T>
+where
+    K: Sync,
+    V: Send,
+    T: CredentialReader<K, V> + Send + Sync,
+{
+    async fn get_credentials(&self, key: &K) -> Result<Option<V>, SecretsError> {
         self.credentials.load().get_credentials(key).await
     }
 }
@@ -532,6 +575,7 @@ mod tests {
                         ..Default::default()
                     },
                     case.start_primary,
+                    FileFormat::JsonOrYaml,
                 ))
                 .await;
             let provider = provider

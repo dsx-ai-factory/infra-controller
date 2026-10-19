@@ -163,20 +163,16 @@ pub enum PasswordPolicyError {
 }
 
 #[async_trait]
-/// Abstract over a credentials reader that functions as a kv map between "key" -> "cred"
-pub trait CredentialReader: Send + Sync {
-    async fn get_credentials(
-        &self,
-        key: &CredentialKey,
-    ) -> Result<Option<Credentials>, SecretsError>;
+/// Reads credentials by key. Read-only consumers may use their own key type;
+/// consumers may also choose their credential value type. The defaults preserve
+/// the keys and values used by the persistent credential manager.
+pub trait CredentialReader<K: Sync = CredentialKey, V: Send = Credentials>: Send + Sync {
+    async fn get_credentials(&self, key: &K) -> Result<Option<V>, SecretsError>;
 }
 
 #[async_trait]
-impl<T: CredentialReader + ?Sized> CredentialReader for Arc<T> {
-    async fn get_credentials(
-        &self,
-        key: &CredentialKey,
-    ) -> Result<Option<Credentials>, SecretsError> {
+impl<K: Sync, V: Send, T: CredentialReader<K, V> + ?Sized> CredentialReader<K, V> for Arc<T> {
+    async fn get_credentials(&self, key: &K) -> Result<Option<V>, SecretsError> {
         (**self).get_credentials(key).await
     }
 }
