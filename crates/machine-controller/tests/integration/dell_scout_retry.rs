@@ -121,7 +121,7 @@ async fn age_state(
         restart_verified: None,
         verification_attempts: None,
     };
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE machines SET controller_state_version = $1, last_reboot_requested = $2, \
          last_reboot_time = NULL, last_scout_contact_time = NULL, last_cleanup_time = $3 \
          WHERE id = $4",
@@ -133,14 +133,43 @@ async fn age_state(
     .execute(&env.test_harness.api().database_connection)
     .await
     .unwrap();
+
+    assert_eq!(result.rows_affected(), 1);
+
+    let machine = host.host.machine().await;
+    assert!(machine.bmc_vendor().is_unknown());
+    let bmc_ip = machine
+        .status
+        .bmc_info
+        .ip
+        .expect("host BMC IP should exist");
+    let metadata = db::explored_endpoints::lookup_bmc_metadata_by_ip(
+        bmc_ip,
+        &env.test_harness.api().database_connection,
+    )
+    .await
+    .unwrap();
+    assert_eq!(metadata.vendor.as_deref(), Some("Dell"));
+    assert!(machine.state.version.timestamp() <= Utc::now() - age);
+    assert!(machine.status.last_reboot_time.is_none());
+    assert!(machine.status.last_scout_contact_time.is_none());
+    assert!(
+        machine
+            .status
+            .last_reboot_requested
+            .as_ref()
+            .is_some_and(|request| request.time < machine.state.version.timestamp())
+    );
 }
 
-fn assert_force_restart(actions: &[RedfishSimAction]) {
+async fn assert_force_restart(host: &TestManagedHost, actions: &[RedfishSimAction]) {
+    let machine = host.host.machine().await;
     assert!(
         actions.contains(&RedfishSimAction::Power(
             libredfish::SystemPowerControl::ForceRestart,
         )),
-        "expected an early host-only restart, got {actions:?}"
+        "expected an early host-only restart, got {actions:?}; controller outcome: {:?}",
+        machine.controller_state_outcome,
     );
 }
 
@@ -164,7 +193,7 @@ async fn booting_with_discovery_image_retries_once_after_ten_minutes(pool: PgPoo
 
     let first = env.redfish_sim.timepoint();
     env.run_single_iteration().await;
-    assert_force_restart(&env.redfish_sim.actions_since(&first).all_hosts());
+    assert_force_restart(&host, &env.redfish_sim.actions_since(&first).all_hosts()).await;
     assert!(matches!(
         host.host.machine().await.current_state(),
         ManagedHostState::Assigned {
@@ -205,7 +234,7 @@ async fn host_cleanup_retries_once_after_ten_minutes(pool: PgPool) {
 
     let first = env.redfish_sim.timepoint();
     env.run_single_iteration().await;
-    assert_force_restart(&env.redfish_sim.actions_since(&first).all_hosts());
+    assert_force_restart(&host, &env.redfish_sim.actions_since(&first).all_hosts()).await;
     assert_eq!(host.host.machine().await.current_state(), &state);
 
     let second = env.redfish_sim.timepoint();
@@ -240,7 +269,11 @@ async fn completed_host_cleanup_advances_normally(pool: PgPool) {
     let timepoint = env.redfish_sim.timepoint();
     env.run_single_iteration().await;
 
-    assert_force_restart(&env.redfish_sim.actions_since(&timepoint).all_hosts());
+    assert_force_restart(
+        &host,
+        &env.redfish_sim.actions_since(&timepoint).all_hosts(),
+    )
+    .await;
     assert_eq!(
         host.host.machine().await.current_state(),
         &ManagedHostState::HostInit {

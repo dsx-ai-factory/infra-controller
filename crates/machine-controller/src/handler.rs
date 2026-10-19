@@ -6096,8 +6096,22 @@ async fn trigger_dell_scout_early_retry_if_needed(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<Option<RebootStatus>, StateHandlerError> {
     let host = &state.host_snapshot;
+    // Proactive hosts have default hardware inventory until Scout first boots.
+    // Use Site Explorer's BMC vendor while Scout's vendor is still unknown.
+    let scout_vendor = host.bmc_vendor();
+    let is_dell = if !scout_vendor.is_unknown() {
+        scout_vendor.is_dell()
+    } else if let Some(bmc_ip) = host.status.bmc_info.ip {
+        db::explored_endpoints::lookup_bmc_metadata_by_ip(bmc_ip, &mut ctx.services.db_reader)
+            .await?
+            .vendor
+            .as_deref()
+            .is_some_and(|vendor| bmc_vendor::BMCVendor::from(vendor).is_dell())
+    } else {
+        false
+    };
     let Some(decision) = dell_scout_early_retry(
-        host.bmc_vendor().is_dell(),
+        is_dell,
         host.state.version.timestamp(),
         host.status.last_scout_contact_time,
         retry_attempted,
