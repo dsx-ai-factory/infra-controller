@@ -95,6 +95,18 @@ pub trait DataSink: Send + Sync {
         event: &CollectorEvent,
     ) -> Result<(), HealthError>;
 
+    /// Dispatches an event with source classification for metric export policy.
+    /// `is_event_record` marks individual event occurrences, not aggregate counts.
+    /// Sinks without an event-record policy receive the original event unchanged.
+    fn try_handle_classified_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        _is_event_record: bool,
+    ) -> Result<(), HealthError> {
+        self.try_handle_event(context, event)
+    }
+
     /// Whether this sink can retain a metric payload shared within one fanout.
     fn accepts_shared_metric(&self) -> bool {
         false
@@ -118,7 +130,17 @@ pub trait DataSink: Send + Sync {
     /// The result is deliberately dropped here: failures are already logged
     /// by the failing sink, and metered when dispatched through the composite.
     fn handle_event(&self, context: &EventContext, event: &CollectorEvent) {
-        if let Err(error) = self.try_handle_event(context, event) {
+        self.handle_classified_event(context, event, false);
+    }
+
+    /// Fire-and-forget dispatch preserving the metric's source classification.
+    fn handle_classified_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        is_event_record: bool,
+    ) {
+        if let Err(error) = self.try_handle_classified_event(context, event, is_event_record) {
             // Fire-and-forget by contract: the sink logged its own detail and
             // the composite meters failures; this line is the safety net for a
             // future sink that forgets to do either.
