@@ -2162,6 +2162,74 @@ mod test_batched_lookups {
     }
 
     #[crate::sqlx_test]
+    async fn snapshot_rejects_malformed_older_active_version(pool: sqlx::PgPool) {
+        let [(service_id, initial_version)] = seed_services(&pool, 1).await.try_into().unwrap();
+        let mut txn = pool.begin().await.expect("begin snapshot decode test");
+        let version_change = initial_version.incremental_change();
+        let (_, updated) = update(
+            &mut txn,
+            service_id,
+            None,
+            None,
+            &[],
+            "updated pod definition",
+            None,
+            false,
+            version_change,
+        )
+        .await
+        .expect("create valid latest version");
+
+        let [snapshot] = find_snapshots_by_ids(&mut txn, &[service_id])
+            .await
+            .expect("read complete active version inventory")
+            .try_into()
+            .expect("one service snapshot");
+        assert_eq!(
+            snapshot.active_versions,
+            vec![updated.version, initial_version]
+        );
+
+        // `ConfigVersion` cannot represent this malformed value. Keep the numeric
+        // prefix valid so the snapshot query's integer cast succeeds and the older
+        // row is aggregated.
+        sqlx::query(
+            "UPDATE extension_service_versions SET version = 'V1-Tbad'
+             WHERE service_id = $1 AND version = $2",
+        )
+        .bind(service_id)
+        .bind(initial_version)
+        .execute(&mut *txn)
+        .await
+        .expect("corrupt only the older version's timestamp");
+
+        let latest = find_version_info_of_known_service(&mut txn, service_id, None)
+            .await
+            .expect("the latest version still decodes");
+        assert_eq!(latest.version, updated.version);
+
+        let error = find_snapshots_by_ids(&mut txn, &[service_id])
+            .await
+            .expect_err("a malformed older version must fail the complete snapshot");
+        let DatabaseError::Sqlx(annotated) = &error else {
+            panic!("expected Sqlx, got {error:?}");
+        };
+        let sqlx::Error::ColumnDecode { index, source } = &annotated.source else {
+            panic!("expected ColumnDecode, got {error:?}");
+        };
+        assert_eq!(index, "active_versions");
+        assert!(
+            matches!(
+                source.downcast_ref::<config_version::ConfigVersionParseError>(),
+                Some(config_version::ConfigVersionParseError::VersionFormat(version))
+                    if version == "V1-Tbad"
+            ),
+            "{source:?}"
+        );
+        txn.rollback().await.expect("rollback snapshot decode test");
+    }
+
+    #[crate::sqlx_test]
     async fn version_queries_decode_complete_records(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
