@@ -73,6 +73,24 @@ The expected results are:
 The tracing sink is also enabled, so the hardware-health terminal shows
 endpoint discovery, collector events, and any collection errors.
 
+## gNMI event metrics
+
+The Prometheus sink excludes individual gNMI event records from `/telemetry`
+because event IDs and creation times create distinct series for each occurrence.
+The exclusion covers the built-in
+`carbide_hardware_health_nvue_gnmi_events_on_change_row_severity` family and custom
+metric mappings under `/system-events/system-event`, regardless of subscription
+mode, metric name, unit, or metric prefix. Cached republication applies the same
+exclusion. Aggregate counts and hardware state metrics remain eligible.
+
+When `collectors.nvue.gnmi.system_events_enabled` is enabled (the default), the
+built-in collector exposes `carbide_hardware_health_nvue_gnmi_events_total` on
+`/metrics` for aggregate row counts by severity and logs individual event details.
+Custom subscriptions alone do not produce the built-in counter or detailed event
+logs. A configured OTLP sink receives built-in event metrics and custom metric
+projections. OTLP export, collector caching, and reconciliation behavior are
+unchanged.
+
 ## Inject an unhealthy sensor
 
 `bmc-mock` supports runtime response injection. The following rule changes the
