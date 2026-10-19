@@ -101,7 +101,10 @@ Managed-host DPUs receive the site-wide leaf password the operator sets with
 `nico-admin-cli credential bgp set-sitewide`, enabled by `bgp_leaf_session_password = "site_wide"`
 in the nico-api config (that key only selects the credential source; the password itself
 never appears in the config). The two passwords must match when the same ToRs serve both.
-Maximum 80 bytes, the TCP MD5 key limit.
+Maximum 80 bytes, the TCP MD5 key limit, and a single line of printable ASCII (bytes 0x20 to
+0x7E, space included): the build rejects anything else, control characters (carriage return,
+newline, tab, Ctrl-B, DEL) as well as non-ASCII text, judged independently of the build host's
+locale.
 
 **Encrypted artifacts (`--encrypt-artifacts`).** `servers/` is packed and encrypted as
 `servers.tar.enc` (AES-256-CBC, PBKDF2, with a SHA-256 manifest inside) using the passphrase

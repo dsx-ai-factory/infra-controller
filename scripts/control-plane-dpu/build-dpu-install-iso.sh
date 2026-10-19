@@ -247,6 +247,19 @@ render_template() {
         local val="${1#*=}"
         # The vars file is YAML with double-quoted scalars: escape the two
         # characters that would break that quoting (a password may contain them).
+        # A control character (judged in the C locale: bytes 0x00-0x1F and 0x7F)
+        # is refused outright: inside such a scalar YAML would fold a raw line
+        # break into a space or drop the byte, no variable rendered here is
+        # multi-line, and a value must reach the template unchanged or not at
+        # all. Only controls, not [[:print:]]: non-ASCII characters are supported,
+        # except three that YAML parsers treat as line breaks and that
+        # [[:cntrl:]] cannot see in the C locale because their UTF-8 bytes are
+        # >= 0x80, so they are refused by name: U+0085 NEL (gomplate's parser
+        # folds it), U+2028 LS and U+2029 PS (YAML 1.1 breaks).
+        if ( LC_ALL=C; [[ "$val" == *[[:cntrl:]]* ]] ) || [[ "$val" == *$'\xc2\x85'* || "$val" == *$'\xe2\x80\xa8'* || "$val" == *$'\xe2\x80\xa9'* ]]; then
+            rm -f "$vars_file"
+            die "render_template: variable '$key' contains a control or line-separator character; refusing to render it"
+        fi
         val="${val//\\/\\\\}"
         val="${val//\"/\\\"}"
         printf '%s: "%s"\n' "$key" "$val" >> "$vars_file"
@@ -396,7 +409,7 @@ if [[ "$ENCRYPT_ARTIFACTS" == "true" ]]; then
     command -v openssl &>/dev/null || die "openssl is required for --encrypt-artifacts"
     command -v shasum  &>/dev/null || die "shasum is required for --encrypt-artifacts"
     if [[ -z "${DPU_ISO_ARTIFACT_PASSWORD:-}" ]] && have_tty; then
-        read -r -s -p "Passphrase to encrypt the ISO artifacts (DPU_ISO_ARTIFACT_PASSWORD): " DPU_ISO_ARTIFACT_PASSWORD < /dev/tty
+        IFS= read -r -s -p "Passphrase to encrypt the ISO artifacts (DPU_ISO_ARTIFACT_PASSWORD): " DPU_ISO_ARTIFACT_PASSWORD < /dev/tty
         echo
     fi
     [[ -n "${DPU_ISO_ARTIFACT_PASSWORD:-}" ]] || die "--encrypt-artifacts needs a passphrase: export DPU_ISO_ARTIFACT_PASSWORD or enter it at the prompt"
@@ -406,10 +419,14 @@ if [[ "$ENCRYPT_ARTIFACTS" == "true" ]]; then
     export -n DPU_ISO_ARTIFACT_PASSWORD
     log "Artifacts will be encrypted (servers.tar.enc); install.sh will ask for the passphrase"
 fi
+# >>> leaf-password-validation
+# Self-contained: unit-tests source this block verbatim (die, log, have_tty and
+# INSTALL_WITH_LEAF_PASSWORD provided by the caller).
 BGP_LEAF_SESSION_PASSWORD="${BGP_LEAF_SESSION_PASSWORD:-}"
 if [[ "$INSTALL_WITH_LEAF_PASSWORD" == "true" ]]; then
     if [[ -z "$BGP_LEAF_SESSION_PASSWORD" ]] && have_tty; then
-        read -r -s -p "BGP leaf session password (BGP_LEAF_SESSION_PASSWORD): " BGP_LEAF_SESSION_PASSWORD < /dev/tty
+        # IFS= so that leading and trailing blanks typed at the prompt survive, as they do in the variable.
+        IFS= read -r -s -p "BGP leaf session password (BGP_LEAF_SESSION_PASSWORD): " BGP_LEAF_SESSION_PASSWORD < /dev/tty
         echo
     fi
     [[ -n "$BGP_LEAF_SESSION_PASSWORD" ]] \
@@ -418,12 +435,22 @@ if [[ "$INSTALL_WITH_LEAF_PASSWORD" == "true" ]]; then
     # accepts at most 80 BYTES, so count bytes, not characters (UTF-8 locales).
     _pw_bytes=$(LC_ALL=C printf '%s' "$BGP_LEAF_SESSION_PASSWORD" | wc -c | tr -d ' ')
     (( _pw_bytes <= 80 )) || die "BGP leaf session password must be at most 80 bytes (got $_pw_bytes)"
-    [[ "$BGP_LEAF_SESSION_PASSWORD" == *$'\n'* ]] && die "BGP leaf session password must be a single line"
+    # Printable ASCII only, judged in the C locale so the answer does not depend
+    # on the build host's locale: the password travels to the template through
+    # a double-quoted YAML scalar, where a raw carriage return is a line break
+    # that YAML folds into a space ("abc<CR>def" renders as "abc def" and the
+    # leaf session never comes up), and every BGP CLI on either end of the
+    # session takes the key as plain text. [[:cntrl:]] alone would miss
+    # non-ASCII text and invalid bytes and would vary with the locale.
+    if ( LC_ALL=C; [[ "$BGP_LEAF_SESSION_PASSWORD" == *[![:print:]]* ]] ); then
+        die "BGP leaf session password must be a single line of printable ASCII characters (0x20-0x7E): it contains a control character (such as a carriage return, newline or tab) or a non-ASCII byte"
+    fi
     log "Leaf BGP password: provided ($_pw_bytes bytes); rendered into every startup.yaml inside the encrypted artifacts"
 elif [[ -n "$BGP_LEAF_SESSION_PASSWORD" ]]; then
     log "BGP_LEAF_SESSION_PASSWORD is set but the site config has no 'installWithLeafPassword: true' — ignoring it"
     BGP_LEAF_SESSION_PASSWORD=""
 fi
+# <<< leaf-password-validation
 
 # Per-node configs are rendered here before staging. With a leaf password they
 # carry a secret, so they go into a private (0700) tree under the output dir that
