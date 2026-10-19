@@ -69,6 +69,7 @@ Optional flags add metadata or pre-allocate resources:
 | `--sku-id` | Assign an existing SKU from the Site selected by `--site-id` to the host when it is discovered; refer to [Assign a SKU through the expected machine](sku-validation.md#assign-a-sku-through-the-expected-machine) for validation and omission behavior |
 | `--manufacturer`, `--model`, `--firmware-version`, `--name`, `--description` | Free-text hardware metadata |
 | `--slot-id`, `--tray-idx`, `--host-id` | Physical placement within a rack/tray |
+| `--bmc-retain-credentials` | `true` to keep the factory-default BMC credentials instead of rotating them; defaults to `false` |
 
 You can also pass additional fields in the stdin JSON object. Keep the password
 on stdin rather than writing it into the command:
@@ -101,6 +102,18 @@ unset NICO_PASSWORD
 During DPU matching, every nonempty serial in `fallbackDPUSerialNumbers` must be discovered and its DPU ready before ingestion, even when host inventory is fully matched. After replacing a DPU (RMA), update or remove its old serial from this list; stale entries block ingestion. See [DPU-host pairing](../architecture/redfish_workflow.md#3-dpu-host-pairing).
 
 `hostLifecycleProfile` is also JSON-only. Set `disableLockdown` to `true` only when the host must remain unlocked during lifecycle management. When the profile is omitted or `disableLockdown` is `false`, NICo applies UEFI lockdown during `HostInit`.
+
+`bmcRetainCredentials` set to `true` makes Site Explorer keep the factory-default
+BMC credentials instead of rotating them to the site-wide credential. On create
+and replace-all, an omitted or `null` value is stored as `false`, which rotates
+the BMC password, matching `nico-admin-cli expected-machine add
+--bmc-retain-credentials`. On update, send an explicit `true` or `false`;
+omitting it or sending `null` keeps the stored value. Site Explorer reads the
+setting only when it first stores a BMC's credentials, so changing it later does
+not rotate or restore that BMC's password. When
+`bmc_factory_reset_on_instance_termination_enabled` is set (off by default), a
+later BMC factory reset uses the current value: `true` skips restoring the stored
+credentials, which leaves the BMC on its factory-default password.
 
 ### Batch (Recommended for Full-Rack Onboarding)
 
@@ -147,7 +160,7 @@ Once Expected Machines are registered and the trust policy is in place, NICo's S
 
 The high-level flow:
 
-1. **DHCP discovery**: the host BMC sends a DHCP request; NICo assigns an IP and Site Explorer probes the BMC over Redfish using the factory default credentials from the Expected Machine, then rotates the BMC password to the site-wide credential. See [Redfish Workflow](../architecture/redfish_workflow.md).
+1. **DHCP discovery**: the host BMC sends a DHCP request; NICo assigns an IP and Site Explorer probes the BMC over Redfish using the factory default credentials from the Expected Machine, then rotates the BMC password to the site-wide credential unless `bmcRetainCredentials` is `true`. See [Redfish Workflow](../architecture/redfish_workflow.md).
 1. **Preingestion**: NICo runs a preingestion state machine against each discovered BMC endpoint (host and DPU). It checks BMC clock drift against site time, resetting the BMC if needed. For host endpoints, firmware components are upgraded to the minimum version required for ingestion.
 1. **DPU-host pairing**: Site Explorer correlates host and DPU serial numbers to form matched pairs. Once DPUs are validated and paired, the `ManagedHost` object is created and the state machine starts.
 1. **`DpuDiscoveringState` / `DPUInit`**: NICo configures Secure Boot on the DPU, installs the DPU OS (BFB image), and power-cycles the host to apply the new DPU configuration.
