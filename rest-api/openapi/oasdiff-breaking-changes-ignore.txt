@@ -335,6 +335,11 @@ API POST /v2/org/{org}/nico/expected-rack-group added the new required request p
 API PUT /v2/org/{org}/nico/expected-rack-group added the new required request property `expectedRackGroups/items/protocol`
 API PUT /v2/org/{org}/nico/expected-rack-group/all added the new required request property `expectedRackGroups/items/protocol`
 
+# Expected switches require operator-declared NVOS ports; discovery no longer fills them.
+# Compatibility exception and migration: fern/changelog/2026-10-19.mdx.
+API POST /v2/org/{org}/nico/expected-switch added the new required request property `nvosInterfaces`
+API PUT /v2/org/{org}/nico/expected-switch/all added the new required request property `expectedSwitches/items/nvosInterfaces`
+
 API POST /v2/org/{org}/nico/dpu-extension-service added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/deployInCluster`
 API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/deployInCluster`
 API POST /v2/org/{org}/nico/dpu-extension-service added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceID`
