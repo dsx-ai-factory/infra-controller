@@ -365,7 +365,10 @@ func TestTxTryAcquireAdvisoryLock(t *testing.T) {
 				assert.Nil(t, err)
 				tx2, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
 				assert.Nil(t, err)
+				rollbackDone := make(chan struct{})
+				defer func() { <-rollbackDone }()
 				go func() {
+					defer close(rollbackDone)
 					time.Sleep(150 * time.Millisecond)
 					assert.NoError(t, tx1.Rollback())
 				}()
