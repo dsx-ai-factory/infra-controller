@@ -30,7 +30,7 @@ type OperatingSystemIpxeArtifact struct {
 	Url string `json:"url"`
 	// Optional SHA256 checksum
 	Sha NullableString `json:"sha,omitempty"`
-	// Optional auth type: Basic or Bearer
+	// Optional auth type: Basic or Bearer. An empty string is treated as no auth type.
 	AuthType NullableString `json:"authType,omitempty"`
 	// Optional auth token. Accepted in create/update requests and never returned in API responses.
 	AuthToken NullableString `json:"authToken,omitempty"`

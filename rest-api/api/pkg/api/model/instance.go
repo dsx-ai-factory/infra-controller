@@ -1750,9 +1750,9 @@ func (idr *APIInstanceDeleteRequest) Validate() error {
 			),
 			validation.Field(&idr.MachineHealthIssue.Summary,
 				validation.Required,
-				validation.Length(0, MachineHealthIssueSummaryMaxLength).Error(validationErrorStringLength)),
+				validation.RuneLength(0, MachineHealthIssueSummaryMaxLength).Error(validationErrorStringLength)),
 			validation.Field(&idr.MachineHealthIssue.Details,
-				validation.Length(0, MachineHealthIssueDetailsMaxLength).Error(validationErrorStringLength)),
+				validation.RuneLength(0, MachineHealthIssueDetailsMaxLength).Error(validationErrorStringLength)),
 		)
 
 		if err != nil {

@@ -23444,8 +23444,9 @@ components:
           enum:
             - Basic
             - Bearer
+            - ''
             - null
-          description: Authentication type for image URL
+          description: Authentication type for image URL. An empty string means the credentials were cleared through an update.
         imageAuthToken:
           type:
             - string
@@ -23597,8 +23598,9 @@ components:
           enum:
             - Basic
             - Bearer
+            - ''
             - null
-          description: 'Optional auth type: Basic or Bearer'
+          description: 'Optional auth type: Basic or Bearer. An empty string is treated as no auth type.'
         authToken:
           type:
             - string
@@ -23832,8 +23834,9 @@ components:
           enum:
             - Basic
             - Bearer
+            - ''
             - null
-          description: 'Authentication type for image URL, if needed; required if imageAuthToken is specified'
+          description: 'Authentication type for image URL, if needed; required if imageAuthToken is specified. An empty string is treated as not specified.'
         imageAuthToken:
           type:
             - string
@@ -23958,13 +23961,14 @@ components:
           enum:
             - Basic
             - Bearer
+            - ''
             - null
-          description: 'Authentication type for image URL, if needed; required if imageAuthToken is specified. Can be updated independently without re-sending imageUrl/imageSha.'
+          description: 'Authentication type for image URL, if needed; required if imageAuthToken is specified. Can be updated independently without re-sending imageUrl/imageSha. Set to an empty string to clear the stored value, null leaves it unchanged.'
         imageAuthToken:
           type:
             - string
             - 'null'
-          description: 'Auth token to retrieve the image from image URL, required if imageAuthType is specified. Can be updated independently without re-sending imageUrl/imageSha.'
+          description: 'Auth token to retrieve the image from image URL, required if imageAuthType is specified. Can be updated independently without re-sending imageUrl/imageSha. Set to an empty string to clear the stored value, null leaves it unchanged.'
         imageDisk:
           type:
             - string
@@ -25379,6 +25383,10 @@ components:
     InstanceDeleteHealthIssue:
       title: InstanceDeleteHealthIssue
       type: object
+      examples:
+        - category: Network
+          summary: Machine has DPU connectivity error
+          details: Tenant observed repeated link flaps on the DPU uplink.
       description: Tenant-reported Machine issue that necessitates Instance deletion. Categories match the Core `IssueCategory` values.
       required:
         - category
