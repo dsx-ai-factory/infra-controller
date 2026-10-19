@@ -95,6 +95,31 @@ func TestConfig_Validate(t *testing.T) {
 			values:    map[string]string{ConfigTemporalSiteNamespaceSuccessfulInventoryRetention: "-1h"},
 			wantPanic: true,
 		},
+		{
+			name: "successful inventory retention longer than the namespace retention is rejected",
+			values: map[string]string{
+				ConfigTemporalSiteNamespaceRetention:                    "72h",
+				ConfigTemporalSiteNamespaceSuccessfulInventoryRetention: "96h",
+			},
+			wantPanic: true,
+		},
+		{
+			name: "successful inventory retention equal to the namespace retention is rejected",
+			values: map[string]string{
+				ConfigTemporalSiteNamespaceRetention:                    "72h",
+				ConfigTemporalSiteNamespaceSuccessfulInventoryRetention: "72h",
+			},
+			wantPanic: true,
+		},
+		{
+			// Zero leaves the namespace retention unchanged, so there's nothing to compare against
+			name: "successful inventory retention is not compared with an unchanged namespace retention",
+			values: map[string]string{
+				ConfigTemporalSiteNamespaceRetention:                    "0",
+				ConfigTemporalSiteNamespaceSuccessfulInventoryRetention: "96h",
+			},
+			wantSuccessfulRetention: 96 * time.Hour,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

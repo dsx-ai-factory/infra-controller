@@ -292,6 +292,14 @@ func (c *Config) Validate() {
 		}
 	}
 
+	// Temporal deletes successful inventory runs at the namespace retention, so a cleanup at or past
+	// it never finds anything to delete
+	siteRetention := c.GetTemporalSiteNamespaceRetention()
+	successfulInventoryRetention := c.GetTemporalSiteNamespaceSuccessfulInventoryRetention()
+	if siteRetention > 0 && successfulInventoryRetention >= siteRetention {
+		log.Panic().Msgf("%s %v must be shorter than %s %v, or 0 to disable", ConfigTemporalSiteNamespaceSuccessfulInventoryRetention, successfulInventoryRetention, ConfigTemporalSiteNamespaceRetention, siteRetention)
+	}
+
 	if c.GetNgcAPIBaseURL() == "" {
 		log.Warn().Msg("ngc api base url config not specified, NGC user lookups will be unavailable")
 	}
