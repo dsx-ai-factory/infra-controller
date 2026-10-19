@@ -39,6 +39,7 @@ use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_e
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialReader, Credentials,
 };
+use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{
     AsMachineId, DpuMachineId, HostMachineId, MachineId, MachineIdSubtypeTrait,
 };
@@ -8894,20 +8895,23 @@ impl StateHandler for InstanceStateHandler {
                     )
                     .await?;
                     let extension_services_status = &mut extension_services_status;
+
+                    // Reclaim endpoint-free terminated attachments before computing readiness so
+                    // the returned transaction commits the status entries used by that decision.
                     let txn = if extension_services_status.configs_synced == SyncState::Synced
                         && !extension_services_status
                             .get_terminated_service_keys()
                             .is_empty()
                     {
                         let mut txn = ctx.services.db_pool.begin().await?;
-                        cleanup_terminated_extension_services(
+                        let cleanup_applied = cleanup_terminated_extension_services(
                             instance,
                             extension_services_status,
                             txn.as_mut(),
                         )
                         .await?;
 
-                        Some(txn)
+                        cleanup_applied.then_some(txn)
                     } else {
                         None
                     };
@@ -8935,6 +8939,9 @@ impl StateHandler for InstanceStateHandler {
                                     )
                                 }
                             };
+
+                    // Publish attachment cleanup with the readiness result computed from the same
+                    // InstanceExtensionServicesStatus.
                     Ok(match txn {
                         Some(txn) => outcome.with_txn(txn),
                         None => outcome,
@@ -9055,13 +9062,17 @@ impl StateHandler for InstanceStateHandler {
                                         .is_empty() =>
                             {
                                 let mut txn = ctx.services.db_pool.begin().await?;
-                                cleanup_terminated_extension_services(
+                                // Retain the transaction only when attachment cleanup wrote,
+                                // allowing endpoint-protected tombstones to coexist with Ready work.
+                                if cleanup_terminated_extension_services(
                                     instance,
                                     &mut extension_services_status,
                                     txn.as_mut(),
                                 )
-                                .await?;
-                                txn_opt = Some(txn);
+                                .await?
+                                {
+                                    txn_opt = Some(txn);
+                                }
                             }
                             Ok(_) => {}
                             Err(error) => {
@@ -9513,6 +9524,21 @@ impl StateHandler for InstanceStateHandler {
                                 ));
                     }
 
+                    // Persisted endpoints are the release authority. Placement
+                    // termination alone cannot prove service-network cleanup.
+                    if !db::instance::find_service_vpc_memberships(
+                        &ctx.services.db_pool,
+                        instance.id,
+                    )
+                    .await?
+                    .is_empty()
+                    {
+                        return Ok(StateHandlerOutcome::wait(
+                            "Waiting for service VPC network cleanup before deleting the instance."
+                                .to_string(),
+                        ));
+                    }
+
                     // Extension services should be terminated on all DPUs
                     if mh_snapshot.has_managed_dpus() {
                         let extension_services_status = get_extension_services_status(
@@ -9641,13 +9667,14 @@ impl StateHandler for InstanceStateHandler {
                     handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceRestart)
                         .await?;
 
-                    // Deleting an instance and marking vpc segments deleted must be done together.
-                    // If segments are marked deleted and instance is not deleted (may be due to redfish failure),
-                    // network segment handler will delete those segments forcefully.
-                    // if instance is deleted before, we won't get network segment details as these
-                    // details are stored in instance's network config which is deleted.
+                    // Commit Instance deletion, VPC-segment deletion, and loopback release
+                    // together. If segments are marked deleted without Instance deletion, the
+                    // network segment handler can force-delete them while the Instance still
+                    // depends on them. If Instance deletion commits first, a retry cannot load
+                    // the network config that identifies those segments.
 
-                    // Delete from database now. Once done, reboot and move to next state.
+                    // The reboot request has succeeded; delete the Instance and publish its
+                    // resource cleanup with PostAssignedMeasuring.
                     let mut txn = ctx.services.db_pool.begin().await?;
                     db::instance::delete(instance.id, &mut txn)
                         .await
@@ -10060,29 +10087,42 @@ async fn handle_instance_network_config_update_request(
                 .await?;
             }
 
-            // The cleanup transaction in `force_delete_instance` locks addresses,
-            // then the Instance, then its segments. Clearing the request here avoids
-            // a deadlock even when SLAAC has no stored addresses to lock.
+            // The cleanup transaction in `force_delete_instance` locks addresses, then the
+            // Instance, then its segments. Clearing the request here preserves that order to
+            // avoid deadlocks and holds the Instance lock across the later service-membership
+            // read and loopback deletion, even when SLAAC has no stored addresses to lock.
             db::instance::delete_update_network_config_request(&instance.id, &mut txn).await?;
 
             if !resources_to_be_released.is_empty() {
-                // Resolve VPC membership before old VPC-prefix segments are marked deleted.
-                let old_vpc_ids =
-                    vpc_ids_for_interfaces(&update_request.old_config.interfaces, &mut txn).await?;
-                let new_vpc_ids =
-                    vpc_ids_for_interfaces(&update_request.new_config.interfaces, &mut txn).await?;
-                let released_vpc_ids = old_vpc_ids.difference(&new_vpc_ids).copied().collect_vec();
-
+                // Resolve VPC membership before old VPC-prefix segments are marked deleted,
+                // preserving pre-cleanup DPU/VPC ownership for loopback release.
+                let old_memberships = vpc_dpu_memberships_for_interfaces(
+                    &update_request.old_config.interfaces,
+                    mh_snapshot,
+                    &mut txn,
+                )
+                .await?;
+                let new_memberships = vpc_dpu_memberships_for_interfaces(
+                    &update_request.new_config.interfaces,
+                    mh_snapshot,
+                    &mut txn,
+                )
+                .await?;
                 release_network_segments_with_vpc_prefix(&resources_to_be_released, &mut txn)
                     .await?;
-                release_vpc_dpu_loopback_for_vpcs(
-                    mh_snapshot,
+                release_vpc_dpu_loopback_for_memberships(
+                    instance.id,
                     common_pools.as_deref(),
                     &mut txn,
-                    &released_vpc_ids,
+                    &old_memberships,
+                    &new_memberships,
                 )
                 .await?;
             }
+
+            // Publish address deletion, network-update request deletion, segment deletion, and
+            // loopback release with Ready so retries cannot observe partially released network
+            // resources.
             let next_state = ManagedHostState::Assigned {
                 instance_state: InstanceState::Ready,
             };
@@ -10272,25 +10312,47 @@ pub async fn release_vpc_dpu_loopback(
     Ok(())
 }
 
-/// Releases VPC DPU loopbacks for selected VPCs on every DPU in the managed host.
-async fn release_vpc_dpu_loopback_for_vpcs(
-    mh_snapshot: &ManagedHostStateSnapshot,
+/// Releases candidate DPU/VPC loopbacks only when neither current host nor
+/// service membership retains them.
+///
+/// Candidates identify ownership that may have ended. Retained host membership
+/// and service-interface rows visible through `txn` must reflect post-mutation
+/// state so host cleanup and final service reclamation share one release decision.
+///
+/// Callers must acquire the Instance row lock before any segment or loopback
+/// mutation, preserving address → Instance → segment ordering and preventing
+/// endpoint publication between the membership read and loopback deletion.
+async fn release_vpc_dpu_loopback_for_memberships(
+    instance_id: InstanceId,
     common_pools: Option<&CommonPools>,
     txn: &mut PgConnection,
-    vpc_ids: &[VpcId],
+    candidate_memberships: &HashSet<(DpuMachineId, VpcId)>,
+    retained_host_memberships: &HashSet<(DpuMachineId, VpcId)>,
 ) -> Result<(), StateHandlerError> {
     let Some(common_pools) = common_pools else {
         return Ok(());
     };
 
-    if vpc_ids.is_empty() {
+    if candidate_memberships.is_empty() {
         return Ok(());
     }
 
-    // Release the removed VPC loopbacks from every DPU that may have rendered them.
-    for dpu_snapshot in &mh_snapshot.dpu_snapshots {
-        let dpu_id = dpu_snapshot.id;
-        db::vpc_dpu_loopback::delete_and_deallocate_for_vpcs(common_pools, &dpu_id, vpc_ids, txn)
+    let retained_memberships = db::instance::find_service_vpc_memberships(&mut *txn, instance_id)
+        .await?
+        .into_iter()
+        .chain(retained_host_memberships.iter().copied())
+        .collect::<HashSet<_>>();
+
+    let mut releasable_by_dpu = HashMap::<DpuMachineId, Vec<VpcId>>::new();
+    for &(dpu_id, vpc_id) in candidate_memberships {
+        // Host and service use retain only their exact DPU/VPC loopback.
+        if !retained_memberships.contains(&(dpu_id, vpc_id)) {
+            releasable_by_dpu.entry(dpu_id).or_default().push(vpc_id);
+        }
+    }
+
+    for (dpu_id, vpc_ids) in releasable_by_dpu {
+        db::vpc_dpu_loopback::delete_and_deallocate_for_vpcs(common_pools, &dpu_id, &vpc_ids, txn)
             .await
             .map_err(|e| StateHandlerError::ResourceCleanupError {
                 resource: "VpcLoopbackIp",
@@ -10301,11 +10363,20 @@ async fn release_vpc_dpu_loopback_for_vpcs(
     Ok(())
 }
 
-/// Returns the VPC IDs referenced by the assigned network segments on these interfaces.
-async fn vpc_ids_for_interfaces(
+/// Maps each VPC interface to its exact host DPU when possible and to every current host DPU when
+/// unresolved, preventing cleanup from guessing which DPU/VPC loopback the interface uses.
+async fn vpc_dpu_memberships_for_interfaces(
     interfaces: &[InstanceInterfaceConfig],
+    mh_snapshot: &ManagedHostStateSnapshot,
     txn: &mut PgConnection,
-) -> Result<HashSet<VpcId>, StateHandlerError> {
+) -> Result<HashSet<(DpuMachineId, VpcId)>, StateHandlerError> {
+    // Zero-DPU hosts can have VPC-bound HostInband interfaces but cannot own
+    // DPU loopbacks, so there is no membership to resolve or release.
+    let host_dpu_ids = mh_snapshot.host_snapshot.associated_dpu_machine_ids();
+    if host_dpu_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+
     let segment_ids = interfaces
         .iter()
         .filter_map(|iface| iface.network_segment_id)
@@ -10323,10 +10394,57 @@ async fn vpc_ids_for_interfaces(
     )
     .await?;
 
-    Ok(segments
+    let vpc_by_segment = segments
         .into_iter()
-        .filter_map(|segment| segment.config.vpc_id)
-        .collect())
+        .filter_map(|segment| segment.config.vpc_id.map(|vpc_id| (segment.id, vpc_id)))
+        .collect::<HashMap<_, _>>();
+    let primary_dpu_id = mh_snapshot.host_snapshot.primary_attached_dpu_machine_id();
+    let dpu_by_locator = mh_snapshot
+        .dpu_snapshots
+        .iter()
+        .filter_map(|dpu| {
+            mh_snapshot
+                .host_snapshot
+                .get_device_locator_for_dpu_id(&dpu.id)
+                .ok()
+                .map(|locator| (locator, dpu.id))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut memberships = HashSet::new();
+
+    for interface in interfaces {
+        let Some(vpc_id) = interface
+            .network_segment_id
+            .and_then(|segment_id| vpc_by_segment.get(&segment_id))
+            .copied()
+        else {
+            continue;
+        };
+
+        // Locator-less legacy interfaces belong to the primary DPU. Explicit
+        // locators preserve exact membership on multi-DPU hosts.
+        let resolved_dpu_id = match &interface.device_locator {
+            Some(locator) => dpu_by_locator.get(locator).copied(),
+            None => primary_dpu_id,
+        };
+
+        if let Some(dpu_id) = resolved_dpu_id {
+            memberships.insert((dpu_id, vpc_id));
+            continue;
+        }
+
+        // Preserve every current host DPU as a possible owner so cleanup cannot assume which
+        // DPU/VPC loopback an unresolved interface uses.
+        tracing::warn!(
+            host_machine_id = %mh_snapshot.host_snapshot.id,
+            device_locator = ?interface.device_locator,
+            %vpc_id,
+            "using every current host DPU because the VPC interface locator cannot be resolved",
+        );
+        memberships.extend(host_dpu_ids.iter().copied().map(|dpu_id| (dpu_id, vpc_id)));
+    }
+
+    Ok(memberships)
 }
 
 async fn release_network_segments_with_vpc_prefix(

@@ -24,7 +24,9 @@ use carbide_uuid::vpc::VpcId;
 use forge::forge_server::Forge;
 use ipnetwork::IpNetwork;
 use itertools::Itertools;
-use model::machine::{ManagedHostState, ManagedHostStateSnapshot};
+use model::machine::{
+    InstanceState, ManagedHostState, ManagedHostStateSnapshot, NetworkConfigUpdateState,
+};
 use model::test_support::ManagedHostConfig;
 use rpc::{Metadata, forge};
 
@@ -639,6 +641,199 @@ async fn test_zero_dpu_instance_allocation_auto(
                 host_inband_prefix.prefix
             ))
     );
+    Ok(())
+}
+
+/// Verifies a zero-DPU network update releases a VPC-bound HostInband
+/// interface without trying to resolve nonexistent DPU loopback membership.
+/// This matters because ordinary address cleanup must still complete for hosts
+/// whose static networking has no DPU owner.
+#[crate::sqlx_test]
+async fn test_zero_dpu_network_update_releases_vpc_bound_host_interface(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Allocate the zero-DPU host through automatic network configuration, where
+    // machine selection and VPC choice drive cleanup and remaining fields
+    // satisfy the allocation contract.
+    let env = create_test_env_for_instance_allocation(pool, None).await;
+    let zero_dpu_host =
+        api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::zero_dpu()).await?;
+    let flat_vpc_id = default_flat_vpc_id(&env).await;
+    let host_inband_segment =
+        db::network_segment::find_by_name(env.pool.begin().await?.deref_mut(), "HOST_INBAND")
+            .await?;
+    let instance = crate::handlers::instance::allocate(
+        env.api.as_ref(),
+        tonic::Request::new(forge::InstanceAllocationRequest {
+            machine_id: Some(stable_host_id(&zero_dpu_host)), // Selects the host with no DPU owner.
+            instance_type_id: None,
+            config: Some(forge::InstanceConfig {
+                tenant: Some(forge::TenantConfig {
+                    tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+                    hostname: None,
+                    tenant_keyset_ids: vec![],
+                }),
+                os: Some(forge::InstanceOperatingSystemConfig {
+                    phone_home_enabled: false,
+                    run_provisioning_instructions_on_every_boot: false,
+                    user_data: None,
+                    variant: Some(forge::instance_operating_system_config::Variant::Ipxe(
+                        forge::InlineIpxe {
+                            ipxe_script: "exit".to_string(),
+                        },
+                    )),
+                }),
+                network: Some(forge::InstanceNetworkConfig {
+                    interfaces: vec![],
+                    #[allow(deprecated)]
+                    auto: true, // Resolves host networking instead of accepting explicit interfaces.
+                    auto_config: Some(forge::InstanceNetworkAutoConfig {
+                        vpc_id: Some(flat_vpc_id), // Makes the resolved interface VPC-bound.
+                    }),
+                }),
+                ..Default::default()
+            }),
+            instance_id: None,
+            metadata: Some(Metadata {
+                name: "zero-dpu-vpc-bound-release".to_string(),
+                description: "tests/instance_allocate".to_string(),
+                labels: vec![],
+            }),
+            allow_unhealthy_machine: false,
+        }),
+    )
+    .await?
+    .into_inner();
+    let instance_id = instance.id.expect("allocated instance has an ID");
+
+    // Bind the selected HostInband segment after allocation so cleanup resolves
+    // VPC ownership without requiring a primary DPU.
+    env.api
+        .attach_network_segment_to_vpc(tonic::Request::new(
+            forge::AttachNetworkSegmentToVpcRequest {
+                network_segment_id: Some(host_inband_segment.id),
+                vpc_id: Some(flat_vpc_id),
+                allow_replace: false,
+            },
+        ))
+        .await?;
+
+    // Finish initial assignment before staging the update so the test exercises
+    // network-update cleanup rather than provisioning.
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &zero_dpu_host.host_snapshot.id,
+        10,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        },
+    )
+    .await;
+
+    // Load the persisted internal config, whose resolved interface and address
+    // are hidden by the external auto-network view.
+    let mut txn = env.db_txn().await;
+    let stored = db::instance::find_by_id(txn.as_mut(), instance_id)
+        .await?
+        .expect("allocated instance remains stored");
+    let old_network = stored.config.network.clone();
+    let [old_interface] = old_network.interfaces.as_slice() else {
+        panic!("zero-DPU cleanup should start with one resolved interface")
+    };
+    let (network_prefix_id, expected_address) = old_interface
+        .ip_addrs
+        .iter()
+        .exactly_one()
+        .expect("the resolved HostInband interface should own one address");
+    let expected_prefix = old_interface
+        .interface_prefixes
+        .get(network_prefix_id)
+        .copied()
+        .expect("the resolved address should have a normalized prefix");
+
+    // Prove this update starts with the exact normalized address it must remove.
+    let normalized_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+        txn.as_mut(),
+        &instance_id,
+        &host_inband_segment.id,
+    )
+    .await?;
+    let [normalized_address] = normalized_addresses.as_slice() else {
+        panic!("zero-DPU cleanup should start with one normalized address")
+    };
+    assert_eq!(
+        (
+            normalized_address.instance_id,
+            normalized_address.segment_id,
+            normalized_address.vpc_id,
+            normalized_address.address,
+            normalized_address.prefix,
+        ),
+        (
+            instance_id,
+            host_inband_segment.id,
+            flat_vpc_id,
+            *expected_address,
+            expected_prefix,
+        ),
+    );
+
+    // Stage removal in the same transaction that proved its cleanup precondition.
+    let mut new_network = old_network.clone();
+    new_network.interfaces.clear();
+    db::instance::trigger_update_network_config_request(
+        &instance_id,
+        &old_network,
+        &new_network,
+        &mut txn,
+    )
+    .await?;
+    txn.commit().await?;
+
+    // Advance through promotion, then execute the resource-release iteration.
+    let release_old_resources = ManagedHostState::Assigned {
+        instance_state: InstanceState::NetworkConfigUpdate {
+            network_config_update_state: NetworkConfigUpdateState::ReleaseOldResources,
+        },
+    };
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &zero_dpu_host.host_snapshot.id,
+        4,
+        release_old_resources,
+    )
+    .await;
+    env.run_machine_state_controller_iteration().await;
+
+    // Reload every persisted owner to prove cleanup completed instead of
+    // retrying forever at DPU membership resolution.
+    let stored = db::instance::find_by_id(&env.pool, instance_id)
+        .await?
+        .expect("updated instance remains stored");
+    assert!(stored.update_network_config_request.is_none());
+    assert!(stored.config.network.interfaces.is_empty());
+    let mut txn = env.db_txn().await;
+    assert!(
+        db::instance_address::find_all_by_instance_id_and_segment_id(
+            txn.as_mut(),
+            &instance_id,
+            &host_inband_segment.id,
+        )
+        .await?
+        .is_empty()
+    );
+    assert!(matches!(
+        db::managed_host::load_snapshot(
+            txn.as_mut(),
+            &zero_dpu_host.host_snapshot.id,
+            Default::default(),
+        )
+        .await?
+        .expect("zero-DPU host remains stored")
+        .managed_state,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        }
+    ));
+
     Ok(())
 }
 
