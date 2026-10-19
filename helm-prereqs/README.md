@@ -550,8 +550,8 @@ decide where the Temporal and Keycloak databases live:
 | `false` | The databases live on the deprecated standalone StatefulSet. It keeps an existing Site there, but it can't move a Site back off `nico-pg-cluster`. |
 
 `preflight.sh` resolves `auto` on every `setup.sh` run. It checks which
-database the deployed Temporal release and Keycloak Deployment use, and keeps
-them there. `setup.sh` only runs them on `nico-pg-cluster` or the standalone
+database Temporal's server config and the Keycloak Deployment point at, and
+keeps them there. `setup.sh` only runs them on `nico-pg-cluster` or the standalone
 StatefulSet. A workload on any other database host fails preflight, whatever
 the value.
 

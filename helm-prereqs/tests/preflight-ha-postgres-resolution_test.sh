@@ -22,20 +22,23 @@ done
 eval "$(grep '^_DB_RECORD_CONFIGMAP=' "${PREFLIGHT_SH}")"
 
 mkdir -p "${TEST_TMP_DIR}/bin"
+# Helm reports its latest revision. FAKE_HELM_TEMPORAL_HOST stands for one whose
+# pre-upgrade hook failed, so its host never reached the ConfigMaps below.
 cat > "${TEST_TMP_DIR}/bin/helm" <<'FAKE_HELM'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${FAKE_READS_FAIL}" == "true" ]]; then
     exit 1
 fi
+host="${FAKE_HELM_TEMPORAL_HOST:-${FAKE_TEMPORAL_HOST}}"
 case "$*" in
     'list -n temporal --short --filter ^temporal$')
-        if [[ -n "${FAKE_TEMPORAL_HOST}" ]]; then
+        if [[ -n "${host}" ]]; then
             echo temporal
         fi
         ;;
     'get values temporal -n temporal -o json')
-        printf '{"server":{"config":{"persistence":{"default":{"sql":{"host":"%s"}}}}}}\n' "${FAKE_TEMPORAL_HOST}"
+        printf '{"server":{"config":{"persistence":{"default":{"sql":{"host":"%s"}}}}}}\n' "${host}"
         ;;
     *)
         echo "unexpected: helm $*" >&2
@@ -53,6 +56,17 @@ if [[ "${FAKE_READS_FAIL}" == "true" ]]; then
     exit 1
 fi
 case "$*" in
+    'get configmap temporal-'*'-config -n temporal --ignore-not-found -o jsonpath='*)
+        # FAKE_TEMPORAL_WORKER_HOST stands for services that disagree.
+        host="${FAKE_TEMPORAL_HOST}"
+        if [[ "$*" == 'get configmap temporal-worker-config '* ]]; then
+            host="${FAKE_TEMPORAL_WORKER_HOST:-${host}}"
+        fi
+        if [[ -n "${host}" ]]; then
+            printf 'persistence:\n  datastores:\n    default:\n      sql:\n        connectAddr: "%s:5432"\n    visibility:\n      sql:\n        connectAddr: "%s:5432"\n' \
+                "${host}" "${host}"
+        fi
+        ;;
     'get deployment keycloak -n kc-ns --ignore-not-found -o name')
         if [[ -n "${FAKE_KEYCLOAK_URL}" ]]; then
             echo deployment.apps/keycloak
@@ -170,6 +184,38 @@ for row in "${resolver_cases[@]}"; do
     # Phase 7 can't run without a resolved value, so -y must not continue.
     check_errors "${name}" "${BLOCKING_ERRORS[*]:-}" "${expected_error}"
 done
+
+# A cutover whose pre-upgrade hook failed leaves Helm's latest revision on
+# nico-pg-cluster, while the ConfigMaps Temporal loads still name the
+# StatefulSet. auto must keep Temporal there, and true must still require the
+# receipt, or the next run could switch Temporal to a stale copy.
+write_values temporal auto
+BLOCKING_ERRORS=()
+FAKE_HELM_TEMPORAL_HOST=nico-pg-cluster.postgres.svc.cluster.local \
+    FAKE_TEMPORAL_HOST=postgres.postgres.svc.cluster.local. FAKE_KEYCLOAK_URL="" \
+    FAKE_STANDALONE=statefulset FAKE_RECORD="" FAKE_DEPLOYMENT_STATE="" FAKE_READS_FAIL=false \
+    PATH="${TEST_TMP_DIR}/bin:${PATH}" _resolve_use_ha_postgres temporal
+if [[ "${_USE_HA_POSTGRES}" != "false" ]]; then
+    echo "FAIL failed pre-upgrade hook: auto resolved '${_USE_HA_POSTGRES}', want 'false'" >&2
+    failures=$((failures + 1))
+fi
+write_values temporal true
+FAKE_HELM_TEMPORAL_HOST=nico-pg-cluster.postgres.svc.cluster.local \
+    FAKE_TEMPORAL_HOST=postgres.postgres.svc.cluster.local. FAKE_KEYCLOAK_URL="" \
+    FAKE_STANDALONE=statefulset FAKE_RECORD="" FAKE_DEPLOYMENT_STATE="" FAKE_READS_FAIL=false \
+    PATH="${TEST_TMP_DIR}/bin:${PATH}" _check_db_cutover temporal true
+check_errors "failed pre-upgrade hook" "${BLOCKING_ERRORS[*]:-}" \
+    "true moves temporal off the standalone postgres.postgres StatefulSet, but its data hasn't been migrated"
+
+# Services that name different hosts fail closed instead of picking one.
+write_values temporal auto
+BLOCKING_ERRORS=()
+FAKE_TEMPORAL_HOST=postgres.postgres.svc.cluster.local. \
+    FAKE_TEMPORAL_WORKER_HOST=nico-pg-cluster.postgres.svc.cluster.local FAKE_KEYCLOAK_URL="" \
+    FAKE_STANDALONE=statefulset FAKE_RECORD="" FAKE_DEPLOYMENT_STATE="" FAKE_READS_FAIL=false \
+    PATH="${TEST_TMP_DIR}/bin:${PATH}" _resolve_use_ha_postgres temporal
+check_errors "Temporal services disagree" "${BLOCKING_ERRORS[*]:-}" \
+    "auto could not tell which PostgreSQL the deployed temporal uses"
 
 # The chart fails to render any other value, so preflight stops on it without
 # cluster access.

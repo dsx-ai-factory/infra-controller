@@ -699,17 +699,31 @@ _keycloak_ns() {
 }
 
 # Prints the PostgreSQL host the deployed Temporal or Keycloak connects to, or
-# nothing when it isn't deployed. Fails when the cluster can't be read, or when
-# a deployed Keycloak doesn't set KC_DB_URL as a literal value.
+# nothing when it isn't deployed. Fails when the cluster can't be read, when
+# Temporal's services don't all name the same host, or when a deployed Keycloak
+# doesn't set KC_DB_URL as a literal value.
+#
+# Temporal's host comes from the ConfigMaps its pods load, not Helm's values.
+# Helm reports the latest revision even when its pre-upgrade schema hook failed
+# before the ConfigMaps changed, so it can name a database Temporal never used.
 _deployed_db_host() {
-    local _release _values _kc_ns _kc_deployment _kc_url
+    local _service _config _configs="" _found=0 _hosts _kc_ns _kc_deployment _kc_url
     case "$1" in
         temporal)
-            _release="$(helm list -n temporal --short --filter '^temporal$')" || return 1
-            [[ -n "${_release}" ]] || return 0
-            _values="$(helm get values temporal -n temporal -o json)" || return 1
-            # An unset host is the chart default, the standalone StatefulSet.
-            jq -r '.server.config.persistence.default.sql.host // "postgres.postgres"' <<< "${_values}"
+            for _service in frontend history matching worker; do
+                _config="$(kubectl get configmap "temporal-${_service}-config" -n temporal \
+                    --ignore-not-found -o jsonpath='{.data.config_template\.yaml}')" || return 1
+                if [[ -n "${_config}" ]]; then
+                    _found=$((_found + 1))
+                    _configs+="${_config}"$'\n'
+                fi
+            done
+            [[ "${_found}" -gt 0 ]] || return 0
+            [[ "${_found}" -eq 4 ]] || return 1
+            _hosts="$(awk '$1 == "connectAddr:" { v = $2; gsub(/"/, "", v); sub(/:[0-9]+$/, "", v); print v }' \
+                <<< "${_configs}" | sort -u)"
+            [[ -n "${_hosts}" && "${_hosts}" != *$'\n'* ]] || return 1
+            printf '%s\n' "${_hosts}"
             ;;
         keycloak)
             _kc_ns="$(_keycloak_ns)"

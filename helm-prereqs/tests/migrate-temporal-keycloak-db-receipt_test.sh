@@ -42,6 +42,11 @@ case "${args}" in
     'create configmap nico-workload-databases -n postgres')
         echo '{"data":{}}' > "${S}/configmap.json"
         ;;
+    'get configmap temporal-'*'-config -n temporal -o jsonpath='*)
+        host="${FAKE_TEMPORAL_HOST:-postgres.postgres.svc.cluster.local.}"
+        printf 'persistence:\n  datastores:\n    default:\n      sql:\n        connectAddr: "%s:5432"\n    visibility:\n      sql:\n        connectAddr: "%s:5432"\n' \
+            "${host}" "${host}"
+        ;;
     'get deployment keycloak -n '*' -o jsonpath='*KC_DB_URL*)
         echo "${FAKE_KEYCLOAK_URL:-jdbc:postgresql://postgres.postgres:5432/keycloak?sslmode=disable}"
         ;;
@@ -67,6 +72,7 @@ case "${args}" in
     'rollout status deploy/'*)
         ;;
     'get deploy '*' -n temporal -o jsonpath={.metadata.uid}/{.metadata.generation}')
+        [[ "${FAKE_STATE_READ_FAILS:-false}" != "true" ]]
         printf 'uid-%s/%s' "${dep}" "$(cat "${S}/gen-${dep}")"
         ;;
     'exec -n postgres postgres-0 -- pg_dump '*)
@@ -87,8 +93,9 @@ esac
 FAKE_KUBECTL
 chmod +x "${TEST_TMP_DIR}/bin/kubectl"
 
-# Without a host override the temporal release falls back to the chart's
-# postgres.postgres default, like a Site still on the StatefulSet.
+# Temporal's ConfigMaps above name the StatefulSet unless FAKE_TEMPORAL_HOST
+# says otherwise. Helm reports its latest revision, and FAKE_HELM_TEMPORAL_HOST
+# stands for one whose pre-upgrade hook failed before the ConfigMaps changed.
 cat > "${TEST_TMP_DIR}/bin/helm" <<'FAKE_HELM'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -96,8 +103,9 @@ if [[ "$*" != 'get values temporal -n temporal -o json' ]]; then
     echo "unexpected: helm $*" >&2
     exit 2
 fi
-if [[ -n "${FAKE_TEMPORAL_HOST:-}" ]]; then
-    jq -n --arg h "${FAKE_TEMPORAL_HOST}" '{server: {config: {persistence: {default: {sql: {host: $h}}}}}}'
+host="${FAKE_HELM_TEMPORAL_HOST:-${FAKE_TEMPORAL_HOST:-}}"
+if [[ -n "${host}" ]]; then
+    jq -n --arg h "${host}" '{server: {config: {persistence: {default: {sql: {host: $h}}}}}}'
 else
     echo '{}'
 fi
@@ -193,6 +201,30 @@ if FAKE_CONFIGMAP_READ_FAILS=true FAKE_RESTORE_FAILS=temporal_visibility run_mig
 fi
 if [[ -s "${STATE}/log" ]]; then
     fail "retry with a failing ConfigMap read changed the cluster: $(tr '\n' ';' < "${STATE}/log")"
+fi
+
+# A failed uid/generation read stops the migration before it writes a receipt
+# preflight would reject, and brings Temporal back up on postgres.postgres.
+reset_state 1 3
+if FAKE_STATE_READ_FAILS=true run_migration; then
+    fail "migration with a failing Deployment-state read exited zero"
+fi
+if [[ -n "$(receipt)" ]]; then
+    fail "migration with a failing Deployment-state read wrote receipt '$(receipt)'"
+fi
+if [[ "$(replicas)" != "1 " ]]; then
+    fail "migration with a failing Deployment-state read left replicas at '$(replicas)', want '1 '"
+fi
+
+# After a cutover whose pre-upgrade hook failed, Helm's latest revision names
+# nico-pg-cluster while Temporal still runs on postgres.postgres. Refreshing the
+# copy must still work, so the source comes from the ConfigMaps, not Helm.
+reset_state 1 3
+if ! FAKE_HELM_TEMPORAL_HOST=nico-pg-cluster.postgres.svc.cluster.local run_migration; then
+    fail "migration after a failed pre-upgrade hook exited non-zero: $(tail -3 "${STATE}/output")"
+fi
+if [[ "$(receipt)" != "$(receipt_for_generation 4)" ]]; then
+    fail "migration after a failed pre-upgrade hook wrote receipt '$(receipt)', want '$(receipt_for_generation 4)'"
 fi
 
 # A failed receipt write brings Temporal back up on postgres.postgres, since

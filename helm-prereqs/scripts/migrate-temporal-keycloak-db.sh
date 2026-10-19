@@ -173,14 +173,25 @@ _KEYCLOAK_NS="${_KEYCLOAK_NS:-nico-rest}"
 # _db_location in preflight.sh.
 # ---------------------------------------------------------------------------
 _require_standalone_source() {
-    local _component="$1" _host _values
+    local _component="$1" _host _service _config _hosts=""
     case "${_component}" in
         temporal)
-            if ! _values="$(helm get values temporal -n temporal -o json 2>/dev/null)"; then
-                echo "ERROR: could not read the temporal Helm release, so this can't tell which PostgreSQL Temporal uses." >&2
+            # The ConfigMaps Temporal's pods load, not Helm's values, which can
+            # name the host of an upgrade whose pre-upgrade hook failed.
+            for _service in frontend history matching worker; do
+                if ! _config="$(kubectl get configmap "temporal-${_service}-config" -n temporal \
+                    -o jsonpath='{.data.config_template\.yaml}' 2>/dev/null)"; then
+                    echo "ERROR: could not read temporal/temporal-${_service}-config, so this can't tell which PostgreSQL Temporal uses." >&2
+                    exit 1
+                fi
+                _hosts+="$(awk '$1 == "connectAddr:" { v = $2; gsub(/"/, "", v); sub(/:[0-9]+$/, "", v); print v }' \
+                    <<< "${_config}")"$'\n'
+            done
+            _host="$(sort -u <<< "${_hosts}" | sed '/^$/d')"
+            if [[ -z "${_host}" || "${_host}" == *$'\n'* ]]; then
+                echo "ERROR: Temporal's services don't name a single PostgreSQL host, so this can't tell which one to migrate from." >&2
                 exit 1
             fi
-            _host="$(jq -r '.server.config.persistence.default.sql.host // "postgres.postgres"' <<< "${_values}")"
             ;;
         keycloak)
             if ! _host="$(kubectl get deployment keycloak -n "${_KEYCLOAK_NS}" \
@@ -254,17 +265,24 @@ _write_receipt() {
         -p "{\"data\":{\"$1-migrated\":\"$2\"}}"
 }
 
-# Prints "<deployment>=<uid>/<generation>" for each Deployment, space-separated.
-_deployment_states() {
+# Sets _DEPLOYMENT_STATES to "<deployment>=<uid>/<generation>" for each
+# Deployment, space-separated, and exits on a failed or incomplete read. A
+# receipt with an empty entry would report success that preflight then rejects,
+# and exiting here lets the EXIT trap bring the stopped workloads back up.
+_read_deployment_states() {
     local _ns="$1" _dep _state
     local -a _states=()
     shift
     for _dep in "$@"; do
-        _state="$(kubectl get deploy "${_dep}" -n "${_ns}" \
-            -o jsonpath='{.metadata.uid}/{.metadata.generation}')"
+        if ! _state="$(kubectl get deploy "${_dep}" -n "${_ns}" \
+            -o jsonpath='{.metadata.uid}/{.metadata.generation}')" \
+            || [[ ! "${_state}" =~ ^[^/]+/[0-9]+$ ]]; then
+            echo "ERROR: could not read the uid and generation of ${_ns}/${_dep}." >&2
+            exit 1
+        fi
         _states+=("${_dep}=${_state}")
     done
-    printf '%s\n' "${_states[*]}"
+    _DEPLOYMENT_STATES="${_states[*]}"
 }
 
 if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
@@ -398,14 +416,16 @@ _dump_restore_db() {
 if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
     _TEMPORAL_DEPLOYMENTS=(temporal-frontend temporal-history temporal-matching temporal-worker)
     _scale_down temporal "${_TEMPORAL_DEPLOYMENTS[@]}"
-    _TEMPORAL_RECEIPT="$(_deployment_states temporal "${_TEMPORAL_DEPLOYMENTS[@]}")"
+    _read_deployment_states temporal "${_TEMPORAL_DEPLOYMENTS[@]}"
+    _TEMPORAL_RECEIPT="${_DEPLOYMENT_STATES}"
     _dump_restore_db "temporal" "temporal.nico"
     _dump_restore_db "temporal_visibility" "temporal.nico"
 fi
 
 if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
     _scale_down "${_KEYCLOAK_NS}" keycloak
-    _KEYCLOAK_RECEIPT="$(_deployment_states "${_KEYCLOAK_NS}" keycloak)"
+    _read_deployment_states "${_KEYCLOAK_NS}" keycloak
+    _KEYCLOAK_RECEIPT="${_DEPLOYMENT_STATES}"
     _dump_restore_db "keycloak" "keycloak.nico"
 fi
 
