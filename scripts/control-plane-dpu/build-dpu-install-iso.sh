@@ -370,10 +370,26 @@ if [[ "$(yq '.fnn' "$CONTROL_PLANE_CONFIG")" != "null" ]]; then
     if [[ "$_rt_type" != "!!null" ]]; then
         [[ "$_rt_type" == "!!map" ]] || \
             die "'fnn.routeTargetsToImport' must be a map whose keys are full numeric route targets ('<asn>:<n>: {}' per entry), not a ${_rt_type#!!}"
+        # Canonical decimal only: "65034:050100" would slip past the duplicate
+        # check below as a different string for the same target.
         while IFS= read -r _rt; do
-            [[ "$_rt" =~ ^[0-9]+:[0-9]+$ ]] || \
-                die "'fnn.routeTargetsToImport': key '$_rt' is not a full numeric route target <asn>:<n>"
+            [[ "$_rt" =~ ^(0|[1-9][0-9]*):(0|[1-9][0-9]*)$ ]] || \
+                die "'fnn.routeTargetsToImport': key '$_rt' is not a full numeric route target <asn>:<n> (decimal, no leading zeros)"
         done < <(yq '.fnn.routeTargetsToImport | keys | .[]' "$CONTROL_PLANE_CONFIG")
+        # The template always imports three targets built from datacenterAsn and
+        # fnn.commonManagedNodeBmcRouteTarget, commonAdminNetworkTarget and
+        # commonSiteControllerRouteTarget (the README's "fixed imports"), before the
+        # operator's map. A map key equal to one of them renders the same YAML key
+        # twice in startup.yaml; what the DPU's parser does with that is its own
+        # business, so refuse it here, where both sources are visible (#7785).
+        _dc_asn=$(yq -r '.datacenterAsn // ""' "$CONTROL_PLANE_CONFIG")
+        for _fixed in commonManagedNodeBmcRouteTarget commonAdminNetworkTarget commonSiteControllerRouteTarget; do
+            _n=$(yq -r ".fnn.$_fixed // \"\"" "$CONTROL_PLANE_CONFIG")
+            [[ -n "$_dc_asn" && -n "$_n" ]] || continue   # missing fields are reported by require_field below
+            if yq -e ".fnn.routeTargetsToImport | has(\"$_dc_asn:$_n\")" "$CONTROL_PLANE_CONFIG" >/dev/null 2>&1; then
+                die "'fnn.routeTargetsToImport': key '$_dc_asn:$_n' duplicates the fixed import <datacenterAsn>:<fnn.$_fixed>, which startupSMN.template already renders into every node's startup.yaml; remove it"
+            fi
+        done
     fi
 fi
 
