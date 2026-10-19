@@ -28,7 +28,7 @@ use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::{
     DpuConfigExt as _, FixtureDefault as _, ManagedHostConfigExt as _,
 };
-use carbide_uuid::machine::{DpuMachineId, MachineId};
+use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId, StableHostMachineId};
 use carbide_uuid::rack::{RackId, RackProfileId};
 use component_manager::{MachineLocationObservation, TestMachineInfoProvider};
 use db::ObjectFilter;
@@ -36,6 +36,7 @@ use mac_address::MacAddress;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData, HostDpuPolicy};
 use model::expected_rack::ExpectedRack;
 use model::machine::machine_search_config::MachineSearchConfig;
+use model::machine_boot_interface::{MachineBootInterface, MachineBootInterfaceTarget};
 use model::rack::RackConfig;
 use model::rack_type::{RackProfile, RackProfileConfig};
 use model::site_explorer::{EndpointExplorationReport, ExploredDpu, ExploredManagedHost};
@@ -625,6 +626,112 @@ async fn explored_host_fixture(env: &Env, managed_host: &ManagedHostConfig) -> E
         host_report,
         dpu_machine_ids,
     }
+}
+
+#[sqlx_test]
+async fn test_zero_dpu_rediscovery_after_stable_registration(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let test_harness = TestHarness::builder(pool.clone()).build().await;
+    let domain = test_harness.test_domain().await;
+    let network_controller = test_harness.network_controller();
+    let underlay_segment = network_controller.create_underlay_segment(&domain).await;
+    let host_inband_segment = network_controller.create_host_inband_segment(&domain).await;
+    let env = Env {
+        pool,
+        underlay_segment,
+        test_harness,
+    };
+    let creator = machine_creator(&env, machine_creator_config());
+    let mock_host = ManagedHostConfig {
+        dpus: vec![],
+        expected_machine_data: Some(ExpectedMachineData {
+            dpu_policy: HostDpuPolicy::Ignore,
+            ..Default::default()
+        }),
+        ..ManagedHostConfig::default()
+    };
+    let inband_mac = mock_host.dhcp_mac_address();
+    let expected = expected_machine(&mock_host);
+    let mut fixture = explored_host_fixture(&env, &mock_host).await;
+    assert!(
+        creator
+            .create_managed_host(
+                &fixture.host,
+                &mut fixture.host_report,
+                Some(&expected),
+                &env.pool,
+            )
+            .await?
+    );
+    let dhcp_response = env
+        .api()
+        .discover_dhcp(
+            rpc::forge::DhcpDiscovery::builder(inband_mac, host_inband_segment.relay_address)
+                .vendor_string("Bluefield")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let predicted_id = dhcp_response.machine_id.expect("host prediction promoted");
+    let stable_id = StableHostMachineId::try_from(model::machine::machine_id::from_hardware_info(
+        &model::hardware_info::HardwareInfo::from(&mock_host),
+    )?)?;
+    let mut txn = env.pool.begin().await?;
+    db::machine::try_sync_stable_id_with_current_machine_id_for_host(
+        txn.as_mut(),
+        Some(predicted_id.try_into()?),
+        &stable_id,
+    )
+    .await?;
+    assert_eq!(
+        db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(
+            txn.as_mut(),
+            mock_host.bmc_mac_address,
+        )
+        .await?,
+        Some(stable_id.into()),
+    );
+    // Model an ingested host without boot metadata so rediscovery must persist reconciliation.
+    sqlx::query("DELETE FROM machine_boot_interfaces WHERE machine_id = $1")
+        .bind(stable_id)
+        .execute(txn.as_mut())
+        .await?;
+    txn.commit().await?;
+
+    assert!(
+        !creator
+            .create_managed_host(
+                &fixture.host,
+                &mut fixture.host_report,
+                Some(&expected),
+                &env.pool,
+            )
+            .await?,
+        "rediscovery must reuse the stable host",
+    );
+    let desired = db::machine_desired_boot_interface::get(&env.pool, &stable_id)
+        .await?
+        .expect("rediscovery should initialize the stable host's boot target");
+    assert_eq!(
+        desired.value,
+        MachineBootInterfaceTarget::Pair(MachineBootInterface {
+            mac_address: inband_mac,
+            interface_id: "NIC.Embedded.1-1-1".to_string(),
+        }),
+    );
+    let machines = db::machine::find(
+        &env.pool,
+        ObjectFilter::<MachineId>::All,
+        MachineSearchConfig {
+            include_predicted_host: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    assert_eq!(machines.len(), 1);
+    assert_eq!(machines[0].id, stable_id.into());
+    Ok(())
 }
 
 #[sqlx_test]

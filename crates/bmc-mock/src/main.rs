@@ -143,7 +143,7 @@ async fn start_libvirt_app(
         bmc_behaviour.redfish_auth,
         MachineRouterOptions {
             bmc_reset_duration: bmc_behaviour.bmc_reset_duration(),
-            virtual_media_devices: machine.libvirt_virtual_media_devices(),
+            virtual_media_devices: Some(machine.libvirt_virtual_media_devices()),
             ..MachineRouterOptions::default()
         },
     );
@@ -295,21 +295,22 @@ impl MachineArgs {
         }
     }
 
-    fn libvirt_virtual_media_devices(&self) -> Option<Vec<VirtualMediaDeviceConfig>> {
+    fn libvirt_virtual_media_devices(&self) -> Vec<VirtualMediaDeviceConfig> {
+        let config_media = VirtualMediaDeviceConfig {
+            id: Cow::Borrowed("ConfigCd"),
+            name: Cow::Borrowed("Configuration Virtual CD"),
+            media_types: vec![Cow::Borrowed("CD"), Cow::Borrowed("DVD")],
+        };
         match self.machine_role {
-            MachineRole::Host => Some(vec![
+            MachineRole::Host => vec![
                 VirtualMediaDeviceConfig {
                     id: Cow::Borrowed("Cd"),
                     name: Cow::Borrowed("Operating System Virtual CD"),
                     media_types: vec![Cow::Borrowed("CD"), Cow::Borrowed("DVD")],
                 },
-                VirtualMediaDeviceConfig {
-                    id: Cow::Borrowed("ConfigCd"),
-                    name: Cow::Borrowed("Configuration Virtual CD"),
-                    media_types: vec![Cow::Borrowed("CD"), Cow::Borrowed("DVD")],
-                },
-            ]),
-            MachineRole::Dpu => None,
+                config_media,
+            ],
+            MachineRole::Dpu => vec![config_media],
         }
     }
 }
@@ -367,6 +368,149 @@ mod tests {
     use carbide_test_support::value_scenarios;
 
     use super::*;
+
+    struct MediaCallbacks;
+
+    impl bmc_mock::Callbacks for MediaCallbacks {
+        async fn computer_system_reset(
+            &self,
+            _reset_type: bmc_mock::ResourceResetType,
+        ) -> Result<(), bmc_mock::ActionError> {
+            Ok(())
+        }
+
+        fn state_refresh_indication(&self) {}
+    }
+
+    async fn redfish_request(
+        router: &Router,
+        method: axum::http::Method,
+        path: &str,
+        payload: Option<serde_json::Value>,
+    ) -> (axum::http::StatusCode, Option<serde_json::Value>) {
+        use axum::body::{Body, to_bytes};
+        use tower::ServiceExt;
+
+        let request = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("Content-Type", "application/json")
+            .body(
+                payload
+                    .map(|value| Body::from(value.to_string()))
+                    .unwrap_or_else(Body::empty),
+            )
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (
+            status,
+            (!body.is_empty()).then(|| serde_json::from_slice(&body).unwrap()),
+        )
+    }
+
+    #[tokio::test]
+    async fn libvirt_media_routes_follow_machine_role() {
+        use axum::http::{Method, StatusCode};
+        use bmc_mock::HardwareType;
+
+        for (role, expected) in [
+            (MachineRole::Dpu, vec!["ConfigCd"]),
+            (MachineRole::Host, vec!["Cd", "ConfigCd"]),
+        ] {
+            let machine = MachineArgs {
+                machine_role: role,
+                hardware_profile: HardwareType::GenericAmi,
+                dpu_count: None,
+                dpu_index: None,
+                instance_index: 0,
+                dpu_firmware: Default::default(),
+            };
+            let (router, _state) = bmc_mock::machine_router(
+                &machine.machine_info(),
+                Arc::new(MediaCallbacks),
+                String::default(),
+                false,
+                MachineRouterOptions {
+                    virtual_media_devices: Some(machine.libvirt_virtual_media_devices()),
+                    ..Default::default()
+                },
+            );
+            let (status, systems) =
+                redfish_request(&router, Method::GET, "/redfish/v1/Systems", None).await;
+            assert_eq!(status, StatusCode::OK);
+            let systems = systems.unwrap();
+            let mut media_systems = 0;
+            for member in systems["Members"].as_array().unwrap() {
+                let system_path = member["@odata.id"].as_str().unwrap();
+                let (status, system) =
+                    redfish_request(&router, Method::GET, system_path, None).await;
+                assert_eq!(status, StatusCode::OK);
+                let system = system.unwrap();
+                let Some(collection_path) = system["VirtualMedia"]["@odata.id"].as_str() else {
+                    continue;
+                };
+                media_systems += 1;
+                let (status, collection) =
+                    redfish_request(&router, Method::GET, collection_path, None).await;
+                assert_eq!(status, StatusCode::OK);
+                let collection = collection.unwrap();
+                let members = collection["Members"].as_array().unwrap();
+                assert_eq!(members.len(), expected.len(), "{role:?}");
+                for (member, id) in members.iter().zip(&expected) {
+                    let path = member["@odata.id"].as_str().unwrap();
+                    let (status, drive) = redfish_request(&router, Method::GET, path, None).await;
+                    assert_eq!(status, StatusCode::OK);
+                    let drive = drive.unwrap();
+                    assert_eq!(drive["Id"], *id);
+                    assert_eq!(drive["Inserted"], false);
+                    if role == MachineRole::Dpu {
+                        let image = "https://images.example.com/config.iso";
+                        let insert = drive["Actions"]["#VirtualMedia.InsertMedia"]["target"]
+                            .as_str()
+                            .unwrap();
+                        let (status, _) = redfish_request(
+                            &router,
+                            Method::POST,
+                            insert,
+                            Some(serde_json::json!({"Image": image})),
+                        )
+                        .await;
+                        assert_eq!(status, StatusCode::NO_CONTENT);
+                        let (_, drive) = redfish_request(&router, Method::GET, path, None).await;
+                        let drive = drive.unwrap();
+                        assert_eq!(drive["Image"], image);
+                        assert_eq!(drive["Inserted"], true);
+                        let eject = drive["Actions"]["#VirtualMedia.EjectMedia"]["target"]
+                            .as_str()
+                            .unwrap();
+                        let (status, _) = redfish_request(
+                            &router,
+                            Method::POST,
+                            eject,
+                            Some(serde_json::json!({})),
+                        )
+                        .await;
+                        assert_eq!(status, StatusCode::NO_CONTENT);
+                        let (_, drive) = redfish_request(&router, Method::GET, path, None).await;
+                        assert_eq!(drive.unwrap()["Inserted"], false);
+                    }
+                }
+                if role == MachineRole::Dpu {
+                    let (status, _) = redfish_request(
+                        &router,
+                        Method::GET,
+                        &format!("{collection_path}/Cd"),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::NOT_FOUND);
+                }
+            }
+            assert_eq!(media_systems, 1, "{role:?}");
+        }
+    }
 
     #[test]
     fn listener_uses_ipv6_wildcard_and_preserves_ports() {

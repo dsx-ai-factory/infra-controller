@@ -49,6 +49,37 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 				},
 			},
 			Status: &corev1.MachineStatus{
+				LldpNeighbors: []*corev1.InterfaceLldp{
+					{
+						MacAddress: "02:00:00:00:01:b0",
+						Lldp: &corev1.LldpSwitchData{
+							Name:            "leaf-switch-01",
+							Description:     "Cumulus Linux",
+							LocalPort:       "enp1s0np0",
+							IpAddress:       []string{"10.0.2.194", "fe80::ff:fe00:1d4"},
+							IdType:          "mac",
+							IdValue:         "02:00:00:00:01:d4",
+							RemotePortType:  "ifname",
+							RemotePortValue: "swp1",
+							MedInventory: &corev1.LldpMedInventory{
+								Serial:       cutil.GetPtr("SN0000000002"),
+								Manufacturer: cutil.GetPtr("https://www.mellanox.com"),
+								Model:        cutil.GetPtr("BlueField-3 DPU"),
+							},
+						},
+					},
+					{
+						MacAddress: "02:00:00:00:01:b1",
+						Lldp: &corev1.LldpSwitchData{
+							Name:            "leaf-switch-02",
+							LocalPort:       "enp1s0np1",
+							IdType:          "mac",
+							IdValue:         "02:00:00:00:01:d5",
+							RemotePortType:  "ifname",
+							RemotePortValue: "swp2",
+						},
+					},
+				},
 				DiscoveryInfo: &corev1.DiscoveryInfo{
 					NetworkInterfaces: []*corev1.NetworkInterface{
 						{
@@ -470,6 +501,26 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 		assert.Equal(t, machineInfo1.Machine.StateSla.Sla.GetSeconds(), apimi.Metadata.LifecycleState.SLASeconds)
 		require.NotNil(t, apimi.Metadata.LifecycleState.Updated)
 		assert.True(t, stateSetAt.Equal(*apimi.Metadata.LifecycleState.Updated))
+
+		protoNeighbors := machineInfo1.Machine.Status.LldpNeighbors
+		require.Len(t, apimi.Metadata.LldpNeighbors, len(protoNeighbors))
+		first := apimi.Metadata.LldpNeighbors[0]
+		assert.Equal(t, protoNeighbors[0].MacAddress, first.MacAddress)
+		assert.Equal(t, protoNeighbors[0].Lldp.Name, first.Name)
+		assert.Equal(t, protoNeighbors[0].Lldp.Description, first.Description)
+		assert.Equal(t, protoNeighbors[0].Lldp.LocalPort, first.LocalPort)
+		assert.Equal(t, protoNeighbors[0].Lldp.IpAddress, first.IpAddresses)
+		assert.Equal(t, protoNeighbors[0].Lldp.IdType, first.ChassisIdType)
+		assert.Equal(t, protoNeighbors[0].Lldp.IdValue, first.ChassisIdValue)
+		assert.Equal(t, protoNeighbors[0].Lldp.RemotePortType, first.RemotePortType)
+		assert.Equal(t, protoNeighbors[0].Lldp.RemotePortValue, first.RemotePortValue)
+		require.NotNil(t, first.MedInventory)
+		assert.Equal(t, protoNeighbors[0].Lldp.MedInventory.Serial, first.MedInventory.Serial)
+		assert.Equal(t, protoNeighbors[0].Lldp.MedInventory.Manufacturer, first.MedInventory.Manufacturer)
+		assert.Equal(t, protoNeighbors[0].Lldp.MedInventory.Model, first.MedInventory.Model)
+		second := apimi.Metadata.LldpNeighbors[1]
+		assert.Equal(t, []string{}, second.IpAddresses)
+		assert.Nil(t, second.MedInventory)
 	}
 
 	if apimi.Health != nil {
@@ -505,6 +556,53 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 		assert.Equal(t, instance.ID.String(), *response.InstanceID)
 		assert.Equal(t, cdbm.MachineStatusReady, ready.Status)
 	})
+}
+
+// TestMachine_NewAPIMachineLldpNeighborsJSON proves the wire contract of
+// metadata.lldpNeighbors: present as [] when the machine has reported no
+// neighbors, and absent only when metadata itself is not rendered.
+func TestMachine_NewAPIMachineLldpNeighborsJSON(t *testing.T) {
+	tests := []struct {
+		name            string
+		includeMetadata bool
+		wantMetadata    bool
+	}{
+		{name: "renders [] with metadata", includeMetadata: true, wantMetadata: true},
+		{name: "omits metadata entirely without includeMetadata", includeMetadata: false, wantMetadata: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiMachine := NewAPIMachine(
+				&cdbm.Machine{Metadata: &cdbm.SiteControllerMachine{Machine: &corev1.Machine{
+					Status: &corev1.MachineStatus{},
+				}}},
+				nil,
+				nil,
+				nil,
+				nil,
+				tt.includeMetadata,
+				true,
+			)
+
+			response, err := json.Marshal(apiMachine)
+			require.NoError(t, err)
+
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(response, &fields))
+			metadata, found := fields["metadata"]
+			require.Equal(t, tt.wantMetadata, found)
+			if !tt.wantMetadata {
+				return
+			}
+
+			var metadataFields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(metadata, &metadataFields))
+			lldpNeighbors, found := metadataFields["lldpNeighbors"]
+			require.True(t, found)
+			assert.JSONEq(t, `[]`, string(lldpNeighbors))
+		})
+	}
 }
 
 func TestMachine_NewAPIMachineScoutVersion(t *testing.T) {
@@ -945,6 +1043,51 @@ func TestAPIMachineUpdateRequest_ToRemoveHealthReportProto(t *testing.T) {
 			require.NotNil(t, got.MachineId)
 			assert.Equal(t, tt.machineID, got.MachineId.Id)
 			assert.Equal(t, tt.wantSource, got.GetSource())
+		})
+	}
+}
+
+// TestAPIMachineLldpNeighbor_MedInventoryJSON proves the wire contract of
+// lldpNeighbors[].medInventory: always rendered, as null when the neighbor does
+// not advertise an LLDP-MED inventory.
+func TestAPIMachineLldpNeighbor_MedInventoryJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		lldp *corev1.LldpSwitchData
+		want string
+	}{
+		{
+			name: "renders null when not advertised",
+			lldp: &corev1.LldpSwitchData{Name: "leaf-switch-01"},
+			want: `null`,
+		},
+		{
+			name: "renders object when advertised",
+			lldp: &corev1.LldpSwitchData{
+				Name: "peer-dpu-01",
+				MedInventory: &corev1.LldpMedInventory{
+					Serial:       cutil.GetPtr("SN0000000002"),
+					Manufacturer: cutil.GetPtr("https://www.mellanox.com"),
+					Model:        cutil.GetPtr("BlueField-3 DPU"),
+				},
+			},
+			want: `{"serial":"SN0000000002","manufacturer":"https://www.mellanox.com","model":"BlueField-3 DPU"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			neighbor := APIMachineLldpNeighbor{}
+			neighbor.FromProto(&corev1.InterfaceLldp{MacAddress: "02:00:00:00:01:b0", Lldp: tt.lldp})
+
+			encoded, err := json.Marshal(neighbor)
+			require.NoError(t, err)
+
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(encoded, &fields))
+			medInventory, found := fields["medInventory"]
+			require.True(t, found)
+			assert.JSONEq(t, tt.want, string(medInventory))
 		})
 	}
 }

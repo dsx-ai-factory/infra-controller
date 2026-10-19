@@ -2548,6 +2548,7 @@ async fn test_site_explorer_audit_exploration_results(
     let explorer_config = SiteExplorerConfig {
         enabled: Arc::new(true.into()),
         retained_boot_interface_window: None,
+        admin_fnn_enabled: false,
         explorations_per_run: 7,
         concurrent_explorations: 1,
         run_interval: std::time::Duration::from_secs(1),

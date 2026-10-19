@@ -39,8 +39,24 @@ impl InstanceSpxConfig {
         Ok(())
     }
 
+    /// Returns whether the tenant-controlled SPX attachment intent changed.
+    ///
+    /// Attachment order is not significant, and MAC addresses are assigned by Core.
     pub fn is_spx_config_update_requested(&self, new_config: &Self) -> bool {
-        self != new_config
+        let normalize = |config: &Self| {
+            let mut attachments = config.spx_attachments.clone();
+            for attachment in &mut attachments {
+                attachment.mac_address = None;
+            }
+            attachments.sort_unstable_by(|left, right| {
+                left.device
+                    .cmp(&right.device)
+                    .then_with(|| right.device_instance.cmp(&left.device_instance))
+            });
+            attachments
+        };
+
+        normalize(self) != normalize(new_config)
     }
 }
 
@@ -96,4 +112,50 @@ pub struct SpxAttachmentVf {
 pub struct SpxAttachmentOvs {
     pub bridge_name: String,
     pub ovn_network_name: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    #[test]
+    fn spx_update_detection_compares_tenant_intent() {
+        let partition_id = SpxPartitionId::new();
+        let attachment = |device_instance, mac_address| InstanceSpxAttachment {
+            device: "NVIDIA BlueField-4".to_string(),
+            device_instance,
+            mac_address,
+            spx_partition_id: partition_id,
+            attachment_type: SpxAttachmentType::Physical,
+            attachment_vf: None,
+            attachment_ovs: None,
+        };
+        let current = InstanceSpxConfig {
+            spx_attachments: vec![
+                attachment(1, Some("02:00:00:00:00:01".to_string())),
+                attachment(0, Some("02:00:00:00:00:00".to_string())),
+            ],
+        };
+
+        let mut equivalent = current.clone();
+        equivalent.spx_attachments.reverse();
+        for attachment in &mut equivalent.spx_attachments {
+            attachment.mac_address = None;
+        }
+
+        let mut changed = equivalent.clone();
+        changed.spx_attachments[0].spx_partition_id = SpxPartitionId::new();
+
+        value_scenarios!(
+            run = |requested| current.is_spx_config_update_requested(&requested);
+            "same tenant intent in request form" {
+                equivalent => false,
+            }
+            "changed partition" {
+                changed => true,
+            }
+        );
+    }
 }

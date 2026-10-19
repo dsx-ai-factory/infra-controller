@@ -16,7 +16,8 @@
  */
 
 /// Row from `nvlink_nmxc_endpoints`: chassis serial and NMX-C gRPC endpoint URL.
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow, carbide_macros::DbTable)]
+#[db_table(name = "nvlink_nmxc_endpoints")]
 pub struct NvlinkNmxcEndpoint {
     pub chassis_serial: String,
     pub endpoint: String,

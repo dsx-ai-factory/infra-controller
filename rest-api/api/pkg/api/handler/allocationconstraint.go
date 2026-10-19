@@ -346,9 +346,10 @@ func (uach UpdateAllocationConstraintHandler) Handle(c echo.Context) error {
 					TenantIDs: []uuid.UUID{a.TenantID},
 				}
 
-				if existingChildIPBlock.ProtocolVersion == cdbm.IPBlockProtocolVersionV4 {
+				switch existingChildIPBlock.ProtocolVersion {
+				case cdbm.IPBlockProtocolVersionV4:
 					subnetFilter.IPv4BlockIDs = []uuid.UUID{existingChildIPBlock.ID}
-				} else if existingChildIPBlock.ProtocolVersion == cdbm.IPBlockProtocolVersionV6 {
+				case cdbm.IPBlockProtocolVersionV6:
 					subnetFilter.IPv6BlockIDs = []uuid.UUID{existingChildIPBlock.ID}
 				}
 

@@ -206,6 +206,7 @@ func New(ctx context.Context, c Config) (*Service, error) {
 	operationRunManager, err := operationrunmanager.New(
 		operationRunStore,
 		operationRunPlanner,
+		taskManager,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create operation run manager: %w", err)

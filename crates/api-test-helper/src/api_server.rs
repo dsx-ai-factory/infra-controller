@@ -27,8 +27,7 @@ use crate::utils::LOCALHOST_CERTS;
 
 const DOMAIN_NAME: &str = "forge.integrationtest";
 
-/// BMC network used by API integration tests. The `/23` accommodates both 71-BMC rack fixtures
-/// while keeping the SQL allocator's candidate scan bounded.
+/// BMC network used by API integration tests. The `/23` accommodates both rack fixtures.
 pub const TEST_BMC_NETWORK_PREFIX: Ipv4Net = Ipv4Net::new_assert(Ipv4Addr::new(127, 0, 0, 0), 23);
 
 /// DHCP relay address for [`TEST_BMC_NETWORK_PREFIX`].
@@ -242,6 +241,15 @@ pub async fn start(
         max_concurrency = 10
         metric_emission_interval = "1s"
         metric_hold_time = "2s"
+
+        [switch_state_controller.controller]
+        metric_emission_interval = "1s"
+
+        [rack_state_controller.controller]
+        metric_emission_interval = "1s"
+
+        [power_shelf_state_controller.controller]
+        metric_emission_interval = "1s"
 
         [host_models]
 

@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, Ipv4Addr};
 
 use ::rpc::forge as rpc;
 use carbide_instrument::emit;
@@ -179,8 +180,45 @@ fn validate_expected_machine_for_insert(machine: &ExpectedMachine) -> Result<(),
         .bmc_ip_allocation
         .validate(machine.data.bmc_ip_address.is_some())
         .map_err(|msg| CarbideError::InvalidArgument(msg.to_string()))?;
+    validate_fixed_addresses(&machine.data)?;
 
     Ok(())
+}
+
+const NOT_A_SINGLE_INTERFACE_ADDRESS: &str =
+    "must not be an unspecified, multicast or IPv4 limited-broadcast address";
+
+/// Rejects fixed addresses that cannot identify a single interface. Without
+/// this check, such an address is reserved on `static-assignments` and blocks
+/// every other declaration that uses it.
+fn validate_fixed_addresses(data: &ExpectedMachineData) -> Result<(), CarbideError> {
+    if let Some(address) = data.bmc_ip_address
+        && !identifies_single_interface(address)
+    {
+        return Err(CarbideError::InvalidArgument(format!(
+            "bmc_ip_address {address} {NOT_A_SINGLE_INTERFACE_ADDRESS}"
+        )));
+    }
+    for interface in &data.interfaces {
+        if let Some(address) = interface.fixed_ip
+            && !identifies_single_interface(address)
+        {
+            return Err(CarbideError::InvalidArgument(format!(
+                "interfaces entry {}: fixed_ip {address} {NOT_A_SINGLE_INTERFACE_ADDRESS}",
+                interface.mac_address,
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Matches the REST API's `ValidateExpectedBmcIPAddress`, including its
+/// treatment of IPv4-mapped IPv6 addresses.
+fn identifies_single_interface(address: IpAddr) -> bool {
+    let address = address.to_canonical();
+    !(address.is_unspecified()
+        || address.is_multicast()
+        || address == IpAddr::V4(Ipv4Addr::BROADCAST))
 }
 
 /// Create missing expected_machines that aren't already in the database,
@@ -1424,6 +1462,77 @@ mod tests {
     use carbide_test_support::{Case, Check, check_cases, check_values};
 
     use super::*;
+
+    #[test]
+    fn fixed_addresses_must_identify_a_single_interface() {
+        let bmc_mac_address: MacAddress = "7A:7B:7C:7D:7E:83".parse().unwrap();
+        let interface_mac_address: MacAddress = "7A:7B:7C:7D:7E:84".parse().unwrap();
+        let is_valid = |data| {
+            validate_expected_machine_for_insert(&ExpectedMachine {
+                id: None,
+                bmc_mac_address,
+                data,
+            })
+            .is_ok()
+        };
+
+        // Each row reports (accepted as bmc_ip_address, accepted as fixed_ip).
+        check_values(
+            [
+                Check {
+                    scenario: "IPv4 unicast",
+                    input: "192.0.2.83",
+                    expect: (true, true),
+                },
+                Check {
+                    scenario: "IPv6 unicast",
+                    input: "2001:db8::83",
+                    expect: (true, true),
+                },
+                Check {
+                    scenario: "IPv4 unspecified",
+                    input: "0.0.0.0",
+                    expect: (false, false),
+                },
+                Check {
+                    scenario: "IPv6 unspecified",
+                    input: "::",
+                    expect: (false, false),
+                },
+                Check {
+                    scenario: "IPv4 limited broadcast",
+                    input: "255.255.255.255",
+                    expect: (false, false),
+                },
+                Check {
+                    scenario: "multicast",
+                    input: "224.0.0.1",
+                    expect: (false, false),
+                },
+                Check {
+                    scenario: "IPv4-mapped unspecified",
+                    input: "::ffff:0.0.0.0",
+                    expect: (false, false),
+                },
+            ],
+            |address| {
+                let address: IpAddr = address.parse().unwrap();
+                let bmc_ip_address = is_valid(ExpectedMachineData {
+                    bmc_ip_address: Some(address),
+                    ..Default::default()
+                });
+                let fixed_ip = is_valid(ExpectedMachineData {
+                    interfaces: vec![ExpectedInterface {
+                        mac_address: interface_mac_address,
+                        fixed_ip: Some(address),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                });
+                (bmc_ip_address, fixed_ip)
+            },
+        );
+    }
 
     #[test]
     fn patch_selected_optional_fields_require_values() {

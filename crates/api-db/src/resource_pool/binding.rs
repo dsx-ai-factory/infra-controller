@@ -60,7 +60,7 @@ pub enum BindingError {
 }
 
 /// `load` returns a pool's saved binding, or `None` if it has no binding yet.
-async fn load(
+pub async fn load(
     db: impl DbReader<'_>,
     name: &str,
 ) -> Result<Option<ResourcePoolBinding>, DatabaseError> {

@@ -31,7 +31,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
@@ -237,13 +236,12 @@ func validateIpxeTemplateAvailableAtSites(ctx context.Context, dbSession *cdb.Se
 	return nil
 }
 
-// getTenantSiteIDs combines explicit membership with effective privileged site
-// access, matching the Site API. An empty result must remain non-nil so queries
+// getTenantSiteIDs combines Allocation sites with effective privileged site
+// access, matching common.TenantHasSiteAccess. An empty result must remain non-nil so queries
 // match no sites rather than removing the site restriction.
 func getTenantSiteIDs(ctx context.Context, dbSession *cdb.Session, tenant *cdbm.Tenant) ([]uuid.UUID, error) {
-	tsDAO := cdbm.NewTenantSiteDAO(dbSession)
-	tss, _, err := tsDAO.GetAll(ctx, nil,
-		cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{tenant.ID}},
+	as, _, err := cdbm.NewAllocationDAO(dbSession).GetAll(ctx, nil,
+		cdbm.AllocationFilterInput{TenantIDs: []uuid.UUID{tenant.ID}},
 		cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
 		nil,
 	)
@@ -255,8 +253,8 @@ func getTenantSiteIDs(ctx context.Context, dbSession *cdb.Session, tenant *cdbm.
 		return nil, err
 	}
 	siteIDs := mapset.NewSet[uuid.UUID]()
-	for _, ts := range tss {
-		siteIDs.Add(ts.SiteID)
+	for _, a := range as {
+		siteIDs.Add(a.SiteID)
 	}
 	for _, id := range privilegedIDs {
 		siteIDs.Add(id)
@@ -457,8 +455,13 @@ func (csh CreateOperatingSystemHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Unable to associate Operating System with Site: %s, Site does not belong to provider", siteID.String()), nil)
 			}
 		} else {
-			// Validate the TenantSite exists for current tenant and this site
-			if _, ok := sttsmap[siteID]; !ok {
+			// Validate the current tenant has access to this site
+			ok, serr := common.TenantHasSiteAccess(ctx, nil, csh.dbSession, tenant, siteID)
+			if serr != nil {
+				logger.Error().Err(serr).Msg("error checking Tenant access to Site")
+				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create Operating System, DB error checking Site access", nil)
+			}
+			if !ok {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Unable to associate Operating System with Site: %s, Tenant does not have access to Site", siteID.String()), nil)
 			}
 
@@ -885,7 +888,6 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 			sitesByID[site.ID] = site
 		}
 
-		tenantSiteIDs := make(map[uuid.UUID]struct{})
 		if tenant != nil {
 			var terr error
 			tenantSites, _, terr = tsDAO.GetAll(
@@ -903,9 +905,6 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine if Tenant has access to Sites specified in query, DB error", nil)
 			}
 			tenantSitesLoaded = true
-			for _, ts := range tenantSites {
-				tenantSiteIDs[ts.SiteID] = struct{}{}
-			}
 		}
 
 		for _, siteID := range requestedSiteIDs {
@@ -913,8 +912,15 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 			if !ok {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to retrieve Site specified in query", nil)
 			}
-			_, tenantHasAccess := tenantSiteIDs[siteID]
-			tenantHasAccess = tenantHasAccess || slices.Contains(tenantVisibleProviderSiteIDs, siteID)
+			tenantHasAccess := slices.Contains(tenantVisibleProviderSiteIDs, siteID)
+			if !tenantHasAccess && tenant != nil {
+				var aerr error
+				tenantHasAccess, aerr = common.TenantHasSiteAccess(ctx, nil, gash.dbSession, tenant, siteID)
+				if aerr != nil {
+					logger.Error().Err(aerr).Msg("error checking Tenant access to Site specified in query")
+					return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine if Tenant has access to Sites specified in query, DB error", nil)
+				}
+			}
 			providerHasAccess := ip != nil && site.InfrastructureProviderID == ip.ID
 			if !tenantHasAccess && !providerHasAccess {
 				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Caller is not associated with Site specified in query", nil)
@@ -1234,7 +1240,7 @@ func (gsh GetOperatingSystemHandler) Handle(c echo.Context) error {
 
 	// If caller has dual role (Tenant+Provider) we already know we can go forward.
 	// Otherwise we need additional checks:
-	if !(tenant != nil && ip != nil) {
+	if tenant == nil || ip == nil {
 		if ip != nil && !ownedByProvider {
 			logger.Warn().Msg("provider admin cannot view tenant-owned operating system")
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Operating System does not belong to the infrastructure provider in org", nil)
@@ -1518,8 +1524,12 @@ func (ush UpdateOperatingSystemHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to update Operating System, Associated Site: %s is not in Registered state", dbosa.Site.Name), nil)
 			}
 
-			// Validate the TenantSite exists for current tenant and this site
-			_, ok := sttsmap[dbosa.SiteID]
+			// Validate the current tenant has access to this site
+			ok, serr := common.TenantHasSiteAccess(ctx, nil, ush.dbSession, tenant, dbosa.SiteID)
+			if serr != nil {
+				logger.Error().Err(serr).Msg("error checking Tenant access to Site")
+				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to update Operating System, DB error checking Site access", nil)
+			}
 			if !ok {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Unable to update associate Operating System with Site: %s, Tenant does not have access to Site", dbosa.Site.Name), nil)
 			}
@@ -1961,7 +1971,7 @@ func (dsh DeleteOperatingSystemHandler) Handle(c echo.Context) error {
 	if tenant != nil {
 		instanceFilter.TenantIDs = []uuid.UUID{tenant.ID}
 	}
-	instances, _, err := isDAO.GetAll(ctx, nil, instanceFilter, paginator.PageInput{}, nil)
+	instances, _, err := isDAO.GetAll(ctx, nil, instanceFilter, cdbp.PageInput{}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Instances for Operating System from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Instances for deleting operatingsystem", nil)

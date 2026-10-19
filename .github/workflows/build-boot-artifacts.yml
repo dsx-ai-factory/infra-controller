@@ -517,6 +517,14 @@ jobs:
             --arch "${ARCH}" \
             --root "${REPOSITORY_ROOT}"
 
+      - name: Verify Scout networking in built loader and full image
+        if: inputs.build_type == 'ephemeral'
+        env:
+          ARCH: ${{ inputs.arch }}
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          bash .github/ci/verify_scout_network.sh "pxe/static/blobs/internal/${ARCH}"
+
       - name: Verify mnv_cli exists in built scout image
         if: inputs.build_type == 'ephemeral' && inputs.inject_extras == true
         run: |

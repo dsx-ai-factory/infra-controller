@@ -65,7 +65,8 @@ impl PowerHandlingOutcome {
 /// If power manager tried to power on the host, wait until DPUs are up or wait_expiry_time is
 /// expired (which is around 15 mins). If DPUs come up by this time, reboot the host, else ignore
 /// the handling and move to the state handler.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, carbide_macros::DbTable)]
+#[db_table(name = "power_options")]
 pub struct PowerOptions {
     pub host_id: HostMachineId,
     pub last_fetched_updated_at: DateTime<Utc>,

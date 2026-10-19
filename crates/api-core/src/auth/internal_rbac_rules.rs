@@ -716,9 +716,10 @@ impl InternalRBACRules {
         x.perm("FindNicFirmwareProfilesByIds", vec![ForgeAdminCLI]);
         x.perm("UpdateNicFirmwareProfile", vec![ForgeAdminCLI]);
         x.perm("DeleteNicFirmwareProfile", vec![ForgeAdminCLI]);
-        x.perm("SetNicFirmwareSiteDefault", vec![ForgeAdminCLI]);
-        x.perm("FindNicFirmwareSiteDefaultIds", vec![ForgeAdminCLI]);
-        x.perm("FindNicFirmwareSiteDefaultsByIds", vec![ForgeAdminCLI]);
+        x.perm("SetNicFirmwareSiteSelection", vec![ForgeAdminCLI]);
+        x.perm("FindNicFirmwareSiteSelectionIds", vec![ForgeAdminCLI]);
+        x.perm("FindNicFirmwareSiteSelectionsByIds", vec![ForgeAdminCLI]);
+        x.perm("SetMachineNicFirmwareConfig", vec![ForgeAdminCLI]);
         x.perm("GetDesiredNicFirmware", vec![ForgeAdminCLI]);
         x.perm("CreateSku", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GenerateSkuFromMachine", vec![ForgeAdminCLI]);
@@ -1078,6 +1079,7 @@ impl InternalRBACRules {
         x.perm("UpdateComputeAllocation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteComputeAllocation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ComponentPowerControl", vec![ForgeAdminCLI, Flow]);
+        x.perm("GetComponentPowerDetails", vec![ForgeAdminCLI, Flow]);
         x.perm("GetComponentInventory", vec![ForgeAdminCLI, Flow]);
         x.perm("UpdateComponentFirmware", vec![ForgeAdminCLI, Flow]);
         x.perm(
@@ -1311,6 +1313,48 @@ mod rbac_rule_tests {
         }
     }
 
+    /// Power details belong to operator and Flow callers; unrelated device and
+    /// site services must not gain access through this additive RPC.
+    #[test]
+    fn component_power_details_operator_permissions() {
+        use carbide_test_support::{Check, check_values};
+
+        check_values(
+            [
+                Check {
+                    scenario: "admin CLI may read power details",
+                    input: Principal::ExternalUser(ExternalUserInfo::new(
+                        None,
+                        "nico-cli-client".into(),
+                        None,
+                    )),
+                    expect: true,
+                },
+                Check {
+                    scenario: "Flow may compose power details",
+                    input: Principal::SpiffeServiceIdentifier("nico-flow".into()),
+                    expect: true,
+                },
+                Check {
+                    scenario: "site agent has no operator access",
+                    input: Principal::SpiffeServiceIdentifier("elektra-site-agent".into()),
+                    expect: false,
+                },
+                Check {
+                    scenario: "machine identity has no operator access",
+                    input: Principal::SpiffeMachineIdentifier("host".into()),
+                    expect: false,
+                },
+            ],
+            |principal| {
+                InternalRBACRules::allowed_from_static(
+                    "GetComponentPowerDetails",
+                    std::slice::from_ref(&principal),
+                )
+            },
+        );
+    }
+
     #[test]
     fn nic_firmware_profile_operator_permissions() {
         for (principal, allowed) in [
@@ -1334,9 +1378,10 @@ mod rbac_rule_tests {
                 "FindNicFirmwareProfilesByIds",
                 "UpdateNicFirmwareProfile",
                 "DeleteNicFirmwareProfile",
-                "SetNicFirmwareSiteDefault",
-                "FindNicFirmwareSiteDefaultIds",
-                "FindNicFirmwareSiteDefaultsByIds",
+                "SetNicFirmwareSiteSelection",
+                "FindNicFirmwareSiteSelectionIds",
+                "FindNicFirmwareSiteSelectionsByIds",
+                "SetMachineNicFirmwareConfig",
                 "GetDesiredNicFirmware",
             ] {
                 assert_eq!(

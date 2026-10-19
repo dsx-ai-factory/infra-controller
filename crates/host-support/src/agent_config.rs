@@ -458,16 +458,20 @@ impl UpdateConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct IterationTime {
-    /// How often to report network health and poll for new configs when in stable state.
+    /// Wait in seconds after reporting network health and applying configs in stable state.
+    /// `forge-dpu-agent` adds up to 10% jitter; SIGHUP can interrupt the wait.
     /// Eventually we will need an event system. Block storage requires very fast DPU responses.
     pub main_loop_idle_secs: u64,
 
-    /// How often to report network health and poll for new configs when things are in flux.
+    /// Wait in seconds after reporting network health and applying configs in flux.
+    /// `forge-dpu-agent` adds up to 10% jitter; SIGHUP can interrupt the wait.
     /// This should be slightly bigger than bgpTimerHoldTimeMsecs as displayed in HBN
     /// container by 'show bgp neighbors json' - which is currently 9s.
     pub main_loop_active_secs: u64,
 
-    /// How often we fetch the desired network configuration for a host
+    /// Wait in seconds after each host network configuration fetch completes.
+    /// `forge-dpu-agent` adds up to 10% jitter to recurring waits. The initial
+    /// fetch is immediate, with one immediate background retry if it fails.
     pub network_config_fetch_secs: u64,
 
     /// How often to check if we have latest forge-dpu-agent version

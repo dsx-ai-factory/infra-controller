@@ -122,22 +122,12 @@ func (cdesh CreateDpuExtensionServiceHandler) Handle(c echo.Context) error {
 	}
 
 	// Verify Tenant has access to Site
-	tsDAO := cdbm.NewTenantSiteDAO(cdesh.dbSession)
-	tenantSites, _, err := tsDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.TenantSiteFilterInput{
-			TenantIDs: []uuid.UUID{tenant.ID},
-			SiteIDs:   []uuid.UUID{site.ID},
-		},
-		paginator.PageInput{Limit: cutil.GetPtr(1)},
-		nil,
-	)
+	hasSiteAccess, err := common.TenantHasSiteAccess(ctx, nil, cdesh.dbSession, tenant, site.ID)
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving TenantSite from DB")
+		logger.Error().Err(err).Msg("error checking Tenant access to Site")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Site access for Tenant, DB error", nil)
 	}
-	if len(tenantSites) == 0 {
+	if !hasSiteAccess {
 		logger.Warn().Msg("Tenant does not have access to Site specified in request")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Tenant does not have access to Site specified in request", nil)
 	}
@@ -422,22 +412,12 @@ func (gadesh GetAllDpuExtensionServiceHandler) Handle(c echo.Context) error {
 		}
 
 		// Verify Tenant has access to Site
-		tsDAO := cdbm.NewTenantSiteDAO(gadesh.dbSession)
-		tenantSites, _, err := tsDAO.GetAll(
-			ctx,
-			nil,
-			cdbm.TenantSiteFilterInput{
-				TenantIDs: []uuid.UUID{tenant.ID},
-				SiteIDs:   []uuid.UUID{site.ID},
-			},
-			paginator.PageInput{Limit: cutil.GetPtr(1)},
-			nil,
-		)
+		hasSiteAccess, err := common.TenantHasSiteAccess(ctx, nil, gadesh.dbSession, tenant, site.ID)
 		if err != nil {
-			logger.Error().Err(err).Msg("error retrieving TenantSite from DB")
+			logger.Error().Err(err).Msg("error checking Tenant access to Site")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Site access for Tenant, DB error", nil)
 		}
-		if len(tenantSites) == 0 {
+		if !hasSiteAccess {
 			logger.Warn().Msg("Tenant does not have access to Site specified in query")
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Tenant does not have access to Site specified in query", nil)
 		}

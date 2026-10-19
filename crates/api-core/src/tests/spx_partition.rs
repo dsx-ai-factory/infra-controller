@@ -16,7 +16,7 @@
  */
 
 use carbide_uuid::spx::SpxPartitionId;
-use db::{ConditionalWrite, ObjectColumnFilter};
+use db::ConditionalWrite;
 use model::resource_pool::common::DPA_VNI;
 use model::resource_pool::{OwnerType, ResourcePoolEntryState};
 use rpc::forge::forge_server::Forge;
@@ -91,16 +91,18 @@ async fn deleting_spx_partition_releases_vni_only_once(pool: sqlx::PgPool) {
         .expect("delete SPX partition");
 
     let mut txn = env.db_txn().await;
-    let partitions = db::spx_partition::find_by(
-        &mut *txn,
-        ObjectColumnFilter::One(db::spx_partition::IdColumn, &id),
-    )
-    .await
-    .expect("find deleted SPX partition");
-    let [deleted_partition] = partitions.as_slice() else {
-        panic!("SPX partition must remain as a soft-deleted row");
-    };
-    assert!(deleted_partition.deleted.is_some());
+    // `find_by` now excludes soft-deleted rows, so read the tombstone directly to
+    // confirm deletion left the row in place with its deletion timestamp set.
+    let is_soft_deleted: bool =
+        sqlx::query_scalar("SELECT deleted IS NOT NULL FROM spx_partitions WHERE id=$1")
+            .bind(id)
+            .fetch_one(&mut *txn)
+            .await
+            .expect("SPX partition must remain as a soft-deleted row");
+    assert!(
+        is_soft_deleted,
+        "SPX partition must remain as a soft-deleted row"
+    );
     let released_entry = db::resource_pool::find_value(&mut *txn, &vni)
         .await
         .expect("find released SPX allocation")

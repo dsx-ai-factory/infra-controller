@@ -14,8 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::collections::BTreeSet;
+
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
+use carbide_uuid::machine::DpuMachineId;
 use chrono::{DateTime, Utc};
+use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 
 use crate::bmc_info::BmcInfo;
@@ -72,4 +76,31 @@ pub struct MlxDeviceObservation {
     pub observed_at: DateTime<Utc>,
     /// All reported devices, including entries with unavailable optional facts.
     pub devices: Vec<MlxDeviceInfo>,
+}
+
+/// `managed_dpu_machine_ids` returns the DPUs associated with a device's base MAC.
+/// Empty means unknown ownership, not a SuperNIC. Matches are distinct and
+/// ordered by machine ID.
+/// Callers supply this host's non-BMC interfaces. Missing, zero, and multicast
+/// base MACs do not match any interface.
+pub fn managed_dpu_machine_ids(
+    base_mac: Option<MacAddress>,
+    interfaces: &[MachineInterfaceSnapshot],
+) -> Vec<DpuMachineId> {
+    let mac = base_mac.filter(valid_mac);
+    // Site exploration records the host PF MAC, normally from Redfish's
+    // `base_mac`. A fallback MAC may differ. Preserve conflicting associations;
+    // neither an association nor an old report proves what is installed now.
+    interfaces
+        .iter()
+        .filter(|interface| Some(interface.mac_address) == mac)
+        .filter_map(|interface| interface.attached_dpu_machine_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn valid_mac(mac: &MacAddress) -> bool {
+    let bytes = mac.bytes();
+    bytes != [0; 6] && bytes[0] & 1 == 0
 }

@@ -163,11 +163,15 @@ The API allocates from these pools when creating instances, VPCs, etc.
 Each `[networks.<name>]` block defines one L3 segment to create at startup, with
 `type` (`admin`, `underlay`, or `hostinband`), `prefix`, `mtu`, and `reserve_first`.
 Definitions support IPv4-only, IPv6-only, or both address families (dual-stack).
-A gateway is required whenever an IPv4 prefix is present. DPU provisioning
-requires an admin segment with an IPv4 prefix and gateway. Editing the
-configuration does not update an existing segment. Refer to
+A gateway is required whenever an IPv4 prefix is present. IPv6-only admin
+networking requires a configured FNN site and compatible Core and DPU-agent
+builds. Retain IPv4 DPU loopback addresses and IPv4 VXLAN tunnel endpoints. This
+does not restrict the address families of physical underlay segments. Non-FNN
+admin networking requires an IPv4 prefix and gateway. Editing the network
+definitions does not update an existing segment. Refer to
 [Initial Network Configuration](../../../docs/provisioning/ip-and-network-configuration.md#initial-network-configuration)
-for `prefix_v6`, `dhcpv6_link_address`, examples, and compatibility requirements.
+for FNN settings, `prefix_v6`, `dhcpv6_link_address`, examples, and compatibility
+requirements.
 
 ### Tenant traffic policy
 
@@ -740,7 +744,7 @@ These don't fit any sub-section but show up in production tuning:
 |-------|---------|---------------|
 | `max_database_connections` | `1000` | Drop when running multiple `nico-api` replicas to avoid saturating Postgres `max_connections`. |
 | [`api_admission_control`](#api-admission-control--api_admission_control) | enabled | Fair per-client scheduling for gRPC and admin business requests. The nico-api chart exposes `enabled` as `apiAdmissionControl.enabled`. See the dedicated section for configuration and service overrides. |
-| `max_find_by_ids` | `100` | Increase if scripts paginate batch lookups; raise the API-side limit to match the client. |
+| `max_find_by_ids` | `100` | Maximum IDs per batch lookup and card selections per `SetMachineNicFirmwareConfig` request. Omitted card selections preserve saved entries; a supplied list must fit this limit. |
 | `compute_allocation_enforcement` | `WarnOnly` | Switch to `Enforce` once tenant compute pools are sized correctly — flips over-allocation from a warning to a refusal. |
 | `bmc_session_lockout_threshold` | `3` | Number of consecutive 401/403s from a BMC before NICo stops session-token logins for that BMC. Raise on environments with flaky BMC firmware. |
 | `bmc_max_sessions_per_caller` | `4` | Cap on outstanding Redfish sessions per calling service identity per BMC; a `GetBmcCredentials` mint past the cap revokes that caller's oldest sessions. Size to the caller's replica count plus headroom; values below 1 are treated as 1. |
@@ -1560,7 +1564,7 @@ These are intentional compatibility surfaces, not bugs.
 | **DSX** | Datacenter Sensor eXchange. MQTT-based event bus for BMS metadata and managed-host state. Configured via `[dsx_exchange_event_bus]`. |
 | **ESO** | External Secrets Operator. Syncs secrets from Vault into Kubernetes Secrets. |
 | **FMDS** | Fleet Management Data Service. Tenant-facing API surfaced by `nico-api` (site identity is exposed here via `sitename`). |
-| **FNN** | Fabric Network Numbering / L3 VPC overlay. Tenant VPC networking via VXLAN. Configured via `[fnn]`. |
+| **FNN** | Forge Native Networking / L3 VPC overlay. Tenant VPC networking over VXLAN. Configured through `[fnn]`. |
 | **FRR** | Free Range Routing. Linux routing daemon used inside DPUs for BGP. ASN configured via the top-level `asn` field. |
 | **HGX** | NVIDIA HGX baseboard (H100/H200/GB200 GPU systems). Has its own BMC reachable via `nico-bmc-proxy`. |
 | **IPMI** | Intelligent Platform Management Interface. Legacy OOB management protocol; `dpu_ipmi_tool_impl` selects prod vs fake implementations. |

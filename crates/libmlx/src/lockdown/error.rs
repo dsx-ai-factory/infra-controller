@@ -20,6 +20,10 @@ use thiserror::Error;
 // MlxError is a custom error type for Mellanox NIC operations.
 #[derive(Error, Debug)]
 pub enum MlxError {
+    /// A flint operation failed; the payload describes the failure.
+    /// Key-taking operations omit raw tool output: unsuccessful exits include the
+    /// operation and exit status, and execution failures include the operation and
+    /// OS error.
     #[error("command execution failed: {0}")]
     CommandFailed(String),
 

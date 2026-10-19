@@ -830,7 +830,8 @@ func TestMachineCapabilitySQLDAO_GetAllDistinct(t *testing.T) {
 		}
 	}
 
-	// totalCount := totalMachineCount * len(MachineCapabilityTypeChoiceMap)
+	// Network has two distinct variants: deviceType DPU on the first Machine and nil on the rest.
+	distinctCount := len(MachineCapabilityTypeChoiceMap) + 1
 
 	// OTEL Spanner configuration
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
@@ -848,6 +849,8 @@ func TestMachineCapabilitySQLDAO_GetAllDistinct(t *testing.T) {
 		DeviceType         *string
 		InactiveDevices    []int
 		orderBy            *paginator.OrderBy
+		offset             *int
+		limit              *int
 		expectedCount      int
 		expectedTotal      *int
 		expectedTypes      []MachineCapabilityType
@@ -865,7 +868,8 @@ func TestMachineCapabilitySQLDAO_GetAllDistinct(t *testing.T) {
 			Vendor:         nil,
 			Count:          nil,
 			DeviceType:     nil,
-			expectedCount:  len(MachineCapabilityTypeChoiceMap) + 1,
+			expectedCount:  distinctCount,
+			expectedTotal:  &distinctCount,
 			expectedTypes: []MachineCapabilityType{
 				MachineCapabilityTypeCPU,
 				MachineCapabilityTypeDPU,
@@ -877,6 +881,19 @@ func TestMachineCapabilitySQLDAO_GetAllDistinct(t *testing.T) {
 				MachineCapabilityTypeStorage,
 			},
 			verifyChildSpanner: true,
+		},
+		{
+			desc:          "limited page counts distinct results before pagination",
+			limit:         cutil.GetPtr(3),
+			expectedCount: 3,
+			expectedTotal: &distinctCount,
+		},
+		{
+			desc:          "page beyond distinct results preserves total",
+			offset:        &distinctCount,
+			limit:         cutil.GetPtr(3),
+			expectedCount: 0,
+			expectedTotal: &distinctCount,
 		},
 		{
 			desc:           "GetAll with machine id filter",
@@ -929,6 +946,7 @@ func TestMachineCapabilitySQLDAO_GetAllDistinct(t *testing.T) {
 			Count:          nil,
 			DeviceType:     nil,
 			expectedCount:  1,
+			expectedTotal:  cutil.GetPtr(1),
 		},
 		{
 			desc:           "GetAll with Type and Name filter",
@@ -1042,7 +1060,11 @@ func TestMachineCapabilitySQLDAO_GetAllDistinct(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			got, total, err := mcd.GetAllDistinct(ctx, nil, tc.MachineIDs, tc.InstanceTypeID, tc.Type, tc.Name, tc.Frequency, tc.Capacity, tc.Vendor, tc.Count, tc.DeviceType, tc.InactiveDevices, nil, cutil.GetPtr(paginator.TotalLimit), tc.orderBy)
+			limit := tc.limit
+			if limit == nil {
+				limit = cutil.GetPtr(paginator.TotalLimit)
+			}
+			got, total, err := mcd.GetAllDistinct(ctx, nil, tc.MachineIDs, tc.InstanceTypeID, tc.Type, tc.Name, tc.Frequency, tc.Capacity, tc.Vendor, tc.Count, tc.DeviceType, tc.InactiveDevices, tc.offset, limit, tc.orderBy)
 			if tc.wantErr != nil {
 				require.ErrorIs(t, err, tc.wantErr)
 				return

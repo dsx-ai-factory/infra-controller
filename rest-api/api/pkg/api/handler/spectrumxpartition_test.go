@@ -414,7 +414,7 @@ func TestGetAllSpectrumXPartitionHandler_Handle(t *testing.T) {
 	// Nothing found is an empty list, not a 404, and the body has to be `[]` rather than
 	// `null` so a client can iterate it without a nil check.
 	t.Run("returns an empty array when no Partition matches", func(t *testing.T) {
-		ec, rec := fx.newContext(t, http.MethodGet, "/?siteId="+fx.noAllocSit.ID.String(), "", fx.user, fx.org, "")
+		ec, rec := fx.newContext(t, http.MethodGet, "/?siteId="+fx.site.ID.String()+"&status=Error", "", fx.user, fx.org, "")
 		require.NoError(t, handler.Handle(ec))
 		require.Equal(t, http.StatusOK, rec.Code)
 		assert.JSONEq(t, "[]", rec.Body.String())

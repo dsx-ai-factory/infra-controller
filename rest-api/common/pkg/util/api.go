@@ -138,9 +138,10 @@ func DefaultHTTPErrorHandler(err error, c echo.Context) {
 	}
 
 	// Override 404
-	if code == http.StatusNotFound {
+	switch code {
+	case http.StatusNotFound:
 		message = APIErrorNotFound
-	} else if code == http.StatusInternalServerError {
+	case http.StatusInternalServerError:
 		message = APIErrorInternalServer
 	}
 

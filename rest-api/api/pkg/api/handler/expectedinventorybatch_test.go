@@ -17,6 +17,7 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -27,8 +28,8 @@ import (
 	tmocks "go.temporal.io/sdk/mocks"
 )
 
-func TestExpectedInventoryBulkHandlersRejectIncompleteRequests(t *testing.T) {
-	user := &cdbm.User{ID: uuid.New(), StarfleetID: cutil.GetPtr("bulk-user")}
+func TestExpectedInventoryBatchHandlersRejectIncompleteRequests(t *testing.T) {
+	user := &cdbm.User{ID: uuid.New(), StarfleetID: cutil.GetPtr("batch-user")}
 	siteID := uuid.New().String()
 	tests := []struct {
 		name, path string
@@ -40,7 +41,7 @@ func TestExpectedInventoryBulkHandlersRejectIncompleteRequests(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			recorder := invokeExpectedInventoryBulkHandler(t, user, "test-org", http.MethodPut, test.path, fmt.Sprintf(`{"siteId":%q}`, siteID), "", test.handle)
+			recorder := invokeExpectedInventoryBatchHandler(t, user, "test-org", http.MethodPut, test.path, fmt.Sprintf(`{"siteId":%q}`, siteID), "", test.handle)
 			require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
 		})
 	}
@@ -55,10 +56,81 @@ func TestExpectedInventoryBulkHandlersRejectIncompleteRequests(t *testing.T) {
 	}
 	for _, test := range deleteHandlers {
 		t.Run("delete "+test.name+" without siteId", func(t *testing.T) {
-			recorder := invokeExpectedInventoryBulkHandler(t, user, "test-org", http.MethodDelete, test.path, "", "", test.handle)
+			recorder := invokeExpectedInventoryBatchHandler(t, user, "test-org", http.MethodDelete, test.path, "", "", test.handle)
 			require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
 		})
 	}
+}
+
+func testExpectedMachineMutationRejectsCompleteMutationLock(t *testing.T, mutation string) {
+	dbSession := testExpectedRackInitDB(t)
+	t.Cleanup(func() { dbSession.Close() })
+	ctx := context.Background()
+	for _, dbModel := range []any{(*cdbm.InstanceType)(nil), (*cdbm.Machine)(nil), (*cdbm.SKU)(nil), (*cdbm.ExpectedMachine)(nil)} {
+		require.NoError(t, dbSession.DB.ResetModel(ctx, dbModel))
+	}
+
+	const org = "test-org"
+	_, site, _ := testExpectedRackSetupTestData(t, dbSession, org)
+	user := &cdbm.User{ID: uuid.New(), StarfleetID: cutil.GetPtr("batch-user"), OrgData: cdbm.OrgData{org: cdbm.Org{Name: org, Roles: []string{"FORGE_PROVIDER_ADMIN"}}}}
+	_, err := dbSession.DB.NewInsert().Model(user).Exec(ctx)
+	require.NoError(t, err)
+	original, err := cdbm.NewExpectedMachineDAO(dbSession).Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
+		ExpectedMachineID: uuid.New(), SiteID: site.ID, BmcMacAddress: "00:11:22:33:44:10",
+		ChassisSerialNumber: "original", Name: cutil.GetPtr("original"), CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+
+	lockTx, err := cdb.BeginTx(ctx, dbSession, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, lockTx.Rollback()) })
+	lockID := cdb.GetAdvisoryLockIDFromString(expectedInventoryMutationLockPrefix + site.ID.String())
+	require.NoError(t, lockTx.TryAcquireAdvisoryLock(ctx, lockID, nil))
+
+	var method, path, body, id string
+	var handle func(echo.Context) error
+	switch mutation {
+	case "single create":
+		method = http.MethodPost
+		path = "/v2/org/test-org/nico/expected-machine"
+		body = fmt.Sprintf(`{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:11","chassisSerialNumber":"created"}`, site.ID.String())
+		handle = NewCreateExpectedMachineHandler(dbSession, nil, common.GetTestConfig()).Handle
+	case "single update":
+		method = http.MethodPatch
+		path = "/v2/org/test-org/nico/expected-machine/" + original.ID.String()
+		id = original.ID.String()
+		body = `{"name":"updated"}`
+		handle = NewUpdateExpectedMachineHandler(dbSession, nil, common.GetTestConfig()).Handle
+	case "single delete":
+		method = http.MethodDelete
+		path = "/v2/org/test-org/nico/expected-machine/" + original.ID.String()
+		id = original.ID.String()
+		handle = NewDeleteExpectedMachineHandler(dbSession, nil, common.GetTestConfig()).Handle
+	case "batch create":
+		method = http.MethodPost
+		path = "/v2/org/test-org/nico/expected-machine/batch"
+		body = fmt.Sprintf(`[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:12","chassisSerialNumber":"batch-created"}]`, site.ID.String())
+		handle = NewCreateExpectedMachinesHandler(dbSession, nil, common.GetTestConfig()).Handle
+	case "batch update":
+		method = http.MethodPatch
+		path = "/v2/org/test-org/nico/expected-machine/batch"
+		body = fmt.Sprintf(`[{"id":%q,"name":"batch-updated"}]`, original.ID.String())
+		handle = NewUpdateExpectedMachinesHandler(dbSession, nil, common.GetTestConfig()).Handle
+	default:
+		t.Fatalf("unknown Expected Machine mutation %q", mutation)
+	}
+
+	recorder := invokeExpectedInventoryMutationHandler(t, user, org, method, path, body, id, handle)
+	require.Equal(t, http.StatusConflict, recorder.Code, recorder.Body.String())
+
+	stored, err := cdbm.NewExpectedMachineDAO(dbSession).Get(ctx, nil, original.ID, nil, false)
+	require.NoError(t, err)
+	require.Equal(t, "original", stored.ChassisSerialNumber)
+	require.NotNil(t, stored.Name)
+	require.Equal(t, "original", *stored.Name)
+	_, count, err := cdbm.NewExpectedMachineDAO(dbSession).GetAll(ctx, nil, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{site.ID}}, paginator.PageInput{}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
 }
 
 func TestReplaceAllExpectedMachinesRollsBackOnCoreFailure(t *testing.T) {
@@ -71,7 +143,7 @@ func TestReplaceAllExpectedMachinesRollsBackOnCoreFailure(t *testing.T) {
 
 	const org = "test-org"
 	_, site, _ := testExpectedRackSetupTestData(t, dbSession, org)
-	user := &cdbm.User{ID: uuid.New(), StarfleetID: cutil.GetPtr("bulk-user"), OrgData: cdbm.OrgData{org: cdbm.Org{Name: org, Roles: []string{"FORGE_PROVIDER_ADMIN"}}}}
+	user := &cdbm.User{ID: uuid.New(), StarfleetID: cutil.GetPtr("batch-user"), OrgData: cdbm.OrgData{org: cdbm.Org{Name: org, Roles: []string{"FORGE_PROVIDER_ADMIN"}}}}
 	_, err := dbSession.DB.NewInsert().Model(user).Exec(ctx)
 	require.NoError(t, err)
 	dao := cdbm.NewExpectedMachineDAO(dbSession)
@@ -93,7 +165,7 @@ func TestReplaceAllExpectedMachinesRollsBackOnCoreFailure(t *testing.T) {
 	})
 
 	body := fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:11","chassisSerialNumber":"replacement"}]}`, site.ID.String(), site.ID.String())
-	recorder := invokeExpectedInventoryBulkHandler(t, user, org, http.MethodPut, "/v2/org/test-org/nico/expected-machine/all", body, "", NewReplaceAllExpectedMachinesHandler(dbSession, pool, common.GetTestConfig()).Handle)
+	recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, "/v2/org/test-org/nico/expected-machine/all", body, "", NewReplaceAllExpectedMachinesHandler(dbSession, pool, common.GetTestConfig()).Handle)
 	require.Equal(t, http.StatusInternalServerError, recorder.Code, recorder.Body.String())
 
 	stored, err := dao.Get(ctx, nil, original.ID, nil, false)
@@ -114,7 +186,7 @@ func TestReplaceAllExpectedMachinesFindsRequestedSKUAmongLargerSiteInventory(t *
 
 	const org = "test-org"
 	_, site, _ := testExpectedRackSetupTestData(t, dbSession, org)
-	user := &cdbm.User{ID: uuid.New(), StarfleetID: cutil.GetPtr("bulk-user"), OrgData: cdbm.OrgData{org: cdbm.Org{Name: org, Roles: []string{"FORGE_PROVIDER_ADMIN"}}}}
+	user := &cdbm.User{ID: uuid.New(), StarfleetID: cutil.GetPtr("batch-user"), OrgData: cdbm.OrgData{org: cdbm.Org{Name: org, Roles: []string{"FORGE_PROVIDER_ADMIN"}}}}
 	_, err := dbSession.DB.NewInsert().Model(user).Exec(ctx)
 	require.NoError(t, err)
 	for _, sku := range []cdbm.SKU{
@@ -137,11 +209,11 @@ func TestReplaceAllExpectedMachinesFindsRequestedSKUAmongLargerSiteInventory(t *
 	})
 
 	body := fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:01","chassisSerialNumber":"machine-1","skuId":"requested-sku"}]}`, site.ID.String(), site.ID.String())
-	recorder := invokeExpectedInventoryBulkHandler(t, user, org, http.MethodPut, "/v2/org/test-org/nico/expected-machine/all", body, "", NewReplaceAllExpectedMachinesHandler(dbSession, pool, common.GetTestConfig()).Handle)
+	recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, "/v2/org/test-org/nico/expected-machine/all", body, "", NewReplaceAllExpectedMachinesHandler(dbSession, pool, common.GetTestConfig()).Handle)
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 }
 
-func TestExpectedInventoryBulkHandlers(t *testing.T) {
+func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	dbSession := testExpectedRackInitDB(t)
 	t.Cleanup(func() { dbSession.Close() })
 	ctx := context.Background()
@@ -153,7 +225,7 @@ func TestExpectedInventoryBulkHandlers(t *testing.T) {
 	_, site, _ := testExpectedRackSetupTestData(t, dbSession, org)
 	user := &cdbm.User{
 		ID:          uuid.New(),
-		StarfleetID: cutil.GetPtr("bulk-user"),
+		StarfleetID: cutil.GetPtr("batch-user"),
 		OrgData: cdbm.OrgData{
 			org: cdbm.Org{Name: org, Roles: []string{"FORGE_PROVIDER_ADMIN"}},
 		},
@@ -209,7 +281,7 @@ func TestExpectedInventoryBulkHandlers(t *testing.T) {
 
 	for _, replacement := range replacements {
 		t.Run("replace all "+replacement.name, func(t *testing.T) {
-			recorder := invokeExpectedInventoryBulkHandler(t, user, org, http.MethodPut, replacement.path, replacement.body, "", replacement.handle)
+			recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, replacement.path, replacement.body, "", replacement.handle)
 			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 			request := captured[len(captured)-1]
 			require.Equal(t, replacement.method, request.FullMethod)
@@ -247,7 +319,7 @@ func TestExpectedInventoryBulkHandlers(t *testing.T) {
 	}
 	for _, deletion := range deletions {
 		t.Run("delete all "+deletion.name, func(t *testing.T) {
-			recorder := invokeExpectedInventoryBulkHandler(t, user, org, http.MethodDelete, deletion.path, "", site.ID.String(), deletion.handle)
+			recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodDelete, deletion.path, "", site.ID.String(), deletion.handle)
 			require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
 			request := captured[len(captured)-1]
 			require.Equal(t, deletion.method, request.FullMethod)
@@ -264,9 +336,60 @@ func TestExpectedInventoryBulkHandlers(t *testing.T) {
 	_, count, err = cdbm.NewExpectedPowerShelfDAO(dbSession).GetAll(ctx, nil, cdbm.ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{site.ID}}, paginator.PageInput{}, nil)
 	require.NoError(t, err)
 	require.Zero(t, count)
+
+	_, err = cdbm.NewExpectedMachineDAO(dbSession).Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
+		ExpectedMachineID: uuid.New(), SiteID: site.ID, BmcMacAddress: "00:11:22:33:44:21",
+		ChassisSerialNumber: "retained-machine", CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+	_, err = cdbm.NewExpectedSwitchDAO(dbSession).Create(ctx, nil, cdbm.ExpectedSwitchCreateInput{
+		ExpectedSwitchID: uuid.New(), SiteID: site.ID, BmcMacAddress: "00:11:22:33:44:22",
+		SwitchSerialNumber: "retained-switch", CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+	_, err = cdbm.NewExpectedPowerShelfDAO(dbSession).Create(ctx, nil, cdbm.ExpectedPowerShelfCreateInput{
+		ExpectedPowerShelfID: uuid.New(), SiteID: site.ID, BmcMacAddress: "00:11:22:33:44:23",
+		ShelfSerialNumber: "retained-shelf", CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+
+	lockTx, err := cdb.BeginTx(ctx, dbSession, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, lockTx.Rollback()) })
+	lockID := cdb.GetAdvisoryLockIDFromString(expectedInventoryMutationLockPrefix + site.ID.String())
+	require.NoError(t, lockTx.TryAcquireAdvisoryLock(ctx, lockID, nil))
+	for _, replacement := range replacements {
+		t.Run("reject concurrent "+replacement.name+" replacement", func(t *testing.T) {
+			callsBefore := len(captured)
+			recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, replacement.path, replacement.body, "", replacement.handle)
+			require.Equal(t, http.StatusConflict, recorder.Code, recorder.Body.String())
+			require.Len(t, captured, callsBefore, "lock conflict must not reach Core")
+		})
+	}
+	for _, deletion := range deletions {
+		t.Run("reject concurrent "+deletion.name+" deletion", func(t *testing.T) {
+			callsBefore := len(captured)
+			recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodDelete, deletion.path, "", site.ID.String(), deletion.handle)
+			require.Equal(t, http.StatusConflict, recorder.Code, recorder.Body.String())
+			require.Len(t, captured, callsBefore, "lock conflict must not reach Core")
+		})
+	}
+
+	machines, count, err := cdbm.NewExpectedMachineDAO(dbSession).GetAll(ctx, nil, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{site.ID}}, paginator.PageInput{}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	require.Equal(t, "retained-machine", machines[0].ChassisSerialNumber)
+	switches, count, err := cdbm.NewExpectedSwitchDAO(dbSession).GetAll(ctx, nil, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{site.ID}}, paginator.PageInput{}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	require.Equal(t, "retained-switch", switches[0].SwitchSerialNumber)
+	shelves, count, err := cdbm.NewExpectedPowerShelfDAO(dbSession).GetAll(ctx, nil, cdbm.ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{site.ID}}, paginator.PageInput{}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	require.Equal(t, "retained-shelf", shelves[0].ShelfSerialNumber)
 }
 
-func invokeExpectedInventoryBulkHandler(t *testing.T, user *cdbm.User, org, method, path, body, siteID string, handle func(echo.Context) error) *httptest.ResponseRecorder {
+func invokeExpectedInventoryBatchHandler(t *testing.T, user *cdbm.User, org, method, path, body, siteID string, handle func(echo.Context) error) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	request.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
@@ -280,6 +403,19 @@ func invokeExpectedInventoryBulkHandler(t *testing.T, user *cdbm.User, org, meth
 	echoContext.Set("user", user)
 	echoContext.SetParamNames("orgName")
 	echoContext.SetParamValues(org)
+	require.NoError(t, handle(echoContext))
+	return recorder
+}
+
+func invokeExpectedInventoryMutationHandler(t *testing.T, user *cdbm.User, org, method, path, body, id string, handle func(echo.Context) error) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	request.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	recorder := httptest.NewRecorder()
+	echoContext := echo.New().NewContext(request, recorder)
+	echoContext.Set("user", user)
+	echoContext.SetParamNames("orgName", "id")
+	echoContext.SetParamValues(org, id)
 	require.NoError(t, handle(echoContext))
 	return recorder
 }

@@ -53,4 +53,11 @@ async fn explore_dell_poweredge_r750() {
             .is_some_and(|status| !status.diffs.is_empty() || status.is_done),
         "machine setup status must be present and structurally valid"
     );
+    assert!(
+        report
+            .machine_setup_status
+            .as_ref()
+            .is_some_and(|status| { status.diffs.iter().any(|diff| diff.key == "BootSeqRetry") }),
+        "disabled BootSeqRetry must be reported as a setup mismatch"
+    );
 }

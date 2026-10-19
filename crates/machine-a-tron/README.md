@@ -7,6 +7,13 @@ environment. I will generate machine information from the files in the template 
 as needed (product serial, mac address, etc). this allows it to create multiple managed hosts. I will stay running and
 periodically report health network observations.
 
+## Dual-stack packet testing
+
+The optional [dual-stack packet test](../../dev/machine-a-tron/network/README.md) uses active
+tenant observations from the read-only MAT control route
+`GET /machines/tenant-networks` to exercise the real NICo DHCPv4/DHCPv6 server and
+temporary Linux endpoints. No file export or additional MAT setting is needed.
+
 ## Usage
 
 ```text

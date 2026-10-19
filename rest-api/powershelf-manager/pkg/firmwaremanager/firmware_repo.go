@@ -85,7 +85,7 @@ func newFirmwareRepo(v vendor.Vendor, firmwareDir string) (*FirmwareRepo, error)
 		return &FirmwareRepo{ff: ff}, nil
 	}
 
-	var upgrades []FirmwareUpgrade = make([]FirmwareUpgrade, 0, len(fw_entries))
+	var upgrades = make([]FirmwareUpgrade, 0, len(fw_entries))
 	var minStartingFwVersion firmwareVersion
 	var maxStartingFwVersion firmwareVersion
 

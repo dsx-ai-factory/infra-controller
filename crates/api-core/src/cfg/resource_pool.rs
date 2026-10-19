@@ -15,8 +15,8 @@
  * limitations under the License.
  */
 
-use std::path::PathBuf;
-
+pub use carbide_resource_pool::grpc::ResourcePoolTlsConfig;
+use carbide_resource_pool::grpc::{GrpcResourcePoolConfigError, validate_endpoint};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use url::Url;
@@ -92,68 +92,12 @@ impl<'de> Deserialize<'de> for ResourcePoolBackendConfig {
     }
 }
 
-/// `ResourcePoolTlsConfig` configures TLS trust and client identity for a
-/// resource pool backend.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ResourcePoolTlsConfig {
-    /// Optional PEM CA certificate file for validating the provider.
-    #[serde(default)]
-    pub ca_cert_file: Option<PathBuf>,
-    /// Optional PEM client certificate file, paired with `client_key_file`.
-    #[serde(default)]
-    pub client_cert_file: Option<PathBuf>,
-    /// Optional PEM client private key file, paired with `client_cert_file`.
-    #[serde(default)]
-    pub client_key_file: Option<PathBuf>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub(super) enum ResourcePoolBackendConfigError {
-    #[error("endpoint must use http or https and include a host")]
-    InvalidEndpoint,
-    #[error("endpoint must not contain credentials, a query, or a fragment")]
-    EndpointContainsCredentialsOrParameters,
-    #[error("endpoint path must be empty or /")]
-    EndpointPath,
-    #[error("client_cert_file and client_key_file must be configured together")]
-    IncompleteClientIdentity,
-    #[error("TLS certificate and key files require an https endpoint")]
-    TlsRequiresHttps,
-}
-
 impl ResourcePoolBackendConfig {
-    pub(super) fn validate(&self) -> Result<(), ResourcePoolBackendConfigError> {
-        let Self::Grpc { endpoint, tls } = self else {
-            return Ok(());
-        };
-
-        if !matches!(endpoint.scheme(), "http" | "https") || endpoint.host().is_none() {
-            return Err(ResourcePoolBackendConfigError::InvalidEndpoint);
+    pub(super) fn validate(&self) -> Result<(), GrpcResourcePoolConfigError> {
+        match self {
+            Self::Integrated => Ok(()),
+            Self::Grpc { endpoint, tls } => validate_endpoint(endpoint, tls.as_ref()),
         }
-        if !endpoint.username().is_empty()
-            || endpoint.password().is_some()
-            || endpoint.query().is_some()
-            || endpoint.fragment().is_some()
-        {
-            return Err(ResourcePoolBackendConfigError::EndpointContainsCredentialsOrParameters);
-        }
-        if !matches!(endpoint.path(), "" | "/") {
-            return Err(ResourcePoolBackendConfigError::EndpointPath);
-        }
-
-        let Some(tls) = tls else {
-            return Ok(());
-        };
-        if tls.client_cert_file.is_some() != tls.client_key_file.is_some() {
-            return Err(ResourcePoolBackendConfigError::IncompleteClientIdentity);
-        }
-        if endpoint.scheme() != "https"
-            && (tls.ca_cert_file.is_some() || tls.client_cert_file.is_some())
-        {
-            return Err(ResourcePoolBackendConfigError::TlsRequiresHttps);
-        }
-        Ok(())
     }
 }
 
@@ -185,42 +129,19 @@ mod tests {
     }
 
     #[test]
-    fn backend_endpoint_and_tls_validation() {
-        scenarios!(
-            run = |(endpoint, tls): (&str, Option<ResourcePoolTlsConfig>)| ResourcePoolBackendConfig::Grpc {
-                endpoint: endpoint.parse().expect("test endpoint URL"),
-                tls,
-            }.validate();
-            "unused definitions are valid without network or certificate reads" {
-                ("http://allocator.example:50051", None) => Yields(()),
-                ("http://allocator.example:50051", Some(ResourcePoolTlsConfig::default())) => Yields(()),
-                ("https://allocator.example/", Some(ResourcePoolTlsConfig {
-                    ca_cert_file: Some("absent-ca.pem".into()),
-                    client_cert_file: Some("absent-cert.pem".into()),
-                    client_key_file: Some("absent-key.pem".into()),
-                })) => Yields(()),
-            }
-            "endpoint restrictions" {
-                ("file:///allocator", None) => FailsWith(ResourcePoolBackendConfigError::InvalidEndpoint),
-                ("https://user:secret@allocator.example", None) => FailsWith(ResourcePoolBackendConfigError::EndpointContainsCredentialsOrParameters),
-                ("https://allocator.example?token=secret", None) => FailsWith(ResourcePoolBackendConfigError::EndpointContainsCredentialsOrParameters),
-                ("https://allocator.example#secret", None) => FailsWith(ResourcePoolBackendConfigError::EndpointContainsCredentialsOrParameters),
-                ("https://allocator.example/pool", None) => FailsWith(ResourcePoolBackendConfigError::EndpointPath),
-            }
-            "TLS fields must be usable together" {
-                ("https://allocator.example", Some(ResourcePoolTlsConfig {
-                    client_cert_file: Some("client.pem".into()),
-                    ..Default::default()
-                })) => FailsWith(ResourcePoolBackendConfigError::IncompleteClientIdentity),
-                ("https://allocator.example", Some(ResourcePoolTlsConfig {
-                    client_key_file: Some("client.key".into()),
-                    ..Default::default()
-                })) => FailsWith(ResourcePoolBackendConfigError::IncompleteClientIdentity),
-                ("http://allocator.example", Some(ResourcePoolTlsConfig {
-                    ca_cert_file: Some("ca.pem".into()),
-                    ..Default::default()
-                })) => FailsWith(ResourcePoolBackendConfigError::TlsRequiresHttps),
-            }
+    fn backend_validation_delegates_grpc_settings() {
+        let backend = ResourcePoolBackendConfig::Grpc {
+            endpoint: "http://allocator.example"
+                .parse()
+                .expect("test endpoint URL"),
+            tls: Some(ResourcePoolTlsConfig {
+                ca_cert_file: Some("ca.pem".into()),
+                ..Default::default()
+            }),
+        };
+        assert_eq!(
+            backend.validate(),
+            Err(GrpcResourcePoolConfigError::TlsRequiresHttps)
         );
     }
 }

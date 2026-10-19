@@ -25,7 +25,7 @@
 //!   minutes. Failed reloads retain the previous configuration and retry after
 //!   thirty seconds. A client certificate is optional here.
 //! - `guard`: identifies the caller from its certificate, then checks the
-//!   principal allow-list and the per-principal ACL.
+//!   principal allow-list, rejects ambiguous paths, and checks the per-principal ACL.
 //! - `target`: resolves the BMC the `Forwarded` header names to its IP.
 //! - `admission`: holds a request until its BMC has a slot for it, when its
 //!   class or the per-BMC limit caps how many requests the BMC receives.
@@ -37,7 +37,7 @@
 //!   of the credential its attempt used, or replaced when it cannot be
 //!   inspected; other bodies stream through unchanged.
 //!
-//! [`proxy_request_inner`] runs a request from the ACL on. When the BMC
+//! [`proxy_request_inner`] runs a request from the path check and ACL on. When the BMC
 //! answers 401 or 403 and the body can be sent again, it drops the cached
 //! credentials and sends the request once more with fresh ones.
 
@@ -82,7 +82,7 @@ use crate::proxy::admission::{Admission, Slot};
 use crate::proxy::credentials::{
     CREDENTIAL_CACHE_IDLE_TTL, CredentialCache, evict_cached_credentials, get_bmc_credentials,
 };
-use crate::proxy::guard::{authorize_proxy_request, cert_description_layer};
+use crate::proxy::guard::{authorize_proxy_request, cert_description_layer, reject_ambiguous_path};
 use crate::proxy::ingress::{BmcProxy, RefreshableTlsAcceptor};
 use crate::proxy::response::{BmcOrigins, build_response, prepare_response_body};
 use crate::proxy::target::{
@@ -324,6 +324,10 @@ async fn proxy_request_inner(
     request: Request<Body>,
 ) -> Result<Response<Body>, Response<Body>> {
     let arrived = tokio::time::Instant::now();
+    if let Some(response) = reject_ambiguous_path(&request) {
+        return Ok(response);
+    }
+
     let Some(principals) = state.authorized_caller(&request) else {
         return Ok(error_response((StatusCode::FORBIDDEN, "Forbidden").into()));
     };

@@ -232,7 +232,8 @@ func run(ctx context.Context) error {
 	log.Info().Str("Temporal Namespace", tcfg.Namespace).Msg("registering workflow and activities")
 
 	// Register workflows
-	if tcfg.Namespace == cwfn.CloudNamespace {
+	switch tcfg.Namespace {
+	case cwfn.CloudNamespace:
 		// Workflows triggered by Cloud services
 		w.RegisterWorkflow(vpcWorkflow.DeleteVpcByID)
 
@@ -259,7 +260,7 @@ func run(ctx context.Context) error {
 
 		// InfiniBandPartition workflows
 		w.RegisterWorkflow(ibpWorkflow.DeleteInfiniBandPartitionByID)
-	} else if tcfg.Namespace == cwfn.SiteNamespace {
+	case cwfn.SiteNamespace:
 		// Workflows triggered by Site Agent
 		// Machine Workflows
 		w.RegisterWorkflow(machineWorkflow.UpdateMachineInventory)

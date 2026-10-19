@@ -299,7 +299,7 @@ func TestServiceBuilder_BuildService_BMCIPAsExternalIP(t *testing.T) {
 }
 
 // TestServiceBuilder_BuildNvosService checks the per-switch NVOS Service: its
-// name, externalIP, and port 9370 forwarded to the bmc-mock listener.
+// name, externalIP, and ports 9370 and 443 forwarded to the bmc-mock listener.
 func TestServiceBuilder_BuildNvosService(t *testing.T) {
 	builder := &ServiceBuilder{
 		Namespace: "test-ns",
@@ -335,12 +335,17 @@ func TestServiceBuilder_BuildNvosService(t *testing.T) {
 	assert.Equal(t, "nvidia_switch_nd5200_ld", svc.Annotations[AnnotationHardwareType])
 	assert.NotContains(t, svc.Annotations, AnnotationBMCIP)
 
-	require.Len(t, svc.Spec.Ports, 1)
-	port := svc.Spec.Ports[0]
-	assert.Equal(t, PortNameNmxc, port.Name)
-	assert.Equal(t, corev1.ProtocolTCP, port.Protocol)
-	assert.Equal(t, int32(NmxcPort), port.Port, "NICo expects NMX-C on 9370")
-	assert.Equal(t, intstr.FromInt32(8443), port.TargetPort, "forwarded to the bmc-mock listener")
+	require.Len(t, svc.Spec.Ports, 2)
+	nmxc := svc.Spec.Ports[0]
+	assert.Equal(t, PortNameNmxc, nmxc.Name)
+	assert.Equal(t, corev1.ProtocolTCP, nmxc.Protocol)
+	assert.Equal(t, int32(NmxcPort), nmxc.Port, "NICo expects NMX-C on 9370")
+	assert.Equal(t, intstr.FromInt32(8443), nmxc.TargetPort, "forwarded to the bmc-mock listener")
+	nvue := svc.Spec.Ports[1]
+	assert.Equal(t, PortNameNvue, nvue.Name)
+	assert.Equal(t, corev1.ProtocolTCP, nvue.Protocol)
+	assert.Equal(t, int32(NvuePort), nvue.Port, "NICo expects the NVUE REST API on 443")
+	assert.Equal(t, intstr.FromInt32(8443), nvue.TargetPort, "forwarded to the bmc-mock listener")
 }
 
 // TestServiceBuilder_BuildServicesFromStatus_SwitchNvosEndpoint checks that a

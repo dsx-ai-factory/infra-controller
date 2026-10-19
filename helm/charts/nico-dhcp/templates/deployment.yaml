@@ -1,3 +1,7 @@
+{{- $env := deepCopy .Values.env -}}
+{{- with .Values.otlpEndpoint -}}
+{{- $_ := set $env "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" . -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -29,7 +33,7 @@ spec:
           image: "{{ include "nico-dhcp.image" . }}"
           command: ['sh', '-c', 'mkdir -vp /var/run/kea /var/lib/kea && /sbin/kea-dhcp4 -c /tmp/kea_config.json']
           env:
-            {{- range $key, $value := .Values.env }}
+            {{- range $key, $value := $env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}

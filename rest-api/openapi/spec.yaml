@@ -4492,6 +4492,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Machine with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
     get:
@@ -4604,6 +4607,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Machine replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
     delete:
@@ -4630,6 +4636,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Machine deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
   '/v2/org/{org}/nico/expected-machine/label/key':
@@ -4876,6 +4885,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine update is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
     delete:
@@ -4899,6 +4911,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
   '/v2/org/{org}/nico/expected-machine/batch':
@@ -4969,6 +4984,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This batch Expected Machine creation is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
     patch:
@@ -5036,6 +5054,9 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
+        '409':
+          description: One or more target Expected Machines changed before they could be locked, or another complete Expected Inventory mutation is in progress for the same Site. The batch can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
   '/v2/org/{org}/nico/expected-power-shelf':
@@ -5085,6 +5106,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Power Shelf with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
     get:
@@ -5198,6 +5222,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Power Shelf replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
     delete:
@@ -5224,6 +5251,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Power Shelf deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
   '/v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId}':
@@ -5317,6 +5347,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Power Shelf update is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
     delete:
@@ -5340,6 +5373,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Power Shelf deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
   '/v2/org/{org}/nico/expected-rack':
@@ -5396,6 +5432,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Rack with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
     get:
@@ -5530,6 +5569,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
   '/v2/org/{org}/nico/expected-rack/all':
@@ -5571,6 +5613,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
     delete:
@@ -5599,6 +5644,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
   '/v2/org/{org}/nico/expected-rack/{id}':
@@ -5695,6 +5743,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack update is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
     delete:
@@ -5717,6 +5768,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
   '/v2/org/{org}/nico/expected-rack-group':
@@ -5776,6 +5830,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Rack Group with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
     get:
@@ -5923,6 +5980,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
   '/v2/org/{org}/nico/expected-rack-group/all':
@@ -5964,6 +6024,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
     delete:
@@ -5992,6 +6055,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
   '/v2/org/{org}/nico/expected-rack-group/{id}':
@@ -6092,6 +6158,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack Group update is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
     delete:
@@ -6114,6 +6183,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack Group deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
   '/v2/org/{org}/nico/expected-switch':
@@ -6167,6 +6239,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Switch with a conflicting BMC or NVOS identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
     get:
@@ -6280,6 +6355,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Switch replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
     delete:
@@ -6306,6 +6384,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Switch deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
   '/v2/org/{org}/nico/expected-switch/{expectedSwitchId}':
@@ -6403,6 +6484,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: An Expected Switch with a conflicting NVOS identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
     delete:
@@ -6426,6 +6510,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Switch deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
   '/v2/org/{org}/nico/sku':
@@ -7181,7 +7268,7 @@ paths:
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
-        The Tenant must be associated with the Site and hold an Allocation on it. Omit `vni` to let the Site allocate one; a requested `vni` that is already allocated or outside the Site's pool is rejected.
+        The Tenant must have an Allocation or TargetedInstanceCreation on the Site. Omit `vni` to let the Site allocate one; a requested `vni` that is already allocated or outside the Site's pool is rejected.
       requestBody:
         content:
           application/json:
@@ -8136,7 +8223,7 @@ paths:
 
         Org must have an Infrastructure Provider entity that owns the Instance Type and the Machine. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
-        The Machine's capabilities must be a superset of the Instance Type's required capabilities for the association to succeed.
+        Each capability specified by the Instance Type must have a matching capability on the Machine. Specified fields—including count, cores, and threads—require exact equality; omitted or null optional fields impose no constraint. The Machine may have additional capabilities that the Instance Type does not specify.
       requestBody:
         content:
           application/json:
@@ -11334,6 +11421,21 @@ paths:
                           numaNode: 1
                           description: 'MT28908 Family [ConnectX-6]'
                           slot: '0000:ca:00.0'
+                      lldpNeighbors:
+                        - macAddress: '02:00:00:00:01:b0'
+                          localPort: enp1s0np0
+                          name: leaf-switch-01
+                          description: Cumulus Linux
+                          ipAddresses:
+                            - 10.0.2.194
+                          chassisIdType: mac
+                          chassisIdValue: '02:00:00:00:01:d4'
+                          remotePortType: ifname
+                          remotePortValue: swp1
+                          medInventory:
+                            serial: SN0000000002
+                            manufacturer: 'https://www.mellanox.com'
+                            model: BlueField-3 DPU
                     status: InUse
                     isUsableByTenant: true
                     statusHistory:
@@ -12454,6 +12556,17 @@ paths:
                       placementInRack:
                         slotNumber: 1
                         trayIndex: 0
+                      lldpNeighbors:
+                        - macAddress: '02:00:00:00:02:a0'
+                          localPort: p0
+                          name: leaf-switch-01
+                          description: Cumulus Linux
+                          ipAddresses:
+                            - 10.0.3.1
+                          chassisIdType: mac
+                          chassisIdValue: '02:00:00:00:02:d4'
+                          remotePortType: ifname
+                          remotePortValue: swp10
         '400':
           $ref: '#/components/responses/GenericHttpError'
         '403':
@@ -17304,8 +17417,6 @@ paths:
             enum:
               - NAME_ASC
               - NAME_DESC
-              - STATUS_ASC
-              - STATUS_DESC
               - CREATED_ASC
               - CREATED_DESC
               - UPDATED_ASC
@@ -20301,8 +20412,10 @@ components:
             - 'null'
           description: 'Org of the Tenant'
         tenantContact:
-          $ref: '#/components/schemas/User'
-          description: 'Contact user for the Tenant'
+          oneOf:
+            - $ref: '#/components/schemas/User'
+            - type: 'null'
+          description: 'Contact user for the Tenant.'
         allocationCount:
           type: integer
           description: 'Number of Allocations for the Tenant Account'
@@ -20349,7 +20462,7 @@ components:
         - exactly one entry must omit siteIds or provide an empty siteIds array
         - each siteId may appear at most once across all entries
         - every provided siteId must be a valid Site UUID
-        - every provided siteId must identify a Site associated with the Tenant and owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
+        - every provided siteId must identify a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
 
         PATCH uses replace semantics: previously configured per-site overrides whose siteId is omitted from the new payload are cleared.
       required:
@@ -20357,7 +20470,7 @@ components:
       properties:
         siteIds:
           type: array
-          description: Sites to configure. An omitted or empty array identifies the Tenant Account default entry. Each value must be a valid Site UUID, may appear only once across all siteCapabilities entries in the same request, must be associated with the Tenant, and must be owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400.
+          description: Sites to configure. An omitted or empty array identifies the Tenant Account default entry. Each value must be a valid Site UUID, may appear only once across all siteCapabilities entries in the same request, and must be owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400.
           items:
             type: string
             format: uuid
@@ -20406,7 +20519,7 @@ components:
         Tenant Admins may accept an invite via `tenantContactId` only.
         Requests containing both fields are rejected with 400.
 
-        When `siteCapabilities` is included, the replace payload must contain at least one entry, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Every provided `siteId` must be a valid UUID for a Site associated with the Tenant and owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400. Previously configured per-site overrides whose `siteId` is omitted from the replacement payload are cleared.
+        When `siteCapabilities` is included, the replace payload must contain at least one entry, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Every provided `siteId` must be a valid UUID for a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400. Previously configured per-site overrides whose `siteId` is omitted from the replacement payload are cleared.
       examples:
         - tenantContactId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
         - siteCapabilities:
@@ -20433,7 +20546,7 @@ components:
             - must contain exactly one entry with omitted or empty siteIds
             - must not repeat any siteId across entries
             - every provided siteId must be a valid Site UUID
-            - every provided siteId must identify a Site associated with the Tenant and owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
+            - every provided siteId must identify a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
           items:
             $ref: '#/components/schemas/TenantAccountSiteCapability'
     Site:
@@ -21405,8 +21518,10 @@ components:
             - 'null'
           description: ID of the Network Security Group attached to the VPC
         networkSecurityGroupPropagationDetails:
-          $ref: '#/components/schemas/NetworkSecurityGroupPropagationDetails'
-          description: Propagation details for the attached Network Security Group
+          oneOf:
+            - $ref: '#/components/schemas/NetworkSecurityGroupPropagationDetails'
+            - type: 'null'
+          description: Propagation details for the attached Network Security Group. Null when no propagation details are available, including when no Network Security Group is attached
         nvLinkLogicalPartitionId:
           type:
             - string
@@ -24237,7 +24352,8 @@ components:
           type:
             - string
             - 'null'
-          description: 'Device Type of the Capability component, if available'
+          enum: [DPU, SpectrumX, NVLink, null]
+          description: 'Optional device type. `Network` accepts `DPU` or `SpectrumX`; `GPU` accepts `NVLink`; other capability types require omission or null. Omitted or null leaves device type unconstrained for every capability type. Empty strings are rejected'
     Instance:
       title: Instance
       type: object
@@ -28731,9 +28847,10 @@ components:
           type:
             - string
             - 'null'
-          description: Optional message describing the reason for moving Machine into maintenance mode. Can be updated by Provider or privileged Tenant.
+          description: Describes the reason for moving Machine into maintenance mode. Required when `setMaintenanceMode` is `true`. Omit or set to null when `setMaintenanceMode` is omitted, null, or `false`; a non-null message is rejected in those cases. Can be updated by Provider or privileged Tenant.
           minLength: 5
           maxLength: 256
+          pattern: '[^ \t\n\f\r]'
         labels:
           description: 'Machine labels will be overwritten, include existing labels to preserve them. Can be updated by Provider or privileged Tenant.'
           $ref: '#/components/schemas/Labels'
@@ -28870,6 +28987,21 @@ components:
             isAboveSLA: false
             updated: '2026-01-15T12:00:00Z'
             slaSeconds: 300
+          lldpNeighbors:
+            - macAddress: '02:00:00:00:01:b0'
+              localPort: enp1s0np0
+              name: leaf-switch-01
+              description: Cumulus Linux
+              ipAddresses:
+                - 10.0.2.194
+              chassisIdType: mac
+              chassisIdValue: '02:00:00:00:01:d4'
+              remotePortType: ifname
+              remotePortValue: swp1
+              medInventory:
+                serial: SN0000000002
+                manufacturer: 'https://www.mellanox.com'
+                model: BlueField-3 DPU
       properties:
         dmiData:
           $ref: '#/components/schemas/MachineDMIData'
@@ -28897,6 +29029,11 @@ components:
             - $ref: '#/components/schemas/MachineLifecycleState'
             - type: 'null'
           description: 'Lifecycle state details for the Machine'
+        lldpNeighbors:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineLldpNeighbor'
+          description: 'LLDP neighbors observed on the machine NICs, as last reported by the machine (scout or DPU agent). Empty when the machine has not reported any neighbors.'
     MachineLifecycleState:
       title: MachineLifecycleState
       type: object
@@ -28927,6 +29064,90 @@ components:
           type: integer
           format: int64
           description: 'Defined SLA for the current lifecycle state in seconds'
+    MachineLldpNeighbor:
+      title: MachineLldpNeighbor
+      type: object
+      description: Describes an LLDP neighbor observed on one of the Machine NICs
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - medInventory
+      examples:
+        - macAddress: '02:00:00:00:01:b0'
+          localPort: enp1s0np0
+          name: leaf-switch-01
+          description: Cumulus Linux
+          ipAddresses:
+            - 10.0.2.194
+            - 'fe80::ff:fe00:1d4'
+          chassisIdType: mac
+          chassisIdValue: '02:00:00:00:01:d4'
+          remotePortType: ifname
+          remotePortValue: swp1
+          medInventory:
+            serial: SN0000000002
+            manufacturer: 'https://www.mellanox.com'
+            model: BlueField-3 DPU
+      properties:
+        macAddress:
+          type: string
+          description: 'MAC address of the Machine NIC on which the neighbor was observed'
+        localPort:
+          type: string
+          description: 'Name of the Machine local interface on which the neighbor was observed'
+        name:
+          type: string
+          description: 'System name advertised by the neighbor'
+        description:
+          type: string
+          description: 'System description advertised by the neighbor'
+        ipAddresses:
+          type: array
+          items:
+            type: string
+          description: 'Management addresses advertised by the neighbor'
+        chassisIdType:
+          type: string
+          description: 'LLDP chassis id subtype advertised by the neighbor (e.g. mac, local)'
+        chassisIdValue:
+          type: string
+          description: 'LLDP chassis id value advertised by the neighbor'
+        remotePortType:
+          type: string
+          description: 'LLDP port id subtype advertised by the neighbor (e.g. ifname, mac)'
+        remotePortValue:
+          type: string
+          description: 'LLDP port id value advertised by the neighbor'
+        medInventory:
+          oneOf:
+            - $ref: '#/components/schemas/MachineLldpMedInventory'
+            - type: 'null'
+          description: 'LLDP-MED inventory advertised by the neighbor. Always present; null when the neighbor does not advertise one.'
+      required:
+        - medInventory
+    MachineLldpMedInventory:
+      title: MachineLldpMedInventory
+      type: object
+      description: LLDP-MED inventory advertised by an LLDP neighbor (e.g. a BlueField DPU)
+      examples:
+        - serial: SN0000000002
+          manufacturer: 'https://www.mellanox.com'
+          model: BlueField-3 DPU
+      properties:
+        serial:
+          type:
+            - string
+            - 'null'
+          description: 'Serial number advertised by the neighbor'
+        manufacturer:
+          type:
+            - string
+            - 'null'
+          description: 'Manufacturer advertised by the neighbor'
+        model:
+          type:
+            - string
+            - 'null'
+          description: 'Model advertised by the neighbor'
     MachineBMCInfo:
       title: MachineBMCInfo
       type: object
@@ -29449,7 +29670,7 @@ components:
       description: |-
         Associates one or more Machines with an Instance Type.
 
-        The Machine's capabilities must be a superset of the Instance Type's required capabilities for the association to succeed.
+        Each capability specified by the Instance Type must have a matching capability on the Machine. Specified fields—including count, cores, and threads—require exact equality; omitted or null optional fields impose no constraint. The Machine may have additional capabilities that the Instance Type does not specify.
       examples:
         - machineIds:
             - fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
@@ -29500,7 +29721,7 @@ components:
             - string
             - 'null'
           minLength: 1
-          description: Optional fixed IPv4 or IPv6 address for the interface. REST preserves repeated MAC declarations without enforcing uniqueness by MAC and address family; Core applies allocation validation.
+          description: Optional fixed IPv4 or IPv6 address for the interface. It must not be unspecified, multicast, or IPv4 limited broadcast. REST preserves repeated MAC declarations without enforcing uniqueness by MAC and address family; Core applies allocation validation.
         fixedMask:
           type: [string, 'null']
           description: Optional legacy mask string, forwarded unchanged. Omission or null clears it when replacing the declaration.
@@ -33438,9 +33659,7 @@ components:
       properties:
         source:
           type: string
-          description: Source of the error.
-          enum:
-            - nico
+          description: 'Source of the error, taken from `api.name` in the REST API server configuration file (`/app/config.yaml` in the supplied Kubernetes deployment; default API name `nico`). This is a configurable string, for example `nico` or `carbide`'
         message:
           type: string
           description: Message describing the error
@@ -34056,7 +34275,7 @@ components:
             and whitespace-containing strings are rejected, not treated as
             site-wide scope. The value is matched case-insensitively and is
             lowercased before the Tenant lookup and before it reaches Core. The
-            tenant must have an allocation and tenant identity configuration on
+            tenant must be associated with and have tenant identity configuration on
             the Site; only that organization's secrets are re-wrapped. The URL
             `{org}` separately identifies the provider authorizing the
             operation. If omitted or null, every row in the Site's tenant
@@ -34269,6 +34488,11 @@ components:
         placementInRack:
           $ref: '#/components/schemas/PlacementInRack'
           description: 'Physical placement of the DPU Machine within its Rack, when known'
+        lldpNeighbors:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineLldpNeighbor'
+          description: 'LLDP neighbors observed on the DPU ports, as last reported by the DPU agent. Empty when the DPU has not reported any neighbors.'
       required:
         - id
         - infrastructureProviderId
@@ -34276,6 +34500,7 @@ components:
         - hostMachineId
         - state
         - dpuNetworkConfig
+        - lldpNeighbors
     DpuMachineSummary:
       title: DpuMachineSummary
       type: object
@@ -34367,6 +34592,11 @@ components:
             - $ref: '#/components/schemas/PlacementInRack'
             - type: 'null'
           description: 'Physical placement of the DPU Machine within its Rack, when known'
+        lldpNeighbors:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineLldpNeighbor'
+          description: 'LLDP neighbors observed on the DPU ports, as last reported by the DPU agent. Empty when the DPU has not reported any neighbors.'
       required:
         - id
         - infrastructureProviderId
@@ -34383,6 +34613,7 @@ components:
         - dpuNetworkConfig
         - lastRebooted
         - placementInRack
+        - lldpNeighbors
     DpuMachineInterface:
       title: DpuMachineInterface
       type: object
@@ -34791,6 +35022,18 @@ components:
               value:
                 source: nico
                 message: Error handling API request
+                data: null
+    ConflictError:
+      description: Error response when the request conflicts with an existing resource or operation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NICoAPIError'
+          examples:
+            example-1:
+              value:
+                source: nico
+                message: Expected Inventory for this Site is being updated; retry the request
                 data: null
     GatewayTimeoutError:
       description: |-

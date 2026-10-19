@@ -16,6 +16,7 @@
  */
 use std::net::IpAddr;
 
+use carbide_uuid::DbTable;
 use model::route_server::{RouteServer, RouteServerSourceType};
 use sqlx::PgConnection;
 
@@ -67,11 +68,14 @@ pub async fn replace(
 // get returns all RouteServer entries, which include the
 // IP address and source_type of the entry.
 pub async fn get(txn: impl DbReader<'_>) -> DatabaseResult<Vec<RouteServer>> {
-    let query = r#"SELECT address, source_type FROM route_servers;"#;
-    sqlx::query_as(query)
+    let query = format!(
+        "SELECT {} FROM route_servers;",
+        RouteServer::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 // find_by_address returns a RouteServer entry matching
@@ -80,12 +84,15 @@ pub async fn find_by_address(
     txn: impl DbReader<'_>,
     address: IpAddr,
 ) -> DatabaseResult<Option<RouteServer>> {
-    let query = r#"SELECT address, source_type FROM route_servers where address=$1;"#;
-    sqlx::query_as(query)
+    let query = format!(
+        "SELECT {} FROM route_servers where address=$1;",
+        RouteServer::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(address)
         .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 // add will insert a list of route server IP addresses

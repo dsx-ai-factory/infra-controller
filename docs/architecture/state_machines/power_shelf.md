@@ -74,14 +74,20 @@ stateDiagram-v2
 | Decommissioning (`SuppressingSiteExplorer`) | Decommissioning (`SuppressingBmcDhcp`) | Site Explorer acknowledges the BMC suppression |
 | Decommissioning (`SuppressingBmcDhcp`) | Decommissioning (`FactoryResetBmc`) | BMC DHCP suppression is recorded |
 | Decommissioning (`FactoryResetBmc`) | Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Redfish accepts the BMC factory-reset request |
-| Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Decommissioning (`DeletingManagedCredentials`) | DHCP acknowledges the BMC suppression |
+| Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Same sub-state | BMC DHCP acknowledgement is required and not yet recorded |
+| Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Decommissioning (`DeletingManagedCredentials`) | No BMC DHCP acknowledgement pending |
 | Decommissioning (`DeletingManagedCredentials`) | Decommissioning (`Decommissioned`) | Managed BMC credential and convergence record are deleted |
 | Deleting | *(end)* | Final delete committed |
 
 ## Decommissioning
 
 Power-shelf decommissioning starts only from `Ready`. It resets management
-state but does not explicitly change rack power output. Refer to
+state but does not explicitly change rack power output. The BMC or PMC can qualify
+to complete its DHCP wait without acknowledgement. Refer to
+[DHCP Suppression Acknowledgement](../../decommissioning/index.md#dhcp-suppression-acknowledgement)
+for the shared rule.
+
+Refer to
 [Decommission Managed Power Shelves](../../decommissioning/power-shelves.md) for the
 operator procedure and intended post-reset state.
 

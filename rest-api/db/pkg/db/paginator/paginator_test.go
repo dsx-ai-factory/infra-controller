@@ -5,9 +5,11 @@ package paginator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
@@ -15,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/pgdialect"
 )
 
 type TestModel struct {
@@ -147,4 +150,24 @@ func TestNewPaginator(t *testing.T) {
 			assert.Equal(t, tt.want.Limit, got.Limit)
 		})
 	}
+}
+
+func TestNewPaginatorCountErrorPreservesCause(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	bunDB := bun.NewDB(sqlDB, pgdialect.New())
+	defer bunDB.Close()
+
+	countCause := errors.New("count failed")
+	mock.ExpectQuery(`SELECT count\(\*\) FROM "site" AS "tm"`).WillReturnError(countCause)
+
+	query := bunDB.NewSelect().Model((*TestModel)(nil))
+	got, err := NewPaginatorMultiOrderBy(t.Context(), query, nil, nil, nil, nil)
+
+	require.ErrorIs(t, err, ErrQueryTotalCount)
+	require.ErrorIs(t, err, countCause)
+	assert.Nil(t, got)
+	require.NoError(t, mock.ExpectationsWereMet())
 }

@@ -319,9 +319,7 @@ func (c *grpcClient) GetMachines(ctx context.Context) ([]MachineDetail, error) {
 	}
 
 	req := &corev1.MachinesByIdsRequest{}
-	for _, machineID := range machineIDs.MachineIds {
-		req.MachineIds = append(req.MachineIds, machineID)
-	}
+	req.MachineIds = append(req.MachineIds, machineIDs.MachineIds...)
 
 	if len(req.MachineIds) == 0 {
 		return nil, nil
@@ -486,7 +484,7 @@ func (c *batchingForgeClient) loadMaxFindByIDs(ctx context.Context) (uint32, err
 		return c.maxFindByIDs, nil
 	}
 
-	response, err := c.ForgeClient.Version(ctx, &corev1.VersionRequest{DisplayConfig: true})
+	response, err := c.Version(ctx, &corev1.VersionRequest{DisplayConfig: true})
 	if err != nil {
 		return 0, fmt.Errorf("get Core runtime config: %w", err)
 	}

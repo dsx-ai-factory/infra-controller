@@ -1024,7 +1024,7 @@ func NewReencryptTenantIdentitySecretsHandler(dbSession *cdb.Session, scp *sc.Cl
 
 // Handle godoc
 // @Summary Reencrypt Tenant Identity Secrets
-// @Description Re-wrap tenant_identity_config ciphertext with the site's current master encryption key (KEK rotation). Provider-admin scoped; the URL org identifies the provider. Omit organizationId to target all orgs, or set it to a tenant org that has an allocation and tenant identity configuration on the Site.
+// @Description Re-wrap tenant_identity_config ciphertext with the site's current master encryption key (KEK rotation). Provider-admin scoped; the URL org identifies the provider. Omit organizationId to target all orgs, or set it to a tenant org that is associated with and has tenant identity configuration on the Site.
 // @Tags TenantIdentity
 // @Accept json
 // @Produce json
@@ -1094,7 +1094,7 @@ func (rtish ReencryptTenantIdentitySecretsHandler) Handle(c echo.Context) error 
 		_, err = cdbm.NewTenantSiteDAO(rtish.dbSession).GetByTenantIDAndSiteID(ctx, nil, tenant.ID, resolvedSiteUUID, nil)
 		if err != nil {
 			if errors.Is(err, cdb.ErrDoesNotExist) {
-				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Tenant organization does not have an allocation on the Site", nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Tenant organization is not associated with the Site", nil)
 			}
 			logger.Error().Err(err).Str("Tenant Org", tenant.Org).Str("Site ID", resolvedSiteID).Msg("error retrieving Tenant Site association")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Tenant access to Site", nil)

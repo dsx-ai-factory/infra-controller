@@ -511,16 +511,18 @@ fn values(headers: &HeaderMap, name: &str) -> Vec<String> {
 /// but without the caller's `Forwarded`, which named the BMC to the proxy;
 /// the BMC's answer comes back with its headers and body.
 #[tokio::test]
-async fn a_request_reaches_the_bmc_with_its_query_and_headers() {
+async fn a_request_reaches_the_bmc_with_its_encoded_query_and_headers() {
     let metrics = MetricsCapture::start();
     let (addr, bmc) = spawn_fake_bmc();
     let state = proxy_reaching(addr, root_password()).await;
+    let path_and_query =
+        format!("{SYSTEM_PATH}?%24filter=EventFormatType%20eq%20%27MetricReport%27");
     let answer = exchange(
         &metrics,
         &state,
         proxied(
             Method::GET,
-            &format!("{SYSTEM_PATH}?$select=PowerState"),
+            &path_and_query,
             to_the_bmc(),
             &[(HeaderName::from_static("x-caller-custom"), "passed")],
             Body::empty(),
@@ -538,12 +540,68 @@ async fn a_request_reaches_the_bmc_with_its_query_and_headers() {
 
     let [received] = <[Received; 1]>::try_from(bmc.received()).expect("one request");
     assert_eq!(received.method, Method::GET);
-    assert_eq!(
-        received.path_and_query,
-        format!("{SYSTEM_PATH}?$select=PowerState")
-    );
+    assert_eq!(received.path_and_query, path_and_query);
     assert_eq!(values(&received.headers, "x-caller-custom"), ["passed"]);
     assert!(values(&received.headers, "forwarded").is_empty());
+}
+
+/// Escape hex case is normalized for authorization while the BMC receives
+/// the caller's original path and query spelling.
+#[tokio::test]
+async fn escape_case_matching_preserves_the_upstream_request_target() {
+    let metrics = MetricsCapture::start();
+    let (addr, bmc) = spawn_fake_bmc();
+    let state = proxy_to(
+        &addr.to_string(),
+        r#"["GET /redfish/v1/Registries/%4aResource%3AName"]"#,
+        root_password(),
+    )
+    .await;
+    let path_and_query = "/redfish/v1/Registries/%4AResource%3aName?name=%2f";
+    let answer = exchange(&metrics, &state, get(path_and_query)).await;
+
+    assert_eq!(answer.status, 404, "the fake BMC has no registry handler");
+    let [received] = <[Received; 1]>::try_from(bmc.received()).expect("one authorized request");
+    assert_eq!(received.path_and_query, path_and_query);
+}
+
+/// Escape opt-in preserves the request target and cannot bypass the path guard.
+#[tokio::test]
+async fn escape_policies_preserve_nvue_ids_without_bypassing_the_path_guard() {
+    let metrics = MetricsCapture::start();
+    let metrics_window = &metrics;
+    let path = "/nvue_v1/revision/changeset%2fadmin%2F2026-10-14%2Fextra?rev=changeset%2Fadmin";
+    check_cases_async(
+        [
+            Case {
+                scenario: "a broad allow cannot consume the encoded ID separators",
+                input: (r#"["GET /nvue_v1/**"]"#, path),
+                expect: Yields((403, Vec::<String>::new())),
+            },
+            Case {
+                scenario: "opt-in allows additional encoded slashes and forwards the original target",
+                input: (r#"[{ pattern = "GET /nvue_v1/revision/*", allow_escapes = ["%2F"] }]"#, path),
+                expect: Yields((404, vec![path.to_string()])),
+            },
+            Case {
+                scenario: "even unrestricted escape matching cannot authorize nested encoding",
+                input: (r#"[{ pattern = "/**", allow_escapes = ["*"] }]"#, "/nvue_v1/revision/name%252Fextra"),
+                expect: Yields((400, Vec::<String>::new())),
+            },
+        ],
+        |(acl, request_path)| async move {
+            let (addr, bmc) = spawn_fake_bmc();
+            let state = proxy_to(&addr.to_string(), acl, root_password()).await;
+            let response = exchange(metrics_window, &state, get(request_path)).await;
+            let paths = bmc
+                .received()
+                .into_iter()
+                .map(|request| request.path_and_query)
+                .collect();
+            Ok::<_, Infallible>((response.status, paths))
+        },
+    )
+    .await;
 }
 
 /// With `bmc_proxy` overriding the host, the proxy names the BMC to that
@@ -911,6 +969,15 @@ async fn requests_the_proxy_does_not_deliver() {
                     bmc_listening: true,
                 },
                 expect: Yields((403, false)),
+            },
+            Case {
+                scenario: "an ambiguous path is rejected before the ACL",
+                input: Refused {
+                    acl: r#"["GET /redfish/v1/Chassis/**"]"#,
+                    request: || get("/redfish/v1/Systems/../Managers/BMC"),
+                    bmc_listening: true,
+                },
+                expect: Yields((400, false)),
             },
             Case {
                 scenario: "no Forwarded header names a BMC",

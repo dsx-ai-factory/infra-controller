@@ -138,29 +138,16 @@ func (cibph CreateInfiniBandPartitionHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to create InfiniBand Partition, Site: %s specified in request is not in Registered state", site.ID.String()), nil)
 	}
 
-	// Determine if tenant has access to requested site
-	tsDAO := cdbm.NewTenantSiteDAO(cibph.dbSession)
-	_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, orgTenant.ID, site.ID, nil)
-	if err != nil {
-		if err == cdb.ErrDoesNotExist {
-			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant is not associated with Site specified in query", nil)
-		}
-		logger.Warn().Err(err).Msg("error retrieving Tenant Site association from DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to determine if Tenant has access to Site specified in query, DB error", nil)
-	}
-
-	// Ensure that Tenant has an Allocation with specified Site
-	aDAO := cdbm.NewAllocationDAO(cibph.dbSession)
-	allocationFilter := cdbm.AllocationFilterInput{TenantIDs: []uuid.UUID{orgTenant.ID}, SiteIDs: []uuid.UUID{site.ID}}
-	aCount, serr := aDAO.GetCount(ctx, nil, allocationFilter)
+	// Ensure that Tenant has access to specified Site
+	hasSiteAccess, serr := common.TenantHasSiteAccess(ctx, nil, cibph.dbSession, orgTenant, site.ID)
 	if serr != nil {
-		logger.Error().Err(serr).Msg("error retrieving Allocations count from DB for Tenant and Site")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site Allocations count for Tenant", nil)
+		logger.Error().Err(serr).Msg("error checking Tenant access to Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant access to Site, DB error", nil)
 	}
 
-	if aCount == 0 {
+	if !hasSiteAccess {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden,
-			"Tenant does not have any Allocations with Site specified in request data", nil)
+			"Tenant does not have access to Site specified in request data", nil)
 	}
 
 	// check for name uniqueness for the tenant, ie, tenant cannot have another InfiniBand Partition with same name
@@ -396,7 +383,6 @@ func (gaibph GetAllInfiniBandPartitionHandler) Handle(c echo.Context) error {
 	}
 
 	// Get site ID from query param
-	tsDAO := cdbm.NewTenantSiteDAO(gaibph.dbSession)
 	var siteIDs []uuid.UUID
 	siteIDStr := c.QueryParam("siteId")
 	if siteIDStr != "" {
@@ -408,7 +394,7 @@ func (gaibph GetAllInfiniBandPartitionHandler) Handle(c echo.Context) error {
 		siteIDs = append(siteIDs, site.ID)
 
 		// Check Site association with Tenant
-		_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, site.ID, nil)
+		err = common.ValidateTenantSiteAccess(ctx, nil, gaibph.dbSession, tenant, site.ID)
 		if err != nil {
 			if err == cdb.ErrDoesNotExist {
 				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have access to this Site", nil)
@@ -741,18 +727,16 @@ func (uibph UpdateInfiniBandPartitionHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Tenant for InfiniBand Partition in request does not match Tenant in org", nil)
 	}
 
-	// Ensure that Tenant has an Allocation with specified Site
-	aDAO := cdbm.NewAllocationDAO(uibph.dbSession)
-	allocationFilter := cdbm.AllocationFilterInput{TenantIDs: []uuid.UUID{ibp.TenantID}, SiteIDs: []uuid.UUID{ibp.SiteID}}
-	aCount, serr := aDAO.GetCount(ctx, nil, allocationFilter)
+	// Ensure that Tenant has access to specified Site
+	hasSiteAccess, serr := common.TenantHasSiteAccess(ctx, nil, uibph.dbSession, orgTenant, ibp.SiteID)
 	if serr != nil {
-		logger.Error().Err(serr).Msg("error retrieving Allocations count from DB for Tenant and Site")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site Allocations count for Tenant", nil)
+		logger.Error().Err(serr).Msg("error checking Tenant access to Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant access to Site, DB error", nil)
 	}
 
-	if aCount == 0 {
+	if !hasSiteAccess {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden,
-			"Tenant does not have any Allocations with Site specified in request data", nil)
+			"Tenant does not have access to Site specified in request data", nil)
 	}
 
 	// check for name uniqueness for the tenant, ie, tenant cannot have another InfiniBand Partition with same name

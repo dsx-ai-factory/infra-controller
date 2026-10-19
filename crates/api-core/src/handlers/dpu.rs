@@ -1159,33 +1159,22 @@ pub(crate) async fn record_dpu_network_status(
 
     txn.commit().await?;
 
-    // Check if we need to flag this forge-dpu-agent for upgrade or mark an upgrade completed
-    // We do this here because we just learnt about which version of forge-dpu-agent is
-    // running.
+    // Read upgrade inputs after committing the report. A concurrent report may
+    // already have persisted a later observation than the one in this request.
     let mut txn = api.txn_begin().await?;
 
     if let Some(policy) = dpu_agent_upgrade_policy::get(&mut txn).await? {
-        let snapshot =
-            db::managed_host::load_snapshot(&mut txn, &dpu_machine_id, Default::default())
-                .await?
-                .ok_or(CarbideError::NotFoundError {
-                    kind: "machine",
-                    id: dpu_machine_id.to_string(),
-                })?;
-
-        let dpu_machine = snapshot
-            .dpu_snapshots
-            .iter()
-            .find(|x| x.id == dpu_machine_id)
-            .ok_or_else(|| CarbideError::NotFoundError {
-                kind: "dpu",
+        let upgrade_status = db::machine::find_dpu_agent_upgrade_status(&mut txn, &dpu_machine_id)
+            .await?
+            .ok_or(CarbideError::NotFoundError {
+                kind: "machine",
                 id: dpu_machine_id.to_string(),
             })?;
 
-        if snapshot.host_snapshot.config.dpf.used_for_ingestion {
+        if upgrade_status.host_dpf_used_for_ingestion {
             // DPF-managed DPUs don't use this upgrade path. Clear any stale flag so the DPU
             // doesn't keep receiving upgrade signals after the host was switched to DPF.
-            if dpu_machine.needs_agent_upgrade() {
+            if upgrade_status.upgrade_requested {
                 db::machine::set_dpu_agent_upgrade_requested(
                     &mut txn,
                     &dpu_machine_id,
@@ -1195,8 +1184,7 @@ pub(crate) async fn record_dpu_network_status(
                 .await?;
             }
         } else {
-            let _needs_upgrade =
-                db::machine::apply_agent_upgrade_policy(&mut txn, policy, dpu_machine).await?;
+            db::machine::apply_agent_upgrade_policy(&mut txn, policy, &upgrade_status).await?;
         }
     }
 

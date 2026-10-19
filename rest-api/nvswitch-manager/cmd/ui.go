@@ -980,7 +980,7 @@ func (s *UIServer) handleAPIUpdateLog(w http.ResponseWriter, r *http.Request) {
 	// Sanitize the update ID to prevent path traversal
 	// UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 	for _, c := range updateID {
-		if !((c >= 'a' && c <= 'f') || (c >= '0' && c <= '9') || c == '-') {
+		if (c < 'a' || c > 'f') && (c < '0' || c > '9') && c != '-' {
 			http.Error(w, "invalid update ID format", http.StatusBadRequest)
 			return
 		}

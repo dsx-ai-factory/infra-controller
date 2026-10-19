@@ -131,7 +131,7 @@ where
     for<'db> &'db mut DB: DbReader<'db>,
 {
     let mut query = FilterableQueryBuilder::new(
-        "SELECT row_to_json(p.*) FROM (SELECT * FROM spx_partitions) p",
+        "SELECT row_to_json(p.*) FROM (SELECT * FROM spx_partitions WHERE deleted IS NULL) p",
     )
     .filter(&filter);
 

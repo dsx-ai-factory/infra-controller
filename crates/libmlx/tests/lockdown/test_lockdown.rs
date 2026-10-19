@@ -146,9 +146,8 @@ mod dry_run_tests {
         );
     }
 
-    // The DryRun error carries the command string that would have run; each
-    // operation's command must mention the flint sub-command plus the arguments
-    // it was handed. A helper pulls the command out of the expected DryRun error.
+    /// Preserve command and device details through the manager while keeping
+    /// its dry-run messages safe to display without exposing the key.
     #[test]
     fn test_dry_run_commands_contain_expected_parts() {
         let runner = FlintRunner::with_path("/test/flint").with_dry_run(true);
@@ -164,14 +163,19 @@ mod dry_run_tests {
         let lock_cmd = dry_run_command(manager.lock_device("test_device", "12345678"));
         assert!(lock_cmd.contains("hw_access disable"));
         assert!(lock_cmd.contains("test_device"));
-        assert!(lock_cmd.contains("12345678"));
+        assert!(lock_cmd.contains("[REDACTED]"));
+        assert!(!lock_cmd.contains("12345678"));
 
         let unlock_cmd = dry_run_command(manager.unlock_device("test_device", "abcdef01"));
         assert!(unlock_cmd.contains("hw_access enable"));
-        assert!(unlock_cmd.contains("abcdef01"));
+        assert!(unlock_cmd.contains("test_device"));
+        assert!(unlock_cmd.contains("[REDACTED]"));
+        assert!(!unlock_cmd.contains("abcdef01"));
 
         let set_key_cmd = dry_run_command(manager.set_device_key("test_device", "12345678"));
         assert!(set_key_cmd.contains("set_key"));
-        assert!(set_key_cmd.contains("12345678"));
+        assert!(set_key_cmd.contains("test_device"));
+        assert!(set_key_cmd.contains("[REDACTED]"));
+        assert!(!set_key_cmd.contains("12345678"));
     }
 }

@@ -118,9 +118,11 @@ vault:
     ## `credential add-uefi` only writes Vault metadata (not the value) and preingestion
     ## logs "Missing credential machines/all_{dpus,hosts}/site_default/uefi-metadata-items/auth".
     ## SITE-SPECIFIC SECRET: blank the passwords before committing/MR; operator populates per site.
-    ## Every seed is written only when its key has no value yet: nico-api treats the
-    ## empty password as "not configured", the operator sets the real one with
-    ## `credential add-uefi`, and a later `setup.sh` run or chart upgrade keeps it.
+    ## A seed is written only when its key has no value yet, on install and on every
+    ## upgrade alike (an upgrade creates keys new to this chart version). Editing a seed
+    ## whose key already holds a value changes nothing; on an existing site use
+    ## `credential add-uefi`. Set site-specific values here before an upgrade that
+    ## introduces their keys.
     - path: "machines/all_dpus/site_default/uefi-metadata-items/auth"
       data:
         UsernamePassword:

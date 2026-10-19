@@ -36,6 +36,7 @@ use carbide_machine_controller::io::MachineStateControllerIO;
 use carbide_rack::bms_client::BmsDsxExchangeHandle;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
+use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::SecretsError;
 use carbide_secrets::certificates::CertificateProvider;
 use carbide_secrets::credentials::{
@@ -56,6 +57,7 @@ use model::resource_pool::common::CommonPools;
 use sqlx::PgTransaction;
 use state_controller::controller::Enqueuer;
 use tokio_stream::Stream;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, Streaming};
 
 use self::metrics::ApiMetricsEmitter;
@@ -86,6 +88,8 @@ pub struct Api {
     pub(crate) bmc_session_manager: Arc<crate::credentials::BmcSessionManager>,
     pub(crate) eth_data: EthVirtData,
     pub(crate) common_pools: Arc<CommonPools>,
+    /// Pool backends resolved at startup; runtime lookups also see later growth.
+    pub(crate) resource_pool_registry: ResourcePoolRegistry,
     pub(crate) ib_fabric_manager: Arc<dyn IBFabricManager>,
     // `pub` (not `pub(crate)`): read by the `carbide-api-web` admin UI for config-derived display.
     pub runtime_config: Arc<CarbideConfig>,
@@ -113,6 +117,7 @@ pub struct Api {
     /// listener.
     pub(crate) node_jwt_validator: Option<Arc<crate::node_auth::NodeJwtValidator>>,
     pub(crate) console_log_source: Arc<dyn crate::console_logs::ConsoleLogSource>,
+    pub(crate) cancel_token: CancellationToken,
 }
 
 pub(crate) type ScoutStreamType =
@@ -3063,25 +3068,32 @@ impl Forge for Api {
         crate::handlers::nic_firmware::update(self, request).await
     }
 
-    async fn set_nic_firmware_site_default(
+    async fn set_nic_firmware_site_selection(
         &self,
-        request: Request<rpc::SetNicFirmwareSiteDefaultRequest>,
-    ) -> Result<Response<rpc::NicFirmwareSiteDefaultResponse>, Status> {
-        crate::handlers::nic_firmware::set_site_default(self, request).await
+        request: Request<rpc::SetNicFirmwareSiteSelectionRequest>,
+    ) -> Result<Response<rpc::NicFirmwareSiteSelectionResponse>, Status> {
+        crate::handlers::nic_firmware::set_site_selection(self, request).await
     }
 
-    async fn find_nic_firmware_site_default_ids(
+    async fn find_nic_firmware_site_selection_ids(
         &self,
-        request: Request<rpc::NicFirmwareSiteDefaultSearchFilter>,
-    ) -> Result<Response<rpc::FindNicFirmwareSiteDefaultIdsResponse>, Status> {
-        crate::handlers::nic_firmware::find_site_default_ids(self, request).await
+        request: Request<rpc::NicFirmwareSiteSelectionSearchFilter>,
+    ) -> Result<Response<rpc::FindNicFirmwareSiteSelectionIdsResponse>, Status> {
+        crate::handlers::nic_firmware::find_site_selection_ids(self, request).await
     }
 
-    async fn find_nic_firmware_site_defaults_by_ids(
+    async fn find_nic_firmware_site_selections_by_ids(
         &self,
-        request: Request<rpc::FindNicFirmwareSiteDefaultsByIdsRequest>,
-    ) -> Result<Response<rpc::FindNicFirmwareSiteDefaultsByIdsResponse>, Status> {
-        crate::handlers::nic_firmware::find_site_defaults_by_ids(self, request).await
+        request: Request<rpc::FindNicFirmwareSiteSelectionsByIdsRequest>,
+    ) -> Result<Response<rpc::FindNicFirmwareSiteSelectionsByIdsResponse>, Status> {
+        crate::handlers::nic_firmware::find_site_selections_by_ids(self, request).await
+    }
+
+    async fn set_machine_nic_firmware_config(
+        &self,
+        request: Request<rpc::SetMachineNicFirmwareConfigRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::nic_firmware::set_machine_config(self, request).await
     }
 
     async fn get_desired_nic_firmware(
@@ -3922,6 +3934,16 @@ impl Forge for Api {
 
         crate::handlers::power_options::allow_ingestion_and_power_on(self, &request.into_inner())
             .await
+    }
+
+    async fn get_component_power_details(
+        &self,
+        request: Request<rpc::GetComponentPowerDetailsRequest>,
+    ) -> Result<Response<rpc::GetComponentPowerDetailsResponse>, Status> {
+        crate::handlers::component_manager::power_details::get_component_power_details(
+            self, request,
+        )
+        .await
     }
 
     async fn component_power_control(

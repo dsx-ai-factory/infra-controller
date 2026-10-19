@@ -254,7 +254,11 @@ impl HealthReportBenchState {
                 attribution: None,
                 target: Some("leak-detector".to_string()),
                 message: "leak detected".to_string(),
-                classifications: vec![Classification::Leak],
+                classifications: vec![
+                    Classification::TrayLeak,
+                    Classification::SensorCritical,
+                    Classification::PreventAllocations,
+                ],
             }],
         }));
 

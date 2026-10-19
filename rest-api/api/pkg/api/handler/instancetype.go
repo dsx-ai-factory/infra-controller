@@ -487,7 +487,6 @@ func (gaith GetAllInstanceTypeHandler) Handle(c echo.Context) error {
 
 	// Collect instance type IDs from both Provider and Tenant perspectives
 	itDAO := cdbm.NewInstanceTypeDAO(gaith.dbSession)
-	tsDAO := cdbm.NewTenantSiteDAO(gaith.dbSession)
 	mergedInstanceTypeIDs := mapset.NewSet[uuid.UUID]()
 
 	var tenantID *uuid.UUID
@@ -525,22 +524,17 @@ func (gaith GetAllInstanceTypeHandler) Handle(c echo.Context) error {
 		var tenantSiteIDs []uuid.UUID
 		skipTenantQuery := false
 		if stID == nil {
-			tss, _, err := tsDAO.GetAll(ctx, nil, cdbm.TenantSiteFilterInput{
-				TenantIDs: []uuid.UUID{tenant.ID},
-			}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+			tenantSiteIDs, err = getTenantSiteIDs(ctx, gaith.dbSession, tenant)
 			if err != nil {
 				logger.Error().Err(err).Msg("error retrieving Tenant Site association from DB")
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant Site association", nil)
-			}
-			for _, ts := range tss {
-				tenantSiteIDs = append(tenantSiteIDs, ts.SiteID)
 			}
 			if len(tenantSiteIDs) == 0 {
 				logger.Info().Msg("skipping tenant perspective: tenant has no site associations")
 				skipTenantQuery = true
 			}
 		} else {
-			_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, *stID, nil)
+			err = common.ValidateTenantSiteAccess(ctx, nil, gaith.dbSession, tenant, *stID)
 			if err != nil {
 				if err == cdb.ErrDoesNotExist {
 					logger.Info().Msg("skipping tenant perspective: tenant not associated with site")
@@ -783,7 +777,6 @@ func (gith GetInstanceTypeHandler) Handle(c echo.Context) error {
 	// Check if Instance Type is associated with Provider or Tenant.
 	// Provider check is a direct ID comparison; tenant check requires a TenantSite DB lookup
 	// since tenants access instance types via site association, not direct ownership.
-	tsDAO := cdbm.NewTenantSiteDAO(gith.dbSession)
 	var tenantID *uuid.UUID
 
 	authorizedViaProvider := provider != nil && it.InfrastructureProviderID == provider.ID
@@ -791,7 +784,7 @@ func (gith GetInstanceTypeHandler) Handle(c echo.Context) error {
 	if authorizedViaProvider {
 		// authorized via provider ownership — fall through
 	} else if tenant != nil && it.SiteID != nil {
-		_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, *it.SiteID, nil)
+		err = common.ValidateTenantSiteAccess(ctx, nil, gith.dbSession, tenant, *it.SiteID)
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Instance Type is not associated with org", nil)
 		} else if err != nil {

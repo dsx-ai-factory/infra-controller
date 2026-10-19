@@ -1,0 +1,522 @@
+//
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+syntax = "proto3";
+
+package resource_pool.v1;
+
+// `ResourcePool` lets NICo allocate through an independently committing provider.
+// Values stay reserved until `Release` or `Cancel`; v1 has no expiring leases.
+// All providers support every value domain and selection mode. `Stats` is optional.
+//
+// Requests require every message field unless its comment says otherwise. Identity
+// strings are opaque and compared exactly, without normalization. Empty identities,
+// unset required oneofs, unknown enums, and malformed values return `InvalidArgument`
+// when validated. The replay rules below take precedence over revalidating
+// allocation inputs. Authentication and authorization failures return
+// `Unauthenticated` and `PermissionDenied`. A timeout or `Unavailable` leaves the
+// allocation result unknown: recover the same request rather than starting another.
+//
+// Otherwise valid requests for an authority or pool this provider does not serve
+// return `NotFound`. Saved operation or eligibility revision conflicts are checked
+// first and return `AlreadyExists`. `NotFound` alone does not confirm cleanup;
+// recover the original operation to establish `cancelled` or `released`.
+// Unsupported `Stats` returns `Unimplemented` before validating its request.
+//
+// Within an authority, `(site_id, request_id)` identifies one allocation attempt.
+// Once the provider receives an allocation request, its method and fields
+// are immutable.
+// Reusing that identity with different inputs returns `AlreadyExists`, even if
+// the pool or binding changed. Cancellation received first saves the `PoolBinding`
+// and blocks any later allocation. The first late allocation records its inputs
+// for future conflict checks. After validating identity and checking saved inputs,
+// replay returns the saved result without revalidating the allocation body.
+// A provider serializes allocation and cancellation for this identity. It retains
+// the binding, immutable inputs or an equivalent digest for conflict checks, and
+// terminal state for the lifetime of its site/authority namespace. Failed states
+// retain their code and message; active allocations retain the complete assignment.
+// There is no TTL or forget operation: a delayed request must never recreate work.
+// For a new request to a served pool, definite allocation failures are saved once
+// a valid operation identity is known.
+// Malformed requests without that identity return `InvalidArgument` without a record.
+service ResourcePool {
+  // `Describe` resolves a configured alias before NICo saves the binding. The
+  // returned authority and pool identities must stay stable across reconnects.
+  // An unknown alias returns `NotFound`; these IDs do not replace authentication.
+  rpc Describe(DescribeRequest) returns (DescribeResponse);
+
+  // `Define` acknowledges an immutable eligibility revision. It does not create
+  // provider inventory or promise that any eligible value is available. Repeating
+  // identical input succeeds; changing an existing revision returns `AlreadyExists`.
+  // For a new revision, a mismatched value domain or empty eligibility returns
+  // `InvalidArgument`.
+  // Invalid growth or an unrecognized predecessor returns `FailedPrecondition`.
+  rpc Define(DefineRequest) returns (DefineResponse);
+
+  // `Allocate` picks an available automatic value, or reserves `requested_value`
+  // from the manual partition. If the selected partition has no available eligible
+  // value, return `ResourceExhausted`, even for a requested value. Otherwise, an
+  // unavailable or ineligible requested value returns `FailedPrecondition`,
+  // matching NICo's allocator.
+  // Success means the assignment and required provider provisioning are ready.
+  // Replays return the same assignment, including its RT policy. A cancelled or
+  // released request returns `FailedPrecondition`; `Recover` gives its terminal state.
+  rpc Allocate(AllocateRequest) returns (AllocateResponse);
+
+  // `AllocateExact` reserves one value from either assignment partition without
+  // changing its mode. An unavailable or ineligible value returns
+  // `FailedPrecondition`, even when another request by the same owner holds it.
+  // Readiness, replay, and terminal-state rules are the same as `Allocate`.
+  rpc AllocateExact(AllocateExactRequest) returns (AllocateExactResponse);
+
+  // `Recover` reads the original request's state without starting allocation.
+  // `unknown` means no request was observed; a delayed allocation can still arrive.
+  // A mismatched saved pool or binding returns `AlreadyExists`.
+  rpc Recover(RecoverRequest) returns (RecoverResponse);
+
+  // `Cancel` prevents this request from allocating, even if it has not arrived.
+  // It removes any reservation and its exclusively owned provisioning before
+  // acknowledging `cancelled`. If cleanup returns `pending`, the provider keeps
+  // cleaning up the same request; callers poll `Recover` for its terminal state.
+  // Repeating `Cancel` is safe. An already released request stays `released`.
+  // Cancelling a failed attempt replaces its saved failure with `cancelled`.
+  // A mismatched saved pool or binding returns `AlreadyExists`.
+  rpc Cancel(CancelRequest) returns (CancelResponse);
+
+  // `Lookup` returns one active allocation and its original operation identity.
+  // A missing, released, or cancelled handle returns `NotFound`; values are not keys.
+  // An unserved authority or pool also returns `NotFound`, not proof of cleanup.
+  rpc Lookup(LookupRequest) returns (LookupResponse);
+
+  // `Release` frees exactly this allocation instance when its pool and complete
+  // owner match. Success waits for provider cleanup and marks its original request
+  // `released`, so a delayed allocation replay cannot reserve again. Missing,
+  // released, cancelled, or differently owned handles return `applied = false`;
+  // they never release a newer assignment of the same value, even for the same owner.
+  // False alone does not confirm cleanup; `Recover` checks the original operation.
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
+
+  // `Stats` counts provider inventory within the requested eligibility revision.
+  // Unsupported statistics return `Unimplemented` before request validation.
+  // An unavailable observation returns `Unavailable`. Neither is a zero count.
+  // Counts exceeding uint64 return `OutOfRange`. An unknown revision returns
+  // `FailedPrecondition`.
+  rpc Stats(StatsRequest) returns (StatsResponse);
+}
+
+// `Empty` selects an operation state that needs no additional fields.
+message Empty {
+}
+
+// `PoolBinding` identifies the saved relationship between a NICo pool and a provider.
+// Every field is required and immutable. Aliases only belong in `Describe`.
+message PoolBinding {
+  // Persisted site identity shared by replicas, never a process or pod ID.
+  string site_id = 1;
+  // Stable issuing provider identity returned by `Describe`.
+  string authority_id = 2;
+  // Stable provider pool identity returned by `Describe`.
+  string pool_id = 3;
+  // NICo's saved binding identity, replaced only through explicit rebinding.
+  string binding_id = 4;
+  // NICo's logical pool name, e.g. `vpc-vni`, independent of the provider alias.
+  string logical_pool = 5;
+}
+
+// `DescribeRequest` resolves the provider lookup name configured for one site.
+message DescribeRequest {
+  // Required persisted NICo site identity.
+  string site_id = 1;
+  // Required lookup name from `remote_pool`; omission in config uses NICo's
+  // logical pool name.
+  string pool_alias = 2;
+}
+
+// `DescribeResponse` identifies the allocator behind an alias in provider API v1.
+message DescribeResponse {
+  // Required stable authority identity, independent of endpoint and credentials.
+  string authority_id = 1;
+  // Required stable identity of the resolved pool within this authority.
+  string pool_id = 2;
+  // Required value family accepted by this pool.
+  ValueDomain value_domain = 3;
+  // Whether `Stats` is supported; false does not mean the pool has no capacity.
+  bool supports_stats = 4;
+}
+
+// `ValueDomain` preserves the value families used by NICo's existing pools.
+enum ValueDomain {
+  // Missing or unrecognized domains are invalid.
+  VALUE_DOMAIN_UNSPECIFIED = 0;
+  // Signed 64-bit identifiers; consumers apply narrower limits such as VNI width.
+  VALUE_DOMAIN_INTEGER = 1;
+  // Individual IPv4 and IPv6 addresses; one pool can contain both families.
+  VALUE_DOMAIN_IP_ADDRESS = 2;
+  // IPv6 networks allocated as prefixes rather than individual addresses.
+  VALUE_DOMAIN_IPV6_PREFIX = 3;
+}
+
+// `Value` identifies exactly one allocatable value; `kind` must be present.
+message Value {
+  // The selected representation must match the pool's `ValueDomain`.
+  oneof kind {
+    // Full signed i64 range, including both endpoints.
+    sint64 integer = 1;
+    // Exactly four address octets in network order.
+    bytes ipv4 = 2;
+    // Exactly sixteen address octets in network order.
+    bytes ipv6 = 3;
+    // A network with zero host bits and its prefix length.
+    Ipv6Prefix ipv6_prefix = 4;
+  }
+}
+
+// `Ipv4Prefix` compactly describes IPv4 address eligibility.
+message Ipv4Prefix {
+  // Exactly four network-order octets with every host bit zero.
+  bytes network = 1;
+  // Prefix length from 0 through 32; `/0` covers the whole IPv4 address space.
+  uint32 prefix_len = 2;
+}
+
+// `Ipv6Prefix` describes either an allocated IPv6 network or source eligibility.
+message Ipv6Prefix {
+  // Exactly sixteen network-order octets with every host bit zero.
+  bytes network = 1;
+  // Prefix length from 0 through 128; `/0` covers the whole IPv6 address space.
+  uint32 prefix_len = 2;
+}
+
+// `AssignmentMode` keeps automatic and caller-requested allocation separate.
+enum AssignmentMode {
+  // A mode must be supplied; unspecified or unknown values are invalid.
+  ASSIGNMENT_MODE_UNSPECIFIED = 0;
+  // Available to `Allocate` when `requested_value` is omitted.
+  ASSIGNMENT_MODE_AUTOMATIC = 1;
+  // Available to `Allocate` when `requested_value` is supplied.
+  ASSIGNMENT_MODE_MANUAL = 2;
+}
+
+// `Eligibility` describes allowed values, independently of provider availability.
+message Eligibility {
+  // Required allocation partition; `AllocateExact` can use either partition.
+  AssignmentMode assignment_mode = 1;
+  // Exactly one declaration is required.
+  oneof entries {
+    // One eligible value, including an integer endpoint or a delegated prefix.
+    Value value = 2;
+    // An explicit interval whose end is excluded.
+    ValueRange range = 3;
+    // Individual addresses expanded from an IPv4 or IPv6 network.
+    AddressPrefix address_prefix = 4;
+    // IPv6 child networks expanded from a containing prefix.
+    DelegatedPrefix delegated_prefix = 5;
+  }
+}
+
+// `ValueRange` includes `start` and excludes `end`. Integer and address intervals
+// are empty when start is at or beyond end. Prefix intervals require start < end.
+message ValueRange {
+  // Required first value. Both endpoints have the same kind; prefix endpoints
+  // also have the same prefix length and step by that prefix size.
+  Value start = 1;
+  // Required exclusive endpoint. Use `Eligibility.value` to include a maximum
+  // value that cannot be represented with an exclusive upper endpoint.
+  Value end = 2;
+}
+
+// `AddressPrefix` preserves NICo's existing network expansion rules.
+message AddressPrefix {
+  // Exactly one address family is required; host bits must be zero.
+  oneof prefix {
+    // Includes the network address and excludes broadcast, including for /31
+    // and /32. A /32 consequently contributes no eligible addresses.
+    Ipv4Prefix ipv4 = 1;
+    // Includes every address, including both endpoints and a /128 singleton.
+    Ipv6Prefix ipv6 = 2;
+  }
+}
+
+// `DelegatedPrefix` describes all equal-sized IPv6 subnets in a source network.
+message DelegatedPrefix {
+  // Required source network with zero host bits.
+  Ipv6Prefix prefix = 1;
+  // Child prefix length, strictly greater than the source prefix length and at
+  // most 128. Use `Eligibility.value` to make the source prefix itself eligible.
+  uint32 delegate_prefix_len = 2;
+}
+
+// `DefineRequest` saves the complete effective eligibility for one revision.
+// The provider compares every field on replay, including declaration order.
+// It retains earlier revisions so requests already using them can still finish.
+message DefineRequest {
+  // Required saved pool identity; revision identities are scoped to this binding.
+  PoolBinding pool = 1;
+  // Required immutable revision ID selected and persisted by NICo before dispatch.
+  string eligibility_revision = 2;
+  // Omitted for the first revision. Growth names the latest accepted revision
+  // and keeps all its declarations as an unchanged ordered prefix of `eligibility`.
+  // New declarations append eligibility; existing assignment modes stay intact.
+  optional string previous_revision = 3;
+  // Required domain, which must match `Describe` and earlier definitions.
+  ValueDomain value_domain = 4;
+  // Nonempty ordered declarations. The first matching declaration sets a value's
+  // assignment mode, so later overlaps preserve it. Missing and empty lists
+  // are invalid.
+  repeated Eligibility eligibility = 5;
+}
+
+// `DefineResponse` confirms the provider accepted the eligibility revision.
+message DefineResponse {
+}
+
+// `Owner` distinguishes allocations for different purposes on the same entity.
+message Owner {
+  // Required existing owner type string, e.g. `vpc` or `machine`.
+  string owner_type = 1;
+  // Required stable entity identity in the owner's existing string format.
+  string owner_id = 2;
+  // Required purpose within the owner; a DPU loopback slot includes its VPC ID.
+  string slot = 3;
+  // Attempt generation for this owner and slot; zero is a valid first generation.
+  uint64 generation = 4;
+}
+
+// `AllocationOperation` identifies one immutable allocation attempt.
+message AllocationOperation {
+  // Required saved issuing identity; configuration changes do not redirect retries.
+  PoolBinding pool = 1;
+  // Required site-wide request ID, never reused within this authority.
+  string request_id = 2;
+  // Required owner, purpose, and attempt generation.
+  Owner owner = 3;
+  // Required accepted revision. Unknown revisions return `FailedPrecondition`.
+  string eligibility_revision = 4;
+}
+
+// `AllocateRequest` preserves automatic versus requested-create selection.
+message AllocateRequest {
+  // Required immutable request identity and allocation inputs.
+  AllocationOperation operation = 1;
+  // Omitted selects automatic allocation; present requests this manual value.
+  Value requested_value = 2;
+}
+
+// `AllocateResponse` returns the ready assignment for this request.
+message AllocateResponse {
+  // Required assignment, including the original operation and any routing policy.
+  Allocation allocation = 1;
+}
+
+// `AllocateExactRequest` selects precisely one eligible value in either partition.
+message AllocateExactRequest {
+  // Required immutable request identity and allocation inputs.
+  AllocationOperation operation = 1;
+  // Required exact value; this never transfers an existing owner's allocation.
+  Value value = 2;
+}
+
+// `AllocateExactResponse` returns the ready assignment for the exact value.
+message AllocateExactResponse {
+  // Required assignment; its mode remains the value's existing partition.
+  Allocation allocation = 1;
+}
+
+// `Allocation` is the immutable assignment returned by allocation and recovery.
+message Allocation {
+  // Required original request identity, owner, and eligibility revision.
+  AllocationOperation operation = 1;
+  // Required provider handle, unique and never reused within the issuing pool.
+  string allocation_id = 2;
+  // Required allocated value, within the operation's accepted eligibility.
+  Value value = 3;
+  // Required mode of that value; exact allocation preserves its partition.
+  AssignmentMode assignment_mode = 4;
+  // Optional VPC routing policy, fixed together with the VNI for this assignment.
+  // Omission preserves existing NICo policy. Non-VPC consumers reject its presence.
+  RouteTargetPolicy route_target_policy = 5;
+}
+
+// `OperationIdentity` identifies an attempt without repeating its allocation inputs.
+message OperationIdentity {
+  // Required original pool identity. Cancellation records it even before allocation.
+  PoolBinding pool = 1;
+  // Required original request ID; a new ID would describe unrelated work.
+  string request_id = 2;
+}
+
+// `RecoverRequest` asks for the state of one allocation attempt.
+message RecoverRequest {
+  // Required original identity; recovery never creates another allocation attempt.
+  OperationIdentity operation_identity = 1;
+}
+
+// `RecoverResponse` pairs the requested attempt with its observed state.
+message RecoverResponse {
+  // Required validated request identity, echoed even when the state is `unknown`.
+  OperationIdentity operation_identity = 1;
+  // Required state of this attempt; `unknown` still allows a delayed allocation.
+  OperationStatus operation_status = 2;
+}
+
+// `CancelRequest` stops an allocation attempt, even before its request arrives.
+message CancelRequest {
+  // Required original identity; a new identity would cancel unrelated work.
+  OperationIdentity operation_identity = 1;
+}
+
+// `CancelResponse` reports the attempt's state after the cancellation request.
+message CancelResponse {
+  // Required validated request identity, echoed for every returned state.
+  OperationIdentity operation_identity = 1;
+  // Required state; `pending` means cleanup continues and `Recover` must be polled.
+  OperationStatus operation_status = 2;
+}
+
+// `OperationStatus` separates an unobserved request from a terminal guarantee.
+message OperationStatus {
+  // Exactly one state must be present in every successful response.
+  oneof state {
+    // No operation observed; this does not prevent a delayed allocation.
+    Empty unknown = 1;
+    // Allocation or cancellation is still running; keep the same request identity.
+    Empty pending = 2;
+    // Ready assignment, identical to `allocation` in the successful response.
+    Allocation allocated = 3;
+    // No allocation or owned provisioning remains, and replay cannot create it.
+    Empty cancelled = 4;
+    // The original assignment was released, and replay cannot recreate it.
+    Empty released = 5;
+    // Definite allocation failure saved for replay; retrying needs a new request.
+    Failure failed = 6;
+  }
+}
+
+// `Failure` records a definite allocation rejection that `Recover` can explain.
+// Transient connectivity errors are not terminal failures. Providers retain the
+// same code and message for identical allocation replays until `Cancel` marks the
+// attempt cancelled.
+message Failure {
+  // Required semantic rejection; enum numbers match the corresponding gRPC codes.
+  FailureCode code = 1;
+  // Required diagnostic without credentials or sensitive request payloads.
+  string message = 2;
+}
+
+// `FailureCode` contains the definite allocation errors saved by the provider.
+enum FailureCode {
+  // Missing or unknown failure codes are invalid.
+  FAILURE_CODE_UNSPECIFIED = 0;
+  // The allocation request is malformed.
+  FAILURE_CODE_INVALID_ARGUMENT = 3;
+  // The selected automatic or manual partition has no available eligible value.
+  FAILURE_CODE_RESOURCE_EXHAUSTED = 8;
+  // A requested/exact value or eligibility revision cannot be used.
+  FAILURE_CODE_FAILED_PRECONDITION = 9;
+}
+
+// `LookupRequest` inspects one allocation instance in its original scope.
+message LookupRequest {
+  // Required original issuing and binding identity.
+  PoolBinding pool = 1;
+  // Required allocation-instance handle, never the allocated value itself.
+  string allocation_id = 2;
+}
+
+// `LookupResponse` returns the active assignment for the requested handle.
+message LookupResponse {
+  // Required assignment, including its original operation identity.
+  Allocation allocation = 1;
+}
+
+// `ReleaseRequest` frees an allocation only if all its identifying fields match.
+message ReleaseRequest {
+  // Required original issuing and binding identity.
+  PoolBinding pool = 1;
+  // Required allocation-instance handle from the original assignment.
+  string allocation_id = 2;
+  // Required complete owner, including slot and generation.
+  Owner owner = 3;
+}
+
+// `ReleaseResponse` reports whether this call removed the matching allocation.
+message ReleaseResponse {
+  // False for missing, released, cancelled, or differently owned allocations.
+  bool applied = 1;
+}
+
+// `StatsRequest` selects the pool and eligibility whose inventory is counted.
+message StatsRequest {
+  // Required saved pool identity.
+  PoolBinding pool = 1;
+  // Required accepted revision; provider inventory outside it is excluded.
+  string eligibility_revision = 2;
+}
+
+// `StatsResponse` returns inventory counts within the requested eligibility.
+message StatsResponse {
+  // Required observation; unavailable or unsupported counts return an RPC error.
+  PoolStats stats = 1;
+}
+
+// `PoolStats` preserves NICo's six counts in one consistent provider observation.
+// Totals equal the sum of their automatic and manual counts. Values unavailable
+// for reasons other than allocation are excluded from both totals. Allocations
+// held by other sites or bindings count as used when their value is eligible here.
+message PoolStats {
+  // Allocated eligible values in this observation.
+  uint64 used = 1;
+  // Eligible values available for allocation in this observation.
+  uint64 free = 2;
+  // Allocated values in the automatic partition.
+  uint64 auto_assign_used = 3;
+  // Available values in the automatic partition.
+  uint64 auto_assign_free = 4;
+  // Allocated values in the manual partition.
+  uint64 non_auto_assign_used = 5;
+  // Available values in the manual partition.
+  uint64 non_auto_assign_free = 6;
+}
+
+// `RouteTargetPolicy` adds provider routing policy to a VPC's VNI assignment.
+// RTs are shared routing labels, not exclusively allocated pool values. NICo
+// checks operator opt-in, effective imports/exports, and peer safety at admission.
+// Duplicate RTs are allowed and add no routing membership. Replays retain every
+// list's original entries and order as part of the immutable assignment.
+message RouteTargetPolicy {
+  // Omitted or zero preserves generated RTs. Unknown enum values are invalid.
+  RouteTargetMode mode = 1;
+  // Absent preserves imports; present empty adds none. Required in replace mode.
+  RouteTargets imports = 2;
+  // Absent preserves exports; present empty adds none. Required in replace mode.
+  RouteTargets exports = 3;
+  // Export RTs that identify only this VPC within the routing domain for peering.
+  // Empty means the provider supplies no peer identity. NICo checks these against
+  // the effective exports before admitting peering; every entry must belong to
+  // those exports. Shared tags are not identities. Duplicates add no membership.
+  repeated RouteTarget peer_identity = 4;
+}
+
+// `RouteTargetMode` controls NICo's generated own import and export RTs.
+enum RouteTargetMode {
+  // Keep generated RTs and append each present provider list.
+  ROUTE_TARGET_MODE_PRESERVE_GENERATED = 0;
+  // Suppress generated RTs with explicit NICo opt-in; retain configured additions.
+  ROUTE_TARGET_MODE_REPLACE_GENERATED = 1;
+}
+
+// `RouteTargets` distinguishes an omitted direction from an explicit empty list.
+message RouteTargets {
+  // Routing labels for this direction; order and duplicates do not change membership.
+  repeated RouteTarget values = 1;
+}
+
+// `RouteTarget` uses the same ASN and local identifier fields as NICo's public API.
+message RouteTarget {
+  // Autonomous system number; NICo validates the supported RT encoding at admission.
+  uint32 asn = 1;
+  // Local identifier, named `vni` to match NICo's existing RouteTarget model.
+  uint32 vni = 2;
+}

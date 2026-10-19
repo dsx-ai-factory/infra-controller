@@ -1015,6 +1015,7 @@ impl Default for PowerShelfHealthReportSinkConfig {
 #[serde(default)]
 pub struct RateLimitConfig {
     /// Burst value for explorations, optimal to set to max rate limit.
+    /// Must be greater than zero when rate limiting is enabled.
     pub bucket_burst: usize,
 
     /// Interval between bucket replenishment.
@@ -2814,6 +2815,14 @@ impl Config {
         {
             return Err(
                 "bucket_replenish must be greater than 0 when rate limiting is enabled".to_string(),
+            );
+        }
+
+        if let Configurable::Enabled(rate_limit) = &self.rate_limit
+            && rate_limit.bucket_burst == 0
+        {
+            return Err(
+                "bucket_burst must be greater than 0 when rate limiting is enabled".to_string(),
             );
         }
 

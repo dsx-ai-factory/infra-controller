@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use carbide_uuid::DbTable;
 use model::attestation::SecretAkPub;
 use sqlx::PgConnection;
 
@@ -27,13 +28,16 @@ pub async fn insert(
     secret: &Vec<u8>,
     ak_pub: &Vec<u8>,
 ) -> DatabaseResult<Option<SecretAkPub>> {
-    let query = "INSERT INTO attestation_secret_ak_pub VALUES ($1, $2) RETURNING secret, ak_pub";
-    let res = sqlx::query_as(query)
+    let query = format!(
+        "INSERT INTO attestation_secret_ak_pub VALUES ($1, $2) RETURNING {}",
+        SecretAkPub::db_table_columns(),
+    );
+    let res = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(secret.as_slice())
         .bind(ak_pub.as_slice())
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+        .map_err(|e| DatabaseError::query(&query, e))?;
 
     Ok(Some(res))
 }
@@ -42,14 +46,16 @@ pub async fn delete(
     txn: &mut PgConnection,
     secret: &Vec<u8>,
 ) -> DatabaseResult<Option<SecretAkPub>> {
-    let query =
-        "DELETE FROM attestation_secret_ak_pub WHERE secret = ($1) RETURNING secret, ak_pub";
+    let query = format!(
+        "DELETE FROM attestation_secret_ak_pub WHERE secret = ($1) RETURNING {}",
+        SecretAkPub::db_table_columns(),
+    );
 
-    let res = sqlx::query_as(query)
+    let res = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(secret.as_slice())
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+        .map_err(|e| DatabaseError::query(&query, e))?;
 
     Ok(Some(res))
 }
@@ -58,11 +64,14 @@ pub async fn get_by_secret(
     txn: &mut PgConnection,
     secret: &Vec<u8>,
 ) -> DatabaseResult<Option<SecretAkPub>> {
-    let query = "SELECT secret, ak_pub FROM attestation_secret_ak_pub WHERE secret = ($1)";
+    let query = format!(
+        "SELECT {} FROM attestation_secret_ak_pub WHERE secret = ($1)",
+        SecretAkPub::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(secret.as_slice())
         .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }

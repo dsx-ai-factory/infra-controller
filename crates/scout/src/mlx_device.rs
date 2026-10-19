@@ -27,7 +27,7 @@ use libmlx::device::report::MlxDeviceReport;
 use libmlx::firmware::config::FirmwareFlasherProfile;
 use libmlx::firmware::credentials::Credentials;
 use libmlx::firmware::flasher::FirmwareFlasher;
-use libmlx::lockdown::error::{MlxError, MlxResult};
+use libmlx::lockdown::error::MlxResult;
 use libmlx::lockdown::lockdown::{LockdownManager, StatusReport};
 use libmlx::profile::error::MlxProfileError;
 use libmlx::profile::serialization::SerializableProfile;
@@ -121,17 +121,6 @@ pub(super) fn unlock_device(device_address: &str, key: &str) -> MlxResult<()> {
     let manager = LockdownManager::new()?;
     manager.unlock_device(device_address, key)?;
     Ok(())
-}
-
-pub(super) fn lockdown_error_context(error: &MlxError, key: &str) -> String {
-    // Flint dry-run and command errors can echo the full invocation. Keep the
-    // diagnostic while removing any non-empty key that reached the tool.
-    let context = error.to_string();
-    match error {
-        MlxError::InvalidKey => context,
-        _ if key.is_empty() => context,
-        _ => context.replace(key, "REDACTED"),
-    }
 }
 
 struct LoggableFirmwareSource {
@@ -518,7 +507,7 @@ pub(super) fn handle_lockdown_lock(
         Err(e) => {
             emit(ScoutMlxDeviceOperationFailed::LockdownLockExecute {
                 device_id: request.device_id.clone(),
-                error: lockdown_error_context(&e, &request.key),
+                error: e.to_string(),
             });
             mlx_device_pb::MlxDeviceLockdownResponse {
                 reply: Some(mlx_device_pb::mlx_device_lockdown_response::Reply::Error(
@@ -575,7 +564,7 @@ pub(super) fn handle_lockdown_unlock(
         Err(e) => {
             emit(ScoutMlxDeviceOperationFailed::LockdownUnlockExecute {
                 device_id: request.device_id.clone(),
-                error: lockdown_error_context(&e, &request.key),
+                error: e.to_string(),
             });
             mlx_device_pb::MlxDeviceLockdownResponse {
                 reply: Some(mlx_device_pb::mlx_device_lockdown_response::Reply::Error(
@@ -1681,48 +1670,6 @@ mod tests {
                         .counter_delta(MLX_FAILURE_METRIC, &fixture.metric_labels()),
                 }
             },
-        );
-    }
-
-    #[test]
-    fn lockdown_error_context_removes_valid_keys() {
-        struct RedactionCase {
-            error: MlxError,
-            key: &'static str,
-        }
-
-        check_values(
-            [
-                Check {
-                    scenario: "dry-run commands do not retain the key",
-                    input: RedactionCase {
-                        error: MlxError::DryRun(
-                            "flint -d device hw_access enable deadbeef".to_string(),
-                        ),
-                        key: "deadbeef",
-                    },
-                    expect:
-                        "dry run - would have executed: flint -d device hw_access enable REDACTED"
-                            .to_string(),
-                },
-                Check {
-                    scenario: "tool output does not retain the key",
-                    input: RedactionCase {
-                        error: MlxError::CommandFailed("flint rejected key DEADBEEF".to_string()),
-                        key: "DEADBEEF",
-                    },
-                    expect: "command execution failed: flint rejected key REDACTED".to_string(),
-                },
-                Check {
-                    scenario: "invalid keys cannot rewrite ordinary diagnostics",
-                    input: RedactionCase {
-                        error: MlxError::InvalidKey,
-                        key: "a",
-                    },
-                    expect: "invalid key format or length".to_string(),
-                },
-            ],
-            |case| lockdown_error_context(&case.error, case.key),
         );
     }
 

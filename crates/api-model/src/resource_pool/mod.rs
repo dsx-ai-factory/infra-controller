@@ -26,7 +26,9 @@ pub use binding::{
     ResourcePoolBackendKind, ResourcePoolBinding, ResourcePoolSelection, ResourcePoolValueDomain,
 };
 use chrono::{DateTime, Utc};
-pub use define::{Range, ResourcePoolConfig, ResourcePoolDef, ResourcePoolType};
+pub use define::{
+    Range, ResourcePoolConfig, ResourcePoolDef, ResourcePoolType, parse_integer_range_bound,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 

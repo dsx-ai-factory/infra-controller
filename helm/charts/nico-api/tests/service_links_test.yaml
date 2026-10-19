@@ -1,0 +1,9 @@
+suite: service links
+templates:
+  - deployment.yaml
+tests:
+  - it: should not inject Kubernetes service variables into the API container
+    asserts:
+      - equal:
+          path: spec.template.spec.enableServiceLinks
+          value: false

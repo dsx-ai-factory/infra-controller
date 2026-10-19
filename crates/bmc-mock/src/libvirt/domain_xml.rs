@@ -20,6 +20,7 @@ use std::str::FromStr;
 use eyre::WrapErr;
 use quick_xml::Writer;
 use quick_xml::events::{BytesStart, Event};
+use serde::Deserialize;
 
 use super::xml::XmlElement;
 
@@ -65,9 +66,49 @@ impl DomainXml {
         })
     }
 
+    /// Reads only direct domain disk devices; unknown XML remains untouched.
+    pub(super) fn disks(&self) -> eyre::Result<Vec<DomainDisk>> {
+        let Some(devices) = self.root()?.optional_child("devices")? else {
+            return Ok(Vec::new());
+        };
+        devices
+            .children()?
+            .into_iter()
+            .filter(|element| element.is_named("disk"))
+            .map(|element| {
+                quick_xml::de::from_str(element.as_xml())
+                    .context("could not parse libvirt disk XML")
+            })
+            .collect()
+    }
+
     pub(super) fn into_xml(self) -> String {
         self.xml
     }
+}
+
+/// The disk identity needed by media ownership checks. This is a read-only
+/// projection; it is never serialized over the original domain document.
+#[derive(Debug, Deserialize)]
+pub(super) struct DomainDisk {
+    #[serde(rename = "@device")]
+    pub(super) device: Option<String>,
+    pub(super) target: Option<DiskTarget>,
+    pub(super) alias: Option<DiskAlias>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct DiskTarget {
+    #[serde(rename = "@dev")]
+    pub(super) dev: Option<String>,
+    #[serde(rename = "@bus")]
+    pub(super) bus: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct DiskAlias {
+    #[serde(rename = "@name")]
+    pub(super) name: Option<String>,
 }
 
 fn boot_elements(devices: &[&str]) -> eyre::Result<String> {
@@ -142,6 +183,35 @@ mod tests {
                     .with_boot_order(&["hd"])
                     .is_err(),
                 "{xml}"
+            );
+        }
+    }
+    #[test]
+    fn reads_direct_disks_and_decodes_attributes_without_rewriting_the_document() {
+        let xml = "<domain><metadata><disk device='disk'><target dev='sdb'/></disk></metadata><devices><disk device='cdrom'><target dev='sdb' bus='sata'/><alias name='ua-bmc-mock-vmedia-C&#100;'/><source file='/tmp/media.iso'/></disk><interface/></devices></domain>";
+        let domain: DomainXml = xml.parse().unwrap();
+        let disks = domain.disks().unwrap();
+        assert_eq!(disks.len(), 1);
+        assert_eq!(
+            disks[0].alias.as_ref().unwrap().name.as_deref(),
+            Some("ua-bmc-mock-vmedia-Cd")
+        );
+        assert_eq!(domain.into_xml(), xml);
+        assert!(
+            "<domain/>"
+                .parse::<DomainXml>()
+                .unwrap()
+                .disks()
+                .unwrap()
+                .is_empty()
+        );
+        for invalid in [
+            "<domain><devices/><devices/></domain>",
+            "<domain><devices><disk><target dev='sdb'/><target dev='sdc'/></disk></devices></domain>",
+        ] {
+            assert!(
+                invalid.parse::<DomainXml>().unwrap().disks().is_err(),
+                "{invalid}"
             );
         }
     }

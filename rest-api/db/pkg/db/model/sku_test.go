@@ -16,35 +16,46 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	otrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestSkuComponents_Equal(t *testing.T) {
-	t.Run("nil wrapper equals nil wrapper", func(t *testing.T) {
-		var a, b *SkuComponents
-		assert.True(t, a.Equal(b))
-	})
-	t.Run("nil wrapper equals wrapper with nil inner", func(t *testing.T) {
-		var a *SkuComponents
-		b := &SkuComponents{}
-		assert.True(t, a.Equal(b))
-		assert.True(t, b.Equal(a))
-	})
-	t.Run("two wrappers with nil inner are equal", func(t *testing.T) {
-		assert.True(t, (&SkuComponents{}).Equal(&SkuComponents{}))
-	})
-	t.Run("identical inner protos are equal", func(t *testing.T) {
-		a := &SkuComponents{SkuComponents: &corev1.SkuComponents{}}
-		b := &SkuComponents{SkuComponents: &corev1.SkuComponents{}}
-		assert.True(t, a.Equal(b))
-	})
-	t.Run("nil inner does not equal non-nil inner", func(t *testing.T) {
-		a := &SkuComponents{}
-		b := &SkuComponents{SkuComponents: &corev1.SkuComponents{}}
-		assert.False(t, a.Equal(b))
-		assert.False(t, b.Equal(a))
-	})
+	decoded := &SkuComponents{}
+	require.NoError(t, decoded.UnmarshalJSON([]byte(`{"chassis":{"model":"DGX"}}`)))
+	fresh := &SkuComponents{SkuComponents: &corev1.SkuComponents{
+		Chassis: &corev1.SkuComponentChassis{Model: "DGX"},
+	}}
+
+	tests := []struct {
+		name  string
+		left  *SkuComponents
+		right *SkuComponents
+		equal bool
+	}{
+		{name: "nil wrappers are equal", equal: true},
+		{name: "nil wrapper equals nil inner", right: &SkuComponents{}, equal: true},
+		{name: "nil inner values are equal", left: &SkuComponents{}, right: &SkuComponents{}, equal: true},
+		{
+			name:  "identical inner protos are equal",
+			left:  &SkuComponents{SkuComponents: &corev1.SkuComponents{}},
+			right: &SkuComponents{SkuComponents: &corev1.SkuComponents{}},
+			equal: true,
+		},
+		{
+			name:  "nil inner does not equal empty proto",
+			left:  &SkuComponents{},
+			right: &SkuComponents{SkuComponents: &corev1.SkuComponents{}},
+		},
+		{name: "decoded and fresh protos compare by fields", left: decoded, right: fresh, equal: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.equal, tc.left.Equal(tc.right))
+			assert.Equal(t, tc.equal, tc.right.Equal(tc.left))
+		})
+	}
 }
 
 func TestSKU_ToProto(t *testing.T) {
@@ -365,6 +376,19 @@ func TestSkuSQLDAO_GetAll(t *testing.T) {
 	}
 }
 
+type testSkuUpdateHook struct {
+	updates int
+}
+
+func (h *testSkuUpdateHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if event.Operation() == "UPDATE" {
+		h.updates++
+	}
+	return ctx
+}
+
+func (h *testSkuUpdateHook) AfterQuery(context.Context, *bun.QueryEvent) {}
+
 func TestSkuSQLDAO_Update(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testSKUInitDB(t)
@@ -378,6 +402,8 @@ func TestSkuSQLDAO_Update(t *testing.T) {
 
 	created := testSkuCreateSkus(ctx, t, dbSession, site.ID)
 	ssd := NewSkuDAO(dbSession)
+	hook := &testSkuUpdateHook{}
+	dbSession.DB.AddQueryHook(hook)
 	authoritativeCreated := time.Date(2025, time.January, 2, 3, 4, 5, 678_901_234, time.UTC)
 	normalizedAuthoritativeCreated := authoritativeCreated.Round(time.Microsecond)
 
@@ -390,7 +416,16 @@ func TestSkuSQLDAO_Update(t *testing.T) {
 		expectedDescription string
 		expectedVersion     uint32
 		expectedCreated     time.Time
+		noWrite             bool
 	}{
+		{
+			desc:                "no fields preserves the stored values and timestamp",
+			input:               SkuUpdateInput{SkuID: created[0].ID},
+			expectedDescription: created[0].Description,
+			expectedVersion:     created[0].SchemaVersion,
+			expectedCreated:     created[0].Created,
+			noWrite:             true,
+		},
 		{
 			desc: "update sku data",
 			input: SkuUpdateInput{
@@ -428,6 +463,13 @@ func TestSkuSQLDAO_Update(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			beforeUpdate := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
+			_, err := dbSession.DB.NewUpdate().Model((*SKU)(nil)).
+				Set("updated = ?", beforeUpdate).Where("id = ?", tc.input.SkuID).Exec(ctx)
+			require.NoError(t, err)
+
+			updatesBefore := hook.updates
+			callStart := time.Now().UTC().Truncate(time.Microsecond)
 			got, err := ssd.Update(ctx, nil, tc.input)
 			require.NoError(t, err)
 			require.NotNil(t, got)
@@ -438,11 +480,104 @@ func TestSkuSQLDAO_Update(t *testing.T) {
 			if tc.input.Components != nil {
 				assert.NotNil(t, got.Components)
 			}
+			stored, err := ssd.Get(ctx, nil, tc.input.SkuID)
+			require.NoError(t, err)
+			assert.Equal(t, got, stored)
+			if tc.noWrite {
+				assert.Equal(t, updatesBefore, hook.updates, "no fields must not issue an UPDATE")
+				assert.True(t, stored.Updated.Equal(beforeUpdate))
+			} else {
+				assert.Equal(t, updatesBefore+1, hook.updates)
+				assert.False(t, stored.Updated.Before(callStart))
+			}
 			// tracer
 			span := otrace.SpanFromContext(ctx)
 			assert.True(t, span.SpanContext().IsValid())
 		})
 	}
+
+	t.Run("conditional writes", func(t *testing.T) {
+		row, err := ssd.Create(ctx, nil, SkuCreateInput{
+			SkuID: "guarded-sku", SiteID: site.ID, Description: "original description",
+		})
+		require.NoError(t, err)
+		updated := time.Date(2025, time.January, 1, 0, 0, 0, 123_456_000, time.UTC)
+		older := updated.Add(-time.Hour)
+		newer := updated.Add(time.Hour)
+		description := "inventory description"
+		cases := []struct {
+			name    string
+			input   SkuUpdateInput
+			wantErr bool
+			noWrite bool
+		}{
+			{
+				name:  "matching version writes",
+				input: SkuUpdateInput{SkuID: row.ID, ExpectedUpdated: &updated, Description: &description},
+			},
+			{
+				name:    "same schema version with a stale token is rejected",
+				input:   SkuUpdateInput{SkuID: row.ID, ExpectedUpdated: &older, SchemaVersion: &row.SchemaVersion},
+				wantErr: true,
+			},
+			{
+				name:    "future token is rejected",
+				input:   SkuUpdateInput{SkuID: row.ID, ExpectedUpdated: &newer, Description: &description},
+				wantErr: true,
+			},
+			{
+				name:    "missing ID does not update a row with the same version",
+				input:   SkuUpdateInput{SkuID: "missing-sku", ExpectedUpdated: &updated, Description: &description},
+				wantErr: true,
+			},
+			{
+				name:    "missing ID without a token is rejected",
+				input:   SkuUpdateInput{SkuID: "missing-sku", Description: &description},
+				wantErr: true,
+			},
+			{
+				name:    "stale token without fields performs no write",
+				input:   SkuUpdateInput{SkuID: row.ID, ExpectedUpdated: &older},
+				noWrite: true,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := dbSession.DB.NewUpdate().Model((*SKU)(nil)).
+					Set("updated = ?", updated).Set("description = ?", "original description").Where("id = ?", row.ID).Exec(ctx)
+				require.NoError(t, err)
+				before, err := ssd.Get(ctx, nil, row.ID)
+				require.NoError(t, err)
+				updatesBefore := hook.updates
+				got, err := ssd.Update(ctx, nil, tc.input)
+				if tc.wantErr {
+					require.ErrorIs(t, err, db.ErrDoesNotExist)
+					assert.Nil(t, got)
+				} else {
+					require.NoError(t, err)
+					require.NotNil(t, got)
+				}
+				stored, err := ssd.Get(ctx, nil, row.ID)
+				require.NoError(t, err)
+				if tc.noWrite {
+					assert.Equal(t, updatesBefore, hook.updates, "a token alone must not issue an UPDATE")
+				} else {
+					assert.Equal(t, updatesBefore+1, hook.updates)
+				}
+				if tc.wantErr || tc.noWrite {
+					assert.Equal(t, before, stored)
+				} else {
+					assert.True(t, stored.Updated.After(before.Updated))
+					before.Description = description
+					before.Updated = stored.Updated
+					assert.Equal(t, before, stored)
+				}
+				if got != nil {
+					assert.Equal(t, stored, got)
+				}
+			})
+		}
+	})
 }
 
 func TestSkuSQLDAO_Delete(t *testing.T) {
@@ -484,6 +619,76 @@ func TestSkuSQLDAO_Delete(t *testing.T) {
 			assert.True(t, span.SpanContext().IsValid())
 		})
 	}
+}
+
+func TestSkuSQLDAO_DeleteIfUnchanged(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testSKUInitDB(t)
+	defer dbSession.Close()
+	testSKUSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+	site := TestBuildSite(t, dbSession, ip, "test-site", user)
+	existing := testSkuCreateSkus(ctx, t, dbSession, site.ID)
+	dao := NewSkuDAO(dbSession)
+	beforeUpdate := existing[1]
+	afterUpdate, err := dao.Update(ctx, nil, SkuUpdateInput{
+		SkuID:       beforeUpdate.ID,
+		Description: cutil.GetPtr("set through the API"),
+	})
+	require.NoError(t, err)
+	require.True(t, afterUpdate.Updated.After(beforeUpdate.Updated))
+
+	tests := []struct {
+		name        string
+		id          string
+		updated     time.Time
+		wantDeleted bool
+		want        *SKU
+	}{
+		{
+			name:        "matching version deletes the row",
+			id:          existing[0].ID,
+			updated:     existing[0].Updated,
+			wantDeleted: true,
+		},
+		{
+			name:    "changed version preserves the row",
+			id:      beforeUpdate.ID,
+			updated: beforeUpdate.Updated,
+			want:    afterUpdate,
+		},
+		{
+			name:    "older stored version is also preserved",
+			id:      existing[2].ID,
+			updated: existing[2].Updated.Add(time.Hour),
+			want:    &existing[2],
+		},
+		{
+			name:    "absent row preserves another row with the same timestamp",
+			id:      "absent-sku",
+			updated: existing[2].Updated,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			deleted, err := dao.DeleteIfUnchanged(ctx, nil, tc.id, tc.updated)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantDeleted, deleted)
+
+			stored, err := dao.Get(ctx, nil, tc.id)
+			if tc.want == nil {
+				assert.ErrorIs(t, err, db.ErrDoesNotExist)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, stored)
+		})
+	}
+	stored, err := dao.Get(ctx, nil, existing[2].ID)
+	require.NoError(t, err)
+	assert.Equal(t, &existing[2], stored)
 }
 
 func TestSkuSQLDAO_Create_DefaultAssociatedMachineIds(t *testing.T) {

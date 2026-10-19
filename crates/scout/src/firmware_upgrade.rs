@@ -15,100 +15,14 @@
  * limitations under the License.
  */
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use carbide_instrument::emit;
-use carbide_utils::none_if_empty::NoneIfEmpty;
-use futures_util::TryStreamExt;
 use rpc::scout_firmware_upgrade::ScoutFirmwareUpgradeTask as FirmwareUpgradeTask;
-use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::metrics::{
-    FirmwareDownloadKind, FirmwareDownloadNextAction, ScoutFirmwareDownloadAttemptFailed,
-};
+use crate::firmware_staging::{FirmwareStaging, LoggableFirmwareUrl};
+use crate::metrics::FirmwareDownloadKind;
 
 const SCRIPT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
-const DOWNLOAD_MAX_RETRIES: u32 = 3;
-
-struct LoggableFirmwareUrl {
-    value: String,
-    task_forms: Vec<String>,
-}
-
-fn is_downloadable_firmware_url(url: &reqwest::Url) -> bool {
-    matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
-}
-
-fn remove_url_credentials(url: &mut reqwest::Url) {
-    // `http` and `https` URLs are always base URLs. `Url` only rejects
-    // username and password changes for cannot-be-a-base schemes;
-    // `LoggableFirmwareUrl::new` rejects those before calling us, so these
-    // results are safe to ignore.
-    let _ = url.set_username("");
-    let _ = url.set_password(None);
-}
-
-impl LoggableFirmwareUrl {
-    fn invalid() -> Self {
-        Self {
-            value: "<invalid firmware URL>".to_string(),
-            task_forms: Vec::new(),
-        }
-    }
-
-    fn new(raw: &str) -> Self {
-        let Ok(parsed) = reqwest::Url::parse(raw) else {
-            return Self::invalid();
-        };
-        if !is_downloadable_firmware_url(&parsed) {
-            return Self::invalid();
-        }
-
-        let mut task_forms = vec![raw.to_string(), parsed.to_string()];
-        for remove_fragment in [false, true] {
-            for remove_query in [false, true] {
-                let mut form = parsed.clone();
-                if remove_fragment {
-                    form.set_fragment(None);
-                }
-                if remove_query {
-                    form.set_query(None);
-                }
-                task_forms.push(form.to_string());
-
-                remove_url_credentials(&mut form);
-                task_forms.push(form.to_string());
-            }
-        }
-
-        let mut loggable = parsed;
-        remove_url_credentials(&mut loggable);
-        loggable.set_query(None);
-        loggable.set_fragment(None);
-        let value = loggable.to_string();
-
-        task_forms.retain(|form| !form.is_empty() && form != &value);
-        task_forms
-            .sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
-        task_forms.dedup();
-
-        Self { value, task_forms }
-    }
-
-    fn redact_from(&self, text: &str) -> String {
-        let mut redacted = text.to_string();
-        for form in &self.task_forms {
-            redacted = redacted.replace(form, &self.value);
-        }
-        redacted
-    }
-
-    fn as_str(&self) -> &str {
-        &self.value
-    }
-}
 
 fn firmware_task_text_context(value: &str, task: &FirmwareUpgradeTask) -> String {
     let urls = task.script.iter().map(|script| script.url.as_str()).chain(
@@ -162,14 +76,14 @@ pub(super) async fn handle_firmware_upgrade(
 async fn run_firmware_upgrade(
     client: &reqwest::Client,
     task: &FirmwareUpgradeTask,
-) -> Result<FirmwareUpgradeResult, Box<dyn std::error::Error>> {
+) -> Result<FirmwareUpgradeResult, Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!(
         component_type = %task.component_type,
         target_version = %task.target_version,
         "[firmware_upgrade] starting",
     );
 
-    let work_dir = tempfile::tempdir()?;
+    let mut staging = FirmwareStaging::new()?;
 
     let download_timeout = Duration::from_secs(task.artifact_download_timeout_seconds.into());
     let script = task
@@ -177,75 +91,30 @@ async fn run_firmware_upgrade(
         .as_ref()
         .ok_or("firmware upgrade task missing script")?;
 
-    // Download the script and verify its checksum.
-    let script_path = tokio::time::timeout(
-        SCRIPT_DOWNLOAD_TIMEOUT,
-        download_file_with_retries(
+    let script_path = staging
+        .stage(
             client,
             &script.url,
-            work_dir.path(),
+            &script.sha256,
             FirmwareDownloadKind::Script,
-        ),
-    )
-    .await
-    .map_err(|_| {
-        format!(
-            "script download timed out after {} seconds",
-            SCRIPT_DOWNLOAD_TIMEOUT.as_secs()
+            SCRIPT_DOWNLOAD_TIMEOUT,
         )
-    })??;
-    let actual = sha256_file(&script_path).await?;
-    if actual != script.sha256 {
-        let script_url = LoggableFirmwareUrl::new(&script.url);
-        return Err(format!(
-            "checksum mismatch for script {}: expected {}, got {actual}",
-            script_url.as_str(),
-            script.sha256
-        )
-        .into());
-    }
-    tracing::info!(
-        script_path = ?script_path,
-        "[firmware_upgrade] script downloaded and verified",
-    );
+        .await?;
 
-    // Download file artifacts and verify checksums.
-    let download_dir = work_dir.path().join("downloads");
-    tokio::fs::create_dir_all(&download_dir).await?;
+    // Keep every input alive until the script exits, including inputs whose
+    // basenames collide. Arguments still follow the task's artifact order.
     let mut downloaded_artifacts = Vec::with_capacity(task.file_artifacts.len());
     for artifact in &task.file_artifacts {
-        let artifact_url = LoggableFirmwareUrl::new(&artifact.url);
-        let dest = tokio::time::timeout(
-            download_timeout,
-            download_file_with_retries(
+        let destination = staging
+            .stage(
                 client,
                 &artifact.url,
-                &download_dir,
+                &artifact.sha256,
                 FirmwareDownloadKind::Artifact,
-            ),
-        )
-        .await
-        .map_err(|_| {
-            format!(
-                "download timed out for {} after {} seconds",
-                artifact_url.as_str(),
-                task.artifact_download_timeout_seconds
+                download_timeout,
             )
-        })??;
-        let actual = sha256_file(&dest).await?;
-        if actual != artifact.sha256 {
-            return Err(format!(
-                "checksum mismatch for {}: expected {}, got {actual}",
-                artifact_url.as_str(),
-                artifact.sha256
-            )
-            .into());
-        }
-        tracing::info!(
-            artifact_url = %artifact_url.as_str(),
-            "[firmware_upgrade] checksum verified",
-        );
-        downloaded_artifacts.push(dest);
+            .await?;
+        downloaded_artifacts.push(destination);
     }
 
     tracing::info!(
@@ -253,19 +122,18 @@ async fn run_firmware_upgrade(
         "[firmware_upgrade] files downloaded; executing script",
     );
 
-    // Execute the script with env vars for context.
-    // kill_on_drop ensures the child process is terminated if the timeout fires,
-    // preventing orphaned processes and races with tempdir cleanup.
+    // kill_on_drop terminates the direct shell when execution times out.
+    // It does not supervise descendants the script starts.
     let mut command = tokio::process::Command::new("sh");
     command
         .arg(&script_path)
         .args(&downloaded_artifacts)
-        .env("DOWNLOAD_DIR", &download_dir)
+        .env("DOWNLOAD_DIR", staging.download_dir())
         .env("COMPONENT_TYPE", &task.component_type)
         .env("TARGET_VERSION", &task.target_version);
 
     let child = command
-        .current_dir(work_dir.path())
+        .current_dir(staging.work_dir())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
@@ -314,102 +182,13 @@ async fn run_firmware_upgrade(
     }
 }
 
-async fn download_file_with_retries(
-    client: &reqwest::Client,
-    url: &str,
-    target_dir: &Path,
-    kind: FirmwareDownloadKind,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let url_owned = url.to_string();
-    let url_context = LoggableFirmwareUrl::new(url);
-    let result = tryhard::retry_fn(|| download_file(client, &url_owned, target_dir))
-        .retries(DOWNLOAD_MAX_RETRIES)
-        .exponential_backoff(Duration::from_secs(1))
-        .on_retry(|attempt, next_delay, error| {
-            let next_action = if next_delay.is_some() {
-                FirmwareDownloadNextAction::Retry
-            } else {
-                FirmwareDownloadNextAction::GiveUp
-            };
-            let delay = next_delay.unwrap_or_default();
-            let error = url_context.redact_from(&error.to_string());
-            emit(ScoutFirmwareDownloadAttemptFailed {
-                kind,
-                next_action,
-                attempt: i64::from(attempt),
-                url: url_context.as_str().to_string(),
-                error,
-                retry_delay_seconds: delay.as_secs_f64(),
-            });
-            std::future::ready(())
-        })
-        .await?;
-    Ok(result)
-}
-
-// download_file downloads a file from the given URL into the target directory,
-// preserving the filename from the URL path.
-async fn download_file(
-    client: &reqwest::Client,
-    url: &str,
-    target_dir: &Path,
-) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    let parsed = reqwest::Url::parse(url)?;
-    if !is_downloadable_firmware_url(&parsed) {
-        return Err("firmware URL must use HTTP or HTTPS and include a host".into());
-    }
-    let url_context = LoggableFirmwareUrl::new(url);
-    let segment = parsed
-        .path_segments()
-        .and_then(|mut s| s.next_back())
-        .none_if_empty()
-        .ok_or_else(|| format!("cannot extract filename from URL: {}", url_context.as_str()))?;
-
-    let filename = Path::new(segment)
-        .file_name()
-        .ok_or_else(|| format!("invalid filename in URL: {}", url_context.as_str()))?;
-
-    let dest = target_dir.join(filename);
-
-    tracing::info!(
-        url = %url_context.as_str(),
-        destination = ?dest,
-        "[firmware_upgrade] downloading",
-    );
-
-    let response = client.get(url).send().await?.error_for_status()?;
-    let mut stream = response.bytes_stream();
-
-    let mut file = tokio::fs::File::create(&dest).await?;
-    while let Some(chunk) = stream.try_next().await? {
-        file.write_all(&chunk).await?;
-    }
-    file.flush().await?;
-
-    Ok(dest)
-}
-
-async fn sha256_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let mut file = tokio::fs::File::open(path).await?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 8192];
-    loop {
-        let n = file.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hex::encode(hasher.finalize()))
-}
-
 #[cfg(test)]
 mod tests {
     use axum::Router;
     use axum::routing::get;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
-    use carbide_test_support::{Check, check_values};
     use rpc::scout_firmware_upgrade::FileArtifact;
+    use sha2::{Digest, Sha256};
     use tokio::net::TcpListener;
 
     use super::*;
@@ -447,98 +226,6 @@ mod tests {
             .enable_all()
             .build()
             .expect("test runtime should build")
-    }
-
-    #[test]
-    fn loggable_firmware_url_excludes_credentials() {
-        check_values(
-            [
-                Check {
-                    scenario: "path remains available for diagnostics",
-                    input: "https://firmware.example/images/fw.bin",
-                    expect: "https://firmware.example/images/fw.bin".to_string(),
-                },
-                Check {
-                    scenario: "userinfo query and fragment are removed",
-                    input: "https://user:password@firmware.example/images/fw.bin?token=secret#download",
-                    expect: "https://firmware.example/images/fw.bin".to_string(),
-                },
-                Check {
-                    scenario: "invalid locations do not echo caller input",
-                    input: "not a URL?token=secret",
-                    expect: "<invalid firmware URL>".to_string(),
-                },
-            ],
-            |url| LoggableFirmwareUrl::new(url).as_str().to_string(),
-        );
-    }
-
-    #[test]
-    fn task_url_redaction_excludes_only_task_credentials() {
-        struct ErrorCase {
-            error: &'static str,
-            url: &'static str,
-        }
-
-        check_values(
-            [
-                Check {
-                    scenario: "raw URL is redacted",
-                    input: ErrorCase {
-                        error: "request failed for https://user:password@firmware.example/fw.bin?token=secret#download",
-                        url: "https://user:password@firmware.example/fw.bin?token=secret#download",
-                    },
-                    expect: "request failed for https://firmware.example/fw.bin".to_string(),
-                },
-                Check {
-                    scenario: "canonicalized URL is redacted independently",
-                    input: ErrorCase {
-                        error: "request failed for https://user:password@firmware.example/fw.bin?token=secret",
-                        url: "HTTPS://user:password@FIRMWARE.EXAMPLE:443/fw.bin?token=secret",
-                    },
-                    expect: "request failed for https://firmware.example/fw.bin".to_string(),
-                },
-                Check {
-                    scenario: "short invalid URL does not rewrite parse errors",
-                    input: ErrorCase {
-                        error: "relative URL without a base",
-                        url: "a",
-                    },
-                    expect: "relative URL without a base".to_string(),
-                },
-                Check {
-                    scenario: "empty URL does not rewrite unrelated errors",
-                    input: ErrorCase {
-                        error: "connection reset",
-                        url: "",
-                    },
-                    expect: "connection reset".to_string(),
-                },
-                Check {
-                    scenario: "unrelated URLs remain untouched",
-                    input: ErrorCase {
-                        error: "upstream=https://user:password@other.example/fw.bin?token=secret",
-                        url: "https://firmware.example/task.bin?token=task-secret",
-                    },
-                    expect: "upstream=https://user:password@other.example/fw.bin?token=secret"
-                        .to_string(),
-                },
-            ],
-            |case| LoggableFirmwareUrl::new(case.url).redact_from(case.error),
-        );
-    }
-
-    #[test]
-    fn malformed_firmware_url_parse_errors_do_not_echo_the_input() {
-        const RAW_URL: &str = "MALFORMED_FIRMWARE_TASK_URL";
-
-        let parse_error = reqwest::Url::parse(RAW_URL).unwrap_err().to_string();
-        let url_context = LoggableFirmwareUrl::new(RAW_URL);
-        let loggable_error = url_context.redact_from(&parse_error);
-
-        assert_eq!(url_context.as_str(), "<invalid firmware URL>");
-        assert_eq!(loggable_error, parse_error);
-        assert!(!loggable_error.contains(RAW_URL));
     }
 
     #[test]
@@ -755,9 +442,12 @@ mod tests {
         assert!(result.stdout.contains("dir="));
     }
 
+    /// Scripts with distinct basenames retain argument order, direct
+    /// DOWNLOAD_DIR paths, and the task directory as their working directory.
     #[tokio::test]
     async fn test_script_receives_artifacts_as_args_in_order() {
         let script = r#"#!/bin/sh
+set -eu
 echo "argc=$#"
 echo "arg1=$(basename "$1")"
 echo "arg2=$(basename "$2")"
@@ -766,6 +456,9 @@ test -f "$1"
 test -f "$2"
 test "$(basename "$1")" = "first.bin"
 test "$(basename "$2")" = "second.bin"
+test "$1" = "$DOWNLOAD_DIR/first.bin"
+test "$2" = "$DOWNLOAD_DIR/second.bin"
+test "$(cd "$DOWNLOAD_DIR" && pwd -P)" = "$PWD/downloads"
 "#;
         let first_content = "first-binary-data";
         let second_content = "second-binary-data";
@@ -836,8 +529,8 @@ test "$(basename "$2")" = "second.bin"
             .filter(|log| log.field("event_name") == Some("scout_firmware_download_attempt_failed"))
             .collect::<Vec<_>>();
         let expected_url = format!("{base}/scripts/nonexistent.sh");
-        let expected_attempts = DOWNLOAD_MAX_RETRIES + 1;
-        assert_eq!(attempt_logs.len(), expected_attempts as usize);
+        // Assert the caller-visible retry budget independently of its constant.
+        assert_eq!(attempt_logs.len(), 4);
         assert!(attempt_logs.iter().all(|log| {
             log.field("kind") == Some("script")
                 && log.field("url") == Some(expected_url.as_str())
@@ -851,7 +544,7 @@ test "$(basename "$2")" = "second.bin"
                 .iter()
                 .filter(|log| log.field("next_action") == Some("retry"))
                 .count(),
-            DOWNLOAD_MAX_RETRIES as usize
+            3
         );
         assert_eq!(
             attempt_logs
@@ -865,7 +558,7 @@ test "$(basename "$2")" = "second.bin"
                 "carbide_scout_firmware_download_attempt_failures_total",
                 &[("kind", "script"), ("next_action", "retry")],
             ),
-            f64::from(DOWNLOAD_MAX_RETRIES)
+            3.0
         );
         assert_eq!(
             metrics.counter_delta(
@@ -875,7 +568,7 @@ test "$(basename "$2")" = "second.bin"
             1.0
         );
         assert!(!result.success);
-        assert!(!result.error.is_empty());
+        assert!(result.error.contains(&expected_url));
         assert!(!format!("{result:?}\n{logs:?}").contains(SECRET));
     }
 

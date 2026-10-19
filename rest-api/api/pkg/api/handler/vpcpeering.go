@@ -27,7 +27,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
@@ -168,24 +167,16 @@ func (cvph CreateVpcPeeringHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Tenant Accounts for tenants of the VPC Peering, DB error", nil)
 			}
 			if taCount == 2 {
-				tsDAO := cdbm.NewTenantSiteDAO(cvph.dbSession)
-				tenantSites, _, serr := tsDAO.GetAll(
-					ctx,
-					nil,
-					cdbm.TenantSiteFilterInput{
-						TenantIDs: []uuid.UUID{vpc1.TenantID, vpc2.TenantID},
-						SiteIDs:   []uuid.UUID{site.ID},
-					},
-					cdbp.PageInput{},
-					nil,
-				)
-				if serr != nil {
-					logger.Error().Err(serr).Msg("error retrieving TenantSite for tenants of the VPC Peering")
-					return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Site access for tenants of the VPC Peering, DB error", nil)
+				providerAuthorized = true
+				for _, tenantID := range []uuid.UUID{vpc1.TenantID, vpc2.TenantID} {
+					hasSiteAccess, serr := common.TenantHasSiteAccess(ctx, nil, cvph.dbSession, &cdbm.Tenant{ID: tenantID}, site.ID)
+					if serr != nil {
+						logger.Error().Err(serr).Msg("error checking Site access for tenants of the VPC Peering")
+						return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Site access for tenants of the VPC Peering, DB error", nil)
+					}
+					providerAuthorized = providerAuthorized && hasSiteAccess
 				}
-				if len(tenantSites) == 2 {
-					providerAuthorized = true
-				} else {
+				if !providerAuthorized {
 					logger.Warn().Msg("Not all tenants have access to Site specified in request")
 				}
 			} else {
@@ -197,24 +188,14 @@ func (cvph CreateVpcPeeringHandler) Handle(c echo.Context) error {
 	tenantAuthorized := false
 	if tenant != nil && !providerAuthorized {
 		// Tenant Admin: tenant must have access to the site.
-		tsDAO := cdbm.NewTenantSiteDAO(cvph.dbSession)
-		tenantSites, _, err := tsDAO.GetAll(
-			ctx,
-			nil,
-			cdbm.TenantSiteFilterInput{
-				TenantIDs: []uuid.UUID{tenant.ID},
-				SiteIDs:   []uuid.UUID{site.ID},
-			},
-			paginator.PageInput{Limit: cutil.GetPtr(1)},
-			nil,
-		)
+		hasSiteAccess, err := common.TenantHasSiteAccess(ctx, nil, cvph.dbSession, tenant, site.ID)
 		if err != nil {
-			logger.Error().Err(err).Msg("error retrieving TenantSite from DB")
+			logger.Error().Err(err).Msg("error checking Tenant access to Site")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Site access for Tenant, DB error", nil)
 		}
 
 		// Tenant-only users can only create single-tenant peerings where both VPCs belong to them.
-		if len(tenantSites) > 0 && vpc1.TenantID == tenant.ID && vpc2.TenantID == tenant.ID {
+		if hasSiteAccess && vpc1.TenantID == tenant.ID && vpc2.TenantID == tenant.ID {
 			tenantAuthorized = true
 		} else {
 			if vpc1.TenantID != tenant.ID {
@@ -493,22 +474,11 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 		}
 
 		if !providerSiteAuthorized && tenant != nil {
-			tsDAO := cdbm.NewTenantSiteDAO(gavph.dbSession)
-			tenantSites, _, err := tsDAO.GetAll(
-				ctx,
-				nil,
-				cdbm.TenantSiteFilterInput{
-					TenantIDs: []uuid.UUID{tenant.ID},
-					SiteIDs:   []uuid.UUID{site.ID},
-				},
-				paginator.PageInput{Limit: cutil.GetPtr(1)},
-				nil,
-			)
+			tenantSiteAuthorized, err = common.TenantHasSiteAccess(ctx, nil, gavph.dbSession, tenant, site.ID)
 			if err != nil {
-				logger.Error().Err(err).Msg("error retrieving TenantSite from DB")
+				logger.Error().Err(err).Msg("error checking Tenant access to Site")
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Site access for Tenant, DB error", nil)
 			}
-			tenantSiteAuthorized = len(tenantSites) > 0
 		}
 
 		if !providerSiteAuthorized && !tenantSiteAuthorized {

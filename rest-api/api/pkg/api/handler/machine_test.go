@@ -859,7 +859,7 @@ func TestMachineHandler_GetAll(t *testing.T) {
 	ins31, err := isd.Create(
 		context.Background(), nil,
 		cdbm.InstanceCreateInput{
-			Name:                     fmt.Sprintf("test-instance-targeted-31"),
+			Name:                     "test-instance-targeted-31",
 			TenantID:                 tenant4.ID,
 			InfrastructureProviderID: ip4.ID,
 			SiteID:                   site3.ID,
@@ -881,7 +881,7 @@ func TestMachineHandler_GetAll(t *testing.T) {
 	ins32, err := isd.Create(
 		context.Background(), nil,
 		cdbm.InstanceCreateInput{
-			Name:                     fmt.Sprintf("test-instance-targeted-32"),
+			Name:                     "test-instance-targeted-32",
 			TenantID:                 tenant4.ID,
 			InfrastructureProviderID: ip4.ID,
 			SiteID:                   site3.ID,
@@ -904,7 +904,7 @@ func TestMachineHandler_GetAll(t *testing.T) {
 
 		context.Background(), nil,
 		cdbm.InstanceCreateInput{
-			Name:                     fmt.Sprintf("test-instance-targeted-34"),
+			Name:                     "test-instance-targeted-34",
 			TenantID:                 tenant5.ID,
 			InfrastructureProviderID: ip4.ID,
 			SiteID:                   site3.ID,

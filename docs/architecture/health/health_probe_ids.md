@@ -97,7 +97,7 @@ Reports BMC Redfish leak detector observations. The target identifies the
 detector. Warning and critical detector states use the `LeakDetector`
 classification, while a detector that cannot be read uses `SensorFailure`.
 Configured leak processing can derive tray-level and rack-level alerts with the
-`Leak` classification from these observations.
+`TrayLeak` and `RackLeak` classifications from these observations.
 
 ### `NvueLeakage`
 
@@ -110,7 +110,9 @@ unavailable, missing, or unrecognized sensor state uses `SensorFailure`.
 
 The DSX Exchange consumer maps Building Management System (BMS) leak events to
 rack health reports. The target is the rack ID. Active events prevent
-allocations and use the `SensorCritical` and `Hardware` classifications.
+allocations and use the `SensorCritical` and `Hardware` classifications. The
+two leak-detection probes also use `RackLeak`; the sensor-fault probe does not,
+because it does not establish that a leak is active.
 
 ### `BmsLeakDetectRack`
 

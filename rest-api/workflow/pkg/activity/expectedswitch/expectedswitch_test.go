@@ -4,7 +4,9 @@
 package expectedswitch
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -17,6 +19,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
@@ -31,7 +35,6 @@ import (
 	cwu "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -181,8 +184,8 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 
 		// Update creation and update timestamp to be earlier than inventory processing interval
 		_, uerr := dbSession.DB.Exec("UPDATE expected_switch SET created = ?, updated = ? WHERE id = ?",
-			time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval*2)),
-			time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval*2)),
+			time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)),
+			time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)),
 			es.ID.String())
 		assert.NoError(t, uerr)
 
@@ -219,7 +222,8 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 		}
 
 		// Test label updates: add/modify labels for some switches
-		if i == 1 {
+		switch i {
+		case 1:
 			// Add labels to a switch that didn't have them before
 			ctrlExpectedSwitch.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{
@@ -227,14 +231,14 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 				},
 			}
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
-		} else if i == 2 {
+		case 2:
 			// Report NVOS MAC addresses for a switch that didn't have them before
 			ctrlExpectedSwitch.NvosMacAddresses = []string{"aa:bb:cc:dd:ee:02", "aa:bb:cc:dd:ee:03"}
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
-		} else if i == 4 {
+		case 4:
 			// NVOS MACs cleared on the Site: reported without any, DB has one
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
-		} else if i == 5 {
+		case 5:
 			// Modify existing labels
 			ctrlExpectedSwitch.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{
@@ -244,13 +248,13 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 				},
 			}
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
-		} else if i == 10 {
+		case 10:
 			// Remove labels (set to empty labels array)
 			ctrlExpectedSwitch.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{},
 			}
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
-		} else if i == 15 {
+		case 15:
 			// Remove labels (set metadata to nil)
 			ctrlExpectedSwitch.Metadata = nil
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
@@ -279,6 +283,8 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 		expectedSwitchInventory *corev1.ExpectedSwitchInventory
 	}
 
+	unsupportedNewID := uuid.New()
+
 	tests := []struct {
 		name                     string
 		fields                   fields
@@ -286,6 +292,9 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 		expectedSwitchesToUpdate []*cdbm.ExpectedSwitch
 		expectedSwitchesToDelete []*cdbm.ExpectedSwitch
 		unchangedID              uuid.UUID
+		notCreatedID             uuid.UUID
+		wantWarning              string
+		wantInventoryStatus      string
 		wantErr                  bool
 	}{
 		{
@@ -313,6 +322,7 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 				ctx:    ctx,
 				siteID: uuid.New(),
 				expectedSwitchInventory: &corev1.ExpectedSwitchInventory{
+					InventoryStatus:  corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
 					ExpectedSwitches: []*corev1.ExpectedSwitch{},
 				},
 			},
@@ -334,7 +344,56 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 					InventoryStatus:  corev1.InventoryStatus_INVENTORY_STATUS_FAILED,
 				},
 			},
-			wantErr: false,
+			unchangedID: pagedExpectedSwitches[7].ID,
+			wantErr:     false,
+			wantWarning: "received failed inventory status from Site Agent, skipping inventory processing",
+		},
+		{
+			name: "test ExpectedSwitch inventory processing, unspecified inventory status",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:                     ctx,
+				siteID:                  st.ID,
+				expectedSwitchInventory: &corev1.ExpectedSwitchInventory{},
+			},
+			unchangedID:         pagedExpectedSwitches[7].ID,
+			wantWarning:         "received unsupported inventory status, skipping inventory processing",
+			wantInventoryStatus: "INVENTORY_STATUS_UNSPECIFIED",
+		},
+		{
+			name: "test ExpectedSwitch inventory processing, unknown inventory status",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st.ID,
+				expectedSwitchInventory: &corev1.ExpectedSwitchInventory{
+					InventoryStatus: corev1.InventoryStatus(99),
+					ExpectedSwitches: []*corev1.ExpectedSwitch{
+						{
+							ExpectedSwitchId:   &corev1.UUID{Value: pagedExpectedSwitches[7].ID.String()},
+							BmcMacAddress:      "00:11:22:33:66:07",
+							SwitchSerialNumber: pagedExpectedSwitches[7].SwitchSerialNumber,
+						},
+						{
+							ExpectedSwitchId:   &corev1.UUID{Value: unsupportedNewID.String()},
+							BmcMacAddress:      "00:11:22:33:66:FF",
+							SwitchSerialNumber: "SN-UNSUPPORTED",
+						},
+					},
+				},
+			},
+			unchangedID:         pagedExpectedSwitches[7].ID,
+			wantWarning:         "received unsupported inventory status, skipping inventory processing",
+			wantInventoryStatus: "99",
+			notCreatedID:        unsupportedNewID,
 		},
 		{
 			name: "test paged ExpectedSwitch inventory processing, empty inventory",
@@ -464,8 +523,27 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 				require.False(t, st.IsTimeWithinStaleInventoryThreshold(beforeUnchanged.Updated))
 			}
 
+			var logOutput bytes.Buffer
+			if tt.wantWarning != "" {
+				originalLogger := log.Logger
+				log.Logger = zerolog.New(&logOutput).Level(zerolog.WarnLevel)
+				t.Cleanup(func() { log.Logger = originalLogger })
+			}
+
 			err := mei.UpdateExpectedSwitchesInDB(tt.args.ctx, tt.args.siteID, tt.args.expectedSwitchInventory)
 			assert.Equal(t, tt.wantErr, err != nil)
+
+			if tt.wantWarning != "" {
+				var warning map[string]any
+				require.NoError(t, json.Unmarshal(logOutput.Bytes(), &warning))
+				assert.Equal(t, "warn", warning["level"])
+				assert.Equal(t, tt.wantWarning, warning["message"])
+				assert.Equal(t, "UpdateExpectedSwitchesInDB", warning["Activity"])
+				assert.Equal(t, tt.args.siteID.String(), warning["Site ID"])
+				if tt.wantInventoryStatus != "" {
+					assert.Equal(t, tt.wantInventoryStatus, warning["inventory_status"])
+				}
+			}
 
 			if tt.wantErr {
 				return
@@ -483,10 +561,14 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 				switchesByID[allSwitches[i].ID] = &allSwitches[i]
 			}
 
+			if tt.notCreatedID != uuid.Nil {
+				assert.NotContains(t, switchesByID, tt.notCreatedID)
+			}
+
 			if beforeUnchanged != nil {
 				unchanged := switchesByID[beforeUnchanged.ID]
 				require.NotNil(t, unchanged)
-				assert.Equal(t, beforeUnchanged.Updated, unchanged.Updated, "absent labels and NVOS MACs must not refresh Updated on the first reconciliation")
+				assert.Equal(t, beforeUnchanged, unchanged, "stored row must keep every field, including Updated")
 			}
 
 			for _, es := range tt.expectedSwitchesToUpdate {

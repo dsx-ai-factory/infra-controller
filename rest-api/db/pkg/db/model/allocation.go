@@ -389,15 +389,16 @@ func (asd AllocationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Alloca
 	if page.OrderBy != nil {
 		multiOrderBy = append(multiOrderBy, page.OrderBy)
 		// handle sorting by instance type name
-		if page.OrderBy.Field == allocationOrderByInstanceTypeName {
+		switch page.OrderBy.Field {
+		case allocationOrderByInstanceTypeName:
 			query = query.ColumnExpr("?TableColumns").ColumnExpr("it.name AS instance_type_name")
 			query = query.Join("LEFT JOIN allocation_constraint AS ac2 ON ac2.allocation_id = a.id AND ac2.resource_type = 'InstanceType'")
 			query = query.Join("LEFT JOIN instance_type AS it ON ac2.resource_type_id = it.id").Distinct()
-		} else if page.OrderBy.Field == allocationOrderByIPBlockName {
+		case allocationOrderByIPBlockName:
 			query = query.ColumnExpr("?TableColumns").ColumnExpr("ipb.name AS ip_block_name")
 			query = query.Join("LEFT JOIN allocation_constraint AS ac2 ON ac2.allocation_id = a.id AND ac2.resource_type = 'IPBlock'")
 			query = query.Join("LEFT JOIN ip_block AS ipb ON ac2.resource_type_id = ipb.id").Distinct()
-		} else if page.OrderBy.Field == allocationOrderByConstraintValue {
+		case allocationOrderByConstraintValue:
 			query = query.ColumnExpr("?TableColumns").ColumnExpr("ac2.constraint_value AS constraint_value")
 			query = query.Join("LEFT JOIN allocation_constraint AS ac2 ON ac2.allocation_id = a.id").Distinct()
 		}

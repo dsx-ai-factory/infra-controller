@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
 	operationrunplanner "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun/manager/planner"
 )
@@ -52,18 +53,29 @@ type TaskCanceller interface {
 	CancelTask(ctx context.Context, taskID uuid.UUID) error
 }
 
+// TaskValidator checks planned child-task requests without persisting them.
+type TaskValidator interface {
+	ValidateTask(ctx context.Context, req *operation.Request) error
+}
+
 // ManagerImpl implements Manager.
 type ManagerImpl struct {
-	store   Store
-	planner operationrunplanner.Planner
+	store         Store
+	planner       operationrunplanner.Planner
+	taskValidator TaskValidator
 }
 
 // New creates an operation-run manager.
 func New(
 	store Store,
 	planner operationrunplanner.Planner,
+	taskValidator TaskValidator,
 ) (*ManagerImpl, error) {
-	manager := &ManagerImpl{store: store, planner: planner}
+	manager := &ManagerImpl{
+		store:         store,
+		planner:       planner,
+		taskValidator: taskValidator,
+	}
 	if err := manager.requireDependencies(); err != nil {
 		return nil, err
 	}
@@ -82,6 +94,9 @@ func (m *ManagerImpl) requireDependencies() error {
 
 	if m.planner == nil {
 		return fmt.Errorf("operation run planner is required")
+	}
+	if m.taskValidator == nil {
+		return fmt.Errorf("task validator is required")
 	}
 
 	return nil

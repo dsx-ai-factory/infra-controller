@@ -19,7 +19,7 @@ use std::borrow::Cow;
 
 use mac_address::MacAddress;
 
-use crate::{Callbacks, redfish};
+use crate::{Callbacks, nvue, redfish};
 
 const BMC_MODEL: &str = "P3809";
 const BMC_PART_NUMBER: &str = "692-13809-4404-000";
@@ -38,6 +38,23 @@ pub(crate) struct NvidiaSwitchN5700Ld<'a> {
 impl NvidiaSwitchN5700Ld<'_> {
     pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
         Some(crate::EventServiceConfig::default())
+    }
+
+    /// The NVOS this tray runs, served over NVUE at the switch's NVOS
+    /// address, whose management interface has `management_mac`, with
+    /// `admin` as its administrator.
+    pub(crate) fn nvue_config(
+        &self,
+        management_mac: Option<MacAddress>,
+        admin: nvue::Account,
+    ) -> nvue::Config {
+        super::nvos::nvl_switch_tray_config(
+            SWITCH_MODEL,
+            SWITCH_PART_NUMBER,
+            &self.switch_serial_number,
+            management_mac,
+            admin,
+        )
     }
 
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
