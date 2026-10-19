@@ -5,12 +5,18 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"html/template"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
 
 	pb "github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/internal/proto/v1"
+	"github.com/google/uuid"
+	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -74,6 +80,104 @@ func TestSwitchesTableEndpointCells(t *testing.T) {
 			require.Len(t, cells, 2)
 			assert.Equal(t, tt.wantBMC, strings.TrimSpace(cells[0][1]))
 			assert.Equal(t, tt.wantNVOS, strings.TrimSpace(cells[1][1]))
+		})
+	}
+}
+
+type uiResponseWriter struct {
+	http.ResponseWriter
+	writeError   error
+	writes       int
+	statusWrites int
+}
+
+func (w *uiResponseWriter) Write(data []byte) (int, error) {
+	w.writes++
+	if w.writeError != nil {
+		return 0, w.writeError
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *uiResponseWriter) WriteHeader(status int) {
+	w.statusWrites++
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func TestUIServerResponseWrites(t *testing.T) {
+	writeError := errors.New("test response write failed")
+	tests := []struct {
+		name       string
+		json       bool
+		template   string
+		writeError error
+		wantBody   string
+		wantLog    string
+	}{
+		{
+			name:     "JSON response",
+			json:     true,
+			wantBody: "{\"error\":\"Log file not found. This update may not use the script strategy or hasn't started yet.\",\"found\":false}\n",
+		},
+		{
+			name:       "JSON write failure",
+			json:       true,
+			writeError: writeError,
+			wantLog:    "Failed to write JSON response",
+		},
+		{
+			name:     "template response",
+			template: `{{define "layout.html"}}{{.ErrorTitle}}: {{.ErrorMessage}}{{end}}`,
+			wantBody: "title: message",
+		},
+		{
+			name:       "template write failure",
+			template:   `{{define "layout.html"}}{{.ErrorTitle}}: {{.ErrorMessage}}{{end}}`,
+			writeError: writeError,
+			wantLog:    "Failed to render UI page",
+		},
+		{
+			name:     "template evaluation failure",
+			template: `{{define "layout.html"}}{{call .Missing}}{{end}}`,
+			wantLog:  "Failed to render UI page",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			logger := log.StandardLogger()
+			originalOutput := logger.Out
+			logger.SetOutput(&logs)
+			t.Cleanup(func() { logger.SetOutput(originalOutput) })
+
+			recorder := httptest.NewRecorder()
+			writer := &uiResponseWriter{ResponseWriter: recorder, writeError: tt.writeError}
+			server := &UIServer{}
+			if tt.json {
+				id := uuid.NewString()
+				_, err := os.Stat("/tmp/nsm-script-" + id + ".log")
+				require.ErrorIs(t, err, os.ErrNotExist)
+				request := httptest.NewRequest(http.MethodGet, "/api/update-log?id="+id, nil)
+				server.handleAPIUpdateLog(writer, request)
+				assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
+			} else {
+				var err error
+				server.templates, err = template.New("").Parse(tt.template)
+				require.NoError(t, err)
+				server.renderError(writer, "title", "message")
+			}
+			assert.Equal(t, http.StatusOK, recorder.Code)
+			assert.Zero(t, writer.statusWrites)
+			assert.Equal(t, tt.wantBody, recorder.Body.String())
+			if tt.wantLog == "" {
+				assert.Empty(t, logs.String())
+			} else {
+				assert.Contains(t, logs.String(), tt.wantLog)
+				if tt.writeError != nil {
+					assert.Contains(t, logs.String(), writeError.Error())
+					assert.Equal(t, 1, writer.writes)
+				}
+			}
 		})
 	}
 }
