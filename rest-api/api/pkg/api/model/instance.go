@@ -20,6 +20,7 @@ import (
 	goset "github.com/deckarep/golang-set/v2"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
+	"github.com/google/uuid"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -935,9 +936,59 @@ func (icr *APIInstanceCreateRequest) ValidateInfiniBandInterfaces(itIbCaps []cdb
 	return ValidateInfiniBandInterfaces(itIbCaps, icr.InfiniBandInterfaces)
 }
 
+func requiresCrossTenantVpcAttachmentCapability(requested, existing []cdbm.Interface, tenantID uuid.UUID) (bool, error) {
+	existingByKey := make(map[string]int, len(existing))
+	for _, ifc := range existing {
+		if ifc.Status == cdbm.InterfaceStatusDeleting {
+			continue
+		}
+		existingByKey[ifc.EthernetInterfaceKey()]++
+	}
+
+	for _, ifc := range requested {
+		foreign := false
+		switch {
+		case ifc.VpcID != nil:
+			if ifc.Vpc == nil {
+				return false, fmt.Errorf("interface selecting VPC %s is missing its VPC relation", ifc.VpcID.String())
+			}
+			foreign = ifc.Vpc.TenantID != tenantID
+		case ifc.VpcPrefixID != nil:
+			if ifc.VpcPrefix == nil {
+				return false, fmt.Errorf("interface selecting VPC Prefix %s is missing its VPC Prefix relation", ifc.VpcPrefixID.String())
+			}
+			foreign = ifc.VpcPrefix.TenantID != tenantID
+		}
+		if !foreign {
+			continue
+		}
+
+		key := ifc.EthernetInterfaceKey()
+		if existingByKey[key] > 0 {
+			existingByKey[key]--
+			continue
+		}
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// RequiresCrossTenantVpcAttachmentCapability reports whether Instance create
+// introduces a foreign VPC or VPC Prefix attachment.
+func (icr *APIInstanceCreateRequest) RequiresCrossTenantVpcAttachmentCapability(tenantID uuid.UUID, requested []cdbm.Interface) (bool, error) {
+	return requiresCrossTenantVpcAttachmentCapability(requested, nil, tenantID)
+}
+
 // ValidateDpuExtensionServiceDeployments validates the DpuExtensionServiceDeployments for the Instance create request
 func (icr *APIInstanceCreateRequest) ValidateDpuExtensionServiceDeployments(desdrs []APIDpuExtensionServiceDeploymentRequest) error {
 	return ValidateDpuExtensionServiceDeployments(desdrs)
+}
+
+// RequiresCrossTenantVpcAttachmentCapability reports whether batch Instance
+// create introduces a foreign VPC or VPC Prefix attachment.
+func (bicr *APIBatchInstanceCreateRequest) RequiresCrossTenantVpcAttachmentCapability(tenantID uuid.UUID, requested []cdbm.Interface) (bool, error) {
+	return requiresCrossTenantVpcAttachmentCapability(requested, nil, tenantID)
 }
 
 // Validate ensure the values passed in batch instance create request are acceptable
@@ -1539,6 +1590,12 @@ func (iur *APIInstanceUpdateRequest) ValidateMultiEthernetDeviceInterfaces(itNet
 // ValidateInfiniBandInterfaces validates the InfiniBand Interfaces for the Instance
 func (iur *APIInstanceUpdateRequest) ValidateInfiniBandInterfaces(itIbCaps []cdbm.MachineCapability) error {
 	return ValidateInfiniBandInterfaces(itIbCaps, iur.InfiniBandInterfaces)
+}
+
+// RequiresCrossTenantVpcAttachmentCapability reports whether Instance update
+// introduces a foreign Interface identity that cannot reuse a persisted row.
+func (iur *APIInstanceUpdateRequest) RequiresCrossTenantVpcAttachmentCapability(tenantID uuid.UUID, requested, existing []cdbm.Interface) (bool, error) {
+	return requiresCrossTenantVpcAttachmentCapability(requested, existing, tenantID)
 }
 
 // ValidateDpuExtensionServiceDeployments validates the DpuExtensionServiceDeployments for the Instance update request

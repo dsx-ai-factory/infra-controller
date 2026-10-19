@@ -148,70 +148,6 @@ func loadInstanceInterfaceVpcs(ctx context.Context, logger *zerolog.Logger, dbSe
 	return vpcByID, nil
 }
 
-// requestIntroducesForeignVpcAttachment reports whether the requested Interface
-// identity contains a foreign selector that cannot reuse an existing Interface.
-func requestIntroducesForeignVpcAttachment(requested, existing []cdbm.Interface, tenantID uuid.UUID) (bool, error) {
-	existingByKey := make(map[string]int, len(existing))
-	for _, ifc := range existing {
-		if ifc.Status == cdbm.InterfaceStatusDeleting {
-			continue
-		}
-		existingByKey[ifc.EthernetInterfaceKey()]++
-	}
-
-	for _, ifc := range requested {
-		foreign := false
-		switch {
-		case ifc.VpcID != nil:
-			if ifc.Vpc == nil {
-				return false, fmt.Errorf("interface selecting VPC %s is missing its VPC relation", ifc.VpcID.String())
-			}
-			foreign = ifc.Vpc.TenantID != tenantID
-		case ifc.VpcPrefixID != nil:
-			if ifc.VpcPrefix == nil {
-				return false, fmt.Errorf("interface selecting VPC Prefix %s is missing its VPC Prefix relation", ifc.VpcPrefixID.String())
-			}
-			foreign = ifc.VpcPrefix.TenantID != tenantID
-		}
-		if !foreign {
-			continue
-		}
-
-		key := ifc.EthernetInterfaceKey()
-		if existingByKey[key] > 0 {
-			existingByKey[key]--
-			continue
-		}
-		return true, nil
-	}
-
-	return false, nil
-}
-
-// authorizeCrossTenantVpcAttachments requires the Site-scoped capability only
-// when the request introduces a new foreign Interface identity.
-func authorizeCrossTenantVpcAttachments(ctx context.Context, logger *zerolog.Logger, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID, requested, existing []cdbm.Interface) *cutil.APIError {
-	requiresCapability, err := requestIntroducesForeignVpcAttachment(requested, existing, tenant.ID)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to compare requested and persisted Interface identities")
-		return cutil.NewAPIError(http.StatusInternalServerError, "Failed to authorize cross-Tenant VPC attachments", nil)
-	}
-	if !requiresCapability {
-		return nil
-	}
-
-	enabled, err := common.TenantHasCrossTenantVpcAttachment(ctx, nil, dbSession, tenant, siteID)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to resolve crossTenantVpcAttachment capability")
-		return cutil.NewAPIError(http.StatusInternalServerError, "Failed to resolve crossTenantVpcAttachment capability, DB error", nil)
-	}
-	if !enabled {
-		return cutil.NewAPIError(http.StatusForbidden, "Tenant does not have crossTenantVpcAttachment capability enabled", nil)
-	}
-
-	return nil
-}
-
 // instanceInterfaceVpcSelection converts persisted REST VPC intent to the
 // Controller request shape and returns nil for non-VPC-selection interfaces.
 func instanceInterfaceVpcSelection(ifc *cdbm.Interface) (*corev1.InstanceInterfaceVpcSelection, error) {
@@ -1019,9 +955,20 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		}
 	}
 
-	attachmentErr := authorizeCrossTenantVpcAttachments(ctx, &logger, cih.dbSession, tenant, site.ID, dbInterfaces, nil)
+	requiresCrossTenantCapability, attachmentErr := apiRequest.RequiresCrossTenantVpcAttachmentCapability(tenant.ID, dbInterfaces)
 	if attachmentErr != nil {
-		return cutil.NewAPIErrorResponse(c, attachmentErr.Code, attachmentErr.Message, attachmentErr.Data)
+		logger.Error().Err(attachmentErr).Msg("failed to compare requested and persisted Interface identities")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to authorize cross-Tenant VPC attachments", nil)
+	}
+	if requiresCrossTenantCapability {
+		enabled, capabilityErr := common.TenantHasCrossTenantVpcAttachment(ctx, nil, cih.dbSession, tenant, site.ID)
+		if capabilityErr != nil {
+			logger.Error().Err(capabilityErr).Msg("failed to resolve crossTenantVpcAttachment capability")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve crossTenantVpcAttachment capability, DB error", nil)
+		}
+		if !enabled {
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have crossTenantVpcAttachment capability enabled", nil)
+		}
 	}
 
 	// End validating interfaces
@@ -3320,9 +3267,20 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		}
 	}
 
-	attachmentErr := authorizeCrossTenantVpcAttachments(ctx, &logger, uih.dbSession, tenant, site.ID, dbInterfaces, existingIfcsForAuthorization)
+	requiresCrossTenantCapability, attachmentErr := apiRequest.RequiresCrossTenantVpcAttachmentCapability(tenant.ID, dbInterfaces, existingIfcsForAuthorization)
 	if attachmentErr != nil {
-		return cutil.NewAPIErrorResponse(c, attachmentErr.Code, attachmentErr.Message, attachmentErr.Data)
+		logger.Error().Err(attachmentErr).Msg("failed to compare requested and persisted Interface identities")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to authorize cross-Tenant VPC attachments", nil)
+	}
+	if requiresCrossTenantCapability {
+		enabled, capabilityErr := common.TenantHasCrossTenantVpcAttachment(ctx, nil, uih.dbSession, tenant, site.ID)
+		if capabilityErr != nil {
+			logger.Error().Err(capabilityErr).Msg("failed to resolve crossTenantVpcAttachment capability")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve crossTenantVpcAttachment capability, DB error", nil)
+		}
+		if !enabled {
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have crossTenantVpcAttachment capability enabled", nil)
+		}
 	}
 
 	mcDAO := cdbm.NewMachineCapabilityDAO(uih.dbSession)
