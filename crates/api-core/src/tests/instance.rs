@@ -102,15 +102,6 @@ use crate::tests::common::rpc_builder::{
     InstanceAllocationRequest, InstanceConfig, InstanceConfigExt, VpcCreationRequest,
 };
 
-/// Returns tenant config matching the shared VPC fixture so ownership
-/// validation does not obscure the scenario under test.
-fn fixture_tenant_config() -> rpc::TenantConfig {
-    rpc::TenantConfig {
-        tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
-        ..default_tenant_config()
-    }
-}
-
 pub(in crate::tests) async fn find_instances_by_label(
     env: &TestEnv,
     label: rpc::forge::Label,
@@ -2646,7 +2637,6 @@ async fn initial_network_wait_keeps_admin_until_tenant_configuration_is_ready(
                     .machine_id(mh.id)
                     .config(
                         InstanceConfig::default_tenant_and_os()
-                            .tenant(fixture_tenant_config())
                             .network(single_interface_network_config_with_vpc_prefix(prefix_id)),
                     )
                     .tonic_request(),
@@ -6242,14 +6232,12 @@ async fn test_allocate_instance_with_multiple_fnn_vpc_prefixes(
         .allocate_instance(
             InstanceAllocationRequest::builder(false)
                 .machine_id(mh.id)
-                .config(
-                    InstanceConfig::default_tenant_and_os()
-                        .tenant(fixture_tenant_config())
-                        .network(dual_physical_network_config_with_vpc_prefixes(
-                            first_prefix_id,
-                            second_prefix_id,
-                        )),
-                )
+                .config(InstanceConfig::default_tenant_and_os().network(
+                    dual_physical_network_config_with_vpc_prefixes(
+                        first_prefix_id,
+                        second_prefix_id,
+                    ),
+                ))
                 .metadata(rpc::Metadata {
                     name: "multi-fnn-vpc".to_string(),
                     description: "tests/instance".to_string(),
@@ -6570,11 +6558,9 @@ async fn test_allocate_instance_rejects_dual_stack_prefixes_from_different_vpcs(
         .allocate_instance(
             InstanceAllocationRequest::builder(false)
                 .machine_id(mh.id)
-                .config(
-                    InstanceConfig::default_tenant_and_os()
-                        .tenant(fixture_tenant_config())
-                        .network(rpc::InstanceNetworkConfig {
-                            interfaces: vec![rpc::InstanceInterfaceConfig {
+                .config(InstanceConfig::default_tenant_and_os().network(
+                    rpc::InstanceNetworkConfig {
+                        interfaces: vec![rpc::InstanceInterfaceConfig {
                             function_type: rpc::InterfaceFunctionType::Physical as i32,
                             network_segment_id: None,
                             network_details: Some(
@@ -6592,11 +6578,11 @@ async fn test_allocate_instance_rejects_dual_stack_prefixes_from_different_vpcs(
                             }),
                             routing_profile: None,
                         }],
-                            #[allow(deprecated)]
-                            auto: false,
-                            auto_config: None,
-                        }),
-                )
+                        #[allow(deprecated)]
+                        auto: false,
+                        auto_config: None,
+                    },
+                ))
                 .tonic_request(),
         )
         .await
