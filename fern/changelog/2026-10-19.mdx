@@ -59,7 +59,7 @@ Protect this file because it contains credentials. `is_primary` defaults to `fal
 
 ## DPF provisioning: Site Explorer suppression
 
-[PR #7775](https://github.com/dsx-ai-factory/infra-controller/pull/7775) pauses periodic exploration, re-exploration, and immediate report refresh during DPF provisioning. Exploration resumes when all Site Explorer suppressions are cleared.
+[PR #7775](https://github.com/dsx-ai-factory/infra-controller/pull/7775) pauses periodic Site Explorer scans during DPF provisioning and rejects re-exploration and immediate report-refresh requests. Periodic scans resume automatically when all Site Explorer suppressions are cleared. Rejected requests are not queued; operators must retry them after suppression clears.
 
 ### Upgrade compatibility
 

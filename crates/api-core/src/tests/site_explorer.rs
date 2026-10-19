@@ -958,7 +958,7 @@ async fn test_manual_refreshes_reject_site_explorer_suppressed_bmc(
         if paused_for_dpf {
             for error in [&refresh_error, &re_explore_error] {
                 assert!(error.message().contains(
-                    "resumes automatically when all Site Explorer suppressions are cleared"
+                    "resumes automatically when all site explorer suppressions are cleared"
                 ));
             }
             for request in ["re_explore", "refresh"] {
