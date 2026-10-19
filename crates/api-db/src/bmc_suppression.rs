@@ -1069,7 +1069,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::raw_sql(include_str!(
-            "../migrations/20261015090000_dpf_provisioning_suppression.sql"
+            "../migrations/20261019084224_dpf_provisioning_suppression.sql"
         ))
         .execute(conn.as_mut())
         .await

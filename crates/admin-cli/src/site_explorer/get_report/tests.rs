@@ -286,7 +286,7 @@ async fn endpoint_table_displays_provisioning_pause() {
         panic!("site explorer command");
     };
     let output = String::from_utf8(
-        dispatch_report_output(command, hosts, OutputFormat::AsciiTable, true).await,
+        dispatch_report_output(command, hosts.clone(), OutputFormat::AsciiTable, true).await,
     )
     .unwrap();
     assert!(output.contains("Exploration Pause"));
@@ -298,6 +298,34 @@ async fn endpoint_table_displays_provisioning_pause() {
         .lines()
         .find(|line| line.contains("192.0.2.11"))
         .unwrap();
-    assert!(paused.contains("DPU provisioning; resumes automatically"));
+    assert!(paused.contains("DPU provisioning; resumes after all suppressions clear"));
     assert_eq!(active.split('|').nth_back(1).unwrap().trim(), "");
+
+    for (address, expected) in [
+        (
+            "192.0.2.10",
+            "DPU provisioning; resumes automatically when all Site Explorer suppressions are cleared",
+        ),
+        ("192.0.2.11", ""),
+    ] {
+        let output = String::from_utf8(
+            dispatch_report_output(
+                parse("endpoint", address).unwrap(),
+                hosts.clone(),
+                OutputFormat::AsciiTable,
+                true,
+            )
+            .await,
+        )
+        .unwrap();
+        let row = output
+            .lines()
+            .find(|line| line.contains("Exploration Pause"))
+            .unwrap();
+        assert_eq!(
+            row.split('|').nth_back(1).unwrap().trim(),
+            expected,
+            "{address}"
+        );
+    }
 }

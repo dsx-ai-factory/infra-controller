@@ -1469,7 +1469,9 @@ mod tests {
             .unwrap();
             assert_eq!(html.contains("Explore (paused)"), paused);
             assert_eq!(
-                html.contains("resume automatically when provisioning suppression is cleared"),
+                html.contains(
+                    "resume automatically when all Site Explorer suppressions are cleared"
+                ),
                 paused
             );
             assert_eq!(

@@ -535,7 +535,7 @@ fn endpoint_to_row(endpoint: &ExploredEndpoint) -> Row {
         ),
         Cell::new(error_segmented.as_str()),
         Cell::new(if endpoint.exploration_paused_for_dpf {
-            "DPU provisioning; resumes automatically"
+            "DPU provisioning; resumes after all suppressions clear"
         } else {
             ""
         }),
@@ -567,7 +567,7 @@ async fn display_endpoint(
     ]);
     table.add_row(row!["Preingestion State", endpoint.preingestion_state]);
     table.add_row(row!["Exploration Pause", if endpoint.exploration_paused_for_dpf {
-        "DPU provisioning; no exploration until provisioning suppression is cleared (resumes automatically)"
+        "DPU provisioning; resumes automatically when all Site Explorer suppressions are cleared"
     } else { "" }]);
     let last_error = report
         .as_ref()

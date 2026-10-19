@@ -500,7 +500,7 @@ type ExploredEndpoint struct {
 	PauseRemediation bool `protobuf:"varint,10,opt,name=pause_remediation,json=pauseRemediation,proto3" json:"pause_remediation,omitempty"`
 	// Periodic exploration, re-exploration, and immediate report refresh are paused
 	// while any DPU waits for DPF readiness or handles a DPF-requested reboot.
-	// Exploration resumes automatically when provisioning suppression is cleared.
+	// Exploration resumes automatically when all Site Explorer suppressions are cleared.
 	// Ad-hoc Explore is unaffected. False when no DPF suppression exists.
 	ExplorationPausedForDpf bool `protobuf:"varint,11,opt,name=exploration_paused_for_dpf,json=explorationPausedForDpf,proto3" json:"exploration_paused_for_dpf,omitempty"`
 	unknownFields           protoimpl.UnknownFields

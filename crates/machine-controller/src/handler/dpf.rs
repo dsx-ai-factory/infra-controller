@@ -74,7 +74,7 @@ pub(super) async fn update_exploration_suppression(
                     bmc_mac_address: mac,
                     subsystem: BmcSuppressionSubsystem::SiteExplorer,
                     source: BmcSuppressionSource::DpfProvisioning,
-                    reason: "DPU provisioning in progress; exploration resumes automatically when provisioning suppression is cleared".to_string(),
+                    reason: "DPU provisioning in progress; exploration resumes automatically when all Site Explorer suppressions are cleared".to_string(),
                 }).await?;
             } else {
                 db::bmc_suppression::delete(txn, mac,

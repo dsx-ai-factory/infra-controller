@@ -874,24 +874,33 @@ async fn test_manual_refreshes_reject_site_explorer_suppressed_bmc(
     let mh = common::api_fixtures::create_managed_host(&env).await;
     let bmc_ip = host_bmc_ip(&env, &mh).await?;
 
-    for source in [
-        BmcSuppressionSource::Decommissioning,
-        BmcSuppressionSource::DpfProvisioning,
+    for (sources, paused_for_dpf) in [
+        (&[BmcSuppressionSource::Decommissioning][..], false),
+        (&[BmcSuppressionSource::DpfProvisioning][..], true),
+        (
+            &[
+                BmcSuppressionSource::DpfProvisioning,
+                BmcSuppressionSource::Decommissioning,
+            ][..],
+            true,
+        ),
     ] {
         let mut txn = env.pool.begin().await?;
         let bmc_interface = db::machine_interface::find_by_ip(txn.as_mut(), bmc_ip)
             .await?
             .ok_or_else(|| format!("expected BMC interface at {bmc_ip}"))?;
-        db::bmc_suppression::upsert(
-            txn.as_mut(),
-            &NewBmcSuppression {
-                bmc_mac_address: bmc_interface.mac_address,
-                reason: "manual refresh rejection test".to_string(),
-                subsystem: BmcSuppressionSubsystem::SiteExplorer,
-                source,
-            },
-        )
-        .await?;
+        for &source in sources {
+            db::bmc_suppression::upsert(
+                txn.as_mut(),
+                &NewBmcSuppression {
+                    bmc_mac_address: bmc_interface.mac_address,
+                    reason: "manual refresh rejection test".to_string(),
+                    subsystem: BmcSuppressionSubsystem::SiteExplorer,
+                    source,
+                },
+            )
+            .await?;
+        }
         txn.commit().await?;
 
         let re_explore_error = env
@@ -944,11 +953,14 @@ async fn test_manual_refreshes_reject_site_explorer_suppressed_bmc(
             .into_inner();
         assert_eq!(
             status.endpoints[0].exploration_paused_for_dpf,
-            source == BmcSuppressionSource::DpfProvisioning
+            paused_for_dpf
         );
-        if source == BmcSuppressionSource::DpfProvisioning {
-            assert!(refresh_error.message().contains("resumes automatically"));
-            assert!(re_explore_error.message().contains("resumes automatically"));
+        if paused_for_dpf {
+            for error in [&refresh_error, &re_explore_error] {
+                assert!(error.message().contains(
+                    "resumes automatically when all Site Explorer suppressions are cleared"
+                ));
+            }
             for request in ["re_explore", "refresh"] {
                 assert!(
                     metrics.counter_delta(
@@ -958,14 +970,40 @@ async fn test_manual_refreshes_reject_site_explorer_suppressed_bmc(
                 );
             }
         }
+        if sources.len() > 1 {
+            let mut txn = env.pool.begin().await?;
+            db::bmc_suppression::delete(
+                txn.as_mut(),
+                bmc_interface.mac_address,
+                BmcSuppressionSubsystem::SiteExplorer,
+                BmcSuppressionSource::DpfProvisioning,
+            )
+            .await?;
+            txn.commit().await?;
+            let still_suppressed = env
+                .api
+                .refresh_endpoint_report(Request::new(rpc::forge::RefreshEndpointReportRequest {
+                    ip_address: bmc_ip.to_string(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(still_suppressed.code(), tonic::Code::FailedPrecondition);
+            assert!(
+                still_suppressed
+                    .message()
+                    .contains("endpoint exploration is suppressed")
+            );
+        }
         let mut txn = env.pool.begin().await?;
-        db::bmc_suppression::delete(
-            txn.as_mut(),
-            bmc_interface.mac_address,
-            BmcSuppressionSubsystem::SiteExplorer,
-            source,
-        )
-        .await?;
+        for &source in sources {
+            db::bmc_suppression::delete(
+                txn.as_mut(),
+                bmc_interface.mac_address,
+                BmcSuppressionSubsystem::SiteExplorer,
+                source,
+            )
+            .await?;
+        }
         txn.commit().await?;
     }
     env.api

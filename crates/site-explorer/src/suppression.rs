@@ -43,7 +43,7 @@ pub enum ExplorationRequest {
     component = "site-explorer",
     log = info,
     metric = counter,
-    message = "Exploration paused during DPU provisioning; resumes automatically when provisioning suppression is cleared",
+    message = "Exploration paused during DPU provisioning; resumes automatically when all Site Explorer suppressions are cleared",
     describe = "Number of periodic endpoint candidates skipped or manual exploration requests rejected during DPF provisioning, by request type.",
 )]
 struct DpfExplorationDeferred {

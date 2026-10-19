@@ -50,7 +50,7 @@ pub enum EndpointExplorationServiceError {
     },
 
     #[error(
-        "exploration of BMC {bmc_mac_address} at {bmc_ip} is paused during DPU provisioning; resumes automatically when provisioning suppression is cleared"
+        "exploration of BMC {bmc_mac_address} at {bmc_ip} is paused during DPU provisioning; resumes automatically when all Site Explorer suppressions are cleared"
     )]
     DpfProvisioning {
         bmc_ip: IpAddr,
