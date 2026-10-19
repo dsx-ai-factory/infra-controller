@@ -9158,7 +9158,10 @@ message PowerOptions {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   PowerState desired_state = 1;
   google.protobuf.Timestamp desired_state_updated_at = 2;
+  // PowerManagerDisabled when desired_state disables observation; otherwise the
+  // last fetched power state. Disabling does not overwrite the stored observation.
   PowerState actual_state = 3;
+  // Last power-state fetch time, retained while the power manager is disabled.
   google.protobuf.Timestamp actual_state_updated_at = 4;
   common.MachineId host_id = 5 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
   string desired_power_state_version = 6;

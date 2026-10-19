@@ -51428,10 +51428,13 @@ func (x *PowerOptionUpdateRequest) GetPowerState() PowerState {
 }
 
 type PowerOptions struct {
-	state                                        protoimpl.MessageState `protogen:"open.v1"`
-	DesiredState                                 PowerState             `protobuf:"varint,1,opt,name=desired_state,json=desiredState,proto3,enum=forge.PowerState" json:"desired_state,omitempty"`
-	DesiredStateUpdatedAt                        *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=desired_state_updated_at,json=desiredStateUpdatedAt,proto3" json:"desired_state_updated_at,omitempty"`
-	ActualState                                  PowerState             `protobuf:"varint,3,opt,name=actual_state,json=actualState,proto3,enum=forge.PowerState" json:"actual_state,omitempty"`
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	DesiredState          PowerState             `protobuf:"varint,1,opt,name=desired_state,json=desiredState,proto3,enum=forge.PowerState" json:"desired_state,omitempty"`
+	DesiredStateUpdatedAt *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=desired_state_updated_at,json=desiredStateUpdatedAt,proto3" json:"desired_state_updated_at,omitempty"`
+	// PowerManagerDisabled when desired_state disables observation; otherwise the
+	// last fetched power state. Disabling does not overwrite the stored observation.
+	ActualState PowerState `protobuf:"varint,3,opt,name=actual_state,json=actualState,proto3,enum=forge.PowerState" json:"actual_state,omitempty"`
+	// Last power-state fetch time, retained while the power manager is disabled.
 	ActualStateUpdatedAt                         *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=actual_state_updated_at,json=actualStateUpdatedAt,proto3" json:"actual_state_updated_at,omitempty"`
 	HostId                                       *MachineId             `protobuf:"bytes,5,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
 	DesiredPowerStateVersion                     string                 `protobuf:"bytes,6,opt,name=desired_power_state_version,json=desiredPowerStateVersion,proto3" json:"desired_power_state_version,omitempty"`
