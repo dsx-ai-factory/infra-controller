@@ -463,6 +463,8 @@ func TestNewAPIInstance(t *testing.T) {
 
 			var attrMap map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(marshalled, &attrMap))
+			require.Contains(t, attrMap, "networkSecurityGroupPropagationDetails")
+			assert.JSONEq(t, "null", string(attrMap["networkSecurityGroupPropagationDetails"]))
 			require.Contains(t, attrMap, "sshKeyGroupIds")
 			assert.JSONEq(t, tt.wantSSHKeyGroupIDsJSON, string(attrMap["sshKeyGroupIds"]))
 		})

@@ -24659,7 +24659,7 @@ components:
           oneOf:
             - $ref: '#/components/schemas/NetworkSecurityGroupPropagationDetails'
             - type: 'null'
-          description: Propagation details for the attached Network Security Group
+          description: Network Security Group propagation details. Null when no details are available, including when no Network Security Group is attached or inherited.
         networkSecurityGroupInherited:
           type: boolean
           description: Indicates if the Network Security Group is inherited from VPC

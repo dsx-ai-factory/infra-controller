@@ -49,7 +49,7 @@ type Instance struct {
 	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
 	// External power provisioning profile associated with the Instance.
 	PowerProfile NullableString `json:"powerProfile,omitempty"`
-	// Propagation details for the attached Network Security Group
+	// Network Security Group propagation details. Null when no details are available, including when no Network Security Group is attached or inherited.
 	NetworkSecurityGroupPropagationDetails NullableNetworkSecurityGroupPropagationDetails `json:"networkSecurityGroupPropagationDetails,omitempty"`
 	// Indicates if the Network Security Group is inherited from VPC
 	NetworkSecurityGroupInherited *bool `json:"networkSecurityGroupInherited,omitempty"`
