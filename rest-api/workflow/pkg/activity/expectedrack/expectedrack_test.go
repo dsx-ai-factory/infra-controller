@@ -710,12 +710,11 @@ func TestManageExpectedRack_UpdateExpectedRacksInDB(t *testing.T) {
 			ctrlExpectedRack.Metadata.Labels = []*corev1.Label{
 				{Key: "region", Value: cutil.GetPtr(fmt.Sprintf("region-updated-%d", i/5))},
 				{Key: "row", Value: cutil.GetPtr(fmt.Sprintf("row-%d", i))},
-				{Key: "status", Value: cutil.GetPtr("active")},
 			}
 			expectedRacksToUpdate = append(expectedRacksToUpdate, pagedExpectedRacks[i])
 		case 10:
-			// Remove labels (set to empty labels array)
-			ctrlExpectedRack.Metadata.Labels = []*corev1.Label{}
+			// Core omits the repeated field when all labels have been removed.
+			ctrlExpectedRack.Metadata.Labels = nil
 			expectedRacksToUpdate = append(expectedRacksToUpdate, pagedExpectedRacks[i])
 		}
 
@@ -871,7 +870,7 @@ func TestManageExpectedRack_UpdateExpectedRacksInDB(t *testing.T) {
 					},
 				},
 			},
-			expectedRacksToUpdate: []*cdbm.ExpectedRack{},
+			expectedRacksToUpdate: expectedRacksToUpdate,
 			expectedRacksToDelete: expectedRacksToDelete,
 		},
 		{
@@ -1033,75 +1032,87 @@ func TestManageExpectedRack_UpdateExpectedRacksInDB(t *testing.T) {
 }
 
 func testExpectedRackInventoryNoChange(t *testing.T) {
-	// Verify that when the inventory matches the DB state exactly, no update is performed.
-	ctx := context.Background()
-
-	dbSession := testExpectedRackInitDB(t)
-	defer dbSession.Close()
-
-	testExpectedRackSetupSchema(t, dbSession)
-
-	ipOrg := "test-provider-org"
-	ipRoles := []string{"FORGE_PROVIDER_ADMIN"}
-
-	ipu := cwu.TestBuildUser(t, dbSession, uuid.NewString(), []string{ipOrg}, ipRoles)
-	ip := cwu.TestBuildInfrastructureProvider(t, dbSession, "test-provider", ipOrg, ipu)
-	st := cwu.TestBuildSite(t, dbSession, ip, "test-site-nochange", cdbm.SiteStatusRegistered, nil, ipu)
-
-	erDAO := cdbm.NewExpectedRackDAO(dbSession)
-	er, err := erDAO.Create(ctx, nil, cdbm.ExpectedRackCreateInput{
-		ExpectedRackID: uuid.New(),
-		SiteID:         st.ID,
-		RackID:         "rack-nc-1",
-		RackProfileID:  "profile-nc",
-		Name:           "Rack NC",
-		Description:    "no change",
-		Labels:         map[string]string{"foo": "bar"},
-		CreatedBy:      ipu.ID,
-	})
-	assert.NoError(t, err)
-
-	// Push the row's Updated timestamp into the past so we can detect whether the activity
-	// touched it (an Update would refresh Updated to current time).
-	pastTime := time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval * 2))
-	_, uerr := dbSession.DB.Exec("UPDATE expected_rack SET created = ?, updated = ? WHERE id = ?",
-		pastTime, pastTime, er.ID.String())
-	assert.NoError(t, uerr)
-
-	tSiteClientPool := testTemporalSiteClientPool(t)
-	mer := ManageExpectedRack{
-		dbSession:      dbSession,
-		siteClientPool: tSiteClientPool,
+	// Core can omit labels for an unlabeled rack; the DB stores an empty map.
+	cases := []struct {
+		name           string
+		storedLabels   cdbm.Labels
+		reportedLabels []*corev1.Label
+	}{
+		{
+			name:           "with labels",
+			storedLabels:   cdbm.Labels{"foo": "bar"},
+			reportedLabels: []*corev1.Label{{Key: "foo", Value: cutil.GetPtr("bar")}},
+		},
+		{
+			name:           "without labels",
+			storedLabels:   cdbm.Labels{},
+			reportedLabels: nil,
+		},
 	}
 
-	// Build inventory that exactly mirrors the DB record
-	inventory := &corev1.ExpectedRackInventory{
-		ExpectedRacks: []*corev1.ExpectedRack{
-			{
-				RackId:        &corev1.RackId{Id: er.RackID},
-				RackProfileId: &corev1.RackProfileId{Id: er.RackProfileID},
-				Metadata: &corev1.Metadata{
-					Name:        er.Name,
-					Description: er.Description,
-					Labels: []*corev1.Label{
-						{Key: "foo", Value: cutil.GetPtr("bar")},
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			dbSession := testExpectedRackInitDB(t)
+			defer dbSession.Close()
+
+			testExpectedRackSetupSchema(t, dbSession)
+
+			ipOrg := "test-provider-org"
+			ipRoles := []string{"FORGE_PROVIDER_ADMIN"}
+
+			ipu := cwu.TestBuildUser(t, dbSession, uuid.NewString(), []string{ipOrg}, ipRoles)
+			ip := cwu.TestBuildInfrastructureProvider(t, dbSession, "test-provider", ipOrg, ipu)
+			st := cwu.TestBuildSite(t, dbSession, ip, "test-site-nochange", cdbm.SiteStatusRegistered, nil, ipu)
+
+			erDAO := cdbm.NewExpectedRackDAO(dbSession)
+			er, err := erDAO.Create(ctx, nil, cdbm.ExpectedRackCreateInput{
+				ExpectedRackID: uuid.New(),
+				SiteID:         st.ID,
+				RackID:         "rack-nc-1",
+				RackProfileID:  "profile-nc",
+				Name:           "Rack NC",
+				Description:    "no change",
+				Labels:         tc.storedLabels,
+				CreatedBy:      ipu.ID,
+			})
+			require.NoError(t, err)
+
+			// Age the row past the inventory threshold so a redundant write would
+			// advance `Updated` instead of being skipped by the freshness check.
+			cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedRack)(nil))
+			before, err := erDAO.Get(ctx, nil, er.ID, nil, false)
+			require.NoError(t, err)
+			require.False(t, st.IsTimeWithinStaleInventoryThreshold(before.Updated))
+			require.Equal(t, tc.storedLabels, before.Labels)
+
+			mer := ManageExpectedRack{dbSession: dbSession}
+			inventory := &corev1.ExpectedRackInventory{
+				ExpectedRacks: []*corev1.ExpectedRack{
+					{
+						RackId:        &corev1.RackId{Id: er.RackID},
+						RackProfileId: &corev1.RackProfileId{Id: er.RackProfileID},
+						Metadata: &corev1.Metadata{
+							Name:        er.Name,
+							Description: er.Description,
+							Labels:      tc.reportedLabels,
+						},
 					},
 				},
-			},
-		},
-		Timestamp:       timestamppb.Now(),
-		InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				Timestamp:       timestamppb.Now(),
+				InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			}
+
+			err = mer.UpdateExpectedRacksInDB(ctx, st.ID, inventory)
+			require.NoError(t, err)
+
+			got, err := erDAO.Get(ctx, nil, er.ID, nil, false)
+			require.NoError(t, err)
+			assert.Equal(t, before.Updated, got.Updated,
+				"row should not have been updated when nothing changed")
+		})
 	}
-
-	err = mer.UpdateExpectedRacksInDB(ctx, st.ID, inventory)
-	assert.NoError(t, err)
-
-	// Re-read and verify Updated wasn't refreshed (the row was not modified by the activity)
-	got, gerr := erDAO.Get(ctx, nil, er.ID, nil, false)
-	assert.NoError(t, gerr)
-	// allow 1s of slop for timestamp comparison
-	assert.WithinDuration(t, pastTime, got.Updated, time.Second,
-		"row should not have been updated when nothing changed")
 }
 
 func testExpectedRackInventoryRecentWrite(t *testing.T) {
