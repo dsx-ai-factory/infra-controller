@@ -34,8 +34,6 @@ pub enum LeakPointType {
     LeakDetectRack,
     /// Rack-level leak sensor fault. Binary value: 0 = OK, 1 = Fault.
     LeakSensorFaultRack,
-    /// Rack tray leak detection. Binary value: 0 = No Leak, 1 = Leak Detected.
-    LeakDetectRackTray,
 }
 
 impl LeakPointType {
@@ -44,7 +42,6 @@ impl LeakPointType {
         match self {
             LeakPointType::LeakDetectRack => "BmsLeakDetectRack",
             LeakPointType::LeakSensorFaultRack => "BmsLeakSensorFaultRack",
-            LeakPointType::LeakDetectRackTray => "BmsLeakDetectRackTray",
         }
         .parse()
         .expect("non-empty strings are always valid probe ids")
@@ -55,7 +52,6 @@ impl LeakPointType {
         match self {
             LeakPointType::LeakDetectRack => "Leak detected",
             LeakPointType::LeakSensorFaultRack => "Leak sensor fault",
-            LeakPointType::LeakDetectRackTray => "Rack tray leak detected",
         }
     }
 }
@@ -129,19 +125,19 @@ impl<'de> Deserialize<'de> for FaultValue {
 
 /// Value message for all BMS points.
 ///
-/// Published on `BMS/v1/{pointPath}/Value` topics.
+/// Published on `BMS/v1/PUB/Value/Rack/{pointType}/{tagPath}` topics.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ValueMessage {
     /// Binary value for the point.
     /// - Leak detection: Clear = No Leak, Active = Leak Detected
     /// - Sensor fault: Clear = OK, Active = Fault
     pub value: FaultValue,
-    /// Timestamp corresponding to the event (deserialized from unix timestamp seconds).
-    #[serde(with = "chrono::serde::ts_seconds")]
+    /// Timestamp corresponding to the event (deserialized from unix timestamp milliseconds).
+    #[serde(with = "chrono::serde::ts_milliseconds")]
     pub timestamp: DateTime<Utc>,
 }
 
-/// Unified metadata type that can represent any of the leak detection metadata types.
+/// Metadata for the BMS-published rack leak points.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LeakMetadata {
@@ -150,9 +146,10 @@ pub struct LeakMetadata {
     /// Canonical object type.
     pub object_type: String,
     /// Human-readable rack name as defined by the BMS.
+    #[serde(rename = "rackLocationName")]
     pub rack_name: String,
-    /// Stable unique identifier for the rack. Maps to racks.id in the database.
-    #[serde(rename = "rackID")]
+    /// Rack identifier shared by the BMS and NICo. Maps to racks.id in the database.
+    #[serde(rename = "rackLocationId")]
     pub rack_id: String,
 }
 
@@ -161,16 +158,15 @@ impl LeakMetadata {
     pub fn is_supported_leak_type(&self) -> bool {
         matches!(
             self.point_type.as_str(),
-            "LeakDetectRack" | "LeakSensorFaultRack" | "LeakDetectRackTray"
+            "RackLeakDetect" | "RackLeakSensorFault"
         )
     }
 
     /// Get the leak point type enum variant.
     pub fn leak_point_type(&self) -> Option<LeakPointType> {
         match self.point_type.as_str() {
-            "LeakDetectRack" => Some(LeakPointType::LeakDetectRack),
-            "LeakSensorFaultRack" => Some(LeakPointType::LeakSensorFaultRack),
-            "LeakDetectRackTray" => Some(LeakPointType::LeakDetectRackTray),
+            "RackLeakDetect" => Some(LeakPointType::LeakDetectRack),
+            "RackLeakSensorFault" => Some(LeakPointType::LeakSensorFaultRack),
             _ => None,
         }
     }
@@ -183,14 +179,15 @@ mod tests {
     #[test]
     fn test_parse_leak_detect_rack_metadata() {
         let json = r#"{
-            "pointType": "LeakDetectRack",
+            "pointType": "RackLeakDetect",
             "objectType": "Rack",
-            "rackName": "Rack-01",
-            "rackID": "rack-001"
+            "stateText": [{"value": 0, "text": "NoLeak"}, {"value": 1, "text": "Leak"}],
+            "rackLocationName": "Rack-01",
+            "rackLocationId": "rack-001"
         }"#;
 
         let metadata: LeakMetadata = serde_json::from_str(json).unwrap();
-        assert_eq!(metadata.point_type, "LeakDetectRack");
+        assert_eq!(metadata.point_type, "RackLeakDetect");
         assert_eq!(metadata.object_type, "Rack");
         assert_eq!(metadata.rack_name, "Rack-01");
         assert_eq!(metadata.rack_id, "rack-001");
@@ -206,9 +203,9 @@ mod tests {
         use carbide_test_support::Outcome::*;
         use carbide_test_support::scenarios;
 
-        // Every fixture carries the same timestamp; 1706284800 = 2024-01-26T12:00:00Z.
+        // Every fixture carries the same timestamp; 1706284800000 ms = 2024-01-26T12:00:00Z.
         // Each success row asserts both the decoded fault value and that the
-        // timestamp round-trips through `ts_seconds`.
+        // timestamp is read as milliseconds, as the BMS schema defines.
         scenarios!(
             run = |json: &str| {
                 serde_json::from_str::<ValueMessage>(json)
@@ -218,18 +215,18 @@ mod tests {
                     .map_err(|e| e.to_string())
             };
             "0 or 1 decode to Clear / Faulting, as int or float" {
-                r#"{"value": 1, "timestamp": 1706284800}"#
+                r#"{"value": 1, "timestamp": 1706284800000}"#
                     => Yields((FaultValue::Faulting, DateTime::from_timestamp(1706284800, 0).unwrap())),
-                r#"{"value": 1.0, "timestamp": 1706284800}"#
+                r#"{"value": 1.0, "timestamp": 1706284800000}"#
                     => Yields((FaultValue::Faulting, DateTime::from_timestamp(1706284800, 0).unwrap())),
-                r#"{"value": 0, "timestamp": 1706284800}"#
+                r#"{"value": 0, "timestamp": 1706284800000}"#
                     => Yields((FaultValue::Clear, DateTime::from_timestamp(1706284800, 0).unwrap())),
-                r#"{"value": 0.0, "timestamp": 1706284800}"#
+                r#"{"value": 0.0, "timestamp": 1706284800000}"#
                     => Yields((FaultValue::Clear, DateTime::from_timestamp(1706284800, 0).unwrap())),
             }
             "anything other than 0 or 1 is rejected, as int or float" {
-                r#"{"value": 2, "timestamp": 1706284800}"# => Fails,
-                r#"{"value": 0.5, "timestamp": 1706284800}"# => Fails,
+                r#"{"value": 2, "timestamp": 1706284800000}"# => Fails,
+                r#"{"value": 0.5, "timestamp": 1706284800000}"# => Fails,
             }
         );
     }
@@ -245,7 +242,6 @@ mod tests {
             "each leak type maps to its health probe id" {
                 LeakPointType::LeakDetectRack => "BmsLeakDetectRack".parse().unwrap(),
                 LeakPointType::LeakSensorFaultRack => "BmsLeakSensorFaultRack".parse().unwrap(),
-                LeakPointType::LeakDetectRackTray => "BmsLeakDetectRackTray".parse().unwrap(),
             }
         );
     }
@@ -259,7 +255,6 @@ mod tests {
             "each leak type carries a human-readable alert description" {
                 LeakPointType::LeakDetectRack => "Leak detected",
                 LeakPointType::LeakSensorFaultRack => "Leak sensor fault",
-                LeakPointType::LeakDetectRackTray => "Rack tray leak detected",
             }
         );
     }

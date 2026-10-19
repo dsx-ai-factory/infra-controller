@@ -226,7 +226,6 @@ fn leak_point_type_name(point_type: &LeakPointType) -> &'static str {
     match point_type {
         LeakPointType::LeakDetectRack => "LeakDetectRack",
         LeakPointType::LeakSensorFaultRack => "LeakSensorFaultRack",
-        LeakPointType::LeakDetectRackTray => "LeakDetectRackTray",
     }
 }
 
