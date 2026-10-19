@@ -257,7 +257,7 @@ pub async fn run(
             _ = log_interval.tick() => tracing::info!(
                 "waiting {}s for {} of {} tasks to complete",
                 shutdown_deadline.duration_since(Instant::now()).as_secs(),
-                join_set.len()
+                join_set.len(),
                 task_count,
             ),
             // Time out after the deadline
