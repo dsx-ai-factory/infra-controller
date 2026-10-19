@@ -289,7 +289,7 @@ func NewClient(grpcTimeout time.Duration) (Client, error) {
 	tlsConfig, _, dynamicConfig, err := certs.DynamicTLSConfig()
 	if err != nil {
 		if err == certs.ErrNotPresent {
-			return nil, errors.New("Certificates not present, unable to authenticate with nico-core-api")
+			return nil, errors.New("certificates not present, unable to authenticate with nico-core-api")
 		}
 		return nil, err
 	}
@@ -297,7 +297,7 @@ func NewClient(grpcTimeout time.Duration) (Client, error) {
 	conn, err := grpc.NewClient(nicoURL, coreGRPCDialOptions(credentials.NewTLS(tlsConfig))...)
 	if err != nil {
 		dynamicConfig.Close()
-		return nil, fmt.Errorf("Unable to connect to nico-core-api: %w", err)
+		return nil, fmt.Errorf("unable to connect to nico-core-api: %w", err)
 	}
 
 	return &grpcClient{
