@@ -528,6 +528,104 @@ func TestAPIInstanceUpdateRequest_PowerProfileJSON(t *testing.T) {
 	}
 }
 
+func TestAPIInstanceCreateRequest_RequiresCrossTenantVpcAttachmentCapability(t *testing.T) {
+	tenantID := uuid.New()
+	foreignTenantID := uuid.New()
+	localVpcID := uuid.New()
+	foreignVpcID := uuid.New()
+	foreignPrefixID := uuid.New()
+
+	local := cdbm.Interface{
+		VpcID: &localVpcID,
+		Vpc:   &cdbm.Vpc{ID: localVpcID, TenantID: tenantID},
+	}
+	foreign := cdbm.Interface{
+		VpcID: &foreignVpcID,
+		Vpc:   &cdbm.Vpc{ID: foreignVpcID, TenantID: foreignTenantID},
+	}
+	foreignPrefix := cdbm.Interface{
+		VpcPrefixID: &foreignPrefixID,
+		VpcPrefix:   &cdbm.VpcPrefix{ID: foreignPrefixID, TenantID: foreignTenantID},
+	}
+	missingRelation := foreign
+	missingRelation.Vpc = nil
+
+	tests := []struct {
+		name      string
+		requested []cdbm.Interface
+		want      bool
+		wantErr   bool
+	}{
+		{name: "same-Tenant selector", requested: []cdbm.Interface{local}},
+		{name: "foreign direct VPC", requested: []cdbm.Interface{foreign}, want: true},
+		{name: "foreign VPC Prefix", requested: []cdbm.Interface{foreignPrefix}, want: true},
+		{name: "missing selector relation", requested: []cdbm.Interface{missingRelation}, wantErr: true},
+	}
+
+	request := APIInstanceCreateRequest{}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := request.RequiresCrossTenantVpcAttachmentCapability(tenantID, tc.requested)
+			assert.Equal(t, tc.wantErr, err != nil)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestAPIInstanceUpdateRequest_RequiresCrossTenantVpcAttachmentCapability(t *testing.T) {
+	tenantID := uuid.New()
+	foreignTenantID := uuid.New()
+	localVpcID := uuid.New()
+	foreignVpcID := uuid.New()
+	otherForeignVpcID := uuid.New()
+	device := "eth0"
+	deviceInstance := 1
+
+	local := cdbm.Interface{
+		VpcID:          &localVpcID,
+		Vpc:            &cdbm.Vpc{ID: localVpcID, TenantID: tenantID},
+		Device:         &device,
+		DeviceInstance: &deviceInstance,
+	}
+	foreign := cdbm.Interface{
+		VpcID:          &foreignVpcID,
+		Vpc:            &cdbm.Vpc{ID: foreignVpcID, TenantID: foreignTenantID},
+		Device:         &device,
+		DeviceInstance: &deviceInstance,
+	}
+	otherForeign := foreign
+	otherForeign.VpcID = &otherForeignVpcID
+	otherForeign.Vpc = &cdbm.Vpc{ID: otherForeignVpcID, TenantID: foreignTenantID}
+	changedForeign := foreign
+	changedDeviceInstance := 2
+	changedForeign.DeviceInstance = &changedDeviceInstance
+	deletingForeign := foreign
+	deletingForeign.Status = cdbm.InterfaceStatusDeleting
+
+	tests := []struct {
+		name      string
+		requested []cdbm.Interface
+		existing  []cdbm.Interface
+		want      bool
+	}{
+		{name: "unchanged foreign identity", requested: []cdbm.Interface{foreign}, existing: []cdbm.Interface{foreign}},
+		{name: "remove foreign Interface", requested: []cdbm.Interface{local}, existing: []cdbm.Interface{foreign}},
+		{name: "retarget foreign Interface", requested: []cdbm.Interface{otherForeign}, existing: []cdbm.Interface{foreign}, want: true},
+		{name: "change foreign Interface identity", requested: []cdbm.Interface{changedForeign}, existing: []cdbm.Interface{foreign}, want: true},
+		{name: "duplicate foreign request needs one match each", requested: []cdbm.Interface{foreign, foreign}, existing: []cdbm.Interface{foreign}, want: true},
+		{name: "deleting Interface cannot be reused", requested: []cdbm.Interface{foreign}, existing: []cdbm.Interface{deletingForeign}, want: true},
+	}
+
+	request := APIInstanceUpdateRequest{}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := request.RequiresCrossTenantVpcAttachmentCapability(tenantID, tc.requested, tc.existing)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 	type fields struct {
 		Name                           string
