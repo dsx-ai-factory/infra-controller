@@ -18,6 +18,7 @@ spec:
         {{- include "nico-hardware-health.labels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "nico-hardware-health.name" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
