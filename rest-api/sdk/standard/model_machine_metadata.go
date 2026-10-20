@@ -22,12 +22,12 @@ import (
 // checks if the MachineMetadata type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &MachineMetadata{}
 
-// MachineMetadata Describes metadata for various Machine components
+// MachineMetadata Describes metadata for various Machine components. Every field is present; unavailable DMI, BMC, and lifecycle data is null, while unavailable inventory and LLDP collections are empty arrays.
 type MachineMetadata struct {
 	// DMI data of the machine
-	DmiData *MachineDMIData `json:"dmiData,omitempty"`
+	DmiData NullableMachineDMIData `json:"dmiData"`
 	// BMC Info of the machine
-	BmcInfo *MachineBMCInfo `json:"bmcInfo,omitempty"`
+	BmcInfo NullableMachineBMCInfo `json:"bmcInfo"`
 	// GPU inventory reported for the Machine
 	Gpus []MachineGPUInfo `json:"gpus"`
 	// List of Ethernet interfaces of the machine
@@ -35,9 +35,9 @@ type MachineMetadata struct {
 	// List of InfiniBand interfaces of the machine
 	InfinibandInterfaces []MachineInfiniBandInterface `json:"infinibandInterfaces"`
 	// Lifecycle state details for the Machine
-	LifecycleState NullableMachineLifecycleState `json:"lifecycleState,omitempty"`
+	LifecycleState NullableMachineLifecycleState `json:"lifecycleState"`
 	// LLDP neighbors observed on the machine NICs, as last reported by the machine (scout or DPU agent). Empty when the machine has not reported any neighbors.
-	LldpNeighbors []MachineLldpNeighbor `json:"lldpNeighbors,omitempty"`
+	LldpNeighbors []MachineLldpNeighbor `json:"lldpNeighbors"`
 }
 
 type _MachineMetadata MachineMetadata
@@ -46,11 +46,15 @@ type _MachineMetadata MachineMetadata
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineMetadata(gpus []MachineGPUInfo, networkInterfaces []MachineNetworkInterface, infinibandInterfaces []MachineInfiniBandInterface) *MachineMetadata {
+func NewMachineMetadata(dmiData NullableMachineDMIData, bmcInfo NullableMachineBMCInfo, gpus []MachineGPUInfo, networkInterfaces []MachineNetworkInterface, infinibandInterfaces []MachineInfiniBandInterface, lifecycleState NullableMachineLifecycleState, lldpNeighbors []MachineLldpNeighbor) *MachineMetadata {
 	this := MachineMetadata{}
+	this.DmiData = dmiData
+	this.BmcInfo = bmcInfo
 	this.Gpus = gpus
 	this.NetworkInterfaces = networkInterfaces
 	this.InfinibandInterfaces = infinibandInterfaces
+	this.LifecycleState = lifecycleState
+	this.LldpNeighbors = lldpNeighbors
 	return &this
 }
 
@@ -62,68 +66,56 @@ func NewMachineMetadataWithDefaults() *MachineMetadata {
 	return &this
 }
 
-// GetDmiData returns the DmiData field value if set, zero value otherwise.
+// GetDmiData returns the DmiData field value
+// If the value is explicit nil, the zero value for MachineDMIData will be returned
 func (o *MachineMetadata) GetDmiData() MachineDMIData {
-	if o == nil || IsNil(o.DmiData) {
+	if o == nil || o.DmiData.Get() == nil {
 		var ret MachineDMIData
 		return ret
 	}
-	return *o.DmiData
+
+	return *o.DmiData.Get()
 }
 
-// GetDmiDataOk returns a tuple with the DmiData field value if set, nil otherwise
+// GetDmiDataOk returns a tuple with the DmiData field value
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineMetadata) GetDmiDataOk() (*MachineDMIData, bool) {
-	if o == nil || IsNil(o.DmiData) {
+	if o == nil {
 		return nil, false
 	}
-	return o.DmiData, true
+	return o.DmiData.Get(), o.DmiData.IsSet()
 }
 
-// HasDmiData returns a boolean if a field has been set.
-func (o *MachineMetadata) HasDmiData() bool {
-	if o != nil && !IsNil(o.DmiData) {
-		return true
-	}
-
-	return false
-}
-
-// SetDmiData gets a reference to the given MachineDMIData and assigns it to the DmiData field.
+// SetDmiData sets field value
 func (o *MachineMetadata) SetDmiData(v MachineDMIData) {
-	o.DmiData = &v
+	o.DmiData.Set(&v)
 }
 
-// GetBmcInfo returns the BmcInfo field value if set, zero value otherwise.
+// GetBmcInfo returns the BmcInfo field value
+// If the value is explicit nil, the zero value for MachineBMCInfo will be returned
 func (o *MachineMetadata) GetBmcInfo() MachineBMCInfo {
-	if o == nil || IsNil(o.BmcInfo) {
+	if o == nil || o.BmcInfo.Get() == nil {
 		var ret MachineBMCInfo
 		return ret
 	}
-	return *o.BmcInfo
+
+	return *o.BmcInfo.Get()
 }
 
-// GetBmcInfoOk returns a tuple with the BmcInfo field value if set, nil otherwise
+// GetBmcInfoOk returns a tuple with the BmcInfo field value
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineMetadata) GetBmcInfoOk() (*MachineBMCInfo, bool) {
-	if o == nil || IsNil(o.BmcInfo) {
+	if o == nil {
 		return nil, false
 	}
-	return o.BmcInfo, true
+	return o.BmcInfo.Get(), o.BmcInfo.IsSet()
 }
 
-// HasBmcInfo returns a boolean if a field has been set.
-func (o *MachineMetadata) HasBmcInfo() bool {
-	if o != nil && !IsNil(o.BmcInfo) {
-		return true
-	}
-
-	return false
-}
-
-// SetBmcInfo gets a reference to the given MachineBMCInfo and assigns it to the BmcInfo field.
+// SetBmcInfo sets field value
 func (o *MachineMetadata) SetBmcInfo(v MachineBMCInfo) {
-	o.BmcInfo = &v
+	o.BmcInfo.Set(&v)
 }
 
 // GetGpus returns the Gpus field value
@@ -198,16 +190,18 @@ func (o *MachineMetadata) SetInfinibandInterfaces(v []MachineInfiniBandInterface
 	o.InfinibandInterfaces = v
 }
 
-// GetLifecycleState returns the LifecycleState field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetLifecycleState returns the LifecycleState field value
+// If the value is explicit nil, the zero value for MachineLifecycleState will be returned
 func (o *MachineMetadata) GetLifecycleState() MachineLifecycleState {
-	if o == nil || IsNil(o.LifecycleState.Get()) {
+	if o == nil || o.LifecycleState.Get() == nil {
 		var ret MachineLifecycleState
 		return ret
 	}
+
 	return *o.LifecycleState.Get()
 }
 
-// GetLifecycleStateOk returns a tuple with the LifecycleState field value if set, nil otherwise
+// GetLifecycleStateOk returns a tuple with the LifecycleState field value
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineMetadata) GetLifecycleStateOk() (*MachineLifecycleState, bool) {
@@ -217,58 +211,31 @@ func (o *MachineMetadata) GetLifecycleStateOk() (*MachineLifecycleState, bool) {
 	return o.LifecycleState.Get(), o.LifecycleState.IsSet()
 }
 
-// HasLifecycleState returns a boolean if a field has been set.
-func (o *MachineMetadata) HasLifecycleState() bool {
-	if o != nil && o.LifecycleState.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetLifecycleState gets a reference to the given NullableMachineLifecycleState and assigns it to the LifecycleState field.
+// SetLifecycleState sets field value
 func (o *MachineMetadata) SetLifecycleState(v MachineLifecycleState) {
 	o.LifecycleState.Set(&v)
 }
 
-// SetLifecycleStateNil sets the value for LifecycleState to be an explicit nil
-func (o *MachineMetadata) SetLifecycleStateNil() {
-	o.LifecycleState.Set(nil)
-}
-
-// UnsetLifecycleState ensures that no value is present for LifecycleState, not even an explicit nil
-func (o *MachineMetadata) UnsetLifecycleState() {
-	o.LifecycleState.Unset()
-}
-
-// GetLldpNeighbors returns the LldpNeighbors field value if set, zero value otherwise.
+// GetLldpNeighbors returns the LldpNeighbors field value
 func (o *MachineMetadata) GetLldpNeighbors() []MachineLldpNeighbor {
-	if o == nil || IsNil(o.LldpNeighbors) {
+	if o == nil {
 		var ret []MachineLldpNeighbor
 		return ret
 	}
+
 	return o.LldpNeighbors
 }
 
-// GetLldpNeighborsOk returns a tuple with the LldpNeighbors field value if set, nil otherwise
+// GetLldpNeighborsOk returns a tuple with the LldpNeighbors field value
 // and a boolean to check if the value has been set.
 func (o *MachineMetadata) GetLldpNeighborsOk() ([]MachineLldpNeighbor, bool) {
-	if o == nil || IsNil(o.LldpNeighbors) {
+	if o == nil {
 		return nil, false
 	}
 	return o.LldpNeighbors, true
 }
 
-// HasLldpNeighbors returns a boolean if a field has been set.
-func (o *MachineMetadata) HasLldpNeighbors() bool {
-	if o != nil && !IsNil(o.LldpNeighbors) {
-		return true
-	}
-
-	return false
-}
-
-// SetLldpNeighbors gets a reference to the given []MachineLldpNeighbor and assigns it to the LldpNeighbors field.
+// SetLldpNeighbors sets field value
 func (o *MachineMetadata) SetLldpNeighbors(v []MachineLldpNeighbor) {
 	o.LldpNeighbors = v
 }
@@ -283,21 +250,13 @@ func (o MachineMetadata) MarshalJSON() ([]byte, error) {
 
 func (o MachineMetadata) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.DmiData) {
-		toSerialize["dmiData"] = o.DmiData
-	}
-	if !IsNil(o.BmcInfo) {
-		toSerialize["bmcInfo"] = o.BmcInfo
-	}
+	toSerialize["dmiData"] = o.DmiData.Get()
+	toSerialize["bmcInfo"] = o.BmcInfo.Get()
 	toSerialize["gpus"] = o.Gpus
 	toSerialize["networkInterfaces"] = o.NetworkInterfaces
 	toSerialize["infinibandInterfaces"] = o.InfinibandInterfaces
-	if o.LifecycleState.IsSet() {
-		toSerialize["lifecycleState"] = o.LifecycleState.Get()
-	}
-	if !IsNil(o.LldpNeighbors) {
-		toSerialize["lldpNeighbors"] = o.LldpNeighbors
-	}
+	toSerialize["lifecycleState"] = o.LifecycleState.Get()
+	toSerialize["lldpNeighbors"] = o.LldpNeighbors
 	return toSerialize, nil
 }
 
@@ -306,9 +265,13 @@ func (o *MachineMetadata) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
+		"dmiData",
+		"bmcInfo",
 		"gpus",
 		"networkInterfaces",
 		"infinibandInterfaces",
+		"lifecycleState",
+		"lldpNeighbors",
 	}
 
 	allProperties := make(map[string]interface{})
@@ -319,8 +282,14 @@ func (o *MachineMetadata) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
+	nullableRequiredProperties := map[string]struct{}{
+		"dmiData":        {},
+		"bmcInfo":        {},
+		"lifecycleState": {},
+	}
 	for _, requiredProperty := range requiredProperties {
-		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+		_, nullable := nullableRequiredProperties[requiredProperty]
+		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

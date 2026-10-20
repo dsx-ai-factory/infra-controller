@@ -630,9 +630,9 @@ type APIMachineLifecycleState struct {
 // APIMachineMetadata is the data structure to capture API representation of a Machine's Metadata Info
 type APIMachineMetadata struct {
 	// DMIData is the DMI data of the machine
-	DMIData *APIDMIData `json:"dmiData,omitempty"`
+	DMIData *APIDMIData `json:"dmiData"`
 	// BMCInfo is the BMC Info of the machine
-	BMCInfo *APIBMCInfo `json:"bmcInfo,omitempty"`
+	BMCInfo *APIBMCInfo `json:"bmcInfo"`
 	// GPUInfo is the list of GPUs for the machine
 	GPUs []APIMachineGPUInfo `json:"gpus"`
 	// NetworkInterfaces is the list of Ethernet interfaces of the machine
@@ -640,7 +640,7 @@ type APIMachineMetadata struct {
 	// InfiniBandInterfaces is the list of InfiniBand interfaces of the machine
 	InfiniBandInterfaces []APIMachineInfiniBandInterface `json:"infinibandInterfaces"`
 	// LifecycleState is the machine lifecycle state details
-	LifecycleState *APIMachineLifecycleState `json:"lifecycleState,omitempty"`
+	LifecycleState *APIMachineLifecycleState `json:"lifecycleState"`
 	// LldpNeighbors is the list of LLDP neighbors observed on the machine's NICs, as last reported by the machine.
 	// Always rendered, as [] when the machine has not reported any neighbors.
 	LldpNeighbors []APIMachineLldpNeighbor `json:"lldpNeighbors"`

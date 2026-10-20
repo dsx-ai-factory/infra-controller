@@ -11422,6 +11422,11 @@ paths:
                           numaNode: 1
                           description: 'MT28908 Family [ConnectX-6]'
                           slot: '0000:ca:00.0'
+                      lifecycleState:
+                        value: Ready
+                        isAboveSLA: false
+                        updated: '2026-01-15T12:00:00Z'
+                        slaSeconds: 300
                       lldpNeighbors:
                         - macAddress: '02:00:00:00:01:b0'
                           localPort: enp1s0np0
@@ -29011,11 +29016,20 @@ components:
     MachineMetadata:
       title: MachineMetadata
       type: object
-      description: Describes metadata for various Machine components
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - dmiData
+        - bmcInfo
+        - lifecycleState
+      description: Describes metadata for various Machine components. Every field is present; unavailable DMI, BMC, and lifecycle data is null, while unavailable inventory and LLDP collections are empty arrays.
       required:
+        - dmiData
+        - bmcInfo
         - gpus
         - networkInterfaces
         - infinibandInterfaces
+        - lifecycleState
+        - lldpNeighbors
       examples:
         - dmiData:
             boardName: 7Z23CTOLWB
@@ -29077,10 +29091,14 @@ components:
                 model: BlueField-3 DPU
       properties:
         dmiData:
-          $ref: '#/components/schemas/MachineDMIData'
+          oneOf:
+            - $ref: '#/components/schemas/MachineDMIData'
+            - type: 'null'
           description: 'DMI data of the machine'
         bmcInfo:
-          $ref: '#/components/schemas/MachineBMCInfo'
+          oneOf:
+            - $ref: '#/components/schemas/MachineBMCInfo'
+            - type: 'null'
           description: 'BMC Info of the machine'
         gpus:
           type: array

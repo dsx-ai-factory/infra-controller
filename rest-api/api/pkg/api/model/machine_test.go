@@ -606,6 +606,18 @@ func TestAPIMachineMetadata_FromProto(t *testing.T) {
 	assert.Nil(t, metadata.LifecycleState)
 	assert.NotNil(t, metadata.LldpNeighbors)
 	assert.Empty(t, metadata.LldpNeighbors)
+
+	payload, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"dmiData": null,
+		"bmcInfo": null,
+		"gpus": [],
+		"networkInterfaces": [],
+		"infinibandInterfaces": [],
+		"lifecycleState": null,
+		"lldpNeighbors": []
+	}`, string(payload))
 }
 
 // TestMachine_NewAPIMachineLldpNeighborsJSON proves the wire contract of
