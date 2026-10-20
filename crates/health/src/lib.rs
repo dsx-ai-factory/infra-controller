@@ -173,10 +173,9 @@ async fn build_endpoint_wiring(
                         port: cfg.port,
                         mac: Some(mac),
                     },
-                    carbide_secrets::local_credentials::BmcCredentialKey {
-                        mac,
+                    static_credentials::BmcCredentialConfig {
                         profile: cfg.credentials_profile.clone(),
-                        inline: carbide_secrets::local_credentials::CredentialOverrides {
+                        inline: static_credentials::CredentialOverrides {
                             username: cfg.username.clone(),
                             password: cfg.password.clone(),
                         },
@@ -695,6 +694,7 @@ switch = {serial = "switch"}
                 None,
             ),
             ("unknown profile", Some("{}"), Some("missing")),
+            ("missing password", Some("{}"), None),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("credentials.json");

@@ -172,8 +172,8 @@ pub struct EndpointSourcesConfig {
     /// precedence over inline target fields, then the explicitly selected profile,
     /// independently for username and password. Omitted/null fields inherit; empty strings do not.
     /// Cached snapshots reload on file events and every 60 seconds. Failed updates
-    /// retain the last valid snapshot; startup requires a readable, valid file
-    /// and valid profile selections. Writers should replace the
+    /// retain the last valid snapshot; startup requires a readable, valid file,
+    /// valid profile selections, and a resolved username and password per target. Writers should replace the
     /// file atomically. By default no file is loaded.
     /// Adding/removing overrides does not change the configured target inventory.
     pub static_credentials_file: Option<PathBuf>,
@@ -296,8 +296,8 @@ pub struct StaticBmcEndpoint {
     pub mac: String,
     /// Inline fallback username; may be supplied by `static_credentials_file`.
     pub username: Option<String>,
-    /// Inline fallback password; omission preserves passwordless authentication
-    /// when the credentials file also supplies no password.
+    /// Inline fallback password. File-backed targets must resolve a password;
+    /// inline-only targets may omit it.
     pub password: Option<String>,
     /// Optional named profile in `static_credentials_file`. No profile is selected
     /// by default; unknown names fail lookup. Requires a configured credentials file.

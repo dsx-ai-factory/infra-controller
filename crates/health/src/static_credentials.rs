@@ -17,43 +17,69 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
-use carbide_secrets::credentials::CredentialReader;
-use carbide_secrets::local_credentials::{
-    BmcCredentialKey, BmcCredentialSnapshot, FileCredentialsConfig, StructuredCredentialReader,
+use carbide_secrets::credentials::{
+    BmcCredentialType, CredentialKey, CredentialReader, Credentials,
 };
+use carbide_secrets::local_credentials::{FileCredentialsConfig, StructuredCredentialReader};
 
 use crate::HealthError;
 use crate::bmc::{BoxFuture, CredentialProvider};
 use crate::endpoint::{BmcAddr, BmcCredentials};
 
+mod snapshot;
+
+pub(crate) use snapshot::{BmcCredentialConfig, CredentialOverrides};
+use snapshot::{BmcCredentialSnapshot, BmcFileCredentialReader};
+
 type Reader = StructuredCredentialReader<BmcCredentialSnapshot>;
 
 /// Shares one eagerly initialized secrets reader across static endpoints.
 pub(crate) struct StaticCredentialProvider {
-    targets: HashMap<BmcAddr, BmcCredentialKey>,
-    reader: Reader,
+    targets: HashMap<BmcAddr, BmcFileCredentialReader>,
+}
+
+fn credential_key(addr: &BmcAddr) -> Result<CredentialKey, HealthError> {
+    let mac = addr.mac.ok_or_else(|| {
+        HealthError::GenericError("static credentials require a MAC address".into())
+    })?;
+    Ok(CredentialKey::BmcCredentials {
+        credential_type: BmcCredentialType::BmcRoot {
+            bmc_mac_address: mac,
+        },
+    })
 }
 
 impl StaticCredentialProvider {
     pub(crate) async fn new(
         path: PathBuf,
-        targets: HashMap<BmcAddr, BmcCredentialKey>,
+        targets: HashMap<BmcAddr, BmcCredentialConfig>,
     ) -> Result<Self, HealthError> {
-        let reader = Reader::new_json(FileCredentialsConfig {
+        let reader = Arc::new(Reader::new_json(FileCredentialsConfig {
             path: Some(path.clone()), poll_interval: Some(Duration::from_secs(60)), ..Default::default()
         }).await.map_err(|error| {
             tracing::error!(path = %path.display(), %error, "failed to load static credential file at startup");
             HealthError::CredentialError(error)
-        })?;
-        for key in targets.values() {
-            reader.get_credentials(key).await.map_err(|error| {
-                tracing::error!(path = %path.display(), %error, "invalid static credential profile at startup");
+        })?);
+        let mut adapters = HashMap::with_capacity(targets.len());
+        for (addr, config) in targets {
+            let key = credential_key(&addr)?;
+            let adapter = BmcFileCredentialReader::new(
+                reader.clone(),
+                addr.mac.ok_or_else(|| {
+                    HealthError::GenericError("static credentials require a MAC address".into())
+                })?,
+                config,
+            );
+            adapter.get_credentials(&key).await.map_err(|error| {
+                tracing::error!(path = %path.display(), endpoint = ?addr, %error, "invalid static credentials at startup");
                 HealthError::CredentialError(error)
             })?;
+            adapters.insert(addr, adapter);
         }
-        Ok(Self { targets, reader })
+        Ok(Self { targets: adapters })
     }
 }
 
@@ -67,24 +93,22 @@ impl CredentialProvider for StaticCredentialProvider {
         endpoint: &'a BmcAddr,
     ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
         Box::pin(async move {
-            let key = self.targets.get(endpoint).ok_or_else(|| {
+            let reader = self.targets.get(endpoint).ok_or_else(|| {
                 HealthError::GenericError("static endpoint has no configured credentials".into())
             })?;
-            let fields = self
-                .reader
-                .get_credentials(key)
+            let credentials = reader
+                .get_credentials(&credential_key(endpoint)?)
                 .await
                 .map_err(HealthError::CredentialError)?
-                .unwrap_or_default();
-            let username = fields.username.ok_or_else(|| {
-                HealthError::GenericError(format!(
-                    "no username configured for static BMC {}",
-                    key.mac
-                ))
-            })?;
+                .ok_or_else(|| {
+                    HealthError::GenericError(
+                        "static endpoint credential key is unsupported".into(),
+                    )
+                })?;
+            let Credentials::UsernamePassword { username, password } = credentials;
             Ok(BmcCredentials::UsernamePassword {
                 username,
-                password: fields.password,
+                password: Some(password),
             })
         })
     }
@@ -92,10 +116,6 @@ impl CredentialProvider for StaticCredentialProvider {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::sync::Arc;
-
-    use carbide_secrets::local_credentials::CredentialOverrides;
-
     use super::*;
 
     pub(crate) fn write_credentials(path: &std::path::Path, password: &str) {
@@ -118,14 +138,15 @@ pub(crate) mod test_support {
         })
         .await
         .expect("test reader");
-        let key = BmcCredentialKey {
-            mac: addr.mac.unwrap(),
+        let config = BmcCredentialConfig {
             profile: Some("test".into()),
             inline: CredentialOverrides::default(),
         };
         Arc::new(StaticCredentialProvider {
-            targets: HashMap::from([(addr, key)]),
-            reader,
+            targets: HashMap::from([(
+                addr.clone(),
+                BmcFileCredentialReader::new(Arc::new(reader), addr.mac.unwrap(), config),
+            )]),
         })
     }
 
@@ -147,81 +168,46 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use carbide_secrets::local_credentials::CredentialOverrides;
-
     use super::*;
 
     #[tokio::test]
-    async fn optional_password_and_inline_fallbacks_preserve_absence() {
+    async fn endpoints_with_the_same_mac_keep_their_own_inline_credentials() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials.json");
-        std::fs::write(
-            &path,
-            r#"{
-            "overrides": {
-                "00:11:22:33:44:02": {"password": ""},
-                "00:11:22:33:44:03": {"password": "file-password"}
-            }
-        }"#,
-        )
-        .unwrap();
-        let fallback = |password: Option<&str>| CredentialOverrides {
-            username: Some("admin".into()),
-            password: password.map(str::to_owned),
-        };
-        let addr = |mac: &str| BmcAddr {
-            ip: "192.0.2.1".parse().unwrap(),
-            port: None,
-            mac: Some(mac.parse().unwrap()),
-        };
-        let provider = StaticCredentialProvider::new(
-            path,
-            HashMap::from([
-                (addr("00:11:22:33:44:01"), fallback(None)),
-                (addr("00:11:22:33:44:02"), fallback(Some("inline"))),
-                (addr("00:11:22:33:44:04"), fallback(Some("inline"))),
-                (addr("00:11:22:33:44:03"), CredentialOverrides::default()),
-            ])
-            .into_iter()
-            .map(|(addr, inline)| {
-                let key = BmcCredentialKey {
-                    mac: addr.mac.unwrap(),
-                    profile: None,
-                    inline,
+        std::fs::write(&path, "{}").unwrap();
+        let targets = (1..=2)
+            .map(|n| {
+                let addr = BmcAddr {
+                    ip: format!("192.0.2.{n}").parse().unwrap(),
+                    port: None,
+                    mac: Some("00:11:22:33:44:55".parse().unwrap()),
                 };
-                (addr, key)
+                (
+                    addr,
+                    BmcCredentialConfig {
+                        profile: None,
+                        inline: CredentialOverrides {
+                            username: Some(format!("user-{n}")),
+                            password: Some(format!("password-{n}")),
+                        },
+                    },
+                )
             })
-            .collect(),
-        )
-        .await
-        .unwrap();
-        for (mac, password) in [
-            ("00:11:22:33:44:01", None),
-            ("00:11:22:33:44:02", Some("")),
-            ("00:11:22:33:44:04", Some("inline")),
-        ] {
+            .collect();
+        let provider = StaticCredentialProvider::new(path, targets).await.unwrap();
+        for n in 1..=2 {
             let addr = BmcAddr {
-                ip: "192.0.2.1".parse().unwrap(),
+                ip: format!("192.0.2.{n}").parse().unwrap(),
                 port: None,
-                mac: Some(mac.parse().unwrap()),
+                mac: Some("00:11:22:33:44:55".parse().unwrap()),
             };
             assert!(
                 provider.fetch_credentials(&addr).await.unwrap()
                     == BmcCredentials::UsernamePassword {
-                        username: "admin".into(),
-                        password: password.map(str::to_owned),
-                    },
-                "{mac}"
+                        username: format!("user-{n}"),
+                        password: Some(format!("password-{n}")),
+                    }
             );
         }
-        let addr = BmcAddr {
-            ip: "192.0.2.1".parse().unwrap(),
-            port: None,
-            mac: Some("00:11:22:33:44:03".parse().unwrap()),
-        };
-        assert!(
-            provider.fetch_credentials(&addr).await.is_err(),
-            "password-only entry requires a username fallback"
-        );
     }
 }

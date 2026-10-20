@@ -41,15 +41,15 @@ requires `static_credentials_file`, and unknown profile names are errors.
 
 Each field resolves independently: **per-MAC override → inline target value →
 selected profile**. Omitted or `null` credential fields inherit; an empty string
-is an explicit value. A username must resolve before collection can authenticate.
-An absent password remains distinct from an empty password and permits
-passwordless authentication. With no file configured, inline usernames are
-required and inline passwords remain optional.
+is an explicit value. File-backed targets require both a username and a password
+after resolution; missing fields cause an error. With no file configured, inline
+usernames are required and inline passwords remain optional.
 
 The file path is optional and has no default; relative paths use the process
 working directory. NICo health loads the file once during startup and shares
-one cached reader across targets. A missing or malformed initial file, or an
-unknown selected profile, fails startup with an error naming the file.
+one cached reader across targets. Startup fails if the file is missing or
+malformed, a selected profile is unknown, or a target lacks a resolved username
+or password. The error log names the file and, for lookup errors, the target.
 File notifications trigger reloads, supplemented by a reread every 60 seconds
 for atomic replacements and Kubernetes Secret symlink updates. Requests read
 cached credentials. Writers should replace the complete JSON file atomically.
@@ -58,9 +58,9 @@ Each update replaces the whole snapshot. Unknown fields, invalid value types,
 malformed JSON, or any invalid MAC key reject the entire update, keeping the last
 valid snapshot. Parse errors identify the failing field when available and
 redact credential values. A valid removal of an override restores the inline or
-profile value; removing a profile still selected by a target causes lookup errors
-for that target. Profile and override additions and removals need no restart.
-Changes to the main configuration, including target lists and profile selections,
+profile value; removing a profile still selected by a target, or leaving required
+fields unresolved, causes lookup errors for that target. Profile and override
+additions and removals need no restart. Changes to the main configuration, including target lists and profile selections,
 require a restart. Established gNMI streams use updated credentials when they
 reconnect.
 
