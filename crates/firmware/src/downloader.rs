@@ -1670,6 +1670,7 @@ mod lifecycle_tests {
             let filename = directory.path().join("fw.bin");
             let downloader = FirmwareDownloader::new();
             let records = SpanRecords::default();
+            carbide_instrument::testing::keep_callsites_enabled();
             let subscriber = tracing_subscriber::registry().with(records.clone());
             let client = download_client(request_client);
             let failure = async {
@@ -1771,7 +1772,19 @@ mod lifecycle_tests {
         let url = format!("{}/fw.bin", server.url());
         let downloader = FirmwareDownloader::new();
         let records = SpanRecords::default();
-        let subscriber = tracing_subscriber::registry().with(records.clone());
+        carbide_instrument::testing::keep_callsites_enabled();
+        let subscriber =
+            tracing::Dispatch::new(tracing_subscriber::registry().with(records.clone()));
+        // Another untraced worker can register the completion callsite first.
+        std::thread::spawn(|| {
+            emit(DownloadFinished::Ok {
+                took: Duration::ZERO,
+                url: String::new(),
+                filename: String::new(),
+            });
+        })
+        .join()
+        .unwrap();
         async {
             async {
                 assert!(matches!(
