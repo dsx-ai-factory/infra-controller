@@ -280,8 +280,9 @@ Populate `unbound.localData` in the Helm values with each service VIP. The
 chart renders IPv4 literals as A records and IPv6 literals as AAAA records. Add
 an AAAA entry for `carbide-ntp.forge` when stock agents use the DHCPv6
 option-56 fallback, and add the corresponding `nico-ntp.nico` record only for
-rebranded images. The Unbound pod restarts automatically once the generated
-ConfigMap changes.
+rebranded images. If Stakater Reloader is installed, the Unbound pod restarts
+automatically once the generated ConfigMap changes. Otherwise, restart the
+Unbound Deployment after changing `unbound.localData`.
 
 ### Using Other DNS Providers
 
@@ -353,4 +354,4 @@ openssl s_client -connect otel-receiver.nico:443 </dev/null 2>/dev/null | grep -
 nc -zv socks.nico 1888
 ```
 
-Refer to [`helm/PREREQUISITES.md`](../../helm/PREREQUISITES.md) for additional deployment prerequisites.
+Refer to [Helm prerequisites](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/PREREQUISITES.md) for additional deployment prerequisites.
