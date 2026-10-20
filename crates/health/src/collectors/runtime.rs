@@ -543,8 +543,8 @@ impl Collector {
                         // handles dec for every exit path (shutdown, error, stream end).
                         let _conn_guard = StreamingConnectionGuard::inc(metrics.connected.clone());
                         let connected_at = Instant::now();
+                        let mut received = false;
 
-                        backoff.reset();
                         tracing::info!(
                             collector_type,
                             endpoint = ?endpoint.addr,
@@ -566,6 +566,7 @@ impl Collector {
 
                             match item {
                                 Some(Ok(event)) => {
+                                    received = true;
                                     metrics.items_processed_total.inc();
                                     data_sink.handle_event(&event_context, &event);
                                 }
@@ -601,6 +602,12 @@ impl Collector {
                                     break;
                                 }
                             }
+                        }
+
+                        // A stream that delivered data, or stayed up a full backoff
+                        // period, was healthy; one that only connected was not.
+                        if received || connected_at.elapsed() >= backoff_config.max {
+                            backoff.reset();
                         }
                     }
                 }
@@ -764,6 +771,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum StreamBehavior {
         End,
+        EventThenEnd,
         Error,
         Pending,
     }
@@ -794,6 +802,14 @@ mod tests {
 
             let stream: EventStream<'_> = match behavior {
                 StreamBehavior::End => Box::pin(futures::stream::empty()),
+                StreamBehavior::EventThenEnd => Box::pin(futures::stream::once(async {
+                    Ok(CollectorEvent::Log(Box::new(LogRecord {
+                        body: "event".to_string(),
+                        severity: LogSeverity::Info,
+                        attributes: Vec::new(),
+                        diagnostic_record: None,
+                    })))
+                })),
                 StreamBehavior::Error => Box::pin(futures::stream::once(async {
                     Err(HealthError::GenericError("stream failed".to_string()))
                 })),
@@ -897,6 +913,67 @@ mod tests {
 
         assert_eq!(callbacks, [Some(true), Some(true)]);
         assert!(callback_rx.try_recv().is_err());
+
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn streaming_backoff_grows_until_a_stream_yields_data()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let endpoint = Arc::new(test_endpoint(mac("00:11:22:33:44:88")));
+        let bmc = Arc::clone(endpoint.bmc());
+        let metrics_manager = MetricsManager::new("test_streaming_runtime_backoff")?;
+
+        let collector_registry = Arc::new(metrics_manager.create_collector_registry(
+            "streaming_collector_backoff_test".to_string(),
+            "test_streaming_runtime_backoff",
+        )?);
+
+        let data_sink: Arc<dyn DataSink> = Arc::new(CountingSink::default());
+        let (ended_tx, mut ended_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let collector = Collector::start_streaming::<SessionStreamingCollector, _>(
+            endpoint,
+            bmc,
+            vec![
+                StreamBehavior::End,
+                StreamBehavior::End,
+                StreamBehavior::EventThenEnd,
+                StreamBehavior::End,
+            ],
+            data_sink,
+            StreamingCollectorStartContext {
+                backoff_config: BackoffConfig {
+                    initial: Duration::from_secs(1),
+                    max: Duration::from_secs(60),
+                },
+                collector_registry,
+            },
+            move |_| ended_tx.send(tokio::time::Instant::now()).is_ok(),
+        )?;
+
+        let mut ended = Vec::new();
+
+        for _ in 0..4 {
+            ended.push(ended_rx.recv().await.ok_or("the collector stopped early")?);
+        }
+
+        collector.stop().await;
+
+        let delays: Vec<Duration> = ended.windows(2).map(|pair| pair[1] - pair[0]).collect();
+
+        // Each delay is its base plus jitter below the base: [1s, 2s), [2s, 4s), then [1s, 2s).
+        assert!(delays[0] < Duration::from_secs(2), "{delays:?}");
+
+        assert!(
+            delays[1] >= Duration::from_secs(2),
+            "an empty stream must not reset the backoff: {delays:?}"
+        );
+
+        assert!(
+            delays[2] < Duration::from_secs(2),
+            "a stream that yields data must reset the backoff: {delays:?}"
+        );
 
         Ok(())
     }
