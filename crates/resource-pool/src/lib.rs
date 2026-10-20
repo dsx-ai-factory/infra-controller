@@ -25,6 +25,12 @@
 //! independently calls a provider using identities and inputs saved by its caller;
 //! remote selection remains separate from the Integrated backend enum.
 //! [`value`] converts Core definitions and typed values to and from provider messages.
+//! [`remote::RemoteResourcePool`] saves remote requests, recovers lost replies,
+//! and finishes cancellation or release. Consumers attach assignments and request
+//! release in their own entity transactions.
+//! Production startup of the coordinator and its cleanup metric follows in
+//! [P11](https://github.com/dsx-ai-factory/infra-controller/issues/7140);
+//! v2.4 configuration still rejects remote pool selection.
 
 #![cfg_attr(test, allow(txn_held_across_await, txn_without_commit))]
 
@@ -35,6 +41,7 @@ mod tests;
 
 pub mod grpc;
 mod registry;
+pub mod remote;
 pub mod value;
 
 use std::str::FromStr;

@@ -27,6 +27,7 @@ repository.workspace = true
 # [local-dependencies]
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 carbide-machine-a-tron = { path = "../machine-a-tron" }
+carbide-resource-pool = { path = "../resource-pool" }
 carbide-rpc = { path = "../rpc" }
 carbide-uuid = { path = "../uuid" }
 carbide-utils = { path = "../utils", features = ["sqlx"] }

@@ -81,6 +81,46 @@ async fn local_provider_satisfies_shared_contract() {
 }
 
 #[tokio::test]
+async fn describe_preserves_unicode_and_rejects_nul_aliases() {
+    let pool = PoolBinding {
+        authority_id: " authority Δ ".into(),
+        pool_id: " pool 池 ".into(),
+        logical_pool: " vpc-vni Δ ".into(),
+        ..pool()
+    };
+    let provider = LocalProvider::new(pool.clone(), ValueDomain::Integer, vec![], None)
+        .expect("create provider with opaque identifiers");
+    for (scenario, alias, expected) in [
+        ("exact Unicode and whitespace", " vpc-vni Δ ", None),
+        (
+            "no whitespace normalization",
+            "vpc-vni Δ",
+            Some(Code::NotFound),
+        ),
+        (
+            "NUL is invalid",
+            " vpc-vni Δ\0 ",
+            Some(Code::InvalidArgument),
+        ),
+    ] {
+        let result = provider
+            .describe(Request::new(DescribeRequest {
+                site_id: " site Δ ".into(),
+                pool_alias: alias.into(),
+            }))
+            .await;
+        match expected {
+            Some(code) => assert_eq!(result.expect_err(scenario).code(), code, "{scenario}"),
+            None => {
+                let response = result.expect(scenario).into_inner();
+                assert_eq!(response.authority_id, pool.authority_id, "{scenario}");
+                assert_eq!(response.pool_id, pool.pool_id, "{scenario}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn unsupported_statistics_are_not_empty_inventory() {
     let pool = pool();
     let provider = LocalProvider::new(pool.clone(), ValueDomain::Integer, vec![1.into()], None)

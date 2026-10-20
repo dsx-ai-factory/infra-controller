@@ -6,6 +6,10 @@
 //! `RemoteAllocationParameters` and the provider's result are stored in
 //! `resource_pool_allocations`. Their JSON fields also support the database's
 //! uniqueness checks, so changing those fields requires updating the queries.
+//!
+//! Provider identifiers, owner IDs, slots, eligibility revisions, and failure
+//! messages must be nonempty UTF-8 without NUL (`U+0000`). Callers validate these
+//! strings before storage; case, whitespace, and other Unicode remain unchanged.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

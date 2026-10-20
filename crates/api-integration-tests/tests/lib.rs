@@ -474,6 +474,27 @@ async fn run_integration() -> eyre::Result<()> {
             .await?;
         }
     }
+    // Exercise the library sampler on the server's meter without activating a
+    // remote backend. Stop its task before `generate_core_metric_docs`, whose
+    // metric fetch and file write can panic on I/O errors.
+    let mut cleanup_metric_tasks = tokio::task::JoinSet::new();
+    let cleanup_metric_cancel = cancel_token.child_token();
+    carbide_resource_pool::remote::start_cleanup_metrics(
+        test_env.db_pool.clone(),
+        server_handle_2.ready.meter.clone(),
+        &mut cleanup_metric_tasks,
+        cleanup_metric_cancel.clone(),
+    )?;
+    let cleanup_metric_result = metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        r#"carbide_resource_pool_cleanup_pending{fresh="true"} 0"#,
+    )
+    .await;
+    cleanup_metric_cancel.cancel();
+    while let Some(result) = cleanup_metric_tasks.join_next().await {
+        result?;
+    }
+    cleanup_metric_result?;
     generate_core_metric_docs(&test_env.carbide_metrics_addrs);
     drop(mqtt_client);
 

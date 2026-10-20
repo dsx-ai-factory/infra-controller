@@ -1394,6 +1394,7 @@ dependencies = [
  "carbide-api-test-helper",
  "carbide-kms-provider",
  "carbide-machine-a-tron",
+ "carbide-resource-pool",
  "carbide-rpc",
  "carbide-secrets",
  "carbide-utils",
@@ -3127,6 +3128,8 @@ dependencies = [
  "carbide-resource-pool-api",
  "carbide-sqlx-testing",
  "carbide-test-support",
+ "carbide-utils",
+ "chrono",
  "ctor",
  "http",
  "http-body",
@@ -3154,6 +3157,7 @@ dependencies = [
  "tracing-opentelemetry 0.33.0",
  "tracing-subscriber",
  "url",
+ "uuid",
 ]
 
 [[package]]

@@ -40,13 +40,25 @@ use sqlx::{Acquire, Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::{
-    OperationNotCurrent, RemoteAllocationError, attach, begin, confirm_cleanup, list, load,
-    record_result, request_cancel, request_release,
+    OperationNotCurrent, RemoteAllocationError, attach, confirm_cleanup, list, load, record_result,
+    request_cancel, request_cancel_if_expired, request_release,
 };
 use crate::ConditionalWrite::{Applied, NotApplied};
+use crate::Transaction;
 use crate::resource_pool::binding::bind_or_verify;
 use crate::resource_pool::{allocate, allocation, populate};
 use crate::test_support::postgres::wait_for_blocked_query;
+
+async fn begin(
+    pool: &PgPool,
+    request: &RemoteAllocationRequest,
+    authority: &CompletionAuthority,
+) -> Result<ResourcePoolAllocation, RemoteAllocationError> {
+    let mut txn = Transaction::begin(pool).await?;
+    let saved = super::begin(txn.as_mut(), request, authority).await?;
+    txn.commit().await?;
+    Ok(saved)
+}
 
 fn saved_result(allocation: &ResourcePoolAllocation) -> Option<&AllocationResult> {
     let AllocationSource::Remote { result, .. } = &allocation.source else {
@@ -190,6 +202,40 @@ async fn attach_assignment(
         Applied(())
     );
     txn.commit().await?;
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn begin_preserves_caller_rollback_and_recovers_from_slot_conflicts(
+    pool: PgPool,
+) -> eyre::Result<()> {
+    let request = new_request(&pool, "vpc-vni", ResourcePoolValueDomain::Integer).await?;
+    let authority = controller_authority();
+    let mut txn = pool.begin().await?;
+    let pending = super::begin(&mut txn, &request, &authority).await?;
+    assert_eq!(load(txn.as_mut(), request.request_id).await?, Some(pending));
+    assert_eq!(load(&pool, request.request_id).await?, None);
+    txn.rollback().await?;
+    assert_eq!(load(&pool, request.request_id).await?, None);
+
+    // A rejected second generation must roll back only its own savepoint.
+    // The caller can still commit the first request in this transaction.
+    let mut txn = pool.begin().await?;
+    let saved = super::begin(&mut txn, &request, &authority).await?;
+    let mut conflicting = request.clone();
+    conflicting.request_id = Uuid::new_v4();
+    conflicting.owner.generation += 1;
+    assert!(matches!(
+        super::begin(&mut txn, &conflicting, &authority).await,
+        Err(RemoteAllocationError::SlotInUse(_))
+    ));
+    assert_eq!(
+        load(txn.as_mut(), request.request_id).await?,
+        Some(saved.clone())
+    );
+    txn.commit().await?;
+    assert_eq!(load(&pool, request.request_id).await?, Some(saved));
+    assert_eq!(load(&pool, conflicting.request_id).await?, None);
     Ok(())
 }
 
@@ -423,11 +469,30 @@ async fn begin_rejects_mismatched_bindings(pool: PgPool) -> eyre::Result<()> {
     wrong_pool.pool.logical_pool = "another-logical-pool".to_owned();
     let mut absent_binding = request.clone();
     absent_binding.binding_id = Uuid::new_v4();
+    let mut txn = pool.begin().await?;
+    let integrated_binding = bind_or_verify(
+        &mut txn,
+        &ResourcePoolSelection {
+            pool_name: "integrated-kind".to_owned(),
+            value_domain: ResourcePoolValueDomain::Integer,
+            backend_name: None,
+            backend_kind: ResourcePoolBackendKind::Integrated,
+            // Match the authority so only the backend kind rejects this binding.
+            authority_id: request.pool.authority_id.clone(),
+            remote_pool: "integrated-kind".to_owned(),
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    let mut integrated = request.clone();
+    integrated.binding_id = integrated_binding.binding_id;
+    integrated.pool.logical_pool = integrated_binding.pool_name;
     check_cases_async(
         [
             ("different authority", wrong_authority),
             ("different logical pool", wrong_pool),
             ("absent binding", absent_binding),
+            ("Integrated backend kind", integrated),
         ]
         .map(|(scenario, mut request)| {
             request.request_id = Uuid::new_v4();
@@ -1193,70 +1258,181 @@ async fn attachment_requires_the_saved_authority_and_deadline(pool: PgPool) -> e
 }
 
 #[crate::sqlx_test]
-async fn attachment_rechecks_deadline_after_waiting_for_the_row(pool: PgPool) -> eyre::Result<()> {
-    let request = new_request(&pool, "vpc-vni", ResourcePoolValueDomain::Integer).await?;
-    let deadline: DateTime<Utc> =
-        sqlx::query_scalar("SELECT clock_timestamp() + interval '10 seconds'")
-            .fetch_one(&pool)
-            .await?;
-    let authority = CompletionAuthority::Foreground {
-        attempt_id: Uuid::new_v4(),
-        attach_before: deadline,
-    };
-    begin(&pool, &request, &authority).await?;
-    let assignment = assignment();
-    save_assignment(&pool, request.request_id, &assignment).await?;
-    let mut blocker = pool.begin().await?;
-    sqlx::query(
-        "SELECT allocation_id FROM resource_pool_allocations WHERE allocation_id = $1 FOR UPDATE",
-    )
-    .bind(request.request_id)
-    .fetch_one(&mut *blocker)
-    .await?;
-    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+async fn foreground_writes_recheck_deadline_after_waiting_for_the_row(
+    pool: PgPool,
+) -> eyre::Result<()> {
+    #[derive(Clone, Copy, Debug)]
+    enum Write {
+        Attach,
+        CancelExpired,
+    }
+    for (write, expected_result, expected_state) in [
+        (
+            Write::Attach,
+            NotApplied(OperationNotCurrent),
+            AllocationState::Pending,
+        ),
+        (
+            Write::CancelExpired,
+            Applied(()),
+            AllocationState::CancelRequested,
+        ),
+    ] {
+        let request = new_request(&pool, "vpc-vni", ResourcePoolValueDomain::Integer).await?;
+        let deadline: DateTime<Utc> =
+            sqlx::query_scalar("SELECT clock_timestamp() + interval '10 seconds'")
+                .fetch_one(&pool)
+                .await?;
+        let authority = CompletionAuthority::Foreground {
+            attempt_id: Uuid::new_v4(),
+            attach_before: deadline,
+        };
+        begin(&pool, &request, &authority).await?;
+        let assignment = assignment();
+        save_assignment(&pool, request.request_id, &assignment).await?;
+        let mut blocker = pool.begin().await?;
+        sqlx::query(
+            "SELECT allocation_id FROM resource_pool_allocations
+            WHERE allocation_id = $1 FOR UPDATE",
+        )
+        .bind(request.request_id)
         .fetch_one(&mut *blocker)
         .await?;
-    let mut attaching = pool.begin().await?;
-    let attachment = async {
-        let result = attach(&mut attaching, request.request_id, &authority, &assignment).await?;
-        attaching.commit().await?;
-        Ok::<_, eyre::Report>(result)
-    };
-    let expire_before_unlock = async {
-        wait_for_blocked_query(&pool, blocker_pid, "resource_pool_allocations").await;
-        let still_valid: bool = sqlx::query_scalar("SELECT clock_timestamp() < $1")
-            .bind(deadline)
-            .fetch_one(&pool)
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
             .await?;
-        assert!(
-            still_valid,
-            "the attachment must start waiting before its deadline"
+        let mut writer = pool.begin().await?;
+        let write_attempt = async {
+            let result = match write {
+                Write::Attach => {
+                    attach(&mut writer, request.request_id, &authority, &assignment).await?
+                }
+                Write::CancelExpired => {
+                    request_cancel_if_expired(&mut writer, request.request_id).await?
+                }
+            };
+            writer.commit().await?;
+            Ok::<_, eyre::Report>(result)
+        };
+        let expire_before_unlock = async {
+            wait_for_blocked_query(&pool, blocker_pid, "resource_pool_allocations").await;
+            let still_valid: bool = sqlx::query_scalar("SELECT clock_timestamp() < $1")
+                .bind(deadline)
+                .fetch_one(&pool)
+                .await?;
+            assert!(
+                still_valid,
+                "the foreground write must start waiting before its deadline"
+            );
+            // The blocker changes no row, so only the passage of database time
+            // can reject attachment or allow cancellation.
+            sqlx::query(
+                "SELECT pg_sleep(GREATEST(
+                    EXTRACT(EPOCH FROM ($1::timestamptz - clock_timestamp())), 0
+                ))",
+            )
+            .bind(deadline)
+            .execute(&pool)
+            .await?;
+            blocker.commit().await?;
+            Ok::<_, eyre::Report>(())
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(20), async {
+            tokio::try_join!(write_attempt, expire_before_unlock)
+        })
+        .await??;
+        assert_eq!(result, expected_result, "{write:?}");
+        assert_eq!(
+            load(&pool, request.request_id)
+                .await?
+                .expect("expired attempt")
+                .state,
+            expected_state,
+            "{write:?}"
         );
-        // Expire against PostgreSQL's clock, which is also used by `attach`.
-        // The blocker changes no row, so only the passage of time can reject it.
-        sqlx::query(
-            "SELECT pg_sleep(GREATEST(
-                EXTRACT(EPOCH FROM ($1::timestamptz - clock_timestamp())), 0
-            ))",
-        )
-        .bind(deadline)
-        .execute(&pool)
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn expiry_cancellation_preserves_ineligible_requests(pool: PgPool) -> eyre::Result<()> {
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&pool)
         .await?;
-        blocker.commit().await?;
-        Ok::<_, eyre::Report>(())
+    let deadline = now + chrono::Duration::seconds(10);
+    let foreground = |attach_before| CompletionAuthority::Foreground {
+        attempt_id: Uuid::new_v4(),
+        attach_before,
     };
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(20), async {
-        tokio::try_join!(attachment, expire_before_unlock)
-    })
-    .await??;
-    assert_eq!(result, NotApplied(OperationNotCurrent));
-    assert_eq!(
-        load(&pool, request.request_id)
-            .await?
-            .expect("expired attempt")
-            .state,
-        AllocationState::Pending
-    );
+    let mut preserved = Vec::new();
+    for (scenario, authority, state) in [
+        (
+            "pending controller request",
+            controller_authority(),
+            AllocationState::Pending,
+        ),
+        (
+            "live foreground request",
+            foreground(now + chrono::Duration::minutes(5)),
+            AllocationState::Pending,
+        ),
+        (
+            "attached foreground allocation after its deadline",
+            foreground(deadline),
+            AllocationState::Attached,
+        ),
+        (
+            "foreground release request after its deadline",
+            foreground(deadline),
+            AllocationState::ReleaseRequested,
+        ),
+    ] {
+        let request = new_request(&pool, "vpc-vni", ResourcePoolValueDomain::Integer).await?;
+        begin(&pool, &request, &authority).await?;
+        if state != AllocationState::Pending {
+            let assignment = assignment();
+            attach_assignment(&pool, request.request_id, &authority, &assignment).await?;
+            if state == AllocationState::ReleaseRequested {
+                let mut txn = pool.begin().await?;
+                assert_eq!(
+                    request_release(&mut txn, request.request_id, &assignment.allocation_id)
+                        .await?,
+                    Applied(()),
+                    "{scenario}"
+                );
+                txn.commit().await?;
+            }
+        }
+        let saved = load(&pool, request.request_id).await?.expect(scenario);
+        assert_eq!(saved.state, state, "{scenario}");
+        preserved.push((scenario, saved));
+    }
+
+    let mut clock = pool.acquire().await?;
+    sqlx::query(
+        "SELECT pg_sleep(GREATEST(
+            EXTRACT(EPOCH FROM ($1::timestamptz - clock_timestamp())), 0
+        ))",
+    )
+    .bind(deadline)
+    .execute(&mut *clock)
+    .await?;
+    wait_for_database_time_after(&mut clock, deadline).await?;
+    drop(clock);
+    for (scenario, saved) in preserved {
+        let mut txn = pool.begin().await?;
+        assert_eq!(
+            request_cancel_if_expired(&mut txn, saved.allocation_id).await?,
+            NotApplied(OperationNotCurrent),
+            "{scenario}"
+        );
+        txn.commit().await?;
+        assert_eq!(
+            load(&pool, saved.allocation_id).await?,
+            Some(saved),
+            "{scenario}"
+        );
+    }
     Ok(())
 }
 
@@ -1277,7 +1453,7 @@ async fn recovery_pages_are_bounded_ordered_and_filtered_by_state(
     );
     txn.commit().await?;
     let limit = NonZeroU16::new(2).expect("nonzero page size");
-    let first = list(&pool, AllocationState::Pending, None, limit).await?;
+    let first = list(&pool, AllocationState::Pending, None, None, limit).await?;
     assert_eq!(
         first
             .iter()
@@ -1289,6 +1465,7 @@ async fn recovery_pages_are_bounded_ordered_and_filtered_by_state(
         &pool,
         AllocationState::Pending,
         Some(first[1].allocation_id),
+        None,
         limit,
     )
     .await?;
@@ -1304,12 +1481,13 @@ async fn recovery_pages_are_bounded_ordered_and_filtered_by_state(
             &pool,
             AllocationState::Pending,
             Some(second[0].allocation_id),
+            None,
             limit
         )
         .await?
         .is_empty()
     );
-    let cancelled = list(&pool, AllocationState::CancelRequested, None, limit).await?;
+    let cancelled = list(&pool, AllocationState::CancelRequested, None, None, limit).await?;
     assert_eq!(
         cancelled
             .iter()
@@ -1355,7 +1533,7 @@ async fn recovery_pages_are_bounded_ordered_and_filtered_by_state(
         &assignment(),
     )
     .await?;
-    let attached = list(&pool, AllocationState::Attached, None, limit).await?;
+    let attached = list(&pool, AllocationState::Attached, None, None, limit).await?;
     assert_eq!(
         attached
             .iter()
@@ -1556,6 +1734,7 @@ async fn entity_deletion_commits_release_work_for_later_cleanup(pool: PgPool) ->
             &mut *observer,
             AllocationState::ReleaseRequested,
             None,
+            None,
             NonZeroU16::new(1).expect("one row")
         )
         .await?,
@@ -1642,7 +1821,7 @@ async fn allocation_reads_survive_added_columns(pool: PgPool) -> eyre::Result<()
         Some(saved.clone())
     );
     assert_eq!(
-        list(&mut *reader, AllocationState::Pending, None, limit).await?,
+        list(&mut *reader, AllocationState::Pending, None, None, limit).await?,
         vec![saved.clone()]
     );
     assert_eq!(
@@ -1670,7 +1849,7 @@ async fn allocation_reads_survive_added_columns(pool: PgPool) -> eyre::Result<()
         Some(saved.clone())
     );
     assert_eq!(
-        list(&mut *reader, AllocationState::Pending, None, limit).await?,
+        list(&mut *reader, AllocationState::Pending, None, None, limit).await?,
         vec![saved]
     );
     assert_eq!(
@@ -1739,5 +1918,275 @@ async fn cleanup_waits_for_result_and_retains_its_terminal_allocation(
     assert_eq!(released.state, AllocationState::Released);
     assert_saved_request(&released, &request, &authority);
     assert_eq!(saved_result(&released), Some(&result));
+    Ok(())
+}
+
+/// Long owner and provider strings must keep their exact text without bypassing
+/// ownership checks when the database indexes their hashes.
+#[crate::sqlx_test]
+async fn opaque_provider_strings_survive_replay_release_and_recovery(
+    pool: PgPool,
+) -> eyre::Result<()> {
+    // Random UUID text keeps long identities from compressing into short
+    // B-tree keys, which would hide oversized-key failures.
+    let long_identity: String = (0..256).map(|_| Uuid::new_v4().to_string()).collect();
+    for (name, identity) in [
+        // Unicode and surrounding spaces remain part of each identity.
+        ("unicode-provider", " Provider é ".to_owned()),
+        // Owner, slot and provider keys must fit even without compression.
+        ("long-provider", format!(" {long_identity} ")),
+    ] {
+        let mut binding_txn = pool.begin().await?;
+        let selection = ResourcePoolSelection {
+            pool_name: name.to_owned(),
+            value_domain: ResourcePoolValueDomain::Integer,
+            backend_name: Some("fabric".to_owned()),
+            backend_kind: ResourcePoolBackendKind::Grpc,
+            authority_id: identity.clone(),
+            remote_pool: "tenant-vnis".to_owned(),
+        };
+        let binding = bind_or_verify(&mut binding_txn, &selection).await?;
+        assert_eq!(bind_or_verify(&mut binding_txn, &selection).await?, binding);
+        binding_txn.commit().await?;
+        assert_eq!(
+            crate::resource_pool::binding::load(&pool, name).await?,
+            Some(binding.clone())
+        );
+        assert!(
+            crate::resource_pool::binding::all(&pool)
+                .await?
+                .contains(&binding)
+        );
+
+        let request = RemoteAllocationRequest {
+            request_id: Uuid::new_v4(),
+            binding_id: binding.binding_id,
+            pool: RemotePoolIdentity {
+                site_id: Uuid::new_v4(),
+                authority_id: identity.clone(),
+                pool_id: identity.clone(),
+                logical_pool: name.to_owned(),
+            },
+            owner: AllocationOwner {
+                owner_type: OwnerType::Vpc,
+                owner_id: identity.clone(),
+                slot: identity.clone(),
+                generation: 0,
+            },
+            eligibility_revision: "revision-1".to_owned(),
+            selection: AllocationSelection::Automatic,
+        };
+        let authority = controller_authority();
+        let pending = begin(&pool, &request, &authority).await?;
+        assert_saved_request(&pending, &request, &authority);
+        assert_eq!(begin(&pool, &request, &authority).await?, pending);
+
+        // A different generation must still wait for this owner's pending slot.
+        let newer = RemoteAllocationRequest {
+            request_id: Uuid::new_v4(),
+            owner: AllocationOwner {
+                generation: 1,
+                ..request.owner.clone()
+            },
+            ..request.clone()
+        };
+        assert!(matches!(
+            begin(&pool, &newer, &authority).await,
+            Err(RemoteAllocationError::SlotInUse(_))
+        ));
+        let assignment = AllocationAssignment {
+            allocation_id: identity,
+            ..assignment()
+        };
+        attach_assignment(&pool, request.request_id, &authority, &assignment).await?;
+        let mut cleanup = pool.begin().await?;
+        assert_eq!(
+            request_release(
+                &mut cleanup,
+                request.request_id,
+                assignment.allocation_id.trim()
+            )
+            .await?,
+            NotApplied(OperationNotCurrent)
+        );
+        assert_eq!(
+            request_release(&mut cleanup, request.request_id, &assignment.allocation_id).await?,
+            Applied(())
+        );
+        assert_eq!(
+            confirm_cleanup(
+                &mut cleanup,
+                request.request_id,
+                CleanupConfirmation::Released
+            )
+            .await?,
+            Applied(())
+        );
+        cleanup.commit().await?;
+        let terminal = load(&pool, request.request_id)
+            .await?
+            .expect("retained opaque assignment");
+        assert_eq!(terminal.state, AllocationState::Released);
+        assert_saved_request(&terminal, &request, &authority);
+        assert_eq!(
+            saved_result(&terminal),
+            Some(&AllocationResult::Allocated(assignment.clone()))
+        );
+        assert_eq!(begin(&pool, &request, &authority).await?, terminal);
+        assert!(
+            list(
+                &pool,
+                AllocationState::Released,
+                None,
+                None,
+                NonZeroU16::new(10).unwrap()
+            )
+            .await?
+            .contains(&terminal)
+        );
+
+        // Cleanup frees the slot, but the completed generation cannot be reused.
+        let reused = RemoteAllocationRequest {
+            request_id: Uuid::new_v4(),
+            ..request.clone()
+        };
+        assert!(matches!(
+            begin(&pool, &reused, &authority).await,
+            Err(RemoteAllocationError::GenerationExists(_))
+        ));
+        begin(&pool, &newer, &authority).await?;
+        let mut duplicate = pool.begin().await?;
+        let error = record_result(
+            &mut duplicate,
+            newer.request_id,
+            &AllocationResult::Allocated(assignment),
+        )
+        .await
+        .expect_err("terminal handle remains unique");
+        assert!(error.violates_constraint("resource_pool_allocations_handle"));
+        duplicate.rollback().await?;
+
+        let rejection = AllocationResult::Failed(AllocationFailure {
+            code: AllocationFailureCode::FailedPrecondition,
+            message: " Provider diagnostic é ".to_owned(),
+        });
+        let mut result_txn = pool.begin().await?;
+        assert_eq!(
+            record_result(&mut result_txn, newer.request_id, &rejection).await?,
+            Applied(())
+        );
+        result_txn.commit().await?;
+        assert_eq!(
+            saved_result(
+                &load(&pool, newer.request_id)
+                    .await?
+                    .expect("saved rejection")
+            ),
+            Some(&rejection)
+        );
+    }
+    Ok(())
+}
+
+/// Rebuilding the identity indexes must preserve existing allocations while an
+/// Integrated writer finishes, then accept long identities through normal writes.
+#[crate::sqlx_test]
+async fn provider_string_indexes_preserve_allocations_with_a_live_writer(
+    pool: PgPool,
+) -> eyre::Result<()> {
+    const VERSION: i64 = 20261020025342;
+    const MIGRATION: &str =
+        include_str!("../../../migrations/20261020025342_resource_pool_provider_strings.sql");
+    crate::migrations::migrate_before(&pool, VERSION).await;
+
+    let request = new_request(&pool, "migration-remote", ResourcePoolValueDomain::Integer).await?;
+    let authority = controller_authority();
+    begin(&pool, &request, &authority).await?;
+    let assignment = assignment();
+    attach_assignment(&pool, request.request_id, &authority, &assignment).await?;
+    let old_remote = load(&pool, request.request_id)
+        .await?
+        .expect("predecessor allocation");
+
+    let inventory = ResourcePool::new("migration-integrated".to_owned(), ValueType::Integer);
+    let mut txn = pool.begin().await?;
+    populate(&inventory, &mut txn, vec![73_i64], true).await?;
+    allocate(
+        &inventory,
+        &mut txn,
+        OwnerType::Vpc,
+        "integrated-owner",
+        None,
+    )
+    .await?;
+    let limit = NonZeroU16::new(10).unwrap();
+    let old_integrated = allocation::list(&mut *txn, inventory.name(), None, limit).await?;
+    assert_eq!(old_integrated.len(), 1);
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *txn)
+        .await?;
+
+    let migrations = sqlx::migrate!("./migrations");
+    assert_eq!(
+        migrations
+            .iter()
+            .find(|migration| migration.version == VERSION)
+            .expect("provider string index migration")
+            .sql
+            .as_ref(),
+        MIGRATION
+    );
+    let migrate = async {
+        crate::migrations::migrate(&pool).await?;
+        Ok::<_, eyre::Report>(())
+    };
+    let commit_writer = async {
+        wait_for_blocked_query(&pool, writer_pid, "resource_pool_allocations_handle").await;
+        txn.commit().await?;
+        Ok::<_, eyre::Report>(())
+    };
+    tokio::time::timeout(Duration::from_secs(40), async {
+        tokio::try_join!(migrate, commit_writer)
+    })
+    .await??;
+
+    assert_eq!(begin(&pool, &request, &authority).await?, old_remote);
+    assert_eq!(
+        allocation::list(&pool, inventory.name(), None, limit).await?,
+        old_integrated
+    );
+    let mut release = pool.begin().await?;
+    assert_eq!(
+        request_release(&mut release, request.request_id, &assignment.allocation_id).await?,
+        Applied(())
+    );
+    release.commit().await?;
+
+    // Exercise the rebuilt owner indexes with text that cannot compress into
+    // a short B-tree key; the old allocation must still reserve its handle.
+    let long_identity: String = (0..256).map(|_| Uuid::new_v4().to_string()).collect();
+    let newer = RemoteAllocationRequest {
+        request_id: Uuid::new_v4(),
+        owner: AllocationOwner {
+            owner_id: long_identity.clone(),
+            slot: long_identity,
+            generation: 1,
+            ..request.owner.clone()
+        },
+        ..request
+    };
+    let pending = begin(&pool, &newer, &authority).await?;
+    assert_saved_request(&pending, &newer, &authority);
+    assert_eq!(load(&pool, newer.request_id).await?, Some(pending));
+    let mut duplicate = pool.begin().await?;
+    let error = record_result(
+        &mut duplicate,
+        newer.request_id,
+        &AllocationResult::Allocated(assignment),
+    )
+    .await
+    .expect_err("migrated assignment still reserves its handle");
+    assert!(error.violates_constraint("resource_pool_allocations_handle"));
+    duplicate.rollback().await?;
     Ok(())
 }
