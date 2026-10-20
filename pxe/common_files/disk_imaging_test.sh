@@ -637,7 +637,6 @@ bootfs_uuid=
 echo "curl_url returns curl's exit status, not tee's"
 # curl_url pipes curl through tee, so without PIPESTATUS a failed download
 # reports success and imaging carries on with a missing or partial image.
-mock_curl_status=0
 curl() {
 	return "$mock_curl_status"
 }
