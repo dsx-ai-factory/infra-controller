@@ -509,6 +509,26 @@ pub async fn run_service(
     });
 
     tokio::select! {
+        // Cancellation is polled first so a discovery loop that has already
+        // drained is reported as a graceful shutdown rather than an unexpected
+        // exit.
+        biased;
+
+        () = cancel_token.cancelled() => {
+            tracing::info!("Shutdown signal received; draining collectors");
+
+            // The loop observes the same cancellation and drains its collectors.
+            match join_discovery.await {
+                Ok(shutdown) => tracing::info!(
+                    closed = shutdown.closed,
+                    timed_out = shutdown.timed_out,
+                    "graceful_shutdown"
+                ),
+                Err(e) => {
+                    tracing::error!(error=?e, "Discovery loop join error during shutdown");
+                }
+            }
+        }
         res = join_listener => {
             match res {
                 Ok(Ok(_)) => {
@@ -529,21 +549,6 @@ pub async fn run_service(
                 }
                 Err(e) => {
                     tracing::error!(error=?e, "Discovery loop join error");
-                }
-            }
-        }
-        () = cancel_token.cancelled() => {
-            tracing::info!("Shutdown signal received; draining collectors");
-
-            // The loop observes the same cancellation and drains its collectors.
-            match join_discovery.await {
-                Ok(shutdown) => tracing::info!(
-                    closed = shutdown.closed,
-                    timed_out = shutdown.timed_out,
-                    "graceful_shutdown"
-                ),
-                Err(e) => {
-                    tracing::error!(error=?e, "Discovery loop join error during shutdown");
                 }
             }
         }
