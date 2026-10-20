@@ -80,6 +80,12 @@ struct ReprovisionRequestRestart {
     pub restart_reprovision_requested_at: DateTime<Utc>,
 }
 
+// Callers filter these queries on `m` columns. To select machines through a related table, do not
+// join it. A join here has produced a plan that builds the snapshot of every machine and applies
+// the join condition afterwards. `m.id IN (SELECT ...)` has the same problem. Use one of these
+// forms, which keep an id condition on the machines scan:
+// - `m.id = (SELECT ... LIMIT 1)` for a single machine
+// - `m.id = ANY(ARRAY(SELECT ...))` for several machines
 lazy_static! {
     pub static ref JSON_MACHINE_SNAPSHOT_WITH_HISTORY_QUERY: String = format!(
         "SELECT row_to_json(m.*) FROM ({}) m INNER JOIN machines ON machines.id = m.id",
@@ -477,11 +483,13 @@ pub async fn find_by_ip(
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     lazy_static! {
         static ref query: String = format!(
-            r#"{}
-                INNER JOIN machine_interfaces mi ON mi.machine_id = m.id
+            r#"{} WHERE m.id = (
+                SELECT mi.machine_id FROM machine_interfaces mi
                 INNER JOIN machine_interface_addresses mia on mia.interface_id=mi.id
                 WHERE mia.address = $1::inet
-                AND mi.interface_type != 'Bmc'"#,
+                AND mi.interface_type != 'Bmc'
+                AND mi.machine_id IS NOT NULL
+                LIMIT 1)"#,
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }
@@ -680,9 +688,10 @@ pub async fn find_by_hostname(
     txn: &mut PgConnection,
     hostname: &str,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
+    // Unassociated interfaces have no machine id, so they must not take the `LIMIT 1` row.
     lazy_static! {
         static ref query: String = format!(
-            "{} JOIN machine_interfaces mi ON m.id = mi.machine_id WHERE mi.hostname = $1 AND mi.interface_type != 'Bmc'",
+            "{} WHERE m.id = (SELECT mi.machine_id FROM machine_interfaces mi WHERE mi.hostname = $1 AND mi.interface_type != 'Bmc' AND mi.machine_id IS NOT NULL LIMIT 1)",
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }
@@ -700,9 +709,10 @@ pub async fn find_by_mac_address(
     txn: &mut PgConnection,
     mac_address: &MacAddress,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
+    // Unassociated interfaces have no machine id, so they must not take the `LIMIT 1` row.
     lazy_static! {
         static ref query: String = format!(
-            "{} JOIN machine_interfaces mi ON m.id = mi.machine_id WHERE mi.mac_address = $1::macaddr AND mi.interface_type != 'Bmc'",
+            "{} WHERE m.id = (SELECT mi.machine_id FROM machine_interfaces mi WHERE mi.mac_address = $1::macaddr AND mi.interface_type != 'Bmc' AND mi.machine_id IS NOT NULL LIMIT 1)",
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }
@@ -1005,10 +1015,12 @@ pub async fn find_host_by_dpu_machine_id(
 ) -> Result<Option<HostMachine>, DatabaseError> {
     lazy_static! {
         static ref query: String = format!(
-            r#"{} INNER JOIN machine_interfaces mi ON m.id = mi.machine_id
+            r#"{} WHERE m.id = (
+                    SELECT mi.machine_id FROM machine_interfaces mi
                     WHERE mi.attached_dpu_machine_id=$1
                     AND mi.interface_type != 'Bmc'
-                    AND mi.attached_dpu_machine_id != mi.machine_id"#,
+                    AND mi.attached_dpu_machine_id != mi.machine_id
+                    LIMIT 1)"#,
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }
@@ -1113,17 +1125,19 @@ pub async fn get_host_use_admin_network_for_dpa_interface(
     Ok(flag.unwrap_or(true))
 }
 
+/// Returns the DPUs attached to the host. Each DPU appears once, even when several host
+/// interfaces attach to it, so callers do not advance or update the same DPU twice.
 pub async fn find_dpus_by_host_machine_id(
     txn: &mut PgConnection,
     host_machine_id: &HostMachineId,
 ) -> Result<Vec<DpuMachine>, DatabaseError> {
     lazy_static! {
         static ref query: String = format!(
-            r#"{}
-                    INNER JOIN machine_interfaces mi
-                      ON m.id = mi.attached_dpu_machine_id
+            r#"{} WHERE m.id = ANY(ARRAY(
+                    SELECT DISTINCT mi.attached_dpu_machine_id FROM machine_interfaces mi
                     WHERE mi.machine_id=$1
-                    AND mi.interface_type != 'Bmc'"#,
+                    AND mi.interface_type != 'Bmc'
+                    AND mi.attached_dpu_machine_id IS NOT NULL))"#,
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }
@@ -6168,6 +6182,311 @@ mod test {
             crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?,
             stats_after_first_pass
         );
+        Ok(())
+    }
+
+    /// The finders that look machines up through `machine_interfaces` skip BMC interfaces and
+    /// interfaces without a machine, and return each matching machine once.
+    #[crate::sqlx_test]
+    async fn interface_finders_match_associated_non_bmc_interfaces(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Ip, Hostname, and Mac look up the values of interface N in the fixture below.
+        enum Lookup {
+            Ip(u8),
+            Hostname(u8),
+            Mac(u8),
+            HostOfDpu(DpuMachineId),
+            DpusOfHost(HostMachineId),
+        }
+
+        let host_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let missing_host_id: HostMachineId =
+            "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0".parse()?;
+        let dpu_id: DpuMachineId =
+            "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80".parse()?;
+        let second_dpu_id: DpuMachineId =
+            "fm100ds27v4uuq7sgs4gsjummskt0b3tedugtpevjrbfh6su081n9jufcq0".parse()?;
+        let bmc_dpu_id: DpuMachineId =
+            "fm100ds10jimoops3mvpb4udrtnp9031m8sif0846eqbu4i5o49n74ijnf0".parse()?;
+        let orphan_dpu_id: DpuMachineId =
+            "fm100dsm61jm8b3ltfj0vh1vnhqff6jak7dhmp429qen6jtr0njjt5iqeq0".parse()?;
+        let missing_dpu_id: DpuMachineId =
+            "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg".parse()?;
+        let host = MachineId::from(host_id);
+
+        let mut txn = pool.begin().await?;
+        for machine_id in [
+            host,
+            dpu_id.into(),
+            second_dpu_id.into(),
+            bmc_dpu_id.into(),
+            orphan_dpu_id.into(),
+        ] {
+            super::create(
+                txn.as_mut(),
+                None,
+                &machine_id,
+                ManagedHostState::Ready,
+                None,
+                2,
+            )
+            .await?;
+        }
+        let mut segment_ids = Vec::new();
+        for name in ["interface-finders", "interface-finders-other"] {
+            let segment_id: NetworkSegmentId = sqlx::query_scalar(
+                "INSERT INTO network_segments (name, version) VALUES ($1, 'V1-T0') RETURNING id",
+            )
+            .bind(name)
+            .fetch_one(txn.as_mut())
+            .await?;
+            segment_ids.push(segment_id);
+        }
+
+        // Interface N has hostname `finder-N`, MAC address `02:00:00:00:30:0N`, and address
+        // `10.30.0.N`. An unassociated interface with the hostname and MAC address of interface 1
+        // is inserted first, so a sequential scan reaches it before the host's interface 1.
+        for (machine_id, attached_dpu_id, segment_id, n, interface_type) in [
+            (None, None, segment_ids[1], 1, "Data"),
+            (None, Some(orphan_dpu_id), segment_ids[0], 7, "Data"),
+            (Some(host), Some(dpu_id), segment_ids[0], 1, "Data"),
+            (Some(host), Some(dpu_id), segment_ids[0], 2, "Data"),
+            (Some(host), Some(second_dpu_id), segment_ids[0], 3, "Data"),
+            (Some(host), None, segment_ids[0], 4, "Data"),
+            (Some(host), Some(bmc_dpu_id), segment_ids[0], 5, "Bmc"),
+            (Some(dpu_id.into()), Some(dpu_id), segment_ids[0], 6, "Data"),
+        ] {
+            let association_type = if machine_id.is_some() {
+                "Machine"
+            } else {
+                "None"
+            };
+            let interface_id: MachineInterfaceId = sqlx::query_scalar(
+                "INSERT INTO machine_interfaces
+                    (machine_id, attached_dpu_machine_id, association_type, segment_id,
+                     mac_address, primary_interface, hostname, interface_type)
+                 VALUES ($1, $2, $3::text::association_type, $4, $5::macaddr, false, $6,
+                         $7::text::interface_type)
+                 RETURNING id",
+            )
+            .bind(machine_id)
+            .bind(attached_dpu_id)
+            .bind(association_type)
+            .bind(segment_id)
+            .bind(format!("02:00:00:00:30:{n:02x}"))
+            .bind(format!("finder-{n}"))
+            .bind(interface_type)
+            .fetch_one(txn.as_mut())
+            .await?;
+            // Addresses are unique, so only the host's interface 1 has address 10.30.0.1.
+            if segment_id == segment_ids[0] {
+                crate::machine_interface_address::insert(
+                    txn.as_mut(),
+                    interface_id,
+                    IpAddr::from([10, 30, 0, n]),
+                    AllocationType::Dhcp,
+                )
+                .await?;
+            }
+        }
+
+        for (scenario, lookup, expected) in [
+            ("ip match", Lookup::Ip(1), vec![host]),
+            ("ip on second interface", Lookup::Ip(2), vec![host]),
+            ("ip on bmc interface", Lookup::Ip(5), vec![]),
+            ("ip without machine", Lookup::Ip(7), vec![]),
+            ("ip no match", Lookup::Ip(9), vec![]),
+            ("hostname match", Lookup::Hostname(1), vec![host]),
+            (
+                "hostname on second interface",
+                Lookup::Hostname(2),
+                vec![host],
+            ),
+            ("hostname on bmc interface", Lookup::Hostname(5), vec![]),
+            ("hostname without machine", Lookup::Hostname(7), vec![]),
+            ("hostname no match", Lookup::Hostname(9), vec![]),
+            ("mac match", Lookup::Mac(1), vec![host]),
+            ("mac on second interface", Lookup::Mac(2), vec![host]),
+            ("mac on bmc interface", Lookup::Mac(5), vec![]),
+            ("mac without machine", Lookup::Mac(7), vec![]),
+            ("mac no match", Lookup::Mac(9), vec![]),
+            (
+                "host of dpu with two links",
+                Lookup::HostOfDpu(dpu_id),
+                vec![host],
+            ),
+            (
+                "host of second dpu",
+                Lookup::HostOfDpu(second_dpu_id),
+                vec![host],
+            ),
+            ("host of dpu on bmc", Lookup::HostOfDpu(bmc_dpu_id), vec![]),
+            (
+                "host of dpu without machine",
+                Lookup::HostOfDpu(orphan_dpu_id),
+                vec![],
+            ),
+            (
+                "host of missing dpu",
+                Lookup::HostOfDpu(missing_dpu_id),
+                vec![],
+            ),
+            (
+                "dpus of host",
+                Lookup::DpusOfHost(host_id),
+                vec![dpu_id.into(), second_dpu_id.into()],
+            ),
+            (
+                "dpus of missing host",
+                Lookup::DpusOfHost(missing_host_id),
+                vec![],
+            ),
+        ] {
+            let mut found: Vec<MachineId> = match lookup {
+                Lookup::Ip(n) => super::find_by_ip(txn.as_mut(), &IpAddr::from([10, 30, 0, n]))
+                    .await?
+                    .map(|machine| machine.id)
+                    .into_iter()
+                    .collect(),
+                Lookup::Hostname(n) => {
+                    super::find_by_hostname(txn.as_mut(), &format!("finder-{n}"))
+                        .await?
+                        .map(|machine| machine.id)
+                        .into_iter()
+                        .collect()
+                }
+                Lookup::Mac(n) => {
+                    let mac = format!("02:00:00:00:30:{n:02x}").parse()?;
+                    super::find_by_mac_address(txn.as_mut(), &mac)
+                        .await?
+                        .map(|machine| machine.id)
+                        .into_iter()
+                        .collect()
+                }
+                Lookup::HostOfDpu(dpu_id) => {
+                    super::find_host_by_dpu_machine_id(txn.as_mut(), &dpu_id)
+                        .await?
+                        .map(|machine| machine.id.into())
+                        .into_iter()
+                        .collect()
+                }
+                Lookup::DpusOfHost(host_id) => {
+                    super::find_dpus_by_host_machine_id(txn.as_mut(), &host_id)
+                        .await?
+                        .into_iter()
+                        .map(|machine| machine.id.into())
+                        .collect()
+                }
+            };
+            found.sort();
+            let mut expected = expected;
+            expected.sort();
+            assert_eq!(found, expected, "{scenario}");
+        }
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// Each interface finder must restrict the `machines` scan inside the snapshot by id. A join
+    /// on `machine_interfaces` has produced a plan that leaves that scan unfiltered, builds every
+    /// snapshot, and applies the interface condition afterwards.
+    #[crate::sqlx_test]
+    async fn interface_finders_restrict_snapshot_machine_scan(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        fn machine_scan_conditions(node: &serde_json::Value, inside_scan: bool) -> Vec<String> {
+            let inside_scan =
+                inside_scan || (node["Relation Name"] == "machines" && node["Alias"] == "m");
+            let mut conditions: Vec<String> = if inside_scan {
+                ["Index Cond", "Recheck Cond", "Filter"]
+                    .into_iter()
+                    .filter_map(|key| node[key].as_str().map(str::to_string))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            for child in node["Plans"].as_array().into_iter().flatten() {
+                conditions.extend(machine_scan_conditions(child, inside_scan));
+            }
+            conditions
+        }
+
+        let host_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let dpu_id: DpuMachineId =
+            "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80".parse()?;
+        let mut txn = pool.begin().await?;
+        // Run each finder once so its statement text is in `pg_prepared_statements`.
+        super::find_by_ip(txn.as_mut(), &"10.30.0.1".parse()?).await?;
+        super::find_by_hostname(txn.as_mut(), "finder-1").await?;
+        super::find_by_mac_address(txn.as_mut(), &"02:00:00:00:30:01".parse()?).await?;
+        super::find_host_by_dpu_machine_id(txn.as_mut(), &dpu_id).await?;
+        super::find_dpus_by_host_machine_id(txn.as_mut(), &host_id).await?;
+
+        for (finder, fragment, argument) in [
+            (
+                "find_by_ip",
+                "mia.address = $1::inet",
+                "10.30.0.1".to_string(),
+            ),
+            (
+                "find_by_hostname",
+                "mi.hostname = $1",
+                "finder-0".to_string(),
+            ),
+            (
+                "find_by_mac_address",
+                "mi.mac_address = $1::macaddr",
+                "02:00:00:00:30:01".to_string(),
+            ),
+            (
+                "find_host_by_dpu_machine_id",
+                "mi.attached_dpu_machine_id=$1",
+                dpu_id.to_string(),
+            ),
+            (
+                "find_dpus_by_host_machine_id",
+                "mi.machine_id=$1",
+                host_id.to_string(),
+            ),
+        ] {
+            let statement: String = sqlx::query_scalar(
+                "SELECT statement FROM pg_prepared_statements WHERE strpos(statement, $1) > 0",
+            )
+            .bind(fragment)
+            .fetch_one(txn.as_mut())
+            .await?;
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "PREPARE finder_plan AS {statement}"
+            )))
+            .execute(txn.as_mut())
+            .await?;
+            for plan_cache_mode in ["force_custom_plan", "force_generic_plan"] {
+                sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                    "SET LOCAL plan_cache_mode = {plan_cache_mode}"
+                )))
+                .execute(txn.as_mut())
+                .await?;
+                let plan: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "EXPLAIN (FORMAT JSON) EXECUTE finder_plan('{argument}')"
+                )))
+                .fetch_one(txn.as_mut())
+                .await?;
+                let conditions = machine_scan_conditions(&plan[0]["Plan"], false);
+                assert!(
+                    conditions
+                        .iter()
+                        .any(|condition| condition.contains("(id)")),
+                    "{finder} ({plan_cache_mode}) scans machines without an id condition: {plan}"
+                );
+            }
+            sqlx::raw_sql("DEALLOCATE finder_plan")
+                .execute(txn.as_mut())
+                .await?;
+        }
+        txn.rollback().await?;
         Ok(())
     }
 }
