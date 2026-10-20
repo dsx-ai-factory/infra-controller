@@ -195,15 +195,23 @@ func TestBoostrapAPI_ReloadBootstrapCredentials(t *testing.T) {
 		rotatedOTP  = "Zr2pW9xT4mLq8vB1nC6yD0eF3gH="
 	)
 	tests := []struct {
-		name          string
-		updatedSiteID string
-		downloadFails bool
-		wantErr       string
-		wantAttempts  uint64
+		name           string
+		updatedSiteID  string
+		downloadFails  bool
+		alreadyApplied bool
+		wantErr        string
+		wantAttempts   uint64
+		wantSucceeded  uint64
+		wantRequests   int
+		wantStoredOTP  string
 	}{
 		{
 			name:          "reloads a same-Site OTP rotation",
 			updatedSiteID: siteID,
+			wantAttempts:  1,
+			wantSucceeded: 1,
+			wantRequests:  1,
+			wantStoredOTP: rotatedOTP,
 		},
 		{
 			name:          "rejects a Site re-pair",
@@ -216,6 +224,14 @@ func TestBoostrapAPI_ReloadBootstrapCredentials(t *testing.T) {
 			downloadFails: true,
 			wantErr:       "missing protocol scheme",
 			wantAttempts:  1,
+		},
+		{
+			name:           "skips a projected Secret already applied by Cloud rotation",
+			updatedSiteID:  siteID,
+			alreadyApplied: true,
+			wantAttempts:   1,
+			wantSucceeded:  1,
+			wantStoredOTP:  testOTP,
 		},
 	}
 	previousAccess := ManagerAccess
@@ -297,30 +313,47 @@ func TestBoostrapAPI_ReloadBootstrapCredentials(t *testing.T) {
 			}
 			writeConfig(updatedConfig)
 
+			bootstrap := ManagerAccess.Data.EB.Managers.Bootstrap
+			if tt.alreadyApplied {
+				bootstrap.ReplaceConfig(updatedConfig)
+				bootstrap.Registration.AddOTP(rotatedOTP)
+				bootstrap.State.DownloadAttempted.Store(1)
+				bootstrap.State.DownloadSucceeded.Store(1)
+				require.NoError(t, os.WriteFile(filepath.Join(temporalDir, bootstraptypes.TagOTP), []byte(testOTP), 0600))
+			}
+
 			err := (&BoostrapAPI{}).reloadBootstrapCredentials(secretDir)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
-				assert.Equal(t, initialConfig, ManagerAccess.Data.EB.Managers.Bootstrap.GetConfig())
-				assert.Equal(t, 0, len(requests))
-				assert.Equal(t, tt.wantAttempts, ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadAttempted.Load())
-				assert.Zero(t, ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadSucceeded.Load())
+			} else {
+				require.NoError(t, err)
+			}
+
+			wantConfig := updatedConfig
+			if tt.wantErr != "" {
+				wantConfig = initialConfig
+			}
+			assert.Equal(t, wantConfig, bootstrap.GetConfig())
+			assert.Equal(t, tt.wantRequests, len(requests))
+			assert.Equal(t, tt.wantAttempts, bootstrap.State.DownloadAttempted.Load())
+			assert.Equal(t, tt.wantSucceeded, bootstrap.State.DownloadSucceeded.Load())
+			if tt.wantErr != "" {
 				assert.Error(t, ManagerAccess.Data.EB.Managers.Bootstrap.Registration.Check(tt.updatedSiteID, rotatedOTP))
 				return
 			}
 
-			require.NoError(t, err)
-			assert.Equal(t, updatedConfig, ManagerAccess.Data.EB.Managers.Bootstrap.GetConfig())
-			assert.Equal(t, uint64(1), ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadAttempted.Load())
-			assert.Equal(t, uint64(1), ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadSucceeded.Load())
-			require.NoError(t, ManagerAccess.Data.EB.Managers.Bootstrap.Registration.Check(siteID, rotatedOTP))
+			require.NoError(t, bootstrap.Registration.Check(siteID, rotatedOTP))
 
-			require.Len(t, requests, 1)
-			request := <-requests
-			assert.Equal(t, siteID, request.UUID)
-			assert.Equal(t, rotatedOTP, request.OTP)
-			storedOTP, readErr := os.ReadFile(filepath.Join(temporalDir, "otp"))
-			require.NoError(t, readErr)
-			assert.Equal(t, rotatedOTP, string(storedOTP))
+			if tt.wantRequests == 1 {
+				request := <-requests
+				assert.Equal(t, siteID, request.UUID)
+				assert.Equal(t, rotatedOTP, request.OTP)
+			}
+			if tt.wantStoredOTP != "" {
+				storedOTP, readErr := os.ReadFile(filepath.Join(temporalDir, bootstraptypes.TagOTP))
+				require.NoError(t, readErr)
+				assert.Equal(t, tt.wantStoredOTP, string(storedOTP))
+			}
 		})
 	}
 }

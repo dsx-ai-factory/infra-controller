@@ -53,9 +53,9 @@ const (
 	// Kubernetes projects Secret keys through the ..data symlink and atomically
 	// replaces that symlink on updates, so watching only the key paths misses changes.
 	kubernetesSecretDataSymlink = "..data"
-	// credentialUpdateTimeout leaves 30 seconds of the rotation activity timeout
-	// for certificate readback and expiry publication.
-	credentialUpdateTimeout = credentialRotationActivityTimeout - 30*time.Second
+	// credentialUpdateTimeout bounds each serialized download and store operation,
+	// including projected Secret reloads, so external I/O cannot hold the update lock indefinitely.
+	credentialUpdateTimeout = 90 * time.Second
 )
 
 func resolveBootstrapRevision(dir string) (string, error) {
@@ -241,10 +241,15 @@ func (bs *BoostrapAPI) reloadBootstrapCredentials(dir string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), credentialUpdateTimeout)
 	defer cancel()
 	var publishedConfig bootstraptypes.SecretConfig
+	var reloaded bool
 	err := bootstrap.RunCredentialUpdate(ctx, func(currentConfig bootstraptypes.SecretConfig) (bootstraptypes.SecretConfig, error) {
 		candidate, _, err := readBootstrapConfig(dir)
 		if err != nil {
 			return currentConfig, err
+		}
+		if candidate == currentConfig {
+			log.Info().Msg("Bootstrap: Credentials already applied for the projected Secret")
+			return currentConfig, nil
 		}
 
 		currentSiteID := currentConfig.UUID
@@ -259,10 +264,14 @@ func (bs *BoostrapAPI) reloadBootstrapCredentials(dir string) error {
 
 		bootstrap.Registration.AddOTP(candidate.OTP)
 		publishedConfig = candidate
+		reloaded = true
 		return candidate, nil
 	})
 	if err != nil {
 		return err
+	}
+	if !reloaded {
+		return nil
 	}
 
 	log.Info().

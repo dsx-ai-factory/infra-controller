@@ -67,8 +67,8 @@ func Test_Bootstrap(t *testing.T) {
 					files[i] = k
 					i++
 				}
-				NumLoop := 1
-				for i := 0; i <= NumLoop; i++ {
+				attemptCount := w.DownloadAttempted.Load()
+				for range 2 {
 					// Update file
 					currentTime := time.Now().Local()
 					err := os.Chtimes(files[0],
@@ -77,9 +77,8 @@ func Test_Bootstrap(t *testing.T) {
 						t.Log(err)
 					}
 					time.Sleep(350 * time.Millisecond)
-					assert.GreaterOrEqual(t, int(w.DownloadAttempted.Load()), i+2)
+					assert.Equal(t, attemptCount, w.DownloadAttempted.Load())
 				}
-				assert.GreaterOrEqual(t, int(w.DownloadAttempted.Load()), NumLoop+1)
 				t.Log(w.DownloadAttempted.Load())
 				log.Info().Msg("Test Bootstrap touch Start")
 			case "noop":

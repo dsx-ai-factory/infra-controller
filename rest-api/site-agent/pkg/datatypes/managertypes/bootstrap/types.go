@@ -100,12 +100,12 @@ func (r *Registration) Check(siteID, otp string) error {
 
 // Bootstrap - data type for Bootstrap
 type Bootstrap struct {
-	Config       *SecretConfig
 	State        *State
 	Secret       coreV1Types.SecretInterface
 	Secretfiles  map[string]bool
 	Registration *Registration
-	mutex        sync.RWMutex // protects Config
+	config       SecretConfig
+	mutex        sync.RWMutex // protects config
 	updateMutex  sync.Mutex   // serializes credential download and publication
 }
 
@@ -113,20 +113,14 @@ type Bootstrap struct {
 func (b *Bootstrap) GetConfig() SecretConfig {
 	b.mutex.RLock()
 	defer b.mutex.RUnlock()
-	if b.Config == nil {
-		return SecretConfig{}
-	}
-	return *b.Config
+	return b.config
 }
 
 // ReplaceConfig atomically replaces all bootstrap configuration fields.
 func (b *Bootstrap) ReplaceConfig(config SecretConfig) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
-	if b.Config == nil {
-		b.Config = &SecretConfig{}
-	}
-	*b.Config = config
+	b.config = config
 }
 
 // RunCredentialUpdate serializes one credential download, store, and publication operation.
@@ -152,7 +146,6 @@ func (b *Bootstrap) RunCredentialUpdate(ctx context.Context, update func(SecretC
 // NewBootstrapInstance - creates a new instance of Bootstrap
 func NewBootstrapInstance() *Bootstrap {
 	return &Bootstrap{
-		Config:       &SecretConfig{},
 		State:        &State{},
 		Secretfiles:  make(map[string]bool),
 		Registration: &Registration{},
