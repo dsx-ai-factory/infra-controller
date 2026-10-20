@@ -1175,13 +1175,9 @@ impl SiteExplorer {
             .await?;
 
         let mut txn = self.txn_begin().await?;
-        Self::persist_identified_managed_hosts(
-            &mut txn,
-            &identified_hosts,
-            &boot_interfaces,
-            &nic_boot_interfaces,
-        )
-        .await?;
+        Self::persist_identified_managed_hosts(&mut txn, &identified_hosts).await?;
+        Self::persist_host_boot_interfaces(&mut txn, &boot_interfaces).await?;
+        Self::persist_nic_redfish_ids(&mut txn, &nic_boot_interfaces).await?;
         txn.commit().await?;
 
         metrics.record_phase_latency(
@@ -1845,8 +1841,6 @@ impl SiteExplorer {
     async fn persist_identified_managed_hosts(
         txn: &mut Transaction<'_>,
         managed_hosts: &[IdentifiedManagedHost],
-        boot_interfaces: &[(IpAddr, MachineBootInterface)],
-        nic_boot_interfaces: &[MachineBootInterface],
     ) -> SiteExplorerResult<()> {
         db::explored_managed_host::update(
             txn,
@@ -1858,11 +1852,25 @@ impl SiteExplorer {
         )
         .await?;
 
+        Ok(())
+    }
+
+    async fn persist_host_boot_interfaces(
+        txn: &mut Transaction<'_>,
+        boot_interfaces: &[(IpAddr, MachineBootInterface)],
+    ) -> SiteExplorerResult<()> {
         // Persist boot interface MACs for host endpoints
         for (address, boot_interface) in boot_interfaces {
             db::explored_endpoints::set_boot_interface(*address, boot_interface, txn).await?;
         }
 
+        Ok(())
+    }
+
+    async fn persist_nic_redfish_ids(
+        txn: &mut Transaction<'_>,
+        nic_boot_interfaces: &[MachineBootInterface],
+    ) -> SiteExplorerResult<()> {
         // Record each host NIC's Redfish id on its machine_interfaces row so the
         // primary-flagged row is the host's complete boot interface (MAC + id).
         // Pending predicted interfaces get the same refresh, so a prediction
