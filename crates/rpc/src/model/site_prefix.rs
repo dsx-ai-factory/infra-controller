@@ -436,7 +436,7 @@ mod tests {
         let forge = descriptor_set
             .file
             .iter()
-            .find(|file| file.package.as_deref() == Some("forge"))
+            .find(|file| file.name.as_deref() == Some("forge.proto"))
             .unwrap();
         let authority = forge
             .enum_type
