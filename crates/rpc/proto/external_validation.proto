@@ -93,7 +93,7 @@ message ExternalValidationAttempt {
 
 // NICo-owned allocation gate; no tenant API creates or removes this resource.
 message ExternalValidationHold {
-  // Stable UUID for the hold's validation cycle.
+  // Stable UUID of this hold; it never rebinds to another validation cycle.
   common.ExternalValidationHoldId hold_id = 1;
   // Held host machine; required and never a DPU machine.
   common.MachineId machine_id = 2 [(carbide.codegen.v1.field_rust_type) = ".common.StableHostMachineId"];
