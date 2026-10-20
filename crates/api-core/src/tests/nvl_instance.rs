@@ -37,6 +37,7 @@ use common::api_fixtures::{
 };
 use db::{ObjectColumnFilter, rack as db_rack, switch as db_switch};
 use ipnetwork::IpNetwork;
+use libnmxc::NmxcPool;
 use libnmxc::nmxc_model::{GetGpuInfoListRequest, GetPartitionInfoListRequest, GpuAttr};
 use model::expected_switch::ExpectedSwitch;
 use model::instance::config::nvlink::InstanceNvLinkConfig;
@@ -1241,6 +1242,221 @@ async fn test_instance_delete_with_nvl_config(pool: sqlx::PgPool) {
         .map(|response| response.into_inner())
         .unwrap();
     assert_eq!(ids_all.partition_ids.len(), 0);
+}
+
+/// Every `nvlink_partitions` row, in no particular order.
+async fn nvl_physical_partition_rows(
+    pool: &sqlx::PgPool,
+) -> Vec<model::nvl_partition::NvlPartition> {
+    db::nvl_partition::find_by(pool, ObjectColumnFilter::<db::nvl_partition::IdColumn>::All)
+        .await
+        .expect("load nvlink_partitions")
+}
+
+/// Every `nvlink_logical_partitions` row, soft-deleted ones included.
+async fn nvl_logical_partition_rows(
+    pool: &sqlx::PgPool,
+) -> Vec<model::nvl_logical_partition::LogicalPartition> {
+    db::nvl_logical_partition::find_by(
+        pool,
+        ObjectColumnFilter::<db::nvl_logical_partition::IdColumn>::All,
+    )
+    .await
+    .expect("load nvlink_logical_partitions")
+}
+
+/// NMX-C partition ids the in-memory simulator currently holds, with their names.
+async fn nmxc_sim_partitions(env: &TestEnv) -> Vec<(u32, String)> {
+    let mut client = env
+        .nmxc_sim
+        .create_client(libnmxc::Endpoint::new("http://localhost:4010").expect("NMX-C endpoint URI"))
+        .await
+        .unwrap();
+    client
+        .get_partition_info_list(GetPartitionInfoListRequest {
+            context: Some(libnmxc::nmxc_model::Context {
+                context: String::new(),
+            }),
+            partition_id_list: vec![],
+            partition_name_list: vec![],
+            gateway_id: libnmxc::NMX_C_GATEWAY_ID.into(),
+        })
+        .await
+        .unwrap()
+        .partition_info_list
+        .into_iter()
+        .map(|p| (p.partition_id.unwrap_or_default().partition_id, p.name))
+        .collect()
+}
+
+async fn nmxc_sim_partition_ids(env: &TestEnv) -> Vec<u32> {
+    nmxc_sim_partitions(env)
+        .await
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// NMX-C that comes back without its fabric state (a controller restart with
+/// `FABRIC_MODE_RESTART=0`) forgets every partition and restarts id allocation
+/// from 1. The monitor recreates the instance's partition and inserts a second
+/// `nvlink_partitions` row for it, but the row of the forgotten partition is
+/// never removed. Once the instance is released and the logical partition is
+/// deleted, purging the logical partition violates
+/// `nvlink_partitions_logical_partition_id_fkey` on every iteration, the
+/// group's work is abandoned, and its hosts get null NVLink observations.
+///
+/// This pins the current behaviour; a fix should flip the orphan and stall
+/// assertions.
+#[crate::sqlx_test]
+async fn test_nmx_c_state_loss_orphans_partition_row_and_stalls_monitor(pool: sqlx::PgPool) {
+    let mut config = common::api_fixtures::get_config();
+    if let Some(nvlink_config) = config.nvlink_config.as_mut() {
+        nvlink_config.enabled = true;
+    }
+    let env = common::api_fixtures::create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config),
+    )
+    .await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let NvlLogicalPartitionFixture {
+        id: logical_partition_id,
+        logical_partition: _logical_partition,
+    } = create_nvl_logical_partition(&env, "test_partition".to_string()).await;
+
+    let mh = create_managed_host_with_hardware_info_template(
+        &env,
+        HardwareInfoTemplate::Custom(
+            crate::tests::common::api_fixtures::host::GB200_COMPUTE_TRAY_1_INFO_JSON,
+        ),
+    )
+    .await;
+    let machine = mh.host().rpc_machine().await;
+    let gpus: Vec<Gpu> = machine
+        .status
+        .as_ref()
+        .unwrap()
+        .discovery_info
+        .as_ref()
+        .unwrap()
+        .gpus
+        .to_vec();
+    assert_eq!(gpus.len(), 4);
+    let nvl_config = rpc::forge::InstanceNvLinkConfig {
+        gpu_configs: gpus
+            .iter()
+            .filter_map(|gpu| {
+                gpu.platform_info.as_ref().map(|platform_info| {
+                    rpc::forge::InstanceNvLinkGpuConfig {
+                        device_instance: platform_info.module_id - 1,
+                        logical_partition_id: Some(logical_partition_id),
+                    }
+                })
+            })
+            .collect(),
+    };
+    let (tinstance, _instance) =
+        create_instance_with_nvlink_config(&env, &mh, nvl_config, segment_id).await;
+    assert_eq!(&mh.host().rpc_machine().await.state, "Assigned/Ready");
+    assert_machine_nvlink_observation_present(&mh, gpus.len()).await;
+
+    // One physical partition backs the logical partition, in the DB and in NMX-C.
+    let rows = nvl_physical_partition_rows(&pool).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let original = rows[0].clone();
+    assert_eq!(original.logical_partition_id, Some(logical_partition_id));
+    let original_nmx_c_id = u32::try_from(original.nmx_c_partition_id).unwrap();
+    assert_eq!(nmxc_sim_partition_ids(&env).await, vec![original_nmx_c_id]);
+
+    // The controller restarts without its fabric state.
+    env.nmxc_sim.wipe_state();
+    assert!(nmxc_sim_partition_ids(&env).await.is_empty());
+
+    // First pass recreates the partition, second pass records observations.
+    env.run_nvl_partition_monitor_iteration().await;
+    env.run_nvl_partition_monitor_iteration().await;
+
+    let rows = nvl_physical_partition_rows(&pool).await;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let orphan = rows
+        .iter()
+        .find(|row| row.id == original.id)
+        .expect("row of the partition NMX-C forgot must still be there");
+    assert!(orphan.deleted.is_none(), "{orphan:?}");
+    assert_eq!(orphan.logical_partition_id, Some(logical_partition_id));
+    let recreated = rows.iter().find(|row| row.id != original.id).unwrap();
+    assert_eq!(recreated.logical_partition_id, Some(logical_partition_id));
+    assert_eq!(
+        nmxc_sim_partition_ids(&env).await,
+        vec![u32::try_from(recreated.nmx_c_partition_id).unwrap()],
+        "only the recreated partition exists in NMX-C"
+    );
+    assert_machine_nvlink_observation_present(&mh, gpus.len()).await;
+
+    // Releasing the instance removes the partition NMX-C knows about and its
+    // row. Nothing references the other row, so no removal is issued for it.
+    tinstance.delete().await;
+    env.run_nvl_partition_monitor_iteration().await;
+    env.run_nvl_partition_monitor_iteration().await;
+
+    let rows = nvl_physical_partition_rows(&pool).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let orphan = &rows[0];
+    assert!(orphan.deleted.is_none(), "{orphan:?}");
+    assert_eq!(orphan.logical_partition_id, Some(logical_partition_id));
+    let sim_partitions = nmxc_sim_partitions(&env).await;
+    assert!(
+        sim_partitions
+            .iter()
+            .all(|(_, name)| name.starts_with("tray_partition_")),
+        "only tray partitions remain in NMX-C: {sim_partitions:?}"
+    );
+
+    // Deletion checks instances, not physical rows, so it soft-deletes the
+    // logical partition and leaves the purge to the monitor.
+    env.api
+        .delete_nv_link_logical_partition(tonic::Request::new(
+            rpc::forge::NvLinkLogicalPartitionDeletionRequest {
+                id: Some(logical_partition_id),
+            },
+        ))
+        .await
+        .expect("deletion succeeds with no instance referencing the logical partition");
+    let logical_partitions = nvl_logical_partition_rows(&pool).await;
+    assert_eq!(logical_partitions.len(), 1);
+    assert!(model::nvl_logical_partition::is_marked_as_deleted(
+        &logical_partitions[0]
+    ));
+
+    // Every later pass fails the same way: the orphan still references the
+    // logical partition, so the purge hits the foreign key, the group's work
+    // is abandoned, and its hosts get null observations.
+    for pass in 1..=2 {
+        env.run_nvl_partition_monitor_iteration().await;
+
+        let unreachable = env
+            .test_meter
+            .formatted_metrics("carbide_nvlink_partition_monitor_nmx_c_unreachable_chassis_count");
+        assert_eq!(
+            unreachable,
+            vec![r#"{reason="partition_monitor_work_failed"} 1"#],
+            "pass {pass}"
+        );
+
+        let logical_partitions = nvl_logical_partition_rows(&pool).await;
+        assert_eq!(
+            logical_partitions.len(),
+            1,
+            "pass {pass}: purge keeps failing"
+        );
+        assert!(model::nvl_logical_partition::is_marked_as_deleted(
+            &logical_partitions[0]
+        ));
+        let rows = nvl_physical_partition_rows(&pool).await;
+        assert_eq!(rows.len(), 1, "pass {pass}: {rows:?}");
+        assert_eq!(rows[0].id, orphan.id);
+    }
 }
 
 #[crate::sqlx_test]
