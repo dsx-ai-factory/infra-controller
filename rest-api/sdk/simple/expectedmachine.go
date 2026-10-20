@@ -24,6 +24,7 @@ type ExpectedMachine struct {
 	MachineID                *string                    `json:"machineId"`
 	Machine                  *standard.MachineSummary   `json:"machine,omitempty"`
 	Labels                   map[string]string          `json:"labels"`
+	BmcRetainCredentials     bool                       `json:"bmcRetainCredentials"`
 	Created                  time.Time                  `json:"created"`
 	Updated                  time.Time                  `json:"updated"`
 }
@@ -50,6 +51,7 @@ type ExpectedMachineCreateRequest struct {
 	FallbackDPUSerialNumbers []string                   `json:"fallbackDPUSerialNumbers"`
 	Interfaces               []ExpectedMachineInterface `json:"interfaces"`
 	Labels                   map[string]string          `json:"labels"`
+	BmcRetainCredentials     *bool                      `json:"bmcRetainCredentials"`
 }
 
 // ExpectedMachineUpdateRequest represents a request to update an Expected Machine
@@ -65,6 +67,7 @@ type ExpectedMachineUpdateRequest struct {
 	Interfaces               []ExpectedMachineInterface `json:"interfaces"`
 	SkuID                    *string                    `json:"skuId"`
 	Labels                   map[string]string          `json:"labels"`
+	BmcRetainCredentials     *bool                      `json:"bmcRetainCredentials"`
 }
 
 func expectedMachineInterfacesFromStandard(interfaces []standard.ExpectedMachineInterface) []ExpectedMachineInterface {
@@ -138,6 +141,7 @@ func expectedMachineFromStandard(api standard.ExpectedMachine) ExpectedMachine {
 		Labels:                   api.Labels,
 		Sku:                      api.Sku,
 		Machine:                  api.Machine,
+		BmcRetainCredentials:     api.GetBmcRetainCredentials(),
 	}
 	if api.Id != nil {
 		em.ID = *api.Id
@@ -178,6 +182,9 @@ func toStandardExpectedMachineCreateRequest(request ExpectedMachineCreateRequest
 	if request.BmcPassword != nil {
 		apiReq.DefaultBmcPassword.Set(request.BmcPassword)
 	}
+	if request.BmcRetainCredentials != nil {
+		apiReq.BmcRetainCredentials.Set(request.BmcRetainCredentials)
+	}
 	return apiReq
 }
 
@@ -204,6 +211,9 @@ func toStandardExpectedMachineUpdateRequest(request ExpectedMachineUpdateRequest
 	}
 	if request.SkuID != nil {
 		apiReq.SkuId.Set(request.SkuID)
+	}
+	if request.BmcRetainCredentials != nil {
+		apiReq.BmcRetainCredentials.Set(request.BmcRetainCredentials)
 	}
 	return apiReq
 }

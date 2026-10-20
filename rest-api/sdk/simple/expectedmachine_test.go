@@ -41,6 +41,7 @@ func TestToStandardExpectedMachineUpdateRequest(t *testing.T) {
 		assert.NotContains(t, body, "fallbackDPUSerialNumbers")
 		assert.NotContains(t, body, "labels")
 		assert.NotContains(t, body, "interfaces")
+		assert.NotContains(t, body, "bmcRetainCredentials")
 	})
 
 	t.Run("explicit empty interfaces slice is forwarded to clear existing entries", func(t *testing.T) {
@@ -118,12 +119,14 @@ func TestToStandardExpectedMachineUpdateRequest(t *testing.T) {
 		mac := "AA:BB:CC:DD:EE:FF"
 		serial := "CHASSIS-999"
 		sku := "sku-123"
+		retain := false
 		req := ExpectedMachineUpdateRequest{
 			BmcMacAddress:            &mac,
 			ChassisSerialNumber:      &serial,
 			FallbackDPUSerialNumbers: []string{"DPU-A"},
 			SkuID:                    &sku,
 			Labels:                   map[string]string{"site": "dc1"},
+			BmcRetainCredentials:     &retain,
 		}
 
 		apiReq := toStandardExpectedMachineUpdateRequest(req)
@@ -141,5 +144,51 @@ func TestToStandardExpectedMachineUpdateRequest(t *testing.T) {
 		assert.Contains(t, body, "fallbackDPUSerialNumbers")
 		assert.Contains(t, body, "skuId")
 		assert.Contains(t, body, "labels")
+		assert.Equal(t, &retain, body["bmcRetainCredentials"])
 	})
+}
+
+func TestToStandardExpectedMachineCreateRequest(t *testing.T) {
+	retain := true
+	tests := []struct {
+		name     string
+		request  ExpectedMachineCreateRequest
+		wantBody map[string]any
+	}{
+		{
+			name:     "BMC credential retention is forwarded",
+			request:  ExpectedMachineCreateRequest{BmcRetainCredentials: &retain},
+			wantBody: map[string]any{"bmcRetainCredentials": &retain},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := toStandardExpectedMachineCreateRequest(tt.request, "f97df110-f4de-492e-8849-4a6af68026b0").ToMap()
+			require.NoError(t, err)
+			for key, want := range tt.wantBody {
+				assert.Equal(t, want, body[key])
+			}
+		})
+	}
+}
+
+func TestExpectedMachineFromStandard(t *testing.T) {
+	retain := true
+	tests := []struct {
+		name     string
+		response standard.ExpectedMachine
+		want     ExpectedMachine
+	}{
+		{
+			name:     "BMC credential retention is read",
+			response: standard.ExpectedMachine{BmcRetainCredentials: &retain},
+			want:     ExpectedMachine{BmcRetainCredentials: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := expectedMachineFromStandard(tt.response)
+			assert.Equal(t, tt.want.BmcRetainCredentials, got.BmcRetainCredentials)
+		})
+	}
 }

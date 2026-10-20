@@ -181,11 +181,16 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 	assert.Nil(t, err)
 
 	// Add mock temporal client for the site
+	var capturedRequest *corev1.ExpectedMachine
 	mockTemporalClient := &tmocks.Client{}
 	mockWorkflowRun := &tmocks.WorkflowRun{}
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
 	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateExpectedMachine", mock.Anything).Return(mockWorkflowRun, nil)
+	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateExpectedMachine", mock.Anything).
+		Run(func(args mock.Arguments) {
+			capturedRequest, _ = args.Get(3).(*corev1.ExpectedMachine)
+		}).
+		Return(mockWorkflowRun, nil)
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 	handler := NewCreateExpectedMachineHandler(dbSession, scp, cfg)
@@ -208,12 +213,13 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 
 	// Test cases
 	tests := []struct {
-		name             string
-		requestBody      model.APIExpectedMachineCreateRequest
-		requestBodyJSON  string
-		setupContext     func(c echo.Context)
-		expectedStatus   int
-		expectedErrorMsg *string
+		name                     string
+		requestBody              model.APIExpectedMachineCreateRequest
+		requestBodyJSON          string
+		setupContext             func(c echo.Context)
+		expectedStatus           int
+		expectedErrorMsg         *string
+		wantBmcRetainCredentials bool
 	}{
 		{
 			name: "successful creation",
@@ -379,6 +385,24 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusCreated,
 		},
 		{
+			name: "successful creation with BMC credential retention",
+			requestBody: model.APIExpectedMachineCreateRequest{
+				SiteID:               site.ID.String(),
+				BmcMacAddress:        "00:11:22:33:44:CC",
+				DefaultBmcUsername:   cutil.GetPtr("admin"),
+				DefaultBmcPassword:   cutil.GetPtr("password"),
+				ChassisSerialNumber:  "CHASSIS-RETAIN-001",
+				BmcRetainCredentials: cutil.GetPtr(true),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus:           http.StatusCreated,
+			wantBmcRetainCredentials: true,
+		},
+		{
 			name: "duplicate MAC address should return 409",
 			requestBody: model.APIExpectedMachineCreateRequest{
 				SiteID:                   site.ID.String(),
@@ -419,6 +443,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 			tt.setupContext(c)
 
 			// Execute
+			capturedRequest = nil
 			err = handler.Handle(c)
 
 			// Assert
@@ -439,6 +464,11 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				stored, err := emDAO.Get(ctx, nil, response.ID, nil, false)
 				require.NoError(t, err)
 				assert.Nil(t, stored.IsDpfEnabled, "response default must not change the stored optional value")
+				assert.Equal(t, fmt.Sprint(tt.wantBmcRetainCredentials), string(fields["bmcRetainCredentials"]))
+				assert.Equal(t, cutil.GetPtr(tt.wantBmcRetainCredentials), stored.BmcRetainCredentials)
+				if assert.NotNil(t, capturedRequest, "Core must receive the create request") {
+					assert.Equal(t, cutil.GetPtr(tt.wantBmcRetainCredentials), capturedRequest.BmcRetainCredentials)
+				}
 				if tt.requestBodyJSON != "" {
 					assert.JSONEq(t, `{}`, string(fields["labels"]))
 					assert.JSONEq(t, `[]`, string(fields["fallbackDPUSerialNumbers"]))
@@ -1407,6 +1437,29 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 			expectedPaths:  []string{"metadata.labels", "chassis_serial_number"},
 		},
 		{
+			name: "BMC credential retention update reaches Core",
+			id:   testEM.ID.String(),
+			requestBody: model.APIExpectedMachineUpdateRequest{
+				BmcRetainCredentials: cutil.GetPtr(true),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEM.ID.String())
+			},
+			expectedStatus: http.StatusOK,
+			expectedPaths:  []string{"bmc_retain_credentials"},
+			checkResponseContent: func(t *testing.T, body []byte) {
+				var response model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(body, &response))
+				assert.True(t, response.BmcRetainCredentials)
+				assert.Equal(t, cutil.GetPtr(true), capturedRequest.BmcRetainCredentials)
+				stored, err := emDAO.Get(ctx, nil, testEM.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, cutil.GetPtr(true), stored.BmcRetainCredentials)
+			},
+		},
+		{
 			name: "empty BMC username rejects accompanying metadata before dispatch",
 			id:   testEM.ID.String(),
 			requestBody: model.APIExpectedMachineUpdateRequest{
@@ -1599,7 +1652,7 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 		})
 	}
 
-	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 3)
+	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 4)
 	require.NotNil(t, capturedRequest)
 	assert.Equal(t, testEM.BmcMacAddress, capturedRequest.GetBmcMacAddress(),
 		"Core must receive the stored BMC MAC spelling")
@@ -2532,7 +2585,8 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 						NicType:    cutil.GetPtr("CX9"),
 						FixedIP:    cutil.GetPtr("192.0.2.9"),
 					}},
-					Labels: map[string]string{"env": "test"},
+					Labels:               map[string]string{"env": "test"},
+					BmcRetainCredentials: cutil.GetPtr(true),
 				},
 				{
 					SiteID:              site.ID.String(),
@@ -2567,6 +2621,10 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 				require.Len(t, response[0].Interfaces, 1)
 				assert.Equal(t, "02:AA:BB:CC:DD:EE", response[0].Interfaces[0].MacAddress)
 				assert.Equal(t, "CX9", batchRequest.ExpectedMachines.ExpectedMachines[0].HostNics[0].GetNicType())
+				assert.Equal(t, "true", string(fields[0]["bmcRetainCredentials"]))
+				assert.Equal(t, "false", string(fields[1]["bmcRetainCredentials"]))
+				assert.Equal(t, cutil.GetPtr(true), batchRequest.ExpectedMachines.ExpectedMachines[0].BmcRetainCredentials)
+				assert.Equal(t, cutil.GetPtr(false), batchRequest.ExpectedMachines.ExpectedMachines[1].BmcRetainCredentials)
 				assert.Contains(t, fields[0], "id")
 				assert.NotContains(t, fields[0], "Labels")
 			},
@@ -3091,6 +3149,10 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.IsDpfEnabled = cutil.GetPtr(true) },
 		},
 		{
+			name:     "BMC credential retention",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.BmcRetainCredentials = cutil.GetPtr(false) },
+		},
+		{
 			name:     "empty labels",
 			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.Labels = map[string]string{} },
 		},
@@ -3416,6 +3478,37 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 				assert.JSONEq(t, `{}`, string(fields[1]["labels"]))
 				assert.Contains(t, fields[0], "id")
 				assert.NotContains(t, fields[0], "Labels")
+			},
+		},
+		{
+			name: "batch BMC credential retention updates reach Core",
+			requestBody: []model.APIExpectedMachineUpdateRequest{
+				{ID: cutil.GetPtr(testEM1.ID.String()), BmcRetainCredentials: cutil.GetPtr(true)},
+				{ID: cutil.GetPtr(testEM2.ID.String()), BmcRetainCredentials: cutil.GetPtr(false)},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusOK,
+			validateResp: func(t *testing.T, body []byte) {
+				want := map[string]bool{testEM1.ID.String(): true, testEM2.ID.String(): false}
+				require.NotNil(t, capturedRequest)
+				require.Len(t, capturedRequest.Patches, 2)
+				for _, patch := range capturedRequest.Patches {
+					assert.Equal(t, []string{"bmc_retain_credentials"}, patch.UpdateMask.Paths)
+					assert.Equal(t, cutil.GetPtr(want[patch.ExpectedMachine.GetId().GetValue()]), patch.ExpectedMachine.BmcRetainCredentials)
+				}
+				var response []model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(body, &response))
+				require.Len(t, response, 2)
+				for _, machine := range response {
+					assert.Equal(t, want[machine.ID.String()], machine.BmcRetainCredentials)
+					stored, err := emDAO.Get(ctx, nil, machine.ID, nil, false)
+					require.NoError(t, err)
+					assert.Equal(t, cutil.GetPtr(want[machine.ID.String()]), stored.BmcRetainCredentials)
+				}
 			},
 		},
 		{
@@ -3764,7 +3857,7 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 		})
 	}
 
-	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 4)
+	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 5)
 	storedEM1, err := emDAO.Get(ctx, nil, testEM1.ID, nil, false)
 	require.NoError(t, err)
 	storedEM2, err := emDAO.Get(ctx, nil, testEM2.ID, nil, false)

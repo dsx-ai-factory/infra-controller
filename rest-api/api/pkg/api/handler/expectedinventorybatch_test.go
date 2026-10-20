@@ -258,7 +258,7 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	}{
 		{
 			name: "machine", path: "/v2/org/test-org/nico/expected-machine/all",
-			body:    fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:01","chassisSerialNumber":"machine-1","defaultBmcUsername":"machine-user","defaultBmcPassword":"machine-pass","interfaces":[{"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9"}]},{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:09","chassisSerialNumber":"machine-empty","interfaces":[]}]}`, site.ID.String(), site.ID.String(), site.ID.String()),
+			body:    fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:01","chassisSerialNumber":"machine-1","defaultBmcUsername":"machine-user","defaultBmcPassword":"machine-pass","bmcRetainCredentials":true,"interfaces":[{"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9"}]},{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:09","chassisSerialNumber":"machine-empty","interfaces":[]}]}`, site.ID.String(), site.ID.String(), site.ID.String()),
 			handle:  NewReplaceAllExpectedMachinesHandler(dbSession, pool, cfg).Handle,
 			method:  corev1.Forge_ReplaceAllExpectedMachines_FullMethodName,
 			secrets: []string{"machine-user", "machine-pass"},
@@ -297,6 +297,8 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	}
 	require.Empty(t, machineList.ExpectedMachines[1].HostNics)
 	require.Equal(t, "machine-pass", machineList.ExpectedMachines[0].BmcPassword)
+	require.Equal(t, cutil.GetPtr(true), machineList.ExpectedMachines[0].BmcRetainCredentials)
+	require.Equal(t, cutil.GetPtr(false), machineList.ExpectedMachines[1].BmcRetainCredentials, "omitted retention is replaced with false")
 	require.Len(t, machineList.ExpectedMachines[0].HostNics, 1)
 	require.Equal(t, "CX9", machineList.ExpectedMachines[0].HostNics[0].GetNicType())
 	require.Equal(t, "192.0.2.9", machineList.ExpectedMachines[0].HostNics[0].GetFixedIp())
