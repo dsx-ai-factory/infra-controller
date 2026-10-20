@@ -46,6 +46,7 @@ mod simulator_registry;
 mod status;
 mod switch_fsm;
 mod switch_simulator;
+mod tenant_network;
 
 use std::time::{Duration, Instant};
 

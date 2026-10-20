@@ -1,26 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# carbide-rest-site-manager Deployment
+# nico-rest-site-manager Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: carbide-rest-site-manager
+  name: nico-rest-site-manager
   labels:
-    app: carbide-rest-site-manager
+    app: nico-rest-site-manager
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: carbide-rest-site-manager
+      app: nico-rest-site-manager
   template:
     metadata:
       labels:
-        app: carbide-rest-site-manager
+        app: nico-rest-site-manager
     spec:
       imagePullSecrets:
         - name: image-pull-secret
-      serviceAccountName: carbide-rest-site-manager
+      serviceAccountName: nico-rest-site-manager
       # 1000 is the `nvs` user the image declares. The image names it rather
       # than giving a UID, which the kubelet cannot verify, so runAsNonRoot
       # needs the number spelled out here.
@@ -30,7 +30,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: site-manager
-          image: carbide-rest-site-manager
+          image: nico-rest-site-manager
           imagePullPolicy: IfNotPresent
           securityContext:
             readOnlyRootFilesystem: true

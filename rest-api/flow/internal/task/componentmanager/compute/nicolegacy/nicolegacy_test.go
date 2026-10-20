@@ -136,25 +136,6 @@ func managerYAMLNode(t *testing.T, data string) yaml.Node {
 	return *node.Content[0]
 }
 
-// TestFirmwareControl_SubTargetsAccepted verifies that the
-// compute/nicolegacy FirmwareControl path tolerates info.SubTargets
-// without erroring. This path goes through SetMachineAutoUpdate +
-// SetFirmwareUpdateTimeWindow, which has no per-sub-target selection in
-// NICo, so the manager only logs a warning and proceeds; we exercise
-// that branch here. The replacement compute/nico implementation routes
-// through Core's UpdateComponentFirmware which does honour sub-targets.
-func TestFirmwareControlRejectsAuthenticationData(t *testing.T) {
-	m := &Manager{}
-
-	err := m.FirmwareControl(
-		context.Background(),
-		common.Target{},
-		operations.FirmwareControlTaskInfo{AccessToken: "token"},
-	)
-
-	require.ErrorContains(t, err, "not supported by the nicolegacy compute manager")
-}
-
 type firmwareStateClient struct {
 	nicoapi.Client
 	desired   []*corev1.DesiredFirmwareVersionEntry
@@ -174,48 +155,91 @@ func (c *firmwareStateClient) FindExploredEndpointsByIds(
 	return c.endpoints, nil
 }
 
-func TestFirmwareControl_SubTargetsAccepted(t *testing.T) {
+type recordingReadinessGate struct {
+	calls int
+}
+
+func (g *recordingReadinessGate) WaitForManagementMACsReady(
+	context.Context,
+	devicetypes.ComponentType,
+	[]string,
+	types.OperationType,
+) error {
+	g.calls++
+	return nil
+}
+
+func (g *recordingReadinessGate) WaitForComponentsReady(
+	context.Context,
+	[]string,
+	types.OperationType,
+) error {
+	g.calls++
+	return nil
+}
+
+func (g *recordingReadinessGate) WaitForRackHostsReady(
+	context.Context,
+	[]string,
+	types.OperationType,
+) error {
+	g.calls++
+	return nil
+}
+
+func TestFirmwareControl_RejectsUnsupportedOptions(t *testing.T) {
 	tests := map[string]struct {
-		subTargets []string
+		info        operations.FirmwareControlTaskInfo
+		errContains string
 	}{
-		"nil sub_targets (legacy path)":     {subTargets: nil},
-		"empty sub_targets (legacy path)":   {subTargets: []string{}},
-		"non-empty sub_targets (warn path)": {subTargets: []string{"bmc", "bios"}},
+		"authentication data": {
+			info:        operations.FirmwareControlTaskInfo{AccessToken: "token"},
+			errContains: "firmware authentication data is not supported",
+		},
+		"compute sub-target": {
+			info:        operations.FirmwareControlTaskInfo{SubTargets: []string{"bmc"}},
+			errContains: "compute firmware sub-target selection is not supported",
+		},
+		"compute and DPU sub-targets": {
+			info:        operations.FirmwareControlTaskInfo{SubTargets: []string{"bmc", "dpu"}},
+			errContains: "compute firmware sub-target selection is not supported",
+		},
+		"version-check override": {
+			info:        operations.FirmwareControlTaskInfo{OverrideVersionCheck: true},
+			errContains: "firmware version-check override is not supported",
+		},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			m := New(nicoapi.NewMockClient(), 0, nil)
+			client := nicoapi.NewMockClient()
+			gate := &recordingReadinessGate{}
+			m := New(client, 0, gate)
 			target := common.Target{
 				Type:        devicetypes.ComponentTypeCompute,
 				Identifiers: []string{"machine-1"},
 			}
 
-			err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
-				Operation:  operations.FirmwareOperationUpgrade,
-				SubTargets: tc.subTargets,
-			})
-			require.NoError(t, err)
+			err := m.FirmwareControl(context.Background(), target, tc.info)
+
+			require.ErrorContains(t, err, tc.errContains)
+			assert.Zero(t, gate.calls, "unsupported options must fail before readiness checks")
+			assert.Empty(t, client.DpuReprovisioningTriggers(), "unsupported options must not trigger DPU reprovisioning")
 		})
 	}
 }
 
 // TestFirmwareControl_DpuTarget_Nicolegacy pins the DPU branch on the
-// legacy path: even though compute-tray-internal targets ignore
-// per-sub-target selection on this path, the "dpu" target still routes
-// through the dpureprov SAGA. Mixed targets run BMC scheduling first
-// and DPU last; a DPU-only request skips the legacy compute-tray
-// scheduling entirely so we don't accidentally enable auto-update on
-// every machine.
+// legacy path. A DPU-only request skips legacy compute-tray scheduling so we
+// don't accidentally enable auto-update on every machine.
 func TestFirmwareControl_DpuTarget_Nicolegacy(t *testing.T) {
 	tests := map[string]struct {
 		subTargets       []string
 		wantDpuTriggered bool
 	}{
-		"dpu-only opts in":      {subTargets: []string{"dpu"}, wantDpuTriggered: true},
-		"mixed bmc+dpu opts in": {subTargets: []string{"bmc", "dpu"}, wantDpuTriggered: true},
-		"empty opts out":        {subTargets: nil, wantDpuTriggered: false},
-		"bmc only opts out":     {subTargets: []string{"bmc"}, wantDpuTriggered: false},
+		"dpu-only opts in": {subTargets: []string{"dpu"}, wantDpuTriggered: true},
+		"nil opts out":     {subTargets: nil, wantDpuTriggered: false},
+		"empty opts out":   {subTargets: []string{}, wantDpuTriggered: false},
 	}
 
 	for name, tc := range tests {

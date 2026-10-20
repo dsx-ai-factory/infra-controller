@@ -467,10 +467,12 @@ stateDiagram-v2
     SuppressingOobDhcp --> PowerCyclingHost : OOB DHCP suppressions recorded
     PowerCyclingHost --> PoweringOnHost : AC power cycle accepted
     PoweringOnHost --> WaitingForOobDhcpAcknowledgement : Host power state is On after power cycle
-    WaitingForOobDhcpAcknowledgement --> SuppressingBmcDhcp : DHCP acknowledges OOB suppressions
+    WaitingForOobDhcpAcknowledgement --> WaitingForOobDhcpAcknowledgement : OOB DHCP acknowledgement pending
+    WaitingForOobDhcpAcknowledgement --> SuppressingBmcDhcp : No OOB DHCP acknowledgements pending
     SuppressingBmcDhcp --> FactoryResettingBmcs : BMC DHCP suppressions recorded
     FactoryResettingBmcs --> WaitingForBmcDhcpAcknowledgement : BMC resets accepted
-    WaitingForBmcDhcpAcknowledgement --> DeletingManagedCredentials : DHCP acknowledges BMC suppressions
+    WaitingForBmcDhcpAcknowledgement --> WaitingForBmcDhcpAcknowledgement : BMC DHCP acknowledgement pending
+    WaitingForBmcDhcpAcknowledgement --> DeletingManagedCredentials : No BMC DHCP acknowledgements pending
     DeletingManagedCredentials --> Decommissioned : Per-device credentials deleted
 ```
 
@@ -478,6 +480,13 @@ stateDiagram-v2
 settings, and clears the host UEFI password. `DeconfiguringDpus` removes DPF
 resources when applicable and installs the vanilla `preingestion.bfb` on every
 DPU.
+
+The OOB DHCP wait checks the host and DPU OOB interface MACs, and the BMC DHCP
+wait checks the host and DPU BMC MACs. Each DHCP wait advances after every MAC
+it checks has a recorded suppression acknowledgement or qualifies to advance
+without one. Refer to
+[DHCP Suppression Acknowledgement](../../decommissioning/index.md#dhcp-suppression-acknowledgement)
+for the shared rule.
 
 Refer to [Decommission Managed Hosts and DPUs](../../decommissioning/hosts.md) for the
 operator procedure, platform limitations, and intended post-reset state.
@@ -579,9 +588,10 @@ stateDiagram-v2
     A_NCU_WaitingForNetworkSegmentToBeReady --> A_NCU_WaitingForConfigSynced : No segments OR All ready
     A_NCU_WaitingForNetworkSegmentToBeReady --> A_NCU_WaitingForNetworkSegmentToBeReady : Not all segments ready
 
-    A_NCU_WaitingForConfigSynced --> A_NCU_ReleaseOldResources : No associated DPU OR observations synced with no aggregate PreventHostStateChanges
-    A_NCU_WaitingForConfigSynced --> A_NCU_WaitingForConfigSynced : Managed DPU observation not synced OR aggregate PreventHostStateChanges
-    A_NCU_ReleaseOldResources --> A_Ready
+    A_NCU_WaitingForConfigSynced --> A_NCU_ReleaseOldResources : No associated DPU OR managed-host and instance versions current with no blocking health
+    A_NCU_WaitingForConfigSynced --> A_NCU_WaitingForConfigSynced : Missing or stale acknowledgement OR blocking health
+    A_NCU_ReleaseOldResources --> A_NCU_ReleaseOldResources : Missing or stale acknowledgement OR blocking health
+    A_NCU_ReleaseOldResources --> A_Ready : Same checks pass and old-resource cleanup commits
 
     A_HPC_PowerCycle --> A_HPC_PowerCycle : Wait Power Off
     A_HPC_PowerCycle --> A_HPC_UH_DisableLockdown : Power On
@@ -644,16 +654,61 @@ Normal success proceeds directly from `WaitingForNetworkConfig` to
 `WaitingForExtensionServicesConfig` remain only so NICo can recover hosts that
 persisted those states on an older release.
 
-The following requests bypass these readiness checks:
+The following requests bypass these initial provisioning readiness checks:
 
 - Instance deletion proceeds through its required restart without waiting for
   network health.
 - An explicit custom iPXE request proceeds through its requested restart.
 
-A live network update uses `NetworkConfigUpdate/WaitingForConfigSynced`. A host
-with associated DPUs waits for current observations and aggregate health alerts
-that prevent host state changes. A host without associated DPUs skips both
-checks. This path does not apply the primary p0 PXE gate or restart the host.
+### Live Network Update Resource Release
+
+A live network update keeps old network resources until the required DPU
+reports and health checks pass. It does not restart the host or apply the
+primary p0 PXE gate.
+
+For a host with associated DPUs, NICo checks these conditions in order:
+
+1. Every DPU in the host topology reports the current managed-host network
+   configuration version. A missing DPU snapshot, observation, or version does
+   not count as an acknowledgement.
+1. The number of instance network observations matches the number of DPUs
+   required by the current instance configuration. Every recorded instance
+   observation reports the current instance network configuration version.
+1. The aggregate health report has no `PreventHostStateChanges` alert.
+
+A host without associated DPUs skips these acknowledgement and aggregate health
+checks.
+
+`NetworkConfigUpdate/WaitingForConfigSynced` runs the checks first. If they pass,
+the host enters `NetworkConfigUpdate/ReleaseOldResources`, which repeats them.
+Another DPU report can arrive after NICo saves the state change.
+
+Missing or stale acknowledgements cause a wait. Blocking health causes a
+handler error. In either case, NICo keeps the same state, old resources, and
+pending update request, then checks again on a later iteration. Instance
+deletion does not bypass these checks for a pending live update.
+
+After the repeated checks pass, NICo completes cleanup in one transaction. It
+releases old addresses and unused VPC loopbacks, marks removed generated
+segments for deletion, and clears the pending update request. The host returns
+to `Assigned/Ready`. To troubleshoot a pending update, refer to
+[Diagnose a Live Network Update](../../playbooks/stuck_objects/waiting_for_network_config.md#diagnose-a-live-network-update).
+
+A DPU that loses all tenant interfaces still belongs to the host
+topology. It must acknowledge its Admin configuration before NICo can release
+the old resources.
+
+Until that DPU reports again, its old instance observation can leave more
+instance observations than required DPUs, even if its managed-host version
+still matches. If applying Admin fails, the instance observation can disappear
+without proving that the old tenant configuration was removed. A healthy
+report or an absent instance observation is therefore not enough: NICo still
+needs the managed-host acknowledgement.
+
+NICo uses the versions and health that the agents report. It does not
+independently verify hardware forwarding. Refer to
+[Wait for Removed DPUs Before Releasing Instance Network Resources](https://github.com/dsx-ai-factory/infra-controller/issues/3895)
+for background on this removed-DPU scenario.
 
 ## Host Reprovision State Details (HostReprovisionState)
 

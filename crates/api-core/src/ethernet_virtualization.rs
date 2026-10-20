@@ -387,7 +387,8 @@ fn build_ipv6_interface_config(
     }
 }
 
-// This writer keeps the deprecated fields populated for older agents during the rollout.
+// This writer keeps the deprecated IPv4 fields populated when IPv4 is configured so older
+// agents can consume IPv4-only and dual-stack payloads during the rollout.
 #[allow(deprecated)]
 pub(crate) async fn admin_network(
     txn: &mut PgConnection,
@@ -463,18 +464,16 @@ pub(crate) async fn admin_network(
     };
 
     let prefixes = PrefixPair::from_segment_prefixes(&admin_segment.prefixes);
-    let prefix = match prefixes.v4() {
-        Some(p) => p,
-        None => {
-            return Err(CarbideError::Internal {
-                message: format!(
-                    "admin network segment '{}' has no IPv4 network prefix",
-                    admin_segment.id,
-                ),
-            }
-            .into());
+    let prefix = prefixes.v4();
+    if prefix.is_none() && !fnn_enabled_on_admin {
+        return Err(CarbideError::Internal {
+            message: format!(
+                "admin network segment '{}' has no IPv4 network prefix",
+                admin_segment.id,
+            ),
         }
-    };
+        .into());
+    }
 
     let domain = match admin_segment.config.subdomain_id {
         Some(domain_id) => {
@@ -490,29 +489,37 @@ pub(crate) async fn admin_network(
         None => "unknowndomain".to_string(),
     };
 
-    let address = active_interface
-        .addresses
-        .iter()
-        .copied()
-        .find(|address| address.is_ipv4())
-        .ok_or_else(|| {
-            CarbideError::InvalidArgument(format!(
-                "no IPv4 address found on primary host admin interface {}",
-                active_interface.id
-            ))
-        })?;
+    let address = prefix
+        .map(|_| {
+            active_interface
+                .addresses
+                .iter()
+                .copied()
+                .find(|address| address.is_ipv4())
+                .ok_or_else(|| {
+                    CarbideError::InvalidArgument(format!(
+                        "no IPv4 address found on primary host admin interface {}",
+                        active_interface.id
+                    ))
+                })
+        })
+        .transpose()?;
     let ipv6_address = active_interface
         .addresses
         .iter()
         .copied()
         .find(IpAddr::is_ipv6);
 
-    // On the admin network, the interface_prefix is always
-    // just going to be a /32 derived from the machine interface
-    // address.
-    let address_prefix = IpNetwork::new(address, 32).map_err(|e| CarbideError::Internal {
-        message: format!("failed to build default admin address prefix for {address}/32: {e}"),
-    })?;
+    // Admin host routes advertise one machine, not the containing segment.
+    let address_prefix = address
+        .map(|address| {
+            IpNetwork::new(address, 32).map_err(|e| CarbideError::Internal {
+                message: format!(
+                    "failed to build default admin address prefix for {address}/32: {e}"
+                ),
+            })
+        })
+        .transpose()?;
 
     let svi_ip = if !fnn_enabled_on_admin {
         None
@@ -524,8 +531,8 @@ pub(crate) async fn admin_network(
     let ipv6_svi_address = ipv6_prefix.and_then(|prefix| prefix.svi_ip);
 
     // The agent installs the segment network address as the IPv6 VRR. Host, SVI, and VRR
-    // therefore have distinct in-prefix roles; incomplete or stale IPv6 is omitted so the valid
-    // IPv4 admin response remains usable.
+    // therefore have distinct in-prefix roles. Incomplete or stale IPv6 can be omitted only
+    // when a valid IPv4 admin response remains usable.
     let (ipv6_interface_config, ipv6_segment_prefix) = match (
         fnn_enabled_on_admin,
         ipv6_prefix,
@@ -562,6 +569,13 @@ pub(crate) async fn admin_network(
         }
         _ => (None, None),
     };
+    if address.is_none() && ipv6_interface_config.is_none() {
+        return Err(CarbideError::internal(format!(
+            "no complete IPv6 configuration found on primary host admin interface {} in segment {}",
+            active_interface.id, admin_segment.id,
+        ))
+        .into());
+    }
 
     let (vpc_vni, tenant_vrf_loopback_ip) = if !fnn_enabled_on_admin {
         (0, None)
@@ -622,15 +636,15 @@ pub(crate) async fn admin_network(
             0
         },
         vpc_vni,
-        gateway: prefix.gateway_cidr(),
-        ip: Some(address.to_string()),
-        interface_prefix: Some(address_prefix.to_string()),
+        gateway: prefix.and_then(NetworkPrefix::gateway_cidr),
+        ip: address.map(|address| address.to_string()),
+        interface_prefix: address_prefix.map(|prefix| prefix.to_string()),
         vpc_prefixes: if fnn_enabled_on_admin {
-            vec![format!("{address}/32")]
+            address_prefix.iter().map(ToString::to_string).collect()
         } else {
             vec![]
         },
-        prefix: Some(prefix.prefix.to_string()),
+        prefix: prefix.map(|prefix| prefix.prefix.to_string()),
         fqdn: format!("{}.{}", active_interface.hostname, domain),
         booturl: booturl.clone(),
         svi_ip,

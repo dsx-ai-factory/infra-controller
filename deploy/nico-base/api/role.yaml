@@ -22,4 +22,4 @@ metadata:
 rules:
   - apiGroups: ["cert-manager.io"]
     resources: ["certificaterequests"]
-    verbs: ["create"]
+    verbs: ["create", "get", "delete"]

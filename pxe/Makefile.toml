@@ -20,7 +20,9 @@ REPO_ROOT = { script = [
 ] }
 PKG_VERSION = { script = [
   "if [ -n \"$VERSION\" ]; then echo \"$VERSION\" | sed 's/^v//'; else v=$(git describe --tags --first-parent --always --long | sed 's/^v//'); case \"$v\" in [0-9]*) echo \"$v\" ;; *) echo \"0.0.0-$v\" ;; esac; fi",
-], condition = { env_not_set = ["PKG_VERSION"] } }
+], condition = { env_not_set = [
+  "PKG_VERSION",
+] } }
 FORGE_CA_PATH = { value = "${REPO_ROOT}/dev/forge_prodroot.pem" }
 
 # Where mkosi keeps downloaded distro packages. Without this mkosi re-downloads
@@ -28,7 +30,9 @@ FORGE_CA_PATH = { value = "${REPO_ROOT}/dev/forge_prodroot.pem" }
 # in CI. Purely a download cache -- mkosi still revalidates package metadata, so
 # a stale entry cannot silently change what lands in the image. CI persists this
 # across runs with actions/cache; locally it just makes rebuilds faster.
-MKOSI_PACKAGE_CACHE_DIR = { value = "${REPO_ROOT}/pxe/.mkosi-package-cache", condition = { env_not_set = ["MKOSI_PACKAGE_CACHE_DIR"] } }
+MKOSI_PACKAGE_CACHE_DIR = { value = "${REPO_ROOT}/pxe/.mkosi-package-cache", condition = { env_not_set = [
+  "MKOSI_PACKAGE_CACHE_DIR",
+] } }
 
 # BlueField Bundle (BFB) Version
 # NOTE: Update `crates/api/src/cfg/file.rs` to set the DOCA BFB component versions (BMC, NIC, CEC fw)
@@ -231,11 +235,7 @@ run_task = "internal-bfb-aarch64-sa"
 [tasks.ipxe-aarch64-sa]
 category = "iPXE Kernel"
 description = "Build iPXE kernel for aarch64 (EFI) for SA builds"
-dependencies = [
-  "ipxe-config",
-  "ipxe-patch-mlnx",
-  "ipxe-install-efi-aarch64",
-]
+dependencies = ["ipxe-config", "ipxe-patch-mlnx", "ipxe-install-efi-aarch64"]
 
 
 [tasks.build-boot-artifacts-bfb]
@@ -688,6 +688,19 @@ script = '''
     OUT=$(patch -p1 --forward -i "${PATCH}") || echo "${OUT}" | grep "Skipping patch" -q || (echo "$OUT" && false)
 '''
 
+[tasks.ipxe-patch-http-ipv6-source]
+category = "iPXE Kernel"
+description = "Patch iPXE to support an explicit IPv6 source for HTTP requests"
+cwd = "${REPO_ROOT}/pxe/ipxe/upstream"
+script = '''
+    IPXE_HTTP_SOURCE_PATCH="${REPO_ROOT}/pxe/ipxe/local/0004-http-ipv6-source.patch"
+    if patch --batch --dry-run -p1 --reverse --forward -i "${IPXE_HTTP_SOURCE_PATCH}" >/dev/null; then
+      echo "HTTP IPv6 source patch is already applied"
+    else
+      patch --batch -p1 --forward -i "${IPXE_HTTP_SOURCE_PATCH}"
+    fi
+'''
+
 [tasks.ipxe-install-efi-x86_64]
 category = "iPXE Kernel"
 description = "Copy the x86_64 EFI iPXE kernel to the boot controller static files directory"
@@ -700,20 +713,12 @@ dependencies = ["ipxe-build-efi-x86_64"]
 [tasks.ipxe-aarch64]
 category = "iPXE Kernel"
 description = "Build iPXE kernel for aarch64 (EFI) and move to the carbide static webroot"
-dependencies = [
-  "ipxe-config",
-  "ipxe-patch-mlnx",
-  "ipxe-install-efi-aarch64",
-]
+dependencies = ["ipxe-config", "ipxe-patch-mlnx", "ipxe-install-efi-aarch64"]
 
 [tasks.ipxe-aarch64-ci]
 category = "iPXE Kernel"
 description = "Build iPXE kernel for aarch64 (EFI) and move to the carbide static webroot"
-dependencies = [
-  "ipxe-config",
-  "ipxe-patch-mlnx",
-  "ipxe-install-efi-aarch64-ci",
-]
+dependencies = ["ipxe-config", "ipxe-patch-mlnx", "ipxe-install-efi-aarch64-ci"]
 
 [tasks.ipxe-install-efi-aarch64]
 category = "iPXE Kernel"
@@ -738,6 +743,7 @@ dependencies = ["ipxe-build-efi-aarch64-ci"]
 [tasks.ipxe-build-efi-x86_64]
 category = "iPXE Kernel"
 description = "Build the x86_64 EFI iPXE kernel"
+dependencies = ["ipxe-patch-http-ipv6-source"]
 script = '''
   LD_ARG=""
   if [ -n "${SA_ENABLEMENT}" ]; then
@@ -759,6 +765,7 @@ cwd = "ipxe/upstream/src"
 [tasks.ipxe-build-efi-aarch64]
 category = "iPXE Kernel"
 description = "Build the aarch64 EFI iPXE kernel on aarch64 gitlab runner"
+dependencies = ["ipxe-patch-http-ipv6-source"]
 script = '''
   if [ -n "${SA_ENABLEMENT}" ]; then
     docker run --rm -u $(id -u):$(id -g) \
@@ -805,6 +812,7 @@ cwd = "ipxe/upstream/src"
 [tasks.ipxe-build-efi-aarch64-ci]
 category = "iPXE Kernel"
 description = "Build the aarch64 EFI iPXE kernel on aarch64 gitlab runner"
+dependencies = ["ipxe-patch-http-ipv6-source"]
 command = "make"
 args = [
   "-j",

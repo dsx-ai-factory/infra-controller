@@ -303,7 +303,9 @@ pub enum PowerShelfDecommissioningState {
     /// Issues the BMC factory reset.
     FactoryResetBmc,
     /// Waiting for the pre-reset BMC DHCP suppression to be acknowledged.
-    /// Endpoints with an expected static IP and no recorded DHCP contact skip this wait.
+    /// An endpoint skips this wait if its MAC has at least one recorded interface,
+    /// every interface has a current `AllocationType::Static` address, and no
+    /// current address lies within any configured network prefix.
     WaitingForBmcDhcpAcknowledgement,
     /// Managed per-device credentials are being removed after factory reset.
     DeletingManagedCredentials,

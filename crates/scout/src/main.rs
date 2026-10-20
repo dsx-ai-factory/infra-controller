@@ -56,11 +56,13 @@ mod cfg;
 mod client;
 mod deprovision;
 mod discovery;
+mod firmware_staging;
 mod firmware_upgrade;
 mod lldp_report;
 mod machine_validation;
 mod metrics;
 mod mlx_device;
+mod nic_firmware_preflight;
 mod platform;
 mod register;
 mod stream;
@@ -200,6 +202,13 @@ async fn initial_setup(config: &Options) -> Result<(uuid::Uuid, MachineId), eyre
 }
 
 async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
+    // A local inspection request must never fall through to registration just
+    // because the caller omitted `--mode standalone`.
+    if matches!(&config.subcmd, Some(Command::Mlx(mlx)) if matches!(&mlx.action, MlxAction::Firmware(_)))
+    {
+        eyre::bail!("firmware preflight requires --mode standalone");
+    }
+
     // Stand up the metrics/scrape endpoint when it is configured. The meter
     // provider must stay alive for the lifetime of the service: dropping it
     // shuts down the Prometheus exporter. The endpoint is opt-in -- without
@@ -363,7 +372,6 @@ async fn run_standalone(config: &Options) -> Result<(), eyre::Report> {
             // Carbide will see re: reporting, troubleshooting, etc. Just
             // run the command locally and exit.
             Command::Mlx(mlx) => match &mlx.action {
-                // Then match on the specific action (Device or Lockdown)
                 MlxAction::Device(mlx_device) => {
                     // The mlx device subcommand doesn't need to be run with any
                     // sort of API integration; it's intended purely for interrogating
@@ -379,6 +387,10 @@ async fn run_standalone(config: &Options) -> Result<(), eyre::Report> {
                 MlxAction::Lockdown(mlx_lockdown) => {
                     handle_mlx_lockdown(mlx_lockdown.action.clone())
                         .map_err(|e| eyre::eyre!("{e}"))?;
+                    return Ok(());
+                }
+                MlxAction::Firmware(mlx_firmware) => {
+                    mlx_firmware.action.run().await?;
                     return Ok(());
                 }
             },
@@ -688,7 +700,7 @@ async fn handle_mlxreport_commands(
                 Err(e) => {
                     emit(metrics::ScoutMlxReconciliationFailed::Lock {
                         pci_name: dev_pci_name,
-                        error: mlx_device::lockdown_error_context(&e, &key),
+                        error: e.to_string(),
                     });
                 }
             },
@@ -764,7 +776,7 @@ async fn handle_mlxreport_commands(
                 Err(e) => {
                     emit(metrics::ScoutMlxReconciliationFailed::Unlock {
                         pci_name: dev_pci_name,
-                        error: mlx_device::lockdown_error_context(&e, &key),
+                        error: e.to_string(),
                     });
                 }
             },

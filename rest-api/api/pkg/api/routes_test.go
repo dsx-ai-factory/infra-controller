@@ -118,12 +118,12 @@ func TestNewAPIRoutes(t *testing.T) {
 				assert.Contains(t, route.Path, "/org/:orgName/"+cfg.GetAPIName())
 			}
 
-			expectedInventoryBulkPaths := []string{
+			expectedInventoryBatchPaths := []string{
 				"/expected-machine",
 				"/expected-power-shelf",
 				"/expected-switch",
 			}
-			for _, path := range expectedInventoryBulkPaths {
+			for _, path := range expectedInventoryBatchPaths {
 				allPath := "/org/:orgName/" + cfg.GetAPIName() + path + "/all"
 				itemPath := "/org/:orgName/" + cfg.GetAPIName() + path + "/:id"
 				assertRouteExists(t, got, http.MethodPut, allPath)

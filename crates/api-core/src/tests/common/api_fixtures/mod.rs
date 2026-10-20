@@ -24,7 +24,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use carbide_extension_service_controller::context::ExtensionServiceStateHandlerServices;
+use carbide_extension_service_controller::context::{
+    ExtensionServiceStateHandlerServices, ServiceVpcRegistrationConfig,
+};
 use carbide_extension_service_controller::handler::ExtensionServiceStateHandler;
 use carbide_extension_service_controller::io::ExtensionServiceStateControllerIO;
 use carbide_ib_fabric::IbFabricMonitor;
@@ -654,6 +656,17 @@ impl TestEnv {
             .lock()
             .await
             .run_single_iteration()
+            .boxed()
+            .await;
+    }
+
+    /// Processes extension-service work already queued by a transition.
+    /// Skipping the periodic scan proves the preceding controller pass requested the retry.
+    pub(in crate::tests) async fn run_queued_extension_service_controller_iterations(&self) {
+        self.extension_service_controller
+            .lock()
+            .await
+            .run_queued_iterations()
             .boxed()
             .await;
     }
@@ -1414,8 +1427,8 @@ async fn create_test_env_with_overrides_inner(
     db::resource_pool::define_all_from(&mut txn, &pool_defs(pool_size))
         .await
         .unwrap();
-    // Record the fixture pools' backend bindings the same way startup does.
-    ResourcePoolRegistry::resolve(
+    // Bind the populated fixture pools to Integrated before constructing the API.
+    let resource_pool_registry = ResourcePoolRegistry::resolve(
         PoolDefinitionSource::SeedConfiguration,
         &mut txn,
         &HashMap::new(),
@@ -1484,6 +1497,7 @@ async fn create_test_env_with_overrides_inner(
         common_pools.clone(),
         work_lock_manager_handle,
     )
+    .with_resource_pool_registry(resource_pool_registry)
     .with_credential_manager(composite_manager.clone())
     .with_runtime_config(config.clone())
     .with_eth_data(eth_virt_data)
@@ -1751,6 +1765,13 @@ async fn create_test_env_with_overrides_inner(
             ExtensionServiceStateHandlerServices {
                 db_pool: db_pool.clone(),
                 dpf_sdk: api.dpf_sdk.clone(),
+                service_vpc: ServiceVpcRegistrationConfig {
+                    slots: carbide_dpf::ServiceVpcSlots::new(
+                        config.dpu_config.service_vpc_slot_count,
+                    )
+                    .expect("test configuration has a validated service-VPC slot count"),
+                    enabled_address_families: config.dpf.deployments.service_vpc_address_families(),
+                },
             }
             .into(),
         )
@@ -1798,6 +1819,12 @@ async fn create_test_env_with_overrides_inner(
         SiteExplorerConfig {
             enabled: Arc::new(true.into()),
             retained_boot_interface_window: None,
+            admin_fnn_enabled: api
+                .runtime_config
+                .fnn
+                .as_ref()
+                .and_then(|fnn| fnn.admin_vpc.as_ref())
+                .is_some_and(|admin| admin.enabled),
             // run_interval shouldn't matter, this should not be run(), we only trigger intervals manually.
             run_interval: Duration::seconds(0).to_std().unwrap(),
             concurrent_explorations: 100,

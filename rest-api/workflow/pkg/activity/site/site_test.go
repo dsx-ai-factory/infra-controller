@@ -1095,6 +1095,7 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 		expectedSwitchID   uuid.UUID
 		expectedShelfID    uuid.UUID
 		imageOSSAID        uuid.UUID
+		tenantSiteID       uuid.UUID
 	}
 
 	buildSiteResources := func(tag string) *siteResources {
@@ -1178,6 +1179,9 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 		imageOS := util.TestBuildImageOperatingSystem(t, dbSession, &ip.ID, nil, "img-"+tag, ipOrg, cutil.GetPtr("v1"), cdbm.OperatingSystemStatusReady)
 		imageOSSA := util.TestBuildImageOperatingSystemSiteAssociation(t, dbSession, imageOS.ID, site.ID, cdbm.OperatingSystemSiteAssociationStatusSynced, "v1", false)
 
+		// Tenant/Site association that holds a Site denial without Allocations
+		tenantSite := cdbm.TestBuildTenantSite(t, dbSession, tenant, site, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, ipu)
+
 		return &siteResources{
 			site:               site,
 			instance:           instance,
@@ -1199,6 +1203,7 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 			expectedSwitchID:   es.ID,
 			expectedShelfID:    eps.ID,
 			imageOSSAID:        imageOSSA.ID,
+			tenantSiteID:       tenantSite.ID,
 		}
 	}
 
@@ -1259,6 +1264,7 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 	assertGone("expected_switch", &cdbm.ExpectedSwitch{}, "es.id", site1Resources.expectedSwitchID)
 	assertGone("expected_power_shelf", &cdbm.ExpectedPowerShelf{}, "eps.id", site1Resources.expectedShelfID)
 	assertGone("operating_system_site_association (site 1 image OS)", &cdbm.OperatingSystemSiteAssociation{}, "ossa.id", site1Resources.imageOSSAID)
+	assertGone("tenant_site", &cdbm.TenantSite{}, "ts.id", site1Resources.tenantSiteID)
 
 	// --- Site 2: nothing should have been touched. ---
 
@@ -1284,6 +1290,7 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 	assertPresent("expected_power_shelf", &cdbm.ExpectedPowerShelf{}, "eps.id", site2Resources.expectedShelfID)
 	// Site 2's image OS and its association are independent of site 1
 	assertPresent("operating_system_site_association (site 2 image OS)", &cdbm.OperatingSystemSiteAssociation{}, "ossa.id", site2Resources.imageOSSAID)
+	assertPresent("tenant_site", &cdbm.TenantSite{}, "ts.id", site2Resources.tenantSiteID)
 
 	// SSHKeyAssociation for site 1 should still be present since the
 	// workflow's call effectively no-ops against site IDs (see test docstring).

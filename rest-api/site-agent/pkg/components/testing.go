@@ -25,14 +25,11 @@ import (
 	"gopkg.in/yaml.v2"
 
 	cutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/coregrpc"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
 	"github.com/rs/zerolog/log"
 
-	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	bootstraptypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/bootstrap"
-	workflowtypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/workflow"
 )
 
 var (
@@ -46,14 +43,6 @@ var (
 	DefaultTestTenantKeysetID = "00000000-0000-4000-a000-000000000000"
 	// DefaultTestIBParitionID is the default IBPartition ID for testing
 	DefaultTestIBParitionID = "00000000-0000-4000-b000-000000000000"
-
-	// Counters to track various failure/success counts
-	wflowGrpcFail = 0
-	wflowGrpcSucc = 0
-	wflowActFail  = uint64(0)
-	wflowActSucc  = uint64(0)
-	wflowPubFail  = uint64(0)
-	wflowPubSucc  = uint64(0)
 )
 
 // Test Elektra objects
@@ -85,42 +74,6 @@ type bootstrapSecretData struct {
 	OTP                 string
 	SiteManagerCredsURL string
 	SiteManagerCACert   string
-}
-
-// checkGrpcState checks the state of the NICo gRPC connection
-func checkGrpcState(stats *workflowtypes.MgrState) {
-	fail := int(coregrpc.ManagerAccess.Data.EB.Managers.CoreGrpc.State.GrpcFail.Load())
-	if wflowGrpcFail != fail {
-		log.Info().Msgf("wflowGrpcFail: %v, state fail: %v ", wflowGrpcFail, fail)
-		panic("wflowGrpcFail ctr incorrect")
-	}
-	succ := int(coregrpc.ManagerAccess.Data.EB.Managers.CoreGrpc.State.GrpcSucc.Load())
-	if wflowGrpcSucc != succ {
-		log.Info().Msgf("wflowGrpcSucc: %v, state succ %v", wflowGrpcSucc, succ)
-		panic("wflowGrpcSucc ctr incorrect")
-	}
-	state := uint64(coregrpc.ManagerAccess.Data.EB.Managers.CoreGrpc.State.HealthStatus.Load())
-	if uint64(computils.CompHealthy) != state {
-		log.Info().Msgf("state %v ", state)
-		panic("Component not in Healthy State")
-	}
-
-	if stats.WflowActFail.Load() != wflowActFail {
-		log.Info().Msgf("%v != %v", stats.WflowActFail.Load(), wflowActFail)
-		panic("wflowActFail")
-	}
-	if stats.WflowActSucc.Load() != wflowActSucc {
-		log.Info().Msgf("%v != %v", stats.WflowActSucc.Load(), wflowActSucc)
-		panic("wflowActSucc")
-	}
-	if stats.WflowPubSucc.Load() != wflowPubSucc {
-		log.Info().Msgf("%v != %v", stats.WflowPubSucc.Load(), wflowPubSucc)
-		panic("wflowPubSucc")
-	}
-	if stats.WflowPubFail.Load() != wflowPubFail {
-		log.Info().Msgf("%v != %v", stats.WflowPubFail.Load(), wflowPubFail)
-		panic("wflowPubFail")
-	}
 }
 
 // SetupTestCA generates a test CA certificate and key.

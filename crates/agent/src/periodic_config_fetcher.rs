@@ -17,7 +17,6 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use ::rpc::forge_tls_client::ForgeClientConfig;
@@ -31,20 +30,21 @@ use config_version::ConfigVersion;
 use eyre::Context;
 use forge_dpu_agent_utils::utils::create_forge_client;
 use ipnetwork::IpNetwork;
+use tokio_util::sync::CancellationToken;
 use tracing::{trace, warn};
 
 use crate::instrumentation::ConfigFetch;
-use crate::util::{get_periodic_dpu_config, get_sitename};
+use crate::util::{get_periodic_dpu_config, get_sitename, jittered_interval};
 
 struct PeriodicFetcherState {
     config: PeriodicConfigFetcherConfig,
     netconf: ArcSwapOption<rpc::ManagedHostNetworkConfigResponse>,
     instmeta: ArcSwapOption<InstanceMetadata>,
-    is_cancelled: AtomicBool,
+    cancel_token: CancellationToken,
     sitename: Option<String>,
 }
 
-/// Fetches the desired network configuration for a managed host in regular intervals
+/// Fetches the desired network configuration for a managed host with jittered waits.
 pub(super) struct PeriodicConfigFetcher {
     state: Arc<PeriodicFetcherState>,
     join_handle: Option<tokio::task::JoinHandle<()>>,
@@ -118,11 +118,8 @@ impl PeriodicConfigFetcherReader {
 
 impl Drop for PeriodicConfigFetcher {
     fn drop(&mut self) {
-        // Signal the background task and wait for it to shut down
-        // TODO: Might be nicer if it would be interrupted during waiting for 30s
-        self.state
-            .is_cancelled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // Interrupt the wait; any fetch already in progress may finish before joining.
+        self.state.cancel_token.cancel();
         if let Some(jh) = self.join_handle.take() {
             tokio::spawn(async move {
                 jh.await.unwrap();
@@ -149,17 +146,24 @@ impl PeriodicConfigFetcher {
             instmeta: ArcSwapOption::default(),
             sitename,
             config,
-            is_cancelled: AtomicBool::new(false),
+            cancel_token: CancellationToken::new(),
         });
 
         // Do an initial synchronous fetch so that caller has data to use
         // This gets a DPU on the network immediately
-        single_fetch(&forge_client_config, state.clone()).await;
+        let next_fetch_delay = single_fetch(&forge_client_config, state.clone(), true).await;
 
         let task_state = state.clone();
         let join_handle = tokio::spawn(async move {
-            while single_fetch(&forge_client_config, task_state.clone()).await {
-                tokio::time::sleep(task_state.config.config_fetch_interval).await;
+            let mut next_fetch_delay = next_fetch_delay;
+            while let Some(delay) = next_fetch_delay {
+                tokio::select! {
+                    biased;
+                    () = task_state.cancel_token.cancelled() => break,
+                    () = tokio::time::sleep(delay) => {}
+                }
+                next_fetch_delay =
+                    single_fetch(&forge_client_config, task_state.clone(), false).await;
             }
         });
 
@@ -186,7 +190,8 @@ impl PeriodicConfigFetcher {
 }
 
 pub(super) struct PeriodicConfigFetcherConfig {
-    /// The interval in which the config is fetched
+    /// Wait between recurring fetches, plus up to 10% jitter. An initial
+    /// fetch failure gets one immediate background retry.
     pub(super) config_fetch_interval: Duration,
     pub(super) machine_id: DpuMachineId,
     pub(super) forge_api: String,
@@ -205,16 +210,15 @@ async fn fetch_sitename(
     get_sitename(&mut client).await
 }
 
+/// Returns the next fetch delay, or `None` when the fetcher was dropped.
 async fn single_fetch(
     forge_client_config: &ForgeClientConfig,
     state: Arc<PeriodicFetcherState>,
-) -> bool {
-    if state
-        .is_cancelled
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
+    initial_fetch: bool,
+) -> Option<Duration> {
+    if state.cancel_token.is_cancelled() {
         trace!("Periodic fetcher was dropped. Stopping config reading");
-        return false;
+        return None;
     }
 
     trace!(
@@ -228,27 +232,26 @@ async fn single_fetch(
         forge_client_config,
     )
     .await;
-    // The outcome covers the whole fetch: a successful RPC whose instance
-    // metadata fails to convert is still a failed configuration fetch.
-    match result {
+    // A successful RPC whose instance metadata fails to convert is still a
+    // failed fetch, so finish conversion before choosing the retry delay.
+    let result = match result {
         Ok(resp) => {
             state.netconf.store(Some(Arc::new(resp.clone())));
-
-            match instance_metadata_from_instance(resp.instance, state.sitename.clone()) {
-                Ok(Some(config)) => {
-                    state.instmeta.store(Some(Arc::new(config)));
-                    ConfigFetch::Succeeded.emit();
-                }
-                Ok(None) => {
-                    state.instmeta.store(None);
-                    ConfigFetch::Succeeded.emit();
-                }
-                Err(err) => ConfigFetch::Failed {
-                    error: err.to_string(),
-                    retry_interval_seconds: state.config.config_fetch_interval.as_secs_f64(),
-                }
-                .emit(),
-            }
+            instance_metadata_from_instance(resp.instance, state.sitename.clone())
+        }
+        Err(err) => Err(err),
+    };
+    // Startup consumers can need the cached config before a normal interval
+    // passes. Preserve one immediate retry if the initial fetch fails.
+    let next_fetch_delay = if initial_fetch && result.is_err() {
+        Duration::ZERO
+    } else {
+        jittered_interval(state.config.config_fetch_interval, &mut rand::rng())
+    };
+    match result {
+        Ok(config) => {
+            state.instmeta.store(config.map(Arc::new));
+            ConfigFetch::Succeeded.emit();
         }
         Err(err) => match err.downcast_ref::<tonic::Status>() {
             Some(grpc_status) if grpc_status.code() == tonic::Code::NotFound => {
@@ -261,13 +264,13 @@ async fn single_fetch(
             }
             _ => ConfigFetch::Failed {
                 error: format!("{err:?}"),
-                retry_interval_seconds: state.config.config_fetch_interval.as_secs_f64(),
+                retry_interval_seconds: next_fetch_delay.as_secs_f64(),
             }
             .emit(),
         },
     }
 
-    true
+    Some(next_fetch_delay)
 }
 
 /// Make the network request to get network config

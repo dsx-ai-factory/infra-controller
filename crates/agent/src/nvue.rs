@@ -581,6 +581,7 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
             fmds_gateway_matched = true;
         }
         let port_has_neighbor = !port.HostIP.is_empty() || port.HostIPv6.is_some();
+        let port_has_ipv4_host_route = !port.HostRoute.is_empty();
         let port_has_ipv6_host_route = port
             .HostIPv6Route
             .as_deref()
@@ -605,6 +606,7 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
                     v.RoutingProfile = routing_profile.clone();
                 }
                 v.HasNeighbors |= port_has_neighbor;
+                v.HasIpv4HostRoutes |= port_has_ipv4_host_route;
                 v.HasIpv6HostRoutes |= port_has_ipv6_host_route;
                 v.PortConfigs.push(port.clone());
             })
@@ -614,6 +616,7 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
                 HasVrfLoopback: network.tenant_vrf_loopback_ip.is_some(),
                 VrfLoopback: network.tenant_vrf_loopback_ip.unwrap_or_default(),
                 HasNeighbors: port_has_neighbor,
+                HasIpv4HostRoutes: port_has_ipv4_host_route,
                 HasIpv6HostRoutes: port_has_ipv6_host_route,
                 PortConfigs: vec![port.clone()],
                 VpcPeerVnis: network
@@ -1798,6 +1801,8 @@ struct TmplVpc {
     VrfLoopback: String,
 
     HasNeighbors: bool,
+    /// Whether any port has an IPv4 host route, so IPv6-only VRFs omit the BGP network map.
+    HasIpv4HostRoutes: bool,
     /// Whether any port has an IPv6 host route, so IPv4-only VRFs omit the BGP network map.
     HasIpv6HostRoutes: bool,
     PortConfigs: Vec<TmplConfigPort>,
@@ -2694,6 +2699,80 @@ type: ipv6
 "#,
             )
             .expect("expected outbound ACL should be valid YAML")
+        );
+    }
+
+    /// `write nvue` accepts several admin ports in one VPC. An IPv6-only port
+    /// must not remove another port's IPv4 route or add an empty route key.
+    #[test]
+    fn test_build_fnn_admin_host_routes_accumulate_across_ports() {
+        value_scenarios!(run = |ipv4_first: bool| {
+            let mut conf = minimal_nvue_config();
+            conf.is_fnn = true;
+            conf.vpc_virtualization_type = VpcVirtualizationType::Fnn;
+            conf.use_admin_network = true;
+            conf.ct_routing_profile = Some(minimal_fnn_routing_profile());
+            // Keep one physical port for the DPU-OS FMDS interface.
+            conf.ct_port_configs = vec![
+                PortConfig {
+                    host_route: "10.0.1.2/32".into(),
+                    l3_vni: Some(100),
+                    svi_ip: Some("10.0.1.3/24".into()),
+                    ..phy_port_config(100)
+                },
+                PortConfig {
+                    interface_name: "pf0vf0_if".into(),
+                    is_phy: false,
+                    host_ip: String::new(),
+                    host_route: String::new(),
+                    host_ipv6: Some("2001:db8::3".into()),
+                    host_ipv6_route: Some("2001:db8::3/128".into()),
+                    vni: Some(1001),
+                    l3_vni: Some(100),
+                    gateway_cidr: String::new(),
+                    svi_ip: None,
+                    ipv6_port_config: Some(Ipv6PortConfig {
+                        gateway_cidr: "2001:db8::/64".into(),
+                        svi_ip: Some("2001:db8::2/64".into()),
+                        router_advertisement: None,
+                    }),
+                    ..phy_port_config(101)
+                },
+            ];
+            if !ipv4_first {
+                conf.ct_port_configs.reverse();
+            }
+
+            let output = build(conf).expect("mixed admin ports should render");
+            let documents: serde_yaml::Value =
+                serde_yaml::from_str(&output).expect("output should be valid YAML");
+            let router = &documents.as_sequence().expect("two YAML documents")[1]["set"]
+                ["vrf"]["vpc_100"]["router"];
+            let address_families = &router["bgp"]["address-family"];
+
+            (
+                yaml_mapping_keys(&router["static"]),
+                yaml_mapping_keys(&address_families["ipv4-unicast"]["network"]),
+                yaml_mapping_keys(&address_families["ipv6-unicast"]["network"]),
+            )
+        };
+            // A later IPv6-only port must preserve IPv4 support recorded by the first port.
+            "IPv6-only port preserves an earlier IPv4 host route" {
+                true => (
+                    address_set(&["10.0.1.2/32", "2001:db8::3/128"]),
+                    address_set(&["10.0.1.2/32"]),
+                    address_set(&["2001:db8::3/128"]),
+                ),
+            }
+
+            // An IPv6-only first port must not prevent a later port from enabling IPv4 routes.
+            "IPv4 port adds a route after an IPv6-only port" {
+                false => (
+                    address_set(&["10.0.1.2/32", "2001:db8::3/128"]),
+                    address_set(&["10.0.1.2/32"]),
+                    address_set(&["2001:db8::3/128"]),
+                ),
+            }
         );
     }
 

@@ -85,6 +85,7 @@ pub mod mac_address_pool;
 mod machine_info;
 mod middleware_router;
 mod mock_machine_router;
+mod nvue;
 mod power_state;
 mod rack_info;
 mod redfish;
@@ -107,6 +108,11 @@ pub use mock_machine_router::{
     EventServiceOverride, MachineRouterOptions, machine_router, machine_router_with_injection_store,
 };
 pub use nv_redfish::schema::resource::ResetType as ResourceResetType;
+/// A switch's NVUE REST API, served at its NVOS address, and the simulation
+/// controls over what it reports.
+pub use nvue::{
+    LeakState, NvueState, SystemHealthStatus, UnknownLeakSensor, UnknownUser, nvue_router,
+};
 pub use power_state::validate_power_reset;
 pub use rack_info::RackInfo;
 /// BMC account state and the credential snapshot type used to persist and
@@ -122,6 +128,9 @@ pub use sse::StreamStep;
 
 pub const DUMMY_FACTORY_USERNAME: &str = "root";
 pub const DUMMY_FACTORY_PASSWORD: &str = "factory_password";
+/// The NVOS administrator of a simulated switch, with
+/// [`DUMMY_FACTORY_PASSWORD`] until a rotation changes it.
+pub const DUMMY_NVOS_USERNAME: &str = "admin";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 pub enum RackType {

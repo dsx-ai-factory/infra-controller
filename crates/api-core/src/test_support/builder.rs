@@ -24,6 +24,7 @@ use carbide_nvlink_manager::nvlink::test_support::NmxcSimClient;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_redfish::libredfish::BmcCredentialOps;
 use carbide_redfish::libredfish::test_support::RedfishSim;
+use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::credentials::CredentialManager;
 use carbide_secrets::test_support::certificates::TestCertificateProvider;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
@@ -40,6 +41,7 @@ use librms::RmsApi;
 use model::resource_pool::common::CommonPools;
 use sqlx::PgPool;
 use state_controller::controller::Enqueuer;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 use super::Api;
@@ -57,6 +59,7 @@ use crate::test_support::network::default_test_eth_virt_data;
 pub struct TestApiBuilder {
     db_pool: PgPool,
     common_pools: Arc<CommonPools>,
+    resource_pool_registry: ResourcePoolRegistry,
     work_lock_manager: WorkLockManagerHandle,
     runtime_config: Option<Arc<CarbideConfig>>,
     credential_manager: Option<Arc<dyn CredentialManager>>,
@@ -83,6 +86,7 @@ impl TestApiBuilder {
         TestApiBuilder {
             db_pool,
             common_pools,
+            resource_pool_registry: ResourcePoolRegistry::default(),
             work_lock_manager,
             runtime_config: None,
             credential_manager: None,
@@ -98,6 +102,15 @@ impl TestApiBuilder {
             endpoint_explorer: None,
             console_log_source: None,
             firmware_object_fetcher: None,
+        }
+    }
+
+    /// `with_resource_pool_registry` supplies the resolved pool backends used by the API.
+    /// Without one, pool lookups read the database in the caller's transaction.
+    pub fn with_resource_pool_registry(self, resource_pool_registry: ResourcePoolRegistry) -> Self {
+        Self {
+            resource_pool_registry,
+            ..self
         }
     }
 
@@ -333,6 +346,7 @@ impl TestApiBuilder {
             bmc_proxy_passthrough: None,
             eth_data,
             common_pools: self.common_pools,
+            resource_pool_registry: self.resource_pool_registry,
             ib_fabric_manager,
             dynamic_settings,
             endpoint_explorer,
@@ -356,6 +370,7 @@ impl TestApiBuilder {
             console_log_source: self
                 .console_log_source
                 .unwrap_or_else(|| Arc::new(crate::console_logs::UnavailableSource)),
+            cancel_token: CancellationToken::new(),
         }
     }
 }

@@ -125,6 +125,10 @@ func testExpectedMachineSetupTestData(t *testing.T, dbSession *cdb.Session, org 
 }
 
 func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
+	t.Run("complete mutation conflict", func(t *testing.T) {
+		testExpectedMachineMutationRejectsCompleteMutationLock(t, "single create")
+	})
+
 	// Setup
 	e := echo.New()
 
@@ -1263,6 +1267,10 @@ func TestBmcMacUnchanged(t *testing.T) {
 }
 
 func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
+	t.Run("complete mutation conflict", func(t *testing.T) {
+		testExpectedMachineMutationRejectsCompleteMutationLock(t, "single update")
+	})
+
 	tests := []struct {
 		name string
 		run  func(*testing.T)
@@ -1755,6 +1763,10 @@ func testUpdateExpectedMachineBmcIpAddress(t *testing.T) {
 }
 
 func TestDeleteExpectedMachineHandler_Handle(t *testing.T) {
+	t.Run("complete mutation conflict", func(t *testing.T) {
+		testExpectedMachineMutationRejectsCompleteMutationLock(t, "single delete")
+	})
+
 	// Setup
 	e := echo.New()
 	dbSession := testExpectedMachineInitDB(t)
@@ -2336,6 +2348,10 @@ func TestTenantWithTargetedInstanceCreationCapability(t *testing.T) {
 
 // TestCreateExpectedMachinesHandler_Handle tests the batch create handler
 func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
+	t.Run("complete mutation conflict", func(t *testing.T) {
+		testExpectedMachineMutationRejectsCompleteMutationLock(t, "batch create")
+	})
+
 	// Setup
 	e := echo.New()
 
@@ -3113,6 +3129,10 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 }
 
 func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
+	t.Run("complete mutation conflict", func(t *testing.T) {
+		testExpectedMachineMutationRejectsCompleteMutationLock(t, "batch update")
+	})
+
 	tests := []struct {
 		name string
 		run  func(*testing.T)

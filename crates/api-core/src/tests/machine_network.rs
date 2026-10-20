@@ -29,13 +29,14 @@ use carbide_uuid::machine::{AsMachineId, DpuMachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use common::api_fixtures::network_segment::{
-    FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS, create_tenant_network_segment,
-    create_underlay_network_segment,
+    FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS, FIXTURE_UNDERLAY_NETWORK_SEGMENT_GATEWAY,
+    create_tenant_network_segment, create_underlay_network_segment,
 };
 use common::api_fixtures::{self, create_managed_host, dpu, network_configured_with_health};
 use config_version::ConfigVersion;
 use db::ConditionalWrite;
 use db::machine::AdminNetworkChangeNotPending;
+use model::expected_machine::{ExpectedInterface, ExpectedInterfaceRole};
 use model::machine::network::ManagedHostQuarantineMode;
 use rpc::Metadata;
 use rpc::forge::forge_server::Forge;
@@ -46,7 +47,7 @@ use crate::cfg::file::{
 use crate::tests::common;
 use crate::tests::common::api_fixtures::TestEnvOverrides;
 use crate::tests::common::api_fixtures::site_explorer::MockExploredHost;
-use crate::tests::common::rpc_builder::VpcCreationRequest;
+use crate::tests::common::rpc_builder::{DhcpDiscovery, VpcCreationRequest};
 
 async fn set_use_admin_network_changed(
     env: &api_fixtures::TestEnv,
@@ -460,7 +461,7 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
     // The same allocated segment must remain IPv4-only when admin FNN is disabled, even though
     // the database contains a complete IPv6 prefix/address pair.
     let mut txn = env.db_txn().await;
-    let snapshot = managed_host.snapshot(&mut txn).await;
+    let mut snapshot = managed_host.snapshot(&mut txn).await;
     let booturl = None;
     let (non_fnn_admin_interface, _) = crate::ethernet_virtualization::admin_network(
         txn.as_mut(),
@@ -490,6 +491,36 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
         non_fnn_admin_interface.ip.as_deref().unwrap()
     );
 
+    // A dual-stack segment still requires its host IPv4 allocation, even when
+    // the IPv6 configuration could otherwise provide a complete response.
+    let active_interface = snapshot
+        .host_snapshot
+        .status
+        .interfaces
+        .iter_mut()
+        .find(|interface| interface.id == persisted_interface.id)
+        .unwrap();
+    active_interface.addresses.retain(std::net::IpAddr::is_ipv6);
+    assert_eq!(active_interface.addresses, vec![persisted_ipv6]);
+    let mut txn = env.db_txn().await;
+    let error = crate::ethernet_virtualization::admin_network(
+        txn.as_mut(),
+        &snapshot,
+        &dpu_machine_id,
+        crate::ethernet_virtualization::AdminNetworkOptions {
+            fnn_enabled: true,
+            common_pools: &env.common_pools,
+            booturl: &booturl,
+            use_vpc_vrf_loopback: false,
+            routing_profile: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(error.message().contains("no IPv4 address found"));
+    txn.rollback().await.unwrap();
+
     // Model a failed IPv6 SVI backfill while retaining the allocated host address. The incomplete
     // IPv6 role set must not prevent Core from returning the valid IPv4 config.
     let mut txn = env.db_txn().await;
@@ -515,6 +546,225 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
     let admin_interface = response.admin_interface.expect("admin interface");
     assert!(admin_interface.ipv6_interface_config.is_none());
     assert_eq!(admin_interface.addresses, vec![expected_ipv4_address]);
+}
+
+/// Gatewayless admin definitions must survive DPU discovery and produce stateful DHCPv6 config.
+/// Unrelated relay metadata must not redirect the host allocation away from its admin segment.
+#[crate::sqlx_test]
+#[allow(deprecated)]
+async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::PgPool) {
+    let env = create_admin_ipv6_test_env(pool).await;
+    let config: crate::cfg::file::InitialObjectsConfig = toml::from_str(
+        r#"
+            [networks.ipv6-admin]
+            type = "admin"
+            prefix = "2001:db8:9::/64"
+            mtu = 1500
+            reserve_first = 3
+
+            [networks.unrelated-ipv6-underlay]
+            type = "underlay"
+            prefix = "2001:db8:a::/64"
+            dhcpv6_link_address = "2001:db8:9::"
+            mtu = 1500
+            reserve_first = 3
+        "#,
+    )
+    .unwrap();
+    crate::db_init::create_initial_networks(&env.api, &env.pool, &config.networks.unwrap())
+        .await
+        .unwrap();
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    crate::db_init::create_admin_vpc(&env.api, Some(10000))
+        .await
+        .unwrap();
+    crate::db_init::update_network_segments_svi_ip(&env.pool)
+        .await
+        .unwrap();
+
+    let mut txn = env.db_txn().await;
+    let segment = db::network_segment::find_by_name(&mut txn, "ipv6-admin")
+        .await
+        .unwrap();
+    let [prefix] = segment.prefixes.as_slice() else {
+        panic!("IPv6-only admin segment must have exactly one prefix")
+    };
+    assert!(prefix.gateway.is_none());
+    assert!(prefix.dhcpv6_link_address.is_none());
+    assert_eq!(prefix.svi_ip, Some("2001:db8:9::2".parse().unwrap()));
+    let unrelated = db::network_segment::find_by_name(&mut txn, "unrelated-ipv6-underlay")
+        .await
+        .unwrap();
+    assert_eq!(
+        unrelated.prefixes[0].dhcpv6_link_address,
+        Some(prefix.prefix.network())
+    );
+    txn.rollback().await.unwrap();
+
+    let mut host_config = env.managed_host_config();
+    let dpu_oob_mac = host_config.get_and_assert_single_dpu().oob_mac_address;
+    // The fixture's IPv4 admin relay is absent here. Declare the underlay DPU
+    // OS identity before DHCP so site exploration does not probe it as a BMC.
+    host_config
+        .expected_machine_data
+        .get_or_insert_with(Default::default)
+        .interfaces
+        .push(ExpectedInterface {
+            mac_address: dpu_oob_mac,
+            role: ExpectedInterfaceRole::DpuOs,
+            ..Default::default()
+        });
+    api_fixtures::site_explorer::register_expected_machine(&env, &host_config, None).await;
+    let dpu_config = host_config.get_and_assert_single_dpu();
+    env.api
+        .discover_dhcp(
+            DhcpDiscovery::builder(
+                dpu_config.oob_mac_address,
+                FIXTURE_UNDERLAY_NETWORK_SEGMENT_GATEWAY.ip(),
+            )
+            .tonic_request(),
+        )
+        .await
+        .expect("DPU out-of-band DHCP must succeed on the IPv4 underlay");
+    let managed_host =
+        dpu::create_dpu_machine_in_waiting_for_network_install(&env, &host_config).await;
+    let dpu_machine_id = managed_host.dpu().id;
+    let mut txn = env.db_txn().await;
+    let dpu_interfaces =
+        db::machine_interface::find_by_mac_address(txn.as_mut(), dpu_config.oob_mac_address)
+            .await
+            .unwrap();
+    let [dpu_interface] = dpu_interfaces.as_slice() else {
+        panic!("DPU discovery requires exactly one out-of-band interface")
+    };
+    txn.rollback().await.unwrap();
+
+    // Site exploration creates the host link before the fixture submits DPU
+    // discovery. Check the public RPC explicitly so that earlier setup cannot
+    // hide a failure to rediscover an IPv6-only admin interface.
+    assert_eq!(
+        dpu::dpu_discover_machine(&env, dpu_config, dpu_interface.id).await,
+        dpu_machine_id.into()
+    );
+
+    let mut txn = env.db_txn().await;
+    let interfaces = db::machine_interface::find_by_machine_and_segment(
+        txn.as_mut(),
+        managed_host.id.as_machine_id(),
+        segment.id,
+    )
+    .await
+    .unwrap();
+    txn.rollback().await.unwrap();
+    let [interface] = interfaces.as_slice() else {
+        panic!("discovery must persist exactly one host admin interface")
+    };
+    assert!(interface.primary_interface);
+    assert_eq!(interface.attached_dpu_machine_id, Some(dpu_machine_id));
+    let [std::net::IpAddr::V6(address)] = interface.addresses.as_slice() else {
+        panic!("IPv6-only admin interface must have exactly one IPv6 address")
+    };
+    assert!(prefix.prefix.contains((*address).into()));
+    let host_route = format!("{address}/128");
+
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(response.use_admin_network);
+    assert!(response.enable_dhcp);
+    assert!(response.is_primary_dpu);
+    assert_eq!(response.host_interface_id, Some(interface.id.to_string()));
+    let admin = response.admin_interface.as_ref().expect("admin interface");
+    assert!(admin.ip.is_none());
+    assert!(admin.gateway.is_none());
+    assert!(admin.prefix.is_none());
+    assert!(admin.interface_prefix.is_none());
+    assert!(admin.svi_ip.is_none());
+    assert!(admin.vpc_prefixes.is_empty());
+    assert_eq!(
+        admin.ipv6_interface_config,
+        Some(rpc::forge::FlatInterfaceIpv6Config {
+            ip: address.to_string(),
+            interface_prefix: host_route.clone(),
+            svi_ip: Some("2001:db8:9::2/64".to_string()),
+        })
+    );
+    assert_eq!(
+        admin.addresses,
+        vec![rpc::forge::InterfaceAddressConfig {
+            address_family: rpc::forge::AddressFamily::V6.into(),
+            ip: address.to_string(),
+            interface_prefix: host_route.clone(),
+            prefix: "2001:db8:9::/64".to_string(),
+            gateway: None,
+            svi_ip: Some("2001:db8:9::2/64".to_string()),
+            tenant_vrf_loopback_ip: None,
+        }]
+    );
+
+    // The public response must produce a stateful DHCPv6 binding without requiring IPv4.
+    let vlan = format!("vlan{}", admin.vlan_id);
+    let dhcp =
+        carbide_rpc_utils::dhcp::HostConfig::try_from(response, "pf0hpf_if", "pf0vf", "_if", true)
+            .unwrap();
+    assert_eq!(dhcp.host_interface_id, interface.id);
+    assert_eq!(dhcp.host_ip_addresses.len(), 1);
+    let dhcp_interface = &dhcp.host_ip_addresses[&vlan];
+    assert!(dhcp_interface.address.is_none());
+    assert!(dhcp_interface.gateway.is_none());
+    assert!(dhcp_interface.prefix.is_none());
+    assert_eq!(
+        dhcp_interface.ipv6,
+        Some(carbide_rpc_utils::dhcp::InterfaceInfoV6 {
+            address: Some(*address),
+            prefix: host_route,
+        })
+    );
+
+    // Without FNN there is no IPv6 admin SVI path, even for this complete segment.
+    let mut txn = env.db_txn().await;
+    let snapshot = managed_host.snapshot(&mut txn).await;
+    let error = crate::ethernet_virtualization::admin_network(
+        txn.as_mut(),
+        &snapshot,
+        &dpu_machine_id,
+        crate::ethernet_virtualization::AdminNetworkOptions {
+            fnn_enabled: false,
+            common_pools: &env.common_pools,
+            booturl: &None,
+            use_vpc_vrf_loopback: false,
+            routing_profile: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert!(error.message().contains("has no IPv4 network prefix"));
+    txn.rollback().await.unwrap();
+
+    // A failed SVI backfill has no IPv4 fallback here; returning an empty admin config would
+    // leave the host without either DHCPv6 routing or a usable IPv4 configuration.
+    let cleared = sqlx::query("UPDATE network_prefixes SET svi_ip = NULL WHERE segment_id = $1")
+        .bind(segment.id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(cleared.rows_affected(), 1);
+    let error = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert!(error.message().contains("no complete IPv6 configuration"));
 }
 
 /// Verifies Core never combines a retained IPv6 address with a different admin segment.

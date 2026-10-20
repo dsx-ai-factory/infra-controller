@@ -675,11 +675,24 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct RecordingMetricSink(StdMutex<Vec<(EventContext, MetricSample)>>);
+    struct RecordingMetricSink {
+        samples: StdMutex<Vec<(EventContext, MetricSample)>>,
+        pruned_keys: StdMutex<Vec<String>>,
+    }
 
     impl DataSink for RecordingMetricSink {
         fn sink_type(&self) -> &'static str {
             "recording_metric"
+        }
+
+        fn prune_metric_key(
+            &self,
+            _context: &EventContext,
+            key: &str,
+            _metric_type: &str,
+            _unit: &str,
+        ) {
+            self.pruned_keys.lock().unwrap().push(key.to_string());
         }
 
         fn try_handle_event(
@@ -688,7 +701,7 @@ mod tests {
             event: &CollectorEvent,
         ) -> Result<(), HealthError> {
             if let CollectorEvent::Metric(sample) = event {
-                self.0
+                self.samples
                     .lock()
                     .expect("recording sink lock")
                     .push((context.clone(), (**sample).clone()));
@@ -810,7 +823,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     let published = sink
-                        .0
+                        .samples
                         .lock()
                         .expect("recorded metrics")
                         .iter()
@@ -1294,10 +1307,20 @@ mod tests {
                 .expect("closures"),
             connection_established_timestamp: Gauge::new("test_established", "test")
                 .expect("established gauge"),
+            connection_established_timestamp_seconds: Gauge::new(
+                "test_established_seconds",
+                "test",
+            )
+            .expect("established seconds gauge"),
             notifications_received_total: Counter::new("test_notifications", "test")
                 .expect("notifications"),
             last_notification_timestamp: Gauge::new("test_last_notification", "test")
                 .expect("last notification"),
+            last_notification_timestamp_seconds: Gauge::new(
+                "test_last_notification_seconds",
+                "test",
+            )
+            .expect("last notification seconds"),
             notification_processing_seconds: Histogram::with_opts(HistogramOpts::new(
                 "test_processing",
                 "test",
@@ -1335,7 +1358,7 @@ mod tests {
 
         assert_eq!(service.active_requests.load(Ordering::SeqCst), 1);
 
-        let samples = sink.0.lock().expect("recorded metric lock").clone();
+        let samples = sink.samples.lock().expect("recorded metric lock").clone();
         assert_eq!(samples.len(), 3);
 
         assert!(samples.iter().all(|(context, sample)| {
@@ -1589,12 +1612,10 @@ mod tests {
             .send(proto::subscribe_response::Response::SyncResponse(false))
             .await;
 
-        // A false sync must time out, release the entire RPC, and leave both rows exposed.
+        // A false sync must time out, release the entire RPC, and leave cached rows intact.
         wait_for_rpc_close(&mut incomplete.completed).await;
 
-        let export = metrics.export_telemetry().unwrap();
-        assert!(export.contains("instance_id=\"removed-event\""));
-        assert!(export.contains("instance_id=\"concurrent-event\""));
+        assert!(recording.pruned_keys.lock().unwrap().is_empty());
 
         for in_band_error in [true, false] {
             let mut failed = next_snapshot(subscriptions, live).await;
@@ -1606,8 +1627,7 @@ mod tests {
                 wait_for_rpc_close(&mut failed.completed).await;
             }
 
-            let export = metrics.export_telemetry().unwrap();
-            assert!(export.contains("instance_id=\"removed-event\""));
+            assert!(recording.pruned_keys.lock().unwrap().is_empty());
         }
 
         let mut snapshot = next_snapshot(subscriptions, live).await;
@@ -1625,8 +1645,18 @@ mod tests {
         wait_for_rpc_close(&mut snapshot.completed).await;
 
         let export = metrics.export_telemetry().unwrap();
-        assert!(!export.contains("instance_id=\"removed-event\""));
-        assert!(!export.contains("instance_id=\"concurrent-event\""));
+
+        let mut pruned = recording.pruned_keys.lock().unwrap().clone();
+        pruned.sort();
+
+        assert_eq!(
+            pruned,
+            [
+                "nvue_gnmi_events:concurrent-event",
+                "nvue_gnmi_events:removed-event"
+            ]
+        );
+
         assert!(export.contains("unrelated-interface"));
     }
 
@@ -1724,15 +1754,27 @@ mod tests {
 
         live.publish(&recording, "repopulated-event").await;
 
-        let export = metrics.export_telemetry().unwrap();
-        assert!(export.contains("instance_id=\"repopulated-event\""));
+        assert!(
+            !recording
+                .pruned_keys
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|key| key.ends_with(":repopulated-event"))
+        );
 
         let mut interrupted = next_snapshot(&mut subscriptions, &live).await;
         live.fail(tonic::Code::Unavailable).await;
         wait_for_rpc_close(&mut interrupted.completed).await;
 
-        let export = metrics.export_telemetry().unwrap();
-        assert!(export.contains("instance_id=\"repopulated-event\""));
+        assert!(
+            !recording
+                .pruned_keys
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|key| key.ends_with(":repopulated-event"))
+        );
 
         let replacement = tokio::time::timeout(Duration::from_secs(4), subscriptions.recv())
             .await
@@ -1843,7 +1885,7 @@ mod tests {
 
             let mut snapshot = next_snapshot(&mut subscriptions, &live).await;
 
-            let emitted = recording.0.lock().unwrap().len();
+            let emitted = recording.samples.lock().unwrap().len();
 
             snapshot
                 .send(proto::subscribe_response::Response::SyncResponse(true))
@@ -1863,7 +1905,7 @@ mod tests {
             .await
             .unwrap();
 
-            assert_eq!(recording.0.lock().unwrap().len(), emitted);
+            assert_eq!(recording.samples.lock().unwrap().len(), emitted);
 
             live.publish(&recording, "restored-reading").await;
 
@@ -1901,7 +1943,7 @@ mod tests {
         );
 
         {
-            let samples = recording.0.lock().unwrap();
+            let samples = recording.samples.lock().unwrap();
 
             let (context, sample) = samples
                 .iter()
@@ -1928,7 +1970,7 @@ mod tests {
             .await;
 
         tokio::time::timeout(Duration::from_secs(2), async {
-            while !recording.0.lock().unwrap().iter().any(|(_, sample)| {
+            while !recording.samples.lock().unwrap().iter().any(|(_, sample)| {
                 sample
                     .labels
                     .iter()
@@ -1941,7 +1983,7 @@ mod tests {
         .unwrap();
 
         {
-            let samples = recording.0.lock().unwrap();
+            let samples = recording.samples.lock().unwrap();
             let (context, sample) = samples.last().unwrap();
 
             assert_eq!(sample.value, 4.0);
@@ -2102,7 +2144,7 @@ mod tests {
                 }
 
                 tokio::time::timeout(Duration::from_secs(2), async {
-                    while recording.0.lock().unwrap().len() < 2 {
+                    while recording.samples.lock().unwrap().len() < 2 {
                         tokio::task::yield_now().await;
                     }
                 })

@@ -24,7 +24,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::FaultConfig;
@@ -146,10 +146,18 @@ impl JobState {
 }
 
 /// What completing a node-level job does to the mock's state.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Effect {
     /// The switch loses its fabric primary role, as a factory reset would.
     ResetFabricRole,
+    /// The switch's NVOS user `username` takes `password`, as a completed
+    /// password rotation leaves it. The switch is the device whose BMC has
+    /// `bmc_mac`, the one identifier every simulated device carries.
+    SetSwitchPassword {
+        bmc_mac: mac_address::MacAddress,
+        username: Arc<str>,
+        password: Arc<str>,
+    },
 }
 
 /// A job the ledger tracks.
@@ -187,11 +195,12 @@ enum NewJob<'a> {
     RackFailure { rack_id: &'a str, error: String },
     /// One child of the batch `parent`. The child of a node no device
     /// matched fails with [`UNMATCHED_NODE`]; any other carries `effect`,
-    /// and the fault table decides its outcome.
+    /// and the fault table decides its outcome, unless the effect could not
+    /// be built, which fails the child with the reason.
     Child {
         node: &'a NodeRef<'a>,
         parent: &'a JobId,
-        effect: Option<Effect>,
+        effect: Result<Option<Effect>, String>,
     },
 }
 
@@ -289,6 +298,18 @@ impl JobStore {
         refs: impl IntoIterator<Item = &'a NodeRef<'a>>,
         effect: Option<Effect>,
     ) -> BatchJobIds<'a> {
+        self.start_batch_with(refs, |_| Ok(effect.clone()))
+    }
+
+    /// [`Self::start_batch`], with each child's effect chosen from its node
+    /// by `effect_for`, for an effect that names the device it acts on. A
+    /// node whose effect cannot be built, `Err` with the reason, gets a child
+    /// that fails with it.
+    pub(crate) fn start_batch_with<'a>(
+        &self,
+        refs: impl IntoIterator<Item = &'a NodeRef<'a>>,
+        effect_for: impl Fn(&NodeRef<'a>) -> Result<Option<Effect>, String>,
+    ) -> BatchJobIds<'a> {
         let refs: Vec<&NodeRef<'a>> = refs.into_iter().collect();
         let racks: HashSet<&str> = refs.iter().map(|r| r.rack_id).collect();
         let rack_id = match racks.len() {
@@ -306,7 +327,7 @@ impl JobStore {
                     NewJob::Child {
                         node,
                         parent: &parent,
-                        effect,
+                        effect: effect_for(node),
                     },
                 );
                 (node.node_id, id)
@@ -425,18 +446,24 @@ impl JobStore {
                 node,
                 parent,
                 effect,
-            } => NodeJob {
-                node_id: Some(node.node_id.to_owned()),
-                rack_id: node.rack_id.to_owned(),
-                failure: if node.matched() {
-                    self.fault(node.node_id)
-                } else {
-                    Some(UNMATCHED_NODE.to_owned())
-                },
-                observations: 0,
-                parent: Some(parent.clone()),
-                effect,
-            },
+            } => {
+                let (effect, unbuildable) = match effect {
+                    Ok(effect) => (effect, None),
+                    Err(reason) => (None, Some(reason)),
+                };
+                NodeJob {
+                    node_id: Some(node.node_id.to_owned()),
+                    rack_id: node.rack_id.to_owned(),
+                    failure: if node.matched() {
+                        unbuildable.or_else(|| self.fault(node.node_id))
+                    } else {
+                        Some(UNMATCHED_NODE.to_owned())
+                    },
+                    observations: 0,
+                    parent: Some(parent.clone()),
+                    effect,
+                }
+            }
         };
         let id = self.allocate_id(ledger);
         ledger.jobs.insert(id.clone(), Job::Node(job));
@@ -487,7 +514,7 @@ impl JobStore {
             error_message,
             children: Vec::new(),
             effect: match state {
-                JobState::Completed => job.effect,
+                JobState::Completed => job.effect.clone(),
                 JobState::Running | JobState::Failed => None,
             },
         };
@@ -807,7 +834,7 @@ mod tests {
             running
                 .children
                 .iter()
-                .map(|c| c.effect)
+                .map(|c| c.effect.clone())
                 .collect::<Vec<_>>(),
             [None, None]
         );
@@ -819,7 +846,7 @@ mod tests {
             terminal
                 .children
                 .iter()
-                .map(|c| (c.state, c.effect))
+                .map(|c| (c.state, c.effect.clone()))
                 .collect::<Vec<_>>(),
             [
                 (JobState::Completed, Some(Effect::ResetFabricRole)),
@@ -828,6 +855,40 @@ mod tests {
         );
         assert_eq!(terminal.effect, None, "a parent has no effect of its own");
         assert_eq!(jobs.observe(&batch.children[0].1).effect, None);
+    }
+
+    /// A child whose effect cannot be built fails with the reason, ahead of
+    /// the fault table; the other children are unaffected.
+    #[test]
+    fn a_child_whose_effect_cannot_be_built_fails_with_the_reason() {
+        let device = SimNode::default();
+        let jobs = store(fail_nodes(&["n2"]));
+        let nodes = [node("rack-a", "n1", &device), node("rack-a", "n2", &device)];
+        let batch = jobs.start_batch_with(&nodes, |node| {
+            if node.node_id == "n2" {
+                Err("n2 has no address to act on".to_owned())
+            } else {
+                Ok(Some(Effect::ResetFabricRole))
+            }
+        });
+
+        jobs.observe(&batch.parent);
+        let terminal = jobs.observe(&batch.parent);
+        assert_eq!(
+            terminal
+                .children
+                .iter()
+                .map(|c| (c.state, c.effect.clone(), c.error_message.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (JobState::Completed, Some(Effect::ResetFabricRole), None),
+                (
+                    JobState::Failed,
+                    None,
+                    Some("n2 has no address to act on".to_owned())
+                ),
+            ]
+        );
     }
 
     #[test]

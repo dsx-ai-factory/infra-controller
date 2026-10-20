@@ -40,7 +40,7 @@ How NICo component tracing works, what it covers, how to turn it on and off and 
   enable recording (see [W3C trace-context propagation](#w3c-trace-context-propagation)).
 - **NICo REST API services** share one OpenTelemetry bootstrap configured through standard `OTEL_*`
   variables. Unlike nico-api, they export over OTLP/HTTP by default and can use TLS. See
-  [REST service tracing](#7-rest-service-tracing).
+  [REST service tracing](#7-nico-rest-api-service-tracing).
 
 ---
 
@@ -58,17 +58,23 @@ The following binaries build an OTLP span exporter:
   [nico-bmc-proxy tracing](#nico-bmc-proxy-tracing)).
 - **nico-pxe** (`crates/pxe/src/main.rs`) - request spans, off by default unless an OTLP
   endpoint is configured (see [nico-pxe tracing](#nico-pxe-tracing)).
+- **nico-dhcp** (`crates/dhcp/src/tracing_setup.rs`) - the Kea hook library the `nico-dhcp` pods
+  load. One span per discovery or lease expiration, off by default unless an OTLP endpoint is
+  configured (see [nico-dhcp tracing](#nico-dhcp-tracing)).
+- **nico-dhcp-server** (`crates/dhcp-server/src/main.rs`) - the Rust DHCP server the BlueField
+  DaemonSet runs. One span per packet, configured the same way (see
+  [nico-dhcp tracing](#nico-dhcp-tracing)).
 - **NICo REST API services** (`rest-api/common/pkg/otel`), off by default until an OTLP endpoint
   variable is set, plus `tracing.enabled` on nico-rest-api and the workflow workers (see
-  [REST service tracing](#7-rest-service-tracing)).
+  [REST service tracing](#7-nico-rest-api-service-tracing)).
 
-The other binaries (nico-dhcp, nico-hardware-health, nico-ssh-console-rs, and
-nico-dsx-exchange-consumer) carry the OpenTelemetry crates in the workspace but do not build a span
-exporter, so they do not emit traces.
+The other binaries (nico-hardware-health, nico-ssh-console-rs, and nico-dsx-exchange-consumer)
+carry the OpenTelemetry crates in the workspace but do not build a span exporter, so they do not
+emit traces.
 
 Unless noted otherwise, the rest of this document describes **nico-api** tracing.
 nico-dns differs as described in [nico-dns tracing](#nico-dns-tracing-separate-opt-in).
-NICo REST API services are described separately in [REST service tracing](#7-rest-service-tracing).
+NICo REST API services are described separately in [REST service tracing](#7-nico-rest-api-service-tracing).
 
 ### What operations are covered
 
@@ -168,8 +174,10 @@ DPS stays one trace across the proxy hop (issue
 - **Resource / tracer:** `service.name = nico-bmc-proxy`, tracer name `nico-bmc-proxy`.
 - **Span fields:** HTTP method and request path, the status the proxy answered its caller with (not
   the BMC's — a request the proxy rejects never reaches one), BMC target IP (span attribute, not
-  a Prometheus label), and, once the request passes its ACL, its request class
-  (`bmc_proxy.class`). Only a 5xx sets the span status to error; a 4xx is the caller's error.
+  a Prometheus label), the request class (`bmc_proxy.class`) after the request passes its ACL,
+  and the target type (`bmc_proxy.target`: `bmc`, or `switch_nvos` for a switch's NVOS
+  management interface) after its credentials resolve. Only a 5xx sets the span status to
+  error; a 4xx is the caller's error.
   A `429` the proxy answers for want of a slot at the BMC leaves the span ok as well;
   `carbide_bmc_proxy_admission_refused_total` counts those.
 
@@ -222,6 +230,36 @@ routes. It uses the shared setup in `carbide_instrument::otlp_tracing`, enabled 
   read these variables, because it installs `CarbideSpanSampler` instead.
 - **Shutdown.** On SIGTERM, `nico-pxe` stops accepting connections, lets in-flight requests finish, then
   sends the last batch of spans.
+
+### nico-dhcp tracing
+
+Two separate programs serve DHCP, and both use the shared setup in
+`carbide_instrument::otlp_tracing` with the same variables as nico-pxe.
+
+- **The Kea hook** (`crates/dhcp`, built as `libdhcp.so`) runs inside the `kea-dhcp4` and
+  `kea-dhcp6` processes that the `nico-dhcp` chart deploys. It opens a `dhcp_discovery`,
+  `dhcpv6_discovery` or `dhcp_lease_expiration` span around each callout that calls nico-api.
+  `service.name = nico-dhcp`.
+- **nico-dhcp-server** (`crates/dhcp-server`, the `forge-dhcp-server` binary) runs on BlueField
+  DPUs through `bluefield/charts/nico-dhcp-server`. It opens one span per DHCPv4 and DHCPv6
+  packet it processes. `service.name = nico-dhcp-server`.
+
+- **Off by default.** Both export spans only when an OTLP endpoint is configured.
+- **Endpoint.** `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`, with the
+  traces-only variable taking precedence. The `otlpEndpoint` Helm value sets the first one in the
+  `nico-dhcp` chart, where it reaches both the DHCPv4 and the DHCPv6 deployment, and in the
+  BlueField chart.
+- **Span level.** `NICO_TRACES_SPAN_LEVEL` works as it does for nico-pxe, defaulting to `info`.
+- **Each packet starts a new trace.** A DHCP client sends no `traceparent`, so there is
+  no inbound context to continue. Spans opened inside that root span, including the outbound gRPC
+  call, join the same trace.
+- **Outbound gRPC to nico-api.** Calls use the shared `ForgeTlsClient`, which sends the trace
+  context on every request, so a DHCP trace continues into nico-api.
+- **Hook logging is unchanged.** The hook logs through Kea's logger, and installing span export
+  does not add log lines or route them through `RUST_LOG`.
+- **Shutdown.** The hook sends its last batch when Kea unloads it. nico-dhcp-server sends its last
+  batch only after its serving loop returns to `main`. It does not handle SIGTERM, so spans still buffered when
+  the pod is terminated are lost.
 
 ### W3C trace-context propagation
 

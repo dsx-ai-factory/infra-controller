@@ -47,8 +47,18 @@ const DOMAINS: [CliDomain; 4] = [
     CliDomain::Admin,
 ];
 
+fn command_tree() -> Command {
+    let mut root = CliOptions::command()
+        .name(BIN)
+        .disable_help_subcommand(true);
+    // Clap fills in full command paths and inherited global options during
+    // build; synopsis rendering needs the same tree as clap_mangen.
+    root.build();
+    root
+}
+
 pub(super) fn generate(out_dir: &Path) -> CarbideCliResult<()> {
-    let root = CliOptions::command().name(BIN);
+    let root = command_tree();
 
     // Render every command's roff man page into a scratch directory. clap_mangen
     // names each file by the full command path joined with '-' (e.g.
@@ -128,7 +138,7 @@ fn render_node(
     let man_file = man_dir.join(format!("{}.1", path.join("-")));
     let body = strip_sections(&man_to_markdown(&man_file)?, &["SUBCOMMANDS", "EXTRA"]);
     let body = clean_pandoc_markdown(&format_markdown_links(&body));
-    let body = if is_machine_validation_log_command(&path) {
+    let body = if uses_clap_synopsis(&path) {
         let usage = cmd.clone().render_usage().to_string();
         replace_synopsis(&body, usage.strip_prefix("Usage: ").unwrap_or(&usage))
     } else {
@@ -395,13 +405,17 @@ fn plain_cli_syntax(line: &str) -> String {
         .replace("\\`", "`")
 }
 
-/// `clap_mangen` does not preserve the explicit usage for the Machine
-/// Validation log commands. Render their synopsis from clap's runtime command
-/// tree so required values and paired selectors remain visible in the generated
-/// reference.
-fn is_machine_validation_log_command(path: &[String]) -> bool {
-    path.get(1).is_some_and(|part| part == "machine-validation")
-        && path.get(2).is_some_and(|part| part == "logs")
+/// `clap_mangen` omits option operands and ignores explicit usage. Limit Clap's
+/// synopsis replacement to the NIC command tree and Machine Validation logs, whose
+/// required versions and paired selectors must remain visible in the reference.
+fn uses_clap_synopsis(path: &[String]) -> bool {
+    matches!(
+        (
+            path.get(1).map(String::as_str),
+            path.get(2).map(String::as_str),
+        ),
+        (Some("machine-validation"), Some("logs")) | (Some("firmware"), Some("nic"))
+    )
 }
 
 fn replace_synopsis(markdown: &str, usage: &str) -> String {
@@ -563,7 +577,10 @@ fn intro(d: CliDomain) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_pandoc_markdown, format_markdown_links, replace_synopsis};
+    use super::{
+        BIN, clean_pandoc_markdown, command_tree, format_markdown_links, replace_synopsis,
+        uses_clap_synopsis,
+    };
 
     #[test]
     fn repository_doc_paths_become_links_in_generated_markdown() {
@@ -636,6 +653,31 @@ An inline `HostInband` value and `mac=<mac>` selector.
         assert_eq!(
             replace_synopsis(markdown, "nico-admin-cli logs --id <ID>"),
             "## NAME\n\nlogs\n\n## SYNOPSIS\n\n```text\nnico-admin-cli logs --id <ID>\n```\n\n## DESCRIPTION\n\ntext\n"
+        );
+    }
+
+    /// Generated usage must retain the full command path and required token operand.
+    #[test]
+    fn nic_profile_synopsis_preserves_the_command_path_and_required_version() {
+        let root = command_tree();
+        let path = [BIN, "firmware", "nic", "profile", "update"].map(String::from);
+        let command = path[1..].iter().fold(&root, |command, name| {
+            command
+                .find_subcommand(name)
+                .expect("command path exists in the CLI tree")
+        });
+
+        // Both group pages and the leaf need Clap's complete command path.
+        for depth in 3..=path.len() {
+            assert!(uses_clap_synopsis(&path[..depth]));
+        }
+        // Unrelated firmware commands keep the existing man page rendering.
+        assert!(!uses_clap_synopsis(
+            &[BIN, "firmware", "show"].map(String::from)
+        ));
+        assert_eq!(
+            command.clone().render_usage().to_string(),
+            "Usage: nico-admin-cli firmware nic profile update [OPTIONS] --if-version-match <VERSION> <ID>"
         );
     }
 }

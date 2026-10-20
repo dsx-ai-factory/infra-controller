@@ -7,8 +7,10 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -790,6 +792,79 @@ func TestExpectedRackDAO_Update_NotFound(t *testing.T) {
 		Name:           cutil.GetPtr("Should not exist"),
 	})
 	assert.Error(t, err)
+}
+
+func TestExpectedRackSQLDAO_DeleteIfUnchanged(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedRackSetupSchema(t, dbSession)
+
+	existing, _, _, _ := testExpectedRackDAOCreateExpectedRacks(ctx, t, dbSession)
+	dao := NewExpectedRackDAO(dbSession)
+	unchanged, err := dao.Get(ctx, nil, existing[0].ID, nil, false)
+	require.NoError(t, err)
+	beforeUpdate, err := dao.Get(ctx, nil, existing[1].ID, nil, false)
+	require.NoError(t, err)
+	afterUpdate, err := dao.Update(ctx, nil, ExpectedRackUpdateInput{
+		ExpectedRackID: beforeUpdate.ID,
+		Name:           cutil.GetPtr("API-name"),
+	})
+	require.NoError(t, err)
+	require.True(t, afterUpdate.Updated.After(beforeUpdate.Updated))
+	other, err := dao.Get(ctx, nil, existing[2].ID, nil, false)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		id          uuid.UUID
+		updated     time.Time
+		wantDeleted bool
+		want        *ExpectedRack
+	}{
+		{
+			name:        "matching version deletes the row",
+			id:          unchanged.ID,
+			updated:     unchanged.Updated,
+			wantDeleted: true,
+		},
+		{
+			name:    "changed version preserves the row",
+			id:      beforeUpdate.ID,
+			updated: beforeUpdate.Updated,
+			want:    afterUpdate,
+		},
+		{
+			name:    "future timestamp preserves the older stored row",
+			id:      other.ID,
+			updated: other.Updated.Add(time.Second),
+			want:    other,
+		},
+		{
+			name:    "absent row preserves another row with the same timestamp",
+			id:      uuid.New(),
+			updated: other.Updated,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			deleted, err := dao.DeleteIfUnchanged(ctx, nil, tc.id, tc.updated)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantDeleted, deleted)
+
+			stored, err := dao.Get(ctx, nil, tc.id, nil, false)
+			if tc.want == nil {
+				assert.ErrorIs(t, err, db.ErrDoesNotExist)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, stored)
+		})
+	}
+
+	stored, err := dao.Get(ctx, nil, other.ID, nil, false)
+	require.NoError(t, err)
+	assert.Equal(t, other, stored)
 }
 
 func TestExpectedRackDAO_Delete(t *testing.T) {

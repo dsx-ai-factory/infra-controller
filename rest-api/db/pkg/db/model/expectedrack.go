@@ -186,6 +186,9 @@ type ExpectedRackDAO interface {
 	UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedRackUpdateInput) ([]ExpectedRack, error)
 	// Delete used to delete a row
 	Delete(ctx context.Context, tx *db.Tx, expectedRackID uuid.UUID) error
+	// DeleteIfUnchanged deletes only the row with the observed `Updated` timestamp.
+	// It returns false without an error when the row is missing or the timestamp differs.
+	DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedRackID uuid.UUID, updated time.Time) (bool, error)
 	// DeleteAll used to delete all rows (optionally scoped by site)
 	DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedRackFilterInput) error
 	// ReplaceAll deletes all rows matching the filter then creates new ones
@@ -552,6 +555,23 @@ func (erd ExpectedRackSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedRac
 	}
 
 	return nil
+}
+
+// DeleteIfUnchanged deletes a row only if its stored `Updated` equals `updated`.
+// Pass the timestamp read from the stored row. With no error, false means the
+// row is missing or its timestamp differs.
+func (erd ExpectedRackSQLDAO) DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedRackID uuid.UUID, updated time.Time) (_ bool, retErr error) {
+	ctx, expectedRackDAOSpan := cotel.StartSpan(ctx, "ExpectedRackDAO.DeleteIfUnchanged")
+	defer func() { cotel.EndSpan(expectedRackDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedRackDAOSpan, attribute.String("id", expectedRackID.String()))
+
+	result, err := db.GetIDB(tx, erd.dbSession).NewDelete().Model((*ExpectedRack)(nil)).
+		Where("id = ?", expectedRackID).Where("updated = ?", updated).Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
 }
 
 // DeleteAll deletes all ExpectedRacks matching the given filter (typically

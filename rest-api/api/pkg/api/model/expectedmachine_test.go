@@ -362,6 +362,7 @@ func TestAPIExpectedMachineInterface_Validate(t *testing.T) {
 		{name: "invalid MAC", value: APIExpectedMachineInterface{MacAddress: "invalid"}, wantErr: "macAddress"},
 		{name: "non-six-octet MAC", value: APIExpectedMachineInterface{MacAddress: "01:23:45:67:89:ab:cd:ef"}, wantErr: "six colon- or hyphen-separated octets"},
 		{name: "invalid fixed IP", value: APIExpectedMachineInterface{MacAddress: "02:00:00:00:00:09", FixedIP: cutil.GetPtr("invalid")}, wantErr: "FixedIP"},
+		{name: "unspecified fixed IP", value: APIExpectedMachineInterface{MacAddress: "02:00:00:00:00:09", FixedIP: cutil.GetPtr("0.0.0.0")}, wantErr: "not unspecified, multicast, or limited broadcast"},
 		{name: "whitespace NIC type", value: APIExpectedMachineInterface{MacAddress: "02:00:00:00:00:09", NicType: cutil.GetPtr(" ")}, wantErr: "NicType"},
 		{name: "invalid gateway", value: APIExpectedMachineInterface{MacAddress: "02:00:00:00:00:09", FixedGateway: cutil.GetPtr("invalid")}, wantErr: "fixedGateway"},
 		{name: "unknown role", value: APIExpectedMachineInterface{MacAddress: "02:00:00:00:00:09", Role: cutil.GetPtr(cdbm.ExpectedInterfaceRole("invalid"))}, wantErr: "role"},

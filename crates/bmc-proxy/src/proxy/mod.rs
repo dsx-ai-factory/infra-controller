@@ -15,8 +15,9 @@
  * limitations under the License.
  */
 
-//! The BMC proxy: authenticated callers name a BMC, and the proxy forwards
-//! their Redfish request to it with credentials it resolves from nico-api.
+//! The BMC proxy: authenticated callers name a management endpoint, a BMC or
+//! a switch's NVOS interface, and the proxy forwards their HTTP request to it
+//! with credentials it resolves from nico-api.
 //!
 //! The modules follow a request's path:
 //!
@@ -25,19 +26,22 @@
 //!   minutes. Failed reloads retain the previous configuration and retry after
 //!   thirty seconds. A client certificate is optional here.
 //! - `guard`: identifies the caller from its certificate, then checks the
-//!   principal allow-list and the per-principal ACL.
-//! - `target`: resolves the BMC the `Forwarded` header names to its IP.
-//! - `admission`: holds a request until its BMC has a slot for it, when its
-//!   class or the per-BMC limit caps how many requests the BMC receives.
-//! - `credentials`: the BMC's credentials, fetched from nico-api and cached
-//!   by IP.
-//! - `upstream`: sends the request to the BMC with the caller's headers and
-//!   body, resolving credentials for each attempt.
+//!   principal allow-list, rejects ambiguous paths, and checks the per-principal ACL.
+//! - `target`: resolves the address the `Forwarded` header names, a BMC's
+//!   or a switch's NVOS interface's, to its IP.
+//! - `admission`: holds a request until its target has a slot for it, when
+//!   its class or the per-BMC limit caps how many requests the target
+//!   receives.
+//! - `credentials`: the credentials for the address, fetched from nico-api
+//!   and cached by IP: a BMC's, or a switch's NVOS admin credentials when
+//!   the address is the switch's NVOS management interface.
+//! - `upstream`: sends the request to the target with the caller's headers
+//!   and body, resolving credentials for each attempt.
 //! - `response`: builds the caller's answer. A 4xx or 5xx body is scrubbed
 //!   of the credential its attempt used, or replaced when it cannot be
 //!   inspected; other bodies stream through unchanged.
 //!
-//! [`proxy_request_inner`] runs a request from the ACL on. When the BMC
+//! [`proxy_request_inner`] runs a request from the path check and ACL on. When the BMC
 //! answers 401 or 403 and the body can be sent again, it drops the cached
 //! credentials and sends the request once more with fresh ones.
 
@@ -80,9 +84,10 @@ use crate::config::Trip;
 use crate::metrics::{MethodLabel, UpstreamAuthRetried};
 use crate::proxy::admission::{Admission, Slot};
 use crate::proxy::credentials::{
-    CREDENTIAL_CACHE_IDLE_TTL, CredentialCache, evict_cached_credentials, get_bmc_credentials,
+    CREDENTIAL_CACHE_IDLE_TTL, CredentialCache, SwitchProbe, TargetCredentials,
+    evict_cached_credentials, resolve_credentials,
 };
-use crate::proxy::guard::{authorize_proxy_request, cert_description_layer};
+use crate::proxy::guard::{authorize_proxy_request, cert_description_layer, reject_ambiguous_path};
 use crate::proxy::ingress::{BmcProxy, RefreshableTlsAcceptor};
 use crate::proxy::response::{BmcOrigins, build_response, prepare_response_body};
 use crate::proxy::target::{
@@ -103,6 +108,8 @@ pub(crate) enum BmcProxyError {
     InternalProxying(String),
     #[error("no credentials found for BMC IP address: {0}")]
     NoCredentials(IpAddr),
+    #[error("the NVOS MAC address at {0} belongs to more than one switch")]
+    AmbiguousNvosAddress(IpAddr),
     #[error("error spawning listener: {0}")]
     Listen(std::io::Error),
     #[error("error loading TLS config: {0}")]
@@ -123,6 +130,8 @@ struct BmcProxyState {
     http_client: reqwest_middleware::ClientWithMiddleware,
     ip_cache: LookupToIpCache,
     admission: Arc<Admission>,
+    /// Whether nico-api lets the proxy tell a switch's address from a BMC's.
+    switch_probe: Arc<SwitchProbe>,
 }
 
 /// Upper bound on cached entries; sized far above any realistic BMC fleet.
@@ -195,6 +204,7 @@ pub(crate) async fn start(
         credential_cache: idle_bounded_cache(CREDENTIAL_CACHE_IDLE_TTL),
         ip_cache: bounded_cache(IP_CACHE_TTL),
         admission,
+        switch_probe: Arc::new(SwitchProbe::default()),
     };
 
     let app = proxy_routes(state.clone())
@@ -299,6 +309,7 @@ fn bmc_proxy_request_span<B>(request: &Request<B>) -> tracing::Span {
         otel.status_code = tracing::field::Empty,
         bmc.ip_address = tracing::field::Empty,
         bmc_proxy.class = tracing::field::Empty,
+        bmc_proxy.target = tracing::field::Empty,
         logfmt.suppress = true,
     );
     set_span_parent_from_headers(&request_span, request.headers());
@@ -324,6 +335,10 @@ async fn proxy_request_inner(
     request: Request<Body>,
 ) -> Result<Response<Body>, Response<Body>> {
     let arrived = tokio::time::Instant::now();
+    if let Some(response) = reject_ambiguous_path(&request) {
+        return Ok(response);
+    }
+
     let Some(principals) = state.authorized_caller(&request) else {
         return Ok(error_response((StatusCode::FORBIDDEN, "Forbidden").into()));
     };
@@ -390,9 +405,14 @@ async fn proxy_request_inner(
     // credentials and waiting for a slot there. Resolving them first means
     // only a BMC nico-api knows takes a slot, and the lookup holds none.
     let deadline = tokio::time::Instant::now() + class.upstream_timeout;
-    tokio::time::timeout_at(
+    let TargetCredentials { target, .. } = tokio::time::timeout_at(
         deadline,
-        get_bmc_credentials(target_ip, &state.api_client, &state.credential_cache),
+        resolve_credentials(
+            target_ip,
+            &state.api_client,
+            &state.credential_cache,
+            &state.switch_probe,
+        ),
     )
     .await
     .map_err(|_elapsed| {
@@ -405,6 +425,7 @@ async fn proxy_request_inner(
         )
     })?
     .map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))?;
+    tracing::Span::current().record("bmc_proxy.target", target.as_str());
     let streamed = !upstream_body.is_replayable();
     let mut slot = state
         .admission

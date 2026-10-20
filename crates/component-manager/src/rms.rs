@@ -1775,6 +1775,16 @@ struct ComputeTrayRmsIdentity {
     bmc_mac: MacAddress,
 }
 
+/// `ComputeTrayIdentityLookup` keeps every current BMC IP owner alongside the
+/// identities eligible for RMS. A machine without a rack still owns its IP,
+/// so passive reads must check ownership before using expected inventory.
+struct ComputeTrayIdentityLookup {
+    /// Rack-associated identities accepted by the existing RMS operations.
+    rms_identities: HashMap<IpAddr, ComputeTrayRmsIdentity>,
+    /// Current BMC MAC for each occupied IP, including machines without a rack.
+    current_owners: HashMap<IpAddr, MacAddress>,
+}
+
 /// A row-less compute tray has no machine id; like a pre-ingestion switch its
 /// BMC MAC is the opaque RMS `node_id` (RMS treats it as a string, and the
 /// request also carries the full node descriptor and BMC endpoint). The wrapper
@@ -1792,11 +1802,12 @@ impl From<db::expected_machine::PreIngestionComputeRmsIdentity> for ComputeTrayR
     }
 }
 
-/// Resolve compute tray BMC IP addresses to RMS identities via the api-db layer.
+/// `resolve_compute_tray_identities` loads BMC IP owners and eligible RMS
+/// identities, retaining owners whose machine has no `rack_id`.
 async fn resolve_compute_tray_identities(
     db: &PgPool,
     bmc_ips: &[IpAddr],
-) -> Result<HashMap<IpAddr, ComputeTrayRmsIdentity>, ComponentManagerError> {
+) -> Result<ComputeTrayIdentityLookup, ComponentManagerError> {
     let rows = db::machine::find_rms_identities_by_bmc_ips(db, bmc_ips)
         .await
         .map_err(|e| {
@@ -1805,13 +1816,15 @@ async fn resolve_compute_tray_identities(
             ))
         })?;
 
-    let mut map = HashMap::with_capacity(rows.len());
+    let mut rms_identities = HashMap::with_capacity(rows.len());
+    let mut current_owners = HashMap::with_capacity(rows.len());
     for row in rows {
+        current_owners.insert(row.bmc_ip, row.bmc_mac_address);
         let Some(rack_id) = row.rack_id else {
             tracing::warn!(bmc_ip_address = %row.bmc_ip, "compute tray has no rack_id, skipping");
             continue;
         };
-        map.insert(
+        rms_identities.insert(
             row.bmc_ip,
             ComputeTrayRmsIdentity {
                 identity: RmsIdentity {
@@ -1823,7 +1836,10 @@ async fn resolve_compute_tray_identities(
             },
         );
     }
-    Ok(map)
+    Ok(ComputeTrayIdentityLookup {
+        rms_identities,
+        current_owners,
+    })
 }
 
 /// Resolve switch MAC addresses to RMS identities via the api-db layer.
@@ -1988,6 +2004,10 @@ fn build_power_shelf_node_info(
 
 #[async_trait::async_trait]
 impl PowerShelfManager for RmsBackend {
+    fn power_state_source(&self) -> Option<crate::component_common::PowerStateSource> {
+        Some(crate::component_common::PowerStateSource::Rms)
+    }
+
     fn name(&self) -> &str {
         "rms"
     }
@@ -2680,12 +2700,24 @@ async fn query_rms_power_states(
     let nodes = match timeout_at(deadline, prepare_nodes).await {
         Ok(Ok(nodes)) => nodes,
         Ok(Err(error)) => {
+            // Keep the failed stage visible without dumping persisted values
+            // that a database decoding error could include.
+            tracing::debug!(
+                component_count = macs.len(),
+                "RMS power inventory preparation failed"
+            );
             for result in &mut results {
                 result.power_state = Err(error.to_string());
             }
             return results;
         }
-        Err(_) => return results,
+        Err(_) => {
+            tracing::debug!(
+                component_count = macs.len(),
+                "RMS power inventory preparation timed out"
+            );
+            return results;
+        }
     };
 
     // RMS node IDs are rack-local, but response entries omit the rack ID.
@@ -2695,6 +2727,10 @@ async fn query_rms_power_states(
         let node = match node {
             Ok(node) => node,
             Err(error) => {
+                // Identify the failed local identity/profile step. Neither
+                // arbitrary error text nor credential-bearing NodeInfo is safe
+                // to include in the diagnostic.
+                tracing::debug!(management_mac_address = %macs[index], "RMS power node identity/profile preparation failed");
                 results[index].power_state = Err(error);
                 continue;
             }
@@ -2719,6 +2755,11 @@ async fn query_rms_power_states(
     for reads in racks.values_mut() {
         reads.retain(|_, read| {
             if read.conflicting {
+                tracing::debug!(
+                    rack_id = %read.node.rack_id,
+                    node_id = %read.node.node_id,
+                    "RMS power read has conflicting request descriptors"
+                );
                 for index in &read.input_indexes {
                     results[*index].power_state = Err(format!(
                         "conflicting RMS request descriptors for rack {} node {}",
@@ -2746,7 +2787,14 @@ async fn query_rms_power_states(
                 timeout_at(deadline, client.batch_get_power_state(request))
                     .await
                     .map_err(|_| RMS_POWER_READ_TIMEOUT_ERROR.to_owned())?
-                    .map_err(|error| error.to_string())
+                    // RMS can echo endpoint credentials in a transport error.
+                    // Strip that text before RED logs and returns the failure.
+                    .map_err(|error| match error {
+                        RackManagerError::ApiInvocationError(status) => {
+                            format!("RMS power read RPC failed: {:?}", status.code())
+                        }
+                        RackManagerError::TlsError(_) => "RMS power read TLS failed".to_owned(),
+                    })
             })
             .await;
             for read in chunk {
@@ -2763,20 +2811,23 @@ async fn query_rms_power_states(
     results
 }
 
+/// Validate one node's evidence independently of its peers. Diagnostics keep
+/// the failure category and node identity, excluding untrusted response text.
 fn rms_power_state_for_node(
     response: &rms::BatchGetPowerStateResponse,
     node_id: &str,
 ) -> Result<Option<PowerState>, String> {
-    let batch = response
-        .response
-        .as_ref()
-        .ok_or_else(|| "missing RMS power response envelope".to_owned())?;
+    let batch = response.response.as_ref().ok_or_else(|| {
+        tracing::debug!(node_id, "RMS power response envelope is missing");
+        "missing RMS power response envelope".to_owned()
+    })?;
     let mut states = response
         .node_power_states
         .iter()
         .filter(|node| node.node_id == node_id);
     let state = states.next();
     if states.next().is_some() {
+        tracing::debug!(node_id, "RMS power response has duplicate states");
         return Err(format!("duplicate RMS power states for node {node_id}"));
     }
     let mut node_results = batch
@@ -2785,6 +2836,10 @@ fn rms_power_state_for_node(
         .filter(|result| result.node_id == node_id);
     let node_result = node_results.next();
     if node_results.next().is_some() {
+        tracing::debug!(
+            node_id,
+            "RMS power response has duplicate operation results"
+        );
         return Err(format!(
             "duplicate RMS operation results for node {node_id}"
         ));
@@ -2792,6 +2847,13 @@ fn rms_power_state_for_node(
     if let Some(result) = node_result
         && (result.status != rms::ReturnCode::Success as i32 || !result.error_message.is_empty())
     {
+        tracing::debug!(
+            node_id,
+            rms_return_code = result.status,
+            has_error_message = !result.error_message.is_empty(),
+            has_conflicting_state = state.is_some(),
+            "RMS power node reported failure"
+        );
         let mut detail = format!("status {}", result.status);
         let message = if result.error_message.is_empty() {
             &batch.message
@@ -2815,6 +2877,7 @@ fn rms_power_state_for_node(
     // The SDK defines this list as successful observations. Aggregate failure
     // can describe a different node and must not erase this node's evidence.
     let Some(state) = state else {
+        tracing::debug!(node_id, "RMS power response has no node state");
         let mut error = format!("missing RMS power state for node {node_id}");
         if !batch.message.is_empty() {
             error.push_str(": ");
@@ -2830,7 +2893,10 @@ fn rms_power_state_for_node(
         "paused" => PowerState::Paused,
         "reset" => PowerState::Reset,
         "unknown" => PowerState::Unknown,
-        _ => return Err(format!("unrecognized RMS power state: {:?}", state.pstate)),
+        _ => {
+            tracing::debug!(node_id, "RMS power response has an unrecognized state");
+            return Err(format!("unrecognized RMS power state: {:?}", state.pstate));
+        }
     };
     Ok(Some(power_state))
 }
@@ -3358,6 +3424,10 @@ pub fn scale_up_fabric_service_statuses_from_rms(
 
 #[async_trait::async_trait]
 impl NvSwitchManager for RmsBackend {
+    fn power_state_source(&self) -> Option<crate::component_common::PowerStateSource> {
+        Some(crate::component_common::PowerStateSource::Rms)
+    }
+
     fn name(&self) -> &str {
         "rms"
     }
@@ -4898,6 +4968,10 @@ impl RmsBackend {
 
 #[async_trait::async_trait]
 impl ComputeTrayManager for RmsBackend {
+    fn power_state_source(&self) -> Option<crate::component_common::PowerStateSource> {
+        Some(crate::component_common::PowerStateSource::Rms)
+    }
+
     fn name(&self) -> &str {
         "rms"
     }
@@ -4918,7 +4992,7 @@ impl ComputeTrayManager for RmsBackend {
             let ingested = resolve_compute_tray_identities(&self.db, &bmc_ips).await?;
             let pre_ingestion_macs: Vec<_> = endpoints
                 .iter()
-                .filter(|ep| !ingested.contains_key(&ep.bmc_ip))
+                .filter(|ep| !ingested.rms_identities.contains_key(&ep.bmc_ip))
                 .map(|ep| ep.bmc_mac)
                 .collect();
             let pre_ingestion = self
@@ -4927,18 +5001,23 @@ impl ComputeTrayManager for RmsBackend {
             Ok(endpoints
                 .iter()
                 .map(|ep| {
+                    // The IP may have changed owners after the endpoint was
+                    // collected. Even an owner without a rack must prevent us
+                    // from reporting its observation under an expected MAC.
+                    if let Some(owner_mac) = ingested.current_owners.get(&ep.bmc_ip)
+                        && *owner_mac != ep.bmc_mac
+                    {
+                        return Err(format!(
+                            "RMS compute identity for BMC IP {} has MAC {}, expected {}",
+                            ep.bmc_ip, owner_mac, ep.bmc_mac
+                        ));
+                    }
+
                     let identity = ingested
+                        .rms_identities
                         .get(&ep.bmc_ip)
                         .or_else(|| pre_ingestion.get(&ep.bmc_mac))
                         .ok_or_else(|| RMS_IDENTITY_LOOKUP_ERROR.to_owned())?;
-                    // The IP may have changed owners after the endpoint was
-                    // collected. Do not report another machine's observation.
-                    if identity.bmc_mac != ep.bmc_mac {
-                        return Err(format!(
-                            "RMS compute identity for BMC IP {} has MAC {}, expected {}",
-                            ep.bmc_ip, identity.bmc_mac, ep.bmc_mac
-                        ));
-                    }
                     self.resolve_compute_node(identity).map(|resolved| {
                         build_compute_tray_node_info(ep, &resolved, identity.bmc_mac)
                     })
@@ -4957,7 +5036,9 @@ impl ComputeTrayManager for RmsBackend {
         // Ingested trays resolve their RMS identity from the machine row by BMC
         // IP.
         let bmc_ips: Vec<IpAddr> = endpoints.iter().map(|ep| ep.bmc_ip).collect();
-        let ingested = resolve_compute_tray_identities(&self.db, &bmc_ips).await?;
+        let ingested = resolve_compute_tray_identities(&self.db, &bmc_ips)
+            .await?
+            .rms_identities;
 
         // Trays with no machine row yet (pre-ingestion) fall back to the
         // expected inventory keyed by BMC MAC. Only rack-scale (RMS-managed)
@@ -5068,7 +5149,9 @@ impl ComputeTrayManager for RmsBackend {
         // Ingested trays resolve their RMS identity from the machine row by BMC
         // IP.
         let bmc_ips: Vec<IpAddr> = endpoints.iter().map(|ep| ep.bmc_ip).collect();
-        let ingested = resolve_compute_tray_identities(&self.db, &bmc_ips).await?;
+        let ingested = resolve_compute_tray_identities(&self.db, &bmc_ips)
+            .await?
+            .rms_identities;
 
         // Trays with no machine row yet (pre-ingestion) fall back to the
         // expected inventory keyed by BMC MAC. Only rack-scale (RMS-managed)
@@ -6998,6 +7081,83 @@ mod tests {
         assert!(mock.batch_set_power_state_calls().await.is_empty());
     }
 
+    /// Expected inventory must not let a passive read use another machine's
+    /// BMC IP. An owner without a managed rack can still use its own expected
+    /// rack identity when the requested MAC matches.
+    #[carbide_macros::sqlx_test]
+    async fn compute_power_read_rejects_ip_owner_without_rack(pool: sqlx::PgPool) {
+        let (mock, backend, owner_rack_id, _, _, _, _) = make_backend(&pool).await;
+        let expected_rack_id = RackId::new("expected-compute-rack");
+        let mut txn = pool.begin().await.expect("begin conflicting owner setup");
+
+        // The requested MAC has valid expected inventory, while a different
+        // machine owns its supplied IP without belonging to any managed rack.
+        seed_pre_ingestion_compute_tray(&mut txn, CT_MAC_1, &expected_rack_id, false).await;
+        let owner_id = seed_machine(&mut txn, CT_MAC_2, CT_IP_1, "CT-002", &owner_rack_id).await;
+        let update = sqlx::query("UPDATE machines SET rack_id = NULL WHERE id = $1")
+            .bind(owner_id)
+            .execute(&mut *txn)
+            .await
+            .expect("clear the current owner's rack");
+        assert_eq!(update.rows_affected(), 1);
+        txn.commit().await.expect("commit conflicting owner setup");
+
+        let endpoint = make_ct_endpoint(CT_IP_1, CT_MAC_1);
+        let results = ComputeTrayManager::get_power_state(&backend, &[endpoint])
+            .await
+            .expect("return the requested tray's read failure");
+
+        // Keep the requested identity in exactly one result slot and stop
+        // before sending the occupied endpoint to RMS.
+        assert_eq!(
+            results,
+            [ComponentPowerStateResult {
+                mac_address: CT_MAC_1.parse().expect("requested BMC MAC"),
+                power_state: Err(format!(
+                    "RMS compute identity for BMC IP {CT_IP_1} has MAC {CT_MAC_2}, expected {CT_MAC_1}"
+                )),
+            }]
+        );
+        assert!(mock.batch_get_power_state_calls().await.is_empty());
+
+        // The same owner has expected rack inventory from `seed_machine`.
+        // A matching MAC must retain that fallback instead of rejecting every
+        // owner whose managed `rack_id` is absent.
+        mock.enqueue_batch_get_power_state(Ok(power_read_response(&[(CT_MAC_2, "ON")])))
+            .await;
+        let endpoint = make_ct_endpoint(CT_IP_1, CT_MAC_2);
+        let results = ComputeTrayManager::get_power_state(&backend, &[endpoint])
+            .await
+            .expect("read the matching owner's expected RMS identity");
+
+        assert_eq!(
+            results,
+            [ComponentPowerStateResult {
+                mac_address: CT_MAC_2.parse().expect("current owner's BMC MAC"),
+                power_state: Ok(Some(PowerState::On)),
+            }]
+        );
+        let calls = mock.batch_get_power_state_calls().await;
+        assert_eq!(calls.len(), 1);
+        let nodes = &calls[0].nodes.as_ref().expect("request nodes").nodes;
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_id, CT_MAC_2);
+        assert_eq!(nodes[0].rack_id, owner_rack_id.to_string());
+        let interface = nodes[0]
+            .bmc_endpoint
+            .as_ref()
+            .expect("BMC endpoint")
+            .interface
+            .as_ref()
+            .expect("BMC interface");
+        assert_eq!(interface.ip_address, CT_IP_1);
+        assert_eq!(interface.mac_address, CT_MAC_2);
+        assert!(mock.create_nodes_calls().await.is_empty());
+        assert!(mock.update_node_calls().await.is_empty());
+        assert!(mock.set_power_state_calls().await.is_empty());
+        assert!(mock.batch_set_power_state_calls().await.is_empty());
+    }
+
     #[carbide_macros::sqlx_test]
     async fn shelf_power_read_resolves_expected_inventory(pool: sqlx::PgPool) {
         let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
@@ -7259,14 +7419,29 @@ mod tests {
         }
     }
 
+    /// A failed chunk must preserve successful peers and report its failure
+    /// without exposing credentials echoed in the RMS transport error.
     #[tokio::test]
     async fn rms_power_reads_bound_chunks_and_preserve_peers_after_transport_failure() {
+        const PRIVATE_PAYLOAD: &str = "power-read-credential-must-not-be-reported";
+        const TRANSPORT_ERROR: &str = "RMS power read RPC failed: Unavailable";
+
         let mock = MockRmsApi::new();
-        let nodes = power_read_nodes(RMS_POWER_READ_BATCH_SIZE * 2 + 1);
+        let mut nodes = power_read_nodes(RMS_POWER_READ_BATCH_SIZE * 2 + 1);
+
+        // Supply the fake secret to the failed chunk so the reply models RMS
+        // echoing part of the request, rather than an unrelated log string.
+        nodes[RMS_POWER_READ_BATCH_SIZE].bmc_endpoint = Some(rms::Endpoint {
+            credentials: Some(credentials_to_rms(&Credentials::UsernamePassword {
+                username: "admin".to_owned(),
+                password: PRIVATE_PAYLOAD.to_owned(),
+            })),
+            ..Default::default()
+        });
         for (index, chunk) in nodes.chunks(RMS_POWER_READ_BATCH_SIZE).enumerate() {
             let response = if index == 1 {
                 Err(RackManagerError::ApiInvocationError(
-                    tonic::Status::unavailable("read failed"),
+                    tonic::Status::unavailable(format!("read failed: {PRIVATE_PAYLOAD}")),
                 ))
             } else {
                 let mut response = power_read_response(
@@ -7292,14 +7467,19 @@ mod tests {
             };
             mock.enqueue_batch_get_power_state(response).await;
         }
-        let results = query_test_power_nodes(
+
+        let (results, logs) = capture_logs_async(query_test_power_nodes(
             &mock,
             nodes.clone(),
             Instant::now() + RMS_POWER_READ_TIMEOUT,
-        )
+        ))
         .await;
+
         assert_eq!(results.len(), nodes.len());
         for (index, result) in results.iter().enumerate() {
+            if let Err(error) = &result.power_state {
+                assert!(!error.contains(PRIVATE_PAYLOAD));
+            }
             if index == 0 {
                 assert!(
                     result
@@ -7309,17 +7489,34 @@ mod tests {
                         .contains("node unavailable")
                 );
             } else if (RMS_POWER_READ_BATCH_SIZE..RMS_POWER_READ_BATCH_SIZE * 2).contains(&index) {
-                assert!(
-                    result
-                        .power_state
-                        .as_ref()
-                        .expect_err("failed chunk")
-                        .contains("read failed")
+                assert_eq!(
+                    result.power_state.as_ref().expect_err("failed chunk"),
+                    TRANSPORT_ERROR,
                 );
             } else {
                 assert_eq!(result.power_state, Ok(Some(PowerState::On)));
             }
         }
+
+        // RED must retain a useful warning while keeping the server's text
+        // out of both the message and every structured field.
+        assert!(logs.iter().all(|log| {
+            !log.message.contains(PRIVATE_PAYLOAD)
+                && log.fields.iter().all(|(name, value)| {
+                    !name.contains(PRIVATE_PAYLOAD) && !value.contains(PRIVATE_PAYLOAD)
+                })
+        }));
+        let failure_log = logs
+            .iter()
+            .find(|log| {
+                log.message == "external call failed"
+                    && log.field("operation") == Some("batch_get_power_state")
+            })
+            .expect("RED reports the transport failure");
+        assert_eq!(failure_log.level, tracing::Level::WARN);
+        assert_eq!(failure_log.field("backend"), Some("rms"));
+        assert_eq!(failure_log.field("error"), Some(TRANSPORT_ERROR));
+
         let calls = mock.batch_get_power_state_calls().await;
         assert_eq!(calls.len(), 3);
         for (call, chunk) in calls.iter().zip(nodes.chunks(RMS_POWER_READ_BATCH_SIZE)) {

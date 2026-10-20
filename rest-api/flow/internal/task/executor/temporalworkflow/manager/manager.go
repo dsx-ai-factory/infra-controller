@@ -19,10 +19,12 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/capabilityrequirements"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/capability"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/activity"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/workflow"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
@@ -273,6 +275,57 @@ func validateRequiredCapabilities(
 	return nil
 }
 
+// validateOperationOptions verifies implementation-specific request options
+// for every active manager that the resolved rule will invoke.
+func validateOperationOptions(
+	info task.ExecutionInfo,
+	registry *componentmanager.Registry,
+) error {
+	if info.OperationType != taskcommon.TaskTypeFirmwareControl {
+		return nil
+	}
+
+	op, err := operations.New(info.OperationType, info.OperationInfo)
+	if err != nil {
+		return err
+	}
+	firmwareInfo, ok := op.(*operations.FirmwareControlTaskInfo)
+	if !ok {
+		return fmt.Errorf("unexpected firmware operation payload %T", op)
+	}
+
+	requirements, err := capabilityrequirements.Required(
+		info.RuleDefinition,
+		executionComponentTypes(info.Components),
+	)
+	if err != nil {
+		return err
+	}
+
+	for _, requirement := range requirements {
+		if !requirement.Capabilities.Contains(capability.CapabilityFirmwareControl) {
+			continue
+		}
+		manager, err := registry.GetManager(requirement.ComponentType)
+		if err != nil {
+			return err
+		}
+		validator, ok := manager.(componentmanager.FirmwareControlValidator)
+		if !ok {
+			continue
+		}
+		if err := validator.ValidateFirmwareControl(*firmwareInfo); err != nil {
+			return fmt.Errorf(
+				"component type %s rejected firmware options: %w",
+				devicetypes.ComponentTypeToString(requirement.ComponentType),
+				err,
+			)
+		}
+	}
+
+	return nil
+}
+
 // executionComponentTypes returns the unique component types targeted by the
 // task, sorted so capability validation receives deterministic input.
 func executionComponentTypes(
@@ -294,24 +347,20 @@ func executionComponentTypes(
 	return types
 }
 
-// Execute dispatches the task to the Temporal workflow registered for its
-// OperationType. All Temporal mechanics (client, options, workflow submission)
-// are contained here — nothing engine-specific crosses the Executor boundary.
-func (m *Manager) Execute(
-	ctx context.Context,
-	req *task.ExecutionRequest,
-) (*task.ExecutionResponse, error) {
+// Validate verifies the request and active component-manager support without
+// creating a Temporal workflow.
+func (m *Manager) Validate(req *task.ExecutionRequest) error {
 	if req == nil {
-		return nil, errors.New("execution request is nil")
+		return errors.New("execution request is nil")
 	}
 
 	if err := req.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid execution request: %w", err)
+		return fmt.Errorf("invalid execution request: %w", err)
 	}
 
-	desc, ok := workflow.Get(req.Info.OperationType)
+	_, ok := workflow.Get(req.Info.OperationType)
 	if !ok {
-		return nil, fmt.Errorf(
+		return fmt.Errorf(
 			"no workflow registered for task type %q (registered types: %v) — "+
 				"ensure the workflow package is imported and its init() runs",
 			req.Info.OperationType,
@@ -324,11 +373,33 @@ func (m *Manager) Execute(
 	// capability contract at the operation boundary.
 	err := validateRequiredCapabilities(req.Info, m.conf.ComponentManagerRegistry)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return fmt.Errorf(
 			"component manager capability pre-dispatch validation failed: %w",
 			err,
 		)
 	}
+	if err := validateOperationOptions(req.Info, m.conf.ComponentManagerRegistry); err != nil {
+		return fmt.Errorf(
+			"component manager option pre-dispatch validation failed: %w",
+			err,
+		)
+	}
+
+	return nil
+}
+
+// Execute dispatches the task to the Temporal workflow registered for its
+// OperationType. All Temporal mechanics (client, options, workflow submission)
+// are contained here — nothing engine-specific crosses the Executor boundary.
+func (m *Manager) Execute(
+	ctx context.Context,
+	req *task.ExecutionRequest,
+) (*task.ExecutionResponse, error) {
+	if err := m.Validate(req); err != nil {
+		return nil, err
+	}
+
+	desc, _ := workflow.Get(req.Info.OperationType)
 
 	return executeWorkflow(ctx, m.publisherClient.Client(), desc, req)
 }

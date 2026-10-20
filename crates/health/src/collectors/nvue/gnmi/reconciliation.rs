@@ -64,11 +64,19 @@ impl MetricReconciler {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
 
-        for (_, sample) in sources.values() {
+        for (source, sample) in sources.values() {
             if let Some(sample) = sample {
-                sink.handle_event(
+                // Reapply the source policy when cached readings are republished.
+                let is_event_record = source
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .take(2)
+                    .eq(["system-events", "system-event"]);
+
+                sink.handle_classified_event(
                     &self.context,
                     &CollectorEvent::Metric(Box::new(sample.clone())),
+                    is_event_record,
                 );
             }
         }

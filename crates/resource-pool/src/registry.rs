@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use db::DatabaseError;
@@ -65,7 +66,7 @@ pub enum ResourcePoolRegistryError {
     /// Reading, saving, or checking a pool's binding or stored values failed.
     #[error(transparent)]
     Binding(#[from] BindingError),
-    /// The database could not load the saved bindings.
+    /// The database could not read pool bindings or stored values.
     #[error(transparent)]
     Database(#[from] DatabaseError),
     /// v2.4 supports only the database-local Integrated authority.
@@ -108,6 +109,40 @@ impl ResourcePoolRegistry {
     /// `None` means this registry has no binding for the name.
     pub fn get(&self, name: &str) -> Option<&ResolvedResourcePool> {
         self.pools.get(name)
+    }
+
+    /// `get_or_load_backend` borrows a resolved backend or checks the database for
+    /// a pool added after startup, using the caller's transaction.
+    ///
+    /// During a rolling upgrade, replicas that do not write pool bindings can
+    /// still grow SQL pools. Existing rows let us use Integrated for those pools.
+    /// A saved binding always takes precedence and must select a supported
+    /// Integrated backend with the same pool name; invalid bindings and database
+    /// errors are returned to the caller.
+    ///
+    /// This does not change the registry or save a binding. `None` means the pool
+    /// has neither a binding nor any stored values.
+    pub async fn get_or_load_backend<'a>(
+        &'a self,
+        txn: &mut PgConnection,
+        name: &str,
+    ) -> Result<Option<Cow<'a, ResourcePoolBackend>>, ResourcePoolRegistryError> {
+        if let Some(resolved) = self.get(name) {
+            return Ok(Some(Cow::Borrowed(&resolved.backend)));
+        }
+        if let Some(stored) = binding::load(&mut *txn, name).await? {
+            validate_integrated(
+                &stored.pool_name,
+                stored.backend_kind,
+                &stored.authority_id,
+                &stored.remote_pool,
+            )?;
+        } else if !db::resource_pool::pool_has_rows(txn, name).await? {
+            return Ok(None);
+        }
+        Ok(Some(Cow::Owned(ResourcePoolBackend::Integrated(
+            IntegratedResourcePoolBackend,
+        ))))
     }
 
     /// `resolve` checks each pool's backend selection and saves new bindings in

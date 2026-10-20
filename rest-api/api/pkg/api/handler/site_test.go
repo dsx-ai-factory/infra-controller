@@ -1611,6 +1611,13 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 	_ = testSiteBuildMachine(t, dbSession, ip2.ID, stdemo2.ID, cdbm.MachineStatusError)
 	_ = testSiteBuildMachine(t, dbSession, ip2.ID, stdemo2.ID, cdbm.MachineStatusError)
 
+	// Privileged Tenant denied at stdemo1 without Allocations
+	blockedTnOrg := "test-blocked-tenant-org"
+	blockedTnu := testSiteBuildUser(t, dbSession, "test-blocked-tenant-user", blockedTnOrg, tnRoles)
+	blockedTn := testSiteBuildTenant(t, dbSession, "Test Blocked Tenant", blockedTnOrg, blockedTnu)
+	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip2, &blockedTn.ID, blockedTnOrg, cdbm.TenantAccountStatusReady, blockedTnu)
+	cdbm.TestBuildTenantSite(t, dbSession, blockedTn, stdemo1, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, blockedTnu)
+
 	// Build Site for Service Provider
 	ss := testSiteBuildSite(t, dbSession, sip, "test-service-site", cdbm.SiteStatusRegistered, su, nil, nil, nil)
 	common.TestBuildTenantSite(t, dbSession, stn, ss, su)
@@ -1953,6 +1960,22 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 			wantCount:              20,
 			wantTotalCount:         totalCount / 2,
 			wantRespCode:           http.StatusOK,
+		},
+		{
+			name: "get all Sites by privileged Tenant excludes Site denied without Allocations",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        &tmocks.Client{},
+				cfg:       cfg,
+			},
+			args: args{
+				org:  blockedTnOrg,
+				user: blockedTnu,
+			},
+			wantCount:      1,
+			wantTotalCount: 1,
+			wantRespCode:   http.StatusOK,
+			wantFirstEntry: stdemo2,
 		},
 		{
 			name: "get all Sites by Service Account success",

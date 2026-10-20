@@ -392,7 +392,7 @@ async fn test_suppression_skips_cached_switch_and_power_shelf_ingestion(
         model::expected_switch::ExpectedSwitch {
             expected_switch_id: None,
             bmc_mac_address: devices[0].mac,
-            nvos_mac_addresses: Vec::new(),
+            nvos_interfaces: Vec::new(),
             serial_number: "SUPPRESSED-SWITCH".to_string(),
             bmc_username: "admin".to_string(),
             bmc_password: "password".to_string(),
@@ -2548,6 +2548,7 @@ async fn test_site_explorer_audit_exploration_results(
     let explorer_config = SiteExplorerConfig {
         enabled: Arc::new(true.into()),
         retained_boot_interface_window: None,
+        admin_fnn_enabled: false,
         explorations_per_run: 7,
         concurrent_explorations: 1,
         run_interval: std::time::Duration::from_secs(1),

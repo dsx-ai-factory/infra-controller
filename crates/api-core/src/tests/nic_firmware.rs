@@ -23,15 +23,18 @@ use config_version::ConfigVersion;
 use futures::{FutureExt, StreamExt};
 use model::nic_firmware::NicFirmwareProfileId;
 use rpc::forge::forge_server::Forge;
+use rpc::forge::nic_firmware_card_selector::Identity as CardIdentity;
 use rpc::forge::nic_firmware_device_target::Result as TargetResult;
-use rpc::forge::set_nic_firmware_site_default_request::Action;
+use rpc::forge::set_machine_nic_firmware_config_request::Action as MachineAction;
+use rpc::forge::set_nic_firmware_site_selection_request::Action;
 use rpc::forge::{
     CreateNicFirmwareProfileRequest, DeleteNicFirmwareProfileRequest,
     FindNicFirmwareProfileIdsRequest, FindNicFirmwareProfilesByIdsRequest,
-    FindNicFirmwareSiteDefaultsByIdsRequest, GetDesiredNicFirmwareRequest, NicFirmwareApproach,
-    NicFirmwareArtifact, NicFirmwareHardware, NicFirmwareProfile, NicFirmwareProfileEntry,
-    NicFirmwareSiteDefaultSearchFilter, SetNicFirmwareSiteDefaultRequest,
-    UpdateNicFirmwareProfileRequest,
+    FindNicFirmwareSiteSelectionsByIdsRequest, GetDesiredNicFirmwareRequest, NicFirmwareApproach,
+    NicFirmwareArtifact, NicFirmwareCardSelection, NicFirmwareCardSelections,
+    NicFirmwareCardSelector, NicFirmwareHardware, NicFirmwareProfile, NicFirmwareProfileEntry,
+    NicFirmwareSiteSelectionSearchFilter, SetMachineNicFirmwareConfigRequest,
+    SetNicFirmwareSiteSelectionRequest, UpdateNicFirmwareProfileRequest,
 };
 use rpc::protos::mlx_device::FirmwareSpec;
 use tonic::{Code, Request};
@@ -71,7 +74,7 @@ fn profile_config() -> rpc::forge::NicFirmwareProfileConfig {
 }
 
 #[crate::sqlx_test]
-async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx::PgPool) {
+async fn site_selections_validate_compatibility_and_assignment_versions(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     for id in ["z-profile", "a-profile", "incompatible"] {
         let mut config = profile_config();
@@ -129,27 +132,27 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
         .unwrap_err();
     assert_eq!(error.code(), Code::InvalidArgument);
     assert!(error.metadata().get("nico-error-text").is_some());
-    let find_request = FindNicFirmwareSiteDefaultsByIdsRequest {
+    let find_request = FindNicFirmwareSiteSelectionsByIdsRequest {
         hardware: vec![hardware.clone()],
     };
-    let mut request = SetNicFirmwareSiteDefaultRequest {
+    let mut request = SetNicFirmwareSiteSelectionRequest {
         hardware: Some(hardware),
         action: Some(Action::ProfileId("z-profile".into())),
         if_version_match: None,
     };
     let created = env
         .api
-        .set_nic_firmware_site_default(Request::new(request.clone()))
+        .set_nic_firmware_site_selection(Request::new(request.clone()))
         .await
         .unwrap()
         .into_inner()
-        .site_default
+        .site_selection
         .unwrap();
     assert_eq!(created.hardware, request.hardware);
     assert_eq!(created.profile_id, "z-profile");
     assert_eq!(
         env.api
-            .set_nic_firmware_site_default(Request::new(request.clone()))
+            .set_nic_firmware_site_selection(Request::new(request.clone()))
             .await
             .unwrap_err()
             .code(),
@@ -159,18 +162,18 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
     request.action = Some(Action::ProfileId("a-profile".into()));
     let updated = env
         .api
-        .set_nic_firmware_site_default(Request::new(request.clone()))
+        .set_nic_firmware_site_selection(Request::new(request.clone()))
         .await
         .unwrap()
         .into_inner()
-        .site_default
+        .site_selection
         .unwrap();
     assert_ne!(updated.version, created.version);
     assert_eq!(updated.profile_id, "a-profile");
     assert_eq!(updated.hardware, request.hardware);
     let filtered_hardware = env
         .api
-        .find_nic_firmware_site_default_ids(Request::new(NicFirmwareSiteDefaultSearchFilter {
+        .find_nic_firmware_site_selection_ids(Request::new(NicFirmwareSiteSelectionSearchFilter {
             profile_id: Some("a-profile".into()),
         }))
         .await
@@ -180,9 +183,11 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
     assert_eq!(filtered_hardware, find_request.hardware);
     assert!(
         env.api
-            .find_nic_firmware_site_default_ids(Request::new(NicFirmwareSiteDefaultSearchFilter {
-                profile_id: Some("z-profile".into()),
-            }))
+            .find_nic_firmware_site_selection_ids(Request::new(
+                NicFirmwareSiteSelectionSearchFilter {
+                    profile_id: Some("z-profile".into()),
+                }
+            ))
             .await
             .unwrap()
             .into_inner()
@@ -193,7 +198,7 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
         ("stale replace", request.clone(), Code::FailedPrecondition),
         (
             "missing profile precedes stale assignment token",
-            SetNicFirmwareSiteDefaultRequest {
+            SetNicFirmwareSiteSelectionRequest {
                 action: Some(Action::ProfileId("missing".into())),
                 ..request.clone()
             },
@@ -201,7 +206,7 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
         ),
         (
             "stale clear",
-            SetNicFirmwareSiteDefaultRequest {
+            SetNicFirmwareSiteSelectionRequest {
                 action: Some(Action::Clear(())),
                 ..request.clone()
             },
@@ -209,7 +214,7 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
         ),
         (
             "unsupported pair",
-            SetNicFirmwareSiteDefaultRequest {
+            SetNicFirmwareSiteSelectionRequest {
                 action: Some(Action::ProfileId("incompatible".into())),
                 if_version_match: Some(updated.version.clone()),
                 ..request.clone()
@@ -218,7 +223,7 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
         ),
         (
             "clear needs token",
-            SetNicFirmwareSiteDefaultRequest {
+            SetNicFirmwareSiteSelectionRequest {
                 action: Some(Action::Clear(())),
                 if_version_match: None,
                 ..request.clone()
@@ -227,7 +232,7 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
         ),
         (
             "missing action does not clear",
-            SetNicFirmwareSiteDefaultRequest {
+            SetNicFirmwareSiteSelectionRequest {
                 action: None,
                 if_version_match: Some(updated.version.clone()),
                 ..request.clone()
@@ -236,7 +241,7 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
         ),
         (
             "missing hardware",
-            SetNicFirmwareSiteDefaultRequest {
+            SetNicFirmwareSiteSelectionRequest {
                 hardware: None,
                 ..request.clone()
             },
@@ -244,7 +249,7 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
         ),
         (
             "empty profile ID does not clear",
-            SetNicFirmwareSiteDefaultRequest {
+            SetNicFirmwareSiteSelectionRequest {
                 action: Some(Action::ProfileId(String::new())),
                 if_version_match: Some(updated.version.clone()),
                 ..request.clone()
@@ -253,7 +258,7 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
         ),
         (
             "malformed token does not create",
-            SetNicFirmwareSiteDefaultRequest {
+            SetNicFirmwareSiteSelectionRequest {
                 if_version_match: Some("bad".into()),
                 ..request.clone()
             },
@@ -261,7 +266,7 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
         ),
         (
             "oversized Unicode selector is rejected without a log truncation panic",
-            SetNicFirmwareSiteDefaultRequest {
+            SetNicFirmwareSiteSelectionRequest {
                 hardware: Some(NicFirmwareHardware {
                     part_number: "🦀".repeat(1500),
                     psid: "PSID1".into(),
@@ -273,7 +278,7 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
     ] {
         assert_eq!(
             env.api
-                .set_nic_firmware_site_default(Request::new(input))
+                .set_nic_firmware_site_selection(Request::new(input))
                 .await
                 .unwrap_err()
                 .code(),
@@ -282,11 +287,11 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
         );
         assert_eq!(
             env.api
-                .find_nic_firmware_site_defaults_by_ids(Request::new(find_request.clone()))
+                .find_nic_firmware_site_selections_by_ids(Request::new(find_request.clone()))
                 .await
                 .unwrap()
                 .into_inner()
-                .site_defaults,
+                .site_selections,
             std::slice::from_ref(&updated),
             "{scenario}"
         );
@@ -295,25 +300,25 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
     request.action = Some(Action::Clear(()));
     assert!(
         env.api
-            .set_nic_firmware_site_default(Request::new(request.clone()))
+            .set_nic_firmware_site_selection(Request::new(request.clone()))
             .await
             .unwrap()
             .into_inner()
-            .site_default
+            .site_selection
             .is_none()
     );
     assert!(
         env.api
-            .find_nic_firmware_site_defaults_by_ids(Request::new(find_request.clone()))
+            .find_nic_firmware_site_selections_by_ids(Request::new(find_request.clone()))
             .await
             .unwrap()
             .into_inner()
-            .site_defaults
+            .site_selections
             .is_empty()
     );
     assert_eq!(
         env.api
-            .set_nic_firmware_site_default(Request::new(request.clone()))
+            .set_nic_firmware_site_selection(Request::new(request.clone()))
             .await
             .unwrap_err()
             .code(),
@@ -321,7 +326,7 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
     );
     assert_eq!(
         env.api
-            .set_nic_firmware_site_default(Request::new(SetNicFirmwareSiteDefaultRequest {
+            .set_nic_firmware_site_selection(Request::new(SetNicFirmwareSiteSelectionRequest {
                 action: Some(Action::ProfileId("a-profile".into())),
                 ..request.clone()
             }))
@@ -332,8 +337,8 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
     );
     assert!(
         env.api
-            .find_nic_firmware_site_default_ids(Request::new(
-                NicFirmwareSiteDefaultSearchFilter::default(),
+            .find_nic_firmware_site_selection_ids(Request::new(
+                NicFirmwareSiteSelectionSearchFilter::default(),
             ))
             .await
             .unwrap()
@@ -343,7 +348,7 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
     );
     let recreated = env
         .api
-        .set_nic_firmware_site_default(Request::new(SetNicFirmwareSiteDefaultRequest {
+        .set_nic_firmware_site_selection(Request::new(SetNicFirmwareSiteSelectionRequest {
             action: Some(Action::ProfileId("a-profile".into())),
             if_version_match: None,
             ..request.clone()
@@ -351,7 +356,7 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
         .await
         .unwrap()
         .into_inner()
-        .site_default
+        .site_selection
         .unwrap();
     assert_ne!(recreated.version, created.version);
     assert_eq!(
@@ -371,7 +376,7 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
         request.action = Some(action);
         assert_eq!(
             env.api
-                .set_nic_firmware_site_default(Request::new(request.clone()))
+                .set_nic_firmware_site_selection(Request::new(request.clone()))
                 .await
                 .unwrap_err()
                 .code(),
@@ -380,17 +385,17 @@ async fn site_defaults_validate_compatibility_and_assignment_versions(pool: sqlx
     }
     assert_eq!(
         env.api
-            .find_nic_firmware_site_defaults_by_ids(Request::new(find_request))
+            .find_nic_firmware_site_selections_by_ids(Request::new(find_request))
             .await
             .unwrap()
             .into_inner()
-            .site_defaults,
+            .site_selections,
         std::slice::from_ref(&recreated)
     );
 }
 
 #[crate::sqlx_test]
-async fn profile_references_reject_changes_until_defaults_are_cleared(pool: sqlx::PgPool) {
+async fn profile_references_reject_changes_until_site_selections_are_cleared(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mut config = profile_config();
     let profile = env
@@ -404,12 +409,12 @@ async fn profile_references_reject_changes_until_defaults_are_cleared(pool: sqlx
         .into_inner()
         .profile
         .unwrap();
-    let mut bindings = Vec::new();
+    let mut site_selections = Vec::new();
     for entry in config.entries.iter().rev() {
         let firmware = entry.firmware.as_ref().unwrap();
-        bindings.push(
+        site_selections.push(
             env.api
-                .set_nic_firmware_site_default(Request::new(SetNicFirmwareSiteDefaultRequest {
+                .set_nic_firmware_site_selection(Request::new(SetNicFirmwareSiteSelectionRequest {
                     hardware: Some(NicFirmwareHardware {
                         part_number: firmware.part_number.clone(),
                         psid: firmware.psid.clone(),
@@ -420,14 +425,14 @@ async fn profile_references_reject_changes_until_defaults_are_cleared(pool: sqlx
                 .await
                 .unwrap()
                 .into_inner()
-                .site_default
+                .site_selection
                 .unwrap(),
         );
     }
     let listed = env
         .api
-        .find_nic_firmware_site_default_ids(Request::new(
-            NicFirmwareSiteDefaultSearchFilter::default(),
+        .find_nic_firmware_site_selection_ids(Request::new(
+            NicFirmwareSiteSelectionSearchFilter::default(),
         ))
         .await
         .unwrap()
@@ -435,12 +440,12 @@ async fn profile_references_reject_changes_until_defaults_are_cleared(pool: sqlx
         .hardware;
     assert_eq!(
         listed,
-        bindings
+        site_selections
             .iter()
-            .map(|binding| binding.hardware.clone().unwrap())
+            .map(|site_selection| site_selection.hardware.clone().unwrap())
             .collect::<Vec<_>>()
     );
-    let details = FindNicFirmwareSiteDefaultsByIdsRequest { hardware: listed };
+    let details = FindNicFirmwareSiteSelectionsByIdsRequest { hardware: listed };
     let delete = DeleteNicFirmwareProfileRequest {
         id: profile.id.clone(),
         if_version_match: Some(profile.version.clone()),
@@ -478,20 +483,20 @@ async fn profile_references_reject_changes_until_defaults_are_cleared(pool: sqlx
         );
         assert_eq!(
             env.api
-                .find_nic_firmware_site_defaults_by_ids(Request::new(details.clone()))
+                .find_nic_firmware_site_selections_by_ids(Request::new(details.clone()))
                 .await
                 .unwrap()
                 .into_inner()
-                .site_defaults,
-            bindings
+                .site_selections,
+            site_selections
         );
     }
-    for (index, binding) in bindings.iter().enumerate() {
+    for (index, site_selection) in site_selections.iter().enumerate() {
         env.api
-            .set_nic_firmware_site_default(Request::new(SetNicFirmwareSiteDefaultRequest {
-                hardware: binding.hardware.clone(),
+            .set_nic_firmware_site_selection(Request::new(SetNicFirmwareSiteSelectionRequest {
+                hardware: site_selection.hardware.clone(),
                 action: Some(Action::Clear(())),
-                if_version_match: Some(binding.version.clone()),
+                if_version_match: Some(site_selection.version.clone()),
             }))
             .await
             .unwrap();
@@ -499,12 +504,12 @@ async fn profile_references_reject_changes_until_defaults_are_cleared(pool: sqlx
         // become placeholders when a client fetches its previously listed keys.
         assert_eq!(
             env.api
-                .find_nic_firmware_site_defaults_by_ids(Request::new(details.clone()))
+                .find_nic_firmware_site_selections_by_ids(Request::new(details.clone()))
                 .await
                 .unwrap()
                 .into_inner()
-                .site_defaults,
-            bindings[index + 1..]
+                .site_selections,
+            site_selections[index + 1..]
         );
     }
     env.api
@@ -525,13 +530,15 @@ async fn profile_references_reject_changes_until_defaults_are_cleared(pool: sqlx
 }
 
 #[crate::sqlx_test]
-async fn site_default_reads_validate_filters_and_batch_bounds(pool: sqlx::PgPool) {
+async fn site_selection_reads_validate_filters_and_batch_bounds(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let api = &env.api;
     assert_eq!(
-        api.find_nic_firmware_site_default_ids(Request::new(NicFirmwareSiteDefaultSearchFilter {
-            profile_id: Some(String::new()),
-        }))
+        api.find_nic_firmware_site_selection_ids(Request::new(
+            NicFirmwareSiteSelectionSearchFilter {
+                profile_id: Some(String::new()),
+            }
+        ))
         .await
         .unwrap_err()
         .code(),
@@ -547,8 +554,8 @@ async fn site_default_reads_validate_filters_and_batch_bounds(pool: sqlx::PgPool
     }))
     .await
     .unwrap();
-    let binding = api
-        .set_nic_firmware_site_default(Request::new(SetNicFirmwareSiteDefaultRequest {
+    let site_selection = api
+        .set_nic_firmware_site_selection(Request::new(SetNicFirmwareSiteSelectionRequest {
             hardware: Some(hardware.clone()),
             action: Some(Action::ProfileId("baseline".into())),
             if_version_match: None,
@@ -556,12 +563,12 @@ async fn site_default_reads_validate_filters_and_batch_bounds(pool: sqlx::PgPool
         .await
         .unwrap()
         .into_inner()
-        .site_default
+        .site_selection
         .unwrap();
     let limit = env.config.max_find_by_ids as usize;
     env.api
-        .find_nic_firmware_site_defaults_by_ids(Request::new(
-            FindNicFirmwareSiteDefaultsByIdsRequest {
+        .find_nic_firmware_site_selections_by_ids(Request::new(
+            FindNicFirmwareSiteSelectionsByIdsRequest {
                 hardware: vec![hardware.clone(); limit],
             },
         ))
@@ -592,8 +599,8 @@ async fn site_default_reads_validate_filters_and_batch_bounds(pool: sqlx::PgPool
             },
         ],
         |hardware| async move {
-            api.find_nic_firmware_site_defaults_by_ids(Request::new(
-                FindNicFirmwareSiteDefaultsByIdsRequest { hardware },
+            api.find_nic_firmware_site_selections_by_ids(Request::new(
+                FindNicFirmwareSiteSelectionsByIdsRequest { hardware },
             ))
             .await
             .map(drop)
@@ -602,16 +609,1187 @@ async fn site_default_reads_validate_filters_and_batch_bounds(pool: sqlx::PgPool
     )
     .await;
     assert_eq!(
-        api.find_nic_firmware_site_defaults_by_ids(Request::new(
-            FindNicFirmwareSiteDefaultsByIdsRequest {
+        api.find_nic_firmware_site_selections_by_ids(Request::new(
+            FindNicFirmwareSiteSelectionsByIdsRequest {
                 hardware: vec![hardware],
             }
         ))
         .await
         .unwrap()
         .into_inner()
-        .site_defaults,
-        [binding]
+        .site_selections,
+        [site_selection]
+    );
+}
+
+// The public write/read path must preserve operator intent as Scout reports
+// change, while clearing the machine selection restores site inheritance.
+#[crate::sqlx_test]
+async fn machine_selection_is_exposed_resolved_and_cleared_with_changing_inventory(
+    pool: sqlx::PgPool,
+) {
+    use model::machine::status::MlxDeviceObservation;
+    use rpc::forge::NicFirmwareSelectionScope;
+    use rpc::protos::mlx_device::MlxDeviceInfo;
+
+    use crate::tests::common::api_fixtures::create_managed_host;
+
+    let env = create_test_env(pool).await;
+    let host = create_managed_host(&env).await;
+    let before = host.host().rpc_machine().await;
+    let snapshot = db::machine::find_one(&env.pool, &host.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let managed = snapshot
+        .status
+        .interfaces
+        .iter()
+        .find(|interface| interface.attached_dpu_machine_id.is_some())
+        .unwrap();
+    let baseline = profile_config();
+    let mut machine_config = baseline.clone();
+    for entry in &mut machine_config.entries {
+        entry.firmware.as_mut().unwrap().version = "machine-target".into();
+    }
+    // Matching the first device is insufficient: both usable pairs constrain
+    // the assignment.
+    let mut incompatible = machine_config.clone();
+    incompatible.entries.truncate(1);
+    for (id, config) in [
+        ("baseline", baseline.clone()),
+        ("machine", machine_config.clone()),
+        ("incompatible", incompatible),
+    ] {
+        env.api
+            .create_nic_firmware_profile(Request::new(CreateNicFirmwareProfileRequest {
+                id: id.into(),
+                config: Some(config),
+            }))
+            .await
+            .unwrap();
+    }
+    let mut devices = Vec::new();
+    for (index, entry) in baseline.entries.iter().enumerate() {
+        let firmware = entry.firmware.as_ref().unwrap();
+        env.api
+            .set_nic_firmware_site_selection(Request::new(SetNicFirmwareSiteSelectionRequest {
+                hardware: Some(NicFirmwareHardware {
+                    part_number: firmware.part_number.clone(),
+                    psid: firmware.psid.clone(),
+                }),
+                action: Some(Action::ProfileId("baseline".into())),
+                if_version_match: None,
+            }))
+            .await
+            .unwrap();
+        devices.push(MlxDeviceInfo {
+            pci_name: format!("0{index}:00.0"),
+            part_number: firmware.part_number.clone(),
+            psid: firmware.psid.clone(),
+            ..Default::default()
+        });
+    }
+    // Managed-DPU hardware and missing or invalid facts must not block the
+    // assignment. Desired reads still need to report each device's error.
+    devices.extend([
+        MlxDeviceInfo {
+            pci_name: "02:00.0".into(),
+            part_number: "managed-DPU-only".into(),
+            psid: "managed-DPU-only".into(),
+            base_mac: managed.mac_address.to_string(),
+            ..Default::default()
+        },
+        MlxDeviceInfo {
+            pci_name: "03:00.0".into(),
+            part_number: "incomplete".into(),
+            ..Default::default()
+        },
+        MlxDeviceInfo {
+            pci_name: "04:00.0".into(),
+            part_number: " padded ".into(),
+            psid: "unusable-pair".into(),
+            ..Default::default()
+        },
+    ]);
+    let mut observation = MlxDeviceObservation {
+        observed_at: "2026-10-12T00:00:00Z".parse().unwrap(),
+        devices: devices
+            .into_iter()
+            .map(|device| device.try_into().unwrap())
+            .collect(),
+    };
+    let mut connection = env.pool.acquire().await.unwrap();
+    assert_eq!(
+        db::machine::update_mlx_device_observation(&mut connection, &host.id, &observation)
+            .await
+            .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
+    drop(connection);
+
+    env.api
+        .set_machine_nic_firmware_config(Request::new(SetMachineNicFirmwareConfigRequest {
+            machine_id: Some(host.id.into()),
+            if_version_match: Some(before.version.clone()),
+            action: Some(MachineAction::ProfileId("machine".into())),
+            card_selections: None,
+        }))
+        .await
+        .unwrap();
+    let configured = host.host().rpc_machine().await;
+    assert_eq!(
+        configured
+            .config
+            .as_ref()
+            .unwrap()
+            .nic_firmware_profile_id
+            .as_deref(),
+        Some("machine")
+    );
+    assert_ne!(configured.version, before.version);
+    assert_eq!(configured.state, before.state);
+    assert_eq!(configured.state_version, before.state_version);
+    let request = GetDesiredNicFirmwareRequest {
+        machine_id: Some(host.id.into()),
+        allocation_profile_id: None,
+    };
+    let desired = env
+        .api
+        .get_desired_nic_firmware(Request::new(request.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(desired.targets.len(), 5);
+    for (target, entry) in desired.targets[..2].iter().zip(&machine_config.entries) {
+        let Some(TargetResult::Firmware(resolved)) = &target.result else {
+            panic!("expected machine selection: {target:?}");
+        };
+        assert_eq!(resolved.scope, NicFirmwareSelectionScope::Machine as i32);
+        assert_eq!(resolved.profile_id, "machine");
+        assert_eq!(resolved.entry.as_ref(), Some(entry));
+    }
+    assert!(
+        matches!(&desired.targets[2].result, Some(TargetResult::Error(error)) if error.contains("managed-DPU"))
+    );
+    assert_eq!(
+        desired.targets[2]
+            .identity
+            .as_ref()
+            .unwrap()
+            .managed_dpu_machine_ids,
+        [managed.attached_dpu_machine_id.unwrap().into()]
+    );
+    assert!(
+        matches!(&desired.targets[3].result, Some(TargetResult::Error(error)) if error.contains("missing a PSID"))
+    );
+    assert!(
+        matches!(&desired.targets[4].result, Some(TargetResult::Error(error)) if error.contains("surrounding whitespace"))
+    );
+
+    let Some(TargetResult::Firmware(resolved)) = &desired.targets[0].result else {
+        panic!("expected machine selection: {:?}", desired.targets[0]);
+    };
+    machine_config.entries[0].firmware.as_mut().unwrap().version = "updated-machine-target".into();
+    let updated = env
+        .api
+        .update_nic_firmware_profile(Request::new(UpdateNicFirmwareProfileRequest {
+            id: "machine".into(),
+            config: Some(machine_config.clone()),
+            if_version_match: Some(resolved.profile_version.clone()),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .profile
+        .unwrap();
+    assert_ne!(updated.version, resolved.profile_version);
+    let desired = env
+        .api
+        .get_desired_nic_firmware(Request::new(request.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    for (target, entry) in desired.targets[..2].iter().zip(&machine_config.entries) {
+        let Some(TargetResult::Firmware(resolved)) = &target.result else {
+            panic!("expected updated machine selection: {target:?}");
+        };
+        assert_eq!(resolved.scope, NicFirmwareSelectionScope::Machine as i32);
+        assert_eq!(resolved.profile_id, "machine");
+        assert_eq!(resolved.profile_version, updated.version);
+        assert_eq!(resolved.entry.as_ref(), Some(entry));
+    }
+    let after_profile_edit = host.host().rpc_machine().await;
+    assert_eq!(after_profile_edit.config, configured.config);
+    assert_eq!(after_profile_edit.version, configured.version);
+
+    let allocation_conflict = env
+        .api
+        .get_desired_nic_firmware(Request::new(GetDesiredNicFirmwareRequest {
+            allocation_profile_id: Some("baseline".into()),
+            ..request.clone()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(&allocation_conflict.targets[0].result, Some(TargetResult::Error(error)) if error.contains("conflicts with the allocation requirement"))
+    );
+
+    let error = env
+        .api
+        .set_machine_nic_firmware_config(Request::new(SetMachineNicFirmwareConfigRequest {
+            machine_id: Some(host.id.into()),
+            if_version_match: Some(configured.version.clone()),
+            action: Some(MachineAction::ProfileId("incompatible".into())),
+            card_selections: None,
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    let rejected = host.host().rpc_machine().await;
+    assert_eq!(rejected.config, configured.config);
+    assert_eq!(rejected.version, configured.version);
+
+    // A later report can introduce incompatible hardware. Keep the saved
+    // selection and expose the mismatch until an operator changes it.
+    observation.observed_at = "2026-10-12T00:01:00Z".parse().unwrap();
+    observation.devices[0].part_number = Some("new-hardware".into());
+    let mut connection = env.pool.acquire().await.unwrap();
+    assert_eq!(
+        db::machine::update_mlx_device_observation(&mut connection, &host.id, &observation)
+            .await
+            .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
+    drop(connection);
+    let changed = env
+        .api
+        .get_desired_nic_firmware(Request::new(request.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(&changed.targets[0].result, Some(TargetResult::Error(error)) if error.contains("does not support"))
+    );
+    assert_eq!(changed.targets[1..], desired.targets[1..]);
+    let still_configured = host.host().rpc_machine().await;
+    assert_eq!(still_configured.config, configured.config);
+    assert_eq!(still_configured.version, configured.version);
+
+    // Clearing remains available even after inventory becomes incompatible.
+    env.api
+        .set_machine_nic_firmware_config(Request::new(SetMachineNicFirmwareConfigRequest {
+            machine_id: Some(host.id.into()),
+            if_version_match: Some(configured.version.clone()),
+            action: Some(MachineAction::Clear(())),
+            card_selections: None,
+        }))
+        .await
+        .unwrap();
+    let cleared = host.host().rpc_machine().await;
+    assert_eq!(cleared.config, before.config);
+    assert_ne!(cleared.version, configured.version);
+    assert_eq!(cleared.state_version, before.state_version);
+    let inherited = env
+        .api
+        .get_desired_nic_firmware(Request::new(request))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(inherited.targets[0].result.is_none());
+    let Some(TargetResult::Firmware(resolved)) = &inherited.targets[1].result else {
+        panic!(
+            "expected restored site selection: {:?}",
+            inherited.targets[1]
+        );
+    };
+    assert_eq!(resolved.scope, NicFirmwareSelectionScope::Site as i32);
+    assert_eq!(resolved.profile_id, "baseline");
+    assert_eq!(resolved.entry.as_ref(), Some(&baseline.entries[1]));
+    assert_eq!(inherited.targets[2..], desired.targets[2..]);
+}
+
+// The public setter and machine reader must preserve a mixed eight-device
+// configuration, including a GUID-only NIC, then restore inheritance on clear.
+#[crate::sqlx_test]
+async fn card_selections_split_eight_devices_and_clear_to_machine_inheritance(pool: sqlx::PgPool) {
+    use model::machine::status::MlxDeviceObservation;
+    use rpc::forge::NicFirmwareSelectionScope;
+    use rpc::protos::mlx_device::MlxDeviceInfo;
+
+    use crate::tests::common::api_fixtures::create_managed_host;
+
+    let env = create_test_env(pool).await;
+    let host = create_managed_host(&env).await;
+    let before = host.host().rpc_machine().await;
+    let machine_config = profile_config();
+    let mut card_config = machine_config.clone();
+    card_config.entries[0].firmware.as_mut().unwrap().version = "card-target".into();
+    for (id, config) in [
+        ("machine", &machine_config),
+        ("card", &card_config),
+        ("second-card", &machine_config),
+    ] {
+        env.api
+            .create_nic_firmware_profile(Request::new(CreateNicFirmwareProfileRequest {
+                id: id.into(),
+                config: Some(config.clone()),
+            }))
+            .await
+            .unwrap();
+    }
+    let firmware = machine_config.entries[0].firmware.as_ref().unwrap();
+    let devices: Vec<_> = (0..8)
+        .map(|index| MlxDeviceInfo {
+            pci_name: format!("{index:02x}:00.0"),
+            part_number: firmware.part_number.clone(),
+            psid: firmware.psid.clone(),
+            base_mac: if index == 0 {
+                String::new()
+            } else {
+                format!("02:AA:BB:CC:DD:{index:02X}")
+            },
+            base_guid: Some(format!("opaque-IB-GUID-{index}")),
+            ..Default::default()
+        })
+        .collect();
+    let observation = MlxDeviceObservation {
+        observed_at: "2026-10-13T00:00:00Z".parse().unwrap(),
+        devices: devices
+            .iter()
+            .cloned()
+            .map(|device| device.try_into().unwrap())
+            .collect(),
+    };
+    let mut connection = env.pool.acquire().await.unwrap();
+    assert_eq!(
+        db::machine::update_mlx_device_observation(&mut connection, &host.id, &observation)
+            .await
+            .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
+    drop(connection);
+    let card_selections: Vec<_> = devices
+        .iter()
+        .enumerate()
+        .map(|(index, device)| NicFirmwareCardSelection {
+            selector: Some(NicFirmwareCardSelector {
+                identity: Some(if index == 0 {
+                    CardIdentity::BaseGuid(device.base_guid.clone().unwrap())
+                } else {
+                    CardIdentity::BaseMac(device.base_mac.clone())
+                }),
+            }),
+            profile_id: if index < 4 { "card" } else { "second-card" }.into(),
+        })
+        .collect();
+    env.api
+        .set_machine_nic_firmware_config(Request::new(SetMachineNicFirmwareConfigRequest {
+            machine_id: Some(host.id.into()),
+            if_version_match: Some(before.version.clone()),
+            action: Some(MachineAction::ProfileId("machine".into())),
+            card_selections: Some(NicFirmwareCardSelections {
+                selections: card_selections.iter().rev().cloned().collect(),
+            }),
+        }))
+        .await
+        .unwrap();
+    let configured = host.host().rpc_machine().await;
+    let config = configured.config.as_ref().unwrap();
+    assert_eq!(config.nic_firmware_profile_id.as_deref(), Some("machine"));
+    assert_eq!(config.nic_firmware_card_selections, card_selections);
+    assert_eq!(
+        configured
+            .version
+            .parse::<ConfigVersion>()
+            .unwrap()
+            .version_nr(),
+        before
+            .version
+            .parse::<ConfigVersion>()
+            .unwrap()
+            .version_nr()
+            + 1
+    );
+    assert_eq!(configured.state, before.state);
+    assert_eq!(configured.state_version, before.state_version);
+    let desired_request = GetDesiredNicFirmwareRequest {
+        machine_id: Some(host.id.into()),
+        allocation_profile_id: None,
+    };
+    let desired = env
+        .api
+        .get_desired_nic_firmware(Request::new(desired_request.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(desired.warnings.is_empty());
+    assert_eq!(desired.targets.len(), 8);
+    for (index, target) in desired.targets.iter().enumerate() {
+        assert_eq!(
+            target.identity.as_ref().unwrap().device_info.as_ref(),
+            Some(&devices[index])
+        );
+        let Some(TargetResult::Firmware(resolved)) = &target.result else {
+            panic!("expected selected firmware for device {index}: {target:?}");
+        };
+        let (profile, entry) = if index < 4 {
+            ("card", &card_config.entries[0])
+        } else {
+            ("second-card", &machine_config.entries[0])
+        };
+        assert_eq!(
+            resolved.scope,
+            NicFirmwareSelectionScope::Card as i32,
+            "device {index}"
+        );
+        assert_eq!(resolved.profile_id, profile, "device {index}");
+        assert_eq!(resolved.entry.as_ref(), Some(entry), "device {index}");
+    }
+
+    // A replacement removes omitted cards, restoring machine inheritance.
+    let previous_version = configured.version.parse::<ConfigVersion>().unwrap();
+    env.api
+        .set_machine_nic_firmware_config(Request::new(SetMachineNicFirmwareConfigRequest {
+            machine_id: Some(host.id.into()),
+            if_version_match: Some(configured.version.clone()),
+            action: Some(MachineAction::ProfileId("machine".into())),
+            card_selections: Some(NicFirmwareCardSelections {
+                selections: card_selections[..4].to_vec(),
+            }),
+        }))
+        .await
+        .unwrap();
+    let configured = host.host().rpc_machine().await;
+    assert_eq!(
+        configured
+            .version
+            .parse::<ConfigVersion>()
+            .unwrap()
+            .version_nr(),
+        previous_version.version_nr() + 1
+    );
+    let config = configured.config.as_ref().unwrap();
+    assert_eq!(config.nic_firmware_card_selections, card_selections[..4]);
+    let mixed = env
+        .api
+        .get_desired_nic_firmware(Request::new(desired_request.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(mixed.warnings.is_empty());
+    assert_eq!(mixed.targets.len(), 8);
+    assert_eq!(mixed.targets[..4], desired.targets[..4]);
+    for target in &mixed.targets[4..] {
+        let Some(TargetResult::Firmware(resolved)) = &target.result else {
+            panic!("expected machine inheritance: {target:?}");
+        };
+        assert_eq!(resolved.scope, NicFirmwareSelectionScope::Machine as i32);
+        assert_eq!(resolved.profile_id, "machine");
+        assert_eq!(resolved.entry.as_ref(), Some(&machine_config.entries[0]));
+    }
+    let preview = env
+        .api
+        .get_desired_nic_firmware(Request::new(GetDesiredNicFirmwareRequest {
+            allocation_profile_id: Some("machine".into()),
+            ..desired_request.clone()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(preview.warnings.is_empty());
+    for target in &preview.targets[..4] {
+        assert!(matches!(
+            &target.result,
+            Some(TargetResult::Error(error)) if error.contains("conflict")
+        ));
+    }
+    assert_eq!(preview.targets[4..], mixed.targets[4..]);
+    let unchanged = host.host().rpc_machine().await;
+    assert_eq!(unchanged.config, configured.config);
+    assert_eq!(unchanged.version, configured.version);
+
+    // Clients that omit the wrapper must retain cards even when clearing the
+    // machine selection.
+    env.api
+        .set_machine_nic_firmware_config(Request::new(SetMachineNicFirmwareConfigRequest {
+            machine_id: Some(host.id.into()),
+            if_version_match: Some(configured.version.clone()),
+            action: Some(MachineAction::Clear(())),
+            card_selections: None,
+        }))
+        .await
+        .unwrap();
+    let preserved = host.host().rpc_machine().await;
+    let preserved_config = preserved.config.as_ref().unwrap();
+    assert!(preserved_config.nic_firmware_profile_id.is_none());
+    assert_eq!(
+        preserved_config.nic_firmware_card_selections,
+        config.nic_firmware_card_selections
+    );
+    let inherited = env
+        .api
+        .get_desired_nic_firmware(Request::new(desired_request.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(inherited.targets[..4], desired.targets[..4]);
+    assert!(
+        inherited.targets[4..]
+            .iter()
+            .all(|target| target.result.is_none())
+    );
+
+    env.api
+        .set_machine_nic_firmware_config(Request::new(SetMachineNicFirmwareConfigRequest {
+            machine_id: Some(host.id.into()),
+            if_version_match: Some(preserved.version.clone()),
+            action: Some(MachineAction::ProfileId("machine".into())),
+            card_selections: Some(NicFirmwareCardSelections {
+                selections: Vec::new(),
+            }),
+        }))
+        .await
+        .unwrap();
+    let cleared = host.host().rpc_machine().await;
+    let cleared_config = cleared.config.as_ref().unwrap();
+    assert_eq!(
+        cleared_config.nic_firmware_profile_id.as_deref(),
+        Some("machine")
+    );
+    assert!(cleared_config.nic_firmware_card_selections.is_empty());
+    assert_eq!(
+        cleared
+            .version
+            .parse::<ConfigVersion>()
+            .unwrap()
+            .version_nr(),
+        preserved
+            .version
+            .parse::<ConfigVersion>()
+            .unwrap()
+            .version_nr()
+            + 1
+    );
+    let inherited = env
+        .api
+        .get_desired_nic_firmware(Request::new(desired_request))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(inherited.warnings.is_empty());
+    assert_eq!(inherited.targets.len(), 8);
+    for target in &inherited.targets {
+        let Some(TargetResult::Firmware(resolved)) = &target.result else {
+            panic!("expected machine inheritance after clearing cards: {target:?}");
+        };
+        assert_eq!(resolved.scope, NicFirmwareSelectionScope::Machine as i32);
+        assert_eq!(resolved.profile_id, "machine");
+        assert_eq!(resolved.entry.as_ref(), Some(&machine_config.entries[0]));
+    }
+}
+
+// Inventory drift must not silently choose an ambiguous device or discard saved
+// intent; an unmatched selector warns without hiding other devices' targets.
+#[crate::sqlx_test]
+async fn changed_inventory_reports_ambiguous_and_unmatched_card_selections(pool: sqlx::PgPool) {
+    use model::address_selection_strategy::AddressSelectionStrategy;
+    use model::machine::status::MlxDeviceObservation;
+    use model::machine_interface_address::MachineInterfaceAssociation;
+    use rpc::forge::NicFirmwareSelectionScope;
+    use rpc::protos::mlx_device::MlxDeviceInfo;
+
+    use crate::tests::common::api_fixtures::create_managed_host;
+
+    let env = create_test_env(pool).await;
+    let host = create_managed_host(&env).await;
+    let config = profile_config();
+    for id in ["machine", "card"] {
+        env.api
+            .create_nic_firmware_profile(Request::new(CreateNicFirmwareProfileRequest {
+                id: id.into(),
+                config: Some(config.clone()),
+            }))
+            .await
+            .unwrap();
+    }
+    let firmware = config.entries[0].firmware.as_ref().unwrap();
+    let site_selection = env
+        .api
+        .set_nic_firmware_site_selection(Request::new(SetNicFirmwareSiteSelectionRequest {
+            hardware: Some(NicFirmwareHardware {
+                part_number: firmware.part_number.clone(),
+                psid: firmware.psid.clone(),
+            }),
+            action: Some(Action::ProfileId("machine".into())),
+            if_version_match: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .site_selection
+        .unwrap();
+    let mut observation = MlxDeviceObservation {
+        observed_at: "2026-10-13T00:00:00Z".parse().unwrap(),
+        devices: [
+            MlxDeviceInfo {
+                pci_name: "01:00.0".into(),
+                part_number: firmware.part_number.clone(),
+                psid: firmware.psid.clone(),
+                base_guid: Some("opaque-IB-GUID".into()),
+                ..Default::default()
+            },
+            MlxDeviceInfo {
+                pci_name: "02:00.0".into(),
+                part_number: firmware.part_number.clone(),
+                psid: firmware.psid.clone(),
+                base_mac: "02:AA:BB:CC:DD:02".into(),
+                ..Default::default()
+            },
+        ]
+        .into_iter()
+        .map(|device| device.try_into().unwrap())
+        .collect(),
+    };
+    let mut connection = env.pool.acquire().await.unwrap();
+    assert_eq!(
+        db::machine::update_mlx_device_observation(&mut connection, &host.id, &observation)
+            .await
+            .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
+    drop(connection);
+    env.api
+        .set_machine_nic_firmware_config(Request::new(SetMachineNicFirmwareConfigRequest {
+            machine_id: Some(host.id.into()),
+            if_version_match: Some(host.host().rpc_machine().await.version),
+            action: Some(MachineAction::ProfileId("machine".into())),
+            card_selections: Some(NicFirmwareCardSelections {
+                selections: [
+                    CardIdentity::BaseGuid("opaque-IB-GUID".into()),
+                    CardIdentity::BaseMac("02:AA:BB:CC:DD:02".into()),
+                ]
+                .into_iter()
+                .map(|identity| NicFirmwareCardSelection {
+                    selector: Some(NicFirmwareCardSelector {
+                        identity: Some(identity),
+                    }),
+                    profile_id: "card".into(),
+                })
+                .collect(),
+            }),
+        }))
+        .await
+        .unwrap();
+    let configured = host.host().rpc_machine().await;
+
+    // The GUID now names two reports, while the MAC no longer names any.
+    observation.observed_at = "2026-10-13T00:01:00Z".parse().unwrap();
+    observation.devices[1].base_mac = Some("02:AA:BB:CC:DD:03".parse().unwrap());
+    let mut duplicate = observation.devices[0].clone();
+    duplicate.pci_name = "03:00.0".into();
+    observation.devices.push(duplicate);
+    let mut connection = env.pool.acquire().await.unwrap();
+    assert_eq!(
+        db::machine::update_mlx_device_observation(&mut connection, &host.id, &observation)
+            .await
+            .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
+    drop(connection);
+
+    // An omitted card list must not revalidate saved selectors after drift.
+    env.api
+        .set_machine_nic_firmware_config(Request::new(SetMachineNicFirmwareConfigRequest {
+            machine_id: Some(host.id.into()),
+            if_version_match: Some(configured.version.clone()),
+            action: Some(MachineAction::ProfileId("machine".into())),
+            card_selections: None,
+        }))
+        .await
+        .unwrap();
+    let edited = host.host().rpc_machine().await;
+    assert_eq!(edited.config, configured.config);
+    assert_eq!(
+        edited
+            .version
+            .parse::<ConfigVersion>()
+            .unwrap()
+            .version_nr(),
+        configured
+            .version
+            .parse::<ConfigVersion>()
+            .unwrap()
+            .version_nr()
+            + 1
+    );
+    let configured = edited;
+    let desired_request = GetDesiredNicFirmwareRequest {
+        machine_id: Some(host.id.into()),
+        allocation_profile_id: None,
+    };
+    let desired = env
+        .api
+        .get_desired_nic_firmware(Request::new(desired_request.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(desired.targets.len(), 3);
+    for index in [0, 2] {
+        assert!(
+            matches!(&desired.targets[index].result, Some(TargetResult::Error(error)) if error.contains("ambiguous")),
+            "device {index}: {:?}",
+            desired.targets[index]
+        );
+        assert_eq!(
+            desired.targets[index].site_selection_version.as_ref(),
+            Some(&site_selection.version)
+        );
+    }
+    let Some(TargetResult::Firmware(resolved)) = &desired.targets[1].result else {
+        panic!("expected machine inheritance: {:?}", desired.targets[1]);
+    };
+    assert_eq!(resolved.scope, NicFirmwareSelectionScope::Machine as i32);
+    assert_eq!(resolved.profile_id, "machine");
+    assert_eq!(desired.warnings.len(), 1);
+    assert!(desired.warnings[0].contains("02:AA:BB:CC:DD:02"));
+    let unchanged = host.host().rpc_machine().await;
+    assert_eq!(unchanged.config, configured.config);
+    assert_eq!(unchanged.version, configured.version);
+
+    // Each selector is unique, but they now converge on the same device.
+    observation.observed_at = "2026-10-13T00:02:00Z".parse().unwrap();
+    observation.devices.truncate(2);
+    observation.devices[0].base_mac = Some("02:AA:BB:CC:DD:02".parse().unwrap());
+    let mut connection = env.pool.acquire().await.unwrap();
+    assert_eq!(
+        db::machine::update_mlx_device_observation(&mut connection, &host.id, &observation)
+            .await
+            .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
+    drop(connection);
+    let converged = env
+        .api
+        .get_desired_nic_firmware(Request::new(desired_request.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(converged.targets.len(), 2);
+    assert!(matches!(
+        &converged.targets[0].result,
+        Some(TargetResult::Error(error)) if error == "multiple NIC firmware card selections match this device"
+    ));
+    assert_eq!(
+        converged.targets[0].site_selection_version.as_ref(),
+        Some(&site_selection.version)
+    );
+    assert_eq!(converged.targets[1], desired.targets[1]);
+    assert!(converged.warnings.is_empty());
+    let unchanged = host.host().rpc_machine().await;
+    assert_eq!(unchanged.config, configured.config);
+    assert_eq!(unchanged.version, configured.version);
+
+    // A later DPU association takes precedence over the saved card conflict,
+    // without requiring another device report.
+    let mut txn = env.pool.begin().await.unwrap();
+    let segments = db::network_segment::admin(&mut txn).await.unwrap();
+    let interface = db::machine_interface::create(
+        &mut txn,
+        &segments,
+        &observation.devices[0].base_mac.unwrap(),
+        false,
+        AddressSelectionStrategy::NextAvailableIp,
+        None,
+    )
+    .await
+    .unwrap();
+    db::machine_interface::associate_interface_with_machine(
+        &interface.id,
+        MachineInterfaceAssociation::Machine(host.id.into()),
+        &mut txn,
+    )
+    .await
+    .unwrap();
+    db::machine_interface::associate_interface_with_dpu_machine(
+        &interface.id,
+        &host.dpu().id.into(),
+        &mut txn,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    let managed = env
+        .api
+        .get_desired_nic_firmware(Request::new(desired_request.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(managed.observed_at, Some(observation.observed_at.into()));
+    assert_eq!(managed.targets.len(), 2);
+    let target = &managed.targets[0];
+    let identity = target.identity.as_ref().unwrap();
+    assert_eq!(
+        identity.device_info,
+        Some(observation.devices[0].clone().into())
+    );
+    assert_eq!(identity.managed_dpu_machine_ids, [host.dpu().id.into()]);
+    assert!(matches!(
+        &target.result,
+        Some(TargetResult::Error(error))
+            if error == "managed-DPU association excludes this device from NIC firmware selection"
+    ));
+    assert!(target.site_selection_version.is_none());
+    assert_eq!(managed.targets[1], converged.targets[1]);
+    assert!(managed.warnings.is_empty());
+    let unchanged = host.host().rpc_machine().await;
+    assert_eq!(unchanged.config, configured.config);
+    assert_eq!(unchanged.version, configured.version);
+
+    assert_eq!(
+        sqlx::query("UPDATE machines SET mlx_device_observation = NULL WHERE id = $1")
+            .bind(host.id)
+            .execute(&env.pool)
+            .await
+            .unwrap()
+            .rows_affected(),
+        1
+    );
+    let absent = env
+        .api
+        .get_desired_nic_firmware(Request::new(desired_request))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(absent.observed_at.is_none());
+    assert!(absent.targets.is_empty());
+    assert_eq!(absent.warnings.len(), 2);
+    assert!(absent.warnings[0].contains("base GUID opaque-IB-GUID"));
+    assert!(absent.warnings[1].contains("base MAC 02:AA:BB:CC:DD:02"));
+    assert!(
+        absent
+            .warnings
+            .iter()
+            .all(|warning| warning.contains("uses profile card but matches no observed device"))
+    );
+    let unchanged = host.host().rpc_machine().await;
+    assert_eq!(unchanged.config, configured.config);
+    assert_eq!(unchanged.version, configured.version);
+}
+
+// An error status alone would miss a partially applied mutation. Rejected
+// requests must preserve both the stored selection and its edit token.
+#[crate::sqlx_test]
+async fn machine_selection_rejects_invalid_requests_without_changing_configuration(
+    pool: sqlx::PgPool,
+) {
+    use model::machine::status::MlxDeviceObservation;
+    use rpc::protos::mlx_device::MlxDeviceInfo;
+
+    use crate::tests::common::api_fixtures::create_managed_host;
+
+    let env = create_test_env(pool).await;
+    let host = create_managed_host(&env).await;
+    let before = host.host().rpc_machine().await;
+    let config = profile_config();
+    let mut incompatible = config.clone();
+    incompatible.entries.remove(0);
+    for (id, config) in [("machine", config.clone()), ("incompatible", incompatible)] {
+        env.api
+            .create_nic_firmware_profile(Request::new(CreateNicFirmwareProfileRequest {
+                id: id.into(),
+                config: Some(config),
+            }))
+            .await
+            .unwrap();
+    }
+    let firmware = config.entries[0].firmware.as_ref().unwrap();
+    let observation = MlxDeviceObservation {
+        observed_at: "2026-10-13T00:00:00Z".parse().unwrap(),
+        devices: vec![
+            MlxDeviceInfo {
+                pci_name: "01:00.0".into(),
+                part_number: firmware.part_number.clone(),
+                psid: firmware.psid.clone(),
+                base_mac: "02:AA:BB:CC:DD:01".into(),
+                ..Default::default()
+            }
+            .try_into()
+            .unwrap(),
+        ],
+    };
+    let mut connection = env.pool.acquire().await.unwrap();
+    assert_eq!(
+        db::machine::update_mlx_device_observation(&mut connection, &host.id, &observation)
+            .await
+            .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
+    drop(connection);
+    let card = NicFirmwareCardSelection {
+        selector: Some(NicFirmwareCardSelector {
+            identity: Some(CardIdentity::BaseMac("02:AA:BB:CC:DD:01".into())),
+        }),
+        profile_id: "machine".into(),
+    };
+    // Start with a saved selection so an accidental clear cannot look like
+    // preservation of an already-empty setting.
+    let mut request = SetMachineNicFirmwareConfigRequest {
+        machine_id: Some(host.id.into()),
+        if_version_match: Some(before.version.clone()),
+        action: Some(MachineAction::ProfileId("machine".into())),
+        card_selections: Some(NicFirmwareCardSelections {
+            selections: vec![card.clone()],
+        }),
+    };
+    env.api
+        .set_machine_nic_firmware_config(Request::new(request.clone()))
+        .await
+        .unwrap();
+    let configured = host.host().rpc_machine().await;
+    request.if_version_match = Some(configured.version.clone());
+    request.action = Some(MachineAction::Clear(()));
+    let version = configured.version.parse::<ConfigVersion>().unwrap();
+    let wrong_timestamp = format!(
+        "V{}-T{}",
+        version.version_nr(),
+        version.timestamp().timestamp_micros() + 1
+    );
+    // Without escaping, the log cutoff would split a UTF-8 character. Try zero
+    // through two ASCII bytes before the three-byte characters so the fixture
+    // keeps that boundary regardless of Debug field-name lengths.
+    let invalid_profile = (0..3)
+        .map(|padding| SetMachineNicFirmwareConfigRequest {
+            action: Some(MachineAction::ProfileId(format!(
+                "{}{} ",
+                "a".repeat(padding),
+                "界".repeat(rpc::MAX_ERR_MSG_SIZE as usize)
+            ))),
+            ..request.clone()
+        })
+        .find(|request| !format!("{request:?}").is_char_boundary(rpc::MAX_ERR_MSG_SIZE as usize))
+        .expect("ASCII padding places the cutoff inside a three-byte character");
+    let cases = [
+        (
+            "missing card selector",
+            SetMachineNicFirmwareConfigRequest {
+                card_selections: Some(NicFirmwareCardSelections {
+                    selections: vec![NicFirmwareCardSelection {
+                        selector: None,
+                        ..card.clone()
+                    }],
+                }),
+                ..request.clone()
+            },
+            Code::InvalidArgument,
+        ),
+        (
+            "unknown card preserves both selections",
+            SetMachineNicFirmwareConfigRequest {
+                card_selections: Some(NicFirmwareCardSelections {
+                    selections: vec![NicFirmwareCardSelection {
+                        selector: Some(NicFirmwareCardSelector {
+                            identity: Some(CardIdentity::BaseMac("02:AA:BB:CC:DD:02".into())),
+                        }),
+                        ..card.clone()
+                    }],
+                }),
+                ..request.clone()
+            },
+            Code::FailedPrecondition,
+        ),
+        (
+            "incompatible card preserves both selections",
+            SetMachineNicFirmwareConfigRequest {
+                card_selections: Some(NicFirmwareCardSelections {
+                    selections: vec![NicFirmwareCardSelection {
+                        profile_id: "incompatible".into(),
+                        ..card.clone()
+                    }],
+                }),
+                ..request.clone()
+            },
+            Code::FailedPrecondition,
+        ),
+        (
+            "card replacement at batch bound reaches selector validation",
+            SetMachineNicFirmwareConfigRequest {
+                card_selections: Some(NicFirmwareCardSelections {
+                    selections: vec![card.clone(); env.config.max_find_by_ids as usize],
+                }),
+                ..request.clone()
+            },
+            Code::FailedPrecondition,
+        ),
+        (
+            "card replacement exceeds batch bound",
+            SetMachineNicFirmwareConfigRequest {
+                card_selections: Some(NicFirmwareCardSelections {
+                    selections: (0..=env.config.max_find_by_ids)
+                        .map(|index| NicFirmwareCardSelection {
+                            selector: Some(NicFirmwareCardSelector {
+                                identity: Some(CardIdentity::BaseGuid(format!("card-{index}"))),
+                            }),
+                            ..card.clone()
+                        })
+                        .collect(),
+                }),
+                ..request.clone()
+            },
+            Code::InvalidArgument,
+        ),
+        (
+            "missing host",
+            SetMachineNicFirmwareConfigRequest {
+                machine_id: None,
+                ..request.clone()
+            },
+            Code::InvalidArgument,
+        ),
+        (
+            "DPU is not a host",
+            SetMachineNicFirmwareConfigRequest {
+                machine_id: Some(
+                    "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80"
+                        .parse()
+                        .unwrap(),
+                ),
+                ..request.clone()
+            },
+            Code::InvalidArgument,
+        ),
+        (
+            "missing token",
+            SetMachineNicFirmwareConfigRequest {
+                if_version_match: None,
+                ..request.clone()
+            },
+            Code::InvalidArgument,
+        ),
+        (
+            "malformed token",
+            SetMachineNicFirmwareConfigRequest {
+                if_version_match: Some("V1".into()),
+                ..request.clone()
+            },
+            Code::InvalidArgument,
+        ),
+        (
+            "missing action",
+            SetMachineNicFirmwareConfigRequest {
+                action: None,
+                ..request.clone()
+            },
+            Code::InvalidArgument,
+        ),
+        (
+            "empty profile ID does not clear",
+            SetMachineNicFirmwareConfigRequest {
+                action: Some(MachineAction::ProfileId(String::new())),
+                ..request.clone()
+            },
+            Code::InvalidArgument,
+        ),
+        (
+            "malformed profile",
+            SetMachineNicFirmwareConfigRequest {
+                action: Some(MachineAction::ProfileId(" ".into())),
+                ..request.clone()
+            },
+            Code::InvalidArgument,
+        ),
+        (
+            "Unicode profile ID with trailing whitespace",
+            invalid_profile,
+            Code::InvalidArgument,
+        ),
+        (
+            "missing profile precedes stale machine token",
+            SetMachineNicFirmwareConfigRequest {
+                action: Some(MachineAction::ProfileId("missing".into())),
+                if_version_match: Some(before.version.clone()),
+                ..request.clone()
+            },
+            Code::NotFound,
+        ),
+        (
+            "missing card profile precedes stale machine token",
+            SetMachineNicFirmwareConfigRequest {
+                card_selections: Some(NicFirmwareCardSelections {
+                    selections: vec![NicFirmwareCardSelection {
+                        profile_id: "missing".into(),
+                        ..card.clone()
+                    }],
+                }),
+                if_version_match: Some(before.version.clone()),
+                ..request.clone()
+            },
+            Code::NotFound,
+        ),
+        (
+            "same counter with different timestamp",
+            SetMachineNicFirmwareConfigRequest {
+                if_version_match: Some(wrong_timestamp),
+                ..request.clone()
+            },
+            Code::FailedPrecondition,
+        ),
+        (
+            "stale token",
+            SetMachineNicFirmwareConfigRequest {
+                if_version_match: Some(before.version),
+                ..request.clone()
+            },
+            Code::FailedPrecondition,
+        ),
+        (
+            "unknown host",
+            SetMachineNicFirmwareConfigRequest {
+                machine_id: Some(
+                    "fm100hseddco33hvlofuqvg543p6p9aj60g76q5cq491g9m9tgtf2dk0530"
+                        .parse()
+                        .unwrap(),
+                ),
+                action: Some(MachineAction::Clear(())),
+                ..request.clone()
+            },
+            Code::NotFound,
+        ),
+    ];
+    let api = &env.api;
+    let host = &host;
+    let configured = &configured;
+    check_cases_async(
+        cases.into_iter().map(|(scenario, request, code)| Case {
+            scenario,
+            input: (scenario, request),
+            expect: FailsWith(code),
+        }),
+        |(scenario, request)| async move {
+            let result = api
+                .set_machine_nic_firmware_config(Request::new(request))
+                .await;
+            let unchanged = host.host().rpc_machine().await;
+            assert_eq!(unchanged.config, configured.config, "{scenario}");
+            assert_eq!(unchanged.version, configured.version, "{scenario}");
+            result.map(drop).map_err(|error| error.code())
+        },
+    )
+    .await;
+
+    // Close only this test's pool after the persistence checks. A transaction
+    // start failure must retain Core's operator error metadata, not just its code.
+    env.pool.close().await;
+    let error = env
+        .api
+        .set_machine_nic_firmware_config(Request::new(request))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::Internal);
+    assert_eq!(
+        error.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-500"
     );
 }
 
@@ -676,7 +1854,7 @@ async fn desired_nic_firmware_uses_stored_devices_and_live_profiles_without_scou
     pool: sqlx::PgPool,
 ) {
     use model::machine::status::MlxDeviceObservation;
-    use rpc::forge::NicFirmwareSelectionSource;
+    use rpc::forge::NicFirmwareSelectionScope;
     use rpc::protos::mlx_device::{MlxDeviceInfo, MlxDeviceReport};
 
     use crate::tests::common::api_fixtures::create_managed_host_multi_dpu;
@@ -713,12 +1891,12 @@ async fn desired_nic_firmware_uses_stored_devices_and_live_profiles_without_scou
         .profile
         .unwrap();
     let mut devices = Vec::new();
-    let mut binding_versions = Vec::new();
+    let mut site_selection_versions = Vec::new();
     for (index, entry) in config.entries.iter().enumerate() {
         let firmware = entry.firmware.as_ref().unwrap();
-        let binding = env
+        let site_selection = env
             .api
-            .set_nic_firmware_site_default(Request::new(SetNicFirmwareSiteDefaultRequest {
+            .set_nic_firmware_site_selection(Request::new(SetNicFirmwareSiteSelectionRequest {
                 hardware: Some(NicFirmwareHardware {
                     part_number: firmware.part_number.clone(),
                     psid: firmware.psid.clone(),
@@ -729,9 +1907,9 @@ async fn desired_nic_firmware_uses_stored_devices_and_live_profiles_without_scou
             .await
             .unwrap()
             .into_inner()
-            .site_default
+            .site_selection
             .unwrap();
-        binding_versions.push(binding.version);
+        site_selection_versions.push(site_selection.version);
         devices.push(MlxDeviceInfo {
             pci_name: ["05:00.0", "02:00.0"][index].into(),
             part_number: firmware.part_number.clone(),
@@ -850,17 +2028,14 @@ async fn desired_nic_firmware_uses_stored_devices_and_live_profiles_without_scou
     for (index, (target, expected)) in desired.targets[..2].iter().zip(&config.entries).enumerate()
     {
         let Some(TargetResult::Firmware(resolved)) = target.result.as_ref() else {
-            panic!("expected site default for device {index}: {target:?}");
+            panic!("expected site selection for device {index}: {target:?}");
         };
         assert_eq!(resolved.entry.as_ref(), Some(expected));
-        assert_eq!(
-            resolved.source,
-            NicFirmwareSelectionSource::SiteDefault as i32
-        );
+        assert_eq!(resolved.scope, NicFirmwareSelectionScope::Site as i32);
         assert_eq!(resolved.profile_version, profile.version);
         assert_eq!(
-            target.site_default_version.as_deref(),
-            Some(binding_versions[index].as_str())
+            target.site_selection_version.as_deref(),
+            Some(site_selection_versions[index].as_str())
         );
     }
     assert!(
@@ -889,7 +2064,7 @@ async fn desired_nic_firmware_uses_stored_devices_and_live_profiles_without_scou
                 .managed_dpu_machine_ids,
             [secondary.attached_dpu_machine_id.unwrap().into()]
         );
-        assert!(desired.targets[index].site_default_version.is_none());
+        assert!(desired.targets[index].site_selection_version.is_none());
     }
     for (index, expected) in [
         (5, "device report is missing a PSID"),
@@ -899,7 +2074,7 @@ async fn desired_nic_firmware_uses_stored_devices_and_live_profiles_without_scou
             desired.targets[index].result.as_ref(),
             Some(TargetResult::Error(error)) if error.starts_with(expected)
         ));
-        assert!(desired.targets[index].site_default_version.is_none());
+        assert!(desired.targets[index].site_selection_version.is_none());
     }
     config.entries[0].firmware.as_mut().unwrap().version = "28.42.1000".into();
     let updated = env
@@ -926,19 +2101,19 @@ async fn desired_nic_firmware_uses_stored_devices_and_live_profiles_without_scou
     assert_eq!(resolved.profile_version, updated.version);
     assert_eq!(resolved.entry.as_ref(), Some(&config.entries[0]));
     assert_eq!(
-        refreshed.targets[0].site_default_version,
-        desired.targets[0].site_default_version
+        refreshed.targets[0].site_selection_version,
+        desired.targets[0].site_selection_version
     );
-    // The allocation also applies to compatible hardware without a site default.
+    // The allocation also applies to compatible hardware without a site selection.
     let unbound = config.entries[1].firmware.as_ref().unwrap();
     env.api
-        .set_nic_firmware_site_default(Request::new(SetNicFirmwareSiteDefaultRequest {
+        .set_nic_firmware_site_selection(Request::new(SetNicFirmwareSiteSelectionRequest {
             hardware: Some(NicFirmwareHardware {
                 part_number: unbound.part_number.clone(),
                 psid: unbound.psid.clone(),
             }),
             action: Some(Action::Clear(())),
-            if_version_match: binding_versions.pop(),
+            if_version_match: site_selection_versions.pop(),
         }))
         .await
         .unwrap();
@@ -972,10 +2147,7 @@ async fn desired_nic_firmware_uses_stored_devices_and_live_profiles_without_scou
         let Some(TargetResult::Firmware(resolved)) = target.result.as_ref() else {
             panic!("expected allocation profile for device {index}: {target:?}");
         };
-        assert_eq!(
-            resolved.source,
-            NicFirmwareSelectionSource::Allocation as i32
-        );
+        assert_eq!(resolved.scope, NicFirmwareSelectionScope::Allocation as i32);
         assert_eq!(resolved.profile_id, allocation.id);
         assert_eq!(resolved.profile_version, allocation.version);
         assert_eq!(
@@ -983,8 +2155,8 @@ async fn desired_nic_firmware_uses_stored_devices_and_live_profiles_without_scou
             Some(&allocation_config.entries[index])
         );
         assert_eq!(
-            target.site_default_version.as_deref(),
-            binding_versions.get(index).map(String::as_str)
+            target.site_selection_version.as_deref(),
+            site_selection_versions.get(index).map(String::as_str)
         );
     }
     assert_eq!(preview.targets[4], desired.targets[4]);
@@ -992,7 +2164,7 @@ async fn desired_nic_firmware_uses_stored_devices_and_live_profiles_without_scou
         preview.targets[2].result.as_ref(),
         Some(TargetResult::Error(error)) if error.contains("does not support")
     ));
-    assert!(preview.targets[2].site_default_version.is_none());
+    assert!(preview.targets[2].site_selection_version.is_none());
     let preview = env
         .api
         .get_desired_nic_firmware(Request::new(GetDesiredNicFirmwareRequest {
@@ -1015,8 +2187,8 @@ async fn desired_nic_firmware_uses_stored_devices_and_live_profiles_without_scou
             "device {index}"
         );
         assert_eq!(
-            target.site_default_version.as_ref(),
-            binding_versions.get(index)
+            target.site_selection_version.as_ref(),
+            site_selection_versions.get(index)
         );
     }
     let after = db::machine::find_one(&env.pool, &host.id, Default::default())
@@ -1076,7 +2248,7 @@ async fn desired_nic_firmware_uses_stored_devices_and_live_profiles_without_scou
 }
 
 #[crate::sqlx_test]
-async fn desired_nic_firmware_keeps_binding_and_profile_in_one_snapshot(pool: sqlx::PgPool) {
+async fn desired_nic_firmware_keeps_selections_and_profiles_in_one_snapshot(pool: sqlx::PgPool) {
     use model::machine::status::MlxDeviceObservation;
     use rpc::protos::mlx_device::MlxDeviceInfo;
 
@@ -1111,9 +2283,9 @@ async fn desired_nic_firmware_keeps_binding_and_profile_in_one_snapshot(pool: sq
         part_number: firmware.part_number.clone(),
         psid: firmware.psid.clone(),
     };
-    let binding = env
+    let site_selection = env
         .api
-        .set_nic_firmware_site_default(Request::new(SetNicFirmwareSiteDefaultRequest {
+        .set_nic_firmware_site_selection(Request::new(SetNicFirmwareSiteSelectionRequest {
             hardware: Some(hardware.clone()),
             action: Some(Action::ProfileId(profiles[0].id.clone())),
             if_version_match: None,
@@ -1121,7 +2293,7 @@ async fn desired_nic_firmware_keeps_binding_and_profile_in_one_snapshot(pool: sq
         .await
         .unwrap()
         .into_inner()
-        .site_default
+        .site_selection
         .unwrap();
     let observation = MlxDeviceObservation {
         observed_at: "2026-10-03T00:00:00Z".parse().unwrap(),
@@ -1145,9 +2317,20 @@ async fn desired_nic_firmware_keeps_binding_and_profile_in_one_snapshot(pool: sq
     );
     drop(connection);
 
-    // Block the profile SELECT after the lookup has read its binding. The writer
-    // then replaces that binding and removes the old profile's hardware entry
-    // in one commit, so mixing snapshots would report a false incompatibility.
+    env.api
+        .set_machine_nic_firmware_config(Request::new(SetMachineNicFirmwareConfigRequest {
+            machine_id: Some(host.id.into()),
+            if_version_match: Some(host.host().rpc_machine().await.version),
+            action: Some(MachineAction::ProfileId(profiles[0].id.clone())),
+            card_selections: None,
+        }))
+        .await
+        .unwrap();
+    let machine_version = host.host().rpc_machine().await.version.parse().unwrap();
+
+    // Block the profile SELECT after the lookup has read both selections. The
+    // writer replaces them and removes the old profile's hardware entry in one
+    // commit, so mixing snapshots would report a false incompatibility.
     let mut writer = env.pool.begin().await.unwrap();
     sqlx::query("LOCK TABLE nic_firmware_profiles IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *writer)
@@ -1165,18 +2348,45 @@ async fn desired_nic_firmware_keeps_binding_and_profile_in_one_snapshot(pool: sq
         .api
         .get_desired_nic_firmware(Request::new(request.clone()));
     let change = async {
-        db::test_support::postgres::wait_for_blocked_query(
+        let reader_pid = db::test_support::postgres::wait_for_blocked_query(
             &env.pool,
             writer_pid,
             "FROM nic_firmware_profiles WHERE id",
         )
         .await;
+        // The transaction retains the machine read's relation lock. A read
+        // through the pool would release it before reaching the profile query.
+        let retains_machine_lock: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM pg_locks
+                WHERE pid = $1 AND locktype = 'relation'
+                  AND relation = 'machines'::regclass
+                  AND mode = 'AccessShareLock' AND granted
+            )",
+        )
+        .bind(reader_pid)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        assert!(
+            retains_machine_lock,
+            "desired firmware reader did not retain the machines relation lock"
+        );
         let hardware = hardware.try_into().unwrap();
-        let replacement = db::nic_firmware::set_site_default(
+        let replacement = db::nic_firmware::set_site_selection(
             &mut writer,
             &hardware,
             &profiles[1].id.parse().unwrap(),
-            Some(binding.version.parse().unwrap()),
+            Some(site_selection.version.parse().unwrap()),
+        )
+        .await
+        .unwrap();
+        db::nic_firmware::set_machine_config(
+            &mut writer,
+            &host.id,
+            Some(&profiles[1].id.parse().unwrap()),
+            None,
+            machine_version,
         )
         .await
         .unwrap();
@@ -1202,11 +2412,15 @@ async fn desired_nic_firmware_keeps_binding_and_profile_in_one_snapshot(pool: sq
         );
     };
     assert_eq!(resolved.profile_id, profiles[0].id);
+    assert_eq!(
+        resolved.scope,
+        rpc::forge::NicFirmwareSelectionScope::Machine as i32
+    );
     assert_eq!(resolved.profile_version, profiles[0].version);
     assert_eq!(resolved.entry.as_ref(), Some(&config.entries[0]));
     assert_eq!(
-        desired.targets[0].site_default_version.as_ref(),
-        Some(&binding.version)
+        desired.targets[0].site_selection_version.as_ref(),
+        Some(&site_selection.version)
     );
 
     let refreshed = env
@@ -1220,7 +2434,11 @@ async fn desired_nic_firmware_keeps_binding_and_profile_in_one_snapshot(pool: sq
     };
     assert_eq!(resolved.profile_id, profiles[1].id);
     assert_eq!(
-        refreshed.targets[0].site_default_version,
+        resolved.scope,
+        rpc::forge::NicFirmwareSelectionScope::Machine as i32
+    );
+    assert_eq!(
+        refreshed.targets[0].site_selection_version,
         Some(replacement.version.to_string())
     );
 }

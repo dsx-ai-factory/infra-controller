@@ -1,6 +1,6 @@
 # nico-firmware
 
-Firmware metadata loading and lookup for NICo.
+Firmware metadata loading, lookup, and artifact downloads for NICo.
 
 ## Overview
 
@@ -24,12 +24,14 @@ This crate is intentionally narrow:
   `FirmwareEntry`, `FirmwareComponentType`, ...) which live in
   `nico-api-model`. Those types describe firmware; this crate
   loads and queries them.
-- It does **not** define the top-level configuration file schema.
-  Knobs like `firmware_directory` are part of `FirmwareGlobal` in
-  `nico-api`.
-- It does **not** perform firmware upgrades, version comparison, or
-  artifact fetching. Those concerns live in `nico-api` and
-  `nico-scout`.
+- Core owns the top-level configuration file schema. `FirmwareGlobal` in
+  `carbide-machine-controller` contains settings such as `firmware_directory`
+  and embeds this crate's `FirmwareDownloadConfig` for downloads.
+- `FirmwareDownloader` fetches Core firmware artifacts and verifies cached
+  files. Its worker, HTTP deadline, and streamed-size limits are configured
+  through [`firmware_global.downloads`](../api-core/src/cfg/README.md#firmwaredownloadconfig).
+- It does **not** perform firmware upgrades or version comparison. Those
+  concerns live in `nico-api` and `nico-scout`.
 
 ## Key types
 

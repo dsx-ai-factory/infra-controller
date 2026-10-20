@@ -93,8 +93,10 @@ pub(crate) async fn scout_stream(
     // the connection registry.
     let registry_clone = api.scout_stream_registry.clone();
     let pool = api.database_connection.clone();
+    let cancel_token = api.cancel_token.clone();
     tokio::spawn(async move {
-        while let Ok(Some(message)) = stream.message().await {
+        while let Some(Ok(Some(message))) = cancel_token.run_until_cancelled(stream.message()).await
+        {
             // This is an observation from the authenticated host, not proof
             // that an outstanding request or firmware operation completed.
             // Unbound simulator connections retain their existing behavior.

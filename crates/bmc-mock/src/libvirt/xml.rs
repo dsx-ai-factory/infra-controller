@@ -37,19 +37,31 @@ impl<'a> XmlElement<'a> {
         self.start.name().as_ref() == name.as_bytes()
     }
 
-    fn children(&self) -> eyre::Result<Vec<Self>> {
+    pub(super) fn children(&self) -> eyre::Result<Vec<Self>> {
         let range = self.content.clone().unwrap_or(self.full.end..self.full.end);
         Self::read_children(self.xml, range)
     }
 
     pub(super) fn child(&self, name: &str) -> eyre::Result<Self> {
-        let mut children: Vec<_> = self
+        self.optional_child(name)?
+            .ok_or_else(|| eyre::eyre!("XML must contain one {name} element"))
+    }
+
+    pub(super) fn optional_child(&self, name: &str) -> eyre::Result<Option<Self>> {
+        let mut children = self
             .children()?
             .into_iter()
-            .filter(|child| child.is_named(name))
-            .collect();
-        eyre::ensure!(children.len() == 1, "XML must contain one {name} element");
-        Ok(children.remove(0))
+            .filter(|child| child.is_named(name));
+        let child = children.next();
+        eyre::ensure!(
+            children.next().is_none(),
+            "XML contains multiple {name} elements"
+        );
+        Ok(child)
+    }
+
+    pub(super) fn as_xml(&self) -> &'a str {
+        &self.xml[self.full.clone()]
     }
 
     pub(super) fn replace_children(&self, name: &str, replacement: &str) -> eyre::Result<XmlEdit> {

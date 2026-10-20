@@ -64,7 +64,8 @@ func TestJWKS_GetKIDPublicKeyMap(t *testing.T) {
 			testServer := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 				res.WriteHeader(http.StatusOK)
 				res.Header().Set("Content-Type", "application/json")
-				res.Write([]byte(tt.jwksJSON))
+				// Mock response writes are best-effort if the client closes the connection.
+				_, _ = res.Write([]byte(tt.jwksJSON))
 			}))
 			defer testServer.Close()
 
@@ -126,21 +127,21 @@ func TestNewJWKSFromURL(t *testing.T) {
 		if strings.Contains(req.URL.Path, "/kas") {
 			res.WriteHeader(http.StatusOK)
 			res.Header().Set("Content-Type", "application/json")
-			res.Write([]byte(legacyKasJwks))
+			_, _ = res.Write([]byte(legacyKasJwks))
 		} else if strings.Contains(req.URL.Path, "/ssa") {
 			res.WriteHeader(http.StatusOK)
 			res.Header().Set("Content-Type", "application/json")
-			res.Write([]byte(ssaJwks))
+			_, _ = res.Write([]byte(ssaJwks))
 		} else if strings.Contains(req.URL.Path, "/keycloak") {
 			res.WriteHeader(http.StatusOK)
 			res.Header().Set("Content-Type", "application/json")
-			res.Write([]byte(keycloakJwks))
+			_, _ = res.Write([]byte(keycloakJwks))
 		} else if strings.Contains(req.URL.Path, "/error") {
 			res.WriteHeader(http.StatusInternalServerError)
 		} else if strings.Contains(req.URL.Path, "/invalid") {
 			res.WriteHeader(http.StatusOK)
 			res.Header().Set("Content-Type", "application/json")
-			res.Write([]byte(`invalid json`))
+			_, _ = res.Write([]byte(`invalid json`))
 		} else {
 			res.WriteHeader(http.StatusNotFound)
 		}
@@ -245,7 +246,7 @@ func TestJWKS_GetKIDPublicKeyMap_EmptyKeys(t *testing.T) {
 	testServer := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 		res.WriteHeader(http.StatusOK)
 		res.Header().Set("Content-Type", "application/json")
-		res.Write([]byte(emptyJwks))
+		_, _ = res.Write([]byte(emptyJwks))
 	}))
 	defer testServer.Close()
 

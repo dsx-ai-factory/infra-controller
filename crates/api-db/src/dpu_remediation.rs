@@ -16,6 +16,7 @@
  */
 use std::ops::DerefMut;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::dpu_remediations::RemediationId;
 use carbide_uuid::machine::DpuMachineId;
 use model::dpu_remediation::{
@@ -186,11 +187,13 @@ pub async fn persist_applied_remediation(
     value: NewAppliedRemediation,
     txn: &mut sqlx::Transaction<'_, Postgres>,
 ) -> Result<AppliedRemediation, DatabaseError> {
-    let query = "INSERT INTO applied_dpu_remediations (id, dpu_machine_id, attempt, succeeded, status) VALUES ($1, $2, $3, $4, $5)
-        RETURNING
-            id, dpu_machine_id, attempt, succeeded, applied_time, status";
+    let query = format!(
+        "INSERT INTO applied_dpu_remediations (id, dpu_machine_id, attempt, succeeded, status) VALUES ($1, $2, $3, $4, $5)
+        RETURNING {}",
+        AppliedRemediation::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(value.id)
         .bind(&value.dpu_machine_id)
         .bind(value.attempt)
@@ -198,7 +201,7 @@ pub async fn persist_applied_remediation(
         .bind(sqlx::types::Json(&value.status))
         .fetch_one(txn.deref_mut())
         .await
-        .map_err(|err| DatabaseError::new(query, err))
+        .map_err(|err| DatabaseError::new(&query, err))
 }
 
 #[derive(Clone, Copy)]
@@ -269,11 +272,11 @@ pub async fn find_applied_remediations_by<'a, C: ColumnInfo<'a, TableType = Appl
     txn: &mut sqlx::Transaction<'_, Postgres>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<AppliedRemediation>, DatabaseError> {
-    let mut query = FilterableQueryBuilder::new(
-        "SELECT
-            id, dpu_machine_id, attempt, succeeded, applied_time, status
+    let mut query = FilterableQueryBuilder::new(format!(
+        "SELECT {}
         FROM applied_dpu_remediations",
-    )
+        AppliedRemediation::db_table_columns(),
+    ))
     .filter(&filter);
     query
         .build_query_as()
@@ -288,15 +291,17 @@ pub async fn find_remediations_by_remediation_id_and_machine(
     remediation_id: RemediationId,
     machine_id: &DpuMachineId,
 ) -> Result<Vec<AppliedRemediation>, DatabaseError> {
-    let query = "SELECT
-            id, dpu_machine_id, attempt, succeeded, applied_time, status
-        FROM applied_dpu_remediations WHERE id=$1 AND dpu_machine_id=$2 ORDER BY attempt DESC";
-    sqlx::query_as(query)
+    let query = format!(
+        "SELECT {}
+        FROM applied_dpu_remediations WHERE id=$1 AND dpu_machine_id=$2 ORDER BY attempt DESC",
+        AppliedRemediation::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(remediation_id)
         .bind(machine_id)
         .fetch_all(txn.deref_mut())
         .await
-        .map_err(|e| DatabaseError::new(query, e))
+        .map_err(|e| DatabaseError::new(&query, e))
 }
 
 /// Records the script's approver in `script_reviewed_by`. Locks the remediation

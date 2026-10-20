@@ -39,6 +39,7 @@ pub mod dpu_agent_upgrade_policy;
 pub mod dpu_machine_update;
 pub mod dpu_remediation;
 pub mod expected_machine;
+pub mod expected_nvlink_domain;
 pub mod expected_power_shelf;
 pub mod expected_rack;
 pub mod expected_rack_group;
@@ -419,7 +420,7 @@ pub enum DatabaseError {
     DhcpError(#[from] DhcpError),
     #[error("maximum one association per interface")]
     MaxOneInterfaceAssociation,
-    #[error("fast-path allocation failed and can be retried")]
+    #[error("host address allocation failed and can be retried")]
     TryAgain,
     #[error("no site-wide rotation target for credential type: {0:?}")]
     MissingSitewideRotationTarget(crate::credential_rotation::CredentialRotationType),

@@ -35,7 +35,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdmu "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
@@ -67,13 +66,13 @@ const (
 )
 
 func phoneHomeLocationIn(userData map[string]interface{}) phoneHomeLocation {
-	_, atRoot := userData[util.SitePhoneHomeName]
+	_, atRoot := userData[cdmu.SitePhoneHomeName]
 	inAutoinstall := false
 	autoinstall, ok := userData["autoinstall"].(map[string]interface{})
 	if ok {
 		targetUserData, ok := autoinstall["user-data"].(map[string]interface{})
 		if ok {
-			_, inAutoinstall = targetUserData[util.SitePhoneHomeName]
+			_, inAutoinstall = targetUserData[cdmu.SitePhoneHomeName]
 		}
 	}
 
@@ -1131,11 +1130,9 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 	}
 
 	// Create 25 test Instances
-	insts2 := []*cdbm.Instance{}
 	for i := 0; i < 25; i++ {
 		inst := testInstanceBuildInstance(t, dbSession, fmt.Sprintf("test-instance-%d", i), tn2.ID, ip.ID, st2.ID, &ist2.ID, vpc3.ID, cutil.GetPtr(ms2[i].ID), &os3.ID, nil, cdbm.InstanceStatusReady)
 		assert.NotNil(t, inst)
-		insts2 = append(insts2, inst)
 	}
 
 	// Tenant 3
@@ -2075,7 +2072,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				reqUser:              tnu1,
 				respCode:             http.StatusCreated,
 				respMessage:          "",
-				respUserDataContains: cutil.GetPtr(util.SiteCloudConfig),
+				respUserDataContains: cutil.GetPtr(cdmu.SiteCloudConfig),
 			},
 			wantErr: false,
 		},
@@ -2107,7 +2104,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				reqUser:              tnu1,
 				respCode:             http.StatusCreated,
 				respMessage:          "",
-				respUserDataContains: cutil.GetPtr(util.SiteCloudConfig),
+				respUserDataContains: cutil.GetPtr(cdmu.SiteCloudConfig),
 			},
 			wantErr: false,
 		},
@@ -4493,8 +4490,8 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 					if tt.args.reqData.OperatingSystemID != nil {
 						lines := strings.Split(*rst.UserData, "\n")
 						// ensure first line is always #cloud-config
-						assert.Equal(t, util.SiteCloudConfig, lines[0])
-						assert.NotEqual(t, util.SiteCloudConfig, lines[1])
+						assert.Equal(t, cdmu.SiteCloudConfig, lines[0])
+						assert.NotEqual(t, cdmu.SiteCloudConfig, lines[1])
 					}
 				} else {
 					assert.Equal(t, phoneHomeAbsent, phoneHomeLocationIn(instUserData))
@@ -8166,8 +8163,8 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 
 				if tt.args.reqData.PhoneHomeEnabled != nil && *tt.args.reqData.PhoneHomeEnabled && tt.args.reqData.OperatingSystemID != nil {
 					lines := strings.Split(*rst.UserData, "\n")
-					assert.Equal(t, util.SiteCloudConfig, lines[0])
-					assert.NotEqual(t, util.SiteCloudConfig, lines[1])
+					assert.Equal(t, cdmu.SiteCloudConfig, lines[0])
+					assert.NotEqual(t, cdmu.SiteCloudConfig, lines[1])
 				}
 			}
 
@@ -8292,7 +8289,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 					cdbp.PageInput{OrderBy: &cdbp.OrderBy{Field: cdbm.InterfaceOrderByCreated, Order: cdbp.OrderAscending}},
 					[]string{cdbm.SubnetRelationName})
 				assert.Equal(t, len(ifcs), len(tt.args.reqData.Interfaces))
-				for i, _ := range ifcs {
+				for i := range ifcs {
 					if ifcs[i].SubnetID != nil && tt.args.reqData.Interfaces[i].SubnetID != nil {
 						assert.Equal(t, ifcs[i].SubnetID.String(), *tt.args.reqData.Interfaces[i].SubnetID)
 					}
@@ -8455,7 +8452,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 					cdbp.PageInput{OrderBy: &cdbp.OrderBy{Field: cdbm.InfiniBandInterfaceOrderByCreated, Order: cdbp.OrderAscending}},
 					[]string{cdbm.InfiniBandPartitionRelationName})
 				assert.Equal(t, len(ibifcs), len(tt.args.reqData.InfiniBandInterfaces))
-				for i, _ := range ibifcs {
+				for i := range ibifcs {
 					assert.Equal(t, tt.args.reqData.InfiniBandInterfaces[i].InfiniBandPartitionID, ibifcs[i].InfiniBandPartitionID.String())
 					assert.Equal(t, cdbm.InfiniBandInterfaceStatusPending, ibifcs[i].Status)
 				}
@@ -9651,6 +9648,18 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 	testUpdateInterfaceWithIPs(t, dbSession, instsubarr[0], []string{"192.168.1.100", "192.168.1.101", "2001:db8::1"})
 	testUpdateInterfaceWithIPs(t, dbSession, instsubarr[1], []string{"192.168.2.200"})
 
+	// Tenant with an Instance on a Site where it has no Tenant/Site association
+	tnOrg2 := "test-tenant-org-2"
+	tnu2 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg2, tnOrgRoles1)
+	tn2 := common.TestBuildTenantWithDisplayName(t, dbSession, "test-tenant-2", tnOrg2, tnu2, "Test Tenant 2")
+	st4 := testInstanceBuildSite(t, dbSession, ip, "test-site-4", cdbm.SiteStatusRegistered, true, ipu)
+	ist5 := testInstanceBuildInstanceType(t, dbSession, ip, "test-instance-type-5", st4, cdbm.InstanceStatusReady)
+	vpc5 := testInstanceBuildVPC(t, dbSession, "test-vpc-5", ip, tn2, st4, nil, nil, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, cdbm.VpcStatusReady, tnu2)
+	mc7 := testInstanceBuildMachineWithID(t, dbSession, ip.ID, st4.ID, cutil.GetPtr(false), nil, "machine-getall-7")
+	instNoTenantSite := testInstanceBuildInstance(t, dbSession, "test-instance-no-tenant-site", tn2.ID, ip.ID, st4.ID, &ist5.ID, vpc5.ID, cutil.GetPtr(mc7.ID), nil, nil, cdbm.InstanceStatusReady)
+	common.TestBuildStatusDetail(t, dbSession, instNoTenantSite.ID.String(), cdbm.InstanceStatusPending, cutil.GetPtr("request received, pending processing"))
+	common.TestBuildStatusDetail(t, dbSession, instNoTenantSite.ID.String(), cdbm.InstanceStatusProvisioning, cutil.GetPtr("Instance is being provisioned on Site"))
+
 	e := echo.New()
 	cfg := common.GetTestConfig()
 	tc := &tmocks.Client{}
@@ -9693,6 +9702,7 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 		expectedIBInterfaceID                       *string
 		expectedDpuExtensionServiceDeploymentID     *string
 		expectedMachineIDOverride                   *string
+		expectedSerialConsoleURL                    *string
 		expectedAnyNetworkSecurityGroupInherited    bool
 		expectedAnyNetworkSecurityGroupNotInherited bool
 		expectedNetworkSecurityGroupInheritedByName map[string]bool
@@ -10757,6 +10767,24 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 			expectedFirstEntryName: instarr[0].Name,
 			wantErr:                false,
 		},
+		{
+			name: "test Instance getall API endpoint returns serial console URL for Site without Tenant/Site association",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqOrg:   tnOrg2,
+				reqUser:  tnu2,
+				respCode: http.StatusOK,
+			},
+			expectedCount:             1,
+			expectedTotal:             1,
+			expectedFirstEntryName:    instNoTenantSite.Name,
+			expectedMachineIDOverride: cutil.GetPtr(mc7.ID),
+			expectedSerialConsoleURL:  cutil.GetPtr(fmt.Sprintf("ssh://%s@%s", instNoTenantSite.ControllerInstanceID.String(), *st4.SerialConsoleHostname)),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -10894,6 +10922,11 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 
 				assert.Equal(t, *rst[0].MachineID, *expectedMachineID)
 				assert.Equal(t, rst[0].Status, cdbm.InstanceStatusReady)
+
+				if tt.expectedSerialConsoleURL != nil {
+					require.NotNil(t, rst[0].SerialConsoleURL)
+					assert.Equal(t, *tt.expectedSerialConsoleURL, *rst[0].SerialConsoleURL)
+				}
 
 				if tt.expectSubnet {
 					assert.Equal(t, *rst[0].Interfaces[0].SubnetID, instsub1.SubnetID.String())

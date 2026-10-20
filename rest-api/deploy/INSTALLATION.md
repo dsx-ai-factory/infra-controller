@@ -543,6 +543,64 @@ configured independently, and pointing `site-manager-tls` at a different issuer
 would otherwise leave Site Manager trusting a CA that never signed the listener
 it is verifying.
 
+#### Rotating `ca-signing-secret`
+
+Both services read this CA once at startup: nico-rest-cert-manager loads the
+signing key and certificate when it builds its issuer, and Site Manager builds
+its trust pool when it constructs the client. Neither notices the projected file
+changing underneath it, so replacing `ca-signing-secret` takes effect only when
+the pods restart.
+
+While the secret holds a single CA, no restart order avoids an outage, because
+whichever side restarts first disagrees with the other: restart
+nico-rest-cert-manager and it signs with the new CA while Site Manager still
+trusts only the old one; restart Site Manager and it trusts only the new CA
+while the listener is still signed by the old one. Either way `/v1/sitecreds`
+fails with `x509: certificate signed by unknown authority` until both have
+restarted.
+
+To rotate without an outage, have the secret hold both CAs for the duration, so
+that there is a state Site Manager can restart into that trusts the listener
+both before and after the issuer moves:
+
+```bash
+# tls.crt carries the new CA followed by the old one, so Site Manager trusts
+# both, while tls.key is the new CA's key, so the listener is signed by the new.
+# The new CA has to come first: kubectl checks tls.key against the leading
+# certificate and rejects the secret outright if the old one is first.
+cat new-ca.crt old-ca.crt > bundle.crt
+
+# Both namespaces, as in Step 2: nico-rest feeds the two deployments and
+# cert-manager feeds the nico-rest-ca-issuer ClusterIssuer.
+for ns in nico-rest cert-manager; do
+  kubectl create secret tls ca-signing-secret \
+    --cert=bundle.crt --key=new-ca.key \
+    -n "$ns" --dry-run=client -o yaml | kubectl apply -f -
+done
+
+# Site Manager first, and let it finish. It is the side whose trust widens to
+# cover both CAs, so until it has restarted it still trusts only the old one.
+# Restarting the issuer first would move the listener to a CA Site Manager does
+# not yet know, which is the outage this procedure exists to avoid.
+kubectl rollout restart deployment/nico-rest-site-manager -n nico-rest
+kubectl rollout status deployment/nico-rest-site-manager -n nico-rest
+
+kubectl rollout restart deployment/nico-rest-cert-manager -n nico-rest
+kubectl rollout status deployment/nico-rest-cert-manager -n nico-rest
+```
+
+nico-rest-cert-manager signs with the first certificate in `tls.crt`, so it
+picks up the new CA and ignores the trailing old one. `/v1/pki/ca/pem` serves
+the file verbatim, so it returns both certificates while the bundle is in place,
+whereas `/v1/pki/ca` decodes it and returns only the leading one.
+
+Once both have rolled out, re-apply the secret with `new-ca.crt` alone and
+restart both again, in the same order, to drop trust in the old CA.
+Certificates already issued by the old CA stay valid until they expire, so plan
+the second step after the longest `duration` in use. If a short outage is
+acceptable, skip the bundle and restart nico-rest-cert-manager followed by Site
+Manager.
+
 ### Apply
 
 Apply the CRD first, then the rest:

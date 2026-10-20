@@ -31,11 +31,30 @@ pub enum DpfError {
     #[error("resource already exists: {kind} '{name}'")]
     AlreadyExists { kind: &'static str, name: String },
 
+    /// A revision-fenced Kubernetes JSON Patch lost a race with another writer.
+    #[error("patch conflict for {kind} '{name}'")]
+    PatchConflict {
+        /// Kubernetes resource kind whose observation became stale.
+        kind: &'static str,
+        /// Name of the resource that must be observed again before retrying.
+        name: String,
+    },
+
     #[error("timeout waiting for {operation}: {details}")]
     Timeout { operation: String, details: String },
 
     #[error("invalid state: {0}")]
     InvalidState(String),
+
+    /// A DPUServiceInterface migration failed with retry context while retaining its repository cause.
+    #[error("{context}: {source}")]
+    MigrationFailed {
+        /// Description of the failed migration and its safe retry action.
+        context: String,
+        /// Repository failure that interrupted the migration.
+        #[source]
+        source: Box<DpfError>,
+    },
 
     /// The current site-wide BMC credential is absent from its authoritative
     /// source. DPF leaves any derived Secret unchanged until the source

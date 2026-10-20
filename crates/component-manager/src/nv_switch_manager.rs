@@ -13,7 +13,7 @@ use model::component_manager::{
 use model::rack_type::RackHardwareTopology;
 use model::switch::FabricManagerStatus;
 
-use crate::component_common::ComponentPowerStateResult;
+use crate::component_common::{ComponentPowerStateResult, PowerStateSource};
 use crate::error::ComponentManagerError;
 use crate::types::FirmwareUpdateOptions;
 
@@ -250,6 +250,13 @@ pub struct SwitchFactoryResetJobStatus {
 #[async_trait::async_trait]
 pub trait NvSwitchManager: Send + Sync + Debug + 'static {
     fn name(&self) -> &str;
+
+    /// Identifies the source when `get_power_state` supports fresh, passive reads.
+    /// `None` means callers must reject passive reads before fetching credentials
+    /// or invoking a getter without that capability, such as NSM or mock.
+    fn power_state_source(&self) -> Option<PowerStateSource> {
+        None
+    }
 
     /// Reports whether this backend supports OS password rotation.
     ///

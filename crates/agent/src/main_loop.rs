@@ -65,7 +65,7 @@ use crate::instrumentation::{
 };
 use crate::machine_inventory_updater::MachineInventoryUpdaterConfig;
 use crate::network_monitor::{self, NetworkPingerType};
-use crate::util::get_host_boot_timestamp;
+use crate::util::{get_host_boot_timestamp, jittered_interval};
 use crate::{
     FMDS_MINIMUM_HBN_VERSION, HBNDeviceNames, NVUE_MINIMUM_HBN_VERSION, RunOptions, astra_weave,
     command_line, ethernet_virtualization, extension_services, get_non_empty_str, hbn, health,
@@ -869,6 +869,7 @@ impl MainLoop {
             if result.stop_agent {
                 return Ok(());
             }
+            let loop_delay = jittered_interval(result.loop_period, &mut rand::rng());
 
             tokio::select! {
                 biased;
@@ -887,9 +888,9 @@ impl MainLoop {
                     self.client_cert_renewer.renew_on_next_check();
                     self.inventory_updater_time = now;
                     self.version_check_time = now;
-                    // the loop_period sleep is interrupted so we will fetch new network config
+                    // Interrupt the wait and apply the latest cached config.
                 }
-                _ = tokio::time::sleep(result.loop_period) => {}
+                _ = tokio::time::sleep(loop_delay) => {}
             }
         }
     }

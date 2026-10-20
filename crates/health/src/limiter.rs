@@ -147,8 +147,14 @@ impl BucketLimiter {
     }
 
     fn jitter(&self) -> Duration {
+        let max_jitter_ms = self.max_jitter.as_millis() as u64;
+
+        if max_jitter_ms == 0 {
+            return Duration::ZERO;
+        }
+
         let mut rng = rand::rng();
-        let jitter_ms = rng.random_range(0..self.max_jitter.as_millis() as u64);
+        let jitter_ms = rng.random_range(0..max_jitter_ms);
         Duration::from_millis(jitter_ms)
     }
 }

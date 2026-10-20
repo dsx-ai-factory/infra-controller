@@ -4,7 +4,9 @@
 package expectedpowershelf
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -17,6 +19,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
@@ -31,7 +35,6 @@ import (
 	cwu "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -182,8 +185,8 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 
 		// Update creation and update timestamp to be earlier than inventory processing interval
 		_, uerr := dbSession.DB.Exec("UPDATE expected_power_shelf SET created = ?, updated = ? WHERE id = ?",
-			time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval*2)),
-			time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval*2)),
+			time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)),
+			time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)),
 			eps.ID.String())
 		assert.NoError(t, uerr)
 
@@ -233,7 +236,8 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 		}
 
 		// Test label updates: add/modify labels for some power shelves
-		if i == 1 {
+		switch i {
+		case 1:
 			// Add labels to a power shelf that didn't have them before
 			ctrlExpectedPowerShelf.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{
@@ -241,7 +245,7 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 				},
 			}
 			expectedPowerShelvesToUpdate = append(expectedPowerShelvesToUpdate, pagedExpectedPowerShelves[i])
-		} else if i == 5 {
+		case 5:
 			// Modify existing labels
 			ctrlExpectedPowerShelf.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{
@@ -251,13 +255,13 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 				},
 			}
 			expectedPowerShelvesToUpdate = append(expectedPowerShelvesToUpdate, pagedExpectedPowerShelves[i])
-		} else if i == 10 {
+		case 10:
 			// Remove labels (set to empty labels array)
 			ctrlExpectedPowerShelf.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{},
 			}
 			expectedPowerShelvesToUpdate = append(expectedPowerShelvesToUpdate, pagedExpectedPowerShelves[i])
-		} else if i == 15 {
+		case 15:
 			// Remove labels (set metadata to nil)
 			ctrlExpectedPowerShelf.Metadata = nil
 			expectedPowerShelvesToUpdate = append(expectedPowerShelvesToUpdate, pagedExpectedPowerShelves[i])
@@ -286,6 +290,8 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 		expectedPowerShelfInventory *corev1.ExpectedPowerShelfInventory
 	}
 
+	unsupportedNewID := uuid.New()
+
 	tests := []struct {
 		name                         string
 		fields                       fields
@@ -293,6 +299,9 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 		expectedPowerShelvesToUpdate []*cdbm.ExpectedPowerShelf
 		expectedPowerShelvesToDelete []*cdbm.ExpectedPowerShelf
 		unchangedID                  uuid.UUID
+		notCreatedID                 uuid.UUID
+		wantWarning                  string
+		wantInventoryStatus          string
 		wantErr                      bool
 	}{
 		{
@@ -320,6 +329,7 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 				ctx:    ctx,
 				siteID: uuid.New(),
 				expectedPowerShelfInventory: &corev1.ExpectedPowerShelfInventory{
+					InventoryStatus:      corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
 					ExpectedPowerShelves: []*corev1.ExpectedPowerShelf{},
 				},
 			},
@@ -341,7 +351,56 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 					InventoryStatus:      corev1.InventoryStatus_INVENTORY_STATUS_FAILED,
 				},
 			},
-			wantErr: false,
+			unchangedID: pagedExpectedPowerShelves[7].ID,
+			wantErr:     false,
+			wantWarning: "received failed inventory status from Site Agent, skipping inventory processing",
+		},
+		{
+			name: "test ExpectedPowerShelf inventory processing, unspecified inventory status",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:                         ctx,
+				siteID:                      st.ID,
+				expectedPowerShelfInventory: &corev1.ExpectedPowerShelfInventory{},
+			},
+			unchangedID:         pagedExpectedPowerShelves[7].ID,
+			wantWarning:         "received unsupported inventory status, skipping inventory processing",
+			wantInventoryStatus: "INVENTORY_STATUS_UNSPECIFIED",
+		},
+		{
+			name: "test ExpectedPowerShelf inventory processing, unknown inventory status",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st.ID,
+				expectedPowerShelfInventory: &corev1.ExpectedPowerShelfInventory{
+					InventoryStatus: corev1.InventoryStatus(99),
+					ExpectedPowerShelves: []*corev1.ExpectedPowerShelf{
+						{
+							ExpectedPowerShelfId: &corev1.UUID{Value: pagedExpectedPowerShelves[7].ID.String()},
+							BmcMacAddress:        "00:11:22:33:66:07",
+							ShelfSerialNumber:    pagedExpectedPowerShelves[7].ShelfSerialNumber,
+						},
+						{
+							ExpectedPowerShelfId: &corev1.UUID{Value: unsupportedNewID.String()},
+							BmcMacAddress:        "00:11:22:33:66:FF",
+							ShelfSerialNumber:    "SN-UNSUPPORTED",
+						},
+					},
+				},
+			},
+			unchangedID:         pagedExpectedPowerShelves[7].ID,
+			wantWarning:         "received unsupported inventory status, skipping inventory processing",
+			wantInventoryStatus: "99",
+			notCreatedID:        unsupportedNewID,
 		},
 		{
 			name: "test paged ExpectedPowerShelf inventory processing, empty inventory",
@@ -470,8 +529,27 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 				require.False(t, st.IsTimeWithinStaleInventoryThreshold(beforeUnchanged.Updated))
 			}
 
+			var logOutput bytes.Buffer
+			if tt.wantWarning != "" {
+				originalLogger := log.Logger
+				log.Logger = zerolog.New(&logOutput).Level(zerolog.WarnLevel)
+				t.Cleanup(func() { log.Logger = originalLogger })
+			}
+
 			err := mei.UpdateExpectedPowerShelvesInDB(tt.args.ctx, tt.args.siteID, tt.args.expectedPowerShelfInventory)
 			assert.Equal(t, tt.wantErr, err != nil)
+
+			if tt.wantWarning != "" {
+				var warning map[string]any
+				require.NoError(t, json.Unmarshal(logOutput.Bytes(), &warning))
+				assert.Equal(t, "warn", warning["level"])
+				assert.Equal(t, tt.wantWarning, warning["message"])
+				assert.Equal(t, "UpdateExpectedPowerShelvesInDB", warning["Activity"])
+				assert.Equal(t, tt.args.siteID.String(), warning["Site ID"])
+				if tt.wantInventoryStatus != "" {
+					assert.Equal(t, tt.wantInventoryStatus, warning["inventory_status"])
+				}
+			}
 
 			if tt.wantErr {
 				return
@@ -489,10 +567,14 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 				powerShelvesByID[allPowerShelves[i].ID] = &allPowerShelves[i]
 			}
 
+			if tt.notCreatedID != uuid.Nil {
+				assert.NotContains(t, powerShelvesByID, tt.notCreatedID)
+			}
+
 			if beforeUnchanged != nil {
 				unchanged := powerShelvesByID[beforeUnchanged.ID]
 				require.NotNil(t, unchanged)
-				assert.Equal(t, beforeUnchanged.Updated, unchanged.Updated, "absent labels must not refresh Updated on the first reconciliation")
+				assert.Equal(t, beforeUnchanged, unchanged, "stored row must keep every field, including Updated")
 			}
 
 			for _, eps := range tt.expectedPowerShelvesToUpdate {

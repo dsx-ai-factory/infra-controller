@@ -634,10 +634,24 @@ service Forge {
   // Delete all expected racks in site
   rpc DeleteAllExpectedRacks(google.protobuf.Empty) returns (google.protobuf.Empty);
 
+  // Administrator-managed expected NVLink domain inventory
+  // Declare immutable expected membership. This does not configure hardware or validate
+  // physical NVLink connectivity. Unknown/ambiguous members and wrong-group racks are rejected.
+  rpc CreateExpectedNvLinkDomain(CreateExpectedNvLinkDomainRequest) returns (ExpectedNvLinkDomain);
+  // Delete only the declaration and release its MAC claims; no hardware operations occur.
+  // Missing declarations return NOT_FOUND. Observed domains and health reports are untouched.
+  rpc DeleteExpectedNvLinkDomain(ExpectedNvLinkDomainRequest) returns (google.protobuf.Empty);
+  rpc GetExpectedNvLinkDomain(ExpectedNvLinkDomainRequest) returns (ExpectedNvLinkDomain);
+  rpc FindExpectedNvLinkDomainIds(ExpectedNvLinkDomainSearchFilter) returns (ExpectedNvLinkDomainIdList);
+  rpc FindExpectedNvLinkDomainsByIds(ExpectedNvLinkDomainsByIdsRequest) returns (ExpectedNvLinkDomainList);
+
   // Expected Rack Group Management
   rpc AddExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
+  // Fails with FAILED_PRECONDITION if expected NVLink domains reference this group.
   rpc DeleteExpectedRackGroup(ExpectedRackGroupRequest) returns (google.protobuf.Empty);
   // Replace the full record, including both lists and metadata.
+  // With expected NVLink domains, racks must remain unchanged.
+  // Topology, protocol, and metadata changes are accepted.
   rpc UpdateExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
   rpc GetExpectedRackGroup(ExpectedRackGroupRequest) returns (ExpectedRackGroup);
   // Return all declarations ordered by rack group ID; an empty site returns an empty list.
@@ -645,7 +659,9 @@ service Forge {
   rpc FindExpectedRackGroupIds(ExpectedRackGroupSearchFilter) returns (ExpectedRackGroupIdList);
   rpc FindExpectedRackGroupsByIds(ExpectedRackGroupsByIdsRequest) returns (ExpectedRackGroupList);
   // Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
+  // Fails with FAILED_PRECONDITION while any expected NVLink domain references a group.
   rpc ReplaceAllExpectedRackGroups(ExpectedRackGroupList) returns (google.protobuf.Empty);
+  // Fails with FAILED_PRECONDITION while any expected NVLink domain references a group.
   rpc DeleteAllExpectedRackGroups(google.protobuf.Empty) returns (google.protobuf.Empty);
 
   // Perform Attestation Procedure for Measured Boot
@@ -895,19 +911,27 @@ service Forge {
   rpc UpsertHostFirmwareConfig(UpsertHostFirmwareConfigRequest) returns (HostFirmwareConfigResponse);
   rpc DeleteHostFirmwareConfig(DeleteHostFirmwareConfigRequest) returns (google.protobuf.Empty);
 
-  // Operator-only NIC firmware profiles, site defaults and desired firmware.
+  // Operator-only NIC firmware profiles, scoped selections and desired firmware.
   // These methods do not update devices or change machine readiness.
+  // NIC firmware selections require matching v2.4 Core and client schemas,
+  // including clients that read MachineConfig or GetDesiredNicFirmware responses.
   rpc CreateNicFirmwareProfile(CreateNicFirmwareProfileRequest) returns (NicFirmwareProfileResponse);
   rpc FindNicFirmwareProfileIds(FindNicFirmwareProfileIdsRequest) returns (FindNicFirmwareProfileIdsResponse);
   rpc FindNicFirmwareProfilesByIds(FindNicFirmwareProfilesByIdsRequest) returns (FindNicFirmwareProfilesByIdsResponse);
   rpc UpdateNicFirmwareProfile(UpdateNicFirmwareProfileRequest) returns (NicFirmwareProfileResponse);
   rpc DeleteNicFirmwareProfile(DeleteNicFirmwareProfileRequest) returns (google.protobuf.Empty);
-  // Select or clear the site default for an exact hardware pair.
-  rpc SetNicFirmwareSiteDefault(SetNicFirmwareSiteDefaultRequest) returns (NicFirmwareSiteDefaultResponse);
-  // List hardware keys for all defaults or those selecting one profile.
-  rpc FindNicFirmwareSiteDefaultIds(NicFirmwareSiteDefaultSearchFilter) returns (FindNicFirmwareSiteDefaultIdsResponse);
+  // Select or clear the site profile for an exact hardware pair.
+  rpc SetNicFirmwareSiteSelection(SetNicFirmwareSiteSelectionRequest) returns (NicFirmwareSiteSelectionResponse);
+  // List hardware keys for all site selections or those selecting one profile.
+  rpc FindNicFirmwareSiteSelectionIds(NicFirmwareSiteSelectionSearchFilter) returns (FindNicFirmwareSiteSelectionIdsResponse);
   // Retrieve existing assignments for a bounded batch of hardware keys.
-  rpc FindNicFirmwareSiteDefaultsByIds(FindNicFirmwareSiteDefaultsByIdsRequest) returns (FindNicFirmwareSiteDefaultsByIdsResponse);
+  rpc FindNicFirmwareSiteSelectionsByIds(FindNicFirmwareSiteSelectionsByIdsRequest) returns (FindNicFirmwareSiteSelectionsByIdsResponse);
+  // Set or clear the operator's machine and card selections using Machine.version.
+  rpc SetMachineNicFirmwareConfig(SetMachineNicFirmwareConfigRequest) returns (google.protobuf.Empty);
+  // Only operators may read the tenant selection; the response includes the shared Tenant.version.
+  rpc GetTenantNicFirmwareConfig(GetTenantNicFirmwareConfigRequest) returns (GetTenantNicFirmwareConfigResponse);
+  // Set or clear the operator's tenant selection using the shared Tenant.version.
+  rpc SetTenantNicFirmwareConfig(SetTenantNicFirmwareConfigRequest) returns (SetTenantNicFirmwareConfigResponse);
   // Get desired firmware for each device using stored host observations.
   rpc GetDesiredNicFirmware(GetDesiredNicFirmwareRequest) returns (GetDesiredNicFirmwareResponse);
 
@@ -1202,6 +1226,16 @@ service Forge {
 
   // --- Component management (unified switch + power shelf operations) ---
   rpc ComponentPowerControl(ComponentPowerControlRequest) returns (ComponentPowerControlResponse);
+  // Reads fresh hardware power state and independently stored desired policy.
+  // Flow and ForgeAdminCLI may call this method. A consistent database snapshot
+  // has five seconds, including pool acquisition; failure aborts with INTERNAL.
+  // After releasing that snapshot, queued targets, credentials, and live reads
+  // share fifteen seconds with at most eight targets active. Completed results
+  // survive expiry; unfinished reads report DeadlineExceeded. Earlier caller
+  // cancellation drops pending work. Core and RMS also enforce ten-second local
+  // read budgets, whose expiry reports ReadFailed. This method never registers
+  // devices, writes policy, or submits power operations.
+  rpc GetComponentPowerDetails(GetComponentPowerDetailsRequest) returns (GetComponentPowerDetailsResponse);
   rpc ComponentConfigureSwitchCertificate(ComponentConfigureSwitchCertificateRequest) returns (ComponentConfigureSwitchCertificateResponse);
   rpc GetComponentInventory(GetComponentInventoryRequest) returns (GetComponentInventoryResponse);
   rpc UpdateComponentFirmware(UpdateComponentFirmwareRequest) returns (UpdateComponentFirmwareResponse);
@@ -2958,8 +2992,9 @@ message Switch {
   reserved 12, 13;
   bool is_primary = 14;
 
-  // Deprecated: use status.nvos_ports. A resolved endpoint is retained here
-  // for compatibility, preferring IPv4 and then the lowest-MAC port.
+  // Deprecated: use status.nvos_ports. Retains the discovered primary port,
+  // preferring IPv4 within that port. Absent if the primary is not discovered;
+  // ip is absent if that port has no address. Never falls back to a secondary.
   SwitchNvosInfo nvos_info = 15 [deprecated = true];
 
   // NVLink domain UUID
@@ -3035,7 +3070,7 @@ message SwitchSearchFilter {
   optional string controller_state = 3;
   // Filter by BMC MAC address via machine_interfaces
   optional string bmc_mac = 4;
-  // Filter by NVOS MAC address via expected_switches.nvos_mac_addresses
+  // Filter by NVOS MAC address via expected_switch_nvos_interfaces.
   optional string nvos_mac = 5;
   // For example, to search for leak alerts, set the below to "hardware-health.tray-leak-detection"
   optional string only_with_health_alert = 6;
@@ -3043,6 +3078,17 @@ message SwitchSearchFilter {
 
 message SwitchesByIdsRequest {
   repeated common.SwitchId switch_ids = 1;
+}
+
+// A single NVOS ethernet port of a switch. Both ports of a switch reach the
+// same NVOS instance; `is_primary` marks the one (eth0) NICo talks to via RMS.
+message ExpectedNvosInterface {
+  // MAC address of this NVOS ethernet port.
+  string mac_address = 1;
+  // Whether NICo treats this as the primary (eth0) NVOS port. Exactly one port
+  // per switch is primary; a switch with a single port is always its own primary
+  // regardless of this flag.
+  bool is_primary = 2;
 }
 
 message ExpectedSwitch {
@@ -3057,14 +3103,24 @@ message ExpectedSwitch {
   optional string nvos_password = 8;
   // Unique identifier for the expected switch. When omitted, server generates one.
   optional common.UUID expected_switch_id = 9;
-  repeated string nvos_mac_addresses = 10;
+  // Field 10 was `repeated string nvos_mac_addresses`; replaced by the
+  // structured `nvos_interfaces` at field 14 to carry the per-port primary
+  // flag. The number is retired rather than reused because the wire type
+  // changed from string to message.
+  reserved 10;
+  reserved "nvos_mac_addresses";
   string bmc_ip_address = 11;
   // When true, site-explorer skips BMC password rotation and stores the
   // factory-default credentials in Vault as-is.
   optional bool bmc_retain_credentials = 12;
   // Static IP reservation for the single wired NVOS port. Only meaningful
-  // when `nvos_mac_addresses` has exactly one entry.
+  // when `nvos_interfaces` has exactly one entry.
   optional string nvos_ip_address = 13;
+  // The switch's NVOS ethernet ports. Create and replace-all entries require
+  // at least one port. Exactly one entry must be flagged
+  // `is_primary` when more than one is present; a single port is primary
+  // implicitly. On reads the flags report the current primary.
+  repeated ExpectedNvosInterface nvos_interfaces = 14;
 
   // WARNING: Following fields are not present in Core, but added directly in REST snapshot
   optional string name = 21;
@@ -4517,6 +4573,20 @@ message MachineConfig {
   // The declared desired hardware SKU (set via the AssignSku API).
   // Distinct from MachineStatus.hw_sku, which reflects the observed match.
   optional string hw_sku = 6;
+
+  // Live NIC firmware profile selected by SetMachineNicFirmwareConfig, following
+  // NicFirmwareProfile.id. Absent means inherit allocation or site selections.
+  // Read this field and Machine.version through FindMachinesByIds before editing.
+  optional string nic_firmware_profile_id = 7;
+
+  // Live profiles selected for individual observed devices. Empty means all devices
+  // inherit the machine, allocation or site selection. Saved selectors remain here
+  // when later observations no longer match them. Results are ordered by the stored
+  // selector JSON value; ordering has no selection significance. Edits use the same
+  // Machine.version as nic_firmware_profile_id.
+  repeated NicFirmwareCardSelection nic_firmware_card_selections = 9;
+  reserved 8;
+  reserved "nic_firmware_card_overrides";
 }
 
 message MachineStatus {
@@ -4630,8 +4700,8 @@ message Machine {
   // Metadata associated with the Machine
   Metadata metadata = 33;
 
-  // Version field that tracks changes to
-  // - Metadata
+  // Shared edit token, including metadata and NIC firmware configuration edits.
+  // Other machine settings do not necessarily advance this token.
   string version = 34;
 
   reserved 35; // Was: optional InstanceNetworkRestrictions instance_network_restrictions = 35;
@@ -5719,7 +5789,10 @@ message AdminForceDeleteMachineRequest {
   // credentials for this machine.
   bool delete_bmc_credentials = 4;
 
-  // Allow force delete of machine with orphaned dpf crds
+  // Allow force deletion to discard Core-owned service VPC resources and
+  // continue when DPF resources cannot be removed. This may leave orphaned
+  // DPF CRDs. The option is request-scoped and must be repeated on polling
+  // retries until force deletion completes.
   bool allow_delete_with_orphaned_dpf_crds = 5;
 
   // Delete Site Explorer and DHCP BMC suppressions for the host/DPU BMC MACs
@@ -6247,6 +6320,9 @@ enum BootstrapCaSource {
 
 message CloudInitDiscoveryInstructions {
   MachineInterface machine_interface = 1;
+  // Absent when a host-owned Data interface has no DNS domain, including
+  // predicted hosts. DPU discovery instructions still require a domain.
+  // A configured domain that cannot be loaded causes the request to fail.
   PxeDomain domain = 2;
   // Selects which representors from the configured VF population HBN is expected to use.
   optional string hbn_reps = 3;
@@ -6533,7 +6609,8 @@ message LinkData {
 message Tenant {
   string organization_id = 1;
   Metadata metadata = 2;
-  // this string is used to verify that the client has the most updated "view" of a keyset when attempting to modify it
+  // Complete concurrency token shared by tenant, identity-configuration and
+  // operator NIC firmware selection updates.
   string version = 3;
   reserved 4;
   optional string routing_profile_type = 5;
@@ -6556,6 +6633,8 @@ message UpdateTenantRequest {
 
   // if this field is set and non-empty, the request will only update the tenant if the version matches the server's view,
   // otherwise it will return a concurrency related error.
+  // Identity-configuration and operator NIC firmware selection updates also
+  // advance this shared Tenant.version token.
   optional string if_version_match = 3;
 
   reserved 4;
@@ -9801,10 +9880,18 @@ enum DpuExtensionServiceDeploymentStatus {
 
 message FindInstancesByDpuExtensionServiceRequest {
   string service_id = 1;
+  // If set, return instances retaining this exact active or terminating
+  // version. If omitted, return one entry per matching instance: the active
+  // attachment when present, otherwise one retained terminating attachment.
+  // Set this field to select a particular retained historical version.
   optional string version = 2;
 }
 
 message FindInstancesByDpuExtensionServiceResponse {
+  // One entry per matching instance. Matching instances include soft-deleted
+  // instances until physical deletion removes the stored attachment. Entries
+  // have no defined order. When version is omitted and no active attachment
+  // remains, which retained terminating attachment is reported is unspecified.
   repeated InstanceDpuExtensionServiceInfo instances = 1;
 }
 
@@ -9812,7 +9899,10 @@ message InstanceDpuExtensionServiceInfo {
   string instance_id = 1;
   string service_id = 2;
   string version = 3;
-  optional string removed = 4; // Signals that this service is being removed from instance config and is terminating
+  // Attachment-removal timestamp. For an active attachment on a soft-deleted
+  // instance, this falls back to the instance-deletion timestamp. It is unset
+  // only while both the attachment and instance remain active.
+  optional string removed = 4;
 }
 
 message DpuExtensionServiceObservabilityConfigPrometheus {
@@ -10302,6 +10392,234 @@ message GetComponentInventoryResponse {
   repeated ComponentInventoryEntry entries = 1;
 }
 
+// --- Component power details ---
+
+// Selects one managed target kind and requires 1-64 unique IDs. Missing
+// target, empty/oversized batches, and duplicate IDs return INVALID_ARGUMENT.
+// ID strings rejected by the typed decoder, including DPU IDs in machine_ids,
+// return INTERNAL before handler validation. IDs absent from the database
+// snapshot report NotFound per entry. Deletion-marked switches and shelves
+// remain readable until their database records are removed.
+//
+// Without a discovered BMC/PMC endpoint, a managed target reports
+// EndpointUnavailable before configuration or backend checks. For resolved
+// endpoints, an expired shared budget reports DeadlineExceeded; otherwise the
+// checks are Component Manager configuration (Disabled), passive-read capability
+// (Unsupported), and BMC/PMC credentials (CredentialsUnavailable), in that order.
+// Switches then require an NVOS endpoint and NVOS credentials, in that order.
+// Missing BMC credentials therefore take precedence over a missing NVOS endpoint.
+// PSM, NSM, and mock backends do not advertise passive live power reads.
+//
+// A host is standalone when it has no rack association and its discovered
+// hardware is not MNNVL-capable. Standalone hosts use the direct Core Redfish
+// reader; rack-scale hosts use the configured compute reader. Core readers use
+// direct BMC authentication even when the site's general Redfish pool uses a
+// proxy. Switches and shelves use their configured component readers.
+message GetComponentPowerDetailsRequest {
+  // Required homogeneous selection; exactly one target kind is accepted.
+  oneof target {
+    // Host machine IDs; DPU IDs are rejected by typed decoding.
+    common.MachineIdList machine_ids = 1;
+    // Managed NVLink switch IDs.
+    SwitchIdList switch_ids = 2;
+    // Managed power shelf IDs.
+    PowerShelfIdList power_shelf_ids = 3;
+  }
+}
+
+// A hardware observation, including explicit Unknown, rather than policy.
+enum ComponentPowerState {
+  // Hardware explicitly reported an unknown state; this is still an observation.
+  COMPONENT_POWER_STATE_UNKNOWN = 0;
+  // Hardware reported power on.
+  COMPONENT_POWER_STATE_ON = 1;
+  // Hardware reported power off.
+  COMPONENT_POWER_STATE_OFF = 2;
+  // Hardware reported a transition toward power on.
+  COMPONENT_POWER_STATE_POWERING_ON = 3;
+  // Hardware reported a transition toward power off.
+  COMPONENT_POWER_STATE_POWERING_OFF = 4;
+  // Hardware reported a paused state.
+  COMPONENT_POWER_STATE_PAUSED = 5;
+  // Hardware reported a reset state.
+  COMPONENT_POWER_STATE_RESET = 6;
+}
+
+// Source of hardware evidence or persisted desired policy.
+enum ComponentPowerSource {
+  // Default enum value; this RPC omits unknown sources instead of emitting it.
+  COMPONENT_POWER_SOURCE_UNSPECIFIED = 0;
+  // A direct BMC Redfish power read.
+  COMPONENT_POWER_SOURCE_REDFISH = 1;
+  // A live read through Rack Management Service.
+  COMPONENT_POWER_SOURCE_RMS = 2;
+  // Desired policy persisted in Core's host power policy table.
+  COMPONENT_POWER_SOURCE_CORE_POWER_POLICY = 3;
+}
+
+// Bounded failure categories; no backend payloads or credentials are exposed.
+enum ComponentPowerErrorCode {
+  // Default enum value; this RPC emits a specific failure category instead.
+  COMPONENT_POWER_ERROR_CODE_UNSPECIFIED = 0;
+  // The requested ID was absent from the managed database snapshot.
+  COMPONENT_POWER_ERROR_CODE_NOT_FOUND = 1;
+  // Component Manager is not configured, including for standalone hosts.
+  COMPONENT_POWER_ERROR_CODE_DISABLED = 2;
+  // The selected backend cannot provide a fresh passive read.
+  COMPONENT_POWER_ERROR_CODE_UNSUPPORTED = 3;
+  // A required discovered BMC, PMC, or NVOS endpoint is missing.
+  COMPONENT_POWER_ERROR_CODE_ENDPOINT_UNAVAILABLE = 4;
+  // Required BMC, PMC, or NVOS credentials are missing or could not be loaded.
+  COMPONENT_POWER_ERROR_CODE_CREDENTIALS_UNAVAILABLE = 5;
+  // The read failed or returned mismatched/multiple results. Backend-local
+  // timeouts also use this category; they do not expire the shared RPC budget.
+  COMPONENT_POWER_ERROR_CODE_READ_FAILED = 6;
+  // The backend returned no result or a matching result without a state.
+  COMPONENT_POWER_ERROR_CODE_NO_OBSERVATION = 7;
+  // The shared fifteen-second credential/read budget expired for this target.
+  COMPONENT_POWER_ERROR_CODE_DEADLINE_EXCEEDED = 8;
+}
+
+// Safe details for a hardware observation or tracked-action lookup failure.
+message ComponentPowerError {
+  // Specific failure category; clients should branch on this value.
+  ComponentPowerErrorCode code = 1;
+  // Fixed explanatory text with no dependency payload or credential details.
+  string message = 2;
+}
+
+// One successful hardware observation or one categorized failure.
+message ComponentPowerObservation {
+  // Always populated by this RPC: exactly one observed state or failure.
+  oneof outcome {
+    // Explicit Unknown is a successful observation. Check the selected outcome:
+    // a generated getter's default Unknown does not imply success.
+    ComponentPowerState state = 1;
+    // Selected when no hardware state could be observed.
+    ComponentPowerError error = 4;
+  }
+  // Redfish or Rms after backend selection, including subsequent failures.
+  // Absent for earlier failures or an outer shared-budget timeout. Always
+  // present with state; CorePowerPolicy and Unspecified are never emitted here.
+  optional ComponentPowerSource source = 2;
+  // NICo receipt time, not a device-provided timestamp; present only with state.
+  google.protobuf.Timestamp observed_at = 3;
+}
+
+// Whether a persisted desired policy exists and applies to the requested ID.
+enum ComponentPowerPolicyStatus {
+  // No host policy row or no managed target; also the default status value.
+  COMPONENT_POWER_POLICY_STATUS_UNAVAILABLE = 0;
+  // A host policy row exists, including a policy that disables power management.
+  COMPONENT_POWER_POLICY_STATUS_AVAILABLE = 1;
+  // Managed switches and shelves have no applicable stored desired policy.
+  COMPONENT_POWER_POLICY_STATUS_NOT_APPLICABLE = 2;
+}
+
+// Desired host policy from the database snapshot, independent of hardware reads.
+message ComponentPowerPolicy {
+  // Available for a host with a policy row; NotApplicable for managed switches
+  // and shelves; Unavailable for a missing host policy or missing managed ID.
+  ComponentPowerPolicyStatus status = 1;
+  // Present exactly when Available: On, Off, or PowerManagerDisabled. Disabled
+  // is a stored policy, not missing policy. Check presence/status before using a
+  // generated getter; its default On does not imply that a policy exists.
+  optional PowerState state = 2;
+  // CorePowerPolicy when Available; absent otherwise.
+  optional ComponentPowerSource source = 3;
+  // Not populated by this RPC. Initial policy versions contain a fixed
+  // timestamp rather than policy creation time.
+  google.protobuf.Timestamp updated_at = 4;
+}
+
+// Whether an explicit saved maintenance operation has been admitted.
+enum ComponentPowerActionStatus {
+  // Default enum value; this RPC always supplies Active or Pending.
+  COMPONENT_POWER_ACTION_STATUS_UNSPECIFIED = 0;
+  // The controller saved this operation in Maintenance. This does not prove
+  // that hardware work has started or that physical power is converging.
+  COMPONENT_POWER_ACTION_STATUS_ACTIVE = 1;
+  // A saved request not known to equal an admitted request. This does not
+  // promise eligibility, admission or eventual execution.
+  COMPONENT_POWER_ACTION_STATUS_PENDING = 2;
+}
+
+// The operation preserved by Core maintenance, not the original Flow task.
+enum ComponentPowerActionOperation {
+  // Default enum value; this RPC always supplies a recorded operation.
+  COMPONENT_POWER_ACTION_OPERATION_UNSPECIFIED = 0;
+  // Power on the component.
+  COMPONENT_POWER_ACTION_OPERATION_POWER_ON = 1;
+  // Power off the component; graceful identifies the saved shutdown mode.
+  COMPONENT_POWER_ACTION_OPERATION_POWER_OFF = 2;
+  // Reset the component. The saved state cannot distinguish original restart
+  // and AC-cycle requests, so no original power-control variant is inferred.
+  COMPONENT_POWER_ACTION_OPERATION_RESET = 3;
+  // Reset a specific Redfish chassis through a compute tray's BMC.
+  COMPONENT_POWER_ACTION_OPERATION_CHASSIS_RESET = 4;
+}
+
+// One explicit persisted maintenance operation. There is no stable action ID,
+// Flow task correlation ID, or recorded execution-start time in this model.
+message ComponentPowerAction {
+  // Active or Pending; never Unspecified in this RPC.
+  ComponentPowerActionStatus status = 1;
+  // Recorded operation, including the distinction between Reset and ChassisReset.
+  ComponentPowerActionOperation operation = 2;
+  // Saved request submission time, not admission/start time. Absent for legacy
+  // active maintenance states that did not save their admitted request.
+  google.protobuf.Timestamp requested_at = 3;
+  // Saved initiator, including an explicitly stored empty string. Absent only
+  // when legacy active maintenance has no admitted request metadata.
+  optional string initiator = 4;
+  // Present exactly for PowerOff. False means forced power off; true means
+  // graceful shutdown. Legacy operations without this flag default to false.
+  optional bool graceful = 5;
+  // Present exactly for ChassisReset; the recorded Redfish chassis identifier.
+  optional string chassis_id = 6;
+}
+
+// Explicit stored power maintenance from the same snapshot as identity/policy.
+// This is informational: reading it neither admits nor changes any operation.
+message ComponentPowerActionDetails {
+  // At most two entries: Active first, then Pending. Suppress Pending only when
+  // the whole saved request equals the admitted request, including operation,
+  // timestamp and initiator. Legacy active states cannot establish that match.
+  // An empty list without error means no matching tracked maintenance, not
+  // idle hardware: ComponentPowerControlRequest.bypass_state_controller calls
+  // and power steps inside other workflows are not tracked here. Switch
+  // certificate maintenance is also excluded.
+  repeated ComponentPowerAction actions = 1;
+  // NotFound when the managed target is missing; actions is empty in that case.
+  // Absent after a successful snapshot, including when actions is empty.
+  // Invalid persisted state/request data fails the whole RPC with INTERNAL;
+  // it is never silently treated as an empty action list.
+  ComponentPowerError error = 2;
+}
+
+// Actual, desired and tracked maintenance for one requested managed component ID.
+message ComponentPowerDetails {
+  // The requested managed ID, in its canonical representation.
+  string component_id = 1;
+  // Always present, with either an observed state or a per-target error.
+  ComponentPowerObservation actual = 2;
+  // Always present; loaded independently and retained when actual is unavailable.
+  ComponentPowerPolicy desired = 3;
+  // Present from servers supporting action details, including missing targets.
+  // Absent means not provided (for example, an older Core server); callers must
+  // check message presence before generated getters turn absence into empty.
+  // Independent of endpoint discovery, actual-read failures, and the
+  // nv_switch_use_state_controller, power_shelf_use_state_controller and
+  // compute_tray_use_state_controller settings.
+  ComponentPowerActionDetails actions = 4;
+}
+
+// Power facts for every requested ID, including targets with unavailable reads.
+message GetComponentPowerDetailsResponse {
+  // Exactly one entry per requested ID, in request order, including missing IDs.
+  repeated ComponentPowerDetails entries = 1;
+}
+
 // --- Component power control ---
 
 message ComponentPowerControlRequest {
@@ -10497,6 +10815,11 @@ message ListComponentFirmwareVersionsResponse {
 }
 
 message SpxPartitionCreationRequest {
+  // Required. Omitted or invalid metadata returns INVALID_ARGUMENT.
+  // Name: 2-256 ASCII characters. Description: at most 1024 UTF-8 bytes.
+  // Labels: at most 16, with unique ASCII keys of 1-255 characters and values
+  // of at most 255 UTF-8 bytes. Omitted descriptions and label values are empty
+  // strings; omitted labels are an empty list.
   Metadata metadata = 1;
   optional common.SpxPartitionId id = 2;
   optional uint32 vni = 3;
@@ -11315,12 +11638,15 @@ message PatchExpectedSwitchRequest {
   ExpectedSwitch expected_switch = 1;
   // Required; an empty mask checks existence without changing the row.
   // Paths: bmc_username, bmc_password, switch_serial_number, bmc_ip_address,
-  // bmc_retain_credentials, rack_id, nvos_mac_addresses, nvos_ip_address,
-  // nvos_username, nvos_password, metadata.name, metadata.description,
-  // metadata.labels.
+  // bmc_retain_credentials, rack_id, nvos_interfaces, nvos_ip_address,
+  // nvos_username, nvos_password, metadata.name,
+  // metadata.description, metadata.labels.
   // Unselected values are ignored. Selected values replace the stored field,
-  // including empty collections, an absent `rack_id` (clear), and an empty BMC
-  // IP (clear). A selected `nvos_ip_address` clears with an absent or empty value.
+  // including empty labels, an absent `rack_id` (clear), and an empty BMC IP
+  // (clear). `nvos_interfaces` replaces the complete port set and must contain
+  // at least one port; a lone port is promoted to primary, while a multi-port
+  // set must flag exactly one primary. A selected `nvos_ip_address` clears with
+  // an absent or empty value.
   // Nonempty IPs must parse as IPv4 or IPv6. A selected `bmc_retain_credentials`
   // must be present; false is an update. BMC and NVOS usernames and passwords
   // can each be selected independently; unselected values stay unchanged.
@@ -11469,6 +11795,9 @@ message SwitchNvosPortInfo {
   optional uint32 service_port = 2;
   // At most one address per family, ordered IPv4 before IPv6.
   repeated IpAddress addresses = 3;
+  // Whether this is the operator-declared primary (eth0) NVOS port that NICo
+  // uses to talk to NVOS via RMS.
+  bool is_primary = 4;
 }
 
 // A named definition, independent of site, machine, card or tenant selection.
@@ -11550,9 +11879,18 @@ message FindNicFirmwareProfilesByIdsResponse {
 message UpdateNicFirmwareProfileRequest {
   // Profile name; follows the NicFirmwareProfile.id contract.
   string id = 1;
-  // Required complete replacement, not a merge or patch. Removing a hardware
-  // pair selected by a site default returns FAILED_PRECONDITION. This compatibility
-  // check precedes the stored-version check.
+  // Required complete replacement, not a merge or patch. Must support hardware
+  // pairs selected at site scope. On machines or devices selecting this profile,
+  // it must retain support for usable observed pairs the previous config supported.
+  // A device with a card selection does not constrain its machine's selected profile.
+  // A card selector matching no device or several devices does not constrain edits,
+  // but its saved profile reference still prevents deletion.
+  // Removing required support returns FAILED_PRECONDITION. A newly observed,
+  // unsupported pair does not block unrelated edits; GetDesiredNicFirmware
+  // continues to report that device's error.
+  // Managed-DPU devices and incomplete or invalid observations do not constrain
+  // the profile. Compatibility checks precede the stored-version check.
+  // Tenant selections have no bound hardware and do not constrain profile edits.
   NicFirmwareProfileConfig config = 2;
   // Required edit-version token from a previous read. Missing or malformed
   // tokens return INVALID_ARGUMENT; stale tokens return FAILED_PRECONDITION
@@ -11562,7 +11900,8 @@ message UpdateNicFirmwareProfileRequest {
 
 message DeleteNicFirmwareProfileRequest {
   // Profile name; follows the NicFirmwareProfile.id contract. A profile selected
-  // by a site default cannot be deleted (FAILED_PRECONDITION).
+  // at site, machine, card or tenant scope cannot be deleted
+  // (FAILED_PRECONDITION), including card selectors no longer found in inventory.
   string id = 1;
   // Required edit-version token from a previous read. Missing or malformed
   // tokens return INVALID_ARGUMENT; stale tokens return FAILED_PRECONDITION
@@ -11582,7 +11921,7 @@ message NicFirmwareHardware {
 }
 
 // A revisioned site-wide assignment from a hardware pair to a live profile.
-message NicFirmwareSiteDefault {
+message NicFirmwareSiteSelection {
   // Composite identity of this assignment, not a machine or physical-card identity.
   NicFirmwareHardware hardware = 1;
   // Selects the live profile, not a pinned catalog revision. Follows NicFirmwareProfile.id.
@@ -11591,13 +11930,14 @@ message NicFirmwareSiteDefault {
   string version = 3;
 }
 
-// Finish upgrading Core before assigning site defaults so every replica
-// validates profile edits against the hardware selected by those defaults.
-message SetNicFirmwareSiteDefaultRequest {
+// Site selections apply only when no card, machine or allocation selection exists
+// for the device. Finish upgrading Core before assigning site selections so every
+// replica validates profile edits against their selected hardware.
+message SetNicFirmwareSiteSelectionRequest {
   // Required hardware pair; missing or invalid hardware returns INVALID_ARGUMENT.
-  // Only operator callers may change defaults.
+  // Only operator callers may change site selections.
   NicFirmwareHardware hardware = 1;
-  // Required action. Omission returns INVALID_ARGUMENT without changing the default.
+  // Required action. Omission returns INVALID_ARGUMENT without changing the selection.
   oneof action {
     // Assign a compatible live profile. Follows NicFirmwareProfile.id validation;
     // malformed IDs return INVALID_ARGUMENT, missing profiles NOT_FOUND, and
@@ -11615,71 +11955,224 @@ message SetNicFirmwareSiteDefaultRequest {
 }
 
 // The assignment saved by Set, or its absence after Clear.
-message NicFirmwareSiteDefaultResponse {
+message NicFirmwareSiteSelectionResponse {
   // Absent after a successful clear. Clearing deletes the assignment.
-  optional NicFirmwareSiteDefault site_default = 1;
+  optional NicFirmwareSiteSelection site_selection = 1;
 }
 
 // Optional exact filter for listing assignment keys. An empty filter lists all keys.
-message NicFirmwareSiteDefaultSearchFilter {
+message NicFirmwareSiteSelectionSearchFilter {
   // Profile name following NicFirmwareProfile.id validation. Malformed IDs return
   // INVALID_ARGUMENT; an unknown valid ID returns an empty list.
   optional string profile_id = 1;
 }
 
-// Hardware keys matching the requested site-default filter.
-message FindNicFirmwareSiteDefaultIdsResponse {
+// Hardware keys matching the requested site-selection filter.
+message FindNicFirmwareSiteSelectionIdsResponse {
   // Matching hardware keys, ordered by part number then PSID in database collation
-  // order. Fetch assignment details in batches with FindNicFirmwareSiteDefaultsByIds.
+  // order. Fetch assignment details in batches with FindNicFirmwareSiteSelectionsByIds.
   repeated NicFirmwareHardware hardware = 1;
 }
 
-// Hardware keys whose site-default assignments should be returned.
-message FindNicFirmwareSiteDefaultsByIdsRequest {
+// Hardware keys whose site-selection assignments should be returned.
+message FindNicFirmwareSiteSelectionsByIdsRequest {
   // Required batch of 1 through max_find_by_ids hardware pairs. Invalid pairs or
   // an empty or oversized batch reject the entire request with INVALID_ARGUMENT.
   repeated NicFirmwareHardware hardware = 1;
 }
 
-// Existing site-default assignments for the requested keys.
-message FindNicFirmwareSiteDefaultsByIdsResponse {
+// Existing site-selection assignments for the requested keys.
+message FindNicFirmwareSiteSelectionsByIdsResponse {
   // Existing assignments once each, ordered by part number then PSID in database
   // collation order. Unknown valid keys are omitted; duplicate keys are collapsed.
-  repeated NicFirmwareSiteDefault site_defaults = 1;
+  repeated NicFirmwareSiteSelection site_selections = 1;
+}
+
+// Explicit identity of one device in a machine's latest stored MLX observation.
+// Matching does not establish physical-card identity, reset boundaries, hardware
+// freshness or flash eligibility. The selector must match exactly one device when
+// assigned; absent or ambiguous matches return FAILED_PRECONDITION.
+message NicFirmwareCardSelector {
+  // Required identity. Omission or an invalid value returns INVALID_ARGUMENT.
+  oneof identity {
+    // Nonzero unicast MAC. Accepts twelve hexadecimal digits or six hexadecimal
+    // octets separated consistently by colons or hyphens. Returned as uppercase colon notation.
+    string base_mac = 1;
+    // Exact opaque Base_Guid reported by MFT: 1–256 UTF-8 bytes without surrounding
+    // whitespace or control characters. The absence placeholders -- and N/A are
+    // invalid. Compared literally, without hex parsing or case/format changes.
+    string base_guid = 2;
+  }
+}
+
+// A live profile selected for one device, above machine, allocation and site settings.
+message NicFirmwareCardSelection {
+  // Required. Follows NicFirmwareCardSelector validation and matching rules.
+  NicFirmwareCardSelector selector = 1;
+  // Required live profile following NicFirmwareProfile.id. Invalid IDs return
+  // INVALID_ARGUMENT, missing profiles NOT_FOUND, and incompatible profiles
+  // FAILED_PRECONDITION. This does not pin a profile revision.
+  string profile_id = 2;
+}
+
+// Complete replacement of a machine's card selections, including an empty clear.
+message NicFirmwareCardSelections {
+  // Zero through Core's max_find_by_ids entries; a larger list is INVALID_ARGUMENT.
+  // Order has no selection significance. Duplicate selectors and distinct selectors
+  // matching the same device are FAILED_PRECONDITION.
+  repeated NicFirmwareCardSelection selections = 1;
+}
+
+// Only operators may set or clear machine and card selections. This operation
+// atomically updates the selections and Machine.version without changing other
+// configuration. Failure leaves both machine and card selections unchanged.
+// It does not schedule firmware or change machine readiness.
+// Finish upgrading Core before assigning machine or card selections so every
+// replica validates their profile references and honors card_selections.
+message SetMachineNicFirmwareConfigRequest {
+  // Required host ID. Missing or non-host IDs return INVALID_ARGUMENT;
+  // an unknown host returns NOT_FOUND.
+  common.MachineId machine_id = 1;
+  // Required complete current Machine.version from FindMachinesByIds. Missing or
+  // malformed tokens return INVALID_ARGUMENT; stale tokens FAILED_PRECONDITION.
+  // Every successful set or clear advances this token, including unchanged values.
+  optional string if_version_match = 2;
+  // Required action. Omission returns INVALID_ARGUMENT without changing the machine.
+  oneof action {
+    // Select a live profile following NicFirmwareProfile.id validation. Malformed
+    // IDs return INVALID_ARGUMENT and missing profiles NOT_FOUND. Profile existence
+    // is checked before host existence and the machine token. After checking the
+    // token, each complete, usable observed PN/PSID pair without a card selection
+    // must match an entry or the request returns FAILED_PRECONDITION. Managed-DPU
+    // devices are excluded. Validation uses the latest stored observation after
+    // acquiring the machine lock, without contacting Scout or proving freshness.
+    // Missing, incomplete or invalid observations allow storing intent; subsequent
+    // GetDesiredNicFirmware reads report per-device errors if facts are unusable
+    // or later observations are incompatible.
+    string profile_id = 3;
+    // Remove the machine-wide selection and restore inheritance. Does not require
+    // compatible inventory and succeeds when the selection is already absent.
+    google.protobuf.Empty clear = 4;
+  }
+  // Omission preserves saved card selections when changing only the machine
+  // selection. Presence replaces the entire list; an empty
+  // wrapper clears all card selections and restores inheritance. The machine action
+  // remains required: resubmit the desired machine profile or clear it in the same request.
+  // Resubmitting the same machine profile rechecks all devices inheriting it,
+  // including devices whose hardware changed since the previous assignment.
+  // Every supplied selector must match exactly one observed device with a usable
+  // PN/PSID pair compatible with its profile and no managed-DPU association.
+  // Missing, ambiguous, managed-DPU or unusable device facts are FAILED_PRECONDITION.
+  // New assignments use the latest stored observation after acquiring the machine
+  // lock. Clearing cards does not require inventory, though a supplied machine
+  // profile still must satisfy the machine compatibility rules above.
+  NicFirmwareCardSelections card_selections = 5;
+}
+
+// The operator-managed NIC firmware selection of an existing tenant.
+message TenantNicFirmwareConfig {
+  // Organization ID of the tenant whose selection was read or committed.
+  string tenant_organization_id = 1;
+  // Selected live profile, not a pinned catalog revision. Absence means the tenant
+  // has no NIC firmware requirement. Tenant selections do not change machine,
+  // card or site selections.
+  optional string profile_id = 2;
+  // Complete shared Tenant.version token in V<number>-T<timestamp> format,
+  // including when profile_id is absent. Tenant, identity-configuration and
+  // NIC firmware selection updates advance it.
+  string config_version = 3;
+}
+
+// Only operators may read a tenant's NIC firmware selection.
+message GetTenantNicFirmwareConfigRequest {
+  // Required nonempty organization ID containing only ASCII letters, digits, '_'
+  // and '-'. Missing or malformed IDs return INVALID_ARGUMENT; unknown tenants
+  // return NOT_FOUND. An existing tenant with no selection returns an absent
+  // profile_id and its current shared version.
+  string tenant_organization_id = 1;
+}
+
+// The tenant's NIC firmware selection and current shared version.
+message GetTenantNicFirmwareConfigResponse {
+  // Always present on success, including when no profile is selected.
+  TenantNicFirmwareConfig firmware_config = 1;
+}
+
+// Only operators may set or clear tenant NIC firmware selections. This stores
+// intent without updating hardware or changing existing allocations. Until NIC
+// firmware preparation is implemented (https://github.com/dsx-ai-factory/infra-controller/issues/6686),
+// Core rejects allocations with nonempty SPX attachments for a tenant with a
+// selected profile, and rejects attachment additions or changes that leave a
+// nonempty SPX list on its existing allocations. Unchanged or cleared attachments
+// remain allowed. Each attempt uses the selection visible to the guard's database
+// read; an attempt already past that read may finish after a selection is committed.
+// Complete the Core upgrade before using tenant selections, and do not roll back
+// to allocators that ignore them. Ordinary tenant updates preserve the selection.
+message SetTenantNicFirmwareConfigRequest {
+  // Required organization ID following GetTenantNicFirmwareConfigRequest validation.
+  // The tenant must already exist; an unknown tenant returns NOT_FOUND.
+  string tenant_organization_id = 1;
+  // Required complete current Tenant.version token in V<number>-T<timestamp> format.
+  // Missing or malformed tokens return INVALID_ARGUMENT; stale tokens return
+  // FAILED_PRECONDITION. Every successful set or clear advances the shared token,
+  // including unchanged values. The response contains the committed new token.
+  string if_version_match = 2;
+  // Required action. Omission returns INVALID_ARGUMENT without changing the tenant.
+  oneof action {
+    // Select a live profile following NicFirmwareProfile.id validation. Invalid
+    // IDs return INVALID_ARGUMENT and missing profiles return NOT_FOUND. Profile
+    // existence is checked before tenant existence and the tenant version token.
+    // No hardware is bound here, so this does not validate device compatibility.
+    string profile_id = 3;
+    // Remove the tenant selection without deleting the tenant or profile. Succeeds
+    // when already unset; does not require the previously selected profile.
+    google.protobuf.Empty clear = 4;
+  }
+}
+
+// The committed tenant NIC firmware selection and new shared version.
+message SetTenantNicFirmwareConfigResponse {
+  // Always present on success, including after clearing the selection.
+  TenantNicFirmwareConfig firmware_config = 1;
 }
 
 // A host and optional allocation profile for looking up desired firmware.
 message GetDesiredNicFirmwareRequest {
-  // Required host ID. A missing, malformed or non-host ID returns INVALID_ARGUMENT;
+  // Required host ID. A missing or non-host ID returns INVALID_ARGUMENT;
   // an unknown host returns NOT_FOUND. Reads stored observations without contacting Scout.
   common.MachineId machine_id = 1;
   // Optional operator-supplied profile to preview against every observed device
-  // with valid hardware and no managed-DPU association, even without a site default.
+  // with valid hardware and no managed-DPU association, even without a site selection.
   // This is a machine-wide preview, not attachment-target selection.
-  // Omission resolves site defaults. Malformed IDs return INVALID_ARGUMENT;
-  // missing or incompatible profiles produce per-device errors without fallback.
+  // Omission resolves card selections, the machine selection or site selections.
+  // A conflicting allocation and card or machine selection produces a per-device
+  // error without fallback.
+  // Malformed IDs return INVALID_ARGUMENT; missing or incompatible profiles
+  // produce per-device errors without fallback.
   // No observation means an empty target list, not validation of this profile's existence.
   // Does not persist tenant settings or change the machine.
   optional string allocation_profile_id = 2;
 }
 
 // Resolver precedence is card > machine > allocation > site. `GetDesiredNicFirmware`
-// supplies only allocation and site selections; persisted overrides are not included.
-enum NicFirmwareSelectionSource {
+// includes stored card and machine selections, allocation preview and site selections.
+enum NicFirmwareSelectionScope {
   // Site-wide selection for the device's hardware pair.
-  NicFirmwareSelectionSourceSiteDefault = 0;
-  // Operator-supplied allocation selection, above the site default.
-  NicFirmwareSelectionSourceAllocation = 1;
-  // Per-machine selection, above an allocation or site default.
-  NicFirmwareSelectionSourceMachineOverride = 2;
+  NicFirmwareSelectionScopeSite = 0;
+  // Operator-supplied allocation selection, above the site selection.
+  NicFirmwareSelectionScopeAllocation = 1;
+  // Per-machine selection, above an allocation or site selection.
+  NicFirmwareSelectionScopeMachine = 2;
   // Per-card selection, above every other selection.
-  NicFirmwareSelectionSourceCardOverride = 3;
+  NicFirmwareSelectionScopeCard = 3;
 }
 
 // The selected profile and compatible firmware entry from one catalog snapshot.
 message NicFirmwareResolution {
-  // Setting that selected the profile; an allocation preview supersedes site defaults.
-  NicFirmwareSelectionSource source = 1;
+  reserved 1;
+  reserved "source";
+  // Configuration scope that selected the profile under the hierarchy's precedence.
+  NicFirmwareSelectionScope scope = 5;
   // Selected live catalog profile, following NicFirmwareProfile.id.
   string profile_id = 2;
   // Profile revision from this read, independent of any assignment edit token.
@@ -11694,22 +12187,26 @@ message NicFirmwareDeviceTarget {
   // PCI functions into physical cards. Missing associations mean unknown ownership.
   mlx_device.MlxDeviceIdentity identity = 1;
   // For devices with valid PN/PSID and no managed-DPU association, unset means
-  // no allocation profile or matching site default was selected (unmanaged).
+  // no card selection, machine selection, allocation profile or matching site selection
+  // was selected (unmanaged).
   // An invalid selected profile returns an error without fallback.
   oneof result {
     // Selected compatible firmware and the catalog revision used to resolve it.
     NicFirmwareResolution firmware = 2;
     // Error text for missing or malformed PN/PSID, managed-DPU exclusion,
+    // an ambiguous card selector, multiple card selections for this device,
     // or an invalid selection; not a machine-readable error code.
     // These errors are returned in the report without failing the request
-    // or hiding other devices' results. Selection source and profile revision
+    // or hiding other devices' results. Selection scope and profile revision
     // are returned only for successful resolutions.
     string error = 3;
   }
   // Assignment revision for a non-excluded device with valid hardware and a
-  // matching site default, even when an allocation preview supersedes that
-  // default or fails. Managed-DPU exclusions omit this field.
-  optional string site_default_version = 4;
+  // matching site selection, even when a card or machine selection or allocation
+  // preview supersedes that selection or fails. Managed-DPU exclusions omit this field.
+  optional string site_selection_version = 5;
+  reserved 4;
+  reserved "site_default_version";
 }
 
 // Desired firmware from database-backed selections and the optional allocation preview.
@@ -11721,4 +12218,58 @@ message GetDesiredNicFirmwareResponse {
   // The lookup is read-only: it does not qualify hardware, admit an update,
   // or change machine readiness.
   repeated NicFirmwareDeviceTarget targets = 2;
+  // Warning text for saved card selectors with no match in the stored report,
+  // including when no observation exists. Ordered by the saved selector JSON value;
+  // empty when every saved selector matches at least one reported device. Warnings
+  // do not fail the request or remove saved selections. Ambiguous matches and
+  // multiple selections for a device are reported in that device's result.error.
+  repeated string warnings = 3;
+}
+
+// Administrator-managed desired inventory, separate from an NMX-C observed domain.
+// Membership and attributes are immutable; delete and recreate to change them.
+message ExpectedNvLinkDomain {
+  // Core-generated declaration UUID, not an NMX-C domain UUID.
+  common.UUID id = 1;
+  common.RackGroupId rack_group_id = 2;
+  // Absent when no name was supplied. Names are not unique.
+  optional string name = 3;
+  // Canonical BMC MACs sorted by address; every MAC belongs to at most one declaration.
+  repeated string member_bmc_mac_addresses = 4;
+}
+
+message CreateExpectedNvLinkDomainRequest {
+  // Required existing group ID, nonblank and at most 128 characters.
+  common.RackGroupId rack_group_id = 1;
+  // Optional nonblank name, at most 256 characters. Omission stores NULL.
+  optional string name = 2;
+  // Required distinct six-byte BMC MACs. Each must resolve to exactly one expected
+  // machine or switch whose rack is in the group. At least one of each type is required.
+  // Discovery is not required. Order is ignored. Claimed MACs return ALREADY_EXISTS.
+  // Membership records intent; subsequent device inventory changes do not rewrite it.
+  repeated string member_bmc_mac_addresses = 3;
+}
+
+message ExpectedNvLinkDomainRequest {
+  // Required non-nil declaration UUID.
+  common.UUID id = 1;
+}
+
+message ExpectedNvLinkDomainSearchFilter {
+  // Optional group filter; omission lists all declaration IDs, sorted by UUID.
+  common.RackGroupId rack_group_id = 1;
+}
+
+message ExpectedNvLinkDomainIdList {
+  repeated common.UUID ids = 1;
+}
+
+message ExpectedNvLinkDomainsByIdsRequest {
+  // Nonempty batch of non-nil UUIDs, limited by max_find_by_ids. Missing IDs are
+  // omitted and duplicates collapsed; results are sorted by UUID.
+  repeated common.UUID ids = 1;
+}
+
+message ExpectedNvLinkDomainList {
+  repeated ExpectedNvLinkDomain domains = 1;
 }

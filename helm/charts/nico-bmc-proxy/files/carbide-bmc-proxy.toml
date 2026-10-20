@@ -31,11 +31,23 @@ additional_issuer_cns = []
 #   "GET /redfish/v1/Systems/*Boot"
 #   "GET,POST /redfish/v1/Managers/BMC/NodeManager/Domains"
 #   "!POST,PATCH /redfish/v1/Systems/*/SecureBoot/**"
+#   "GET /nvue_v1/platform/environment/**"
 # Matching is ordered and first-match-wins. `*` matches one path component.
 # `prefix*` and `*suffix` match one component by prefix or suffix. `**` matches
 # zero or more path components. Replace templated components like `{id}` with
 # `*` when deriving ACLs from endpoint documentation.
-"spiffe-service-id/{{ .Values.auth.apiPrincipal }}" = ["/**"]
+# An address that is a switch's NVOS management interface is proxied to its
+# NVUE REST API with the switch's NVOS credentials, so entries for switches
+# name `/nvue_v1/` paths.
+# By default, allow wildcards cannot consume percent escapes; spell them literally.
+# Structured allow entries may opt in, for example:
+#   { pattern = "/nvue_v1/**", allow_escapes = ["%2F", "%3A"] }
+# Use ["*"] for unrestricted wildcard escapes, still subject to path validation.
+# Deny wildcards remain broad. This GET rule permits escaped registry names.
+"spiffe-service-id/{{ .Values.auth.apiPrincipal }}" = [
+  "GET /redfish/v1/Registries/%23*",
+  "/**",
+]
 "spiffe-service-id/nv-dps" = [
   "GET /redfish/v1",
   "POST /redfish/v1/SessionService/Sessions",

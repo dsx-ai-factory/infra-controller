@@ -4,6 +4,7 @@
 package model
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -20,32 +21,79 @@ import (
 )
 
 // nvosMacAddressRegexp matches the 6-octet, colon- or hyphen-separated MAC
-// address format the OpenAPI contract publishes for `nvosMacAddresses`.
+// address format the OpenAPI contract publishes for NVOS interface MACs.
 var nvosMacAddressRegexp = regexp.MustCompile(`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`)
 
-// APINvosMacAddresses is the list of NVOS MAC addresses on an expected switch.
+// APINvosMacAddresses is the deprecated flat NVOS MAC list returned in responses.
 type APINvosMacAddresses []string
 
-// Validate checks that every entry is a 6-octet MAC address in the published
-// format and then enforces that the list holds no duplicates. Duplicate
-// comparison ignores case and separator style since those spellings refer to
-// the same interface.
-func (macs APINvosMacAddresses) Validate() error {
-	err := validation.Validate([]string(macs),
-		validation.Each(
-			validation.Required.Error(validationErrorValueRequired),
-			validation.Match(nvosMacAddressRegexp).Error("must be a MAC address of six colon- or hyphen-separated octets")))
-	if err != nil {
-		return err
-	}
+// APINvosInterface is one NVOS ethernet port of an expected switch: its MAC
+// address and whether it is the primary (eth0) port NICo manages via RMS.
+type APINvosInterface struct {
+	// MacAddress is the MAC of this NVOS ethernet port.
+	MacAddress string `json:"macAddress"`
+	// IsPrimary marks this port as the primary (eth0) port. At most one entry
+	// per switch may be primary; when no entry is marked, the REST layer defaults
+	// the first port on a multi-port switch (a single-port switch is always
+	// primary) when it builds the Core request, so Core does not apply this
+	// default on the REST path.
+	IsPrimary bool `json:"isPrimary"`
+}
 
-	seen := make(map[string]bool, len(macs))
-	for _, mac := range macs {
-		key := cdbm.NormalizeMacAddress(mac)
+// APINvosInterfaces is the list of NVOS ethernet ports on an expected switch.
+type APINvosInterfaces []APINvosInterface
+
+// Validate checks that every entry carries a well-formed MAC, that no MAC
+// repeats (ignoring case and separator style since those spellings refer to the
+// same interface), and that at most one entry is marked primary.
+func (interfaces APINvosInterfaces) Validate() error {
+	seen := make(map[string]bool, len(interfaces))
+	primaryCount := 0
+	for i := range interfaces {
+		iface := interfaces[i]
+		if err := validation.Validate(iface.MacAddress,
+			validation.Required.Error(validationErrorValueRequired),
+			validation.Match(nvosMacAddressRegexp).Error("must be a MAC address of six colon- or hyphen-separated octets")); err != nil {
+			return err
+		}
+		key := cdbm.NormalizeMacAddress(iface.MacAddress)
 		if seen[key] {
-			return fmt.Errorf("duplicate MAC address: %s", mac)
+			return fmt.Errorf("duplicate MAC address: %s", iface.MacAddress)
 		}
 		seen[key] = true
+		if iface.IsPrimary {
+			primaryCount++
+		}
+	}
+	if primaryCount > 1 {
+		return errors.New("at most one nvosInterfaces entry may be marked primary")
+	}
+	return nil
+}
+
+// MacAddresses returns the ordered NVOS MAC list for the flat DB column. A nil
+// receiver yields nil so an absent field stays distinct from an explicitly
+// empty set.
+func (interfaces APINvosInterfaces) MacAddresses() []string {
+	if interfaces == nil {
+		return nil
+	}
+	macs := make([]string, 0, len(interfaces))
+	for i := range interfaces {
+		macs = append(macs, interfaces[i].MacAddress)
+	}
+	return macs
+}
+
+// PrimaryMacAddress returns the explicitly flagged primary MAC, or nil when no
+// entry is flagged. The REST persistence layer applies its first-port wire
+// default after storing an unflagged list.
+func (interfaces APINvosInterfaces) PrimaryMacAddress() *string {
+	for i := range interfaces {
+		if interfaces[i].IsPrimary {
+			mac := interfaces[i].MacAddress
+			return &mac
+		}
 	}
 	return nil
 }
@@ -66,8 +114,13 @@ type APIExpectedSwitchCreateRequest struct {
 	NvOsUsername *string `json:"nvOsUsername"`
 	// NvOsPassword is the NVOS password of the expected switch
 	NvOsPassword *string `json:"nvOsPassword"`
-	// NvosMacAddresses is the list of NVOS MAC addresses of the expected switch
-	NvosMacAddresses APINvosMacAddresses `json:"nvosMacAddresses"`
+	// NvosInterfaces lists the switch's NVOS ethernet ports. Mark one entry
+	// primary to choose eth0; a single-port switch is primary implicitly and a
+	// multi-port switch with no primary marked defaults to the first entry.
+	NvosInterfaces APINvosInterfaces `json:"nvosInterfaces"`
+	// NvosMacAddresses is deprecated and ignored, regardless of its JSON value.
+	// Use NvosInterfaces to configure ports and primary selection.
+	NvosMacAddresses json.RawMessage `json:"nvosMacAddresses"`
 	// RackID is the optional rack identifier
 	RackID *string `json:"rackId"`
 	// BmcIpAddress is the optional BMC IP address of the expected switch
@@ -105,7 +158,7 @@ func (escr *APIExpectedSwitchCreateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validation.Match(util.NotAllWhitespaceRegexp).Error("Switch serial number consists only of whitespace"),
 			validation.Length(1, 32).Error("Switch serial number must be 32 characters or less")),
-		validation.Field(&escr.NvosMacAddresses),
+		validation.Field(&escr.NvosInterfaces, validation.Required.Error("at least one nvosInterfaces entry is required")),
 		validation.Field(&escr.RackID,
 			validation.NilOrNotEmpty.Error("RackID cannot be empty")),
 		validation.Field(&escr.BmcIpAddress,
@@ -150,8 +203,14 @@ type APIExpectedSwitchUpdateRequest struct {
 	NvOsUsername *string `json:"nvOsUsername"`
 	// NvOsPassword is the NVOS password of the expected switch
 	NvOsPassword *string `json:"nvOsPassword"`
-	// NvosMacAddresses is the list of NVOS MAC addresses of the expected switch
-	NvosMacAddresses APINvosMacAddresses `json:"nvosMacAddresses"`
+	// NvosInterfaces replaces the switch's NVOS ethernet port set. Omission
+	// leaves the stored set unchanged; an empty array is rejected because a
+	// switch must keep at least one NVOS port. Mark one entry primary to choose
+	// eth0.
+	NvosInterfaces APINvosInterfaces `json:"nvosInterfaces"`
+	// NvosMacAddresses is deprecated and ignored, regardless of its JSON value.
+	// Use NvosInterfaces to configure ports and primary selection.
+	NvosMacAddresses json.RawMessage `json:"nvosMacAddresses"`
 	// RackID is the optional rack identifier
 	RackID *string `json:"rackId"`
 	// BmcIpAddress is the optional BMC IP address of the expected switch
@@ -189,6 +248,13 @@ func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
 		}
 	}
 
+	// The structured field requires a nonempty replacement.
+	if esur.NvosInterfaces != nil && len(esur.NvosInterfaces) == 0 {
+		return validation.Errors{
+			"nvosInterfaces": errors.New("nvosInterfaces must not be an empty list; omit the field to leave the NVOS ports unchanged"),
+		}
+	}
+
 	err := validation.ValidateStruct(esur,
 		validation.Field(&esur.DefaultBmcUsername,
 			validation.NilOrNotEmpty.Error("BMC Username cannot be empty"),
@@ -208,7 +274,7 @@ func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
 			validation.When(esur.SwitchSerialNumber != nil && *esur.SwitchSerialNumber != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("Switch Serial Number consists only of whitespace")),
 			validation.Length(1, 32).Error("Switch Serial Number must be 1-32 characters")),
-		validation.Field(&esur.NvosMacAddresses),
+		validation.Field(&esur.NvosInterfaces),
 		validation.Field(&esur.RackID,
 			validation.NilOrNotEmpty.Error("RackID cannot be empty")),
 		validation.Field(&esur.BmcIpAddress,
@@ -257,7 +323,7 @@ func (esur *APIExpectedSwitchUpdateRequest) ToProto(entity *cdbm.ExpectedSwitch)
 			util.ExpectedComponentUpdateField{Path: "metadata.description", Present: esur.Description != nil},
 			util.ExpectedComponentUpdateField{Path: "metadata.labels", Present: esur.Labels != nil || esur.Manufacturer != nil || esur.Model != nil || esur.SlotID != nil || esur.TrayIdx != nil || esur.HostID != nil},
 			util.ExpectedComponentUpdateField{Path: "switch_serial_number", Present: esur.SwitchSerialNumber != nil},
-			util.ExpectedComponentUpdateField{Path: "nvos_mac_addresses", Present: esur.NvosMacAddresses != nil},
+			util.ExpectedComponentUpdateField{Path: "nvos_interfaces", Present: esur.NvosInterfaces != nil},
 			util.ExpectedComponentUpdateField{Path: "nvos_username", Present: esur.NvOsUsername != nil},
 			util.ExpectedComponentUpdateField{Path: "nvos_password", Present: esur.NvOsPassword != nil},
 		),
@@ -276,8 +342,12 @@ type APIExpectedSwitch struct {
 	Site *APISite `json:"site,omitempty"`
 	// SwitchSerialNumber is the serial number of the expected switch
 	SwitchSerialNumber string `json:"switchSerialNumber"`
-	// NvosMacAddresses is the list of NVOS MAC addresses of the expected switch
-	NvosMacAddresses APINvosMacAddresses `json:"nvosMacAddresses,omitempty"`
+	// NvosInterfaces lists the switch's NVOS ethernet ports with the primary
+	// (eth0) port flagged.
+	NvosInterfaces APINvosInterfaces `json:"nvosInterfaces"`
+	// NvosMacAddresses is the deprecated flat form retained for v2 clients.
+	// New clients should use NvosInterfaces.
+	NvosMacAddresses APINvosMacAddresses `json:"nvosMacAddresses"`
 	// RackID is the optional rack identifier
 	RackID *string `json:"rackId"`
 	// BmcIpAddress is the optional BMC IP address of the expected switch
@@ -304,14 +374,35 @@ type APIExpectedSwitch struct {
 	Updated time.Time `json:"updated"`
 }
 
+// newAPINvosInterfaces converts the DB model's canonical NVOS port view into
+// the API representation so the response flags the same primary as the workflow
+// proto. A nil stored MAC list yields an empty array on the REST surface.
+func newAPINvosInterfaces(dbModel *cdbm.ExpectedSwitch) APINvosInterfaces {
+	views := dbModel.NvosInterfaces()
+	if views == nil {
+		return make(APINvosInterfaces, 0)
+	}
+	interfaces := make(APINvosInterfaces, 0, len(views))
+	for _, view := range views {
+		interfaces = append(interfaces, APINvosInterface{
+			MacAddress: view.MacAddress,
+			IsPrimary:  view.IsPrimary,
+		})
+	}
+	return interfaces
+}
+
 // NewAPIExpectedSwitch accepts a DB layer ExpectedSwitch object and returns an API object
 func NewAPIExpectedSwitch(dbModel *cdbm.ExpectedSwitch) *APIExpectedSwitch {
+	legacyNvosMacAddresses := make(APINvosMacAddresses, len(dbModel.NvosMacAddresses))
+	copy(legacyNvosMacAddresses, dbModel.NvosMacAddresses)
 	apies := &APIExpectedSwitch{
 		ID:                 dbModel.ID,
 		BmcMacAddress:      dbModel.BmcMacAddress,
 		SiteID:             dbModel.SiteID,
 		SwitchSerialNumber: dbModel.SwitchSerialNumber,
-		NvosMacAddresses:   dbModel.NvosMacAddresses,
+		NvosInterfaces:     newAPINvosInterfaces(dbModel),
+		NvosMacAddresses:   legacyNvosMacAddresses,
 		RackID:             dbModel.RackID,
 		BmcIpAddress:       dbModel.BmcIpAddress,
 		Name:               dbModel.Name,

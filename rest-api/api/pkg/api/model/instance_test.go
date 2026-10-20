@@ -3369,6 +3369,30 @@ func TestAPIInstanceDeleteRequest_Validate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			// Limits count characters, not bytes: a two-byte rune at every position still fits.
+			name: "test valid Instance delete request - multibyte summary and details at character limits",
+			fields: fields{
+				MachineHealthIssue: &APIMachineHealthIssue{
+					Category: "Hardware",
+					Summary:  cutil.GetPtr(strings.Repeat("é", MachineHealthIssueSummaryMaxLength)),
+					Details:  cutil.GetPtr(strings.Repeat("é", MachineHealthIssueDetailsMaxLength)),
+				},
+				IsRepairTenant: cutil.GetPtr(true),
+			},
+			wantErr: false,
+		},
+		{
+			name: "test invalid Instance delete request - summary exceeds character limit",
+			fields: fields{
+				MachineHealthIssue: &APIMachineHealthIssue{
+					Category: "Hardware",
+					Summary:  cutil.GetPtr(strings.Repeat("é", MachineHealthIssueSummaryMaxLength+1)),
+				},
+				IsRepairTenant: cutil.GetPtr(true),
+			},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

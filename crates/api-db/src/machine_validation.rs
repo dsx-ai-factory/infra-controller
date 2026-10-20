@@ -30,6 +30,8 @@ use crate::machine::MachineRowLockItem;
 use crate::{ConditionalWrite, DatabaseError, DatabaseResult};
 
 #[cfg(test)]
+mod test_error_classification;
+#[cfg(test)]
 mod test_explicit_columns;
 
 impl MachineRowLockItem for MachineValidation {
@@ -296,6 +298,9 @@ pub async fn create_new_run(
     Ok(validation)
 }
 
+/// `find` returns the discovery, cleanup, and on-demand validation runs referenced
+/// by the machine, or all its runs when `include_history` is set. Without history,
+/// a missing machine returns `NotFoundError`; other lookup errors propagate unchanged.
 pub async fn find<DB>(
     txn: &mut DB,
     machine_id: &MachineId,
@@ -312,9 +317,7 @@ where
         {
             Err(err) => {
                 tracing::warn!(%machine_id, error = %err, "failed loading machine");
-                return Err(DatabaseError::InvalidArgument(
-                    "err loading machine".to_string(),
-                ));
+                return Err(err);
             }
             Ok(None) => {
                 tracing::info!(%machine_id, "machine not found");

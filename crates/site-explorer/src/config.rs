@@ -47,6 +47,10 @@ pub struct SiteExplorerConfig {
     /// honor the same knob as DHCP.
     #[serde(skip)]
     pub retained_boot_interface_window: Option<chrono::Duration>,
+    /// Whether proactive host discovery can use IPv6-only admin segments. Setup copies
+    /// `[fnn.admin_vpc].enabled`; this is not an independent `[site_explorer]` setting.
+    #[serde(skip)]
+    pub admin_fnn_enabled: bool,
     /// The interval at which site explorer runs.
     #[serde(
         default = "SiteExplorerConfig::default_run_interval",
@@ -197,6 +201,7 @@ impl Default for SiteExplorerConfig {
         SiteExplorerConfig {
             enabled: Self::default_enabled(),
             retained_boot_interface_window: None,
+            admin_fnn_enabled: false,
             run_interval: Self::default_run_interval(),
             concurrent_explorations: Self::default_concurrent_explorations(),
             explorations_per_run: Self::default_explorations_per_run(),
@@ -227,6 +232,7 @@ impl PartialEq for SiteExplorerConfig {
         let Self {
             enabled,
             retained_boot_interface_window,
+            admin_fnn_enabled,
             run_interval,
             concurrent_explorations,
             explorations_per_run,
@@ -250,6 +256,7 @@ impl PartialEq for SiteExplorerConfig {
 
         enabled.load(AtomicOrdering::Relaxed) == other.enabled.load(AtomicOrdering::Relaxed)
             && *retained_boot_interface_window == other.retained_boot_interface_window
+            && *admin_fnn_enabled == other.admin_fnn_enabled
             && *run_interval == other.run_interval
             && *concurrent_explorations == other.concurrent_explorations
             && *explorations_per_run == other.explorations_per_run

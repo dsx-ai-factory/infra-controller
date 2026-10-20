@@ -49,10 +49,9 @@ func (mhm MachineHealthReportMode) FromProto(mode corev1.HealthReportApplyMode) 
 }
 
 // APIMachineHealth is the Machine API representation of aggregate hardware health.
-// ObservedAtDeprecated preserves the legacy snake_case field on Machine responses.
+// The legacy snake_case observed_at alias was removed on September 10th, 2026.
 type APIMachineHealth struct {
 	APIAggregateHealth
-	ObservedAtDeprecated *string `json:"observed_at"`
 }
 
 // FromProto populates an APIMachineHealth from its Core protobuf form.
@@ -62,10 +61,7 @@ func (mh *APIMachineHealth) FromProto(protoHealth *corev1.HealthReport) {
 	}
 	var aggregate APIAggregateHealth
 	aggregate.FromProto(protoHealth)
-	*mh = APIMachineHealth{
-		APIAggregateHealth:   aggregate,
-		ObservedAtDeprecated: aggregate.ObservedAt,
-	}
+	*mh = APIMachineHealth{APIAggregateHealth: aggregate}
 }
 
 // FromDBModel populates an APIMachineHealth from its REST DB model form.
@@ -75,10 +71,7 @@ func (mh *APIMachineHealth) FromDBModel(machineHealth *cdbm.MachineHealth) {
 	}
 	var aggregate APIAggregateHealth
 	aggregate.FromDBModel(machineHealth)
-	*mh = APIMachineHealth{
-		APIAggregateHealth:   aggregate,
-		ObservedAtDeprecated: aggregate.ObservedAt,
-	}
+	*mh = APIMachineHealth{APIAggregateHealth: aggregate}
 }
 
 // APIMachineHealthReportEntry is the API representation of a Machine health report override entry.

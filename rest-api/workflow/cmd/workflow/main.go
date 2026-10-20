@@ -232,7 +232,8 @@ func run(ctx context.Context) error {
 	log.Info().Str("Temporal Namespace", tcfg.Namespace).Msg("registering workflow and activities")
 
 	// Register workflows
-	if tcfg.Namespace == cwfn.CloudNamespace {
+	switch tcfg.Namespace {
+	case cwfn.CloudNamespace:
 		// Workflows triggered by Cloud services
 		w.RegisterWorkflow(vpcWorkflow.DeleteVpcByID)
 
@@ -259,7 +260,7 @@ func run(ctx context.Context) error {
 
 		// InfiniBandPartition workflows
 		w.RegisterWorkflow(ibpWorkflow.DeleteInfiniBandPartitionByID)
-	} else if tcfg.Namespace == cwfn.SiteNamespace {
+	case cwfn.SiteNamespace:
 		// Workflows triggered by Site Agent
 		// Machine Workflows
 		w.RegisterWorkflow(machineWorkflow.UpdateMachineInventory)
@@ -471,8 +472,7 @@ func run(ctx context.Context) error {
 
 	hconfig := cfg.GetHealthzConfig()
 	if hconfig.Enabled {
-		http.HandleFunc("/healthz", cwfh.StatusHandler)
-		http.HandleFunc("/readyz", cwfh.StatusHandler)
+		registerHealthRoutes(http.DefaultServeMux)
 		serve("health check API", hconfig.GetListenAddr())
 	}
 
@@ -505,6 +505,13 @@ func run(ctx context.Context) error {
 
 	// NOTE: Log messages past this point do not show up in the log output
 	return nil
+}
+
+// registerHealthRoutes serves the health status on GET and HEAD only, so any
+// other method gets 405 rather than a healthy response.
+func registerHealthRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /healthz", cwfh.StatusHandler)
+	mux.HandleFunc("GET /readyz", cwfh.StatusHandler)
 }
 
 // runWorker triggers the Cloud cron workflows, then runs w until interruptCh fires.

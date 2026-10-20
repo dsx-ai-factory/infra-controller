@@ -18,7 +18,10 @@ use carbide_uuid::machine::MachineId;
 use chrono::{DateTime, Utc};
 use sqlx::FromRow;
 
-#[derive(FromRow, Debug)]
+/// Verification status stored in `ek_cert_verification_status`.
+/// The table's `ca_id` is used for CA matching but is not decoded into this record.
+#[derive(FromRow, Debug, carbide_macros::DbTable)]
+#[db_table(name = "ek_cert_verification_status")]
 pub struct EkCertVerificationStatus {
     pub ek_sha256: Vec<u8>,
     pub serial_num: String,
@@ -26,10 +29,12 @@ pub struct EkCertVerificationStatus {
     pub issuer: Vec<u8>,
     pub issuer_access_info: Option<String>,
     pub machine_id: MachineId,
-    // pub ca_id: Option<i32>, // currently unused
 }
 
-#[derive(FromRow, Debug, sqlx::Encode)]
+/// Attestation challenge stored in `attestation_secret_ak_pub`.
+/// The table's `created_at` is used to expire challenges and is not decoded here.
+#[derive(FromRow, Debug, sqlx::Encode, carbide_macros::DbTable)]
+#[db_table(name = "attestation_secret_ak_pub")]
 pub struct SecretAkPub {
     pub secret: Vec<u8>,
     pub ak_pub: Vec<u8>,

@@ -371,7 +371,7 @@ reviews:
         keys, environment-specific assumptions, and secret-safe defaults.
   auto_review:
     enabled: true
-    ignore_usernames: [] # Add usernames here to opt-out of auto-review
+    ignore_usernames: ["rwthompsonii"] # Add usernames here to opt-out of auto-review
 knowledge_base:
   code_guidelines:
     enabled: true

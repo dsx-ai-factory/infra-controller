@@ -59,6 +59,9 @@ use crate::tests::common::rpc_builder::{
     VpcCreationRequest,
 };
 use crate::tests::common::{self};
+use crate::tests::instance_allocate::{
+    TENANT_FIRMWARE_DPA_MAC, create_spx_allocation_request, set_tenant_nic_firmware_profile,
+};
 
 /// Returns tenant config matching the shared VPC fixture so update tests reach
 /// prefix behavior rather than fail ownership validation.
@@ -1646,6 +1649,227 @@ fn assert_metadata_equals(actual: &rpc::forge::Metadata, expected: &rpc::forge::
     actual.labels.sort_by(|l1, l2| l1.key.cmp(&l2.key));
     expected.labels.sort_by(|l1, l2| l1.key.cmp(&l2.key));
     assert_eq!(actual, expected);
+}
+
+/// Exercises tenant preparation checks through public updates, including
+/// preserving existing bindings and removing attachments after selection.
+#[crate::sqlx_test]
+async fn tenant_nic_firmware_selection_guards_spx_config_updates(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let host = create_managed_host(&env).await;
+    let profile_id = "spx-config-update-profile";
+    set_tenant_nic_firmware_profile(&env, Some(profile_id)).await;
+
+    // Reach Ready before discovering the DPA. Adding an attachment later must
+    // apply the same tenant requirement as allocation with that attachment.
+    let instance = host
+        .instance_builer(&env)
+        .tenant_org(FIXTURE_TENANT_ORG_ID)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    let allocation = create_spx_allocation_request(&env, &host, segment_id).await;
+    let requested_spx = allocation.config.unwrap().spxconfig.unwrap();
+    let before = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(before.config.spxconfig.spx_attachments.is_empty());
+    let initial = instance.rpc_instance().await.into_inner();
+    let mut requested_config = initial.config.unwrap();
+    requested_config.spxconfig = Some(requested_spx);
+    let add_attachment = rpc::forge::InstanceConfigUpdateRequest {
+        instance_id: Some(instance.id),
+        if_version_match: Some(before.config_version.to_string()),
+        config: Some(requested_config),
+        metadata: initial.metadata,
+    };
+
+    let error = env
+        .api
+        .update_instance_config(Request::new(add_attachment.clone()))
+        .await
+        .expect_err("tenant firmware selection blocks attachment addition");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("NIC firmware preparation"));
+    assert!(!error.message().contains(profile_id));
+    let rejected = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rejected.config.spxconfig, before.config.spxconfig);
+    assert_eq!(rejected.spx_config_version, before.spx_config_version);
+    assert_eq!(rejected.config_version, before.config_version);
+
+    // The same request must bind successfully once the requirement is cleared;
+    // an invalid partition or device must not account for the rejection above.
+    set_tenant_nic_firmware_profile(&env, None).await;
+    let attached = env
+        .api
+        .update_instance_config(Request::new(add_attachment))
+        .await
+        .expect("attach SPX after clearing the tenant selection")
+        .into_inner();
+    let bound = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(bound.config.spxconfig.spx_attachments.len(), 1);
+    assert_eq!(
+        bound.config.spxconfig.spx_attachments[0]
+            .mac_address
+            .as_deref(),
+        Some(TENANT_FIRMWARE_DPA_MAC)
+    );
+    assert_eq!(
+        bound.spx_config_version.version_nr(),
+        before.spx_config_version.version_nr() + 1
+    );
+    assert_eq!(
+        bound.config_version.version_nr(),
+        before.config_version.version_nr() + 1
+    );
+
+    // An already attached device must not bypass preparation by selecting a
+    // different partition owned by the same tenant.
+    set_tenant_nic_firmware_profile(&env, Some(profile_id)).await;
+    let replacement_partition_id = env
+        .api
+        .create_spx_partition(Request::new(rpc::forge::SpxPartitionCreationRequest {
+            metadata: Some(rpc::forge::Metadata {
+                name: "replacement-spx-partition".to_string(),
+                ..Default::default()
+            }),
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .expect("create another partition owned by the instance tenant")
+        .into_inner()
+        .id
+        .unwrap();
+    assert_ne!(
+        replacement_partition_id,
+        bound.config.spxconfig.spx_attachments[0].spx_partition_id
+    );
+    let mut replacement_config = attached.config.clone().unwrap();
+    replacement_config
+        .spxconfig
+        .as_mut()
+        .unwrap()
+        .spx_attachments[0]
+        .spx_partition_id = Some(replacement_partition_id);
+    let replace_attachment = rpc::forge::InstanceConfigUpdateRequest {
+        instance_id: Some(instance.id),
+        if_version_match: Some(bound.config_version.to_string()),
+        config: Some(replacement_config),
+        metadata: attached.metadata,
+    };
+    let error = env
+        .api
+        .update_instance_config(Request::new(replace_attachment.clone()))
+        .await
+        .expect_err("tenant firmware selection blocks attachment replacement");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("NIC firmware preparation"));
+    assert!(!error.message().contains(profile_id));
+    let rejected = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rejected.config.spxconfig, bound.config.spxconfig);
+    assert_eq!(rejected.spx_config_version, bound.spx_config_version);
+    assert_eq!(rejected.config_version, bound.config_version);
+
+    // Retry the exact replacement after clearing the requirement to prove the
+    // partition change is valid and still binds the same physical device.
+    set_tenant_nic_firmware_profile(&env, None).await;
+    let replacement_response = env
+        .api
+        .update_instance_config(Request::new(replace_attachment))
+        .await
+        .expect("replace SPX partition after clearing the tenant selection")
+        .into_inner();
+    let replaced = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replaced.config.spxconfig.spx_attachments.len(), 1);
+    assert_eq!(
+        replaced.config.spxconfig.spx_attachments[0].spx_partition_id,
+        replacement_partition_id
+    );
+    assert_eq!(
+        replaced.config.spxconfig.spx_attachments[0]
+            .mac_address
+            .as_deref(),
+        Some(TENANT_FIRMWARE_DPA_MAC)
+    );
+    assert_eq!(
+        replaced.spx_config_version.version_nr(),
+        bound.spx_config_version.version_nr() + 1
+    );
+    assert_eq!(
+        replaced.config_version.version_nr(),
+        bound.config_version.version_nr() + 1
+    );
+
+    // A later operator selection must allow full config replacements that keep
+    // the existing attachment intent, including Core's persisted MAC binding.
+    set_tenant_nic_firmware_profile(&env, Some(profile_id)).await;
+    let mut metadata = replacement_response.metadata.unwrap();
+    metadata.description = "updated after the tenant selected firmware".to_string();
+    let updated = env
+        .api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance.id),
+            if_version_match: Some(replaced.config_version.to_string()),
+            config: replacement_response.config,
+            metadata: Some(metadata.clone()),
+        }))
+        .await
+        .expect("unchanged SPX intent permits a full config replacement")
+        .into_inner();
+    let preserved = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(preserved.config.spxconfig, replaced.config.spxconfig);
+    assert_eq!(preserved.spx_config_version, replaced.spx_config_version);
+    assert_eq!(preserved.metadata.description, metadata.description);
+    assert_eq!(
+        preserved.config_version.version_nr(),
+        replaced.config_version.version_nr() + 1
+    );
+
+    // Removing attachments remains available while preparation is required.
+    let mut cleared_config = updated.config.unwrap();
+    cleared_config.spxconfig = Some(rpc::forge::InstanceSpxConfig {
+        spx_attachments: vec![],
+    });
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance.id),
+            if_version_match: Some(preserved.config_version.to_string()),
+            config: Some(cleared_config),
+            metadata: updated.metadata,
+        }))
+        .await
+        .expect("tenant firmware selection permits clearing SPX attachments");
+    let cleared = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(cleared.config.spxconfig.spx_attachments.is_empty());
+    assert_eq!(
+        cleared.spx_config_version.version_nr(),
+        preserved.spx_config_version.version_nr() + 1
+    );
+    assert_eq!(
+        cleared.config_version.version_nr(),
+        preserved.config_version.version_nr() + 1
+    );
 }
 
 #[crate::sqlx_test]
@@ -3881,8 +4105,8 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
         );
     }
 
-    // Ownership validation must precede the SLAAC policy error so an update
-    // cannot disclose another tenant's VPC mode.
+    // A foreign Prefix is eligible for attachment, but its SLAAC policy must
+    // still reject an explicit IPv6 address before any update is persisted.
     let foreign_tenant_organization_id = "slaac-update-foreign-tenant";
     create_fixture_tenant(&env, foreign_tenant_organization_id)
         .await
@@ -3898,7 +4122,7 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
     .await;
     let managed_host = create_managed_host(&env).await;
     let metadata = rpc::Metadata {
-        name: "SLAAC update ownership validation".to_string(),
+        name: "Foreign SLAAC update validation".to_string(),
         ..Default::default()
     };
     let initial_config = rpc::InstanceConfig {
@@ -3921,6 +4145,11 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
         .build()
         .await;
 
+    // Capture active state so the rejected foreign request cannot silently mutate it.
+    let mut txn = env.db_txn().await;
+    let before = instance.db_instance(&mut txn).await;
+    txn.rollback().await.unwrap();
+
     let mut requested_config = initial_config;
     let mut requested_network =
         single_vpc_interface_network(NetworkDetails::VpcPrefixId(foreign_fixture.vpc_prefix_id));
@@ -3936,18 +4165,200 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
                 .tonic_request(),
         )
         .await
-        .expect_err("foreign VPC prefix must fail ownership validation");
-    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        .expect_err("foreign SLAAC VPC must reject an explicit IPv6 address");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
     assert!(
-        error.message().contains("which is not owned by tenant")
-            && !error.message().contains("has SLAAC enabled"),
-        "unexpected ownership error: {error}",
+        error.message().contains("has SLAAC enabled"),
+        "unexpected SLAAC error: {error}",
     );
 
+    // Rejection must preserve both active configuration and the absence of staged work.
     let mut txn = env.db_txn().await;
     let after = instance.db_instance(&mut txn).await;
     txn.rollback().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&after.config).unwrap(),
+        serde_json::to_value(&before.config).unwrap()
+    );
+    assert_eq!(after.config_version, before.config_version);
+    assert_eq!(after.network_config_version, before.network_config_version);
     assert!(after.update_network_config_request.is_none());
+}
+
+/// Verifies adding and removing a foreign Prefix VF preserves Instance ownership
+/// and frees its generated resources after reconciliation, avoiding cross-tenant leaks.
+#[crate::sqlx_test]
+async fn test_cross_tenant_vpc_prefix_update_releases_resources(pool: sqlx::PgPool) {
+    const VPC_OWNER: &str = "foreign-prefix-owner";
+
+    // Allocate the provider's primary interface separately from the customer's VPC.
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let tenant = default_tenant_config();
+    for tenant_id in [tenant.tenant_organization_id.as_str(), VPC_OWNER] {
+        create_fixture_tenant(&env, tenant_id).await.unwrap();
+    }
+    let own = create_fnn_vpc_prefix_fixture(
+        &env,
+        &tenant.tenant_organization_id,
+        "provider-vpc",
+        "provider-prefix",
+        "192.1.4.0/25",
+        false,
+    )
+    .await;
+    let foreign = create_fnn_vpc_prefix_fixture(
+        &env,
+        VPC_OWNER,
+        "customer-vpc",
+        "customer-prefix",
+        "192.1.4.128/25",
+        false,
+    )
+    .await;
+    let mh = create_managed_host(&env).await;
+    let metadata = rpc::Metadata {
+        name: "cross-tenant-prefix-update".to_string(),
+        ..Default::default()
+    };
+    let initial_config = rpc::InstanceConfig {
+        tenant: Some(tenant.clone()),
+        os: Some(default_os_config()),
+        network: Some(single_vpc_interface_network(NetworkDetails::VpcPrefixId(
+            own.vpc_prefix_id,
+        ))),
+        ..Default::default()
+    };
+    let instance = mh
+        .instance_builer(&env)
+        .config(initial_config.clone())
+        .metadata(metadata.clone())
+        .build()
+        .await;
+    let primary_segment = instance.rpc_instance().await.config().network().interfaces[0]
+        .network_segment_id
+        .unwrap();
+
+    // Include a requested address to exercise the update validator as well as allocation.
+    let mut attached_config = initial_config.clone();
+    let mut vf = single_vpc_interface_network(NetworkDetails::VpcPrefixId(foreign.vpc_prefix_id))
+        .interfaces
+        .remove(0);
+    vf.function_type = rpc::InterfaceFunctionType::Virtual as i32;
+    vf.virtual_function_id = Some(1);
+    vf.ip_address = Some("192.1.4.129".to_string());
+    attached_config
+        .network
+        .as_mut()
+        .unwrap()
+        .interfaces
+        .push(vf);
+    env.api
+        .update_instance_config(
+            InstanceConfigUpdateRequest::builder()
+                .instance_id(instance.id)
+                .config(attached_config)
+                .metadata(metadata.clone())
+                .tonic_request(),
+        )
+        .await
+        .unwrap();
+    env.run_machine_state_controller_iteration_network_config_return_to_ready(&mh, true)
+        .await;
+
+    // Re-read active state to prove the foreign attachment reached the selected VPC.
+    let active = instance.rpc_instance().await;
+    assert_eq!(
+        active.config().tenant().tenant_organization_id,
+        tenant.tenant_organization_id
+    );
+    assert_eq!(
+        active.config().network().interfaces[0].network_segment_id,
+        Some(primary_segment)
+    );
+    let foreign_segment = active.config().network().interfaces[1]
+        .network_segment_id
+        .unwrap();
+    assert_eq!(
+        active.status().network().interfaces[1].addresses,
+        vec!["192.1.4.129".to_string()]
+    );
+    let mut txn = env.db_txn().await;
+    let segment = db::network_segment::find_by(
+        txn.as_mut(),
+        db::ObjectColumnFilter::One(db::network_segment::IdColumn, &foreign_segment),
+        model::network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap()
+    .pop()
+    .unwrap();
+    assert_eq!(segment.config.vpc_id, Some(foreign.vpc_id));
+    assert_eq!(
+        segment.prefixes[0].vpc_prefix_id,
+        Some(foreign.vpc_prefix_id)
+    );
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &foreign_segment)
+            .await
+            .unwrap(),
+        1
+    );
+    txn.rollback().await.unwrap();
+
+    // Remove only the foreign VF through the public update and synchronize cleanup.
+    env.api
+        .update_instance_config(
+            InstanceConfigUpdateRequest::builder()
+                .instance_id(instance.id)
+                .config(initial_config)
+                .metadata(metadata)
+                .tonic_request(),
+        )
+        .await
+        .unwrap();
+    env.run_machine_state_controller_iteration_network_config_return_to_ready(&mh, false)
+        .await;
+
+    // The primary allocation survives while the foreign segment is retired and its address freed.
+    let remaining = instance.rpc_instance().await;
+    assert_eq!(remaining.config().network().interfaces.len(), 1);
+    assert_eq!(
+        remaining.config().network().interfaces[0].network_segment_id,
+        Some(primary_segment)
+    );
+    let mut txn = env.db_txn().await;
+    let retired = db::network_segment::find_by(
+        txn.as_mut(),
+        db::ObjectColumnFilter::One(db::network_segment::IdColumn, &foreign_segment),
+        model::network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap()
+    .pop()
+    .unwrap();
+    assert!(retired.is_marked_as_deleted());
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &foreign_segment)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &primary_segment)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        instance
+            .db_instance(&mut txn)
+            .await
+            .update_network_config_request
+            .is_none()
+    );
+    txn.rollback().await.unwrap();
 }
 
 /// Verifies VPC replacement, VF removal, and instance deletion release generated

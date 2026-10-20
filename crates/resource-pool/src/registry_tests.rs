@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
@@ -25,7 +26,9 @@ use model::resource_pool::binding::{
     ResourcePoolValueDomain,
 };
 use model::resource_pool::common::ib_pkey_pool_name;
-use model::resource_pool::{Range, ResourcePool, ResourcePoolDef, ResourcePoolType, ValueType};
+use model::resource_pool::{
+    OwnerType, Range, ResourcePool, ResourcePoolDef, ResourcePoolType, ValueType,
+};
 
 use crate::{
     PoolDefinitionSource, ResourcePoolBackend, ResourcePoolRegistry, ResourcePoolRegistryError,
@@ -43,6 +46,143 @@ fn integrated_selection(
         authority_id: INTEGRATED_AUTHORITY_ID.to_string(),
         remote_pool: name.to_string(),
     }
+}
+
+#[carbide_macros::sqlx_test]
+async fn runtime_lookup_borrows_resolved_backend_without_database_access(
+    database: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let selection = integrated_selection("resolved", ResourcePoolValueDomain::Integer);
+    let configured = HashMap::from([(selection.pool_name.clone(), selection)]);
+    let mut txn = database.begin().await?;
+    let registry = ResourcePoolRegistry::resolve(
+        PoolDefinitionSource::SeedConfiguration,
+        &mut txn,
+        &configured,
+    )
+    .await?;
+    txn.commit().await?;
+
+    // Any SQL lookup would fail in this aborted transaction.
+    let mut txn = database.begin().await?;
+    sqlx::query("SELECT 1 / 0")
+        .execute(&mut *txn)
+        .await
+        .expect_err("division by zero must abort the transaction");
+    let Some(Cow::Borrowed(backend)) = registry.get_or_load_backend(&mut txn, "resolved").await?
+    else {
+        panic!("a resolved backend must be borrowed without querying the database");
+    };
+    assert!(std::ptr::eq(
+        backend,
+        &registry.get("resolved").expect("resolved pool").backend
+    ));
+    txn.rollback().await?;
+    Ok(())
+}
+
+#[carbide_macros::sqlx_test]
+async fn runtime_lookup_uses_the_callers_transaction_without_caching_results(
+    database: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let registry = ResourcePoolRegistry::default();
+    let selection = integrated_selection("late-pool", ResourcePoolValueDomain::Integer);
+    let mut txn = database.begin().await?;
+    assert!(
+        registry
+            .get_or_load_backend(&mut txn, &selection.pool_name)
+            .await?
+            .is_none()
+    );
+    assert!(binding::all(&mut *txn).await?.is_empty());
+
+    binding::bind_or_verify(&mut txn, &selection).await?;
+    assert!(matches!(
+        registry
+            .get_or_load_backend(&mut txn, &selection.pool_name)
+            .await?,
+        Some(Cow::Owned(ResourcePoolBackend::Integrated(_)))
+    ));
+    assert!(registry.get(&selection.pool_name).is_none());
+    txn.rollback().await?;
+
+    // A backend loaded from a rolled-back binding must not survive in memory.
+    let mut txn = database.begin().await?;
+    assert!(
+        registry
+            .get_or_load_backend(&mut txn, &selection.pool_name)
+            .await?
+            .is_none()
+    );
+    txn.commit().await?;
+    Ok(())
+}
+
+#[carbide_macros::sqlx_test]
+async fn runtime_lookup_uses_unbound_sql_values_without_saving_or_caching_a_binding(
+    database: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let registry = ResourcePoolRegistry::default();
+    let pool = ResourcePool::new("late-unbound".to_string(), ValueType::Integer);
+    let mut txn = database.begin().await?;
+
+    // A replica that predates pool bindings can grow and allocate from this pool
+    // after the new replica has built its registry. Allocated values count too:
+    // their owners still need to release them through Integrated.
+    populate(&pool, &mut txn, vec![42], true).await?;
+    db::resource_pool::allocate_exact(&pool, &mut txn, OwnerType::Vpc, "vpc-1", 42).await?;
+    assert!(matches!(
+        registry.get_or_load_backend(&mut txn, pool.name()).await?,
+        Some(Cow::Owned(ResourcePoolBackend::Integrated(_)))
+    ));
+    assert!(binding::all(&mut *txn).await?.is_empty());
+    assert!(registry.get(pool.name()).is_none());
+    txn.rollback().await?;
+
+    // The rolled-back values must not leave an Integrated backend in memory.
+    let mut txn = database.begin().await?;
+    assert!(
+        registry
+            .get_or_load_backend(&mut txn, pool.name())
+            .await?
+            .is_none()
+    );
+    assert!(binding::all(&mut *txn).await?.is_empty());
+    txn.commit().await?;
+    Ok(())
+}
+
+#[carbide_macros::sqlx_test]
+async fn runtime_lookup_rejects_saved_authority_before_remote_alias(
+    database: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let registry = ResourcePoolRegistry::default();
+    let remote = ResourcePoolSelection {
+        backend_kind: ResourcePoolBackendKind::Grpc,
+        authority_id: "provider-a".to_string(),
+        remote_pool: "provider-pool".to_string(),
+        ..integrated_selection("remote", ResourcePoolValueDomain::Integer)
+    };
+    let mut txn = database.begin().await?;
+    let original = binding::bind_or_verify(&mut txn, &remote).await?;
+    let local_pool = ResourcePool::new(remote.pool_name.clone(), ValueType::Integer);
+    populate(&local_pool, &mut txn, vec![42], true).await?;
+    txn.commit().await?;
+
+    let mut txn = database.begin().await?;
+    let Err(error) = registry
+        .get_or_load_backend(&mut txn, &remote.pool_name)
+        .await
+    else {
+        panic!("a saved unsupported authority must be rejected");
+    };
+    assert!(matches!(
+        error,
+        ResourcePoolRegistryError::UnsupportedAuthority { name } if name == remote.pool_name
+    ));
+    txn.commit().await?;
+    assert_eq!(binding::all(&database).await?, vec![original]);
+    Ok(())
 }
 
 #[carbide_macros::sqlx_test]

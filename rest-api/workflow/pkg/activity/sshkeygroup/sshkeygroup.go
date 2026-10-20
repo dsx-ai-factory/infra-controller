@@ -430,7 +430,7 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 	}
 
 	updatedSkgStrIDs := []string{}
-	for skgID, _ := range updatedSkgMap {
+	for skgID := range updatedSkgMap {
 		updatedSkgStrIDs = append(updatedSkgStrIDs, skgID)
 	}
 

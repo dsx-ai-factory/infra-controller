@@ -888,8 +888,8 @@ pub struct Machine<ID: MachineIdSubtypeTrait> {
     /// Machine metadata
     pub metadata: Metadata,
 
-    /// Version field that tracks changes to
-    /// - Metadata
+    /// Shared edit version, including metadata and NIC firmware machine and card
+    /// selection changes.
     pub version: ConfigVersion,
     // Columns for these exist, but are unused in rust code
     // /// When this machine record was created
@@ -1598,7 +1598,9 @@ pub enum DecommissioningState {
     /// Powers the host back on after the cycle so OOB rediscovery can proceed.
     PoweringOnHost,
     /// Waiting for the pre-cycle OOB DHCP suppression to be acknowledged.
-    /// Endpoints with an expected static IP and no recorded DHCP contact skip this wait.
+    /// An endpoint skips this wait if its MAC has at least one recorded interface,
+    /// every interface has a current `AllocationType::Static` address, and no
+    /// current address lies within any configured network prefix.
     WaitingForOobDhcpAcknowledgement,
     /// BMC DHCP is suppressed before the BMC factory reset.
     SuppressingBmcDhcp,
@@ -1607,7 +1609,9 @@ pub enum DecommissioningState {
         completed: HashSet<MachineId>,
     },
     /// Waiting for the pre-reset BMC DHCP suppression to be acknowledged.
-    /// Endpoints with an expected static IP and no recorded DHCP contact skip this wait.
+    /// An endpoint skips this wait if its MAC has at least one recorded interface,
+    /// every interface has a current `AllocationType::Static` address, and no
+    /// current address lies within any configured network prefix.
     WaitingForBmcDhcpAcknowledgement,
     /// Managed per-device BMC and DPU credentials are being removed after factory reset.
     DeletingManagedCredentials,
@@ -2852,6 +2856,19 @@ pub struct UpgradeDecision {
     pub should_upgrade: bool,
     pub to_version: String,
     pub last_updated: DateTime<Utc>,
+}
+
+/// `DpuAgentUpgradeStatus` contains the persisted inputs to an agent upgrade decision.
+#[derive(Debug, sqlx::FromRow)]
+pub struct DpuAgentUpgradeStatus {
+    /// The DPU whose observation and upgrade decision were read.
+    pub id: DpuMachineId,
+    /// The version in the latest network observation, or `None` if unreported.
+    pub agent_version: Option<String>,
+    /// Whether an agent upgrade is requested; an absent decision means `false`.
+    pub upgrade_requested: bool,
+    /// Whether the attached host was ingested with DPF, which manages its upgrades.
+    pub host_dpf_used_for_ingestion: bool,
 }
 
 impl Display for DpuDiscoveringState {
@@ -5392,7 +5409,7 @@ mod tests {
                         reprovision_state: HostReprovisionState::CheckingFirmware,
                         retry_count: 0,
                     }),
-                    expect: (seconds(2_400), true),
+                    expect: (seconds(5_400), true),
                 },
                 Check {
                     scenario: "pre-assignment measurement collection uses the measurement SLA",

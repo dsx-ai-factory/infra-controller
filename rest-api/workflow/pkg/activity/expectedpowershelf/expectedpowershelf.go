@@ -35,6 +35,7 @@ type ManageExpectedPowerShelf struct {
 // Expected Power Shelf records have two unique values (MAC and UUID). We ignore the MAC value and only rely on the UUID for uniqueness.
 // Core supplies inventory values; omitted names, descriptions, and rack IDs
 // preserve the existing Cloud values.
+// Only successful inventory is reconciled; failed or unsupported statuses are skipped.
 // The reconciliation logic is as follows:
 // - UUID existing in NICo but not in DB: create record in DB
 // - UUID existing in both NICo and DB with differences: update record in DB
@@ -51,6 +52,12 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 
 	if expectedPowerShelfInventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
 		logger.Warn().Msg("received failed inventory status from Site Agent, skipping inventory processing")
+		return nil
+	}
+
+	if expectedPowerShelfInventory.InventoryStatus != corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS {
+		logger.Warn().Str("inventory_status", expectedPowerShelfInventory.InventoryStatus.String()).
+			Msg("received unsupported inventory status, skipping inventory processing")
 		return nil
 	}
 

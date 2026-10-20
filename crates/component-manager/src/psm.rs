@@ -463,6 +463,20 @@ mod tests {
 
     use super::*;
 
+    /// PSM registers devices and reads cached inventory; the passive API must
+    /// reject that getter before it can cause those effects.
+    #[tokio::test]
+    async fn registering_power_getter_is_not_a_passive_capability() {
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let backend = PsmPowerShelfBackend {
+            client: psm::powershelf_manager_client::PowershelfManagerClient::new(
+                TraceInjectService::new(channel),
+            ),
+        };
+        // The passive API must never invoke this backend's registering getter.
+        assert_eq!(backend.power_state_source(), None);
+    }
+
     #[test]
     fn psm_fw_state_maps_each_variant() {
         value_scenarios!(run = |state: psm::FirmwareUpdateState| map_psm_fw_state(state as i32);

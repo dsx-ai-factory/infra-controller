@@ -42,6 +42,7 @@ use crate::crds::dpuservices_generated::DPUService;
 use crate::crds::dpuservicetemplates_generated::DPUServiceTemplate;
 use crate::crds::dpusets_generated::DPUSet;
 use crate::error::DpfError;
+use crate::types::DpfDeletePreconditions;
 
 /// Repository for BFB (BlueField Bundle) resources.
 #[async_trait]
@@ -231,13 +232,27 @@ pub trait DpuServiceRepository: Send + Sync {
     async fn get(&self, name: &str, namespace: &str) -> Result<Option<DPUService>, DpfError>;
     async fn list(&self, namespace: &str) -> Result<Vec<DPUService>, DpfError>;
     async fn create(&self, service: &DPUService) -> Result<DPUService, DpfError>;
+    /// Implementations must atomically apply the RFC 6902 patch and return the resulting
+    /// DPUService.
+    ///
+    /// They must reject a stale resource-version precondition without modifying the resource.
     async fn patch(
         &self,
         name: &str,
         namespace: &str,
         patch: serde_json::Value,
-    ) -> Result<(), DpfError>;
+    ) -> Result<DPUService, DpfError>;
     async fn delete(&self, name: &str, namespace: &str) -> Result<(), DpfError>;
+    /// Implementations must delete only when both preconditions match the current DPUService.
+    ///
+    /// They must treat absence as success and preserve a same-name replacement when either
+    /// precondition is stale.
+    async fn delete_if_current(
+        &self,
+        name: &str,
+        namespace: &str,
+        preconditions: &DpfDeletePreconditions,
+    ) -> Result<(), DpfError>;
 }
 
 /// Repository for DPUServiceNAD resources.
@@ -252,7 +267,37 @@ pub trait DpuServiceNADRepository: Send + Sync {
 #[async_trait]
 pub trait DpuServiceChainRepository: Send + Sync {
     async fn get(&self, name: &str, namespace: &str) -> Result<Option<DPUServiceChain>, DpfError>;
-    async fn list(&self, namespace: &str) -> Result<Vec<DPUServiceChain>, DpfError>;
+    /// Implementations must return every chain in the namespace that matches the supplied selector,
+    /// or every chain when the selector is absent.
+    async fn list(
+        &self,
+        namespace: &str,
+        label_selector: Option<&str>,
+    ) -> Result<Vec<DPUServiceChain>, DpfError>;
+    /// Implementations must create the chain only when its namespace and name are absent.
+    ///
+    /// They must return an error without modifying an existing chain with the same namespace and
+    /// name.
+    async fn create(&self, chain: &DPUServiceChain) -> Result<DPUServiceChain, DpfError>;
+    /// Implementations must atomically apply the RFC 6902 patch and return the resulting chain.
+    ///
+    /// They must reject a stale resource-version precondition without modifying the resource.
+    async fn patch(
+        &self,
+        name: &str,
+        namespace: &str,
+        patch: serde_json::Value,
+    ) -> Result<DPUServiceChain, DpfError>;
+    /// Implementations must delete only when both preconditions match the current chain.
+    ///
+    /// They must treat absence as success and preserve a same-name replacement when either
+    /// precondition is stale.
+    async fn delete_if_current(
+        &self,
+        name: &str,
+        namespace: &str,
+        preconditions: &DpfDeletePreconditions,
+    ) -> Result<(), DpfError>;
 }
 
 /// Repository for DPUServiceInterface resources.
@@ -263,9 +308,39 @@ pub trait DpuServiceInterfaceRepository: Send + Sync {
         name: &str,
         namespace: &str,
     ) -> Result<Option<DPUServiceInterface>, DpfError>;
-    async fn list(&self, namespace: &str) -> Result<Vec<DPUServiceInterface>, DpfError>;
+    /// Implementations must return every interface in the namespace that matches the supplied
+    /// selector, or every interface when the selector is absent.
+    async fn list(
+        &self,
+        namespace: &str,
+        label_selector: Option<&str>,
+    ) -> Result<Vec<DPUServiceInterface>, DpfError>;
     async fn apply(&self, iface: &DPUServiceInterface) -> Result<DPUServiceInterface, DpfError>;
+    /// Implementations must create the interface only when its namespace and name are absent.
+    ///
+    /// They must return an error without modifying an existing interface with the same namespace
+    /// and name.
+    async fn create(&self, iface: &DPUServiceInterface) -> Result<DPUServiceInterface, DpfError>;
+    /// Implementations must atomically apply the RFC 6902 patch and return the resulting interface.
+    ///
+    /// They must reject a stale resource-version precondition without modifying the resource.
+    async fn patch(
+        &self,
+        name: &str,
+        namespace: &str,
+        patch: serde_json::Value,
+    ) -> Result<DPUServiceInterface, DpfError>;
     async fn delete(&self, name: &str, namespace: &str) -> Result<(), DpfError>;
+    /// Implementations must delete only when both preconditions match the current interface.
+    ///
+    /// They must treat absence as success and preserve a same-name replacement when either
+    /// precondition is stale.
+    async fn delete_if_current(
+        &self,
+        name: &str,
+        namespace: &str,
+        preconditions: &DpfDeletePreconditions,
+    ) -> Result<(), DpfError>;
 }
 
 /// Repository for Kubernetes ConfigMaps and Secrets.

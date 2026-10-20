@@ -158,7 +158,7 @@ pub(super) struct ScoutStreamResponseDropped {
     pub(super) error: String,
 }
 
-/// Which firmware-upgrade input is being downloaded.
+/// Which input Scout is downloading for a script upgrade or NIC preflight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
 pub(super) enum FirmwareDownloadKind {
     Script,

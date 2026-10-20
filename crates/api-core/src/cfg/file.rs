@@ -16,7 +16,7 @@
  */
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -58,6 +58,7 @@ use libmlx::profile::profile::MlxConfigProfile;
 use libmlx::profile::serialization::{
     deserialize_option_profile_map, serialize_option_profile_map,
 };
+use model::extension_service::ServiceVpcAddressFamily;
 use model::firmware::{
     AgentUpgradePolicyChoice, Firmware, FirmwareComponent, FirmwareComponentType, FirmwareEntry,
 };
@@ -631,8 +632,8 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub machine_updater: MachineUpdater,
 
-    /// Maximum number of IDs accepted by
-    /// `find_*_by_ids` APIs to prevent oversized queries.
+    /// Maximum number of IDs accepted by `find_*_by_ids` APIs and
+    /// card selections accepted by `SetMachineNicFirmwareConfig`.
     /// Default is 100.
     #[serde(default = "default_max_find_by_ids")]
     pub max_find_by_ids: u32,
@@ -1010,6 +1011,21 @@ pub struct CarbideConfig {
     /// store; absent means certs are issued from the credential Vault.
     #[serde(default)]
     pub certificates: CertificatesConfig,
+
+    /// How long to wait for the nico-api server to shut down gracefully before forcing background
+    /// tasks to abort.
+    #[serde(
+        default = "default_shutdown_timeout",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub shutdown_timeout: std::time::Duration,
+
+    /// Intended for integration testing: Whether to panic if a background task (for instance, state
+    /// controllers, site-explorer) finishes early before we've shut down. Not recommended for
+    /// production.
+    #[serde(default)]
+    pub panic_on_early_task_return: bool,
 }
 
 /// Global admission limits for business requests handled by nico-api.
@@ -1135,13 +1151,29 @@ impl ApiAdmissionControlConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CertificatesConfig {
-    /// Which backend issues certificates. Defaults to sharing the credential
-    /// Vault client (historical behavior).
+    /// Use cert-manager for Scout and DPU certificate issuance. Defaults to false.
+    #[serde(default)]
+    pub use_cert_manager: bool,
+
+    /// Use cert-manager for UFM certificate issuance independently of machine
+    /// issuance. Defaults to false; requires approval policy allowing UFM DNS SANs.
+    #[serde(default)]
+    pub use_cert_manager_ufm: bool,
+
+    /// Optional overrides for the cert-manager defaults; ignored when disabled.
+    /// The signer must chain to the existing `[tls] root_cafile_path` bundle.
+    #[serde(default)]
+    pub cert_manager: Option<cert_manager::Config>,
+
+    /// Vault backend used for each certificate type whose cert-manager flag is
+    /// false. Defaults to sharing
+    /// the credential Vault client (historical behavior).
     #[serde(default)]
     pub backend: CertBackendKind,
 
     /// Connection settings for a dedicated certificate Vault. Required when
-    /// `backend = "dedicated_vault"`, ignored otherwise.
+    /// `backend = "dedicated_vault"` and either certificate type uses Vault.
+    /// Ignored when both cert-manager flags are true.
     #[serde(default)]
     pub dedicated_vault: Option<DedicatedVaultSettings>,
 }
@@ -1311,6 +1343,17 @@ impl std::fmt::Debug for DedicatedVaultSettings {
 }
 
 impl CertificatesConfig {
+    /// Return and validate the signer settings when cert-manager is enabled.
+    /// Disabled settings are ignored; an omitted section uses the signer defaults.
+    pub fn cert_manager_config(&self) -> eyre::Result<Option<cert_manager::Config>> {
+        if !self.use_cert_manager && !self.use_cert_manager_ufm {
+            return Ok(None);
+        }
+        let config = self.cert_manager.clone().unwrap_or_default();
+        config.validate()?;
+        Ok(Some(config))
+    }
+
     /// Convert the parsed section into the runtime certificate config, failing
     /// fast if a dedicated backend was selected without its settings.
     pub fn to_certificate_config(&self) -> eyre::Result<carbide_secrets::CertificateConfig> {
@@ -1909,8 +1952,14 @@ pub struct DpfConfig {
     /// ServiceInterfaces exist.
     #[serde(default)]
     pub deployment_scoped_service_interfaces: bool,
-    /// SF capacity reserved beyond configured NICo-managed service endpoints.
-    /// Without intercept bridging, this remains the complete legacy `PF_TOTAL_SF` value.
+    /// SF capacity reserve for regular BF3 and generic BF4.
+    ///
+    /// With intercept bridging, it is added to NICo-managed service endpoints and
+    /// `additional_managed_sf`. Without intercept bridging, it is the complete legacy
+    /// `PF_TOTAL_SF` pool, and those endpoints plus `additional_managed_sf` must fit inside it. BF3
+    /// GB200 applies the same validation but emits fixed `PF_TOTAL_SF=128`, so changing this value
+    /// does not change its flavor. BF4 Astra ignores this value and derives capacity from managed
+    /// endpoints plus fixed allocations.
     #[serde(default = "default_dpf_pf_total_sf_reserved")]
     pub pf_total_sf_reserved: u32,
     /// Whether carbide rolls a changed DPUService out on its own, by releasing
@@ -2402,13 +2451,69 @@ fn default_dpf_max_sf_per_pf() -> u32 {
     carbide_dpf::DEFAULT_MAX_SF_PER_PF
 }
 
+/// Operator-declared service-VPC families for one DPF deployment.
+/// A set makes ordering irrelevant while custom deserialization rejects duplicates as configuration
+/// mistakes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ServiceVpcEnabledAddressFamilies(BTreeSet<ServiceVpcAddressFamily>);
+
+impl ServiceVpcEnabledAddressFamilies {
+    /// Returns whether a parsed test fixture contains `family`.
+    #[cfg(test)]
+    fn contains(&self, family: ServiceVpcAddressFamily) -> bool {
+        self.0.contains(&family)
+    }
+
+    /// Iterates enabled families in a stable order for controller context construction.
+    /// Stable ordering keeps diagnostics and serialized configuration deterministic.
+    pub fn iter(&self) -> impl Iterator<Item = ServiceVpcAddressFamily> + '_ {
+        self.0.iter().copied()
+    }
+
+    /// Returns whether this deployment enables no service-VPC family.
+    /// Omitted and explicitly empty configuration intentionally share this state.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl FromIterator<ServiceVpcAddressFamily> for ServiceVpcEnabledAddressFamilies {
+    /// Builds programmatic configuration with the same set semantics as parsed TOML.
+    /// Callers already hold typed values, so duplicate rejection remains a parsing-only diagnostic.
+    fn from_iter<T: IntoIterator<Item = ServiceVpcAddressFamily>>(iter: T) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl<'de> Deserialize<'de> for ServiceVpcEnabledAddressFamilies {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let configured = Vec::<ServiceVpcAddressFamily>::deserialize(deserializer)?;
+        let mut families = BTreeSet::new();
+
+        // A duplicate is almost certainly an operator typo, so fail instead of silently normalizing
+        // it.
+        for family in configured {
+            if !families.insert(family) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate service-VPC address family {family:?}"
+                )));
+            }
+        }
+        Ok(Self(families))
+    }
+}
+
 /// Per-deployment DPF configuration for named entries under `[dpf.deployments]`.
 ///
 /// `flavor_name`, `deployment_name`, and `node_label_key` are required when a
-/// `[dpf.deployments.<name>]` block is written; `bfb_url` and `services` are
-/// optional. When `services` is omitted, the deployment inherits the top-level
-/// `[dpf.services]` (see [`DpfConfig::resolved_services_for`]). Extra services
-/// are configured per deployment in `extra_services`.
+/// `[dpf.deployments.<name>]` block is written. A written BF3 block must also
+/// set `bfb_url`, while a written BF4 block must set `bluefield_software`.
+/// `services` remains optional. When it is omitted, the deployment inherits
+/// the top-level `[dpf.services]` (see [`DpfConfig::resolved_services_for`]).
+/// Extra services are configured per deployment in `extra_services`.
 ///
 /// The `Default` impl (BF3 values) is used when the entire
 /// `[dpf.deployments.bf3]` block is absent, via `#[serde(default)]` on the
@@ -2439,6 +2544,13 @@ pub struct DpfDeploymentConfig {
     /// The platform's SF BAR size gives the allocation, not physical firmware qualification.
     #[serde(default = "default_dpf_max_sf_per_pf")]
     pub max_sf_per_pf: u32,
+    /// Address families whose external DHCP CNI and raw NAD have been installed
+    /// and qualified for this deployment. The BF3 declaration also applies to
+    /// BF3 GB200. Registration is enabled globally when any supported non-Astra
+    /// deployment enables a family; omission retains this deployment and any
+    /// derivative in the map with no enabled family.
+    #[serde(default)]
+    pub service_vpc_enabled_address_families: ServiceVpcEnabledAddressFamilies,
     /// Optional per-deployment override of the mandatory Helm services. When set,
     /// these services are deployed for this deployment instead of the top-level
     /// [`DpfConfig::services`]. When absent, the top-level services are inherited.
@@ -2476,6 +2588,7 @@ impl Default for DpfDeploymentConfig {
             deployment_name: default_dpf_deployment_name(),
             node_label_key: default_dpf_node_label_key(),
             max_sf_per_pf: default_dpf_max_sf_per_pf(),
+            service_vpc_enabled_address_families: Default::default(),
             services: None,
             extra_services: BTreeMap::new(),
             extra_bfcfg_parameters: Vec::new(),
@@ -2562,8 +2675,9 @@ pub struct DpfBlueFieldSoftwareConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DpfDeploymentsConfig {
-    /// BF3 deployment. Present by default with sensible values; override individual
-    /// fields in `[dpf.deployments.bf3]` when the site uses non-default names or BFBs.
+    /// BF3 deployment. The default applies only when the complete block is absent.
+    /// A written `[dpf.deployments.bf3]` block must include every required field
+    /// and a site-qualified `bfb_url`.
     #[serde(default)]
     pub bf3: DpfDeploymentConfig,
     /// BF4 generic deployment (NICo + BF4 via DPF).
@@ -2586,6 +2700,48 @@ impl DpfDeploymentsConfig {
             v.push(("bf4_astra", bf4_astra));
         }
         v
+    }
+
+    /// Groups configured address families by deployment type so later activation can authorize each
+    /// target DPU independently.
+    pub(crate) fn service_vpc_address_families(
+        &self,
+    ) -> BTreeMap<DpuDeploymentType, BTreeSet<ServiceVpcAddressFamily>> {
+        let mut families = BTreeMap::from([
+            (
+                DpuDeploymentType::Bf3,
+                self.bf3
+                    .service_vpc_enabled_address_families
+                    .iter()
+                    .collect(),
+            ),
+            (
+                DpuDeploymentType::Bf3Gb200,
+                self.bf3
+                    .service_vpc_enabled_address_families
+                    .iter()
+                    .collect(),
+            ),
+        ]);
+        if let Some(deployment) = &self.bf4_generic {
+            families.insert(
+                DpuDeploymentType::Bf4Generic,
+                deployment
+                    .service_vpc_enabled_address_families
+                    .iter()
+                    .collect(),
+            );
+        }
+        if let Some(deployment) = &self.bf4_astra {
+            families.insert(
+                DpuDeploymentType::Bf4Astra,
+                deployment
+                    .service_vpc_enabled_address_families
+                    .iter()
+                    .collect(),
+            );
+        }
+        families
     }
 
     /// Validates the final Kubernetes identifiers, their uniqueness, and reserved labels.
@@ -3300,6 +3456,51 @@ fn validate_tool_url(name: &str, url: &str) -> eyre::Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+pub(crate) enum SupernicFirmwareProfileDiagnostic {
+    PartNumber {
+        config_key_part_number: String,
+        profile_part_number: String,
+        psid: String,
+    },
+    Psid {
+        part_number: String,
+        config_key_psid: String,
+        profile_psid: String,
+    },
+}
+
+impl SupernicFirmwareProfileDiagnostic {
+    pub(crate) fn emit(self) {
+        match self {
+            Self::PartNumber {
+                config_key_part_number,
+                profile_part_number,
+                psid,
+            } => {
+                tracing::warn!(
+                    config_key_part_number = %config_key_part_number,
+                    profile_part_number = %profile_part_number,
+                    psid = %psid,
+                    "firmware profile part_number does not match config key"
+                );
+            }
+            Self::Psid {
+                part_number,
+                config_key_psid,
+                profile_psid,
+            } => {
+                tracing::warn!(
+                    part_number = %part_number,
+                    config_key_psid = %config_key_psid,
+                    profile_psid = %profile_psid,
+                    "firmware profile psid does not match config key"
+                );
+            }
+        }
+    }
+}
+
 impl CarbideConfig {
     /// Which configuration keys were explicitly provided by the merged
     /// sources, mapped to source labels — see [`super::provenance`]. Empty
@@ -3357,6 +3558,11 @@ impl CarbideConfig {
     }
 
     pub(crate) fn validate_service_vpc_slots(&self) -> eyre::Result<()> {
+        // Reject unrealizable capacity before startup creates DPF resources or launches
+        // controllers.
+        carbide_dpf::ServiceVpcSlots::new(self.dpu_config.service_vpc_slot_count)
+            .map_err(|error| eyre::eyre!("invalid service-VPC slot inventory: {error}"))?;
+
         // Endpoint capacity is unusable without a provisioned slot for its VPC.
         eyre::ensure!(
             self.dpu_config.max_active_service_vpc_interfaces_per_dpu == 0
@@ -3370,6 +3576,35 @@ impl CarbideConfig {
         eyre::ensure!(
             self.dpu_config.service_vpc_slot_count == 0 || self.site_global_vpc_vni.is_none(),
             "dpu_config.service_vpc_slot_count requires site_global_vpc_vni to be unset because service VPCs require distinct HBN VRFs"
+        );
+        let supported_family_enabled = !self
+            .dpf
+            .deployments
+            .bf3
+            .service_vpc_enabled_address_families
+            .is_empty()
+            || self
+                .dpf
+                .deployments
+                .bf4_generic
+                .as_ref()
+                .is_some_and(|deployment| {
+                    !deployment.service_vpc_enabled_address_families.is_empty()
+                });
+        eyre::ensure!(
+            !supported_family_enabled || self.dpu_config.service_vpc_slot_count > 0,
+            "dpf deployment service_vpc_enabled_address_families requires service_vpc_slot_count > 0"
+        );
+        eyre::ensure!(
+            self.dpf
+                .deployments
+                .bf4_astra
+                .as_ref()
+                .is_none_or(|deployment| deployment
+                    .service_vpc_enabled_address_families
+                    .is_empty()),
+            // xtask:allow-error-case: BF4 Astra is a deployment name
+            "BF4 Astra does not support service_vpc_enabled_address_families"
         );
         Ok(())
     }
@@ -3390,31 +3625,33 @@ impl CarbideConfig {
         Ok(())
     }
 
-    /// validate_supernic_firmware_profiles checks that each profile's inner
-    /// part_number and psid match the HashMap keys they are nested under.
-    /// Logs a warning for any mismatches (the inner values are authoritative
-    /// at runtime since they are what gets sent to scout).
-    pub fn validate_supernic_firmware_profiles(&self) {
+    /// Returns mismatches between each profile's inner part number/PSID and
+    /// the map keys it is nested under.
+    ///
+    /// The inner values remain authoritative because they are sent to Scout.
+    pub(crate) fn supernic_firmware_profile_diagnostics(
+        &self,
+    ) -> Vec<SupernicFirmwareProfileDiagnostic> {
+        let mut diagnostics = Vec::new();
         for (key_pn, psid_map) in &self.supernic_firmware_profiles {
             for (key_psid, profile) in psid_map {
                 if profile.firmware_spec.part_number != *key_pn {
-                    tracing::warn!(
-                        config_key_part_number = %key_pn,
-                        profile_part_number = %profile.firmware_spec.part_number,
-                        psid = %key_psid,
-                        "firmware profile part_number does not match config key"
-                    );
+                    diagnostics.push(SupernicFirmwareProfileDiagnostic::PartNumber {
+                        config_key_part_number: key_pn.clone(),
+                        profile_part_number: profile.firmware_spec.part_number.clone(),
+                        psid: key_psid.clone(),
+                    });
                 }
                 if profile.firmware_spec.psid != *key_psid {
-                    tracing::warn!(
-                        part_number = %key_pn,
-                        config_key_psid = %key_psid,
-                        profile_psid = %profile.firmware_spec.psid,
-                        "firmware profile psid does not match config key"
-                    );
+                    diagnostics.push(SupernicFirmwareProfileDiagnostic::Psid {
+                        part_number: key_pn.clone(),
+                        config_key_psid: key_psid.clone(),
+                        profile_psid: profile.firmware_spec.psid.clone(),
+                    });
                 }
             }
         }
+        diagnostics
     }
 
     /// get_supernic_firmware_profile looks up the firmware profile for a
@@ -3901,6 +4138,10 @@ pub const fn default_bmc_max_sessions_per_caller() -> usize {
     4
 }
 
+pub const fn default_shutdown_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(60)
+}
+
 /// Routing of core's own BMC Redfish traffic through nico-bmc-proxy.
 ///
 /// The client certificate identifies this instance to the proxy's mTLS
@@ -4003,8 +4244,10 @@ pub struct DpuConfig {
     #[serde(default)]
     pub dpu_enable_secure_boot: bool,
 
-    /// Number of virtual functions configured per DPU PF during BlueField provisioning.
-    /// Defaults to 16 and must not exceed 126.
+    /// Number of virtual functions configured per DPU PF during BF3 and generic-BF4 provisioning.
+    /// Defaults to 16 and must not exceed 126. BF4 Astra always emits `NUM_OF_VFS=46` and retains
+    /// its full topology-free static VF inventory, but this value still bounds VF identities in a
+    /// configured intercept topology shared by all DPF deployment profiles.
     #[serde(default)]
     pub num_of_vfs: u32,
 
@@ -4878,9 +5121,9 @@ pub struct VmaasConfig {
     /// `dpu_config.num_of_vfs`. An explicit value replaces the fallback; when omitted or empty,
     /// VF0 through VF13 are selected and still capped by `num_of_vfs`. Malformed PF0 VF selectors,
     /// whitespace, and empty list entries cause non-DPF instance creation and network updates to
-    /// fail. DPF-managed hosts ignore this field for instance admission: BF4 Astra hosts use the
-    /// static VF0 through VF13 inventory provisioned for Astra, while other DPF hosts use the
-    /// configured intercept topology or retain topology-free compatibility behavior.
+    /// fail. DPF-managed hosts ignore this field for instance admission: configured intercept
+    /// topology is authoritative for every DPF deployment profile, while topology-free Astra uses
+    /// its static VF0 through VF13 inventory and other profiles retain compatibility behavior.
     pub hbn_reps: Option<String>,
 
     /// Provisioning-time topology for bridges inserted between host representors and HBN.
@@ -5613,6 +5856,77 @@ path = "credentials.yaml"
         );
     }
 
+    #[test]
+    fn cert_manager_toml_config_contract() {
+        let cases = [
+            ("default off", "", Ok((false, false))),
+            (
+                "enabled with only the flag",
+                "use_cert_manager = true",
+                Ok((true, false)),
+            ),
+            (
+                "signer defaults",
+                "use_cert_manager = true\n[cert_manager]",
+                Ok((true, false)),
+            ),
+            (
+                "UFM enabled independently",
+                "use_cert_manager_ufm = true",
+                Ok((false, true)),
+            ),
+            (
+                "timeout too large",
+                "use_cert_manager = true\n[cert_manager]\nnamespace = 'forge-system'\nissuer_name = 'site-issuer'\nrequest_timeout_secs = 601",
+                Err("1..=600"),
+            ),
+            (
+                "UFM signer settings are validated",
+                "use_cert_manager_ufm = true\n[cert_manager]\nrequest_timeout_secs = 601",
+                Err("1..=600"),
+            ),
+        ];
+        for (name, toml, expected) in cases {
+            let config: CertificatesConfig =
+                Figment::new().merge(Toml::string(toml)).extract().unwrap();
+            match (config.cert_manager_config(), expected) {
+                (Ok(settings), Ok((machine, ufm))) => {
+                    assert_eq!(config.use_cert_manager, machine, "{name}");
+                    assert_eq!(config.use_cert_manager_ufm, ufm, "{name}");
+                    assert_eq!(settings.is_some(), machine || ufm, "{name}");
+                    if let Some(settings) = settings {
+                        assert_eq!(settings.namespace, "forge-system", "{name}");
+                        assert_eq!(settings.issuer_name, "site-issuer", "{name}");
+                        assert_eq!(settings.request_timeout_secs, 120, "{name}");
+                        assert_eq!(
+                            settings.max_ttl,
+                            std::time::Duration::from_secs(720 * 3600),
+                            "{name}"
+                        );
+                        assert!(
+                            matches!(
+                                settings.issuer_kind,
+                                cert_manager::IssuerKind::ClusterIssuer
+                            ),
+                            "{name}"
+                        );
+                    }
+                    assert!(
+                        matches!(
+                            config.to_certificate_config().unwrap().backend,
+                            carbide_secrets::CertBackend::SharedVault
+                        ),
+                        "{name}: default Vault backend"
+                    );
+                }
+                (Err(error), Err(message)) => {
+                    assert!(error.to_string().contains(message), "{name}: {error}")
+                }
+                (actual, expected) => panic!("{name}: got {actual:?}, expected {expected:?}"),
+            }
+        }
+    }
+
     /// Exercises the real `[certificates]` / `[certificates.dedicated_vault]`
     /// TOML contract through Figment (the production config path), rather than
     /// JSON serde. Each case parses a TOML fragment into `CertificatesConfig`
@@ -5975,13 +6289,28 @@ path = "credentials.yaml"
         assert!(config.validate_web_ui_sidebar_tools().is_err());
     }
 
-    /// Verifies static slots cannot bypass site isolation rules or reserve endpoints without a bridge.
+    /// Rejects unrealizable slot counts, endpoint reservations without a bridge, and static slots
+    /// that conflict with site isolation settings before controller startup can perform external
+    /// work.
     #[test]
-    fn validate_service_vpc_slots_rejects_site_global_vpc_vni() {
+    fn validate_service_vpc_slots_rejects_invalid_capacity_and_site_isolation() {
         let mut config: CarbideConfig = Figment::new()
             .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
             .extract()
             .unwrap();
+
+        // Reject counts beyond HBN's fixed interface inventory during configuration preflight.
+        config.dpu_config.service_vpc_slot_count = 33;
+        assert!(
+            config
+                .validate_service_vpc_slots()
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds the supported HBN interface maximum of 32")
+        );
+
+        // Restore zero slots so the remaining assertions isolate dependency and site conflicts.
+        config.dpu_config.service_vpc_slot_count = 0;
 
         // An endpoint reservation without slots is unusable even before DPF initialization.
         config.dpu_config.max_active_service_vpc_interfaces_per_dpu = 1;
@@ -6015,6 +6344,128 @@ path = "credentials.yaml"
                 .unwrap_err()
                 .to_string()
                 .contains("requires site_global_vpc_vni to be unset")
+        );
+    }
+
+    /// Verifies family enablement requires fixed capacity and excludes Astra deployments.
+    /// These startup failures prevent a declaration from advertising infrastructure it cannot
+    /// safely use.
+    #[test]
+    fn validate_service_vpc_families_require_supported_slot_inventory() {
+        // Start from the minimal site fixture so only family and slot policy drive each result.
+        let mut config: CarbideConfig = Figment::new()
+            .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+            .extract()
+            .unwrap();
+        // Remove the unrelated global-VNI conflict so this test isolates family capacity policy.
+        config.site_global_vpc_vni = None;
+        config
+            .dpf
+            .deployments
+            .bf3
+            .service_vpc_enabled_address_families =
+            [ServiceVpcAddressFamily::Ipv4].into_iter().collect();
+
+        // A qualified family without even one fixed bridge cannot create a usable registration
+        // path.
+        assert!(
+            config
+                .validate_service_vpc_slots()
+                .unwrap_err()
+                .to_string()
+                .contains("requires service_vpc_slot_count > 0")
+        );
+        // One fixed slot satisfies the capacity prerequisite for the enabled BF3 family.
+        config.dpu_config.service_vpc_slot_count = 1;
+        assert!(config.validate_service_vpc_slots().is_ok());
+
+        // Astra uses a separate networking model and must not opt into the slot-backed declaration.
+        let astra = DpfDeploymentConfig {
+            service_vpc_enabled_address_families: [ServiceVpcAddressFamily::Ipv4]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        config.dpf.deployments.bf4_astra = Some(astra);
+        assert!(
+            config
+                .validate_service_vpc_slots()
+                .unwrap_err()
+                .to_string()
+                .contains("BF4 Astra")
+        );
+    }
+
+    /// Verifies generic BF4 family enablement requires slot capacity without populating either
+    /// BF3 deployment entry.
+    #[test]
+    fn bf4_generic_service_vpc_family_requires_capacity_and_remains_isolated() {
+        // Configure only generic BF4 with no global VNI so its slot requirement is independent of
+        // BF3.
+        let mut config: CarbideConfig = Figment::new()
+            .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+            .extract()
+            .unwrap();
+        config.site_global_vpc_vni = None;
+        config.dpu_config.service_vpc_slot_count = 0;
+        config
+            .dpf
+            .deployments
+            .bf3
+            .service_vpc_enabled_address_families = Default::default();
+        let mut bf4 = bf4_config(None, None);
+        bf4.service_vpc_enabled_address_families =
+            [ServiceVpcAddressFamily::Ipv4].into_iter().collect();
+        config.dpf.deployments.bf4_generic = Some(bf4);
+        config.dpf.deployments.bf4_astra = None;
+
+        // Reject generic BF4 family enablement until at least one fixed service slot exists.
+        assert!(
+            config
+                .validate_service_vpc_slots()
+                .unwrap_err()
+                .to_string()
+                .contains("requires service_vpc_slot_count > 0")
+        );
+
+        // Adding one slot satisfies generic BF4 capacity without broadening either BF3 variant.
+        config.dpu_config.service_vpc_slot_count = 1;
+        assert!(config.validate_service_vpc_slots().is_ok());
+        assert_eq!(
+            config.dpf.deployments.service_vpc_address_families(),
+            BTreeMap::from([
+                (DpuDeploymentType::Bf3, BTreeSet::new()),
+                (DpuDeploymentType::Bf3Gb200, BTreeSet::new()),
+                (
+                    DpuDeploymentType::Bf4Generic,
+                    BTreeSet::from([ServiceVpcAddressFamily::Ipv4]),
+                ),
+            ])
+        );
+    }
+
+    /// Copies each BF3 service-VPC family to both BF3 deployment types so GB200 DPUs retain the
+    /// configured capability.
+    #[test]
+    fn bf3_service_vpc_family_applies_to_standard_and_gb200_deployments() {
+        // Configure only BF3 to isolate the shared BF3 and BF3 GB200 membership rule.
+        let mut deployments = DpfDeploymentsConfig::default();
+        deployments.bf3.service_vpc_enabled_address_families =
+            [ServiceVpcAddressFamily::Ipv4].into_iter().collect();
+
+        // Require both concrete BF3 deployment keys and no unrelated deployment entries.
+        assert_eq!(
+            deployments.service_vpc_address_families(),
+            BTreeMap::from([
+                (
+                    DpuDeploymentType::Bf3,
+                    BTreeSet::from([ServiceVpcAddressFamily::Ipv4]),
+                ),
+                (
+                    DpuDeploymentType::Bf3Gb200,
+                    BTreeSet::from([ServiceVpcAddressFamily::Ipv4]),
+                ),
+            ])
         );
     }
 
@@ -6471,6 +6922,27 @@ path = "credentials.yaml"
                 "/etc/forge/carbide-api/site/admin_root_cert_pem",
             ),
             ("{{ .Values.auth.permissiveMode | default false }}", "false"),
+            ("{{ .Values.global.certificate.useCertManager }}", "false"),
+            (
+                "{{ .Values.global.certificate.useCertManagerUfm }}",
+                "false",
+            ),
+            (
+                r#"{{ include "nico-api.namespace" . | quote }}"#,
+                r#""nico-system""#,
+            ),
+            (
+                "{{ .Values.machineCertificates.issuerRef.name | quote }}",
+                r#""site-issuer""#,
+            ),
+            (
+                "{{ .Values.machineCertificates.issuerRef.kind | quote }}",
+                r#""ClusterIssuer""#,
+            ),
+            (
+                "{{ .Values.machineCertificates.requestTimeoutSecs }}",
+                "120",
+            ),
             ("{{ .Values.global.spiffe.trustDomain }}", "example.test"),
             (
                 r#"{{ .Values.auth.namespace | default (include "nico-api.namespace" .) }}"#,
@@ -7112,6 +7584,8 @@ path = "credentials.yaml"
                 "[fnn.routing_profiles.test]\nunknown_routing_profile_field = true" => Fails,
                 "[host_health]\nunknown_host_health_field = true" => Fails,
                 "[firmware_global]\nunknown_firmware_field = true" => Fails,
+                // The nested downloader schema must participate in Core's unknown-key handling.
+                "[firmware_global.downloads]\nunknown_download_field = true" => Fails,
                 "[machine_validation_config]\nunknown_validation_field = true" => Fails,
                 "[network_security_group]\nunknown_nsg_field = true" => Fails,
                 "[machine_identity]\nunknown_identity_field = true" => Fails,
@@ -8587,6 +9061,7 @@ helm_repo_url = "oci://registry.example.test/doca"
             deployment_name: "bf4-dep".to_string(),
             node_label_key: "carbide.nvidia.com/bf4".to_string(),
             max_sf_per_pf: default_dpf_max_sf_per_pf(),
+            service_vpc_enabled_address_families: Default::default(),
             services: None,
             extra_services: BTreeMap::new(),
             extra_bfcfg_parameters: Vec::new(),
@@ -8607,6 +9082,68 @@ helm_repo_url = "oci://registry.example.test/doca"
 
         assert!(!defaulted.enable_delay_host_init);
         assert!(enabled.enable_delay_host_init);
+    }
+
+    /// Verifies family configuration is set-like and rejects ambiguous operator input.
+    /// This matters because deployment authorization must not depend on TOML ordering or silent
+    /// normalization.
+    #[test]
+    fn dpf_service_vpc_address_families_parse_as_unique_membership() {
+        // Parse one otherwise-complete deployment so each case isolates list membership semantics.
+        let deployment = |families: &str| {
+            toml::from_str::<DpfDeploymentConfig>(&format!(
+                r#"
+                    flavor_name = "flavor"
+                    deployment_name = "deployment"
+                    node_label_key = "example.com/dpu"
+                    {families}
+                "#
+            ))
+        };
+
+        scenarios!(
+            run = |families| {
+                deployment(families)
+                    .map(|deployment| {
+                        let configured = deployment.service_vpc_enabled_address_families;
+                        (
+                            configured.is_empty(),
+                            configured.contains(ServiceVpcAddressFamily::Ipv4),
+                            configured.contains(ServiceVpcAddressFamily::Ipv6),
+                        )
+                    })
+                    .map_err(drop)
+            };
+            "omitted field" {
+                // Omission exercises the serde default rather than explicit list parsing.
+                "" => Yields((true, false, false)),
+            }
+
+            "explicit empty list" {
+                // An explicit empty list must match omission without relying on the default.
+                "service_vpc_enabled_address_families = []" => Yields((true, false, false)),
+            }
+
+            "all known families" {
+                // The canonical ordering proves both accepted values become members.
+                "service_vpc_enabled_address_families = [\"ipv4\", \"ipv6\"]" => Yields((false, true, true)),
+            }
+
+            "reordered known families" {
+                // Reversing the declaration proves membership does not depend on TOML order.
+                "service_vpc_enabled_address_families = [\"ipv6\", \"ipv4\"]" => Yields((false, true, true)),
+            }
+
+            "duplicate family" {
+                // A repeated known value exercises duplicate rejection rather than enum validation.
+                "service_vpc_enabled_address_families = [\"ipv4\", \"ipv4\"]" => Fails,
+            }
+
+            "unknown family" {
+                // Reject an unknown value through enum validation rather than duplicate detection.
+                "service_vpc_enabled_address_families = [\"ipv5\"]" => Fails,
+            }
+        );
     }
 
     /// Verifies deployment selectors remain distinct from each other and NICo-owned labels.

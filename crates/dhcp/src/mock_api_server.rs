@@ -93,18 +93,17 @@ fn base_dhcp_response_for_family(
 
 fn dhcp_response_with_override(
     mac_address_str: &str,
-    address_override: Option<String>,
-    fqdn_override: Option<String>,
+    overrides: DhcpResponseOverrides,
     address_family: rpc::AddressFamily,
 ) -> Vec<u8> {
     let mac_address = mac_address_str.parse::<MacAddress>().unwrap();
 
     let mut r = base_dhcp_response_for_family(mac_address, address_family);
 
-    if let Some(addr) = address_override {
+    if let Some(addr) = overrides.address {
         r.address = addr;
     }
-    if let Some(fqdn) = fqdn_override {
+    if let Some(fqdn) = overrides.fqdn {
         r.fqdn = fqdn;
     }
 
@@ -119,6 +118,9 @@ fn dhcp_response_with_override(
                     .into();
         }
         _ => {}
+    }
+    if let Some(booturl) = overrides.booturl {
+        r.booturl = Some(booturl);
     }
 
     let mut out = Vec::with_capacity(224);
@@ -229,6 +231,14 @@ pub(super) fn matches_mock_response(machine: &Machine) -> bool {
         && machine.inner.address == address_to_offer(machine.discovery_info.mac_address)
 }
 
+#[derive(Clone, Default)]
+struct DhcpResponseOverrides {
+    /// An empty address simulates Core refusing a stateful allocation.
+    address: Option<String>,
+    fqdn: Option<String>,
+    booturl: Option<String>,
+}
+
 pub struct MockAPIServer {
     calls: Arc<Mutex<HashMap<String, usize>>>,
     handle: JoinHandle<Result<(), hyper::Error>>,
@@ -238,12 +248,7 @@ pub struct MockAPIServer {
     inject_failure: Arc<Mutex<bool>>,
     discoveries: Arc<Mutex<Vec<rpc::DhcpDiscovery>>>,
     expired_leases: Arc<Mutex<Vec<rpc::ExpireDhcpLeaseRequest>>>,
-    /// Per-MAC override for the `address` field of the DhcpRecord response.
-    /// A value of `""` is meaningful: it simulates a Machine with no address
-    /// binding, which allocation hooks should treat as "refuse to allocate".
-    address_overrides: Arc<Mutex<HashMap<String, String>>>,
-    /// Per-MAC override for the `fqdn` field of the DhcpRecord response.
-    fqdn_overrides: Arc<Mutex<HashMap<String, String>>>,
+    response_overrides: Arc<Mutex<HashMap<String, DhcpResponseOverrides>>>,
 }
 
 #[derive(Debug)]
@@ -279,10 +284,8 @@ impl MockAPIServer {
         let d2 = discoveries.clone();
         let expired_leases = Arc::new(Mutex::new(Vec::new()));
         let e2 = expired_leases.clone();
-        let address_overrides = Arc::new(Mutex::new(HashMap::<String, String>::new()));
-        let a2 = address_overrides.clone();
-        let fqdn_overrides = Arc::new(Mutex::new(HashMap::<String, String>::new()));
-        let f2 = fqdn_overrides.clone();
+        let response_overrides = Arc::new(Mutex::new(HashMap::new()));
+        let o2 = response_overrides.clone();
         let listener = TcpListener::bind(addr).await.unwrap();
         let local_addr = listener.local_addr().unwrap().to_string();
         let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
@@ -292,8 +295,7 @@ impl MockAPIServer {
                 let i3 = i2.clone();
                 let d3 = d2.clone();
                 let e3 = e2.clone();
-                let a3 = a2.clone();
-                let f3 = f2.clone();
+                let o3 = o2.clone();
                 tokio::select! {
                     result = listener.accept() => {
                         let (stream, _) = result.unwrap();
@@ -303,10 +305,9 @@ impl MockAPIServer {
                                 let i3 = i3.clone();
                                 let d3 = d3.clone();
                                 let e3 = e3.clone();
-                                let a3 = a3.clone();
-                                let f3 = f3.clone();
+                                let o3 = o3.clone();
                                 async move {
-                                    Ok::<Response<GrpcBody>, hyper::Error>(MockAPIServer::handler(req, c3.clone(), i3.clone(), d3.clone(), e3.clone(), a3.clone(), f3.clone()).await.unwrap())
+                                    Ok::<Response<GrpcBody>, hyper::Error>(MockAPIServer::handler(req, c3.clone(), i3.clone(), d3.clone(), e3.clone(), o3.clone()).await.unwrap())
                                 }
                             })).await.inspect_err(|e| eprintln!("ERROR: {e:?}")).unwrap()
                         });
@@ -328,28 +329,42 @@ impl MockAPIServer {
             inject_failure,
             discoveries,
             expired_leases,
-            address_overrides,
-            fqdn_overrides,
+            response_overrides,
         }
     }
 
     /// Override what address the mock returns for a specific MAC on subsequent
     /// `DiscoverDhcp` calls. Pass `""` to simulate "Machine has no address binding".
     pub fn set_address_override(&self, mac_address: &str, address: &str) {
-        self.address_overrides
+        self.response_overrides
             .lock()
             .unwrap()
-            .insert(normalized_mac_key(mac_address), address.to_string());
+            .entry(normalized_mac_key(mac_address))
+            .or_default()
+            .address = Some(address.to_string());
     }
 
     /// Override what FQDN the mock returns for a specific MAC on subsequent
     /// `DiscoverDhcp` calls. Pass `""` to simulate an options-only record with
     /// no API-owned hostname.
     pub fn set_fqdn_override(&self, mac_address: &str, fqdn: &str) {
-        self.fqdn_overrides
+        self.response_overrides
             .lock()
             .unwrap()
-            .insert(normalized_mac_key(mac_address), fqdn.to_string());
+            .entry(normalized_mac_key(mac_address))
+            .or_default()
+            .fqdn = Some(fqdn.to_string());
+    }
+
+    /// Override `booturl` for subsequent `DiscoverDhcp` calls for this MAC.
+    /// An empty string suppresses the hook's boot URL and generated fallback.
+    pub fn set_booturl_override(&self, mac_address: &str, booturl: &str) {
+        self.response_overrides
+            .lock()
+            .unwrap()
+            .entry(normalized_mac_key(mac_address))
+            .or_default()
+            .booturl = Some(booturl.to_string());
     }
 
     // The HTTP address of the server
@@ -386,8 +401,7 @@ impl MockAPIServer {
         fail: Option<Arc<Mutex<bool>>>,
         discoveries: Arc<Mutex<Vec<rpc::DhcpDiscovery>>>,
         expired_leases: Arc<Mutex<Vec<rpc::ExpireDhcpLeaseRequest>>>,
-        address_overrides: Arc<Mutex<HashMap<String, String>>>,
-        fqdn_overrides: Arc<Mutex<HashMap<String, String>>>,
+        response_overrides: Arc<Mutex<HashMap<String, DhcpResponseOverrides>>>,
     ) -> Result<Response<GrpcBody>, MockAPIServerError> {
         let path = req.uri().path();
         calls
@@ -404,13 +418,7 @@ impl MockAPIServer {
                     Err(MockAPIServerError::MockAPIFetchMachineError)
                 } else {
                     Ok(grpc_response(
-                        MockAPIServer::discover_dhcp(
-                            req,
-                            discoveries,
-                            address_overrides,
-                            fqdn_overrides,
-                        )
-                        .await,
+                        MockAPIServer::discover_dhcp(req, discoveries, response_overrides).await,
                     ))
                 }
             }
@@ -434,8 +442,7 @@ impl MockAPIServer {
     async fn discover_dhcp(
         req: Request<Incoming>,
         discoveries: Arc<Mutex<Vec<rpc::DhcpDiscovery>>>,
-        address_overrides: Arc<Mutex<HashMap<String, String>>>,
-        fqdn_overrides: Arc<Mutex<HashMap<String, String>>>,
+        response_overrides: Arc<Mutex<HashMap<String, DhcpResponseOverrides>>>,
     ) -> Vec<u8> {
         let input_bytes = req.into_body().collect().await.unwrap().to_bytes();
 
@@ -444,24 +451,20 @@ impl MockAPIServer {
         let (address_family, message_kind) = validate_discovery_contract(&disco);
         discoveries.lock().unwrap().push(disco.clone());
         let mac_key = normalized_mac_key(&disco.mac_address);
-        let override_for_mac = address_overrides
+        let mut overrides = response_overrides
             .lock()
             .unwrap()
             .get(&mac_key)
             .cloned()
-            .or_else(|| {
-                (address_family == rpc::AddressFamily::V6
-                    && message_kind == Some(rpc::MessageKind::V6InfoRequest))
-                .then_some(String::new())
-            });
-        let fqdn_override_for_mac = fqdn_overrides.lock().unwrap().get(&mac_key).cloned();
+            .unwrap_or_default();
+        if overrides.address.is_none()
+            && address_family == rpc::AddressFamily::V6
+            && message_kind == Some(rpc::MessageKind::V6InfoRequest)
+        {
+            overrides.address = Some(String::new());
+        }
 
-        dhcp_response_with_override(
-            &disco.mac_address,
-            override_for_mac,
-            fqdn_override_for_mac,
-            address_family,
-        )
+        dhcp_response_with_override(&disco.mac_address, overrides, address_family)
     }
 }
 

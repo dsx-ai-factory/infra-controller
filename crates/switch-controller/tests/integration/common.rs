@@ -203,7 +203,10 @@ pub(super) async fn new_switch(
             }),
             nvos_username,
             nvos_password,
-            nvos_mac_addresses: vec![nvos_mac.to_string()],
+            nvos_interfaces: vec![rpc::forge::ExpectedNvosInterface {
+                mac_address: nvos_mac.to_string(),
+                is_primary: true,
+            }],
             bmc_ip_address: bmc_ip.to_string(),
             nvos_ip_address: Some(nvos_ip.to_string()),
             ..Default::default()

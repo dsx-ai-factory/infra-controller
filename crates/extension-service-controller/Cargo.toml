@@ -33,12 +33,16 @@ config-version = { path = "../config-version", default-features = false }
 state-controller = { path = "../state-controller" }
 
 async-trait = { workspace = true }
+futures = { workspace = true }
 kube = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+json-patch = { workspace = true }
 
 [lints]
 workspace = true
