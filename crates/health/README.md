@@ -11,8 +11,8 @@ needed for this workflow.
 
 ## Static endpoint credentials
 
-Static endpoints may keep inline `username` and `password` fields, or use one
-shared JSON or YAML credentials file for both static endpoint lists:
+Static endpoints require one shared JSON credentials file for both
+static endpoint lists. Inline `username` and `password` fields are rejected:
 
 ```toml
 [endpoint_sources]
@@ -27,7 +27,6 @@ credentials_profile = "bmc"
 ip = "192.0.2.2"
 mac = "aa:bb:cc:dd:ee:01"
 credentials_profile = "switch"
-username = "cumulus"
 switch = { serial = "switch-01" }
 ```
 
@@ -37,19 +36,20 @@ partial credentials keyed by MAC, ignoring letter case. Omitted and empty maps
 both contain no entries. `credentials_profile` selects a profile explicitly,
 requires a configured file, and rejects unknown names; there is no default.
 
-Fields resolve independently: **per-MAC override → inline target value → selected
-profile**. Omitted or `null` fields inherit; empty strings are explicit values.
-Usernames are required; passwords are optional. With a file configured, target
-MACs must be unique across both static lists.
+Fields resolve independently: **per-MAC override → selected profile**. Omitted
+or `null` fields inherit; empty strings are explicit values.
+Usernames are required; passwords are optional. Target MACs must be unique
+across both static lists.
 
-The file path is optional with no default; relative paths use the working
-directory. One reader is shared across targets. Startup rejects missing or
+The file path is required when either static list is nonempty and has no
+default; relative paths use the working directory. One reader is shared across
+targets. Startup rejects missing or
 malformed files, unknown profiles, and missing usernames, logging the file path
 and, for lookup errors, the target MAC.
 
 File events trigger reloads; 60-second polling also detects atomic replacements
 and Kubernetes Secret updates. Replace complete files atomically. Missing files,
-unknown fields, invalid types or MACs, and malformed JSON or YAML retain the
+unknown fields, invalid types or MACs, and malformed JSON retain the
 entire last valid snapshot. Parse errors report line/column when available and
 redact values.
 
@@ -58,7 +58,7 @@ reads retry; mutating calls are not replayed. NVUE REST fetches again on the nex
 collection pass. gNMI refreshes before reconnecting; established streams remain
 connected. Rotation can cause rejected requests or a failed REST collection pass.
 
-Profile/override changes need no restart. Removed overrides restore fallbacks;
+Profile/override changes need no restart. Removed overrides restore profile values;
 removing a selected profile or the last username causes lookup errors. Main
 configuration changes, including targets and profile selections, require restart.
 

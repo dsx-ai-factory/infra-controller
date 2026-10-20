@@ -29,20 +29,19 @@ use crate::endpoint::{BmcAddr, BmcCredentials};
 mod snapshot;
 
 use snapshot::BmcCredentialSnapshot;
-pub(crate) use snapshot::{BmcCredentialConfig, CredentialOverrides};
 
 type Reader = StructuredCredentialReader<BmcCredentialSnapshot>;
 
 /// Shares one eagerly initialized secrets reader across static endpoints.
 pub(crate) struct StaticCredentialProvider {
     reader: Reader,
-    targets: HashMap<MacAddress, BmcCredentialConfig>,
+    targets: HashMap<MacAddress, Option<String>>,
 }
 
 impl StaticCredentialProvider {
     pub(crate) async fn new(
         path: PathBuf,
-        configs: Vec<(MacAddress, BmcCredentialConfig)>,
+        configs: Vec<(MacAddress, Option<String>)>,
     ) -> Result<Self, HealthError> {
         let reader = Reader::new(FileCredentialsConfig {
             path: Some(path.clone()), poll_interval: Some(Duration::from_secs(60)), ..Default::default()
@@ -53,8 +52,8 @@ impl StaticCredentialProvider {
         let snapshot = reader.snapshot();
         let mut targets = HashMap::with_capacity(configs.len());
         for (mac, config) in configs {
-            snapshot.resolve(mac, &config).map_err(|error| {
-                tracing::error!(path = %path.display(), %mac, %error, "invalid static credentials at startup");
+            snapshot.resolve(mac, config.as_deref()).map_err(|error| {
+                tracing::error!(path = %path.display(), mac_address = %mac, %error, "invalid static credentials at startup");
                 HealthError::GenericError(error.to_string())
             })?;
             targets.insert(mac, config);
@@ -77,7 +76,7 @@ impl CredentialProvider for StaticCredentialProvider {
             })?;
             self.reader
                 .snapshot()
-                .resolve(mac, config)
+                .resolve(mac, config.as_deref())
                 .map_err(|error| HealthError::GenericError(error.to_string()))
         })
     }
@@ -109,13 +108,9 @@ pub(crate) mod test_support {
         })
         .await
         .expect("test reader");
-        let config = BmcCredentialConfig {
-            profile: Some("test".into()),
-            inline: CredentialOverrides::default(),
-        };
         Arc::new(StaticCredentialProvider {
             reader,
-            targets: HashMap::from([(addr.mac.unwrap(), config)]),
+            targets: HashMap::from([(addr.mac.unwrap(), Some("test".into()))]),
         })
     }
 

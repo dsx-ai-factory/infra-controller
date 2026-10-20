@@ -167,16 +167,15 @@ pub struct EndpointSourcesConfig {
     #[serde(rename = "nico_api", alias = "carbide_api")]
     pub carbide_api: Configurable<CarbideApiConnectionConfig>,
 
-    /// Optional JSON or YAML credentials file for both static endpoint lists.
-    /// Relative paths use the process working directory. Per-MAC overrides take
-    /// precedence over inline target fields, then the explicitly selected profile,
-    /// independently for username and password. Omitted/null fields inherit; empty strings do not.
-    /// Cached snapshots reload on file events, with polling every 60 seconds. Failed updates
-    /// retain the last valid snapshot; startup requires a readable, valid file,
-    /// valid profile selections, and a resolved username per target. Passwords are optional.
-    /// Target MACs must be unique when a file is configured. Consumers refresh after
-    /// authentication failures. Writers should replace the file atomically. By default no file is loaded.
-    /// Adding/removing overrides does not change the configured target inventory.
+    /// JSON credentials file, required when either static endpoint list is nonempty.
+    /// Relative paths use the process working directory; no file is loaded by default.
+    /// Per-MAC overrides take precedence over the explicitly selected profile for each field.
+    /// Omitted/null fields inherit; empty strings do not. Usernames are required;
+    /// passwords are optional. Unknown profiles or missing usernames fail startup.
+    /// One cached reader reloads on file events, with polling every 60 seconds;
+    /// failed updates retain the last valid snapshot. Replace files atomically.
+    /// Consumers refresh after authentication failures. Target MACs must be unique.
+    /// File updates do not change the configured target inventory.
     pub static_credentials_file: Option<PathBuf>,
 
     /// Static BMC endpoints, including switch host endpoints.
@@ -295,10 +294,6 @@ pub struct StaticBmcEndpoint {
     #[serde(default)]
     pub port: Option<u16>,
     pub mac: String,
-    /// Inline fallback username; may be supplied by `static_credentials_file`.
-    pub username: Option<String>,
-    /// Optional inline fallback password; omission allows inheritance from the file.
-    pub password: Option<String>,
     /// Optional named profile in `static_credentials_file`. No profile is selected
     /// by default; unknown names fail lookup. Requires a configured credentials file.
     pub credentials_profile: Option<String>,
@@ -395,25 +390,6 @@ impl Debug for StaticBmcEndpoint {
 }
 
 impl StaticBmcEndpoint {
-    fn validate_credential_source(
-        &self,
-        config_path: &str,
-        index: usize,
-        has_file: bool,
-    ) -> Result<(), String> {
-        if !has_file && self.credentials_profile.is_some() {
-            return Err(format!(
-                "{config_path}[{index}].credentials_profile requires endpoint_sources.static_credentials_file"
-            ));
-        }
-        if !has_file && self.username.is_none() {
-            return Err(format!(
-                "{config_path}[{index}].username is required without endpoint_sources.static_credentials_file"
-            ));
-        }
-        Ok(())
-    }
-
     fn identity_count(&self) -> usize {
         usize::from(self.machine.is_some())
             + usize::from(self.power_shelf.is_some())
@@ -490,23 +466,29 @@ impl EndpointSourcesConfig {
         {
             return Err("endpoint_sources.static_credentials_file must not be empty".into());
         }
+        for (path, endpoints) in [
+            (BMC_ENDPOINTS_PATH, &self.static_bmc_endpoints),
+            (
+                SWITCH_HOST_ENDPOINTS_PATH,
+                &self.static_switch_host_endpoints,
+            ),
+        ] {
+            if !endpoints.is_empty() && self.static_credentials_file.is_none() {
+                return Err(format!(
+                    "{path}[0] requires endpoint_sources.static_credentials_file"
+                ));
+            }
+        }
         let mut static_macs = HashMap::new();
 
         for (index, endpoint) in self.static_bmc_endpoints.iter().enumerate() {
             endpoint.validate(BMC_ENDPOINTS_PATH, index)?;
-            endpoint.validate_credential_source(
-                BMC_ENDPOINTS_PATH,
-                index,
-                self.static_credentials_file.is_some(),
-            )?;
 
             let mac = endpoint.mac.parse::<MacAddress>().map_err(|_| {
                 format!("{BMC_ENDPOINTS_PATH}[{index}].mac must be a valid MAC address")
             })?;
 
-            if self.static_credentials_file.is_some()
-                && let Some((existing_path, existing_index)) = static_macs.get(&mac)
-            {
+            if let Some((existing_path, existing_index)) = static_macs.get(&mac) {
                 return Err(format!(
                     "{BMC_ENDPOINTS_PATH}[{index}].mac duplicates {existing_path}[{existing_index}].mac"
                 ));
@@ -518,11 +500,6 @@ impl EndpointSourcesConfig {
 
         for (index, endpoint) in self.static_switch_host_endpoints.iter().enumerate() {
             endpoint.validate(SWITCH_HOST_ENDPOINTS_PATH, index)?;
-            endpoint.validate_credential_source(
-                SWITCH_HOST_ENDPOINTS_PATH,
-                index,
-                self.static_credentials_file.is_some(),
-            )?;
 
             let Some(switch) = endpoint.switch.as_ref() else {
                 return Err(format!(
@@ -3152,6 +3129,7 @@ mod tests {
 
     fn config_with(configure: impl FnOnce(&mut Config)) -> Box<Config> {
         let mut config = Config::default();
+        config.endpoint_sources.static_credentials_file = Some("credentials.json".into());
         configure(&mut config);
         Box::new(config)
     }
@@ -3162,8 +3140,6 @@ mod tests {
             port: None,
             mac: "00:11:22:33:44:55".to_string(),
             credentials_profile: None,
-            username: Some("admin".to_string()),
-            password: None,
             machine: None,
             power_shelf: None,
             switch: None,
@@ -3445,11 +3421,12 @@ mod tests {
 endpoint_discovery_interval = "1m"
 bmc_request_concurrency = 2
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "192.168.1.100"
 mac = "00:11:22:33:44:55"
-username = "root"
-password = "pass"
 
 [endpoint_sources.nico_api]
 enabled = false
@@ -3520,10 +3497,12 @@ cache_size = 50
     #[test]
     fn test_static_endpoint_config_rejects_invalid_ip() {
         let toml_content = r#"
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "not-an-ip"
 mac = "00:11:22:33:44:55"
-username = "root"
 "#;
 
         let result = Figment::new()
@@ -3541,45 +3520,24 @@ username = "root"
             let config: Config = Figment::new().merge(Toml::string(&input)).extract().map_err(|_| ())?;
             config.endpoint_sources.validate().map_err(|_| ())
         };
-            "valid sources" {
-                ("", "username = \"admin\"") => Yields(()),
+            "file credentials" {
+                ("static_credentials_file = \"credentials.json\"", "") => Yields(()),
                 ("static_credentials_file = \"credentials.json\"", "credentials_profile = \"bmc\"") => Yields(()),
             }
             "invalid sources" {
                 ("", "") => Fails,
                 ("static_credentials_file = \"\"", "") => Fails,
-                ("", "username = \"admin\"\ncredentials_profile = \"bmc\"") => Fails,
+                ("static_credentials_file = \"credentials.json\"", "username = \"admin\"") => Fails,
+                ("static_credentials_file = \"credentials.json\"", "password = \"obsolete\"") => Fails,
             }
         );
     }
 
     #[test]
-    fn static_credential_errors_identify_the_entry() {
-        for (list, global, target, field, reason) in [
-            (
-                "static_bmc_endpoints",
-                "",
-                "",
-                "username",
-                "is required without endpoint_sources.static_credentials_file",
-            ),
-            (
-                "static_switch_host_endpoints",
-                "",
-                "username = \"admin\"\ncredentials_profile = \"missing\"",
-                "credentials_profile",
-                "requires endpoint_sources.static_credentials_file",
-            ),
-            (
-                "static_bmc_endpoints",
-                "static_credentials_file = \"credentials.json\"",
-                "username = \"admin\"",
-                "mac",
-                "duplicates endpoint_sources.static_bmc_endpoints[0].mac",
-            ),
-        ] {
+    fn missing_static_credential_file_identifies_the_list() {
+        for list in ["static_bmc_endpoints", "static_switch_host_endpoints"] {
             let input = format!(
-                "[endpoint_sources]\n{global}\n[[endpoint_sources.{list}]]\nip = \"192.0.2.1\"\nmac = \"00:11:22:33:44:55\"\nusername = \"admin\"\nswitch = {{ serial = \"switch-1\", endpoint_role = \"host\" }}\n[[endpoint_sources.{list}]]\nip = \"192.0.2.2\"\nmac = \"00:11:22:33:44:55\"\n{target}"
+                "[[endpoint_sources.{list}]]\nip = \"192.0.2.1\"\nmac = \"00:11:22:33:44:55\""
             );
             let config: Config = Figment::new()
                 .merge(Toml::string(&input))
@@ -3587,7 +3545,9 @@ username = "root"
                 .unwrap();
             assert_eq!(
                 config.endpoint_sources.validate().unwrap_err(),
-                format!("endpoint_sources.{list}[1].{field} {reason}")
+                format!(
+                    "endpoint_sources.{list}[0] requires endpoint_sources.static_credentials_file"
+                )
             );
         }
     }
@@ -6014,31 +5974,26 @@ enabled = false
 [sinks.health_report]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.0.1"
 mac = "aa:bb:cc:dd:ee:ff"
-username = "admin"
-password = "pass"
 
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:11"
-username = "cumulus"
-password = "pass"
 machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "MN-001" }
 
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.1"
 mac = "11:22:33:44:55:66"
-username = "cumulus"
-password = "pass"
 switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-SW-001", slot_number = 7, tray_index = 3 }
 
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.2.1"
 mac = "22:33:44:55:66:77"
-username = "admin"
-password = "pass"
 power_shelf = { id = "fps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-PS-001" }
 "#;
 
@@ -6134,11 +6089,12 @@ enabled = false
 [sinks.health_report]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:11"
-username = "admin"
-password = "pass"
 machine = { serial = "MN-001" }
 "#;
 
@@ -6163,11 +6119,12 @@ machine = { serial = "MN-001" }
 [endpoint_sources.nico_api]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.1"
 mac = "11:22:33:44:55:66"
-username = "admin"
-password = "pass"
 switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-SW-001", endpoint_role = "host", is_primary = true }
 "#;
 
@@ -6194,11 +6151,12 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
 [endpoint_sources.nico_api]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:77"
-username = "admin"
-password = "pass"
 switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-SW-002", endpoint_role = "host", is_primary = false, nmxc_enabled = true, nmxt_enabled = true, nvlink_domain_uuid = "9f4b45ec-705a-4af4-89f7-a112bc9c8f4e" }
 "#;
 
@@ -6292,7 +6250,7 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
                 ),
             }
 
-            "duplicate within BMC endpoint list is accepted" {
+            "duplicate within BMC endpoint list" {
                 config_with(|config| {
                     let endpoint = StaticBmcEndpoint {
                         mac: "aa:bb:cc:dd:ee:ff".to_string(),
@@ -6308,7 +6266,9 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
                             ..static_endpoint()
                         },
                     ];
-                }) => Yields(()),
+                }) => FailsWith(
+                    "endpoint_sources.static_bmc_endpoints[1].mac duplicates endpoint_sources.static_bmc_endpoints[0].mac".to_string()
+                ),
             }
 
             "duplicate within host list" {
@@ -6358,11 +6318,12 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
 [endpoint_sources.nico_api]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:11"
-username = "admin"
-password = "pass"
 labels = { site = "rno-dev7", environment = "development" }
 machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "MN-001", driver_version = "570.82", slot_number = 15, tray_index = 5, nvlink_domain_uuid = "00000000-0000-0000-0000-000000000000" }
 "#;
@@ -6408,11 +6369,12 @@ machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
 [endpoint_sources.nico_api]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:11"
-username = "admin"
-password = "pass"
 labels = {{ {name} = "value" }}
 machine = {{ id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0" }}
 "#
@@ -6434,18 +6396,17 @@ machine = {{ id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0" 
 [endpoint_sources.nico_api]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:11"
-username = "admin"
-password = "pass"
 machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", physical_slot_number = 15, compute_tray_index = 5 }
 
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.1"
 mac = "11:22:33:44:55:66"
-username = "cumulus"
-password = "pass"
 switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 3 }
 "#;
 

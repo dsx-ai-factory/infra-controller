@@ -26,11 +26,11 @@ use crate::endpoint::BmcCredentials;
 /// An explicit empty string is a value and does not inherit.
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct CredentialOverrides {
+struct CredentialOverrides {
     /// Username override, or absence to inherit.
-    pub(crate) username: Option<String>,
+    username: Option<String>,
     /// Password override, or absence to inherit.
-    pub(crate) password: Option<String>,
+    password: Option<String>,
 }
 
 impl fmt::Debug for CredentialOverrides {
@@ -42,16 +42,6 @@ impl fmt::Debug for CredentialOverrides {
     }
 }
 
-/// A target's profile selection and inline credential fields.
-/// Resolution uses per-MAC overrides, then inline fields, then the profile.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct BmcCredentialConfig {
-    /// Explicit profile selection; unknown profiles fail lookup.
-    pub(crate) profile: Option<String>,
-    /// Target-specific inline fields, taking precedence over profile fields.
-    pub(crate) inline: CredentialOverrides,
-}
-
 /// One structured BMC credentials file, independent of target inventory.
 /// Both maps may be omitted or empty. MAC letter case does not affect matching.
 /// Unknown fields or malformed MAC keys reject the entire snapshot.
@@ -60,7 +50,7 @@ pub(crate) struct BmcCredentialConfig {
 pub(super) struct BmcCredentialSnapshot {
     /// Named credential sets selected explicitly by targets; no implicit default.
     profiles: HashMap<String, CredentialOverrides>,
-    /// Per-MAC fields, taking precedence over inline values and selected profiles.
+    /// Per-MAC fields, taking precedence over selected profiles.
     overrides: HashMap<MacAddress, CredentialOverrides>,
 }
 
@@ -76,26 +66,22 @@ impl BmcCredentialSnapshot {
     pub(super) fn resolve(
         &self,
         mac: MacAddress,
-        config: &BmcCredentialConfig,
+        profile_name: Option<&str>,
     ) -> Result<BmcCredentials, ResolutionError> {
-        let profile = config
-            .profile
-            .as_ref()
+        let profile = profile_name
             .map(|name| {
                 self.profiles
                     .get(name)
-                    .ok_or_else(|| ResolutionError::UnknownProfile(name.clone()))
+                    .ok_or_else(|| ResolutionError::UnknownProfile(name.to_owned()))
             })
             .transpose()?;
         let entry = self.overrides.get(&mac);
         let username = entry
             .and_then(|v| v.username.clone())
-            .or_else(|| config.inline.username.clone())
             .or_else(|| profile.and_then(|v| v.username.clone()))
             .ok_or(ResolutionError::MissingUsername(mac))?;
         let password = entry
             .and_then(|v| v.password.clone())
-            .or_else(|| config.inline.password.clone())
             .or_else(|| profile.and_then(|v| v.password.clone()));
         Ok(BmcCredentials::UsernamePassword { username, password })
     }
@@ -119,66 +105,50 @@ mod tests {
                 "bmc": {"username":"admin", "password":"shared"},
                 "switch": {"username":"cumulus", "password":"switch-password"}
             },
-            "overrides": {"aa:bb:cc:dd:ee:01": {"password":"individual"}}
+            "overrides": {
+                "aa:bb:cc:dd:ee:01": {"password":"individual"},
+                "aa:bb:cc:dd:ee:02": {"username":"standalone"},
+                "aa:bb:cc:dd:ee:03": {"password":""}
+            }
         }"#,
         )
         .unwrap();
-        let config = |profile: Option<&str>, username: Option<&str>, password: Option<&str>| {
-            BmcCredentialConfig {
-                profile: profile.map(str::to_owned),
-                inline: CredentialOverrides {
-                    username: username.map(str::to_owned),
-                    password: password.map(str::to_owned),
-                },
-            }
-        };
         check_cases(
             [
                 Case {
                     scenario: "selected switch profile",
-                    input: ("AA:BB:CC:DD:EE:00", config(Some("switch"), None, None)),
+                    input: ("AA:BB:CC:DD:EE:00", Some("switch")),
                     expect: Yields(("cumulus".into(), Some("switch-password".into()))),
                 },
                 Case {
-                    scenario: "override beats inline; inline beats profile",
-                    input: (
-                        "AA:BB:CC:DD:EE:01",
-                        config(Some("bmc"), Some("cumulus"), Some("inline")),
-                    ),
-                    expect: Yields(("cumulus".into(), Some("individual".into()))),
+                    scenario: "override beats profile",
+                    input: ("AA:BB:CC:DD:EE:01", Some("bmc")),
+                    expect: Yields(("admin".into(), Some("individual".into()))),
                 },
                 Case {
-                    scenario: "explicit empty password",
-                    input: ("AA:BB:CC:DD:EE:00", config(Some("bmc"), None, Some(""))),
+                    scenario: "explicit empty password overrides profile",
+                    input: ("AA:BB:CC:DD:EE:03", Some("bmc")),
                     expect: Yields(("admin".into(), Some("".into()))),
                 },
                 Case {
-                    scenario: "complete inline credentials without profile",
-                    input: (
-                        "AA:BB:CC:DD:EE:00",
-                        config(None, Some("inline"), Some("inline-password")),
-                    ),
-                    expect: Yields(("inline".into(), Some("inline-password".into()))),
+                    scenario: "passwordless override without profile",
+                    input: ("AA:BB:CC:DD:EE:02", None),
+                    expect: Yields(("standalone".into(), None)),
                 },
                 Case {
-                    scenario: "no implicit profile or password",
-                    input: ("AA:BB:CC:DD:EE:00", config(None, Some("inline"), None)),
-                    expect: Yields(("inline".into(), None)),
-                },
-                Case {
-                    scenario: "missing username",
-                    input: ("AA:BB:CC:DD:EE:01", config(None, None, None)),
+                    scenario: "no implicit profile",
+                    input: ("AA:BB:CC:DD:EE:00", None),
                     expect: Fails,
                 },
                 Case {
                     scenario: "unknown selected profile",
-                    input: ("AA:BB:CC:DD:EE:01", config(Some("missing"), None, None)),
+                    input: ("AA:BB:CC:DD:EE:01", Some("missing")),
                     expect: Fails,
                 },
             ],
-            |(mac, config)| {
+            |(mac, profile)| {
                 snapshot
-                    .resolve(mac.parse().unwrap(), &config)
+                    .resolve(mac.parse().unwrap(), profile)
                     .map(|credentials| match credentials {
                         BmcCredentials::UsernamePassword { username, password } => {
                             (username, password)
@@ -259,13 +229,9 @@ mod tests {
             .await
             .unwrap();
         let mac = "00:11:22:33:44:55".parse().unwrap();
-        let config = BmcCredentialConfig {
-            profile: Some("bmc".into()),
-            ..Default::default()
-        };
         let password = || {
             let BmcCredentials::UsernamePassword { password, .. } =
-                reader.snapshot().resolve(mac, &config).unwrap()
+                reader.snapshot().resolve(mac, Some("bmc")).unwrap()
             else {
                 panic!("file credentials must use username/password");
             };
