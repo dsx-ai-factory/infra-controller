@@ -6339,9 +6339,14 @@ type PowerOnRackRequest struct {
 	// persisted ComponentOperationStatus. Intended for operator-supervised
 	// maintenance where tenant impact has been acknowledged out-of-band;
 	// the bypass is recorded in the server log.
+	// Defaults to false. Does not bypass Core state-controller routing.
 	OverrideReadinessCheck bool `protobuf:"varint,5,opt,name=override_readiness_check,json=overrideReadinessCheck,proto3" json:"override_readiness_check,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Optional, defaults to false. Requests direct backend dispatch from Core
+	// instead of state-controller maintenance, and also skips Flow readiness.
+	// Intended for operator-supervised maintenance. Does not recover controller state.
+	BypassStateController bool `protobuf:"varint,6,opt,name=bypass_state_controller,json=bypassStateController,proto3" json:"bypass_state_controller,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *PowerOnRackRequest) Reset() {
@@ -6409,6 +6414,13 @@ func (x *PowerOnRackRequest) GetOverrideReadinessCheck() bool {
 	return false
 }
 
+func (x *PowerOnRackRequest) GetBypassStateController() bool {
+	if x != nil {
+		return x.BypassStateController
+	}
+	return false
+}
+
 type PowerOffRackRequest struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
 	TargetSpec   *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"` // Target racks or NVLink domains with an optional type filter, or specific components
@@ -6422,9 +6434,14 @@ type PowerOffRackRequest struct {
 	// persisted ComponentOperationStatus. Intended for operator-supervised
 	// maintenance where tenant impact has been acknowledged out-of-band;
 	// the bypass is recorded in the server log.
+	// Defaults to false. Does not bypass Core state-controller routing.
 	OverrideReadinessCheck bool `protobuf:"varint,6,opt,name=override_readiness_check,json=overrideReadinessCheck,proto3" json:"override_readiness_check,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Optional, defaults to false. Requests direct backend dispatch from Core
+	// instead of state-controller maintenance, and also skips Flow readiness.
+	// Intended for operator-supervised maintenance. Does not recover controller state.
+	BypassStateController bool `protobuf:"varint,7,opt,name=bypass_state_controller,json=bypassStateController,proto3" json:"bypass_state_controller,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *PowerOffRackRequest) Reset() {
@@ -6499,6 +6516,13 @@ func (x *PowerOffRackRequest) GetOverrideReadinessCheck() bool {
 	return false
 }
 
+func (x *PowerOffRackRequest) GetBypassStateController() bool {
+	if x != nil {
+		return x.BypassStateController
+	}
+	return false
+}
+
 type PowerResetRackRequest struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
 	TargetSpec   *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"` // Target racks or NVLink domains with an optional type filter, or specific components
@@ -6512,9 +6536,14 @@ type PowerResetRackRequest struct {
 	// persisted ComponentOperationStatus. Intended for operator-supervised
 	// maintenance where tenant impact has been acknowledged out-of-band;
 	// the bypass is recorded in the server log.
+	// Defaults to false. Does not bypass Core state-controller routing.
 	OverrideReadinessCheck bool `protobuf:"varint,6,opt,name=override_readiness_check,json=overrideReadinessCheck,proto3" json:"override_readiness_check,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Optional, defaults to false. Requests direct backend dispatch from Core
+	// instead of state-controller maintenance, and also skips Flow readiness.
+	// Intended for operator-supervised maintenance. Does not recover controller state.
+	BypassStateController bool `protobuf:"varint,7,opt,name=bypass_state_controller,json=bypassStateController,proto3" json:"bypass_state_controller,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *PowerResetRackRequest) Reset() {
@@ -6589,6 +6618,13 @@ func (x *PowerResetRackRequest) GetOverrideReadinessCheck() bool {
 	return false
 }
 
+func (x *PowerResetRackRequest) GetBypassStateController() bool {
+	if x != nil {
+		return x.BypassStateController
+	}
+	return false
+}
+
 type ACPowerCycleRackRequest struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
 	TargetSpec   *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"` // Target racks or NVLink domains with an optional type filter, or specific components
@@ -6601,9 +6637,14 @@ type ACPowerCycleRackRequest struct {
 	// persisted ComponentOperationStatus. Intended for operator-supervised
 	// maintenance where tenant impact has been acknowledged out-of-band;
 	// the bypass is recorded in the server log.
+	// Defaults to false. Does not bypass Core state-controller routing.
 	OverrideReadinessCheck bool `protobuf:"varint,5,opt,name=override_readiness_check,json=overrideReadinessCheck,proto3" json:"override_readiness_check,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Optional, defaults to false. Requests direct backend dispatch from Core
+	// instead of state-controller maintenance, and also skips Flow readiness.
+	// Intended for operator-supervised maintenance. Does not recover controller state.
+	BypassStateController bool `protobuf:"varint,6,opt,name=bypass_state_controller,json=bypassStateController,proto3" json:"bypass_state_controller,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *ACPowerCycleRackRequest) Reset() {
@@ -6667,6 +6708,13 @@ func (x *ACPowerCycleRackRequest) GetRuleId() *UUID {
 func (x *ACPowerCycleRackRequest) GetOverrideReadinessCheck() bool {
 	if x != nil {
 		return x.OverrideReadinessCheck
+	}
+	return false
+}
+
+func (x *ACPowerCycleRackRequest) GetBypassStateController() bool {
+	if x != nil {
+		return x.BypassStateController
 	}
 	return false
 }
@@ -7389,9 +7437,14 @@ type PowerControlTaskOperation struct {
 	// Required. UNSPECIFIED and unknown values are rejected.
 	Operation PowerControlOperation `protobuf:"varint,1,opt,name=operation,proto3,enum=v1.PowerControlOperation" json:"operation,omitempty"`
 	// Bypasses the component readiness gate when the task executes.
+	// Defaults to false. Does not bypass Core state-controller routing.
 	OverrideReadinessCheck bool `protobuf:"varint,2,opt,name=override_readiness_check,json=overrideReadinessCheck,proto3" json:"override_readiness_check,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Optional, defaults to false. Requests direct backend dispatch from Core
+	// instead of state-controller maintenance, and also skips Flow readiness.
+	// Intended for operator-supervised maintenance. Does not recover controller state.
+	BypassStateController bool `protobuf:"varint,3,opt,name=bypass_state_controller,json=bypassStateController,proto3" json:"bypass_state_controller,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *PowerControlTaskOperation) Reset() {
@@ -7434,6 +7487,13 @@ func (x *PowerControlTaskOperation) GetOperation() PowerControlOperation {
 func (x *PowerControlTaskOperation) GetOverrideReadinessCheck() bool {
 	if x != nil {
 		return x.OverrideReadinessCheck
+	}
+	return false
+}
+
+func (x *PowerControlTaskOperation) GetBypassStateController() bool {
+	if x != nil {
+		return x.BypassStateController
 	}
 	return false
 }
@@ -14809,17 +14869,18 @@ const file_flow_proto_rawDesc = "" +
 	"\btask_ids\x18\x01 \x03(\v2\b.v1.UUIDR\ataskIds\"\x85\x01\n" +
 	"\fQueueOptions\x12A\n" +
 	"\x11conflict_strategy\x18\x01 \x01(\x0e2\x14.v1.ConflictStrategyR\x10conflictStrategy\x122\n" +
-	"\x15queue_timeout_seconds\x18\x02 \x01(\x05R\x13queueTimeoutSeconds\"\xac\x02\n" +
+	"\x15queue_timeout_seconds\x18\x02 \x01(\x05R\x13queueTimeoutSeconds\"\xe4\x02\n" +
 	"\x12PowerOnRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12:\n" +
 	"\rqueue_options\x18\x03 \x01(\v2\x10.v1.QueueOptionsH\x00R\fqueueOptions\x88\x01\x01\x12&\n" +
 	"\arule_id\x18\x04 \x01(\v2\b.v1.UUIDH\x01R\x06ruleId\x88\x01\x01\x128\n" +
-	"\x18override_readiness_check\x18\x05 \x01(\bR\x16overrideReadinessCheckB\x10\n" +
+	"\x18override_readiness_check\x18\x05 \x01(\bR\x16overrideReadinessCheck\x126\n" +
+	"\x17bypass_state_controller\x18\x06 \x01(\bR\x15bypassStateControllerB\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
-	"\b_rule_id\"\xc5\x02\n" +
+	"\b_rule_id\"\xfd\x02\n" +
 	"\x13PowerOffRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12\x16\n" +
@@ -14827,10 +14888,11 @@ const file_flow_proto_rawDesc = "" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12:\n" +
 	"\rqueue_options\x18\x04 \x01(\v2\x10.v1.QueueOptionsH\x00R\fqueueOptions\x88\x01\x01\x12&\n" +
 	"\arule_id\x18\x05 \x01(\v2\b.v1.UUIDH\x01R\x06ruleId\x88\x01\x01\x128\n" +
-	"\x18override_readiness_check\x18\x06 \x01(\bR\x16overrideReadinessCheckB\x10\n" +
+	"\x18override_readiness_check\x18\x06 \x01(\bR\x16overrideReadinessCheck\x126\n" +
+	"\x17bypass_state_controller\x18\a \x01(\bR\x15bypassStateControllerB\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
-	"\b_rule_id\"\xc7\x02\n" +
+	"\b_rule_id\"\xff\x02\n" +
 	"\x15PowerResetRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12\x16\n" +
@@ -14838,17 +14900,19 @@ const file_flow_proto_rawDesc = "" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12:\n" +
 	"\rqueue_options\x18\x04 \x01(\v2\x10.v1.QueueOptionsH\x00R\fqueueOptions\x88\x01\x01\x12&\n" +
 	"\arule_id\x18\x05 \x01(\v2\b.v1.UUIDH\x01R\x06ruleId\x88\x01\x01\x128\n" +
-	"\x18override_readiness_check\x18\x06 \x01(\bR\x16overrideReadinessCheckB\x10\n" +
+	"\x18override_readiness_check\x18\x06 \x01(\bR\x16overrideReadinessCheck\x126\n" +
+	"\x17bypass_state_controller\x18\a \x01(\bR\x15bypassStateControllerB\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
-	"\b_rule_id\"\xb1\x02\n" +
+	"\b_rule_id\"\xe9\x02\n" +
 	"\x17ACPowerCycleRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12:\n" +
 	"\rqueue_options\x18\x03 \x01(\v2\x10.v1.QueueOptionsH\x00R\fqueueOptions\x88\x01\x01\x12&\n" +
 	"\arule_id\x18\x04 \x01(\v2\b.v1.UUIDH\x01R\x06ruleId\x88\x01\x01\x128\n" +
-	"\x18override_readiness_check\x18\x05 \x01(\bR\x16overrideReadinessCheckB\x10\n" +
+	"\x18override_readiness_check\x18\x05 \x01(\bR\x16overrideReadinessCheck\x126\n" +
+	"\x17bypass_state_controller\x18\x06 \x01(\bR\x15bypassStateControllerB\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
 	"\b_rule_id\"\xde\x01\n" +
@@ -14913,10 +14977,11 @@ const file_flow_proto_rawDesc = "" +
 	"\rTaskOperation\x12D\n" +
 	"\rpower_control\x18\x01 \x01(\v2\x1d.v1.PowerControlTaskOperationH\x00R\fpowerControl\x12M\n" +
 	"\x10firmware_control\x18\x02 \x01(\v2 .v1.FirmwareControlTaskOperationH\x00R\x0ffirmwareControlB\v\n" +
-	"\toperation\"\x8e\x01\n" +
+	"\toperation\"\xc6\x01\n" +
 	"\x19PowerControlTaskOperation\x127\n" +
 	"\toperation\x18\x01 \x01(\x0e2\x19.v1.PowerControlOperationR\toperation\x128\n" +
-	"\x18override_readiness_check\x18\x02 \x01(\bR\x16overrideReadinessCheck\"\xc2\x03\n" +
+	"\x18override_readiness_check\x18\x02 \x01(\bR\x16overrideReadinessCheck\x126\n" +
+	"\x17bypass_state_controller\x18\x03 \x01(\bR\x15bypassStateController\"\xc2\x03\n" +
 	"\x1cFirmwareControlTaskOperation\x12:\n" +
 	"\toperation\x18\x01 \x01(\x0e2\x1c.v1.FirmwareControlOperationR\toperation\x12*\n" +
 	"\x0etarget_version\x18\x02 \x01(\tH\x00R\rtargetVersion\x88\x01\x01\x12>\n" +

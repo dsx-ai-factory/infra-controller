@@ -913,8 +913,8 @@ func TestNVLinkDomainOperationWorkflowIdentity_PowerWorkflowID(t *testing.T) {
 		NVLinkDomainIDs: []string{uuid.NewString()},
 		RuleID:          &ruleID,
 	}
-	baseID := identity.powerWorkflowID("forceoff", true)
-	assert.Equal(t, baseID, identity.powerWorkflowID(model.PowerControlStateForceOff, true),
+	baseID := identity.powerWorkflowID("forceoff", true, false)
+	assert.Equal(t, baseID, identity.powerWorkflowID(model.PowerControlStateForceOff, true, false),
 		"canonical and legacy states must retain the same workflow identity")
 
 	tests := []struct {
@@ -922,9 +922,18 @@ func TestNVLinkDomainOperationWorkflowIdentity_PowerWorkflowID(t *testing.T) {
 		identity   nvLinkDomainOperationWorkflowIdentity
 		state      string
 		override   bool
+		bypass     bool
 		wantPrefix string
 		wantBase   bool
 	}{
+		{
+			name:       "includes controller bypass in the identity",
+			identity:   identity,
+			state:      "forceoff",
+			override:   true,
+			bypass:     true,
+			wantPrefix: "nvlink-domain-power-state-update-forceoff-",
+		},
 		{
 			name:       "is deterministic for the same operation",
 			identity:   identity,
@@ -960,7 +969,7 @@ func TestNVLinkDomainOperationWorkflowIdentity_PowerWorkflowID(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := test.identity.powerWorkflowID(test.state, test.override)
+			got := test.identity.powerWorkflowID(test.state, test.override, test.bypass)
 			assert.True(t, strings.HasPrefix(got, test.wantPrefix))
 			if test.wantBase {
 				assert.Equal(t, baseID, got)

@@ -355,3 +355,40 @@ func mustMarshal(t *testing.T, v any) json.RawMessage {
 	}
 	return data
 }
+
+func TestManager_PowerControlRouting(t *testing.T) {
+	cases := []struct {
+		name     string
+		override bool
+		bypass   bool
+	}{
+		{name: "readiness override retains controller routing", override: true},
+		{name: "controller bypass also skips readiness", bypass: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := nicoapi.NewMockClient()
+			client.SetPowerShelfRackID("ps-1", "rack-A")
+			reader := readiness.NewMemReader()
+			reader.SetRackHosts("rack-A", []string{"host-1"})
+			reader.SetStatus("host-1", &types.ComponentOperationStatus{
+				Phase:             types.PhaseError,
+				BlockedOperations: []types.OperationType{types.OperationTypePowerControl},
+			})
+			m := newManagerForReadinessTest(t, client, reader)
+			target := common.Target{
+				Type:        devicetypes.ComponentTypePowerShelf,
+				Identifiers: []string{"ps-1"},
+			}
+			err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
+				Operation:              operations.PowerOperationPowerOn,
+				OverrideReadinessCheck: tc.override,
+				BypassStateController:  tc.bypass,
+			})
+			require.NoError(t, err)
+			request := client.LastComponentPowerControlRequest()
+			require.NotNil(t, request)
+			assert.Equal(t, tc.bypass, request.GetBypassStateController())
+		})
+	}
+}

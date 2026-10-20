@@ -38,6 +38,7 @@ func TaskOperationFrom(spec *pb.TaskOperation) (operations.Operation, error) {
 			Operation:              powerOperation,
 			Forced:                 powerOperationIsForced(powerOperation),
 			OverrideReadinessCheck: typed.PowerControl.GetOverrideReadinessCheck(),
+			BypassStateController:  typed.PowerControl.GetBypassStateController(),
 		}
 	case *pb.TaskOperation_FirmwareControl:
 		if typed.FirmwareControl == nil {
@@ -106,6 +107,7 @@ func TaskOperationTo(operation operations.Operation) (*pb.TaskOperation, error) 
 				PowerControl: &pb.PowerControlTaskOperation{
 					Operation:              powerOperation,
 					OverrideReadinessCheck: typed.OverrideReadinessCheck,
+					BypassStateController:  typed.BypassStateController,
 				},
 			},
 		}, nil

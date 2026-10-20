@@ -1598,19 +1598,19 @@ func TestScheduledOperationFrom(t *testing.T) {
 		"power_on": {
 			input: &pb.ScheduledOperation{
 				Operation: &pb.ScheduledOperation_PowerOn{
-					PowerOn: &pb.PowerOnRackRequest{TargetSpec: rackTargetProto},
+					PowerOn: &pb.PowerOnRackRequest{BypassStateController: true, TargetSpec: rackTargetProto},
 				},
 			},
-			wantOp: &operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn},
+			wantOp: &operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn, BypassStateController: true},
 			wantTS: rackSpec,
 		},
 		"power_off unforced": {
 			input: &pb.ScheduledOperation{
 				Operation: &pb.ScheduledOperation_PowerOff{
-					PowerOff: &pb.PowerOffRackRequest{TargetSpec: rackTargetProto, Forced: false},
+					PowerOff: &pb.PowerOffRackRequest{BypassStateController: true, TargetSpec: rackTargetProto, Forced: false},
 				},
 			},
-			wantOp: &operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOff},
+			wantOp: &operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOff, BypassStateController: true},
 			wantTS: rackSpec,
 		},
 		"power_off forced": {
@@ -1628,10 +1628,10 @@ func TestScheduledOperationFrom(t *testing.T) {
 		"power_reset unforced": {
 			input: &pb.ScheduledOperation{
 				Operation: &pb.ScheduledOperation_PowerReset{
-					PowerReset: &pb.PowerResetRackRequest{TargetSpec: rackTargetProto, Forced: false},
+					PowerReset: &pb.PowerResetRackRequest{BypassStateController: true, TargetSpec: rackTargetProto, Forced: false},
 				},
 			},
-			wantOp: &operations.PowerControlTaskInfo{Operation: operations.PowerOperationRestart},
+			wantOp: &operations.PowerControlTaskInfo{Operation: operations.PowerOperationRestart, BypassStateController: true},
 			wantTS: rackSpec,
 		},
 		"power_reset forced": {

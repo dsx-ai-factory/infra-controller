@@ -1175,7 +1175,17 @@ components (or, for rack-scoped components, any host on the owning
 rack) are reported as not ready for the operation by their
 persisted ComponentOperationStatus. Intended for operator-supervised
 maintenance where tenant impact has been acknowledged out-of-band;
-the bypass is recorded in the server log. </p></td>
+the bypass is recorded in the server log.
+Defaults to false. Does not bypass Core state-controller routing. </p></td>
+                </tr>
+
+                <tr>
+                  <td>bypass_state_controller</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p>Optional, defaults to false. Requests direct backend dispatch from Core
+instead of state-controller maintenance, and also skips Flow readiness.
+Intended for operator-supervised maintenance. Does not recover controller state. </p></td>
                 </tr>
 
             </tbody>
@@ -6870,7 +6880,17 @@ selected cohort is deterministic and auditable. </p></td>
                   <td>override_readiness_check</td>
                   <td><a href="#bool">bool</a></td>
                   <td></td>
-                  <td><p>Bypasses the component readiness gate when the task executes. </p></td>
+                  <td><p>Bypasses the component readiness gate when the task executes.
+Defaults to false. Does not bypass Core state-controller routing. </p></td>
+                </tr>
+
+                <tr>
+                  <td>bypass_state_controller</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p>Optional, defaults to false. Requests direct backend dispatch from Core
+instead of state-controller maintenance, and also skips Flow readiness.
+Intended for operator-supervised maintenance. Does not recover controller state. </p></td>
                 </tr>
 
             </tbody>
@@ -6934,7 +6954,17 @@ components (or, for rack-scoped components, any host on the owning
 rack) are reported as not ready for the operation by their
 persisted ComponentOperationStatus. Intended for operator-supervised
 maintenance where tenant impact has been acknowledged out-of-band;
-the bypass is recorded in the server log. </p></td>
+the bypass is recorded in the server log.
+Defaults to false. Does not bypass Core state-controller routing. </p></td>
+                </tr>
+
+                <tr>
+                  <td>bypass_state_controller</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p>Optional, defaults to false. Requests direct backend dispatch from Core
+instead of state-controller maintenance, and also skips Flow readiness.
+Intended for operator-supervised maintenance. Does not recover controller state. </p></td>
                 </tr>
 
             </tbody>
@@ -6991,7 +7021,17 @@ components (or, for rack-scoped components, any host on the owning
 rack) are reported as not ready for the operation by their
 persisted ComponentOperationStatus. Intended for operator-supervised
 maintenance where tenant impact has been acknowledged out-of-band;
-the bypass is recorded in the server log. </p></td>
+the bypass is recorded in the server log.
+Defaults to false. Does not bypass Core state-controller routing. </p></td>
+                </tr>
+
+                <tr>
+                  <td>bypass_state_controller</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p>Optional, defaults to false. Requests direct backend dispatch from Core
+instead of state-controller maintenance, and also skips Flow readiness.
+Intended for operator-supervised maintenance. Does not recover controller state. </p></td>
                 </tr>
 
             </tbody>
@@ -7055,7 +7095,17 @@ components (or, for rack-scoped components, any host on the owning
 rack) are reported as not ready for the operation by their
 persisted ComponentOperationStatus. Intended for operator-supervised
 maintenance where tenant impact has been acknowledged out-of-band;
-the bypass is recorded in the server log. </p></td>
+the bypass is recorded in the server log.
+Defaults to false. Does not bypass Core state-controller routing. </p></td>
+                </tr>
+
+                <tr>
+                  <td>bypass_state_controller</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p>Optional, defaults to false. Requests direct backend dispatch from Core
+instead of state-controller maintenance, and also skips Flow readiness.
+Intended for operator-supervised maintenance. Does not recover controller state. </p></td>
                 </tr>
 
             </tbody>

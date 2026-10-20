@@ -26587,7 +26587,16 @@ components:
             When true, proceed even if one or more target components (or hosts
             on the owning rack for rack-scoped components) are reported as not
             ready by their persisted status. Intended for operator-supervised
-            maintenance.
+            maintenance. This flag only skips Flow readiness checks; it does
+            not bypass Core state-controller routing.
+        bypassStateController:
+          type: boolean
+          default: false
+          description: |-
+            When true, request direct backend dispatch from Core instead of
+            state-controller maintenance, and also skip Flow readiness checks.
+            Intended for operator-supervised maintenance. This does not recover
+            controller state. When false or omitted, retain Core's normal routing.
       examples:
         - siteId: 550e8400-e29b-41d4-a716-446655440000
           domainIds:
@@ -26749,7 +26758,16 @@ components:
             When true, proceed even if one or more target components (or hosts
             on the owning rack for rack-scoped components) are reported as not
             ready by their persisted status. Intended for operator-supervised
-            maintenance.
+            maintenance. This flag only skips Flow readiness checks; it does
+            not bypass Core state-controller routing.
+        bypassStateController:
+          type: boolean
+          default: false
+          description: |-
+            When true, request direct backend dispatch from Core instead of
+            state-controller maintenance, and also skip Flow readiness checks.
+            Intended for operator-supervised maintenance. This does not recover
+            controller state. When false or omitted, retain Core's normal routing.
     BatchUpdateTrayPowerStateRequest:
       title: BatchUpdateTrayPowerStateRequest
       type: object
@@ -26795,7 +26813,16 @@ components:
             When true, proceed even if one or more target components (or hosts
             on the owning rack for rack-scoped components) are reported as not
             ready by their persisted status. Intended for operator-supervised
-            maintenance.
+            maintenance. This flag only skips Flow readiness checks; it does
+            not bypass Core state-controller routing.
+        bypassStateController:
+          type: boolean
+          default: false
+          description: |-
+            When true, request direct backend dispatch from Core instead of
+            state-controller maintenance, and also skip Flow readiness checks.
+            Intended for operator-supervised maintenance. This does not recover
+            controller state. When false or omitted, retain Core's normal routing.
     BatchRackFirmwareUpdateRequest:
       title: BatchRackFirmwareUpdateRequest
       type: object
@@ -28226,7 +28253,16 @@ components:
             When true, proceed even if one or more target components (or hosts
             on the owning rack for rack-scoped components) are reported as not
             ready by their persisted status. Intended for operator-supervised
-            maintenance.
+            maintenance. This flag only skips Flow readiness checks; it does
+            not bypass Core state-controller routing.
+        bypassStateController:
+          type: boolean
+          default: false
+          description: |-
+            When true, request direct backend dispatch from Core instead of
+            state-controller maintenance, and also skip Flow readiness checks.
+            Intended for operator-supervised maintenance. This does not recover
+            controller state. When false or omitted, retain Core's normal routing.
       examples:
         - siteId: 550e8400-e29b-41d4-a716-446655440000
           state: 'On'

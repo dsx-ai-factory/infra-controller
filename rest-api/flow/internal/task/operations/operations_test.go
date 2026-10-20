@@ -19,6 +19,7 @@ func TestOperation_Clone(t *testing.T) {
 			Forced:                 true,
 			RuleID:                 "power-rule",
 			OverrideReadinessCheck: true,
+			BypassStateController:  true,
 		},
 		"inject expectation": &InjectExpectationTaskInfo{
 			Info: json.RawMessage(`{"expected":"value"}`),

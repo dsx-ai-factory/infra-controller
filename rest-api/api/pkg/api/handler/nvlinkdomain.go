@@ -353,6 +353,7 @@ type nvLinkDomainOperationWorkflowIdentity struct {
 	Version                *string  `json:"version,omitempty"`
 	RuleID                 *string  `json:"ruleId,omitempty"`
 	OverrideReadinessCheck bool     `json:"overrideReadinessCheck,omitempty"`
+	BypassStateController  bool     `json:"bypassStateController,omitempty"`
 }
 
 func newNVLinkDomainOperationWorkflowIdentity(
@@ -395,10 +396,12 @@ func newNVLinkDomainOperationWorkflowIdentity(
 func (identity nvLinkDomainOperationWorkflowIdentity) powerWorkflowID(
 	state string,
 	overrideReadinessCheck bool,
+	bypassStateController bool,
 ) string {
 	workflowToken := model.PowerControlStateWorkflowToken(state)
 	identity.State = workflowToken
 	identity.OverrideReadinessCheck = overrideReadinessCheck
+	identity.BypassStateController = bypassStateController
 
 	return fmt.Sprintf("nvlink-domain-power-state-update-%s-%s", workflowToken, common.RequestHash(identity))
 }
@@ -531,7 +534,8 @@ func (h UpdateNVLinkDomainPowerStateHandler) Handle(c echo.Context) error {
 		request.State,
 		identity.RuleID,
 		request.OverrideReadinessCheck,
-		identity.powerWorkflowID(request.State, request.OverrideReadinessCheck),
+		request.BypassStateController,
+		identity.powerWorkflowID(request.State, request.OverrideReadinessCheck, request.BypassStateController),
 		"NVLink Domain",
 	)
 	if proxyErr != nil {
@@ -651,7 +655,8 @@ func (h BatchUpdateNVLinkDomainPowerStateHandler) Handle(c echo.Context) error {
 		request.State,
 		identity.RuleID,
 		request.OverrideReadinessCheck,
-		identity.powerWorkflowID(request.State, request.OverrideReadinessCheck),
+		request.BypassStateController,
+		identity.powerWorkflowID(request.State, request.OverrideReadinessCheck, request.BypassStateController),
 		"NVLink Domains",
 	)
 	if proxyErr != nil {

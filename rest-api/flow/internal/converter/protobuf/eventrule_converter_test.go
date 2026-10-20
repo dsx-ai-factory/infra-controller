@@ -185,14 +185,19 @@ func TestTaskOperationFrom(t *testing.T) {
 		wantErr   string
 	}{
 		"power control": {
-			operation: powerTaskOperation(
-				pb.PowerControlOperation_POWER_CONTROL_OPERATION_FORCE_POWER_OFF,
-			),
+			operation: &pb.TaskOperation{
+				Operation: &pb.TaskOperation_PowerControl{PowerControl: &pb.PowerControlTaskOperation{
+					Operation:             pb.PowerControlOperation_POWER_CONTROL_OPERATION_FORCE_POWER_OFF,
+					BypassStateController: true,
+				}},
+			},
 			check: func(t *testing.T, operation operations.Operation) {
 				power, ok := operation.(*operations.PowerControlTaskInfo)
 				require.True(t, ok)
 				require.Equal(t, operations.PowerOperationForcePowerOff, power.Operation)
 				require.True(t, power.Forced)
+				require.True(t, power.BypassStateController)
+				require.False(t, power.OverrideReadinessCheck)
 			},
 		},
 		"firmware control": {
@@ -345,6 +350,7 @@ func TestTaskOperationTo(t *testing.T) {
 			operation: &operations.PowerControlTaskInfo{
 				Operation:              operations.PowerOperationWarmReset,
 				OverrideReadinessCheck: true,
+				BypassStateController:  true,
 			},
 			check: func(t *testing.T, converted *pb.TaskOperation) {
 				power := converted.GetPowerControl()
@@ -353,6 +359,7 @@ func TestTaskOperationTo(t *testing.T) {
 					pb.PowerControlOperation_POWER_CONTROL_OPERATION_WARM_RESET,
 					power.GetOperation(),
 				)
+				require.True(t, power.GetBypassStateController())
 				require.True(t, power.GetOverrideReadinessCheck())
 			},
 		},

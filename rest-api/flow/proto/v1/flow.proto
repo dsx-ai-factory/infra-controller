@@ -801,7 +801,12 @@ message PowerOnRackRequest {
     // persisted ComponentOperationStatus. Intended for operator-supervised
     // maintenance where tenant impact has been acknowledged out-of-band;
     // the bypass is recorded in the server log.
+    // Defaults to false. Does not bypass Core state-controller routing.
     bool override_readiness_check = 5;
+    // Optional, defaults to false. Requests direct backend dispatch from Core
+    // instead of state-controller maintenance, and also skips Flow readiness.
+    // Intended for operator-supervised maintenance. Does not recover controller state.
+    bool bypass_state_controller = 6;
 }
 
 message PowerOffRackRequest {
@@ -816,7 +821,12 @@ message PowerOffRackRequest {
     // persisted ComponentOperationStatus. Intended for operator-supervised
     // maintenance where tenant impact has been acknowledged out-of-band;
     // the bypass is recorded in the server log.
+    // Defaults to false. Does not bypass Core state-controller routing.
     bool override_readiness_check = 6;
+    // Optional, defaults to false. Requests direct backend dispatch from Core
+    // instead of state-controller maintenance, and also skips Flow readiness.
+    // Intended for operator-supervised maintenance. Does not recover controller state.
+    bool bypass_state_controller = 7;
 }
 
 message PowerResetRackRequest {
@@ -831,7 +841,12 @@ message PowerResetRackRequest {
     // persisted ComponentOperationStatus. Intended for operator-supervised
     // maintenance where tenant impact has been acknowledged out-of-band;
     // the bypass is recorded in the server log.
+    // Defaults to false. Does not bypass Core state-controller routing.
     bool override_readiness_check = 6;
+    // Optional, defaults to false. Requests direct backend dispatch from Core
+    // instead of state-controller maintenance, and also skips Flow readiness.
+    // Intended for operator-supervised maintenance. Does not recover controller state.
+    bool bypass_state_controller = 7;
 }
 
 message ACPowerCycleRackRequest {
@@ -845,7 +860,12 @@ message ACPowerCycleRackRequest {
     // persisted ComponentOperationStatus. Intended for operator-supervised
     // maintenance where tenant impact has been acknowledged out-of-band;
     // the bypass is recorded in the server log.
+    // Defaults to false. Does not bypass Core state-controller routing.
     bool override_readiness_check = 5;
+    // Optional, defaults to false. Requests direct backend dispatch from Core
+    // instead of state-controller maintenance, and also skips Flow readiness.
+    // Intended for operator-supervised maintenance. Does not recover controller state.
+    bool bypass_state_controller = 6;
 }
 
 message BringUpRackRequest {
@@ -963,7 +983,12 @@ message PowerControlTaskOperation {
     // Required. UNSPECIFIED and unknown values are rejected.
     PowerControlOperation operation = 1;
     // Bypasses the component readiness gate when the task executes.
+    // Defaults to false. Does not bypass Core state-controller routing.
     bool override_readiness_check = 2;
+    // Optional, defaults to false. Requests direct backend dispatch from Core
+    // instead of state-controller maintenance, and also skips Flow readiness.
+    // Intended for operator-supervised maintenance. Does not recover controller state.
+    bool bypass_state_controller = 3;
 }
 
 enum FirmwareControlOperation {

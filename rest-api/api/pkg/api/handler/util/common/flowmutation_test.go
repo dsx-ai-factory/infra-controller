@@ -95,35 +95,38 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		{
 			name: "power on",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateOn, &ruleIDArg, false, workflowID, entityName)
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateOn, &ruleIDArg, false, true, workflowID, entityName)
 			},
 			wantFullMethod: flowv1.Flow_PowerOnRack_FullMethodName,
 			wantRequest: &flowv1.PowerOnRackRequest{
-				TargetSpec:  mutationTargetSpec(rackID),
-				Description: "API power on rack r1",
-				RuleId:      &flowv1.UUID{Id: ruleID},
+				BypassStateController: true,
+				TargetSpec:            mutationTargetSpec(rackID),
+				Description:           "API power on rack r1",
+				RuleId:                &flowv1.UUID{Id: ruleID},
 			},
 		},
 		{
 			name: "power off",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateOff, nil, false, workflowID, entityName)
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateOff, nil, false, true, workflowID, entityName)
 			},
 			wantFullMethod: flowv1.Flow_PowerOffRack_FullMethodName,
 			wantRequest: &flowv1.PowerOffRackRequest{
-				TargetSpec:  mutationTargetSpec(rackID),
-				Description: "API power off rack r1",
+				BypassStateController: true,
+				TargetSpec:            mutationTargetSpec(rackID),
+				Description:           "API power off rack r1",
 			},
 		},
 		{
 			name: "power cycle",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateCycle, nil, false, workflowID, entityName)
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateCycle, nil, false, true, workflowID, entityName)
 			},
 			wantFullMethod: flowv1.Flow_PowerResetRack_FullMethodName,
 			wantRequest: &flowv1.PowerResetRackRequest{
-				TargetSpec:  mutationTargetSpec(rackID),
-				Description: "API power cycle rack r1",
+				BypassStateController: true,
+				TargetSpec:            mutationTargetSpec(rackID),
+				Description:           "API power cycle rack r1",
 			},
 		},
 		{
@@ -131,10 +134,11 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 			// the only thing separating them on the wire.
 			name: "force power off",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateForceOff, nil, true, workflowID, entityName)
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateForceOff, nil, true, true, workflowID, entityName)
 			},
 			wantFullMethod: flowv1.Flow_PowerOffRack_FullMethodName,
 			wantRequest: &flowv1.PowerOffRackRequest{
+				BypassStateController:  true,
 				TargetSpec:             mutationTargetSpec(rackID),
 				Forced:                 true,
 				Description:            "API force power off rack r1",
@@ -144,22 +148,24 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		{
 			name: "force power cycle",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateForceCycle, nil, false, workflowID, entityName)
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateForceCycle, nil, false, true, workflowID, entityName)
 			},
 			wantFullMethod: flowv1.Flow_PowerResetRack_FullMethodName,
 			wantRequest: &flowv1.PowerResetRackRequest{
-				TargetSpec:  mutationTargetSpec(rackID),
-				Forced:      true,
-				Description: "API force power cycle rack r1",
+				BypassStateController: true,
+				TargetSpec:            mutationTargetSpec(rackID),
+				Forced:                true,
+				Description:           "API force power cycle rack r1",
 			},
 		},
 		{
 			name: "AC power cycle",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateACCycle, nil, true, workflowID, entityName)
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateACCycle, nil, true, true, workflowID, entityName)
 			},
 			wantFullMethod: flowv1.Flow_ACPowerCycleRack_FullMethodName,
 			wantRequest: &flowv1.ACPowerCycleRackRequest{
+				BypassStateController:  true,
 				TargetSpec:             mutationTargetSpec(rackID),
 				Description:            "API AC power cycle rack r1",
 				OverrideReadinessCheck: true,
@@ -273,7 +279,7 @@ func TestExecuteFirmwareUpdateWorkflowEncryptsAuthenticationData(t *testing.T) {
 func TestExecutePowerControlWorkflowRejectsUnknownState(t *testing.T) {
 	temporalClient := &tmocks.Client{}
 
-	got, apiErr := ExecutePowerControlWorkflow(context.Background(), zerolog.Nop(), temporalClient, mutationTargetSpec("6f1b7c4e-9c2a-4d1e-8f3b-2a5c7d9e1b04"), "hibernate", nil, false, "rack-power-1", "rack r1")
+	got, apiErr := ExecutePowerControlWorkflow(context.Background(), zerolog.Nop(), temporalClient, mutationTargetSpec("6f1b7c4e-9c2a-4d1e-8f3b-2a5c7d9e1b04"), "hibernate", nil, false, false, "rack-power-1", "rack r1")
 
 	assert.Nil(t, got)
 	require.NotNil(t, apiErr)

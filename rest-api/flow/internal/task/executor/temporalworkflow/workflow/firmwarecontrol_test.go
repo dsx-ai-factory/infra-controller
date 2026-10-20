@@ -287,7 +287,8 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 		"legacy selection retains omitted layer steps": {
 			reqInfo: layeredReqInfo,
 			info: &operations.FirmwareControlTaskInfo{
-				Operation: operations.FirmwareOperationUpgrade, TargetVersion: `{"nvswitch":{"Id":"switch-fw"}}`,
+				OverrideReadinessCheck: true,
+				Operation:              operations.FirmwareOperationUpgrade, TargetVersion: `{"nvswitch":{"Id":"switch-fw"}}`,
 			},
 			versions: map[devicetypes.ComponentType]string{
 				devicetypes.ComponentTypeCompute: "", devicetypes.ComponentTypeNVSwitch: `{"Id":"switch-fw"}`,
@@ -506,7 +507,11 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 			if tc.postFailure {
 				powerErr = temporal.NewNonRetryableApplicationError("post-operation power failure", "test", nil)
 			}
-			env.OnActivity(mockPowerControl, mock.Anything, mock.Anything, mock.Anything).Return(powerErr).Maybe()
+			env.OnActivity(mockPowerControl, mock.Anything, mock.Anything,
+				mock.MatchedBy(func(info *operations.PowerControlTaskInfo) bool {
+					return info.OverrideReadinessCheck == tc.info.OverrideReadinessCheck &&
+						info.BypassStateController == tc.info.OverrideReadinessCheck
+				})).Return(powerErr).Maybe()
 			env.OnActivity(mockGetPowerStatus, mock.Anything, mock.Anything).Return(
 				func(_ context.Context, target common.Target) (map[string]operations.PowerStatus, error) {
 					statuses := make(map[string]operations.PowerStatus, target.Len())
