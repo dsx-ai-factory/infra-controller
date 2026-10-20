@@ -59,6 +59,9 @@ pub struct EventServiceLimits {
     /// How long an emitted frame may wait for transport progress before the
     /// serving connection is closed. Idle waits between frames do not count.
     pub output_stall_timeout: Duration,
+    /// Delete a subscription when its stream closes. `false` models a BMC that
+    /// leaks them.
+    pub reap_on_close: bool,
 }
 
 impl Default for EventServiceLimits {
@@ -70,6 +73,7 @@ impl Default for EventServiceLimits {
             max_history_bytes: 4 * 1024 * 1024,
             heartbeat: Some(Duration::from_secs(15)),
             output_stall_timeout: Duration::from_secs(60),
+            reap_on_close: true,
         }
     }
 }
@@ -241,7 +245,10 @@ impl EventServiceState {
     // Destructors must not recover potentially inconsistent poisoned state.
     pub(crate) fn unsubscribe_on_drop(&self, id: u64) {
         if let Ok(mut inner) = self.inner.lock() {
-            inner.subscribers.remove(&id);
+            if self.config.limits.reap_on_close {
+                inner.subscribers.remove(&id);
+            }
+
             inner.streams = inner.streams.saturating_sub(1);
         }
     }
@@ -440,7 +447,9 @@ impl EventServiceState {
                 seq + 1
             }
         };
-        if inner.streams >= self.config.limits.max_subscribers {
+
+        // A subscription a leaking service kept after its stream closed holds a slot.
+        if inner.streams.max(inner.subscribers.len()) >= self.config.limits.max_subscribers {
             return Err(EventServiceError::Unavailable);
         }
         let id = inner.next_subscriber;
@@ -965,6 +974,33 @@ mod tests {
         ));
         drop(live);
         assert!(state.subscription_context(id).is_none());
+    }
+
+    #[test]
+    fn a_leaking_service_holds_closed_subscriptions_until_deleted() {
+        let state = EventServiceState::new(
+            EventServiceConfig::try_from(EventServiceLimits {
+                max_subscribers: 1,
+                reap_on_close: false,
+                heartbeat: None,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+
+        drop(state.subscribe(None).unwrap());
+
+        assert!(
+            matches!(state.subscribe(None), Err(EventServiceError::Unavailable)),
+            "a leaked subscription must hold its slot"
+        );
+
+        let [id] = state.subscription_ids()[..] else {
+            panic!("the leaked subscription must stay listed");
+        };
+
+        assert!(state.delete_subscription(id));
+        assert!(state.subscribe(None).is_ok(), "DELETE must free the slot");
     }
 
     #[test]
@@ -1788,6 +1824,7 @@ mod tests {
                     max_history_bytes: 8192,
                     heartbeat: None,
                     output_stall_timeout: Duration::from_millis(500),
+                    reap_on_close: true,
                 })
                 .unwrap(),
             );
