@@ -202,16 +202,26 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 
 	ctx := context.Background()
 
+	percentLabelComponent := createMockComponent(
+		uuid.NewString(), "compute-tray-percent", "NVIDIA", "GB200", "unit%label",
+		flowv1.ComponentType_COMPONENT_TYPE_COMPUTE, "rack-id-1",
+	)
+	encodedSlashComponent := createMockComponent(
+		uuid.NewString(), "compute-tray-encoded-slash", "NVIDIA", "GB200", "unit%2Flabel",
+		flowv1.ComponentType_COMPONENT_TYPE_COMPUTE, "rack-id-1",
+	)
+
 	tests := []struct {
-		name           string
-		reqOrg         string
-		user           *cdbm.User
-		trayID         string
-		expectedTrayID string
-		queryParams    map[string]string
-		mockComponent  *flowv1.Component
-		expectedStatus int
-		wantErr        bool
+		name               string
+		reqOrg             string
+		user               *cdbm.User
+		trayID             string
+		expectedTrayID     string
+		expectedResponseID string
+		queryParams        map[string]string
+		mockComponent      *flowv1.Component
+		expectedStatus     int
+		wantErr            bool
 	}{
 		{
 			name:   "success - get tray by ID",
@@ -243,6 +253,28 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 			queryParams:    map[string]string{"siteId": site.ID.String()},
 			mockComponent:  mockComponent,
 			expectedStatus: http.StatusOK,
+		},
+		{
+			name:               "success - percent-encoded percent sign decoded once",
+			reqOrg:             org,
+			user:               providerUser,
+			trayID:             "unit%25label",
+			expectedTrayID:     "unit%label",
+			expectedResponseID: "unit%label",
+			queryParams:        map[string]string{"siteId": site.ID.String()},
+			mockComponent:      percentLabelComponent,
+			expectedStatus:     http.StatusOK,
+		},
+		{
+			name:               "success - percent-encoded slash sequence decoded once",
+			reqOrg:             org,
+			user:               providerUser,
+			trayID:             "unit%252Flabel",
+			expectedTrayID:     "unit%2Flabel",
+			expectedResponseID: "unit%2Flabel",
+			queryParams:        map[string]string{"siteId": site.ID.String()},
+			mockComponent:      encodedSlashComponent,
+			expectedStatus:     http.StatusOK,
 		},
 		{
 			name:   "failure - Flow not enabled on site",
@@ -353,7 +385,14 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 			var apiTray model.APITray
 			err = json.Unmarshal(rec.Body.Bytes(), &apiTray)
 			assert.NoError(t, err)
-			assert.Equal(t, trayID, apiTray.ID)
+			expectedResponseID := trayID
+			if tt.expectedResponseID != "" {
+				expectedResponseID = tt.expectedResponseID
+			}
+			assert.Equal(t, expectedResponseID, apiTray.ID)
+			if tt.expectedResponseID != "" {
+				return
+			}
 			assert.Equal(t, "Compute", apiTray.Type)
 			assert.Equal(t, "NVIDIA", apiTray.Manufacturer)
 			require.Len(t, apiTray.BMCs, 1)
