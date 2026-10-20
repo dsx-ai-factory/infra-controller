@@ -35,7 +35,7 @@ pub use file::{FileCredentialsConfig, FileCredentialsWatcher, StructuredCredenti
 /// Flat username/password struct for serde compatibility with env vars and
 /// config files, where the externally-tagged `Credentials` enum layout
 /// (`{"UsernamePassword": {...}}`) is not ergonomic.
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct UsernamePassword {
     pub username: String,
     pub password: String,

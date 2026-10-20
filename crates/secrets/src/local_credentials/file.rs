@@ -187,12 +187,6 @@ fn start_primary_watcher(path: &Path, tx: WatchEventSender) -> notify::Result<Re
 /// File reader for the core API's existing credential schema.
 pub type FileCredentialsWatcher = StructuredCredentialReader<CredentialSnapshot>;
 
-#[derive(Clone, Copy)]
-enum FileFormat {
-    JsonOrYaml,
-    Json,
-}
-
 /// Watches one credential file and publishes complete, cached snapshots.
 /// Initial load failures prevent construction; failed reloads retain the last
 /// valid snapshot. Values and parser details are redacted from parse errors.
@@ -213,14 +207,7 @@ impl<T: DeserializeOwned + Send + Sync + 'static> StructuredCredentialReader<T> 
 
     /// Loads JSON or YAML; reloads when the existing watchers report changes.
     pub async fn new(config: FileCredentialsConfig) -> Result<Self, SecretsError> {
-        Self::new_with_primary_watcher(config, start_primary_watcher, FileFormat::JsonOrYaml).await
-    }
-
-    /// Loads JSON only and also rereads every poll interval, including after
-    /// atomic replacement or Kubernetes Secret symlink rotation. Incomplete JSON
-    /// and trailing content reject the update, retaining the last good snapshot.
-    pub async fn new_json(config: FileCredentialsConfig) -> Result<Self, SecretsError> {
-        Self::new_with_primary_watcher(config, start_primary_watcher, FileFormat::Json).await
+        Self::new_with_primary_watcher(config, start_primary_watcher).await
     }
 
     /// `start_primary` arms the kernel-backed watcher. Its failure is not
@@ -233,7 +220,6 @@ impl<T: DeserializeOwned + Send + Sync + 'static> StructuredCredentialReader<T> 
     async fn new_with_primary_watcher(
         config: FileCredentialsConfig,
         start_primary: impl FnOnce(&Path, WatchEventSender) -> notify::Result<RecommendedWatcher>,
-        format: FileFormat,
     ) -> Result<Self, SecretsError> {
         let path = config.path();
         let poll_interval = config.poll_interval();
@@ -276,7 +262,7 @@ impl<T: DeserializeOwned + Send + Sync + 'static> StructuredCredentialReader<T> 
         // replacement between the read and watcher registration could remain
         // invisible until the file changes again. Events received while this
         // read is in flight remain queued for the reload task below.
-        let initial = match Self::load_file(&path, format).await {
+        let initial = match Self::load_file(&path).await {
             Ok(initial) => initial,
             Err(error) => {
                 // Close the receiver before dropping the watchers so callbacks
@@ -299,21 +285,16 @@ impl<T: DeserializeOwned + Send + Sync + 'static> StructuredCredentialReader<T> 
         let watched_path = path.clone();
         let credentials_clone = credentials.clone();
         tokio::spawn(async move {
-            let mut retry = tokio::time::interval_at(
-                tokio::time::Instant::now() + poll_interval,
-                poll_interval,
-            );
-            retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    event = rx.recv() => {
-                        let Some(event) = event else { break; };
-                        if !event.paths.iter().any(|p| p.file_name() == watched_path.file_name()) { continue; }
-                    }
-                    _ = retry.tick(), if matches!(format, FileFormat::Json) => {}
+            while let Some(event) = rx.recv().await {
+                if !event
+                    .paths
+                    .iter()
+                    .any(|event_path| event_path.file_name() == watched_path.file_name())
+                {
+                    continue;
                 }
 
-                match Self::load_file(&watched_path, format).await {
+                match Self::load_file(&watched_path).await {
                     Ok(updated) => {
                         credentials_clone.store(Arc::new(updated));
                     }
@@ -333,24 +314,10 @@ impl<T: DeserializeOwned + Send + Sync + 'static> StructuredCredentialReader<T> 
         })
     }
 
-    async fn load_file(path: &Path, format: FileFormat) -> Result<T, SecretsError> {
+    async fn load_file(path: &Path) -> Result<T, SecretsError> {
         let content = tokio::fs::read(path)
             .await
             .map_err(|err| SecretsError::GenericError(err.into()))?;
-
-        if matches!(format, FileFormat::Json) {
-            let mut deserializer = serde_json::Deserializer::from_slice(&content);
-            let parsed = serde_path_to_error::deserialize(&mut deserializer).map_err(|err| {
-                SecretsError::GenericError(eyre::eyre!(
-                    "failed to parse credentials JSON field {} at line {}, column {}; parse details redacted",
-                    err.path(), err.inner().line(), err.inner().column()
-                ))
-            })?;
-            deserializer.end().map_err(|err| SecretsError::GenericError(eyre::eyre!(
-                "invalid credentials JSON document at line {}, column {}; parse details redacted", err.line(), err.column()
-            )))?;
-            return Ok(parsed);
-        }
 
         if let Ok(parsed) = serde_json::from_slice::<T>(&content) {
             return Ok(parsed);
@@ -399,7 +366,7 @@ mod tests {
         let path = dir.path().join("snapshot.json");
         tokio::fs::write(&path, r#"{"version":1}"#).await.unwrap();
         let reader =
-            StructuredCredentialReader::<HashMap<String, u64>>::new_json(FileCredentialsConfig {
+            StructuredCredentialReader::<HashMap<String, u64>>::new(FileCredentialsConfig {
                 path: Some(path.clone()),
                 poll_interval: Some(Duration::from_millis(25)),
                 ..Default::default()
@@ -408,7 +375,7 @@ mod tests {
             .unwrap();
         let previous = reader.snapshot();
         let replacement = dir.path().join("next.json");
-        tokio::fs::write(&replacement, r#"{"version":2}"#)
+        tokio::fs::write(&replacement, "version: 2\n")
             .await
             .unwrap();
         tokio::fs::rename(&replacement, &path).await.unwrap();
@@ -617,7 +584,6 @@ mod tests {
                         ..Default::default()
                     },
                     case.start_primary,
-                    FileFormat::JsonOrYaml,
                 ))
                 .await;
             let provider = provider
