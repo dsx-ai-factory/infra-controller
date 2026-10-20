@@ -46,15 +46,16 @@ mod test_explicit_columns;
 #[cfg(test)]
 mod test_metadata;
 
-// Select the lowest-MAC addressed inventory port, then IPv4, segment ID, and address.
-// TODO: Preserve eth0/eth1 identity; lowest MAC does not identify eth0:
-// https://github.com/dsx-ai-factory/infra-controller/issues/4840.
+// Prefer the operator-declared primary NVOS port (eth0), then an addressed port,
+// IPv4, lowest segment ID, address, and MAC as tiebreaks. Requires the joined
+// `expected_switch_nvos_interfaces nvos_esi` row for the `is_primary` flag.
 const NVOS_ENDPOINT_ORDER: &str = "
+    (NOT nvos_esi.is_primary),
     (nvos_mia.address IS NULL),
-    nvos_mi.mac_address NULLS LAST,
     family(nvos_mia.address) NULLS LAST,
     nvos_mi.segment_id,
-    nvos_mia.address NULLS LAST
+    nvos_mia.address NULLS LAST,
+    nvos_mi.mac_address NULLS LAST
 ";
 
 #[derive(Copy, Clone)]
@@ -237,7 +238,9 @@ pub async fn find_ids(
     }
 
     if filter.nvos_mac.is_some() {
-        qb.push(" JOIN expected_switches es_nvos ON es_nvos.bmc_mac_address = s.bmc_mac_address");
+        qb.push(
+            " JOIN expected_switch_nvos_interfaces es_nvos ON es_nvos.bmc_mac_address = s.bmc_mac_address",
+        );
     }
 
     qb.push(" WHERE TRUE");
@@ -266,7 +269,7 @@ pub async fn find_ids(
     if let Some(mac) = filter.nvos_mac {
         qb.push(" AND ");
         qb.push_bind(mac);
-        qb.push(" = ANY(es_nvos.nvos_mac_addresses)");
+        qb.push(" = es_nvos.mac_address");
     }
 
     if let Some(ovrrd_str) = &filter.only_with_health_alert {
@@ -821,7 +824,7 @@ pub async fn clear_bmc_credential_rotation_requested(
 
 /// Full endpoint info for a switch: BMC MAC/IP and optionally NVOS MAC/IP.
 ///
-/// NVOS fields are nullable because `nvos_mac_addresses` may not be set on the
+/// NVOS fields are nullable because `nvos_interfaces` may not be set on a legacy
 /// expected switch, or the corresponding `machine_interfaces` / addresses may
 /// not exist yet.
 #[derive(Debug, sqlx::FromRow)]
@@ -842,6 +845,8 @@ pub struct SwitchNvosEndpointRow {
     pub switch_id: SwitchId,
     pub nvos_mac: MacAddress,
     pub nvos_ip: Option<IpAddr>,
+    /// Whether this NVOS port is the operator-declared primary (eth0).
+    pub is_primary: bool,
 }
 
 /// Persisted switch identity and its selected NVOS certificate endpoint.
@@ -891,15 +896,15 @@ pub struct ReadyControlPlaneSwitchEndpointRow {
 
 /// Resolve SwitchIds to full endpoint info (BMC + NVOS MAC/IP).
 ///
-/// Selects the lowest-MAC discovered inventory port with an address, preferring
-/// IPv4 on that port, then the lowest segment ID and address. NVOS LEFT JOINs
+/// Selects the operator-declared primary port, even when it has no address.
+/// Within that port, prefers IPv4, then the lowest segment ID and address. NVOS LEFT JOINs
 /// preserve switches without usable NVOS data with nullable MAC/IP fields.
 /// BMC resolution still requires an underlay address.
 ///
 /// Path:
 ///   switches.bmc_mac_address -> expected_switches.bmc_mac_address (BMC MAC)
 ///   -> machine_interfaces (by bmc_mac) -> machine_interface_addresses (underlay) -> BMC IP
-///   -> expected_switches.nvos_mac_addresses (NVOS MAC, nullable)
+///   -> expected_switch_nvos_interfaces (NVOS MAC and primary flag)
 ///   -> machine_interfaces (by nvos_mac) -> machine_interface_addresses -> NVOS IP
 pub async fn find_switch_endpoints_by_ids(
     db: impl crate::db_read::DbReader<'_>,
@@ -927,9 +932,10 @@ pub async fn find_switch_endpoints_by_ids(
             ON bmc_mia.interface_id = bmc_mi.id
         JOIN network_segments bmc_ns
             ON bmc_ns.id = bmc_mi.segment_id
+        LEFT JOIN expected_switch_nvos_interfaces nvos_esi
+            ON nvos_esi.bmc_mac_address = es.bmc_mac_address
         LEFT JOIN machine_interfaces nvos_mi
-            ON es.nvos_mac_addresses IS NOT NULL
-           AND nvos_mi.mac_address = ANY(es.nvos_mac_addresses)
+            ON nvos_mi.mac_address = nvos_esi.mac_address
         LEFT JOIN machine_interface_addresses nvos_mia
             ON nvos_mia.interface_id = nvos_mi.id
         LEFT JOIN domains nvos_d
@@ -960,25 +966,26 @@ pub async fn find_switch_nvos_endpoints_by_ids(
     let sql = r#"
         SELECT DISTINCT ON (
             s.id,
-            nvos.mac_address,
+            nvos_esi.mac_address,
             family(nvos_mia.address)
         )
             s.id                 AS switch_id,
-            nvos.mac_address     AS nvos_mac,
-            nvos_mia.address     AS nvos_ip
+            nvos_esi.mac_address AS nvos_mac,
+            nvos_mia.address     AS nvos_ip,
+            nvos_esi.is_primary  AS is_primary
         FROM switches s
         JOIN expected_switches es
             ON es.bmc_mac_address = s.bmc_mac_address
-        JOIN LATERAL unnest(es.nvos_mac_addresses) AS nvos(mac_address)
-            ON TRUE
+        JOIN expected_switch_nvos_interfaces nvos_esi
+            ON nvos_esi.bmc_mac_address = es.bmc_mac_address
         JOIN machine_interfaces nvos_mi
-            ON nvos_mi.mac_address = nvos.mac_address
+            ON nvos_mi.mac_address = nvos_esi.mac_address
         LEFT JOIN machine_interface_addresses nvos_mia
             ON nvos_mia.interface_id = nvos_mi.id
         WHERE s.id = ANY($1)
         ORDER BY
             s.id,
-            nvos.mac_address NULLS LAST,
+            nvos_esi.mac_address NULLS LAST,
             family(nvos_mia.address) NULLS LAST,
             nvos_mi.segment_id,
             nvos_mia.address NULLS LAST
@@ -1020,8 +1027,10 @@ pub async fn find_switch_certificate_endpoint_candidates_by_rack_id(
         FROM switches s
         LEFT JOIN expected_switches es
             ON es.bmc_mac_address = s.bmc_mac_address
+        LEFT JOIN expected_switch_nvos_interfaces nvos_esi
+            ON nvos_esi.bmc_mac_address = es.bmc_mac_address
         LEFT JOIN machine_interfaces nvos_mi
-            ON nvos_mi.mac_address = ANY(es.nvos_mac_addresses)
+            ON nvos_mi.mac_address = nvos_esi.mac_address
         LEFT JOIN machine_interface_addresses nvos_mia
             ON nvos_mia.interface_id = nvos_mi.id
         LEFT JOIN domains nvos_d
@@ -1071,7 +1080,8 @@ pub async fn find_switch_endpoints_by_bmc_macs(
     db: impl crate::db_read::DbReader<'_>,
     bmc_macs: &[MacAddress],
 ) -> DatabaseResult<Vec<PreIngestionSwitchEndpointRow>> {
-    let sql = r#"
+    let sql = format!(
+        r#"
         SELECT DISTINCT ON (es.bmc_mac_address)
             es.bmc_mac_address   AS bmc_mac,
             bmc_mia.address      AS bmc_ip,
@@ -1089,19 +1099,21 @@ pub async fn find_switch_endpoints_by_bmc_macs(
             ON bmc_mia.interface_id = bmc_mi.id
         JOIN network_segments bmc_ns
             ON bmc_ns.id = bmc_mi.segment_id
+        LEFT JOIN expected_switch_nvos_interfaces nvos_esi
+            ON nvos_esi.bmc_mac_address = es.bmc_mac_address
         LEFT JOIN machine_interfaces nvos_mi
-            ON es.nvos_mac_addresses IS NOT NULL
-           AND nvos_mi.mac_address = ANY(es.nvos_mac_addresses)
+            ON nvos_mi.mac_address = nvos_esi.mac_address
         LEFT JOIN machine_interface_addresses nvos_mia
             ON nvos_mia.interface_id = nvos_mi.id
         LEFT JOIN domains nvos_d
             ON nvos_d.id = nvos_mi.domain_id
         WHERE es.bmc_mac_address = ANY($1)
           AND bmc_ns.network_segment_type = 'underlay'
-        ORDER BY es.bmc_mac_address
-    "#;
+        ORDER BY es.bmc_mac_address, {NVOS_ENDPOINT_ORDER}
+    "#
+    );
 
-    sqlx::query_as(sql)
+    sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(bmc_macs)
         .fetch_all(db)
         .await
@@ -1111,37 +1123,52 @@ pub async fn find_switch_endpoints_by_bmc_macs(
 /// Resolve one ready Fabric Manager control-plane switch endpoint per rack.
 ///
 /// When several switches in a rack match, the primary switch is preferred,
-/// then the lowest switch ID. Uses the same NVOS selection as
-/// [`find_switch_endpoints_by_ids`], excluding switches without an address.
+/// then the lowest switch ID. Uses the same primary-first NVOS selection as
+/// [`find_switch_endpoints_by_ids`] for each switch. A switch whose selected
+/// port has no address is excluded before the rack-level choice, allowing an
+/// addressed peer switch to supply the rack endpoint.
 pub async fn find_ready_control_plane_configured_switch_endpoints<DB>(
     db: &mut DB,
 ) -> DatabaseResult<Vec<ReadyControlPlaneSwitchEndpointRow>>
 where
     for<'db> &'db mut DB: DbReader<'db>,
 {
+    // First pick one primary-first endpoint row per switch. Filter switches
+    // whose selected row is unaddressed, then choose the preferred switch per
+    // rack. Keeping these two choices separate prevents an unaddressed switch
+    // from hiding an addressed peer in the same rack.
     let sql = format!(
         r#"
-        SELECT DISTINCT ON (s.rack_id)
-            s.id               AS switch_id,
-            s.rack_id          AS rack_id,
-            r.rack_profile_id  AS rack_profile_id,
-            nvos_mia.address   AS nvos_ip
-        FROM switches s
-        LEFT JOIN racks r
-            ON r.id = s.rack_id
-        JOIN expected_switches es
-            ON es.bmc_mac_address = s.bmc_mac_address
-        JOIN machine_interfaces nvos_mi
-            ON es.nvos_mac_addresses IS NOT NULL
-           AND nvos_mi.mac_address = ANY(es.nvos_mac_addresses)
-        JOIN machine_interface_addresses nvos_mia
-            ON nvos_mia.interface_id = nvos_mi.id
-        WHERE s.rack_id IS NOT NULL
-          AND s.deleted IS NULL
-          AND s.controller_state->>'state' = $1
-          AND s.fabric_manager_status->>'fabric_manager_state' = $2
-          AND s.fabric_manager_status->>'addition_info' = $3
-        ORDER BY s.rack_id, s.is_primary DESC, s.id, {NVOS_ENDPOINT_ORDER}
+        WITH switch_endpoints AS (
+            SELECT DISTINCT ON (s.id)
+                s.id               AS switch_id,
+                s.rack_id          AS rack_id,
+                r.rack_profile_id  AS rack_profile_id,
+                s.is_primary       AS is_primary,
+                nvos_mia.address   AS nvos_ip
+            FROM switches s
+            LEFT JOIN racks r
+                ON r.id = s.rack_id
+            JOIN expected_switches es
+                ON es.bmc_mac_address = s.bmc_mac_address
+            LEFT JOIN expected_switch_nvos_interfaces nvos_esi
+                ON nvos_esi.bmc_mac_address = es.bmc_mac_address
+            LEFT JOIN machine_interfaces nvos_mi
+                ON nvos_mi.mac_address = nvos_esi.mac_address
+            LEFT JOIN machine_interface_addresses nvos_mia
+                ON nvos_mia.interface_id = nvos_mi.id
+            WHERE s.rack_id IS NOT NULL
+              AND s.deleted IS NULL
+              AND s.controller_state->>'state' = $1
+              AND s.fabric_manager_status->>'fabric_manager_state' = $2
+              AND s.fabric_manager_status->>'addition_info' = $3
+            ORDER BY s.id, {NVOS_ENDPOINT_ORDER}
+        )
+        SELECT DISTINCT ON (rack_id)
+            switch_id, rack_id, rack_profile_id, nvos_ip
+        FROM switch_endpoints
+        WHERE nvos_ip IS NOT NULL
+        ORDER BY rack_id, is_primary DESC, switch_id
     "#
     );
 
@@ -1294,31 +1321,64 @@ mod tests {
     use super::*;
     use crate::test_support::switch::create_seeded_discovered;
 
+    async fn replace_expected_nvos_macs(
+        txn: &mut PgConnection,
+        bmc_mac: MacAddress,
+        macs: &[MacAddress],
+    ) -> DatabaseResult<()> {
+        let mut expected = crate::expected_switch::find_by_bmc_mac_address(txn, bmc_mac)
+            .await?
+            .expect("seeded expected switch");
+        let retained_primary = expected
+            .primary_nvos_mac_address()
+            .filter(|mac| macs.contains(mac));
+        expected.nvos_interfaces = macs
+            .iter()
+            .enumerate()
+            .map(
+                |(index, mac_address)| model::expected_switch::ExpectedNvosInterface {
+                    mac_address: *mac_address,
+                    is_primary: retained_primary
+                        .map_or(index == 0, |primary| primary == *mac_address),
+                },
+            )
+            .collect();
+        crate::expected_switch::update(txn, &expected).await
+    }
+
     #[crate::sqlx_test]
     async fn single_nvos_endpoint_queries_agree(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // `lower_mac` is the seeded operator-declared primary port; `higher_mac`
+        // is a non-primary port. Because `(NOT is_primary)` is the top ordering
+        // key, the primary port is always the resolved endpoint -- the remaining
+        // address/family/segment tiebreaks only choose among the primary port's
+        // own addresses and never fall back to the non-primary port.
         let lower_mac: MacAddress = "44:44:33:33:01:00".parse()?;
         let higher_mac: MacAddress = "ff:ff:ff:ff:ff:fe".parse()?;
         let v4 = "192.0.2.20";
         let v6 = "2001:db8::20";
-        let higher_ip = "192.0.2.10";
         let lower_segment: NetworkSegmentId = "00000000-0000-0000-0000-000000000010".parse()?;
         let higher_segment: NetworkSegmentId = "00000000-0000-0000-0000-000000000020".parse()?;
         let rack_id = RackId::new("endpoint-agreement");
 
-        let lower_v4 = (lower_mac, Some(v4));
-        let lower_v6 = (lower_mac, Some(v6));
-        let higher_v4 = (higher_mac, Some(higher_ip));
+        let lower_v4 = (Some(lower_mac), Some(v4));
+        let lower_v6 = (Some(lower_mac), Some(v6));
+        // The primary wins even when it has no address and the non-primary does.
+        let primary_unaddressed: (Option<MacAddress>, Option<&str>) = (Some(lower_mac), None);
+        // An undiscovered primary resolves to no endpoint rather than falling
+        // back to the addressed non-primary port.
+        let primary_undiscovered: (Option<MacAddress>, Option<&str>) = (None, None);
 
         let cases: [(_, Option<&[&str]>, _, _, _); 7] = [
             ("two ports", Some(&[v4]), true, false, lower_v4),
             ("MAC before family", Some(&[v6]), true, false, lower_v6),
             ("dual stack", Some(&[v6, v4]), true, false, lower_v4),
-            ("unaddressed", Some(&[]), true, false, higher_v4),
-            ("undiscovered", None, true, false, higher_v4),
+            ("unaddressed", Some(&[]), true, false, primary_unaddressed),
+            ("undiscovered", None, true, false, primary_undiscovered),
             ("segment before address", Some(&[v4]), true, true, lower_v4),
-            ("unresolved", Some(&[]), false, false, (lower_mac, None)),
+            ("unresolved", Some(&[]), false, false, primary_unaddressed),
         ];
 
         for (name, lower_addresses, higher_addressed, multiple_segments, expected) in cases {
@@ -1328,12 +1388,7 @@ mod tests {
 
             crate::rack::create(txn.as_mut(), &rack_id, None, &RackConfig::default(), None).await?;
 
-            crate::expected_switch::update_nvos_mac_addresses(
-                txn.as_mut(),
-                bmc_mac,
-                &[higher_mac, lower_mac],
-            )
-            .await?;
+            replace_expected_nvos_macs(txn.as_mut(), bmc_mac, &[higher_mac, lower_mac]).await?;
 
             sqlx::query(
                 "UPDATE switches SET rack_id = $1, controller_state = $2,
@@ -1423,7 +1478,7 @@ mod tests {
             let (expected_mac, expected_ip) = expected;
             let expected_ip = expected_ip.map(str::parse::<IpAddr>).transpose()?;
 
-            assert_eq!(by_id[0].nvos_mac, Some(expected_mac), "{name}");
+            assert_eq!(by_id[0].nvos_mac, expected_mac, "{name}");
             assert_eq!(by_id[0].nvos_ip, expected_ip, "{name}");
             assert_eq!(by_rack[0].nvos_mac, by_id[0].nvos_mac, "{name}");
             assert_eq!(by_rack[0].nvos_ip, by_id[0].nvos_ip, "{name}");
@@ -1458,7 +1513,7 @@ mod tests {
         let second_nvos_mac: MacAddress = "44:44:33:33:01:01".parse()?;
         let third_nvos_mac: MacAddress = "44:44:33:33:01:02".parse()?;
 
-        crate::expected_switch::update_nvos_mac_addresses(
+        replace_expected_nvos_macs(
             txn.as_mut(),
             bmc_mac,
             &[first_nvos_mac, second_nvos_mac, third_nvos_mac],
@@ -1493,13 +1548,67 @@ mod tests {
         assert_eq!(rows[1].nvos_mac, second_nvos_mac);
         assert!(rows[1].nvos_ip.is_none());
 
-        crate::expected_switch::update_nvos_mac_addresses(txn.as_mut(), bmc_mac, &[third_nvos_mac])
-            .await?;
+        replace_expected_nvos_macs(txn.as_mut(), bmc_mac, &[third_nvos_mac]).await?;
         assert!(
             find_switch_nvos_endpoints_by_ids(txn.as_mut(), &[switch.id])
                 .await?
                 .is_empty()
         );
+        txn.rollback().await?;
+
+        Ok(())
+    }
+
+    /// `(NOT nvos_esi.is_primary)` is the top endpoint-ordering key, so the
+    /// operator-declared primary port is the resolved endpoint even when a
+    /// second, addressed port has a MAC that sorts first and would otherwise
+    /// win every remaining tiebreak.
+    #[crate::sqlx_test]
+    async fn find_switch_endpoints_prefers_the_primary_nvos_port_over_a_lower_mac(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let switch = create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
+        let bmc_mac = switch.bmc_mac_address.expect("seeded BMC MAC");
+
+        // The seeded NVOS port is already the primary and has a discovered
+        // address.
+        let primary_mac = find_switch_nvos_endpoints_by_ids(txn.as_mut(), &[switch.id])
+            .await?
+            .first()
+            .map(|row| row.nvos_mac)
+            .expect("seeded NVOS MAC");
+
+        // Add a non-primary port whose MAC sorts before the primary's; the
+        // reconcile keeps the existing primary flag on `primary_mac`.
+        let lower_mac: MacAddress = "11:11:11:11:11:11".parse()?;
+        assert!(
+            lower_mac < primary_mac,
+            "the second port must sort before the primary to make the test meaningful"
+        );
+        replace_expected_nvos_macs(txn.as_mut(), bmc_mac, &[primary_mac, lower_mac]).await?;
+
+        // Give the lower port a discovered address so address/family tiebreaks
+        // cannot explain the result -- only `is_primary` can.
+        let admin_segments = crate::network_segment::admin(txn.as_mut()).await?;
+        crate::machine_interface::create(
+            txn.as_mut(),
+            &admin_segments,
+            &lower_mac,
+            false,
+            AddressSelectionStrategy::NextAvailableIp,
+            None,
+        )
+        .await?;
+
+        let endpoints = find_switch_endpoints_by_ids(txn.as_mut(), &[switch.id]).await?;
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(
+            endpoints[0].nvos_mac,
+            Some(primary_mac),
+            "the primary port must win over the lower-MAC port"
+        );
+
         txn.rollback().await?;
 
         Ok(())
@@ -1898,6 +2007,30 @@ mod tests {
         assert_eq!(rack_endpoints[0].switch_id, primary_switch.id);
         assert_eq!(rack_endpoints[0].rack_id, rack_id);
         assert_eq!(rack_endpoints[0].nvos_ip, expected_nvos_ip);
+
+        let primary_nvos_mac = find_switch_endpoints_by_ids(txn.as_mut(), &[primary_switch.id])
+            .await?
+            .pop()
+            .and_then(|endpoint| endpoint.nvos_mac)
+            .expect("primary switch has an NVOS MAC");
+        sqlx::query(
+            "DELETE FROM machine_interface_addresses WHERE interface_id IN
+             (SELECT id FROM machine_interfaces WHERE mac_address = $1)",
+        )
+        .bind(primary_nvos_mac)
+        .execute(txn.as_mut())
+        .await?;
+
+        let endpoints = find_ready_control_plane_configured_switch_endpoints(txn.as_mut()).await?;
+        let rack_endpoints = endpoints
+            .into_iter()
+            .filter(|endpoint| endpoint.rack_id == rack_id)
+            .collect::<Vec<_>>();
+        assert_eq!(rack_endpoints.len(), 1);
+        assert_eq!(
+            rack_endpoints[0].switch_id, secondary_switch.id,
+            "an unaddressed preferred switch must not hide an addressed peer"
+        );
         txn.rollback().await?;
 
         Ok(())
@@ -1970,7 +2103,7 @@ mod tests {
     /// The pre-ingestion endpoint resolver is anchored on
     /// `expected_switches.bmc_mac_address` (no `switches` row): it resolves the
     /// BMC IP from an underlay-segment BMC interface, joins the NVOS MAC/IP by
-    /// `nvos_mac_addresses` membership, and builds the NVOS hostname from the
+    /// `expected_switch_nvos_interfaces`, preferring the primary, and builds the NVOS hostname from the
     /// interface hostname plus its domain. A BMC interface on a non-underlay
     /// segment must not resolve.
     #[crate::sqlx_test]
@@ -1989,13 +2122,22 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO expected_switches
-                 (serial_number, bmc_mac_address, bmc_username, bmc_password, nvos_mac_addresses)
-             VALUES ('SW-A', $1::macaddr, 'admin', 'pw', ARRAY[$2]::macaddr[]),
-                    ('SW-B', $3::macaddr, 'admin', 'pw', NULL)",
+                 (serial_number, bmc_mac_address, bmc_username, bmc_password)
+             VALUES ('SW-A', $1::macaddr, 'admin', 'pw'),
+                    ('SW-B', $2::macaddr, 'admin', 'pw')",
         )
         .bind(bmc_mac_a)
-        .bind(nvos_mac_a)
         .bind(bmc_mac_b)
+        .execute(txn.as_mut())
+        .await?;
+
+        // NVOS ports live in their own table; SW-A has a single primary port.
+        sqlx::query(
+            "INSERT INTO expected_switch_nvos_interfaces (mac_address, bmc_mac_address, is_primary)
+             VALUES ($1::macaddr, $2::macaddr, true)",
+        )
+        .bind(nvos_mac_a)
+        .bind(bmc_mac_a)
         .execute(txn.as_mut())
         .await?;
 

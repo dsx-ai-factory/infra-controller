@@ -15,25 +15,69 @@
  * limitations under the License.
  */
 
+use std::collections::HashSet;
+
 use carbide_uuid::switch::SwitchId;
 use db::DatabaseError;
 use mac_address::MacAddress;
 use model::expected_switch::ExpectedSwitch;
-use model::site_explorer::ExploredManagedSwitch;
+use model::site_explorer::{EndpointType, ExploredManagedSwitch};
 use sqlx::{PgConnection, PgPool};
 
-use crate::SiteExplorerConfig;
+use super::Config;
 use crate::errors::SiteExplorerResult;
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 use crate::metrics::SiteExplorationMetrics;
 
 pub struct SwitchCreator {
     database_connection: PgPool,
-    config: SiteExplorerConfig,
+    config: Config,
 }
 
 impl SwitchCreator {
-    pub fn new(database_connection: PgPool, config: SiteExplorerConfig) -> Self {
+    pub(super) async fn identify_switches_to_ingest(
+        &self,
+        expected_endpoint_index: &ExploredEndpointIndex,
+        suppressed_bmc_macs: &HashSet<MacAddress>,
+    ) -> SiteExplorerResult<Vec<ExploredManagedSwitch>> {
+        let mut txn = self
+            .database_connection
+            .begin()
+            .await
+            .map_err(|e| DatabaseError::new("load find_all_preingestion_complete data", e))?;
+
+        let explored_endpoints =
+            db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
+
+        txn.commit()
+            .await
+            .map_err(|e| DatabaseError::new("end find_all_preingestion_complete data", e))?;
+        let managed_switches = explored_endpoints
+            .iter()
+            .filter(|ep| {
+                if let Some(expected) = expected_endpoint_index.matched_expected_switch(&ep.address)
+                    && suppressed_bmc_macs.contains(&expected.bmc_mac_address)
+                {
+                    tracing::info!(
+                        bmc_ip_address = %ep.address,
+                        bmc_mac_address = %expected.bmc_mac_address,
+                        "Skipping ingestion of suppressed switch",
+                    );
+                    return false;
+                }
+                true
+            })
+            .filter(|ep| ep.report.endpoint_type == EndpointType::Bmc && ep.report.is_switch())
+            .map(|ep| ExploredManagedSwitch {
+                bmc_ip: ep.address,
+                report: ep.report.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        Ok(managed_switches)
+    }
+
+    pub fn new(database_connection: PgPool, config: Config) -> Self {
         Self {
             database_connection,
             config,
@@ -68,16 +112,6 @@ impl SwitchCreator {
 
             if existing_bmc_macs.contains(&expected_switch.bmc_mac_address) {
                 skipped_existing_switches += 1;
-                if let Err(error) = self
-                    .update_nvos_mac_addresses_if_changed(explored_managed_switch, expected_switch)
-                    .await
-                {
-                    tracing::error!(
-                        %error,
-                        bmc_ip_address = %explored_managed_switch.bmc_ip,
-                        "Failed to update NVOS MAC addresses of existing switch"
-                    );
-                }
                 continue;
             }
 
@@ -124,37 +158,6 @@ impl SwitchCreator {
         Ok(())
     }
 
-    /// Opens a transaction only when the explored NVOS MAC addresses differ
-    /// from the expected switch record.
-    async fn update_nvos_mac_addresses_if_changed(
-        &self,
-        explored_managed_switch: &ExploredManagedSwitch,
-        expected_switch: &ExpectedSwitch,
-    ) -> SiteExplorerResult<()> {
-        let Some(explored_macs) =
-            changed_nvos_mac_addresses(explored_managed_switch, expected_switch)
-        else {
-            return Ok(());
-        };
-
-        let mut txn = self
-            .database_connection
-            .begin()
-            .await
-            .map_err(|e| DatabaseError::new("begin update_nvos_mac_addresses", e))?;
-        db::expected_switch::update_nvos_mac_addresses(
-            &mut txn,
-            expected_switch.bmc_mac_address,
-            explored_macs,
-        )
-        .await?;
-        txn.commit()
-            .await
-            .map_err(|e| DatabaseError::new("commit update_nvos_mac_addresses", e))?;
-
-        Ok(())
-    }
-
     pub async fn create_managed_switch(
         &self,
         explored_managed_switch: &ExploredManagedSwitch,
@@ -184,17 +187,6 @@ impl SwitchCreator {
         explored_managed_switch: &ExploredManagedSwitch,
         expected_switch: &ExpectedSwitch,
     ) -> SiteExplorerResult<Option<SwitchId>> {
-        if let Some(explored_macs) =
-            changed_nvos_mac_addresses(explored_managed_switch, expected_switch)
-        {
-            db::expected_switch::update_nvos_mac_addresses(
-                &mut *txn,
-                expected_switch.bmc_mac_address,
-                explored_macs,
-            )
-            .await?;
-        }
-
         // Defense against the duplicate-switches bug: if a switch already
         // exists in the database for this BMC MAC, don't make another one.
         // This catches the case where the chassis serial drifts between
@@ -288,67 +280,5 @@ impl SwitchCreator {
         }
 
         Ok(())
-    }
-}
-
-/// Explored NVOS MAC addresses that should replace the expected switch
-/// record's; an empty exploration result never replaces it.
-fn changed_nvos_mac_addresses<'a>(
-    explored_managed_switch: &'a ExploredManagedSwitch,
-    expected_switch: &ExpectedSwitch,
-) -> Option<&'a [MacAddress]> {
-    let explored_macs = explored_managed_switch.nv_os_mac_addresses.as_slice();
-    (!explored_macs.is_empty() && explored_macs != expected_switch.nvos_mac_addresses)
-        .then_some(explored_macs)
-}
-
-#[cfg(test)]
-mod tests {
-    use carbide_test_support::{Check, check_values};
-    use model::site_explorer::EndpointExplorationReport;
-
-    use super::*;
-
-    #[test]
-    fn changed_nvos_mac_addresses_cases() {
-        let mac = |last| MacAddress::new([0x02, 0, 0, 0, 0, last]);
-        let expected_switch = ExpectedSwitch {
-            nvos_mac_addresses: vec![mac(1), mac(2)],
-            ..ExpectedSwitch::default()
-        };
-        let explored = |nv_os_mac_addresses| ExploredManagedSwitch {
-            bmc_ip: "10.0.0.1".parse().unwrap(),
-            nv_os_mac_addresses,
-            report: EndpointExplorationReport::default(),
-        };
-
-        check_values(
-            [
-                Check {
-                    scenario: "empty exploration result keeps the record",
-                    input: vec![],
-                    expect: None,
-                },
-                Check {
-                    scenario: "same addresses need no update",
-                    input: vec![mac(1), mac(2)],
-                    expect: None,
-                },
-                Check {
-                    scenario: "different addresses replace the record",
-                    input: vec![mac(3)],
-                    expect: Some(vec![mac(3)]),
-                },
-                Check {
-                    scenario: "same addresses in another order replace the record",
-                    input: vec![mac(2), mac(1)],
-                    expect: Some(vec![mac(2), mac(1)]),
-                },
-            ],
-            |nv_os_mac_addresses| {
-                changed_nvos_mac_addresses(&explored(nv_os_mac_addresses), &expected_switch)
-                    .map(<[MacAddress]>::to_vec)
-            },
-        );
     }
 }

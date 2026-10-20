@@ -864,6 +864,28 @@ func TestAPIMachineUpdateRequest_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "test valid enter online repair request with Software issue",
+			fields: fields{
+				OnlineRepair: &APIMachineOnlineRepair{
+					Enabled: cutil.GetPtr(true),
+					Policy: &APIMachineOnlineRepairPolicy{
+						AllowAutoInstanceDeletionOnFailure: cutil.GetPtr(false),
+					},
+					Acknowledgments: &APIMachineOnlineRepairAcknowledgments{
+						AcceptDataCorruptionRisk:   cutil.GetPtr(true),
+						AcceptRepairTeamAccess:     cutil.GetPtr(true),
+						AcceptInstanceDeletionRisk: cutil.GetPtr(true),
+					},
+				},
+				HealthIssue: &APIMachineHealthIssue{
+					Category: HealthIssueSoftware,
+					Summary:  cutil.GetPtr("Software issue"),
+					Details:  cutil.GetPtr("driver service failed"),
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name: "test invalid enter online repair without HealthIssue (APIMachineOnlineRepair.Enabled true requires non-nil HealthIssue)",
 			fields: fields{
 				OnlineRepair: &APIMachineOnlineRepair{
@@ -910,7 +932,7 @@ func TestAPIMachineUpdateRequest_Validate(t *testing.T) {
 			name: "test invalid HealthIssue without onlineRepair",
 			fields: fields{
 				HealthIssue: &APIMachineHealthIssue{
-					Category: HealthIssueStorage,
+					Category: HealthIssueHardware,
 					Summary:  cutil.GetPtr("x"),
 					Details:  cutil.GetPtr("y"),
 				},
@@ -940,22 +962,24 @@ func TestAPIMachineUpdateRequest_ToInsertHealthReportProto(t *testing.T) {
 		HealthIssue *APIMachineHealthIssue
 	}
 	tests := []struct {
-		name      string
-		machineID string
-		fields    fields
-		wantErr   bool
+		name         string
+		machineID    string
+		fields       fields
+		wantCategory string
+		wantErr      bool
 	}{
 		{
-			name:      "maps Storage health issue to proto payload with STORAGE issue_category",
+			name:      "maps Performance health issue to proto payload with PERFORMANCE issue_category",
 			machineID: "161c4de4-afb3-4839-a5bd-305f9dea8744",
 			fields: fields{
 				HealthIssue: &APIMachineHealthIssue{
-					Category: HealthIssueStorage,
-					Summary:  cutil.GetPtr("storage subsystem degraded"),
-					Details:  cutil.GetPtr("disk SMART errors in slot 2"),
+					Category: HealthIssuePerformance,
+					Summary:  cutil.GetPtr("sustained GPU throttling"),
+					Details:  cutil.GetPtr("dcgmi diag logs attached"),
 				},
 			},
-			wantErr: false,
+			wantCategory: "PERFORMANCE",
+			wantErr:      false,
 		},
 		{
 			name:      "maps Hardware health issue to proto payload with HARDWARE issue_category",
@@ -967,7 +991,34 @@ func TestAPIMachineUpdateRequest_ToInsertHealthReportProto(t *testing.T) {
 					Details:  cutil.GetPtr("port 1 logs attached"),
 				},
 			},
-			wantErr: false,
+			wantCategory: "HARDWARE",
+			wantErr:      false,
+		},
+		{
+			name:      "maps Storage health issue to alert payload with STORAGE issue_category",
+			machineID: "361c4de4-afb3-4839-a5bd-305f9dea8744",
+			fields: fields{
+				HealthIssue: &APIMachineHealthIssue{
+					Category: HealthIssueStorage,
+					Summary:  cutil.GetPtr("storage subsystem degraded"),
+					Details:  cutil.GetPtr("disk SMART errors in slot 2"),
+				},
+			},
+			wantCategory: "STORAGE",
+			wantErr:      false,
+		},
+		{
+			name:      "maps Software health issue to alert payload with SOFTWARE issue_category",
+			machineID: "461c4de4-afb3-4839-a5bd-305f9dea8744",
+			fields: fields{
+				HealthIssue: &APIMachineHealthIssue{
+					Category: HealthIssueSoftware,
+					Summary:  cutil.GetPtr("driver service failed"),
+					Details:  cutil.GetPtr("service exited repeatedly"),
+				},
+			},
+			wantCategory: "SOFTWARE",
+			wantErr:      false,
 		},
 	}
 	for _, tt := range tests {
@@ -1011,7 +1062,7 @@ func TestAPIMachineUpdateRequest_ToInsertHealthReportProto(t *testing.T) {
 			}
 			require.NoError(t, json.Unmarshal([]byte(alert.Message), &payload))
 			assert.Equal(t, *mhi.Details, payload.Details)
-			assert.Equal(t, ValidHealthIssueCategoriesMap[mhi.Category], payload.IssueCategory)
+			assert.Equal(t, tt.wantCategory, payload.IssueCategory)
 			assert.Equal(t, *mhi.Summary, payload.Summary)
 		})
 	}

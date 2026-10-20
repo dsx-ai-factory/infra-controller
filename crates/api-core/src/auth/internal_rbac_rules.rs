@@ -320,7 +320,7 @@ impl InternalRBACRules {
         x.perm("DeleteTenantKeyset", vec![SiteAgent]);
         x.perm("ValidateTenantPublicKey", vec![SiteAgent, Ssh, SshRs]);
         x.perm("GetBmcCredentials", vec![Health, BmcProxy]);
-        x.perm("GetSwitchNvosCredentials", vec![Health]);
+        x.perm("GetSwitchNvosCredentials", vec![Health, BmcProxy]);
         x.perm("GetAllManagedHostNetworkStatus", vec![ForgeAdminCLI]);
         x.perm(
             "GetSiteExplorationReport",
@@ -720,6 +720,8 @@ impl InternalRBACRules {
         x.perm("FindNicFirmwareSiteSelectionIds", vec![ForgeAdminCLI]);
         x.perm("FindNicFirmwareSiteSelectionsByIds", vec![ForgeAdminCLI]);
         x.perm("SetMachineNicFirmwareConfig", vec![ForgeAdminCLI]);
+        x.perm("GetTenantNicFirmwareConfig", vec![ForgeAdminCLI]);
+        x.perm("SetTenantNicFirmwareConfig", vec![ForgeAdminCLI]);
         x.perm("GetDesiredNicFirmware", vec![ForgeAdminCLI]);
         x.perm("CreateSku", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GenerateSkuFromMachine", vec![ForgeAdminCLI]);
@@ -888,7 +890,7 @@ impl InternalRBACRules {
         );
         x.perm(
             "FindSwitchIds",
-            vec![ForgeAdminCLI, Machineatron, Flow, Health],
+            vec![ForgeAdminCLI, Machineatron, Flow, Health, BmcProxy],
         );
         x.perm(
             "FindSwitchesByIds",
@@ -1360,8 +1362,19 @@ mod rbac_rule_tests {
         );
     }
 
+    /// Firmware configuration stays operator-only, including tenant selections
+    /// that ordinary tenant callers must neither read nor change.
     #[test]
     fn nic_firmware_profile_operator_permissions() {
+        // Check the complete grant set for the tenant NIC firmware methods so
+        // service or anonymous grants cannot hide behind the sampled callers below.
+        let operator_principals = RuleInfo::new(vec![ForgeAdminCLI]).principals;
+        for method in ["GetTenantNicFirmwareConfig", "SetTenantNicFirmwareConfig"] {
+            assert_eq!(
+                INTERNAL_RBAC_RULES.perms[method].principals, operator_principals,
+                "{method} must remain operator-only"
+            );
+        }
         for (principal, allowed) in [
             (
                 Principal::ExternalUser(ExternalUserInfo::new(
@@ -1387,6 +1400,8 @@ mod rbac_rule_tests {
                 "FindNicFirmwareSiteSelectionIds",
                 "FindNicFirmwareSiteSelectionsByIds",
                 "SetMachineNicFirmwareConfig",
+                "GetTenantNicFirmwareConfig",
+                "SetTenantNicFirmwareConfig",
                 "GetDesiredNicFirmware",
             ] {
                 assert_eq!(
@@ -1799,7 +1814,12 @@ mod rbac_rule_tests {
             "MachineSetAutoUpdate",
             &[Principal::SpiffeServiceIdentifier("nico-flow".to_string())]
         ));
-        for method in ["FindMacAddressByBmcIp", "GetBmcCredentials"] {
+        for method in [
+            "FindMacAddressByBmcIp",
+            "GetBmcCredentials",
+            "FindSwitchIds",
+            "GetSwitchNvosCredentials",
+        ] {
             assert!(
                 InternalRBACRules::allowed_from_static(
                     method,

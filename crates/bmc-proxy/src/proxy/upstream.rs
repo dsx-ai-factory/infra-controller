@@ -38,7 +38,7 @@ use crate::metrics::{
     UpstreamRequestCompleted, UpstreamStatus,
 };
 use crate::proxy::credentials::{
-    BmcCredentials, CredentialCache, REDFISH_AUTH_TOKEN_HEADER, get_bmc_credentials,
+    BmcCredentials, CredentialCache, REDFISH_AUTH_TOKEN_HEADER, SwitchProbe, resolve_credentials,
 };
 use crate::proxy::{BmcProxyError, BmcProxyState, ProxyError, error_response};
 use crate::span_isolation::SpanIsolationMiddleware;
@@ -198,6 +198,7 @@ pub(super) async fn send_upstream(
             target_ip,
             &state.api_client,
             &state.credential_cache,
+            &state.switch_probe,
             state.http_client.clone(),
             &state.config.bmc_proxy,
         ),
@@ -346,6 +347,7 @@ async fn create_client(
     ip: IpAddr,
     api_client: &ForgeApiClient,
     credential_cache: &CredentialCache,
+    switch_probe: &SwitchProbe,
     http_client: reqwest_middleware::ClientWithMiddleware,
     bmc_proxy: &Option<HostPortPair>,
 ) -> Result<BmcClientInfo, BmcProxyError> {
@@ -369,7 +371,9 @@ async fn create_client(
     if add_custom_header {
         header_map.insert("forwarded", format!("host={ip}").parse().unwrap());
     }
-    let credentials = get_bmc_credentials(ip, api_client, credential_cache).await?;
+    let credentials = resolve_credentials(ip, api_client, credential_cache, switch_probe)
+        .await?
+        .credentials;
 
     let base_authority = build_authority(host, port);
 
@@ -505,7 +509,9 @@ mod tests {
     };
     use crate::config::RedirectMode;
     use crate::metrics::RedirectTarget;
-    use crate::proxy::credentials::{BmcCredentials, CREDENTIAL_CACHE_IDLE_TTL, CredentialCache};
+    use crate::proxy::credentials::{
+        BmcCredentials, CREDENTIAL_CACHE_IDLE_TTL, CredentialCache, SwitchProbe,
+    };
     use crate::proxy::idle_bounded_cache;
     use crate::proxy::test_support::*;
 
@@ -842,10 +848,10 @@ mod tests {
         credential_cache
             .insert(
                 ip,
-                BmcCredentials::UsernamePassword {
+                for_bmc(BmcCredentials::UsernamePassword {
                     username: "admin".to_string(),
                     password: "secret".to_string(),
-                },
+                }),
             )
             .await;
         let client_config = ForgeClientConfig::default();
@@ -856,6 +862,7 @@ mod tests {
             ip,
             &api_client,
             &credential_cache,
+            &SwitchProbe::default(),
             build_http_client(RedirectMode::FollowSameOrigin).expect("test HTTP client builds"),
             &proxy_override(case),
         )

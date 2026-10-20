@@ -64,8 +64,15 @@ fn setup() {
 }
 
 /// Run multiple machine-a-tron integration tests in parallel against a shared carbide API instance.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_integration() -> eyre::Result<()> {
+#[test]
+fn test_integration() -> eyre::Result<()> {
+    utils::api_server_runtime_builder()
+        .build()?
+        .block_on(run_integration())
+}
+
+/// Runs the shared API lifecycle and parallel machine-a-tron assertions.
+async fn run_integration() -> eyre::Result<()> {
     // NOTE: These tests run two carbide-api servers, and the clients are configured to randomly
     // switch between them on every API call. This helps prevent issues that arise when multiple API
     // severs may be running in production.
@@ -628,8 +635,16 @@ pub(crate) const METRIC_DOC_PATH: &str = concat!(
 
 /// Run integration tests with machine-a-tron, asserting on metrics. This has to run as its own
 /// test, to make the values in the metrics buckets predictable.
-#[tokio::test(flavor = "multi_thread", worker_threads = 10)]
-async fn test_metrics_integration() -> eyre::Result<()> {
+#[test]
+fn test_metrics_integration() -> eyre::Result<()> {
+    utils::api_server_runtime_builder()
+        .worker_threads(10)
+        .build()?
+        .block_on(run_metrics_integration())
+}
+
+/// Runs the isolated API lifecycle and machine-a-tron metric assertions.
+async fn run_metrics_integration() -> eyre::Result<()> {
     let Some(mut test_env) =
         IntegrationTestEnvironment::try_from_environment(1, "api_server_test_metrics_integration")
             .await?

@@ -1147,20 +1147,28 @@ pub(crate) async fn find_instances_by_extension_service(
     let mut instance_infos: Vec<rpc::InstanceDpuExtensionServiceInfo> = Vec::new();
 
     for instance in instances {
-        // Get the extension service config for this instance
+        // Prefer an active match independently of stored order. If only
+        // tombstones match, which retained attachment is returned is unspecified.
         if let Some(ext_service_config) = instance
             .config
             .extension_services
             .service_configs
             .iter()
-            .find(|config| config.service_id == service_id)
+            .filter(|config| {
+                config.service_id == service_id
+                    && version.is_none_or(|version| config.version == version)
+            })
+            .min_by_key(|config| config.removed.is_some())
         {
             let service_version = ext_service_config.version;
             instance_infos.push(rpc::InstanceDpuExtensionServiceInfo {
                 instance_id: instance.id.to_string(),
                 service_id: service_id.to_string(),
                 version: service_version.to_string(),
-                removed: ext_service_config.removed.map(|ts| ts.to_string()),
+                removed: ext_service_config
+                    .removed
+                    .or(instance.deleted)
+                    .map(|timestamp| timestamp.to_string()),
             });
         } else {
             return Err(CarbideError::Internal {

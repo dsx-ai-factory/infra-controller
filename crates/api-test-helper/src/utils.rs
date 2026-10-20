@@ -53,6 +53,15 @@ lazy_static::lazy_static! {
     };
 }
 
+/// `api_server_runtime_builder` enables all Tokio drivers and uses the Core
+/// binary's 8 MiB worker stacks. In-process tests bypass Core's `main`, so they
+/// need to apply its runtime settings here.
+pub fn api_server_runtime_builder() -> tokio::runtime::Builder {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().thread_stack_size(8 * 1024 * 1024);
+    builder
+}
+
 #[derive(Debug, Clone)]
 pub struct IntegrationTestEnvironment {
     /// API client addresses. Each slot starts at `127.0.0.1:0`; [`start_api_server`] replaces it

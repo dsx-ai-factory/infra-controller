@@ -14,10 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
 use carbide_network::virtualization::VpcVirtualizationType;
 use model::ConfigValidationError;
 use model::metadata::Metadata;
+use model::nic_firmware::NicFirmwareProfileId;
+use model::tenant::TenantOrganizationId;
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
@@ -280,6 +283,85 @@ pub(crate) async fn update(
     txn.commit().await?;
 
     Ok(response)
+}
+
+/// Reads the operator's selection and shared version even when no profile is selected.
+pub(crate) async fn get_nic_firmware_config(
+    api: &Api,
+    request: Request<rpc::GetTenantNicFirmwareConfigRequest>,
+) -> Result<Response<rpc::GetTenantNicFirmwareConfigResponse>, Status> {
+    // The shared logger truncates by byte offset before validation. Escaping
+    // produces ASCII so truncation cannot split a multi-byte character.
+    crate::api::log_request_data_redacted(
+        format!("{:?}", request.get_ref())
+            .escape_default()
+            .to_string(),
+    );
+    let request = request.into_inner();
+    let organization_id = request
+        .tenant_organization_id
+        .parse::<TenantOrganizationId>()
+        .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
+    log_tenant_organization_id(organization_id.as_str());
+
+    let config = db::tenant::find_nic_firmware_config(api.pg_pool(), &organization_id)
+        .await
+        .map_err(CarbideError::from)?
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "tenant",
+            id: organization_id.to_string(),
+        })?;
+    Ok(Response::new(rpc::GetTenantNicFirmwareConfigResponse {
+        firmware_config: Some(config.into()),
+    }))
+}
+
+/// Changes the operator's selection and shared tenant version in one transaction.
+pub(crate) async fn set_nic_firmware_config(
+    api: &Api,
+    request: Request<rpc::SetTenantNicFirmwareConfigRequest>,
+) -> Result<Response<rpc::SetTenantNicFirmwareConfigResponse>, Status> {
+    // The shared logger truncates by byte offset before validation. Escaping
+    // produces ASCII so truncation cannot split a multi-byte character.
+    crate::api::log_request_data_redacted(
+        format!("{:?}", request.get_ref())
+            .escape_default()
+            .to_string(),
+    );
+    let request = request.into_inner();
+    let organization_id = request
+        .tenant_organization_id
+        .parse::<TenantOrganizationId>()
+        .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
+    log_tenant_organization_id(organization_id.as_str());
+    let expected_version = request
+        .if_version_match
+        .parse()
+        .map_err(|_| RpcDataConversionError::InvalidConfigVersion(request.if_version_match))
+        .map_err(CarbideError::from)?;
+    let profile_id: Option<NicFirmwareProfileId> = match request
+        .action
+        .ok_or(CarbideError::MissingArgument("action"))?
+    {
+        rpc::set_tenant_nic_firmware_config_request::Action::ProfileId(id) => {
+            Some(id.parse().map_err(CarbideError::from)?)
+        }
+        rpc::set_tenant_nic_firmware_config_request::Action::Clear(()) => None,
+    };
+
+    let mut txn = api.txn_begin().await?;
+    let config = db::tenant::set_nic_firmware_config(
+        &mut txn,
+        &organization_id,
+        profile_id.as_ref(),
+        expected_version,
+    )
+    .await
+    .map_err(CarbideError::from)?;
+    txn.commit().await?;
+    Ok(Response::new(rpc::SetTenantNicFirmwareConfigResponse {
+        firmware_config: Some(config.into()),
+    }))
 }
 
 pub(crate) async fn find_tenants_by_organization_ids(

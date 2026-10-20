@@ -1489,11 +1489,9 @@ impl ApiClient {
                     bmc_username: switch.bmc_username,
                     bmc_password: switch.bmc_password,
                     switch_serial_number: switch.switch_serial_number,
-                    nvos_mac_addresses: switch
-                        .nvos_mac_addresses
-                        .iter()
-                        .map(|m| m.to_string())
-                        .collect(),
+                    nvos_interfaces: crate::expected_switch::common::nvos_interfaces_wire(
+                        &switch.nvos_interfaces,
+                    ),
                     nvos_username: switch.nvos_username,
                     nvos_password: switch.nvos_password,
                     bmc_ip_address: switch

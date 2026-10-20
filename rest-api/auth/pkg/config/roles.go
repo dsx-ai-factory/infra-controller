@@ -29,17 +29,6 @@ var (
 // Role Validation Functions
 // =============================================================================
 
-// validateRoles checks that all roles are in the AllowedRoles set.
-// Returns false immediately upon finding the first invalid role.
-func validateRoles(roles []string) bool {
-	for _, role := range roles {
-		if !AllowedRoles[role] {
-			return false
-		}
-	}
-	return true
-}
-
 // IsValidRole checks if a single role is in the AllowedRoles set.
 func IsValidRole(role string) bool {
 	return AllowedRoles[role]

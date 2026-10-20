@@ -270,7 +270,10 @@ func (s *Service) Start(ctx context.Context) (retErr error) {
 			s.taskManager.Stop(ctx)
 		}
 		if invStarted {
-			s.inventoryManager.Stop(ctx)
+			err := s.inventoryManager.Stop(ctx)
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to stop inventory manager")
+			}
 		}
 		s.session.Close()
 	}()
@@ -341,6 +344,7 @@ func (s *Service) Start(ctx context.Context) (retErr error) {
 		s.operationRunManager,
 		s.eventRuleManager,
 		s.conf.DataCipher,
+		powerReaderFromRegistry(s.conf.ProviderRegistry),
 	)
 	if err != nil {
 		return err
@@ -486,8 +490,12 @@ func (s *Service) Stop(ctx context.Context) {
 	}
 
 	if s.inventoryManager != nil {
-		s.inventoryManager.Stop(ctx)
-		log.Info().Msg("Inventory manager stopped")
+		err := s.inventoryManager.Stop(ctx)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to stop inventory manager")
+		} else {
+			log.Info().Msg("Inventory manager stopped")
+		}
 	}
 
 	// Rule resolver has no cleanup needed (cache is GC'd automatically)

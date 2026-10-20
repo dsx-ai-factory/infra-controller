@@ -233,12 +233,14 @@ systemctl show -p TimeoutStartUSec cloud-final.service
 
 ### Metadata Precedence
 
-PXE resolves `instance-id` in this order:
+After Core resolves the client identity, PXE selects `instance-id` in this order:
 
 1. The `instance-id` from the resolved cloud-init metadata, when present
    (normally the machine ID).
 1. The resolved machine interface ID.
 1. The fixed fallback value `nico-discovery`.
+
+Core lookup errors return HTTP 400 before this metadata fallback runs.
 
 PXE sets `local-hostname` only when the resolved machine interface has a
 non-empty hostname. Otherwise, the field is omitted so cloud-init can apply its

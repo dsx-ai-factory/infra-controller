@@ -8,6 +8,9 @@ import (
 	"errors"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -798,4 +801,10 @@ func (c *mockClient) SetDecommissionSwitchError(err error) {
 // (mock only).
 func (c *mockClient) SetDecommissionPowerShelfError(err error) {
 	c.decommissionPowerShelfErr = err
+}
+
+// GetComponentPowerDetails leaves passive power details explicitly unsupported
+// in the generic mock. Focused service tests supply the observations they need.
+func (c *mockClient) GetComponentPowerDetails(context.Context, *corev1.GetComponentPowerDetailsRequest) (*corev1.GetComponentPowerDetailsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "mock power details are not configured")
 }

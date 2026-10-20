@@ -507,7 +507,6 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 	common.TestBuildAllocation(t, dbSession, site2, tenant4, "test-allocation-4", tnu)
 
 	imageoss := []cdbm.OperatingSystem{}
-	imageossa := []cdbm.OperatingSystemSiteAssociation{}
 	ipxeoss := []cdbm.OperatingSystem{}
 	totalCount2 := 18
 
@@ -538,13 +537,12 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 			)
 			assert.Nil(t, err)
 
-			ossa := common.TestBuildOperatingSystemSiteAssociation(t, dbSession, os.ID, site2.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSyncing, tnu)
+			common.TestBuildOperatingSystemSiteAssociation(t, dbSession, os.ID, site2.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSyncing, tnu)
 			common.TestBuildStatusDetail(t, dbSession, os.ID.String(), cdbm.OperatingSystemStatusSyncing, cutil.GetPtr("received Operating System creation request, syncing"))
 			common.TestBuildStatusDetail(t, dbSession, os.ID.String(), cdbm.OperatingSystemStatusReady, cutil.GetPtr("Operating System is now ready for use"))
 
 			assert.Nil(t, err)
 			imageoss = append(imageoss, *os)
-			imageossa = append(imageossa, *ossa)
 
 		} else {
 			os, err := osDAO.Create(

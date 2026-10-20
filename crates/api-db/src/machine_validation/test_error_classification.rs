@@ -16,12 +16,64 @@
  */
 
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
+use carbide_uuid::machine_validation::MachineValidationId;
 use model::machine::machine_search_config::MachineSearchConfig;
+use model::machine_validation::MachineValidationState;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
 use crate::db_read::PgPoolReader;
 use crate::{DatabaseError, machine, machine_validation_config, machine_validation_result};
+
+#[crate::sqlx_test]
+async fn find_by_id_decodes_legacy_success_and_rejects_unknown_state(pool: PgPool) {
+    let mut txn = pool.begin().await.expect("begin fixture transaction");
+    let machine_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [0x67; 32],
+        MachineType::Host,
+    );
+    for (state, expected) in [
+        ("Completed", Ok(MachineValidationState::Success)),
+        ("Unknown", Err("invalid machine_validation.state: Unknown")),
+    ] {
+        let id = MachineValidationId::new();
+        // Seed stored spellings directly; typed writers emit only canonical states.
+        sqlx::query(
+            "INSERT INTO machine_validation
+                (id, machine_id, name, state, end_time, total, completed)
+             VALUES ($1, $2, 'stored-state', $3, NOW(), 1, 1)",
+        )
+        .bind(id)
+        .bind(machine_id)
+        .bind(state)
+        .execute(txn.as_mut())
+        .await
+        .expect("insert validation with the stored state");
+
+        let result = super::find_by_id(txn.as_mut(), &id).await;
+        match expected {
+            Ok(expected_state) => {
+                let validation = result.expect("a legacy successful state must decode");
+                assert_eq!(
+                    validation.status.expect("run has a status").state,
+                    expected_state
+                );
+            }
+            Err(expected_error) => {
+                let error = result.expect_err("an unknown validation state must fail decoding");
+                let DatabaseError::Sqlx(annotated) = &error else {
+                    panic!("expected Sqlx, got {error:?}");
+                };
+                let sqlx::Error::Decode(source) = &annotated.source else {
+                    panic!("expected Decode, got {error:?}");
+                };
+                assert_eq!(annotated.query, "machine_validation find_by");
+                assert!(source.to_string().contains(expected_error), "{error:?}");
+            }
+        }
+    }
+}
 
 #[crate::sqlx_test]
 async fn missing_external_config_returns_not_found(pool: PgPool) {

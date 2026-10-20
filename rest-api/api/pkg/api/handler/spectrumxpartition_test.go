@@ -47,6 +47,9 @@ type spectrumXPartitionFixture struct {
 	proxiedReq  *grpcproxy.Request
 	coreVNI     *uint32
 	coreErr     error
+	coreStarted chan struct{}
+	coreRelease <-chan struct{}
+	coreClient  *tmocks.Client
 	scp         *sc.ClientPool
 }
 
@@ -111,6 +114,10 @@ func newSpectrumXPartitionFixture(t *testing.T) *spectrumXPartitionFixture {
 	// The Core response the proxy decodes into the caller's `resp` message is returned
 	// through the workflow result, so the mock fills it from the fixture's coreVNI.
 	wrun.On("Get", mock.Anything, mock.Anything).Return(func(_ context.Context, out interface{}) error {
+		if fx.coreStarted != nil {
+			fx.coreStarted <- struct{}{}
+			<-fx.coreRelease
+		}
 		if fx.coreErr != nil {
 			return fx.coreErr
 		}
@@ -138,6 +145,7 @@ func newSpectrumXPartitionFixture(t *testing.T) *spectrumXPartitionFixture {
 			return true
 		}),
 	).Return(wrun, nil)
+	fx.coreClient = tsc
 
 	fx.scp = sc.NewClientPool(nil)
 	fx.scp.IDClientMap[fx.site.ID.String()] = tsc
@@ -260,6 +268,79 @@ func TestCreateSpectrumXPartitionHandler_Handle(t *testing.T) {
 		request := model.APISpectrumXPartitionCreateRequest{Name: "east-west-net", SiteID: fx.site.ID.String()}
 		require.Equal(t, http.StatusCreated, fx.create(t, request, fx.user, fx.org).Code)
 		assert.Equal(t, http.StatusConflict, fx.create(t, request, fx.user, fx.org).Code)
+	})
+
+	t.Run("concurrent duplicate name returns one conflict without another Core create", func(t *testing.T) {
+		fx := newSpectrumXPartitionFixture(t)
+		fx.coreStarted = make(chan struct{}, 2)
+		coreRelease := make(chan struct{})
+		fx.coreRelease = coreRelease
+		released := false
+		t.Cleanup(func() {
+			if !released {
+				close(coreRelease)
+			}
+		})
+
+		request := model.APISpectrumXPartitionCreateRequest{Name: "east-west-net", SiteID: fx.site.ID.String()}
+		body, err := json.Marshal(request)
+		require.NoError(t, err)
+		handler := NewCreateSpectrumXPartitionHandler(fx.dbSession, fx.scp, common.GetTestConfig())
+		type result struct {
+			code int
+			err  error
+		}
+		create := func() <-chan result {
+			done := make(chan result, 1)
+			go func() {
+				ec, rec := fx.newContext(t, http.MethodPost, "/", string(body), fx.user, fx.org, "")
+				done <- result{code: rec.Code, err: handler.Handle(ec)}
+			}()
+			return done
+		}
+
+		first := create()
+		select {
+		case <-fx.coreStarted:
+		case <-time.After(5 * time.Second):
+			t.Fatal("first create did not reach Core")
+		}
+
+		second := create()
+		select {
+		case got := <-second:
+			require.NoError(t, got.err)
+			assert.Equal(t, http.StatusConflict, got.code)
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent create did not return a conflict while the first request held the lock")
+		}
+		assert.Empty(t, fx.coreStarted, "the conflicting request must not call Core")
+
+		close(coreRelease)
+		released = true
+		select {
+		case got := <-first:
+			require.NoError(t, got.err)
+			assert.Equal(t, http.StatusCreated, got.code)
+		case <-time.After(5 * time.Second):
+			t.Fatal("first create did not complete after Core was released")
+		}
+		fx.coreClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+
+		partitions, total, err := cdbm.NewSpectrumXPartitionDAO(fx.dbSession).GetAll(
+			context.Background(),
+			nil,
+			cdbm.SpectrumXPartitionFilterInput{
+				Names:     []string{request.Name},
+				SiteIDs:   []uuid.UUID{fx.site.ID},
+				TenantIDs: []uuid.UUID{fx.tenant.ID},
+			},
+			paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		assert.Equal(t, 1, total)
+		assert.Len(t, partitions, 1)
 	})
 
 	// Two Tenants on one Site are independent namespaces, so the same name has to work.

@@ -249,7 +249,10 @@ async fn test_site_explorer_reconcile_preallocates_nvos_ip(
         model::expected_switch::ExpectedSwitch {
             expected_switch_id: None,
             bmc_mac_address: bmc_mac,
-            nvos_mac_addresses: vec![nvos_mac],
+            nvos_interfaces: vec![model::expected_switch::ExpectedNvosInterface {
+                mac_address: nvos_mac,
+                is_primary: true,
+            }],
             bmc_username: "ADMIN".into(),
             serial_number: "reconcile-nvos-001".into(),
             bmc_password: "PASS".into(),

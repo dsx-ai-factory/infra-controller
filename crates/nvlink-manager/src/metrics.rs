@@ -362,6 +362,38 @@ pub(super) enum NvlPartitionMonitorIterationFinished {
     },
 }
 
+/// Which `NvlinkUnhealthy` health-report write failed: setting the allocation
+/// block or clearing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, LabelValue)]
+pub(super) enum NvlinkUnhealthyAlertWrite {
+    Set,
+    Clear,
+}
+
+/// A `NvlinkUnhealthy` merge-report write failed. The pass otherwise finishes
+/// normally and the write is retried on the next pass, so this is the only
+/// signal that a machine's allocation block was not applied or cleared.
+#[derive(Event)]
+#[event(
+    event_name = "nvlink_unhealthy_alert_write_failed",
+    metric_name = "carbide_nvlink_partition_monitor_unhealthy_alert_write_failures_total",
+    component = "nvlink-manager",
+    log = warn,
+    metric = counter,
+    message = "Failed to update NvlinkUnhealthy health alert; retrying next pass",
+    describe = "Number of NvlinkUnhealthy health-report writes that failed and were deferred to the next pass"
+)]
+pub(super) struct NvlinkUnhealthyAlertWriteFailed {
+    #[label]
+    pub(super) write: NvlinkUnhealthyAlertWrite,
+    #[context]
+    pub(super) machine_id: String,
+    #[context]
+    pub(super) domain_uuid: String,
+    #[context]
+    pub(super) error: String,
+}
+
 /// Instruments that are used by pub struct NvlPartitionMonitor
 struct NvlPartitionMonitorInstruments {
     nmxc_changes_applied: Counter<u64>,
@@ -1210,6 +1242,46 @@ mod tests {
         assert!(
             !encoded.contains("_milliseconds_milliseconds"),
             "the unit suffix must be applied exactly once:\n{encoded}"
+        );
+    }
+
+    #[test]
+    fn unhealthy_alert_write_failure_counts_per_write_kind_and_logs_context() {
+        const METRIC_NAME: &str =
+            "carbide_nvlink_partition_monitor_unhealthy_alert_write_failures_total";
+
+        let metrics = MetricsCapture::start();
+        let logs = capture_logs(|| {
+            emit(NvlinkUnhealthyAlertWriteFailed {
+                write: NvlinkUnhealthyAlertWrite::Set,
+                machine_id: "machine-1".to_string(),
+                domain_uuid: "domain-1".to_string(),
+                error: "pool timed out".to_string(),
+            });
+        });
+
+        let log = logs.first().expect("a write failure must log");
+        assert_eq!(log.level, tracing::Level::WARN);
+        assert_eq!(
+            log.field("event_name"),
+            Some("nvlink_unhealthy_alert_write_failed")
+        );
+        assert_eq!(log.field("metric_name"), Some(METRIC_NAME));
+        assert_eq!(log.field("machine_id"), Some("machine-1"));
+        assert_eq!(log.field("error"), Some("pool timed out"));
+
+        let encoded = metrics.render();
+        assert!(
+            encoded.contains(&format!("# TYPE {METRIC_NAME} counter\n")),
+            "expected a counter family:\n{encoded}"
+        );
+        assert!(
+            encoded.contains(&format!("{METRIC_NAME}{{")) && encoded.contains("write=\"set\""),
+            "expected the write kind as the only label:\n{encoded}"
+        );
+        assert!(
+            !encoded.contains("machine-1"),
+            "machine id must stay in log context, not become a label:\n{encoded}"
         );
     }
 

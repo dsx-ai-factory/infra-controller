@@ -938,6 +938,10 @@ service Forge {
   rpc FindNicFirmwareSiteSelectionsByIds(FindNicFirmwareSiteSelectionsByIdsRequest) returns (FindNicFirmwareSiteSelectionsByIdsResponse);
   // Set or clear the operator's machine and card selections using Machine.version.
   rpc SetMachineNicFirmwareConfig(SetMachineNicFirmwareConfigRequest) returns (google.protobuf.Empty);
+  // Only operators may read the tenant selection; the response includes the shared Tenant.version.
+  rpc GetTenantNicFirmwareConfig(GetTenantNicFirmwareConfigRequest) returns (GetTenantNicFirmwareConfigResponse);
+  // Set or clear the operator's tenant selection using the shared Tenant.version.
+  rpc SetTenantNicFirmwareConfig(SetTenantNicFirmwareConfigRequest) returns (SetTenantNicFirmwareConfigResponse);
   // Get desired firmware for each device using stored host observations.
   rpc GetDesiredNicFirmware(GetDesiredNicFirmwareRequest) returns (GetDesiredNicFirmwareResponse);
 
@@ -3080,8 +3084,9 @@ message Switch {
   reserved 12, 13;
   bool is_primary = 14;
 
-  // Deprecated: use status.nvos_ports. A resolved endpoint is retained here
-  // for compatibility, preferring IPv4 and then the lowest-MAC port.
+  // Deprecated: use status.nvos_ports. Retains the discovered primary port,
+  // preferring IPv4 within that port. Absent if the primary is not discovered;
+  // ip is absent if that port has no address. Never falls back to a secondary.
   SwitchNvosInfo nvos_info = 15 [deprecated = true];
 
   // NVLink domain UUID
@@ -3159,7 +3164,7 @@ message SwitchSearchFilter {
   optional string controller_state = 3;
   // Filter by BMC MAC address via machine_interfaces
   optional string bmc_mac = 4;
-  // Filter by NVOS MAC address via expected_switches.nvos_mac_addresses
+  // Filter by NVOS MAC address via expected_switch_nvos_interfaces.
   optional string nvos_mac = 5;
   // For example, to search for leak alerts, set the below to "hardware-health.tray-leak-detection"
   optional string only_with_health_alert = 6;
@@ -3167,6 +3172,18 @@ message SwitchSearchFilter {
 
 message SwitchesByIdsRequest {
   repeated common.SwitchId switch_ids = 1;
+}
+
+// A single NVOS ethernet port of a switch. Both ports of a switch reach the
+// same NVOS instance; `is_primary` marks the one (eth0) NICo talks to via RMS.
+message ExpectedNvosInterface {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // MAC address of this NVOS ethernet port.
+  string mac_address = 1;
+  // Whether NICo treats this as the primary (eth0) NVOS port. Exactly one port
+  // per switch is primary; a switch with a single port is always its own primary
+  // regardless of this flag.
+  bool is_primary = 2;
 }
 
 message ExpectedSwitch {
@@ -3182,14 +3199,24 @@ message ExpectedSwitch {
   optional string nvos_password = 8;
   // Unique identifier for the expected switch. When omitted, server generates one.
   optional common.UUID expected_switch_id = 9;
-  repeated string nvos_mac_addresses = 10;
+  // Field 10 was `repeated string nvos_mac_addresses`; replaced by the
+  // structured `nvos_interfaces` at field 14 to carry the per-port primary
+  // flag. The number is retired rather than reused because the wire type
+  // changed from string to message.
+  reserved 10;
+  reserved "nvos_mac_addresses";
   string bmc_ip_address = 11;
   // When true, site-explorer skips BMC password rotation and stores the
   // factory-default credentials in Vault as-is.
   optional bool bmc_retain_credentials = 12;
   // Static IP reservation for the single wired NVOS port. Only meaningful
-  // when `nvos_mac_addresses` has exactly one entry.
+  // when `nvos_interfaces` has exactly one entry.
   optional string nvos_ip_address = 13;
+  // The switch's NVOS ethernet ports. Create and replace-all entries require
+  // at least one port. Exactly one entry must be flagged
+  // `is_primary` when more than one is present; a single port is primary
+  // implicitly. On reads the flags report the current primary.
+  repeated ExpectedNvosInterface nvos_interfaces = 14;
 }
 
 message ExpectedSwitchRequest {
@@ -5979,7 +6006,10 @@ message AdminForceDeleteMachineRequest {
   // credentials for this machine.
   bool delete_bmc_credentials = 4;
 
-  // Allow force delete of machine with orphaned dpf crds
+  // Allow force deletion to discard Core-owned service VPC resources and
+  // continue when DPF resources cannot be removed. This may leave orphaned
+  // DPF CRDs. The option is request-scoped and must be repeated on polling
+  // retries until force deletion completes.
   bool allow_delete_with_orphaned_dpf_crds = 5;
 
   // Delete Site Explorer and DHCP BMC suppressions for the host/DPU BMC MACs
@@ -6818,7 +6848,8 @@ message Tenant {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   string organization_id = 1;
   Metadata metadata = 2;
-  // this string is used to verify that the client has the most updated "view" of a keyset when attempting to modify it
+  // Complete concurrency token shared by tenant, identity-configuration and
+  // operator NIC firmware selection updates.
   string version = 3;
   reserved 4;
   optional string routing_profile_type = 5;
@@ -6841,6 +6872,8 @@ message UpdateTenantRequest {
 
   // if this field is set and non-empty, the request will only update the tenant if the version matches the server's view,
   // otherwise it will return a concurrency related error.
+  // Identity-configuration and operator NIC firmware selection updates also
+  // advance this shared Tenant.version token.
   optional string if_version_match = 3;
 
   reserved 4;
@@ -10254,10 +10287,18 @@ enum DpuExtensionServiceDeploymentStatus {
 
 message FindInstancesByDpuExtensionServiceRequest {
   string service_id = 1;
+  // If set, return instances retaining this exact active or terminating
+  // version. If omitted, return one entry per matching instance: the active
+  // attachment when present, otherwise one retained terminating attachment.
+  // Set this field to select a particular retained historical version.
   optional string version = 2;
 }
 
 message FindInstancesByDpuExtensionServiceResponse {
+  // One entry per matching instance. Matching instances include soft-deleted
+  // instances until physical deletion removes the stored attachment. Entries
+  // have no defined order. When version is omitted and no active attachment
+  // remains, which retained terminating attachment is reported is unspecified.
   repeated InstanceDpuExtensionServiceInfo instances = 1;
 }
 
@@ -10265,7 +10306,10 @@ message InstanceDpuExtensionServiceInfo {
   string instance_id = 1;
   string service_id = 2;
   string version = 3;
-  optional string removed = 4; // Signals that this service is being removed from instance config and is terminating
+  // Attachment-removal timestamp. For an active attachment on a soft-deleted
+  // instance, this falls back to the instance-deletion timestamp. It is unset
+  // only while both the attachment and instance remain active.
+  optional string removed = 4;
 }
 
 message DpuExtensionServiceObservabilityConfigPrometheus {
@@ -11187,6 +11231,11 @@ message ListComponentFirmwareVersionsResponse {
 }
 
 message SpxPartitionCreationRequest {
+  // Required. Omitted or invalid metadata returns INVALID_ARGUMENT.
+  // Name: 2-256 ASCII characters. Description: at most 1024 UTF-8 bytes.
+  // Labels: at most 16, with unique ASCII keys of 1-255 characters and values
+  // of at most 255 UTF-8 bytes. Omitted descriptions and label values are empty
+  // strings; omitted labels are an empty list.
   Metadata metadata = 1;
   optional common.SpxPartitionId id = 2;
   optional uint32 vni = 3;
@@ -12036,12 +12085,15 @@ message PatchExpectedSwitchRequest {
   ExpectedSwitch expected_switch = 1;
   // Required; an empty mask checks existence without changing the row.
   // Paths: bmc_username, bmc_password, switch_serial_number, bmc_ip_address,
-  // bmc_retain_credentials, rack_id, nvos_mac_addresses, nvos_ip_address,
-  // nvos_username, nvos_password, metadata.name, metadata.description,
-  // metadata.labels.
+  // bmc_retain_credentials, rack_id, nvos_interfaces, nvos_ip_address,
+  // nvos_username, nvos_password, metadata.name,
+  // metadata.description, metadata.labels.
   // Unselected values are ignored. Selected values replace the stored field,
-  // including empty collections, an absent `rack_id` (clear), and an empty BMC
-  // IP (clear). A selected `nvos_ip_address` clears with an absent or empty value.
+  // including empty labels, an absent `rack_id` (clear), and an empty BMC IP
+  // (clear). `nvos_interfaces` replaces the complete port set and must contain
+  // at least one port; a lone port is promoted to primary, while a multi-port
+  // set must flag exactly one primary. A selected `nvos_ip_address` clears with
+  // an absent or empty value.
   // Nonempty IPs must parse as IPv4 or IPv6. A selected `bmc_retain_credentials`
   // must be present; false is an update. BMC and NVOS usernames and passwords
   // can each be selected independently; unselected values stay unchanged.
@@ -12192,6 +12244,9 @@ message SwitchNvosPortInfo {
   optional uint32 service_port = 2;
   // At most one address per family, ordered IPv4 before IPv6.
   repeated IpAddress addresses = 3;
+  // Whether this is the operator-declared primary (eth0) NVOS port that NICo
+  // uses to talk to NVOS via RMS.
+  bool is_primary = 4;
 }
 
 // A named definition, independent of site, machine, card or tenant selection.
@@ -12284,6 +12339,7 @@ message UpdateNicFirmwareProfileRequest {
   // continues to report that device's error.
   // Managed-DPU devices and incomplete or invalid observations do not constrain
   // the profile. Compatibility checks precede the stored-version check.
+  // Tenant selections have no bound hardware and do not constrain profile edits.
   NicFirmwareProfileConfig config = 2;
   // Required edit-version token from a previous read. Missing or malformed
   // tokens return INVALID_ARGUMENT; stale tokens return FAILED_PRECONDITION
@@ -12293,7 +12349,7 @@ message UpdateNicFirmwareProfileRequest {
 
 message DeleteNicFirmwareProfileRequest {
   // Profile name; follows the NicFirmwareProfile.id contract. A profile selected
-  // at site, machine or card scope cannot be deleted
+  // at site, machine, card or tenant scope cannot be deleted
   // (FAILED_PRECONDITION), including card selectors no longer found in inventory.
   string id = 1;
   // Required edit-version token from a previous read. Missing or malformed
@@ -12462,6 +12518,73 @@ message SetMachineNicFirmwareConfigRequest {
   // lock. Clearing cards does not require inventory, though a supplied machine
   // profile still must satisfy the machine compatibility rules above.
   NicFirmwareCardSelections card_selections = 5;
+}
+
+// The operator-managed NIC firmware selection of an existing tenant.
+message TenantNicFirmwareConfig {
+  // Organization ID of the tenant whose selection was read or committed.
+  string tenant_organization_id = 1;
+  // Selected live profile, not a pinned catalog revision. Absence means the tenant
+  // has no NIC firmware requirement. Tenant selections do not change machine,
+  // card or site selections.
+  optional string profile_id = 2;
+  // Complete shared Tenant.version token in V<number>-T<timestamp> format,
+  // including when profile_id is absent. Tenant, identity-configuration and
+  // NIC firmware selection updates advance it.
+  string config_version = 3;
+}
+
+// Only operators may read a tenant's NIC firmware selection.
+message GetTenantNicFirmwareConfigRequest {
+  // Required nonempty organization ID containing only ASCII letters, digits, '_'
+  // and '-'. Missing or malformed IDs return INVALID_ARGUMENT; unknown tenants
+  // return NOT_FOUND. An existing tenant with no selection returns an absent
+  // profile_id and its current shared version.
+  string tenant_organization_id = 1;
+}
+
+// The tenant's NIC firmware selection and current shared version.
+message GetTenantNicFirmwareConfigResponse {
+  // Always present on success, including when no profile is selected.
+  TenantNicFirmwareConfig firmware_config = 1;
+}
+
+// Only operators may set or clear tenant NIC firmware selections. This stores
+// intent without updating hardware or changing existing allocations. Until NIC
+// firmware preparation is implemented (https://github.com/dsx-ai-factory/infra-controller/issues/6686),
+// Core rejects allocations with nonempty SPX attachments for a tenant with a
+// selected profile, and rejects attachment additions or changes that leave a
+// nonempty SPX list on its existing allocations. Unchanged or cleared attachments
+// remain allowed. Each attempt uses the selection visible to the guard's database
+// read; an attempt already past that read may finish after a selection is committed.
+// Complete the Core upgrade before using tenant selections, and do not roll back
+// to allocators that ignore them. Ordinary tenant updates preserve the selection.
+message SetTenantNicFirmwareConfigRequest {
+  // Required organization ID following GetTenantNicFirmwareConfigRequest validation.
+  // The tenant must already exist; an unknown tenant returns NOT_FOUND.
+  string tenant_organization_id = 1;
+  // Required complete current Tenant.version token in V<number>-T<timestamp> format.
+  // Missing or malformed tokens return INVALID_ARGUMENT; stale tokens return
+  // FAILED_PRECONDITION. Every successful set or clear advances the shared token,
+  // including unchanged values. The response contains the committed new token.
+  string if_version_match = 2;
+  // Required action. Omission returns INVALID_ARGUMENT without changing the tenant.
+  oneof action {
+    // Select a live profile following NicFirmwareProfile.id validation. Invalid
+    // IDs return INVALID_ARGUMENT and missing profiles return NOT_FOUND. Profile
+    // existence is checked before tenant existence and the tenant version token.
+    // No hardware is bound here, so this does not validate device compatibility.
+    string profile_id = 3;
+    // Remove the tenant selection without deleting the tenant or profile. Succeeds
+    // when already unset; does not require the previously selected profile.
+    google.protobuf.Empty clear = 4;
+  }
+}
+
+// The committed tenant NIC firmware selection and new shared version.
+message SetTenantNicFirmwareConfigResponse {
+  // Always present on success, including after clearing the selection.
+  TenantNicFirmwareConfig firmware_config = 1;
 }
 
 // A host and optional allocation profile for looking up desired firmware.

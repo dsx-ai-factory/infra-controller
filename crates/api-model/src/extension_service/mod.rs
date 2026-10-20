@@ -321,6 +321,8 @@ pub struct ExtensionServiceSnapshot {
     pub tenant_organization_id: TenantOrganizationId,
     pub version_ctr: i32,
     pub latest_version: Option<ExtensionServiceVersionInfo>,
+    /// Complete non-deleted inventory, ordered by version number and then
+    /// creation time, both descending.
     pub active_versions: Vec<ConfigVersion>,
     pub description: String,
     /// Service-facing interface requirements in ordinal order.
@@ -335,13 +337,15 @@ pub struct ExtensionServiceSnapshot {
 }
 
 impl<'r> FromRow<'r, PgRow> for ExtensionServiceSnapshot {
+    /// Returns [`sqlx::Error::ColumnDecode`] naming `active_versions` when any
+    /// entry is malformed, rather than returning a partial list.
     fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
         let service_id: ExtensionServiceId = row.try_get("service_id")?;
         let service_type_str: String = row.try_get("service_type")?;
         let service_type = service_type_str
             .parse::<ExtensionServiceType>()
             .map_err(|e| sqlx::Error::ColumnDecode {
-                index: "type".to_string(),
+                index: "service_type".to_string(),
                 source: Box::new(e),
             })?;
         let service_name: String = row.try_get("service_name")?;
@@ -368,8 +372,12 @@ impl<'r> FromRow<'r, PgRow> for ExtensionServiceSnapshot {
         let active_versions_str: Vec<String> = row.try_get("active_versions")?;
         let active_versions: Vec<ConfigVersion> = active_versions_str
             .iter()
-            .filter_map(|s| s.parse().ok())
-            .collect();
+            .map(|s| s.parse())
+            .collect::<Result<_, _>>()
+            .map_err(|e| sqlx::Error::ColumnDecode {
+                index: "active_versions".to_string(),
+                source: Box::new(e),
+            })?;
 
         let latest_version = row.try_get("latest_version")?;
         let latest_data = row.try_get("latest_data")?;
@@ -720,6 +728,31 @@ mod tests {
     use carbide_test_support::scenarios;
 
     use super::*;
+
+    #[crate::sqlx_test]
+    async fn snapshot_service_type_error_identifies_column(pool: sqlx::PgPool) {
+        // Use a projected row because the table constraint rejects unknown service types.
+        let row = sqlx::query(
+            "SELECT
+                $1::uuid AS service_id,
+                'virtual_machine'::text AS service_type",
+        )
+        .bind(ExtensionServiceId::new())
+        .fetch_one(&pool)
+        .await
+        .expect("fetch snapshot row with an invalid service type");
+
+        let error = ExtensionServiceSnapshot::from_row(&row)
+            .expect_err("an unknown service type must fail decoding");
+        let sqlx::Error::ColumnDecode { index, source } = error else {
+            panic!("expected ColumnDecode, got {error:?}");
+        };
+        assert_eq!(index, "service_type");
+        assert!(
+            source.is::<InvalidExtensionServiceTypeError>(),
+            "{source:?}"
+        );
+    }
 
     // ExtensionServiceType parses case-insensitively from its wire form, and an
     // unknown string is rejected.

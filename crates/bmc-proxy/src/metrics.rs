@@ -350,6 +350,29 @@ pub(crate) struct UpstreamAuthRetried {
     pub(crate) bmc_ip_address: String,
 }
 
+/// nico-api denied the proxy's probe for the switch at a proxied address, so
+/// the proxy took the address for a BMC's. Expected only while nico-api
+/// predates the proxy's switch support; from a current nico-api it means its
+/// RBAC lost the proxy's grant for `FindSwitchIds`. The proxy then takes
+/// every address for a BMC's until it probes again, so one denial is counted
+/// per retry interval, not per address.
+#[derive(Event)]
+#[event(
+    event_name = "bmc_proxy_switch_probe_denied",
+    metric_name = "carbide_bmc_proxy_switch_probe_denied_total",
+    component = "nico-bmc-proxy",
+    log = warn,
+    metric = counter,
+    message = "nico-api denied the switch lookup; taking addresses for BMCs' until the next probe",
+    describe = "Number of times nico-api denied the proxy's FindSwitchIds probe for the switch at a proxied address, after which the proxy resolves every address as a BMC's until it probes again"
+)]
+pub(crate) struct SwitchProbeDenied {
+    #[context]
+    pub(crate) bmc_ip_address: String,
+    #[context]
+    pub(crate) error: String,
+}
+
 /// The redirect response status, kept to the five statuses HTTP clients
 /// automatically follow and one bounded fallback for other 3xx responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

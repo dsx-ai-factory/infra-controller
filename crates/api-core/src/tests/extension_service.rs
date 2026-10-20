@@ -4225,10 +4225,10 @@ async fn test_dpf_interface_requirements_can_be_added_for_reconciliation(
 }
 
 /// Verifies active, terminating, and soft-deleted-instance attachments prevent
-/// removing a service's interface requirements, because each can still own
-/// network resources that depend on the registered contract.
+/// removing a DPF service contract through requirement updates or public
+/// deletion, because each can still own resources that depend on it.
 #[crate::sqlx_test]
-async fn test_dpf_interface_requirement_removal_rejects_existing_attachments(
+async fn test_dpf_contract_removal_rejects_existing_attachments(
     db_pool: sqlx::PgPool,
 ) -> Result<(), eyre::Report> {
     // Start from a Ready networked registration, where removing the requirement
@@ -4255,6 +4255,12 @@ async fn test_dpf_interface_requirement_removal_rejects_existing_attachments(
         }))
         .await?
         .into_inner();
+    let registered_version: ConfigVersion = created
+        .latest_version_info
+        .as_ref()
+        .expect("created DPF service has an initial version")
+        .version
+        .parse()?;
     mark_dpf_service_ready_for_update(&env, service_id).await?;
 
     // Public Service VPC activation is planned in issue #6125, so seed only
@@ -4287,11 +4293,14 @@ async fn test_dpf_interface_requirement_removal_rejects_existing_attachments(
         ),
     ];
     for (scenario, removed, instance_deleted) in cases {
+        // Persist the attachment-removal and instance-deletion state that
+        // distinguishes this case. The other fields form a valid reference to
+        // the service version whose contract must remain protected.
         let attachment = serde_json::json!({
             "service_configs": [{
                 "id": uuid::Uuid::new_v4(),
                 "service_id": service_id,
-                "version": ConfigVersion::initial(),
+                "version": registered_version,
                 "removed": removed
             }]
         });
@@ -4347,6 +4356,52 @@ async fn test_dpf_interface_requirement_removal_rejects_existing_attachments(
         assert_eq!(persisted.version_ctr, created.version_ctr, "{scenario}");
         assert_eq!(lifecycle_state(&persisted), "ready", "{scenario}");
     }
+
+    // Exercise the public DPF deletion handler with the strongest retained
+    // form: a terminating attachment on a soft-deleted instance.
+    let attachment = serde_json::json!({
+        "service_configs": [{
+            "id": uuid::Uuid::new_v4(),
+            "service_id": service_id,
+            "version": registered_version,
+            "removed": chrono::Utc::now()
+        }]
+    });
+    sqlx::query(
+        "UPDATE instances SET extension_services_config = $1, deleted = NOW() WHERE id = $2",
+    )
+    .bind(sqlx::types::Json(attachment))
+    .bind(instance_id)
+    .execute(&env.pool)
+    .await?;
+    let error = env
+        .api
+        .delete_dpu_extension_service(Request::new(rpc::DeleteDpuExtensionServiceRequest {
+            service_id: created.service_id.clone(),
+            versions: vec![],
+        }))
+        .await
+        .expect_err("terminating attachment on a deleted instance must block DPF deletion");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        "extension service is in use by instances; detach before deleting"
+    );
+
+    // A fresh public read proves the rejected delete preserved the registration.
+    let persisted = env
+        .api
+        .find_dpu_extension_services_by_ids(Request::new(rpc::DpuExtensionServicesByIdsRequest {
+            service_ids: vec![created.service_id.clone()],
+        }))
+        .await?
+        .into_inner()
+        .services
+        .pop()
+        .expect("service remains visible after rejected deletion");
+    assert_eq!(persisted.service_vpc_interfaces, requirements);
+    assert_eq!(persisted.version_ctr, created.version_ctr);
+    assert_eq!(lifecycle_state(&persisted), "ready");
 
     Ok(())
 }
@@ -8259,6 +8314,11 @@ async fn test_extension_service_get_version_infos(
     Ok(())
 }
 
+/// Verifies service-reference lookup prefers an active attachment independent of stored order,
+/// returns one retained tombstone when only terminating versions remain, selects exact versions,
+/// includes soft-deleted instances, and gives attachment removal timestamps precedence over the
+/// instance-deletion fallback, keeping lifecycle consumers tied to stored owners throughout detach
+/// and instance deletion.
 #[crate::sqlx_test]
 async fn test_find_instances_by_extension_service(
     db_pool: sqlx::PgPool,
@@ -8329,7 +8389,93 @@ async fn test_find_instances_by_extension_service(
         .build_and_return()
         .await;
 
-    // Find instances by service without version filter - should return both instances
+    // Upgrade instance1 through the public API to retain its terminating v1 attachment beside the
+    // active v2 attachment selected by unversioned lookup.
+    env.api
+        .update_instance_config(Request::new(rpc::InstanceConfigUpdateRequest {
+            if_version_match: None,
+            config: Some(rpc::InstanceConfig {
+                tenant: Some(crate::tests::common::api_fixtures::instance::default_tenant_config()),
+                os: Some(crate::tests::common::api_fixtures::instance::default_os_config()),
+                network: Some(
+                    crate::tests::common::api_fixtures::instance::single_interface_network_config(
+                        segment_id,
+                    ),
+                ),
+                dpu_extension_services: Some(rpc::InstanceDpuExtensionServicesConfig {
+                    service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
+                        service_id: service_id.clone(),
+                        version: version2.clone(),
+                        service_vpc_ids: vec![],
+                    }],
+                }),
+                ..Default::default()
+            }),
+            instance_id: Some(instance1.id),
+            metadata: Some(rpc::Metadata {
+                name: "version-filtered-service-lookup".to_string(),
+                description: "tests/extension_service".to_string(),
+                labels: vec![],
+            }),
+        }))
+        .await?;
+
+    // Preserve distinct timestamps so each lookup proves which removal source won.
+    let parsed_service_id: ExtensionServiceId = service_id.parse()?;
+    let parsed_version1: ConfigVersion = version1.parse()?;
+    let parsed_version2: ConfigVersion = version2.parse()?;
+    let upgraded = db::instance::find_by_id(&env.pool, instance1.id)
+        .await?
+        .expect("updated instance remains stored");
+    let attachment_removed_at = upgraded
+        .config
+        .extension_services
+        .service_configs
+        .iter()
+        .find(|attachment| {
+            attachment.service_id == parsed_service_id && attachment.version == parsed_version1
+        })
+        .and_then(|attachment| attachment.removed)
+        .expect("replaced v1 attachment is terminating");
+    let instance_deleted_at = attachment_removed_at + chrono::Duration::seconds(1);
+
+    // Store the terminating attachment first so active preference cannot depend on JSON order.
+    let mut tombstone_first_config = upgraded.config.extension_services.clone();
+    assert_eq!(tombstone_first_config.service_configs.len(), 2);
+    assert!(tombstone_first_config.service_configs[0].removed.is_none());
+    assert!(tombstone_first_config.service_configs[1].removed.is_some());
+    tombstone_first_config.service_configs.reverse();
+    let mut txn = env.db_txn().await;
+    assert_eq!(
+        db::instance::update_extension_services_config(
+            txn.as_mut(),
+            upgraded.id,
+            upgraded.extension_services_config_version,
+            &upgraded.config.extension_services,
+            &tombstone_first_config,
+            false,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(()),
+    );
+    sqlx::query("UPDATE instances SET deleted = $2 WHERE id = $1")
+        .bind(instance1.id)
+        .bind(instance_deleted_at)
+        .execute(txn.as_mut())
+        .await?;
+    txn.commit().await?;
+    let attachment_removed_at = attachment_removed_at.to_string();
+
+    // Use the persisted TIMESTAMPTZ representation expected from the API.
+    let instance_deleted_at = db::instance::find_by_id(&env.pool, instance1.id)
+        .await?
+        .expect("deleted instance remains stored")
+        .deleted
+        .expect("instance deletion timestamp was persisted")
+        .to_string();
+
+    // Unfiltered lookup reports each active attachment, including the one whose
+    // instance-level deletion supplies its removal timestamp.
     let find_resp = env
         .api
         .find_instances_by_dpu_extension_service(Request::new(
@@ -8348,15 +8494,19 @@ async fn test_find_instances_by_extension_service(
     assert!(instance_ids.contains(&instance1.id.to_string()));
     assert!(instance_ids.contains(&instance2.id.to_string()));
 
-    // Verify version information
+    // The upgraded, deleted instance resolves to active v2, not its earlier v1 row.
     let instance1_info = instances
         .iter()
         .find(|i| i.instance_id == instance1.id.to_string())
         .unwrap();
     assert_eq!(instance1_info.service_id, service_id);
-    assert_eq!(instance1_info.version, version1);
-    assert!(instance1_info.removed.is_none());
+    assert_eq!(instance1_info.version, version2);
+    assert_eq!(
+        instance1_info.removed.as_deref(),
+        Some(instance_deleted_at.as_str())
+    );
 
+    // The second instance remains an active v2 control with no removal source.
     let instance2_info = instances
         .iter()
         .find(|i| i.instance_id == instance2.id.to_string())
@@ -8365,7 +8515,7 @@ async fn test_find_instances_by_extension_service(
     assert_eq!(instance2_info.version, version2);
     assert!(instance2_info.removed.is_none());
 
-    // Find instances by service with version1 filter - should return only instance1
+    // Exact v1 lookup must skip active v2 and preserve the earlier attachment timestamp.
     let find_resp = env
         .api
         .find_instances_by_dpu_extension_service(Request::new(
@@ -8380,9 +8530,13 @@ async fn test_find_instances_by_extension_service(
     assert_eq!(instances[0].instance_id, instance1.id.to_string());
     assert_eq!(instances[0].service_id, service_id);
     assert_eq!(instances[0].version, version1);
-    assert!(instances[0].removed.is_none());
+    assert_eq!(
+        instances[0].removed.as_deref(),
+        Some(attachment_removed_at.as_str())
+    );
 
-    // Find instance by service with version2 filter - should return only instance2
+    // Exact v2 lookup returns both active attachments and applies deletion
+    // fallback only to instance1.
     let find_resp = env
         .api
         .find_instances_by_dpu_extension_service(Request::new(
@@ -8393,11 +8547,148 @@ async fn test_find_instances_by_extension_service(
         ))
         .await?;
     let instances = find_resp.into_inner().instances;
-    assert_eq!(instances.len(), 1);
-    assert_eq!(instances[0].instance_id, instance2.id.to_string());
-    assert_eq!(instances[0].service_id, service_id);
-    assert_eq!(instances[0].version, version2);
-    assert!(instances[0].removed.is_none());
+    assert_eq!(instances.len(), 2);
+    let instance1_info = instances
+        .iter()
+        .find(|info| info.instance_id == instance1.id.to_string())
+        .expect("deleted instance1 retains its active v2 attachment");
+    assert_eq!(instance1_info.service_id, service_id);
+    assert_eq!(instance1_info.version, version2);
+    assert_eq!(
+        instance1_info.removed.as_deref(),
+        Some(instance_deleted_at.as_str())
+    );
+    let instance2_info = instances
+        .iter()
+        .find(|info| info.instance_id == instance2.id.to_string())
+        .expect("active instance2 retains its v2 attachment");
+    assert_eq!(instance2_info.service_id, service_id);
+    assert_eq!(instance2_info.version, version2);
+    assert!(instance2_info.removed.is_none());
+
+    // Switch instance2 from v2 to v1 through the public API so final detach retains two historical
+    // versions without depending on direct fixture construction.
+    let current = instance2.rpc_instance().await.into_inner();
+    let mut switched_config = current.config.expect("active instance has config");
+    switched_config.dpu_extension_services = Some(rpc::InstanceDpuExtensionServicesConfig {
+        service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
+            service_id: service_id.clone(),
+            version: version1.clone(),
+            service_vpc_ids: vec![],
+        }],
+    });
+    env.api
+        .update_instance_config(Request::new(rpc::InstanceConfigUpdateRequest {
+            instance_id: Some(instance2.id),
+            metadata: current.metadata,
+            config: Some(switched_config),
+            ..Default::default()
+        }))
+        .await?;
+
+    // Detach the active v1 attachment while preserving the earlier v2 tombstone.
+    let current = instance2.rpc_instance().await.into_inner();
+    let mut detached_config = current.config.expect("updated instance has config");
+    detached_config.dpu_extension_services = Some(rpc::InstanceDpuExtensionServicesConfig {
+        service_configs: vec![],
+    });
+    env.api
+        .update_instance_config(Request::new(rpc::InstanceConfigUpdateRequest {
+            instance_id: Some(instance2.id),
+            metadata: current.metadata,
+            config: Some(detached_config),
+            ..Default::default()
+        }))
+        .await?;
+
+    // Reload both retained tombstones so unversioned and exact lookups can be checked against the
+    // durable version/timestamp pairs without imposing an order between terminating versions.
+    let detached = db::instance::find_by_id(&env.pool, instance2.id)
+        .await?
+        .expect("detached instance remains stored");
+    let detached_attachments = detached
+        .config
+        .extension_services
+        .service_configs
+        .iter()
+        .filter(|attachment| attachment.service_id == parsed_service_id)
+        .collect::<Vec<_>>();
+    assert_eq!(detached_attachments.len(), 2);
+    assert!(
+        detached_attachments
+            .iter()
+            .all(|attachment| attachment.removed.is_some())
+    );
+    let detached_version1_removed_at = detached_attachments
+        .iter()
+        .find(|attachment| attachment.version == parsed_version1)
+        .and_then(|attachment| attachment.removed)
+        .expect("detached v1 attachment is terminating")
+        .to_string();
+    let detached_version2_removed_at = detached_attachments
+        .iter()
+        .find(|attachment| attachment.version == parsed_version2)
+        .and_then(|attachment| attachment.removed)
+        .expect("detached v2 attachment is terminating")
+        .to_string();
+
+    // Unversioned lookup returns exactly one retained tombstone whose timestamp matches its
+    // selected version, without promising which terminating version wins.
+    let find_resp = env
+        .api
+        .find_instances_by_dpu_extension_service(Request::new(
+            rpc::FindInstancesByDpuExtensionServiceRequest {
+                service_id: service_id.clone(),
+                version: None,
+            },
+        ))
+        .await?;
+    let instances = find_resp.into_inner().instances;
+    let instance2_infos = instances
+        .iter()
+        .filter(|info| info.instance_id == instance2.id.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(instance2_infos.len(), 1);
+    let instance2_info = instance2_infos[0];
+    assert_eq!(instance2_info.service_id, service_id);
+    assert!(
+        (instance2_info.version == version1
+            && instance2_info.removed.as_deref() == Some(detached_version1_removed_at.as_str()))
+            || (instance2_info.version == version2
+                && instance2_info.removed.as_deref()
+                    == Some(detached_version2_removed_at.as_str()))
+    );
+
+    let exact_version_cases = [
+        // Exact v1 selects the attachment removed by the final detach, distinguishing it from v2.
+        (version1.clone(), detached_version1_removed_at.as_str()),
+        // Exact v2 selects the earlier replacement tombstone, distinguishing it from v1.
+        (version2.clone(), detached_version2_removed_at.as_str()),
+    ];
+    for (requested_version, expected_removed_at) in exact_version_cases {
+        let find_resp = env
+            .api
+            .find_instances_by_dpu_extension_service(Request::new(
+                rpc::FindInstancesByDpuExtensionServiceRequest {
+                    service_id: service_id.clone(),
+                    version: Some(requested_version.clone()),
+                },
+            ))
+            .await?;
+        let instance2_infos = find_resp
+            .into_inner()
+            .instances
+            .into_iter()
+            .filter(|info| info.instance_id == instance2.id.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(instance2_infos.len(), 1);
+        assert_eq!(instance2_infos[0].service_id, service_id);
+        assert_eq!(instance2_infos[0].version, requested_version);
+        assert_eq!(
+            instance2_infos[0].removed.as_deref(),
+            Some(expected_removed_at),
+        );
+    }
 
     // Find instance by a non-existent version - should return empty list
     let find_resp = env

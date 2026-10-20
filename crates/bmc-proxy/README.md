@@ -8,6 +8,8 @@ A small authenticated HTTP/2 proxy for BMC access:
 - fetches the BMC's credentials from nico-api over gRPC
 - proxies the HTTP request to the target BMC
 
+The same path serves a switch's NVOS management interface. When nico-api identifies an address as a switch's NVOS interface, the proxy forwards the request to the switch's NVUE REST API with the switch's NVOS admin credentials. A caller reaches `/nvue_v1/` paths the same way it reaches `/redfish/v1/` paths on a BMC.
+
 The point is to keep BMC authentication and credential handling in one place, while allowing multiple higher-level systems to coexist as peers.
 
 ## Configuration
@@ -141,8 +143,13 @@ after the configuration file. The Helm chart always sets that variable from
   "GET /redfish/v1",
   "GET,POST /redfish/v1/Managers/BMC/NodeManager/Domains",
   "GET,PATCH,DELETE /redfish/v1/Managers/BMC/NodeManager/Domains/*",
+  "GET /nvue_v1/platform/environment/**",
 ]
 ```
+
+ACL entries match only the request path, not the target type. A principal
+that reaches switches lists the `/nvue_v1/` paths of the switches' NVUE REST
+API alongside its `/redfish/v1/` paths.
 
 Each ACL entry is a string with this form, or a table with the same string in `pattern`:
 
@@ -652,7 +659,7 @@ An alternative approach is to have nico-api be the only service that talks to BM
 
 nico-api routes its own eligible BMC Redfish traffic through nico-bmc-proxy when its static `[bmc_proxy]` configuration section is enabled: machine-lifecycle traffic and the credentialed exploration of endpoints whose stored root credential is established. Credential-subject operations (credential setup, BMC session minting, password rotation, UEFI password management) and the other documented exceptions stay direct, so nico-api still holds BMC credentials. The routing contract, including every direct-path exception, is in [`crates/api-core/src/cfg/README.md`](../api-core/src/cfg/README.md#bmcproxyconfig--bmc_proxy).
 
-We soon expect that [DPS] will support configuration of an authenticating proxy like this one, to manage power configuration on BMC's. DPS is a standalone service that should not have a direct dependency on nico-api. So nico-bmc-proxy serves an implementation of such a proxy, although any proxy that implements similar functionality can work.
+We soon expect that [DPS] will support configuration of an authenticating proxy like this one, to manage power configuration on BMCs, and on NVLink switch trays through their NVUE REST API. DPS is a standalone service that should not have a direct dependency on nico-api. So nico-bmc-proxy serves an implementation of such a proxy, although any proxy that implements similar functionality can work.
 
 Future work can move the remaining direct paths behind the proxy so that nico-api no longer holds BMC credentials at all.
 
@@ -691,19 +698,19 @@ flowchart TB
     subgraph ProxyBoundary["nico-bmc-proxy"]
         MTLS[mTLS termination + SPIFFE/external cert authn]
         ALLOW[principal allow-list]
-        LOOKUP[nico-api: BMC IP -> BMC identity]
+        LOOKUP[nico-api: IP -> MAC, BMC or switch NVOS interface]
         CREDS[nico-api: credential lookup]
         FORWARD[upstream HTTP proxy]
     end
 
-    subgraph BMCBoundary["BMC"]
-        Redfish[Redfish / HTTPS]
+    subgraph BMCBoundary["BMC or switch NVOS"]
+        Redfish[Redfish or NVUE REST / HTTPS]
     end
 
     Client --> MTLS --> ALLOW --> LOOKUP --> CREDS --> FORWARD --> Redfish
 ```
 
-The caller authenticates with a client certificate. If the caller is authorized, nico-bmc-proxy looks up the target BMC, retrieves the corresponding credentials, and performs the backend request itself.
+The caller authenticates with a client certificate. If the caller is authorized, nico-bmc-proxy looks up the target, retrieves the credentials for what it is, and performs the backend request itself.
 
 ### Request Sequence
 
@@ -712,27 +719,41 @@ sequenceDiagram
     participant Client
     participant Proxy as nico-bmc-proxy
     participant API as nico-api
-    participant BMC
+    participant BMC as BMC or switch NVOS
 
     Client->>Proxy: HTTPS + HTTP/2 + client cert
     Client->>Proxy: GET /redfish/v1/...<br/>Forwarded: host=10.0.0.42
     Proxy->>Proxy: authenticate + authorize principal
     Proxy->>API: FindMacAddressByBmcIp(10.0.0.42)
-    API-->>Proxy: BMC MAC / identity
-    Proxy->>API: GetBmcCredentials(BMC MAC)
-    API-->>Proxy: BMC credentials
-    Proxy->>BMC: HTTPS request + provided BMC credentials
-    BMC-->>Proxy: Redfish response
+    API-->>Proxy: MAC at the address
+    Proxy->>API: FindSwitchIds(nvos_mac = MAC)
+    API-->>Proxy: no switch (a BMC) or one switch (its NVOS interface)
+    alt a BMC
+        Proxy->>API: GetBmcCredentials(MAC)
+        API-->>Proxy: BMC credentials
+    else a switch's NVOS interface
+        Proxy->>API: GetSwitchNvosCredentials(switch)
+        API-->>Proxy: NVOS admin credentials
+    end
+    Proxy->>BMC: HTTPS request + provided credentials
+    BMC-->>Proxy: Redfish or NVUE response
     Proxy-->>Client: proxied response
 ```
+
+The resolved credentials are cached by address, so the three lookups run
+once per address until the upstream rejects the credentials or the entry
+idles out. If nico-api denies `FindSwitchIds`, because it predates the
+proxy's switch support or lost the proxy's grant for that method, the proxy
+treats every address as a BMC for five minutes and then probes again.
+`carbide_bmc_proxy_switch_probe_denied_total` counts each denial.
 
 ## Future Direction
 
 This crate is meant to implement a clean architectural boundary, but the implementation still couples to nico in slightly uncomfortable ways:
 
 1. It's still a component of the infra-controller repo, so it's not fully independent
-2. It expects nico-api to resolve proxied BMC IPs through `FindMacAddressByBmcIp`.
-3. It expects nico-api to return credentials from `GetBmcCredentials` for every proxied BMC.
+2. It expects nico-api to resolve proxied IPs through `FindMacAddressByBmcIp` and `FindSwitchIds`.
+3. It expects nico-api to return credentials from `GetBmcCredentials` for every proxied BMC, and from `GetSwitchNvosCredentials` for every proxied switch.
 
 Point #1 doesn't really need to be solved, since there's no problem storing the crate in this repo and taking advantage of existing code. But future work can focus on making nico-bmc-proxy:
 

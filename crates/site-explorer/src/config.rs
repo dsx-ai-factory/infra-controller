@@ -196,6 +196,21 @@ pub struct SiteExplorerConfig {
     pub explore_mode: SiteExplorerExploreMode,
 }
 
+impl From<&SiteExplorerConfig> for crate::inventory_creator::Config {
+    fn from(config: &SiteExplorerConfig) -> Self {
+        Self {
+            create_machines: config.create_machines.clone(),
+            machines_created_per_run: config.machines_created_per_run,
+            create_power_shelves: config.create_power_shelves.clone(),
+            power_shelves_created_per_run: config.power_shelves_created_per_run,
+            create_switches: config.create_switches.clone(),
+            switches_created_per_run: config.switches_created_per_run,
+            admin_fnn_enabled: config.admin_fnn_enabled,
+            retained_boot_interface_window: config.retained_boot_interface_window,
+        }
+    }
+}
+
 impl Default for SiteExplorerConfig {
     fn default() -> Self {
         SiteExplorerConfig {
