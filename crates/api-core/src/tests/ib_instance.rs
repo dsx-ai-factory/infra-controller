@@ -1250,6 +1250,7 @@ pub(in crate::tests) async fn try_allocate_instance(
                 labels: Vec::new(),
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await?;
 

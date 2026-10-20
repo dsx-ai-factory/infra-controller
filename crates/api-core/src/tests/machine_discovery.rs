@@ -362,6 +362,7 @@ fn scout_test_allocation_request(
         }),
         metadata: None,
         allow_unhealthy_machine: false,
+        external_validation_request_id: None,
     }
 }
 

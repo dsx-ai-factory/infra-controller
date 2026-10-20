@@ -9,6 +9,7 @@ import "codegen/v1/rust_type.proto";
 import "common.proto";
 import "console_log.proto";
 import "dns.proto";
+import "external_validation.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
 import "google/protobuf/field_mask.proto";
@@ -1271,6 +1272,30 @@ service Forge {
 
   // Secrets management
   rpc ReWrapSecrets(ReWrapSecretsRequest) returns (ReWrapSecretsResponse);
+
+  // External-validation contract only: these methods are not implemented until
+  // durable holds and attempts are delivered. With internal RBAC enabled, the
+  // explicit empty grants deny callers with an AuthContext before dispatch
+  // (PERMISSION_DENIED). Missing AuthContext is also rejected before dispatch;
+  // no gRPC wire status for that branch is promised here. With RBAC bypassed,
+  // the stubs return UNIMPLEMENTED. Scope is the connected Core site
+  // and configured tenant_org_id. Existing mTLS and method authorization are
+  // required in addition to tenant-scoped checks; request IDs grant no permission.
+  // Discovers hold IDs (active by default) in immutable (created_at, hold_id) order using
+  // exclusive keyset pagination; removal of earlier holds cannot shift pages.
+  rpc FindExternalValidationHoldIds(ExternalValidationHoldSearchFilter) returns (ExternalValidationHoldIdList);
+  // Fetches current holds, including Satisfied, by ID within the authorized tenant.
+  rpc FindExternalValidationHoldsByIds(ExternalValidationHoldsByIdsRequest) returns (ExternalValidationHoldList);
+  // Atomically opens one attempt or replays the attempt identified by the key.
+  rpc StartExternalValidation(StartExternalValidationRequest) returns (StartExternalValidationResponse);
+  // Cancels only a NotStarted allocation; Creating or Created must be reconciled.
+  rpc CancelExternalValidation(CancelExternalValidationRequest) returns (ExternalValidationAttempt);
+  // Records a result for the bound instance; never clears the hold immediately.
+  rpc CompleteExternalValidation(CompleteExternalValidationRequest) returns (ExternalValidationAttempt);
+  // Site-administrator-only audited recovery, fenced by the expected hold ID.
+  // Unresolved allocation or cleanup returns FAILED_PRECONDITION. Successful
+  // removal atomically closes/fences any attempt and removes the matching gate.
+  rpc RemoveExternalValidationHold(RemoveExternalValidationHoldRequest) returns (google.protobuf.Empty);
 }
 
 // Indicates the lifecycle state of a resource that is controlled by a state controller
@@ -3619,6 +3644,27 @@ message InstanceAllocationRequest {
 
   // Allow allocation on unhealthy machines
   bool allow_unhealthy_machine = 13;
+
+  // Opaque UUID returned by StartExternalValidation. Requires the exact held
+  // machine, config.tenant.tenant_organization_id matching the policy, and
+  // allow_unhealthy_machine=true, with instance_type_id omitted. Bypasses only
+  // this workflow's hold; unrelated blocking health alerts and repair admission
+  // are rechecked at allocation commit.
+  // It is an allocation idempotency key, not an authorization token. Identical
+  // retries return the original instance, including a server-generated instance
+  // ID; changed accepted inputs return ALREADY_EXISTS. Creating returns UNAVAILABLE
+  // with ASCII trailing metadata external-validation-allocation-state: creating;
+  // this marker identifies accepted, in-progress allocation without parsing text.
+  // Recover through hold ID discovery and retrieval, or retry the same key and inputs.
+  // The binding must commit with the instance. Omission preserves ordinary allocation.
+  // Contract milestone: present values return FAILED_PRECONDITION until binding
+  // is implemented, including in batch requests. External validation uses only
+  // the single-instance AllocateInstance RPC; request-bound batch allocation is
+  // outside this contract. REST consumers require externalValidationRequestId
+  // propagation and machine-readable allocation outcomes through the REST/workflow
+  // boundary before this feature can be used through REST. That runtime support
+  // is deferred; see designs/machine-validation/external-validation-api-contract.md.
+  common.ExternalValidationRequestId external_validation_request_id = 14;
 }
 
 // Batch instance allocation request

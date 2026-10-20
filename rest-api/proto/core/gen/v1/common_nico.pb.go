@@ -1558,6 +1558,144 @@ func (x *MachineValidationId) GetValue() string {
 	return ""
 }
 
+// Identifies one external-validation hold; the value is a UUID.
+type ExternalValidationHoldId struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Canonical UUID string; missing required IDs are rejected by the owning RPC.
+	Value         string `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExternalValidationHoldId) Reset() {
+	*x = ExternalValidationHoldId{}
+	mi := &file_common_nico_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExternalValidationHoldId) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExternalValidationHoldId) ProtoMessage() {}
+
+func (x *ExternalValidationHoldId) ProtoReflect() protoreflect.Message {
+	mi := &file_common_nico_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExternalValidationHoldId.ProtoReflect.Descriptor instead.
+func (*ExternalValidationHoldId) Descriptor() ([]byte, []int) {
+	return file_common_nico_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *ExternalValidationHoldId) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+// Identifies one external-validation lifecycle cycle; the value is a UUID.
+type ExternalValidationCycleId struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Canonical UUID string; missing required IDs are rejected by the owning RPC.
+	Value         string `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExternalValidationCycleId) Reset() {
+	*x = ExternalValidationCycleId{}
+	mi := &file_common_nico_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExternalValidationCycleId) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExternalValidationCycleId) ProtoMessage() {}
+
+func (x *ExternalValidationCycleId) ProtoReflect() protoreflect.Message {
+	mi := &file_common_nico_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExternalValidationCycleId.ProtoReflect.Descriptor instead.
+func (*ExternalValidationCycleId) Descriptor() ([]byte, []int) {
+	return file_common_nico_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *ExternalValidationCycleId) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+// Identifies one external-validation attempt request; the value is a UUID.
+type ExternalValidationRequestId struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Canonical UUID string; missing required IDs are rejected by the owning RPC.
+	Value         string `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExternalValidationRequestId) Reset() {
+	*x = ExternalValidationRequestId{}
+	mi := &file_common_nico_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExternalValidationRequestId) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExternalValidationRequestId) ProtoMessage() {}
+
+func (x *ExternalValidationRequestId) ProtoReflect() protoreflect.Message {
+	mi := &file_common_nico_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExternalValidationRequestId.ProtoReflect.Descriptor instead.
+func (*ExternalValidationRequestId) Descriptor() ([]byte, []int) {
+	return file_common_nico_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *ExternalValidationRequestId) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
 // ID of a physical device managed by NICo. Individual RPCs may support only a
 // subset of these device kinds.
 type DeviceId struct {
@@ -1574,7 +1712,7 @@ type DeviceId struct {
 
 func (x *DeviceId) Reset() {
 	*x = DeviceId{}
-	mi := &file_common_nico_proto_msgTypes[33]
+	mi := &file_common_nico_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1586,7 +1724,7 @@ func (x *DeviceId) String() string {
 func (*DeviceId) ProtoMessage() {}
 
 func (x *DeviceId) ProtoReflect() protoreflect.Message {
-	mi := &file_common_nico_proto_msgTypes[33]
+	mi := &file_common_nico_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1599,7 +1737,7 @@ func (x *DeviceId) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeviceId.ProtoReflect.Descriptor instead.
 func (*DeviceId) Descriptor() ([]byte, []int) {
-	return file_common_nico_proto_rawDescGZIP(), []int{33}
+	return file_common_nico_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *DeviceId) GetValue() isDeviceId_Value {
@@ -1733,6 +1871,12 @@ const file_common_nico_proto_rawDesc = "" +
 	"\x10RackHardwareType\x12\x14\n" +
 	"\x05value\x18\x01 \x01(\tR\x05value\"+\n" +
 	"\x13MachineValidationId\x12\x14\n" +
+	"\x05value\x18\x01 \x01(\tR\x05value\"0\n" +
+	"\x18ExternalValidationHoldId\x12\x14\n" +
+	"\x05value\x18\x01 \x01(\tR\x05value\"1\n" +
+	"\x19ExternalValidationCycleId\x12\x14\n" +
+	"\x05value\x18\x01 \x01(\tR\x05value\"3\n" +
+	"\x1bExternalValidationRequestId\x12\x14\n" +
 	"\x05value\x18\x01 \x01(\tR\x05value\"\xb6\x01\n" +
 	"\bDeviceId\x122\n" +
 	"\n" +
@@ -1762,43 +1906,46 @@ func file_common_nico_proto_rawDescGZIP() []byte {
 }
 
 var file_common_nico_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_common_nico_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
+var file_common_nico_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
 var file_common_nico_proto_goTypes = []any{
-	(SystemPowerControl)(0),          // 0: common.SystemPowerControl
-	(*MachineId)(nil),                // 1: common.MachineId
-	(*MachineIdList)(nil),            // 2: common.MachineIdList
-	(*StringList)(nil),               // 3: common.StringList
-	(*UUID)(nil),                     // 4: common.UUID
-	(*PowerShelfId)(nil),             // 5: common.PowerShelfId
-	(*RackId)(nil),                   // 6: common.RackId
-	(*RackProfileId)(nil),            // 7: common.RackProfileId
-	(*RackGroupId)(nil),              // 8: common.RackGroupId
-	(*SwitchId)(nil),                 // 9: common.SwitchId
-	(*Uint32List)(nil),               // 10: common.Uint32List
-	(*RouteTarget)(nil),              // 11: common.RouteTarget
-	(*RouteTargets)(nil),             // 12: common.RouteTargets
-	(*DomainId)(nil),                 // 13: common.DomainId
-	(*MachineInterfaceId)(nil),       // 14: common.MachineInterfaceId
-	(*VpcId)(nil),                    // 15: common.VpcId
-	(*VpcPrefixId)(nil),              // 16: common.VpcPrefixId
-	(*SitePrefixId)(nil),             // 17: common.SitePrefixId
-	(*VpcPeeringId)(nil),             // 18: common.VpcPeeringId
-	(*IBPartitionId)(nil),            // 19: common.IBPartitionId
-	(*InstanceId)(nil),               // 20: common.InstanceId
-	(*NetworkSegmentId)(nil),         // 21: common.NetworkSegmentId
-	(*DpaInterfaceId)(nil),           // 22: common.DpaInterfaceId
-	(*NetworkPrefixId)(nil),          // 23: common.NetworkPrefixId
-	(*RemediationId)(nil),            // 24: common.RemediationId
-	(*NVLinkPartitionId)(nil),        // 25: common.NVLinkPartitionId
-	(*NVLinkLogicalPartitionId)(nil), // 26: common.NVLinkLogicalPartitionId
-	(*NVLinkDomainId)(nil),           // 27: common.NVLinkDomainId
-	(*ComputeAllocationId)(nil),      // 28: common.ComputeAllocationId
-	(*SpxPartitionId)(nil),           // 29: common.SpxPartitionId
-	(*OperatingSystemId)(nil),        // 30: common.OperatingSystemId
-	(*IpxeTemplateId)(nil),           // 31: common.IpxeTemplateId
-	(*RackHardwareType)(nil),         // 32: common.RackHardwareType
-	(*MachineValidationId)(nil),      // 33: common.MachineValidationId
-	(*DeviceId)(nil),                 // 34: common.DeviceId
+	(SystemPowerControl)(0),             // 0: common.SystemPowerControl
+	(*MachineId)(nil),                   // 1: common.MachineId
+	(*MachineIdList)(nil),               // 2: common.MachineIdList
+	(*StringList)(nil),                  // 3: common.StringList
+	(*UUID)(nil),                        // 4: common.UUID
+	(*PowerShelfId)(nil),                // 5: common.PowerShelfId
+	(*RackId)(nil),                      // 6: common.RackId
+	(*RackProfileId)(nil),               // 7: common.RackProfileId
+	(*RackGroupId)(nil),                 // 8: common.RackGroupId
+	(*SwitchId)(nil),                    // 9: common.SwitchId
+	(*Uint32List)(nil),                  // 10: common.Uint32List
+	(*RouteTarget)(nil),                 // 11: common.RouteTarget
+	(*RouteTargets)(nil),                // 12: common.RouteTargets
+	(*DomainId)(nil),                    // 13: common.DomainId
+	(*MachineInterfaceId)(nil),          // 14: common.MachineInterfaceId
+	(*VpcId)(nil),                       // 15: common.VpcId
+	(*VpcPrefixId)(nil),                 // 16: common.VpcPrefixId
+	(*SitePrefixId)(nil),                // 17: common.SitePrefixId
+	(*VpcPeeringId)(nil),                // 18: common.VpcPeeringId
+	(*IBPartitionId)(nil),               // 19: common.IBPartitionId
+	(*InstanceId)(nil),                  // 20: common.InstanceId
+	(*NetworkSegmentId)(nil),            // 21: common.NetworkSegmentId
+	(*DpaInterfaceId)(nil),              // 22: common.DpaInterfaceId
+	(*NetworkPrefixId)(nil),             // 23: common.NetworkPrefixId
+	(*RemediationId)(nil),               // 24: common.RemediationId
+	(*NVLinkPartitionId)(nil),           // 25: common.NVLinkPartitionId
+	(*NVLinkLogicalPartitionId)(nil),    // 26: common.NVLinkLogicalPartitionId
+	(*NVLinkDomainId)(nil),              // 27: common.NVLinkDomainId
+	(*ComputeAllocationId)(nil),         // 28: common.ComputeAllocationId
+	(*SpxPartitionId)(nil),              // 29: common.SpxPartitionId
+	(*OperatingSystemId)(nil),           // 30: common.OperatingSystemId
+	(*IpxeTemplateId)(nil),              // 31: common.IpxeTemplateId
+	(*RackHardwareType)(nil),            // 32: common.RackHardwareType
+	(*MachineValidationId)(nil),         // 33: common.MachineValidationId
+	(*ExternalValidationHoldId)(nil),    // 34: common.ExternalValidationHoldId
+	(*ExternalValidationCycleId)(nil),   // 35: common.ExternalValidationCycleId
+	(*ExternalValidationRequestId)(nil), // 36: common.ExternalValidationRequestId
+	(*DeviceId)(nil),                    // 37: common.DeviceId
 }
 var file_common_nico_proto_depIdxs = []int32{
 	1,  // 0: common.MachineIdList.machine_ids:type_name -> common.MachineId
@@ -1818,7 +1965,7 @@ func file_common_nico_proto_init() {
 	if File_common_nico_proto != nil {
 		return
 	}
-	file_common_nico_proto_msgTypes[33].OneofWrappers = []any{
+	file_common_nico_proto_msgTypes[36].OneofWrappers = []any{
 		(*DeviceId_MachineId)(nil),
 		(*DeviceId_SwitchId)(nil),
 		(*DeviceId_PowerShelfId)(nil),
@@ -1829,7 +1976,7 @@ func file_common_nico_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_common_nico_proto_rawDesc), len(file_common_nico_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   34,
+			NumMessages:   37,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

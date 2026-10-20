@@ -634,6 +634,7 @@ async fn test_allocate_instance_rejects_interface_anycast_prefix_outside_vpc_pro
             instance_id: None,
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
         .expect_err("interface anycast prefix outside VPC profile should be rejected");
@@ -711,6 +712,7 @@ async fn test_zero_dpu_instance_allocation_rejects_explicit_interfaces(
             instance_id: None,
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }),
     )
     .await;
@@ -848,6 +850,7 @@ async fn test_zero_dpu_instance_allocation_auto(
             instance_id: None,
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }),
     )
     .await
@@ -1020,6 +1023,7 @@ async fn test_zero_dpu_network_update_releases_vpc_bound_host_interface(
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }),
     )
     .await?
@@ -1212,6 +1216,7 @@ async fn test_zero_dpu_auto_update_rejects_host_inband_segment_bound_to_differen
                 ..Default::default()
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }),
     )
     .await
@@ -1298,6 +1303,7 @@ async fn test_zero_dpu_instance_allocation_rejects_missing_auto(
             instance_id: None,
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }),
     )
     .await;
@@ -1357,6 +1363,7 @@ async fn test_zero_dpu_instance_allocation_rejects_missing_vpc_id(
             instance_id: None,
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }),
     )
     .await;
@@ -1420,6 +1427,7 @@ async fn test_zero_dpu_instance_allocation_rejects_non_flat_vpc_id(
             instance_id: None,
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }),
     )
     .await;
@@ -1477,6 +1485,7 @@ async fn test_reject_single_dpu_instance_allocation_no_network_config(
             instance_id: None,
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }),
     )
     .await;
@@ -1554,6 +1563,7 @@ async fn test_reject_single_dpu_instance_allocation_host_inband_network_config(
             instance_id: None,
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }),
     )
     .await;
@@ -1718,6 +1728,7 @@ async fn test_reject_zero_dpu_instance_allocation_multiple_vpcs(
             instance_id: None,
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }),
     )
     .await;
@@ -1796,6 +1807,7 @@ async fn test_single_dpu_instance_allocation(
             instance_id: None,
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }),
     )
     .await
@@ -1951,6 +1963,7 @@ async fn test_reject_zero_dpu_instance_with_tenant_network_segment(
             instance_id: None,
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }),
     )
     .await;
@@ -2016,6 +2029,7 @@ async fn test_reject_zero_dpu_instance_with_extension_services(
             instance_id: None,
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }),
     )
     .await;
@@ -2094,6 +2108,7 @@ async fn test_instance_allocation_rejects_auto_with_explicit_interfaces(
             instance_id: None,
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }),
     )
     .await;
@@ -2161,6 +2176,7 @@ async fn test_instance_allocation_rejects_auto_on_dpu_host(
             instance_id: None,
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }),
     )
     .await;

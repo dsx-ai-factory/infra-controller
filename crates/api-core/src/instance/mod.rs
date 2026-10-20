@@ -495,10 +495,24 @@ fn normalize_created_power_profile(power_profile: Option<String>) -> Option<Stri
     power_profile.filter(|profile| !profile.is_empty())
 }
 
+/// Rejects request-bound allocation before legacy hydration or persistence while
+/// the external-validation allocation contract is not implemented.
+pub(crate) fn reject_unsupported_external_validation_binding(
+    request: &rpc::InstanceAllocationRequest,
+) -> CarbideResult<()> {
+    if request.external_validation_request_id.is_some() {
+        return Err(CarbideError::FailedPrecondition(
+            "request-bound external validation allocation is not implemented".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl TryFrom<rpc::InstanceAllocationRequest> for InstanceAllocationRequest {
     type Error = CarbideError;
 
     fn try_from(request: rpc::InstanceAllocationRequest) -> Result<Self, Self::Error> {
+        reject_unsupported_external_validation_binding(&request)?;
         let machine_id = request
             .machine_id
             .ok_or(RpcDataConversionError::MissingArgument("machine_id"))?;
@@ -2995,6 +3009,35 @@ mod tests {
     use model::instance::config::infiniband::InstanceIbInterfaceConfig;
 
     use super::*;
+
+    /// A present binding must fail conversion even when defaulted or otherwise valid.
+    #[test]
+    fn external_validation_binding_is_rejected_before_allocation() {
+        use carbide_uuid::external_validation::ExternalValidationRequestId;
+
+        check_values(
+            [
+                Check {
+                    scenario: "present default binding is unsupported",
+                    input: ExternalValidationRequestId::default(),
+                    expect: tonic::Code::FailedPrecondition,
+                },
+                Check {
+                    scenario: "request UUID is unsupported before binding implementation",
+                    input: ExternalValidationRequestId::new(),
+                    expect: tonic::Code::FailedPrecondition,
+                },
+            ],
+            |request_id| {
+                let request = rpc::InstanceAllocationRequest {
+                    external_validation_request_id: Some(request_id),
+                    ..Default::default()
+                };
+                let error = InstanceAllocationRequest::try_from(request).unwrap_err();
+                tonic::Status::from(error).code()
+            },
+        );
+    }
 
     /// Verifies request conversion rejects service-VPC activation before database
     /// work, so allocation cannot persist attachment identity without the required
