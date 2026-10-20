@@ -455,8 +455,6 @@ mod tests {
     use axum::body::{Body, Bytes};
     use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
     use axum_extra::headers::{Authorization, HeaderMapExt};
-    use carbide_test_support::Outcome::Yields;
-    use carbide_test_support::{Case, Check, check_cases_async, check_values};
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
@@ -536,43 +534,42 @@ mod tests {
     async fn routes_require_the_current_nvos_credentials() {
         let (router, state) = switch();
         let rotated = "rotated-password";
-        check_cases_async(
-            [
-                Case {
-                    scenario: "no credentials",
-                    input: (None, false),
-                    expect: Yields((StatusCode::UNAUTHORIZED, true)),
-                },
-                Case {
-                    scenario: "wrong password",
-                    input: (Some(basic(DUMMY_NVOS_USERNAME, "nope")), false),
-                    expect: Yields((StatusCode::UNAUTHORIZED, true)),
-                },
-                Case {
-                    scenario: "credentials that are not Basic",
-                    input: (Some(HeaderValue::from_static("Bearer xyz")), false),
-                    expect: Yields((StatusCode::UNAUTHORIZED, true)),
-                },
-                Case {
-                    scenario: "the factory password",
-                    input: (Some(admin()), false),
-                    expect: Yields((StatusCode::OK, false)),
-                },
-                Case {
-                    scenario: "the factory password after a rotation",
-                    input: (Some(admin()), true),
-                    expect: Yields((StatusCode::UNAUTHORIZED, true)),
-                },
-                Case {
-                    scenario: "the rotated password",
-                    input: (Some(basic(DUMMY_NVOS_USERNAME, rotated)), true),
-                    expect: Yields((StatusCode::OK, false)),
-                },
-            ],
-            |(authorization, after_rotation): (Option<HeaderValue>, bool)| {
+        for (scenario, (authorization, after_rotation), expected) in [
+            (
+                "no credentials",
+                (None, false),
+                (StatusCode::UNAUTHORIZED, true),
+            ),
+            (
+                "wrong password",
+                (Some(basic(DUMMY_NVOS_USERNAME, "nope")), false),
+                (StatusCode::UNAUTHORIZED, true),
+            ),
+            (
+                "credentials that are not Basic",
+                (Some(HeaderValue::from_static("Bearer xyz")), false),
+                (StatusCode::UNAUTHORIZED, true),
+            ),
+            (
+                "the factory password",
+                (Some(admin()), false),
+                (StatusCode::OK, false),
+            ),
+            (
+                "the factory password after a rotation",
+                (Some(admin()), true),
+                (StatusCode::UNAUTHORIZED, true),
+            ),
+            (
+                "the rotated password",
+                (Some(basic(DUMMY_NVOS_USERNAME, rotated)), true),
+                (StatusCode::OK, false),
+            ),
+        ] {
+            let actual = {
                 let router = router.clone();
                 let state = state.clone();
-                async move {
+                {
                     let password = if after_rotation {
                         rotated
                     } else {
@@ -591,11 +588,11 @@ mod tests {
                     let realm = headers
                         .get(header::WWW_AUTHENTICATE)
                         .map(|value| value == "Basic realm=\"nvueapi\"");
-                    Ok::<_, std::convert::Infallible>((status, realm == Some(true)))
+                    (status, realm == Some(true))
                 }
-            },
-        )
-        .await;
+            };
+            assert_eq!(actual, expected, "{scenario}");
+        }
         assert_eq!(
             state.admin_credentials(),
             (DUMMY_NVOS_USERNAME.to_string(), rotated.to_string())
@@ -619,147 +616,146 @@ mod tests {
     #[tokio::test]
     async fn trees_answer_their_nv_show_shape() {
         let (router, _state) = switch();
-        check_cases_async(
-            [
-                Case {
-                    scenario: "system identity",
-                    input: (
-                        Method::GET,
-                        "/nvue_v1/system?rev=operational",
-                        "/version/product-release",
-                    ),
-                    expect: Yields((StatusCode::OK, json!("25.02.4463"))),
-                },
-                Case {
-                    scenario: "system version",
-                    input: (Method::GET, "/nvue_v1/system/version", "/image/build-id"),
-                    expect: Yields((StatusCode::OK, json!("nvos-25.02.4463"))),
-                },
-                Case {
-                    scenario: "platform identity",
-                    input: (Method::GET, "/nvue_v1/platform", "/system-type"),
-                    expect: Yields((StatusCode::OK, json!("N5700_LD"))),
-                },
-                Case {
-                    scenario: "system health",
-                    input: (Method::GET, "/nvue_v1/system/health", "/status"),
-                    expect: Yields((StatusCode::OK, json!("OK"))),
-                },
-                Case {
-                    scenario: "reboot reason",
-                    input: (Method::GET, "/nvue_v1/system/reboot/reason", "/reason"),
-                    expect: Yields((StatusCode::OK, json!("reboot"))),
-                },
-                Case {
-                    scenario: "environment lists every sensor with its type",
-                    input: (
-                        Method::GET,
-                        "/nvue_v1/platform/environment",
-                        "/FAN1~11/type",
-                    ),
-                    expect: Yields((StatusCode::OK, json!("fan"))),
-                },
-                Case {
-                    scenario: "environment LEDs",
-                    input: (
-                        Method::GET,
-                        "/nvue_v1/platform/environment",
-                        "/STATUS/state",
-                    ),
-                    expect: Yields((StatusCode::OK, json!("green"))),
-                },
-                Case {
-                    scenario: "LED colors",
-                    input: (
-                        Method::GET,
-                        "/nvue_v1/platform/environment/led",
-                        "/UID/color",
-                    ),
-                    expect: Yields((StatusCode::OK, json!("off"))),
-                },
-                Case {
-                    scenario: "fans",
-                    input: (
-                        Method::GET,
-                        "/nvue_v1/platform/environment/fan",
-                        "/FAN1~11/current-speed",
-                    ),
-                    expect: Yields((StatusCode::OK, json!("10096"))),
-                },
-                Case {
-                    scenario: "a temperature sensor carries only the thresholds it has",
-                    input: (
-                        Method::GET,
-                        "/nvue_v1/platform/environment/temperature",
-                        "/Ambient-MNG-Temp",
-                    ),
-                    expect: Yields((StatusCode::OK, json!({"current": "23.50", "state": "ok"}))),
-                },
-                Case {
-                    scenario: "leak sensors",
-                    input: (
-                        Method::GET,
-                        "/nvue_v1/platform/environment/leakage",
-                        "/LEAKAGE-1/state",
-                    ),
-                    expect: Yields((StatusCode::OK, json!("ok"))),
-                },
-                Case {
-                    scenario: "NVLink interfaces",
-                    input: (
-                        Method::GET,
-                        "/nvue_v1/interface?rev=operational&filter_=type%3Dnvl&include=%2F*%2Ftype",
-                        "/acp1/link/state",
-                    ),
-                    expect: Yields((StatusCode::OK, json!({"up": {}}))),
-                },
-                Case {
-                    scenario: "the type filter is ignored, as NVOS ignores it",
-                    input: (
-                        Method::GET,
-                        "/nvue_v1/interface?filter_=type%3Dnvl",
-                        "/eth0/type",
-                    ),
-                    expect: Yields((StatusCode::OK, json!("eth"))),
-                },
-                Case {
-                    scenario: "cluster applications",
-                    input: (
-                        Method::GET,
-                        "/nvue_v1/cluster/apps",
-                        "/nmx-controller/addition-info",
-                    ),
-                    expect: Yields((StatusCode::OK, json!("CONTROL_PLANE_STATE_CONFIGURED"))),
-                },
-                Case {
-                    scenario: "partitions",
-                    input: (Method::GET, "/nvue_v1/sdn/partition", "/32766/health"),
-                    expect: Yields((StatusCode::OK, json!("healthy"))),
-                },
-                Case {
-                    scenario: "an unmodeled tree",
-                    input: (Method::GET, "/nvue_v1/vrf", "/status"),
-                    expect: Yields((StatusCode::NOT_FOUND, json!(404))),
-                },
-                Case {
-                    scenario: "a write",
-                    input: (Method::PATCH, "/nvue_v1/system", "/status"),
-                    expect: Yields((StatusCode::METHOD_NOT_ALLOWED, json!(405))),
-                },
-            ],
-            |(method, path, pointer): (Method, &str, &str)| {
+        for (scenario, (method, path, pointer), expected) in [
+            (
+                "system identity",
+                (
+                    Method::GET,
+                    "/nvue_v1/system?rev=operational",
+                    "/version/product-release",
+                ),
+                (StatusCode::OK, json!("25.02.4463")),
+            ),
+            (
+                "system version",
+                (Method::GET, "/nvue_v1/system/version", "/image/build-id"),
+                (StatusCode::OK, json!("nvos-25.02.4463")),
+            ),
+            (
+                "platform identity",
+                (Method::GET, "/nvue_v1/platform", "/system-type"),
+                (StatusCode::OK, json!("N5700_LD")),
+            ),
+            (
+                "system health",
+                (Method::GET, "/nvue_v1/system/health", "/status"),
+                (StatusCode::OK, json!("OK")),
+            ),
+            (
+                "reboot reason",
+                (Method::GET, "/nvue_v1/system/reboot/reason", "/reason"),
+                (StatusCode::OK, json!("reboot")),
+            ),
+            (
+                "environment lists every sensor with its type",
+                (
+                    Method::GET,
+                    "/nvue_v1/platform/environment",
+                    "/FAN1~11/type",
+                ),
+                (StatusCode::OK, json!("fan")),
+            ),
+            (
+                "environment LEDs",
+                (
+                    Method::GET,
+                    "/nvue_v1/platform/environment",
+                    "/STATUS/state",
+                ),
+                (StatusCode::OK, json!("green")),
+            ),
+            (
+                "LED colors",
+                (
+                    Method::GET,
+                    "/nvue_v1/platform/environment/led",
+                    "/UID/color",
+                ),
+                (StatusCode::OK, json!("off")),
+            ),
+            (
+                "fans",
+                (
+                    Method::GET,
+                    "/nvue_v1/platform/environment/fan",
+                    "/FAN1~11/current-speed",
+                ),
+                (StatusCode::OK, json!("10096")),
+            ),
+            (
+                "a temperature sensor carries only the thresholds it has",
+                (
+                    Method::GET,
+                    "/nvue_v1/platform/environment/temperature",
+                    "/Ambient-MNG-Temp",
+                ),
+                (StatusCode::OK, json!({"current": "23.50", "state": "ok"})),
+            ),
+            (
+                "leak sensors",
+                (
+                    Method::GET,
+                    "/nvue_v1/platform/environment/leakage",
+                    "/LEAKAGE-1/state",
+                ),
+                (StatusCode::OK, json!("ok")),
+            ),
+            (
+                "NVLink interfaces",
+                (
+                    Method::GET,
+                    "/nvue_v1/interface?rev=operational&filter_=type%3Dnvl&include=%2F*%2Ftype",
+                    "/acp1/link/state",
+                ),
+                (StatusCode::OK, json!({"up": {}})),
+            ),
+            (
+                "the type filter is ignored, as NVOS ignores it",
+                (
+                    Method::GET,
+                    "/nvue_v1/interface?filter_=type%3Dnvl",
+                    "/eth0/type",
+                ),
+                (StatusCode::OK, json!("eth")),
+            ),
+            (
+                "cluster applications",
+                (
+                    Method::GET,
+                    "/nvue_v1/cluster/apps",
+                    "/nmx-controller/addition-info",
+                ),
+                (StatusCode::OK, json!("CONTROL_PLANE_STATE_CONFIGURED")),
+            ),
+            (
+                "partitions",
+                (Method::GET, "/nvue_v1/sdn/partition", "/32766/health"),
+                (StatusCode::OK, json!("healthy")),
+            ),
+            (
+                "an unmodeled tree",
+                (Method::GET, "/nvue_v1/vrf", "/status"),
+                (StatusCode::NOT_FOUND, json!(404)),
+            ),
+            (
+                "a write",
+                (Method::PATCH, "/nvue_v1/system", "/status"),
+                (StatusCode::METHOD_NOT_ALLOWED, json!(405)),
+            ),
+        ] {
+            let actual = {
                 let router = router.clone();
-                async move {
+                {
                     let (status, body) = exchange_json(&router, method, path).await;
                     // A JSON pointer spells the `/` of `FAN1/1` as `~1`.
-                    Ok::<_, std::convert::Infallible>((
+                    (
                         status,
                         body.pointer(pointer).cloned().unwrap_or(Value::Null),
-                    ))
+                    )
                 }
-            },
-        )
-        .await;
+            };
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 
     /// Simulation changes what the sensors, the LEDs and the health tree
@@ -801,32 +797,23 @@ mod tests {
     /// Only switch profiles have an NVOS to serve.
     #[test]
     fn only_switch_profiles_serve_nvue() {
-        check_values(
-            [
-                Check {
-                    scenario: "an NVLink switch tray",
-                    input: HardwareType::NvidiaSwitchN5700Ld,
-                    expect: true,
-                },
-                Check {
-                    scenario: "the other NVLink switch tray",
-                    input: HardwareType::NvidiaSwitchNd5200Ld,
-                    expect: true,
-                },
-                Check {
-                    scenario: "a compute tray",
-                    input: HardwareType::WiwynnGB200Nvl,
-                    expect: false,
-                },
-                Check {
-                    scenario: "a power shelf",
-                    input: HardwareType::DeltaPowerShelf,
-                    expect: false,
-                },
-            ],
-            |hardware_type| {
-                nvue_router(&host(hardware_type), Arc::new(InjectionStore::new())).is_some()
-            },
-        );
+        for (scenario, hardware_type, expected) in [
+            (
+                "an NVLink switch tray",
+                HardwareType::NvidiaSwitchN5700Ld,
+                true,
+            ),
+            (
+                "the other NVLink switch tray",
+                HardwareType::NvidiaSwitchNd5200Ld,
+                true,
+            ),
+            ("a compute tray", HardwareType::WiwynnGB200Nvl, false),
+            ("a power shelf", HardwareType::DeltaPowerShelf, false),
+        ] {
+            let actual =
+                { nvue_router(&host(hardware_type), Arc::new(InjectionStore::new())).is_some() };
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 }

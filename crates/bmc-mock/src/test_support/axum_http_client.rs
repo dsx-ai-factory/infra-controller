@@ -275,30 +275,32 @@ impl HttpClient for AxumRouterHttpClient {
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
 
     use super::*;
 
     #[test]
     fn bmc_error_classification_distinguishes_http_and_parse_failures() {
         let cases = [
-            Check {
-                scenario: "server failure must not be skipped as an unclassified account slot",
-                input: Error::InvalidResponse {
+            (
+                "server failure must not be skipped as an unclassified account slot",
+                Error::InvalidResponse {
                     url: Url::parse("http://bmc.example/redfish/v1/AccountService/Accounts/1")
                         .unwrap(),
                     status: StatusCode::SERVICE_UNAVAILABLE,
                     text: String::new(),
                 },
-                expect: BmcErrorClass::HttpResponse { status: 503 },
-            },
-            Check {
-                scenario: "malformed response",
-                input: Error::Json(serde_json::from_str::<bool>("invalid").unwrap_err()),
-                expect: BmcErrorClass::ResponseParse,
-            },
+                BmcErrorClass::HttpResponse { status: 503 },
+            ),
+            (
+                "malformed response",
+                Error::Json(serde_json::from_str::<bool>("invalid").unwrap_err()),
+                BmcErrorClass::ResponseParse,
+            ),
         ];
 
-        check_values(cases, |error| error.error_class());
+        for (scenario, error, expected) in cases {
+            let actual = error.error_class();
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 }

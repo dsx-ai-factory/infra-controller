@@ -825,8 +825,6 @@ mod tests {
     use axum::http::{HeaderMap, Request, StatusCode};
     use axum::response::Response;
     use bytes::Bytes;
-    use carbide_test_support::Outcome::Yields;
-    use carbide_test_support::{Case, check_cases_async};
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
     use tower::ServiceExt;
@@ -840,22 +838,80 @@ mod tests {
 
     #[test]
     fn configuration_rejects_unbounded_or_invalid_limits() {
-        carbide_test_support::value_scenarios!(run = |limits: EventServiceLimits|
-            EventServiceConfig::try_from(limits).is_ok();
-            "resource limits" {
-                EventServiceLimits { max_subscribers: 1, max_frame_bytes: 1, max_frames: 1,
-                    max_history_bytes: 1, heartbeat: None, ..Default::default() } => true,
-                EventServiceLimits { max_subscribers: 0, ..Default::default() } => false,
-                EventServiceLimits { max_frame_bytes: 0, ..Default::default() } => false,
-                EventServiceLimits { max_frames: 0, ..Default::default() } => false,
-                EventServiceLimits { max_frame_bytes: 2, max_history_bytes: 1, ..Default::default() } => false,
-            }
-            "interval bounds" {
-                EventServiceLimits { heartbeat: Some(Duration::ZERO), ..Default::default() } => false,
-                EventServiceLimits { heartbeat: Some(Duration::from_secs(86_401)), ..Default::default() } => false,
-                EventServiceLimits { output_stall_timeout: Duration::ZERO, ..Default::default() } => false,
-            }
-        );
+        for (scenario, limits, expected) in [
+            (
+                "resource limits",
+                EventServiceLimits {
+                    max_subscribers: 1,
+                    max_frame_bytes: 1,
+                    max_frames: 1,
+                    max_history_bytes: 1,
+                    heartbeat: None,
+                    ..Default::default()
+                },
+                true,
+            ),
+            (
+                "resource limits",
+                EventServiceLimits {
+                    max_subscribers: 0,
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                "resource limits",
+                EventServiceLimits {
+                    max_frame_bytes: 0,
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                "resource limits",
+                EventServiceLimits {
+                    max_frames: 0,
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                "resource limits",
+                EventServiceLimits {
+                    max_frame_bytes: 2,
+                    max_history_bytes: 1,
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                "interval bounds",
+                EventServiceLimits {
+                    heartbeat: Some(Duration::ZERO),
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                "interval bounds",
+                EventServiceLimits {
+                    heartbeat: Some(Duration::from_secs(86_401)),
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                "interval bounds",
+                EventServiceLimits {
+                    output_stall_timeout: Duration::ZERO,
+                    ..Default::default()
+                },
+                false,
+            ),
+        ] {
+            let actual = EventServiceConfig::try_from(limits).is_ok();
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 
     #[tokio::test]
@@ -889,16 +945,29 @@ mod tests {
     #[test]
     fn publication_validation_and_encoded_byte_limits() {
         let state = state(2);
-        carbide_test_support::value_scenarios!(run = |value| {
-            let rejected = state.publish(value).is_err();
-            (rejected, state.stats().retained_frames)
-        };
-            "invalid publication leaves history unchanged" {
-                json!({"@odata.type": "#LogEntry.v1_9_0.LogEntry"}) => (true, 0),
-                json!({"@odata.type": "#Event.v1_6_0.Event"}) => (true, 0),
-                json!({"padding": "x".repeat(4096)}) => (true, 0),
-            }
-        );
+        for (scenario, value, expected) in [
+            (
+                "invalid publication leaves history unchanged",
+                json!({"@odata.type": "#LogEntry.v1_9_0.LogEntry"}),
+                (true, 0),
+            ),
+            (
+                "invalid publication leaves history unchanged",
+                json!({"@odata.type": "#Event.v1_6_0.Event"}),
+                (true, 0),
+            ),
+            (
+                "invalid publication leaves history unchanged",
+                json!({"padding": "x".repeat(4096)}),
+                (true, 0),
+            ),
+        ] {
+            let actual = {
+                let rejected = state.publish(value).is_err();
+                (rejected, state.stats().retained_frames)
+            };
+            assert_eq!(actual, expected, "{scenario}");
+        }
         assert!(state.publish(event()).unwrap().ends_with(":1"));
         assert!(state.publish(metric()).unwrap().ends_with(":2"));
         let encoded_size = state.stats().retained_bytes;
@@ -927,17 +996,43 @@ mod tests {
     #[test]
     fn script_limits_do_not_mutate_queue_on_rejection() {
         let state = state(1);
-        carbide_test_support::value_scenarios!(run = |steps| {
-            (state.queue_script(steps).is_err(), state.stats().queued_scripts)
-        };
-            "invalid scripts leave the queue unchanged" {
-                vec![] => (true, 0),
-                vec![StreamStep::Eof, StreamStep::Eof] => (true, 0),
-                vec![StreamStep::Delay { millis: 60_001 }] => (true, 0),
-                vec![StreamStep::Bytes { data: vec![0; MAX_SCRIPT_BYTES + 1] }] => (true, 0),
-                vec![StreamStep::Delay { millis: 0 }; MAX_SCRIPT_STEPS + 1] => (true, 0),
-            }
-        );
+        for (scenario, steps, expected) in [
+            (
+                "invalid scripts leave the queue unchanged",
+                vec![],
+                (true, 0),
+            ),
+            (
+                "invalid scripts leave the queue unchanged",
+                vec![StreamStep::Eof, StreamStep::Eof],
+                (true, 0),
+            ),
+            (
+                "invalid scripts leave the queue unchanged",
+                vec![StreamStep::Delay { millis: 60_001 }],
+                (true, 0),
+            ),
+            (
+                "invalid scripts leave the queue unchanged",
+                vec![StreamStep::Bytes {
+                    data: vec![0; MAX_SCRIPT_BYTES + 1],
+                }],
+                (true, 0),
+            ),
+            (
+                "invalid scripts leave the queue unchanged",
+                vec![StreamStep::Delay { millis: 0 }; MAX_SCRIPT_STEPS + 1],
+                (true, 0),
+            ),
+        ] {
+            let actual = {
+                (
+                    state.queue_script(steps).is_err(),
+                    state.stats().queued_scripts,
+                )
+            };
+            assert_eq!(actual, expected, "{scenario}");
+        }
         for _ in 0..MAX_SCRIPTS {
             state.queue_script(vec![StreamStep::Eof]).unwrap();
         }
@@ -966,29 +1061,59 @@ mod tests {
 
     #[test]
     fn accept_header_honors_media_ranges_and_weights() {
-        carbide_test_support::value_scenarios!(run = |accept: &str| {
-            let mut headers = HeaderMap::new();
-            headers.insert("accept", accept.parse().unwrap());
-            accepts_sse(&headers)
-        };
-            "compatible ranges" {
-                "*/*" => true,
-                "text/*;q=0.5" => true,
-                "text/event-stream;charset=utf-8" => true,
-                "text/event-stream;version=2, */*" => true,
-                "text/event-stream;" => true,
-                // The served representation has no parameters, so only the bare range applies.
-                "text/event-stream;charset=utf-8;q=0, text/event-stream" => true,
-                r#"text/event-stream;profile="a;b,c", */*"# => true,
-            }
-            "explicit exclusion or invalid weight" {
-                "application/json" => false,
-                "text/event-stream;q=0, */*;q=1" => false,
-                "text/event-stream;q=0, text/*" => false,
-                "text/event-stream;q=NaN" => false,
-                r#"application/json;profile="a,text/event-stream,b", text/event-stream;q=0"# => false,
-            }
-        );
+        for (scenario, accept, expected) in [
+            ("compatible ranges", "*/*", true),
+            ("compatible ranges", "text/*;q=0.5", true),
+            ("compatible ranges", "text/event-stream;charset=utf-8", true),
+            (
+                "compatible ranges",
+                "text/event-stream;version=2, */*",
+                true,
+            ),
+            ("compatible ranges", "text/event-stream;", true),
+            (
+                "compatible ranges", // The served representation has no parameters, so only the bare range applies.
+                "text/event-stream;charset=utf-8;q=0, text/event-stream",
+                true,
+            ),
+            (
+                "compatible ranges",
+                r#"text/event-stream;profile="a;b,c", */*"#,
+                true,
+            ),
+            (
+                "explicit exclusion or invalid weight",
+                "application/json",
+                false,
+            ),
+            (
+                "explicit exclusion or invalid weight",
+                "text/event-stream;q=0, */*;q=1",
+                false,
+            ),
+            (
+                "explicit exclusion or invalid weight",
+                "text/event-stream;q=0, text/*",
+                false,
+            ),
+            (
+                "explicit exclusion or invalid weight",
+                "text/event-stream;q=NaN",
+                false,
+            ),
+            (
+                "explicit exclusion or invalid weight",
+                r#"application/json;profile="a,text/event-stream,b", text/event-stream;q=0"#,
+                false,
+            ),
+        ] {
+            let actual = {
+                let mut headers = HeaderMap::new();
+                headers.insert("accept", accept.parse().unwrap());
+                accepts_sse(&headers)
+            };
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 
     fn router_with(limits: EventServiceConfig) -> (Router, BmcState<TestCallbacks>) {
@@ -1050,64 +1175,63 @@ mod tests {
 
     #[tokio::test]
     async fn hardware_profiles_control_discovery_and_routes() {
-        check_cases_async(
-            [
-                Case {
-                    scenario: "Dell R750 host profile",
-                    input: (
-                        HardwareType::DellPowerEdgeR750,
-                        false,
-                        EventServiceOverride::Profile,
-                    ),
-                    expect: Yields((true, true, StatusCode::OK)),
-                },
-                Case {
-                    scenario: "BlueField-3 DPU profile",
-                    input: (
-                        HardwareType::DellPowerEdgeR750,
-                        true,
-                        EventServiceOverride::Profile,
-                    ),
-                    expect: Yields((true, true, StatusCode::OK)),
-                },
-                Case {
-                    scenario: "BlueField-4 DPU profile",
-                    input: (
-                        HardwareType::DellPowerEdgeR760Bf4,
-                        true,
-                        EventServiceOverride::Profile,
-                    ),
-                    expect: Yields((true, true, StatusCode::OK)),
-                },
-                Case {
-                    scenario: "power shelf profile",
-                    input: (
-                        HardwareType::DeltaPowerShelf,
-                        false,
-                        EventServiceOverride::Profile,
-                    ),
-                    expect: Yields((true, true, StatusCode::OK)),
-                },
-                Case {
-                    scenario: "switch profile",
-                    input: (
-                        HardwareType::NvidiaSwitchNd5200Ld,
-                        false,
-                        EventServiceOverride::Profile,
-                    ),
-                    expect: Yields((true, true, StatusCode::OK)),
-                },
-                Case {
-                    scenario: "generic profile with limit overrides",
-                    input: (
-                        HardwareType::GenericAmi,
-                        false,
-                        EventServiceOverride::Limits(EventServiceConfig::default()),
-                    ),
-                    expect: Yields((true, true, StatusCode::OK)),
-                },
-            ],
-            |(hardware, dpu, event_service)| async move {
+        for (scenario, (hardware, dpu, event_service), expected) in [
+            (
+                "Dell R750 host profile",
+                (
+                    HardwareType::DellPowerEdgeR750,
+                    false,
+                    EventServiceOverride::Profile,
+                ),
+                (true, true, StatusCode::OK),
+            ),
+            (
+                "BlueField-3 DPU profile",
+                (
+                    HardwareType::DellPowerEdgeR750,
+                    true,
+                    EventServiceOverride::Profile,
+                ),
+                (true, true, StatusCode::OK),
+            ),
+            (
+                "BlueField-4 DPU profile",
+                (
+                    HardwareType::DellPowerEdgeR760Bf4,
+                    true,
+                    EventServiceOverride::Profile,
+                ),
+                (true, true, StatusCode::OK),
+            ),
+            (
+                "power shelf profile",
+                (
+                    HardwareType::DeltaPowerShelf,
+                    false,
+                    EventServiceOverride::Profile,
+                ),
+                (true, true, StatusCode::OK),
+            ),
+            (
+                "switch profile",
+                (
+                    HardwareType::NvidiaSwitchNd5200Ld,
+                    false,
+                    EventServiceOverride::Profile,
+                ),
+                (true, true, StatusCode::OK),
+            ),
+            (
+                "generic profile with limit overrides",
+                (
+                    HardwareType::GenericAmi,
+                    false,
+                    EventServiceOverride::Limits(EventServiceConfig::default()),
+                ),
+                (true, true, StatusCode::OK),
+            ),
+        ] {
+            let actual = {
                 let info = if dpu {
                     use crate::mac_address_pool::{Config, MacAddressPool, PoolConfig};
                     let mut pool = MacAddressPool::new(Config {
@@ -1137,116 +1261,98 @@ mod tests {
                 );
                 let root = json_body(request(&router, "GET", "/redfish/v1", None).await).await;
                 let response = request(&router, "GET", SSE, None).await;
-                Ok::<_, std::convert::Infallible>((
+                (
                     state.event_service.is_some(),
                     root.get("EventService").is_some(),
                     response.status(),
-                ))
-            },
-        )
-        .await;
+                )
+            };
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 
     #[tokio::test]
     async fn unknown_subscriptions_return_redfish_errors() {
         let (router, _) = router(false);
-        check_cases_async(
-            [
-                Case {
-                    scenario: "missing member",
-                    input: ("GET", "999999"),
-                    expect: Yields((StatusCode::NOT_FOUND, true)),
-                },
-                Case {
-                    scenario: "nonnumeric member",
-                    input: ("GET", "garbage"),
-                    expect: Yields((StatusCode::NOT_FOUND, true)),
-                },
-                Case {
-                    scenario: "deleting missing member",
-                    input: ("DELETE", "garbage"),
-                    expect: Yields((StatusCode::NOT_FOUND, true)),
-                },
-            ],
-            |(method, id)| {
+        for (scenario, (method, id), expected) in [
+            (
+                "missing member",
+                ("GET", "999999"),
+                (StatusCode::NOT_FOUND, true),
+            ),
+            (
+                "nonnumeric member",
+                ("GET", "garbage"),
+                (StatusCode::NOT_FOUND, true),
+            ),
+            (
+                "deleting missing member",
+                ("DELETE", "garbage"),
+                (StatusCode::NOT_FOUND, true),
+            ),
+        ] {
+            let actual = {
                 let router = router.clone();
-                async move {
+                {
                     let response =
                         request(&router, method, &format!("{SUBSCRIPTIONS}/{id}"), None).await;
                     let status = response.status();
                     let error = json_body(response).await;
-                    Ok::<_, std::convert::Infallible>((status, error["error"]["code"].is_string()))
+                    (status, error["error"]["code"].is_string())
                 }
-            },
-        )
-        .await;
+            };
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 
     #[tokio::test]
     async fn closing_unpolled_bodies_holds_admission_until_drop() {
-        check_cases_async(
-            [
-                Case {
-                    scenario: "explicit close",
-                    input: "close",
-                    expect: Yields(()),
-                },
-                Case {
-                    scenario: "BMC reset",
-                    input: "reset",
-                    expect: Yields(()),
-                },
-                Case {
-                    scenario: "subscription deletion",
-                    input: "delete",
-                    expect: Yields(()),
-                },
-            ],
-            |operation| async move {
-                let (router, bmc) = router_with(limits(1, 4096, 2, 8192));
-                let state = bmc.event_service.as_ref().unwrap();
-                state
-                    .queue_script(vec![StreamStep::Bytes {
-                        data: vec![0; MAX_SCRIPT_BYTES],
-                    }])
-                    .unwrap();
-                let response = request(&router, "GET", SSE, None).await;
-                assert_eq!(response.status(), StatusCode::OK);
-                match operation {
-                    "close" => state.close_subscribers(),
-                    "reset" => {
-                        bmc.reset();
-                    }
-                    "delete" => {
-                        let member = json_body(request(&router, "GET", SUBSCRIPTIONS, None).await)
-                            .await["Members"][0]["@odata.id"]
-                            .as_str()
-                            .unwrap()
-                            .to_owned();
-                        assert_eq!(
-                            request(&router, "DELETE", &member, None).await.status(),
-                            StatusCode::NO_CONTENT
-                        );
-                    }
-                    _ => unreachable!(),
+        for (scenario, operation) in [
+            ("explicit close", "close"),
+            ("BMC reset", "reset"),
+            ("subscription deletion", "delete"),
+        ] {
+            let (router, bmc) = router_with(limits(1, 4096, 2, 8192));
+            let state = bmc.event_service.as_ref().unwrap();
+            state
+                .queue_script(vec![StreamStep::Bytes {
+                    data: vec![0; MAX_SCRIPT_BYTES],
+                }])
+                .unwrap();
+            let response = request(&router, "GET", SSE, None).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            match operation {
+                "close" => state.close_subscribers(),
+                "reset" => {
+                    bmc.reset();
                 }
-                // Removing the registry entry releases the unsent script, but the
-                // held body keeps its admission slot.
-                assert_eq!((state.stats().subscribers, state.stats().streams), (0, 1));
-                assert_eq!(
-                    request(&router, "GET", SSE, None).await.status(),
-                    StatusCode::SERVICE_UNAVAILABLE
-                );
-                drop(response);
-                assert_eq!(state.stats().streams, 0);
-                assert_eq!(
-                    request(&router, "GET", SSE, None).await.status(),
-                    StatusCode::OK
-                );
-                Ok::<_, std::convert::Infallible>(())
-            },
-        )
-        .await;
+                "delete" => {
+                    let member = json_body(request(&router, "GET", SUBSCRIPTIONS, None).await)
+                        .await["Members"][0]["@odata.id"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned();
+                    assert_eq!(
+                        request(&router, "DELETE", &member, None).await.status(),
+                        StatusCode::NO_CONTENT
+                    );
+                }
+                _ => unreachable!(),
+            }
+            // Removing the registry entry releases the unsent script, but the
+            // held body keeps its admission slot.
+            assert_eq!((state.stats().subscribers, state.stats().streams), (0, 1));
+            assert_eq!(
+                request(&router, "GET", SSE, None).await.status(),
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+            drop(response);
+            assert_eq!(state.stats().streams, 0, "{scenario}");
+            assert_eq!(
+                request(&router, "GET", SSE, None).await.status(),
+                StatusCode::OK
+            );
+        }
     }
 
     #[tokio::test]
@@ -1518,27 +1624,26 @@ mod tests {
             1,
             "HEAD must not claim an SSE script"
         );
-        check_cases_async(
-            [
-                Case {
-                    scenario: "unsupported query",
-                    input: (format!("{SSE}?$expand=*"), "text/event-stream"),
-                    expect: Yields(StatusCode::BAD_REQUEST),
-                },
-                Case {
-                    scenario: "incompatible media type",
-                    input: (SSE.into(), "application/json"),
-                    expect: Yields(StatusCode::NOT_ACCEPTABLE),
-                },
-                Case {
-                    scenario: "explicit exclusion overrides wildcard",
-                    input: (SSE.into(), "text/event-stream;q=0, */*;q=1"),
-                    expect: Yields(StatusCode::NOT_ACCEPTABLE),
-                },
-            ],
-            |(uri, accept)| {
+        for (scenario, (uri, accept), expected) in [
+            (
+                "unsupported query",
+                (format!("{SSE}?$expand=*"), "text/event-stream"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "incompatible media type",
+                (SSE.into(), "application/json"),
+                StatusCode::NOT_ACCEPTABLE,
+            ),
+            (
+                "explicit exclusion overrides wildcard",
+                (SSE.into(), "text/event-stream;q=0, */*;q=1"),
+                StatusCode::NOT_ACCEPTABLE,
+            ),
+        ] {
+            let actual = {
                 let router = router.clone();
-                async move {
+                {
                     let response = router
                         .oneshot(
                             Request::builder()
@@ -1554,11 +1659,11 @@ mod tests {
                     assert!(json_body(response).await["error"]["code"].is_string());
                     assert_eq!(state.stats().queued_scripts, 1);
                     assert_eq!(state.stats().subscribers, 0);
-                    Ok::<_, std::convert::Infallible>(status)
+                    status
                 }
-            },
-        )
-        .await;
+            };
+            assert_eq!(actual, expected, "{scenario}");
+        }
         let mut empty = request(&router, "GET", SSE, None).await.into_body();
         assert!(empty.frame().await.is_none());
         let first = state.publish(event()).unwrap();
@@ -1790,16 +1895,31 @@ mod tests {
                 .unwrap(),
             );
             let state = bmc.event_service.as_ref().unwrap();
-            let (mut server, base) = serve_https("sse-stall-test", router);
+            let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+                .expect("test certificate");
+            let cert_dir = tempfile::tempdir().unwrap();
+            std::fs::write(cert_dir.path().join("tls.crt"), certified.cert.pem()).unwrap();
+            std::fs::write(
+                cert_dir.path().join("tls.key"),
+                certified.signing_key.serialize_pem(),
+            )
+            .unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut server = crate::CombinedServer::run_router(
+                "sse-stall-test",
+                router,
+                Some(crate::ListenerOrAddress::Listener(listener)),
+                crate::tls::server_config(Some(cert_dir.path())).unwrap(),
+            );
+            let base = url::Url::parse(&format!("https://{}", server.address)).unwrap();
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add(certified.cert.der().clone()).unwrap();
             let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
                 rustls::crypto::aws_lc_rs::default_provider(),
             ))
             .with_safe_default_protocol_versions()
             .unwrap()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(
-                forge_tls::dummy_tls_verifier::DummyTlsVerifier::new_for_tests(),
-            ))
+            .with_root_certificates(roots)
             .with_no_client_auth();
             config.alpn_protocols = vec![b"h2".to_vec()];
             let socket = tokio::net::TcpStream::connect(server.address)

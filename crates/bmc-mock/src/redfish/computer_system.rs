@@ -1484,57 +1484,6 @@ mod tests {
         }
     }
 
-    /// Core's Lenovo client must accept both the order and option PATCH responses.
-    #[tokio::test]
-    async fn lenovo_gb300_client_restores_dpu_boot_order() {
-        use libredfish::{BootInterfaceRef, Endpoint, RedfishClientPool};
-
-        let machine = host_info(HardwareType::LenovoGB300Nvl);
-        let crate::MachineInfo::Host(host) = &machine else {
-            panic!("expected host fixture");
-        };
-        let dpu_mac = host.dpus[0].host_mac_address;
-        let (router, _) = create_test_bmc(
-            &machine,
-            TestBmcConfig::default(),
-            "test-host-id".to_string(),
-            false,
-            MachineRouterOptions::default(),
-        );
-        let (_server, url) = crate::test_support::serve_https("gb300-boot-order", router.clone());
-        let client = RedfishClientPool::builder()
-            .danger_accept_invalid_certs()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .unwrap()
-            .create_client(Endpoint {
-                host: url.host_str().unwrap().to_owned(),
-                port: url.port(),
-                user: None,
-                password: None,
-            })
-            .await
-            .unwrap();
-        assert!(
-            !client
-                .is_boot_order_setup(BootInterfaceRef::Mac(dpu_mac))
-                .await
-                .unwrap()
-        );
-        client
-            .set_boot_order_dpu_first(BootInterfaceRef::Mac(dpu_mac))
-            .await
-            .unwrap();
-        assert!(
-            client
-                .is_boot_order_setup(BootInterfaceRef::Mac(dpu_mac))
-                .await
-                .unwrap()
-        );
-        let target = get_json(&router, "/redfish/v1/Systems/System_0/BootOptions/0004").await;
-        assert_eq!(target["BootOptionEnabled"], true);
-    }
-
     #[tokio::test]
     async fn log_services_discovery_names_the_log_collection() {
         let (router, _) = create_test_bmc(

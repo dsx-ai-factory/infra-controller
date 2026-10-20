@@ -130,7 +130,6 @@ pub(super) fn cbc_chassis(
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
 
     use super::*;
     use crate::{RackInfo, RackType};
@@ -143,65 +142,67 @@ mod tests {
 
     #[test]
     fn cbc_values_follow_rack_placement() {
-        check_values(
-            [
-                Check {
-                    scenario: "first lower compute tray",
-                    input: Input {
-                        rack_type: RackType::WiwynnGb200Nvl72,
-                        position: 11,
-                    },
-                    expect: Some((10, 0, 2, 128)),
+        for (scenario, input, expected) in [
+            (
+                "first lower compute tray",
+                Input {
+                    rack_type: RackType::WiwynnGb200Nvl72,
+                    position: 11,
                 },
-                Check {
-                    scenario: "last lower compute tray",
-                    input: Input {
-                        rack_type: RackType::WiwynnGb200Nvl72,
-                        position: 18,
-                    },
-                    expect: Some((17, 7, 2, 128)),
+                Some((10, 0, 2, 128)),
+            ),
+            (
+                "last lower compute tray",
+                Input {
+                    rack_type: RackType::WiwynnGb200Nvl72,
+                    position: 18,
                 },
-                Check {
-                    scenario: "first upper compute tray",
-                    input: Input {
-                        rack_type: RackType::LenovoGb300Nvl72,
-                        position: 28,
-                    },
-                    expect: Some((18, 8, 2, 128)),
+                Some((17, 7, 2, 128)),
+            ),
+            (
+                "first upper compute tray",
+                Input {
+                    rack_type: RackType::LenovoGb300Nvl72,
+                    position: 28,
                 },
-                Check {
-                    scenario: "last upper compute tray",
-                    input: Input {
-                        rack_type: RackType::LenovoGb300Nvl72,
-                        position: 37,
-                    },
-                    expect: Some((27, 17, 2, 128)),
+                Some((18, 8, 2, 128)),
+            ),
+            (
+                "last upper compute tray",
+                Input {
+                    rack_type: RackType::LenovoGb300Nvl72,
+                    position: 37,
                 },
-                Check {
-                    scenario: "non-compute rack member",
-                    input: Input {
-                        rack_type: RackType::WiwynnGb200Nvl72,
-                        position: 19,
-                    },
-                    expect: None,
+                Some((27, 17, 2, 128)),
+            ),
+            (
+                "non-compute rack member",
+                Input {
+                    rack_type: RackType::WiwynnGb200Nvl72,
+                    position: 19,
                 },
-            ],
-            |input| {
+                None,
+            ),
+        ] {
+            let actual = {
                 let placement = RackInfo {
                     rack_type: input.rack_type,
                 }
                 .placement(input.position);
                 let topology = Topology::from_rack_placement(placement);
                 let chassis = cbc_chassis("CBC_0".into(), topology.as_ref());
-                let nvidia = chassis.oem?.get("Nvidia")?.clone();
-                Some((
-                    nvidia.get("ChassisPhysicalSlotNumber")?.as_u64()?,
-                    nvidia.get("ComputeTrayIndex")?.as_u64()?,
-                    nvidia.get("RevisionId")?.as_u64()?,
-                    nvidia.get("TopologyId")?.as_u64()?,
-                ))
-            },
-        );
+                chassis.oem.and_then(|oem| {
+                    let nvidia = oem.get("Nvidia")?;
+                    Some((
+                        nvidia.get("ChassisPhysicalSlotNumber")?.as_u64()?,
+                        nvidia.get("ComputeTrayIndex")?.as_u64()?,
+                        nvidia.get("RevisionId")?.as_u64()?,
+                        nvidia.get("TopologyId")?.as_u64()?,
+                    ))
+                })
+            };
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 
     fn switch(position: u8) -> Option<(u8, u32)> {

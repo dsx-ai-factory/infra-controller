@@ -82,7 +82,6 @@ pub(crate) fn generate_chassis_leak_detectors(count: usize) -> Vec<LeakDetector>
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
 
     use super::*;
 
@@ -95,37 +94,36 @@ mod tests {
 
     #[test]
     fn detector_state_sets_detector_and_health_status() {
-        check_values(
-            [
-                Check {
-                    scenario: "OK detector keeps healthy Redfish status",
-                    input: redfish::resource::Status::Ok,
-                    expect: SerializedState {
-                        detector_state: "OK".to_string(),
-                        health: "OK".to_string(),
-                        state: "Enabled".to_string(),
-                    },
+        for (scenario, detector_state, expected) in [
+            (
+                "OK detector keeps healthy Redfish status",
+                redfish::resource::Status::Ok,
+                SerializedState {
+                    detector_state: "OK".to_string(),
+                    health: "OK".to_string(),
+                    state: "Enabled".to_string(),
                 },
-                Check {
-                    scenario: "warning detector reports warning Redfish status",
-                    input: redfish::resource::Status::Warning,
-                    expect: SerializedState {
-                        detector_state: "Warning".to_string(),
-                        health: "Warning".to_string(),
-                        state: "Enabled".to_string(),
-                    },
+            ),
+            (
+                "warning detector reports warning Redfish status",
+                redfish::resource::Status::Warning,
+                SerializedState {
+                    detector_state: "Warning".to_string(),
+                    health: "Warning".to_string(),
+                    state: "Enabled".to_string(),
                 },
-                Check {
-                    scenario: "critical detector reports critical Redfish status",
-                    input: redfish::resource::Status::Critical,
-                    expect: SerializedState {
-                        detector_state: "Critical".to_string(),
-                        health: "Critical".to_string(),
-                        state: "Enabled".to_string(),
-                    },
+            ),
+            (
+                "critical detector reports critical Redfish status",
+                redfish::resource::Status::Critical,
+                SerializedState {
+                    detector_state: "Critical".to_string(),
+                    health: "Critical".to_string(),
+                    state: "Enabled".to_string(),
                 },
-            ],
-            |detector_state| {
+            ),
+        ] {
+            let actual = {
                 let value = LeakDetector {
                     id: Cow::Borrowed("LeakDetector_1"),
                     user_label: None,
@@ -138,7 +136,8 @@ mod tests {
                     health: value["Status"]["Health"].as_str().unwrap().to_string(),
                     state: value["Status"]["State"].as_str().unwrap().to_string(),
                 }
-            },
-        );
+            };
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 }
