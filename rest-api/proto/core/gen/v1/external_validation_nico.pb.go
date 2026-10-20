@@ -430,7 +430,7 @@ func (x *ExternalValidationAttempt) GetDetails() string {
 // NICo-owned allocation gate; no tenant API creates or removes this resource.
 type ExternalValidationHold struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Stable UUID for the hold's validation cycle.
+	// Stable UUID of this hold; it never rebinds to another validation cycle.
 	HoldId *ExternalValidationHoldId `protobuf:"bytes,1,opt,name=hold_id,json=holdId,proto3" json:"hold_id,omitempty"`
 	// Held host machine; required and never a DPU machine.
 	MachineId *MachineId `protobuf:"bytes,2,opt,name=machine_id,json=machineId,proto3" json:"machine_id,omitempty"`
