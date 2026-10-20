@@ -148,15 +148,14 @@ with CA certificates. Service images install their additional runtime packages;
 the compiler toolchains remain in build stages. DHCP uses the Kea version in
 `dev/docker/kea.version`, matching the compiler container.
 
-`Dockerfile.core` has separate targets for API, BMC proxy, DHCP, machine-a-tron,
-SSH console, and the MAT protocol gateway. Each target builds and packages only
-its own binary (or DHCP hook library), sharing locked Cargo dependency and target
-caches. No combined artifacts image is exported. Tilt's Rust build stages use
-`line-tables-only` debug information for development and release profiles,
-retaining source-line backtraces without full debugger type and variable
-information. Host Cargo builds and CI profiles are unchanged. The API image does
-not include the admin CLI or SSH console; SSH console has its own image and
-resource refresh.
+`Dockerfile.core` has separate targets for API, BMC proxy, DHCP,
+machine-a-tron, SSH console, and the MAT protocol gateway. Each target builds
+and packages its own binary (or DHCP hook library), sharing locked Cargo
+dependency and target caches. Tilt's Rust build stages use `line-tables-only`
+debug information for development and release profiles, retaining source-line
+backtraces without full debugger type and variable information. The API image
+contains a copy of nico-admin-cli for convenience.
+
 The MAT controller and its gateway also use separate images in Tilt. Other chart
 users keep the combined controller image unless they set
 `mat-k8s-controller.gateway.image.repository` or `.tag`; each empty field falls
