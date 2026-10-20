@@ -4339,7 +4339,8 @@ fn map_rms_password_rotation_state(job: &rms::JobStatus) -> SwitchPasswordRotati
 ///
 /// `tls_server_domain` overrides the RMS switch domain. If omitted, RMS uses its
 /// configured domain.
-/// The request allows SSH fallback if RMS cannot submit the reset through NVUE.
+/// The request enables SSH fallback for NVUE connection or TLS failures before
+/// reset submission.
 async fn rms_batch_reset_switch_factory_default(
     client: &dyn RmsApi,
     nodes: Vec<rms::NodeInfo>,

@@ -44,7 +44,7 @@ use librms::protos::rack_manager as rms;
 use librms::{RackManagerError, RmsApi};
 use tokio::sync::{Mutex, oneshot};
 
-struct BlockedPowerStateRead {
+struct BlockedRmsRequest {
     entered: oneshot::Sender<()>,
     resume: oneshot::Receiver<()>,
 }
@@ -72,7 +72,7 @@ pub struct MockRmsApi {
     batch_get_power_state_responses:
         Mutex<VecDeque<Result<rms::BatchGetPowerStateResponse, RackManagerError>>>,
     batch_get_power_state_calls: Mutex<Vec<rms::BatchGetPowerStateRequest>>,
-    blocked_power_state_read: Mutex<Option<BlockedPowerStateRead>>,
+    blocked_power_state_read: Mutex<Option<BlockedRmsRequest>>,
 
     // Inventory calls.
     list_node_inventory_responses:
@@ -140,6 +140,7 @@ pub struct MockRmsApi {
     apply_firmware_object_responses:
         Mutex<VecDeque<Result<rms::ApplyFirmwareObjectResponse, RackManagerError>>>,
     apply_firmware_object_calls: Mutex<Vec<rms::ApplyFirmwareObjectRequest>>,
+    blocked_firmware_submission: Mutex<Option<BlockedRmsRequest>>,
 
     apply_switch_system_image_responses:
         Mutex<VecDeque<Result<rms::ApplySwitchSystemImageResponse, RackManagerError>>>,
@@ -189,6 +190,7 @@ pub struct MockRmsApi {
     get_firmware_job_status_responses:
         Mutex<VecDeque<Result<rms::GetFirmwareJobStatusResponse, RackManagerError>>>,
     get_firmware_job_status_calls: Mutex<Vec<rms::GetFirmwareJobStatusRequest>>,
+    blocked_firmware_status: Mutex<Option<BlockedRmsRequest>>,
 
     // Switch firmware calls.
     list_switch_firmware_responses:
@@ -307,6 +309,7 @@ impl MockRmsApi {
             apply_stored_firmware_object_calls: Default::default(),
             apply_firmware_object_responses: Default::default(),
             apply_firmware_object_calls: Default::default(),
+            blocked_firmware_submission: Default::default(),
             apply_switch_system_image_responses: Default::default(),
             apply_switch_system_image_calls: Default::default(),
             apply_stored_switch_system_image_responses: Default::default(),
@@ -331,6 +334,7 @@ impl MockRmsApi {
             get_job_status_calls: Default::default(),
             get_firmware_job_status_responses: Default::default(),
             get_firmware_job_status_calls: Default::default(),
+            blocked_firmware_status: Default::default(),
             list_switch_firmware_responses: Default::default(),
             list_switch_firmware_calls: Default::default(),
             push_switch_firmware_responses: Default::default(),
@@ -412,7 +416,53 @@ impl MockRmsApi {
         let (release, resume) = oneshot::channel();
         let mut blocked = self.blocked_power_state_read.lock().await;
         assert!(blocked.is_none(), "a power read blocker is already armed");
-        *blocked = Some(BlockedPowerStateRead { entered, resume });
+        *blocked = Some(BlockedRmsRequest { entered, resume });
+        (arrival, release)
+    }
+
+    /// Pauses the next firmware submission after recording the request and before
+    /// taking its queued response. The returned receiver signals when the call pauses.
+    /// Send `()` through the returned sender, or drop the sender, to resume the call.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the next firmware submission is already set to pause.
+    pub async fn block_next_apply_firmware_object(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, arrival) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let mut blocked = self.blocked_firmware_submission.lock().await;
+
+        assert!(
+            blocked.is_none(),
+            "a firmware submission blocker is already armed"
+        );
+
+        *blocked = Some(BlockedRmsRequest { entered, resume });
+        (arrival, release)
+    }
+
+    /// Pauses the next firmware status request after recording the request and before
+    /// taking its queued response. The returned receiver signals when the call pauses.
+    /// Send `()` through the returned sender, or drop the sender, to resume the call.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the next firmware status request is already set to pause.
+    pub async fn block_next_get_firmware_job_status(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, arrival) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let mut blocked = self.blocked_firmware_status.lock().await;
+
+        assert!(
+            blocked.is_none(),
+            "a firmware status blocker is already armed"
+        );
+
+        *blocked = Some(BlockedRmsRequest { entered, resume });
         (arrival, release)
     }
 
@@ -1320,6 +1370,14 @@ impl RmsApi for MockRmsApi {
         cmd: rms::ApplyFirmwareObjectRequest,
     ) -> Result<rms::ApplyFirmwareObjectResponse, RackManagerError> {
         self.apply_firmware_object_calls.lock().await.push(cmd);
+
+        let blocked = self.blocked_firmware_submission.lock().await.take();
+
+        if let Some(blocked) = blocked {
+            blocked.entered.send(()).ok();
+            blocked.resume.await.ok();
+        }
+
         pop_or_err(&mut self.apply_firmware_object_responses.lock().await)
     }
 
@@ -1394,6 +1452,14 @@ impl RmsApi for MockRmsApi {
         cmd: rms::GetFirmwareJobStatusRequest,
     ) -> Result<rms::GetFirmwareJobStatusResponse, RackManagerError> {
         self.get_firmware_job_status_calls.lock().await.push(cmd);
+
+        let blocked = self.blocked_firmware_status.lock().await.take();
+
+        if let Some(blocked) = blocked {
+            blocked.entered.send(()).ok();
+            blocked.resume.await.ok();
+        }
+
         pop_or_err(&mut self.get_firmware_job_status_responses.lock().await)
     }
     async fn list_switch_firmware(

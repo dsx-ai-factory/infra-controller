@@ -421,6 +421,123 @@ async fn failed_submission_with_job_id_fails_without_resubmitting(
 }
 
 #[sqlx_test]
+async fn submission_timeout_fails_without_resubmitting(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = test_env(&pool).await;
+    let rack_id = RackId::from("rack-submit-timeout");
+    let bmc_mac: MacAddress = "02:00:00:00:00:23".parse()?;
+    let bmc_ip: IpAddr = "192.0.1.23".parse()?;
+    let mut txn = pool.begin().await?;
+
+    seed_expected_rack(txn.as_mut(), &rack_id).await?;
+    seed_compute(txn.as_mut(), &rack_id, bmc_mac, bmc_ip).await?;
+    txn.commit().await?;
+
+    seed_bmc_credentials(env.api().credential_manager().as_ref(), bmc_mac).await;
+
+    let rms = Arc::new(MockRmsApi::new());
+    let (mut arrived, release) = rms.block_next_apply_firmware_object().await;
+    let preingestion_manager = manager(&pool, &env, rms.clone(), rack_profiles(None));
+
+    tokio::time::timeout(
+        Duration::from_secs(90),
+        preingestion_manager.run_single_iteration(),
+    )
+    .await??;
+
+    assert_eq!(arrived.try_recv(), Ok(()));
+
+    assert!(
+        release.is_closed(),
+        "the timed-out submission must be cancelled"
+    );
+
+    let state = endpoint(&pool, bmc_ip).await.preingestion_state;
+
+    let PreingestionState::Failed { reason } = state else {
+        panic!("expected failed preingestion state, got {state:?}");
+    };
+
+    assert!(reason.contains("outcome is unknown"));
+    assert!(reason.contains("60-second deadline"));
+
+    preingestion_manager.run_single_iteration().await?;
+
+    assert_eq!(rms.apply_firmware_object_calls().await.len(), 1);
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn polling_timeout_preserves_job_and_retries(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = test_env(&pool).await;
+    let rack_id = RackId::from("rack-poll-timeout");
+    let bmc_mac: MacAddress = "02:00:00:00:00:24".parse()?;
+    let bmc_ip: IpAddr = "192.0.1.24".parse()?;
+    let mut txn = pool.begin().await?;
+
+    seed_expected_rack(txn.as_mut(), &rack_id).await?;
+    seed_compute(txn.as_mut(), &rack_id, bmc_mac, bmc_ip).await?;
+    txn.commit().await?;
+
+    seed_bmc_credentials(env.api().credential_manager().as_ref(), bmc_mac).await;
+
+    let rms = Arc::new(MockRmsApi::new());
+
+    rms.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_ok(
+        &bmc_mac.to_string(),
+        "poll-timeout-job",
+    )))
+    .await;
+
+    let preingestion_manager = manager(&pool, &env, rms.clone(), rack_profiles(None));
+    preingestion_manager.run_single_iteration().await?;
+
+    rms.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
+        rms::FirmwareJobState::Completed,
+    )))
+    .await;
+
+    let (mut arrived, release) = rms.block_next_get_firmware_job_status().await;
+
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        preingestion_manager.run_single_iteration(),
+    )
+    .await??;
+
+    assert_eq!(arrived.try_recv(), Ok(()));
+
+    assert!(release.is_closed(), "the timed-out poll must be cancelled");
+
+    assert_eq!(
+        endpoint(&pool, bmc_ip).await.preingestion_state,
+        PreingestionState::RackFirmwareUpdateWait {
+            backend_job_id: Some("poll-timeout-job".to_string()),
+        },
+    );
+
+    preingestion_manager.run_single_iteration().await?;
+
+    assert_eq!(
+        endpoint(&pool, bmc_ip).await.preingestion_state,
+        PreingestionState::Complete
+    );
+
+    assert_eq!(rms.apply_firmware_object_calls().await.len(), 1);
+
+    let calls = rms.get_firmware_job_status_calls().await;
+
+    assert_eq!(calls.len(), 2);
+    assert!(calls.iter().all(|call| call.job_id == "poll-timeout-job"));
+
+    Ok(())
+}
+
+#[sqlx_test]
 async fn failed_firmware_job_fails_preingestion(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
