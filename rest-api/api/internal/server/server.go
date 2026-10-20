@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -245,6 +246,28 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 		log.Panic().Msg("token origin config not initialized, cannot initialize auth middleware")
 	}
 
+	// Gated on the same condition that exposes the issuer routes below, so a replica
+	// never maintains a registry nothing can write to, nor serves writes it never
+	// loads. In Keycloak mode the ConfigMap is the sole auth source and the issuer
+	// table is never consulted.
+	if cfg.DynamicIssuersEnabled() {
+		issuerCtx := cfg.NewIssuerLoopContext(context.Background())
+		cfg.InstallIssuerResolver(dbSession)
+		// ConfigMap issuers are rows in the issuer table, written here at startup.
+		// The sync is a hard requirement like a migration: a conflict between the
+		// ConfigMap and an API-managed issuer, or an unreachable database, must not
+		// leave a replica serving a trust plane it has not reconciled.
+		if err := cfg.SyncConfigMapIssuers(issuerCtx, dbSession); err != nil {
+			log.Fatal().Err(err).Msg("failed to sync ConfigMap issuers into the issuer table; fix the ConfigMap or the conflicting Auth Issuer and restart")
+		}
+		if err := cfg.ReloadDBIssuers(issuerCtx, dbSession); err != nil {
+			log.Fatal().Err(err).Msg("failed to load issuers into the auth registry")
+		}
+
+		cfg.StartIssuerReloadLoop(issuerCtx, dbSession, cfg.GetAuthIssuerReloadInterval())
+		cfg.StartJWKSRefreshLoop(issuerCtx, dbSession, config.DefaultJWKSPendingRetryInterval, cfg.GetAuthJWKSRefreshInterval())
+	}
+
 	keycloakConfig, _ := cfg.GetOrInitKeycloakConfig()
 	payloadEncryptionConfig := cconfig.NewPayloadEncryptionConfig(cfg.GetTemporalEncryptionKey())
 
@@ -256,6 +279,21 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 	for _, apiRoute := range apiRoutes {
 		routeGroup.Add(apiRoute.Method, apiRoute.Path, apiRoute.Handler.Handle)
 	}
+
+	// Same gate as the DB-backed issuer machinery above.
+	if cfg.DynamicIssuersEnabled() {
+		log.Info().Msg("Registering Auth Issuer management routes")
+		for _, r := range api.NewAuthIssuerRoutes(dbSession, cfg) {
+			routeGroup.Add(r.Method, r.Path, r.Handler.Handle)
+		}
+	} else {
+		log.Warn().
+			Bool("disconnected", cfg.GetEnvDisconnected()).
+			Bool("keycloak", cfg.GetKeycloakEnabled()).
+			Bool("privilegedOrigins", cfg.HasPrivilegedStaticIssuerOrigins()).
+			Msg("Auth Issuer management routes not registered (connected, keycloak, or privileged static issuer active)")
+	}
+
 	if keycloakConfig != nil {
 		log.Info().Msg("Registering Keycloak auth routes")
 		authGroup := e.Group("/auth")

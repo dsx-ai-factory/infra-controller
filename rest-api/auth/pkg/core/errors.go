@@ -24,6 +24,14 @@ var (
 	ErrNoValidKeys = errors.New("JWKS contains no valid keys")
 	// ErrJWKSUpdateInProgress is returned when a JWKS update is already in progress
 	ErrJWKSUpdateInProgress = errors.New("JWKS update already in progress")
+	// ErrJWKSTooLarge is returned when a JWKS response exceeds MaxJWKSResponseBytes
+	ErrJWKSTooLarge = errors.New("JWKS response exceeds the maximum allowed size")
+	// ErrInternalAddress is returned when a restricted JWKS fetch would connect to a
+	// loopback, private, link-local, carrier-grade NAT, or unspecified address
+	ErrInternalAddress = errors.New("JWKS endpoint resolves to an internal network address")
+	// ErrJWKSExpired is returned when the loaded key set has not been confirmed by a
+	// successful fetch recently enough to keep trusting it
+	ErrJWKSExpired = errors.New("JWKS key set is older than the maximum accepted age")
 
 	// --- Token Validation Errors ---
 
@@ -38,6 +46,9 @@ var (
 	ErrInvalidConfiguration = errors.New("no claim mapping configured for requested organization")
 	// ErrNoClaimRoles is returned when no roles found in token claims (401)
 	ErrNoClaimRoles = errors.New("no roles found in token claims for organization")
+	// ErrAmbiguousMapping is returned when more than one claim mapping for the
+	// requested organization accepts the token (403)
+	ErrAmbiguousMapping = errors.New("more than one claim mapping authorizes the token for the requested organization")
 	// ErrReservedOrgName is returned when token claims a reserved organization name (403)
 	ErrReservedOrgName = errors.New("token claims a reserved organization name")
 	// ErrInvalidRole is returned when role is not in allowed roles set

@@ -83,7 +83,6 @@ func main() {
 
 func run(ctx context.Context) (retErr error) {
 	cfg := config.NewConfig()
-	defer cfg.Close()
 
 	// Initialize tracing before DB, Temporal, and Echo so their
 	// instrumentation picks up the global tracer provider
@@ -109,6 +108,9 @@ func run(ctx context.Context) (retErr error) {
 		return fmt.Errorf("failed to initialize DB session: %w", err)
 	}
 	defer dbSession.Close()
+	// Deferred after the session so it runs first: the issuer loops Close stops
+	// use this pool.
+	defer cfg.Close()
 
 	// Initialize Temporal client and namespace client
 	// Client objects are expensive so they are only initialized once
