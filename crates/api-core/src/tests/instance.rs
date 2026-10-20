@@ -5869,6 +5869,7 @@ async fn test_combined_service_and_network_update_preserves_deletion_lock_order(
     let service = env
         .api
         .create_dpu_extension_service(Request::new(rpc::forge::CreateDpuExtensionServiceRequest {
+            deployment_type: 0,
             dpu_target: None,
             service_vpc_interfaces: vec![],
             service_id: None,
@@ -9346,6 +9347,7 @@ async fn create_networked_dpf_service(
             data: TEST_DPF_HELM_SERVICE_DATA.to_string(),
             credential: None,
             observability: None,
+            deployment_type: 0,
         }))
         .await?
         .into_inner())
@@ -9473,6 +9475,7 @@ async fn test_allocate_instance_with_extension_services(
                 data: create_dpu_extension_service_data("test-service"),
                 credential: None,
                 observability: None,
+                deployment_type: 0,
             },
         ))
         .await?
@@ -9587,6 +9590,7 @@ async fn test_allocate_instance_rejects_networked_service_without_vpc_selection(
             data: TEST_DPF_HELM_SERVICE_DATA.to_string(),
             credential: None,
             observability: None,
+            deployment_type: 0,
         }))
         .await?
         .into_inner();
@@ -9697,6 +9701,7 @@ async fn test_update_instance_rejects_new_networked_attachment_before_reconcilia
             data: TEST_DPF_HELM_SERVICE_DATA.to_string(),
             credential: None,
             observability: None,
+            deployment_type: 0,
         }))
         .await?
         .into_inner();
@@ -10189,6 +10194,7 @@ async fn create_dpu_extension_services(
                 data: create_dpu_extension_service_data("test-service1-v1"),
                 credential: None,
                 observability: None,
+                deployment_type: 0,
             },
         ))
         .await?
@@ -10226,6 +10232,7 @@ async fn create_dpu_extension_services(
                 data: create_dpu_extension_service_data("test-service2-v1"),
                 credential: None,
                 observability: None,
+                deployment_type: 0,
             },
         ))
         .await?
@@ -10245,6 +10252,7 @@ async fn create_dpu_extension_services(
                 data: create_dpu_extension_service_data("test-service3-v1"),
                 credential: None,
                 observability: None,
+                deployment_type: 0,
             },
         ))
         .await?

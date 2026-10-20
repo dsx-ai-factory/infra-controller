@@ -8914,6 +8914,33 @@ mod tests {
         assert_eq!(observed.interfaces, service.interfaces);
     }
 
+    /// Verifies the serialized DPUService omits nodeSelector when no selector is
+    /// supplied, so DPF can deploy the baseline service to all DPU nodes.
+    #[test]
+    fn detached_dpu_service_omits_absent_node_selector_from_checked_cr_type() {
+        // Build a detached service with DaemonSet settings but no placement selector.
+        let mut service = test_dpu_service("baseline-extension-service");
+        service.service_daemon_set = Some(crate::types::DetachedServiceDaemonSet {
+            node_selector_labels: None,
+            labels: Some(BTreeMap::from([("app".to_owned(), "baseline".to_owned())])),
+            ..Default::default()
+        });
+
+        // Check the serialized DPUService omits both selectors so neither
+        // node selection nor cluster selection restricts deployment.
+        let resource = serde_json::to_value(dpu_service_to_resource(&service)).unwrap();
+        assert!(
+            resource
+                .pointer("/spec/serviceDaemonSet/nodeSelector")
+                .is_none()
+        );
+        assert!(resource.pointer("/spec/dpuClusterSelector").is_none());
+        assert_eq!(
+            resource.pointer("/spec/serviceDaemonSet/labels/app"),
+            Some(&json!("baseline"))
+        );
+    }
+
     /// Verifies detached DPUService create, observe, patch, and conditional delete preserve
     /// namespace, returned observations, and delete preconditions across `DpfSdk` and
     /// `DpuServiceRepository`.
