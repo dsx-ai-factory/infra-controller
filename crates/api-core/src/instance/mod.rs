@@ -61,6 +61,7 @@ use model::instance::config::network::{
     NetworkDetails,
 };
 use model::instance::config::spx::{InstanceSpxConfig, SpxAttachmentType};
+use model::instance::nic_firmware::NicFirmwareAllocationTarget;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
     HostHealthConfig, LoadSnapshotOptions, ManagedHostStateSnapshot, NotAllocatableReason,
@@ -1770,12 +1771,12 @@ pub(crate) async fn allocate_instance(
         .ok_or_else(|| CarbideError::internal("instance allocation returned no result".to_string()))
 }
 
-/// Rejects new SPX attachment intent when a tenant NIC firmware profile is selected.
+/// Rejects SPX allocation and legacy attachment edits when a tenant profile is selected.
 /// Remove this guard when tenant firmware preparation is implemented by
 /// https://github.com/dsx-ai-factory/infra-controller/issues/6686.
 ///
-/// The selection visible to this read decides applicability. Missing tenants and
-/// unset selections do not require preparation; later selections affect later requests.
+/// Missing tenant rows and unset profiles are allowed. Snapshot-backed edits
+/// use their frozen requirement and bindings instead of this live lookup.
 pub(crate) async fn validate_tenant_nic_firmware_preparation(
     txn: &mut PgConnection,
     tenant_organization_id: &TenantOrganizationId,
@@ -1977,7 +1978,8 @@ fn not_allocatable_error(
 /// 4. Validate shared resources: NSG, extension services, OS images, IB partitions, DPA
 /// 5. Network allocation + config validation (sequential)
 /// 6. Batch persist instances, process configs (IPs, IB GUIDs), batch update
-/// 7. Load final instances, assemble snapshots, commit
+/// 7. Capture batch firmware inputs, reject unsupported preparation, persist snapshots
+/// 8. Load final instances, assemble snapshots, commit
 pub(crate) async fn batch_allocate_instances(
     api: &Api,
     mut requests: Vec<InstanceAllocationRequest>,
@@ -2021,6 +2023,8 @@ pub(crate) async fn batch_allocate_instances(
         db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
     }
 
+    // Preserve unsupported-preparation error precedence before allocation work.
+    // The final capture rechecks tenant input after every attachment is bound.
     let spx_tenants: Vec<_> = requests
         .iter()
         .filter(|request| !request.config.spxconfig.spx_attachments.is_empty())
@@ -2624,6 +2628,7 @@ pub(crate) async fn batch_allocate_instances(
         ConfigVersion,
         model::instance::config::spx::InstanceSpxConfig,
     )> = Vec::with_capacity(request_count);
+    let mut firmware_targets = HashMap::with_capacity(request_count);
 
     for (request, mh_snapshot) in &processed_requests {
         let instance_id = request.instance_id;
@@ -2670,8 +2675,10 @@ pub(crate) async fn batch_allocate_instances(
             request.config.nvlink.clone(),
         ));
 
-        let updated_spx_config = allocate_spx_port_mac(&request.config.spxconfig, mh_snapshot)?;
+        let (updated_spx_config, targets) =
+            allocate_spx_port_mac(&request.config.spxconfig, mh_snapshot)?;
         spx_config_updates.push((instance_id, spx_config_version, updated_spx_config));
+        firmware_targets.insert(instance_id, targets);
     }
 
     // ==== Phase 8: Batch update configs ====
@@ -2713,6 +2720,35 @@ pub(crate) async fn batch_allocate_instances(
         .map(|(id, ver, cfg)| (*id, *ver, cfg))
         .collect();
     db::instance::batch_update_spx_config(&mut txn, &spx_refs, false).await?;
+
+    // Finish Phase 8 by freezing firmware inputs after every attachment is bound.
+    // Retain Machine locks through commit as required by
+    // db::instance::nic_firmware::capture.
+    let instance_ids: Vec<_> = processed_requests
+        .iter()
+        .map(|(request, _)| request.instance_id)
+        .collect();
+    let firmware_snapshots =
+        db::instance::nic_firmware::capture(txn.as_mut(), &instance_ids).await?;
+    for (instance_id, mut snapshot) in firmware_snapshots {
+        snapshot.targets = firmware_targets.remove(&instance_id).ok_or_else(|| {
+            CarbideError::internal(format!(
+                "NIC firmware bindings for instance {instance_id} were not found"
+            ))
+        })?;
+        if !snapshot.targets.is_empty()
+            && snapshot
+                .tenant
+                .as_ref()
+                .is_some_and(|tenant| tenant.profile_id.is_some())
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "tenant {} requires NIC firmware preparation for SPX attachments, which is not supported",
+                snapshot.tenant_organization_id
+            )));
+        }
+        db::instance::nic_firmware::persist(txn.as_mut(), instance_id, &snapshot).await?;
+    }
 
     // ==== Phase 9: Load final instances ====
     let machine_id_refs: Vec<&HostMachineId> = processed_requests
@@ -2912,12 +2948,13 @@ pub(crate) fn sort_spx_by_slot(
     spx_hw_map
 }
 
-/// Allocate SPX port MAC addresses
+/// Binds SPX attachments to DPA rows and returns the selected rows' firmware evidence.
 pub(crate) fn allocate_spx_port_mac(
     spx_config: &InstanceSpxConfig,
     mh_snapshot: &ManagedHostStateSnapshot,
-) -> CarbideResult<InstanceSpxConfig> {
+) -> CarbideResult<(InstanceSpxConfig, Vec<NicFirmwareAllocationTarget>)> {
     let mut updated_spx_config = spx_config.clone();
+    let mut targets = Vec::with_capacity(spx_config.spx_attachments.len());
 
     tracing::debug!(
         dpa_interface_snapshot_count = mh_snapshot.dpa_interface_snapshots.len(),
@@ -2960,6 +2997,10 @@ pub(crate) fn allocate_spx_port_mac(
         if let Some(sorted_spxs) = spx_hw_map.get_mut(&spx_attachment.device) {
             if let Some(spx_interface) = sorted_spxs.get(spx_attachment.device_instance as usize) {
                 spx_attachment.mac_address = Some(spx_interface.mac_address.to_string());
+                targets.push(NicFirmwareAllocationTarget::from_binding(
+                    spx_attachment.clone(),
+                    spx_interface,
+                ));
                 sorted_spxs.remove(spx_attachment.device_instance as usize);
             } else {
                 tracing::error!(
@@ -2985,16 +3026,184 @@ pub(crate) fn allocate_spx_port_mac(
         }
     }
 
-    Ok(updated_spx_config)
+    Ok((updated_spx_config, targets))
 }
 
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, Check, check_cases, check_values, value_scenarios};
+    use carbide_uuid::dpa_interface::DpaInterfaceId;
+    use config_version::Versioned;
+    use model::dpa_interface::{
+        DpaInterfaceControllerState, DpaInterfaceNetworkConfig, DpaInterfaceType,
+    };
     use model::instance::config::infiniband::InstanceIbInterfaceConfig;
+    use model::instance::config::spx::InstanceSpxAttachment;
+    use model::test_support::machine_snapshot::managed_host_state_snapshot;
 
     use super::*;
+
+    /// Builds physical attachment intent without a MAC; the mapper owns binding.
+    fn spx_attachment(device: &str, device_instance: u32) -> InstanceSpxAttachment {
+        InstanceSpxAttachment {
+            device: device.to_string(),
+            device_instance,
+            mac_address: None,
+            spx_partition_id: SpxPartitionId::new(),
+            attachment_type: SpxAttachmentType::Physical,
+            attachment_vf: None,
+            attachment_ovs: None,
+        }
+    }
+
+    /// Builds distinct DPA rows grouped by device label and ordered by PCI locator.
+    fn spx_interface(
+        machine_id: HostMachineId,
+        device: &str,
+        pci_name: &str,
+        mac_address: &str,
+    ) -> DpaInterface {
+        let now = chrono::Utc::now();
+        DpaInterface {
+            id: DpaInterfaceId::new(),
+            machine_id,
+            mac_address: mac_address.parse().unwrap(),
+            pci_name: pci_name.to_string(),
+            underlay_ip: None,
+            overlay_ip: None,
+            created: now,
+            updated: now,
+            deleted: None,
+            controller_state: Versioned::new(
+                DpaInterfaceControllerState::Ready,
+                ConfigVersion::initial(),
+            ),
+            last_hb_time: now,
+            controller_state_outcome: None,
+            network_config: Versioned::new(
+                DpaInterfaceNetworkConfig::default(),
+                ConfigVersion::initial(),
+            ),
+            card_state: None,
+            device_info: None,
+            device_info_ts: None,
+            mlxconfig_profile: None,
+            history: Vec::new(),
+            device_description: Some(device.to_string()),
+            interface_type: DpaInterfaceType::Svpc,
+        }
+    }
+
+    /// An error after a successful binding must reject the entire mapper result,
+    /// not expose the evidence accumulated before the failing attachment.
+    #[test]
+    fn spx_binding_rejects_errors_after_a_valid_attachment() {
+        let mut snapshot = managed_host_state_snapshot();
+        let machine_id = snapshot.host_snapshot.id;
+        snapshot.dpa_interface_snapshots = vec![
+            spx_interface(
+                machine_id,
+                "NVIDIA ConnectX-7",
+                "0000:cc:00.0",
+                "02:11:22:33:44:55",
+            ),
+            spx_interface(
+                machine_id,
+                "NVIDIA ConnectX-8",
+                "0000:dd:00.0",
+                "02:11:22:33:44:66",
+            ),
+        ];
+
+        check_cases(
+            [
+                // An absent hardware group must not be skipped after earlier success.
+                Case {
+                    scenario: "unknown device after a successful binding",
+                    input: ("unknown-device", 0),
+                    expect: FailsWith(format!(
+                        "no SPX device with name unknown-device in machine {machine_id}"
+                    )),
+                },
+                // A known group with no requested index must not yield partial bindings.
+                Case {
+                    scenario: "missing index after a successful binding",
+                    input: ("NVIDIA ConnectX-8", 1),
+                    expect: FailsWith("SPX device NVIDIA ConnectX-8 has no instance 1".to_string()),
+                },
+            ],
+            |(device, device_instance)| {
+                let config = InstanceSpxConfig {
+                    spx_attachments: vec![
+                        spx_attachment("NVIDIA ConnectX-7", 0),
+                        spx_attachment(device, device_instance),
+                    ],
+                };
+                allocate_spx_port_mac(&config, &snapshot)
+                    .map(|_| ())
+                    .map_err(|error| match error {
+                        CarbideError::InvalidArgument(message) => message,
+                        error => panic!("unexpected mapper error: {error}"),
+                    })
+            },
+        );
+    }
+
+    /// Sorting and consuming rows must preserve each returned attachment's pairing
+    /// with its exact selected row, including when hardware input order differs.
+    #[test]
+    fn spx_binding_targets_follow_mapper_order_and_selected_rows() {
+        let mut snapshot = managed_host_state_snapshot();
+        let machine_id = snapshot.host_snapshot.id;
+        snapshot.dpa_interface_snapshots = vec![
+            spx_interface(
+                machine_id,
+                "NVIDIA ConnectX-7",
+                "0000:dd:00.0",
+                "02:11:22:33:44:66",
+            ),
+            spx_interface(
+                machine_id,
+                "NVIDIA ConnectX-7",
+                "0000:cc:00.0",
+                "02:11:22:33:44:55",
+            ),
+        ];
+        let config = InstanceSpxConfig {
+            spx_attachments: vec![
+                spx_attachment("NVIDIA ConnectX-7", 0),
+                spx_attachment("NVIDIA ConnectX-7", 1),
+            ],
+        };
+
+        let (bound, targets) = allocate_spx_port_mac(&config, &snapshot).unwrap();
+        let expected = InstanceSpxConfig {
+            spx_attachments: vec![
+                InstanceSpxAttachment {
+                    mac_address: Some("02:11:22:33:44:66".to_string()),
+                    ..config.spx_attachments[1].clone()
+                },
+                InstanceSpxAttachment {
+                    mac_address: Some("02:11:22:33:44:55".to_string()),
+                    ..config.spx_attachments[0].clone()
+                },
+            ],
+        };
+        assert_eq!(bound, expected);
+        assert_eq!(targets.len(), bound.spx_attachments.len());
+        for ((target, attachment), interface) in targets
+            .iter()
+            .zip(&bound.spx_attachments)
+            .zip(&snapshot.dpa_interface_snapshots)
+        {
+            assert_eq!(&target.attachment, attachment);
+            assert_eq!(target.dpa_interface_id, interface.id);
+            assert_eq!(target.machine_id, interface.machine_id);
+            assert_eq!(target.mac_address, interface.mac_address);
+            assert_eq!(target.pci_name, interface.pci_name);
+        }
+    }
 
     /// Verifies request conversion rejects service-VPC activation before database
     /// work, so allocation cannot persist attachment identity without the required

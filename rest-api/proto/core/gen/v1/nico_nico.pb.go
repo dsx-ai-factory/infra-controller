@@ -21690,6 +21690,9 @@ type InstanceConfigUpdateRequest struct {
 	// documented on that field), the server does not merge omitted fields.
 	// Read-modify-write clients must preserve fields and oneof variants they do
 	// not intend to change.
+	// Allocation-time NIC firmware requirements are stored separately and are not
+	// replaced here. SPX edits must preserve captured target bindings; see
+	// SetTenantNicFirmwareConfigRequest for attachment restrictions.
 	Config *InstanceConfig `protobuf:"bytes,3,opt,name=config,proto3" json:"config,omitempty"`
 	// New Metadata to be utilized by the instance
 	Metadata      *Metadata `protobuf:"bytes,4,opt,name=metadata,proto3" json:"metadata,omitempty"`
@@ -71246,10 +71249,16 @@ func (x *GetTenantNicFirmwareConfigResponse) GetFirmwareConfig() *TenantNicFirmw
 // intent without updating hardware or changing existing allocations. Until NIC
 // firmware preparation is implemented (https://github.com/dsx-ai-factory/infra-controller/issues/6686),
 // Core rejects allocations with nonempty SPX attachments for a tenant with a
-// selected profile, and rejects attachment additions or changes that leave a
-// nonempty SPX list on its existing allocations. Unchanged or cleared attachments
-// remain allowed. Each attempt uses the selection visible to the guard's database
-// read; an attempt already past that read may finish after a selection is committed.
+// selected profile. Allocation captures the tenant selection, profile contents
+// and selected attachment bindings together before commit. Later selection or
+// profile edits affect future allocations, not those captured requirements.
+// An allocation that captured a profile cannot add attachments, even after the
+// live selection is cleared. Without a captured profile, additions retain their
+// existing firmware baseline. Edits must preserve allocation-time attachment
+// bindings; a changed DPA row, host, MAC or PCI address returns FAILED_PRECONDITION.
+// Removing attachments retains the captured bindings until release. Partition
+// edits are allowed when bindings still match. Instances without a captured
+// snapshot use the live selection check for changed, nonempty attachment lists.
 // Complete the Core upgrade before using tenant selections, and do not roll back
 // to allocators that ignore them. Ordinary tenant updates preserve the selection.
 type SetTenantNicFirmwareConfigRequest struct {

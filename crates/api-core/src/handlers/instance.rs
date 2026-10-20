@@ -1679,7 +1679,10 @@ pub(crate) async fn update_instance_config(
             id: instance_id.to_string(),
         })?;
 
-    if !config.spxconfig.spx_attachments.is_empty()
+    // Legacy instances have no frozen input, so retain their live-selection
+    // guard and error precedence. Captured inputs are checked after binding.
+    if instance.nic_firmware_snapshot.is_none()
+        && !config.spxconfig.spx_attachments.is_empty()
         && instance
             .config
             .spxconfig
@@ -2512,7 +2515,12 @@ async fn update_instance_spx_config(
     validate_spx_partition_ownership(txn, &instance.config.tenant.tenant_organization_id, spxcfg)
         .await?;
 
-    let spx_config_with_ports = allocate_spx_port_mac(spxcfg, &mh_snapshot)?;
+    let (spx_config_with_ports, targets) = allocate_spx_port_mac(spxcfg, &mh_snapshot)?;
+    if let Some(snapshot) = &instance.nic_firmware_snapshot {
+        snapshot
+            .validate_bindings(&targets)
+            .map_err(|error| CarbideError::FailedPrecondition(error.to_string()))?;
+    }
     *spxcfg = spx_config_with_ports;
 
     // Update config in db.

@@ -1362,6 +1362,23 @@ mod rbac_rule_tests {
         );
     }
 
+    /// SiteAgent can allocate and configure instances without firmware-setting
+    /// privileges; Core obtains those settings from stored operator selections.
+    #[test]
+    fn site_agent_can_allocate_without_firmware_privileges() {
+        let site_agent = Principal::SpiffeServiceIdentifier("elektra-site-agent".into());
+        for method in [
+            "AllocateInstance",
+            "AllocateInstances",
+            "UpdateInstanceConfig",
+        ] {
+            assert!(
+                InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&site_agent),),
+                "{method} remains available to SiteAgent"
+            );
+        }
+    }
+
     /// Firmware configuration stays operator-only, including tenant selections
     /// that ordinary tenant callers must neither read nor change.
     #[test]
