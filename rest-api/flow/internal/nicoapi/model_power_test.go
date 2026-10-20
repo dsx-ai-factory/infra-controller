@@ -19,7 +19,7 @@ func TestMachinePowerStateFromPb(t *testing.T) {
 	}{
 		{"on", corev1.PowerState_On, PowerStateOn},
 		{"off", corev1.PowerState_Off, PowerStateOff},
-		{"disabled observation", corev1.PowerState_PowerManagerDisabled, PowerStateDisabled},
+		{"disabled observation is unknown", corev1.PowerState_PowerManagerDisabled, PowerStateUnknown},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := machinePowerStateFromPb(&corev1.PowerOptions{

@@ -148,8 +148,8 @@ func TestSyncPowerStates(t *testing.T) {
 		name  string
 		state nicoapi.PowerState
 	}{
-		{"disabled observation replaces stored on", nicoapi.PowerStateDisabled},
-		{"fresh observation replaces disabled", nicoapi.PowerStateOff},
+		{"disabled observation replaces stored on", nicoapi.PowerStateUnknown},
+		{"fresh observation replaces unknown", nicoapi.PowerStateOff},
 	} {
 		t.Run(step.name, func(t *testing.T) {
 			client.AddPowerState(machineID, step.state)
