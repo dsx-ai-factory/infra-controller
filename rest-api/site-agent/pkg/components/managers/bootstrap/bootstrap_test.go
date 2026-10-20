@@ -21,6 +21,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/fsnotify.v1"
+	coreV1Types "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 
 	Manager "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
@@ -364,45 +367,57 @@ func TestBoostrapAPI_DownloadAndStoreCreds(t *testing.T) {
 		rotatedOTP = "Zr2pW9xT4mLq8vB1nC6yD0eF3gH="
 		newerOTP   = "Kt7uY2iO5pA9sD4fG8hJ1kL6zXc="
 	)
+	const temporalSecretName = "temporal-cert"
+	// Kubernetes mode, where the projected OTP file can lag behind the Secret, so
+	// only the Secret read from the API server shows what was stored.
 	tests := []struct {
 		name         string
-		overrideOTP  string
+		publishedOTP string
+		storedOTP    string
 		wantErr      string
 		wantAttempts uint64
+		wantOTP      string
 	}{
 		{
-			name:        "already applied override skips stale mounted OTP",
-			overrideOTP: rotatedOTP,
+			name:         "credentials stored for the override skip the download",
+			publishedOTP: testOTP,
+			storedOTP:    rotatedOTP,
+			wantOTP:      rotatedOTP,
 		},
 		{
-			name:         "new override still attempts credential download",
-			overrideOTP:  newerOTP,
+			// Init publishes the bootstrap Secret's OTP before any download, as
+			// after a restart between Site Manager consuming the OTP and the store.
+			name:         "published override OTP without stored credentials still downloads",
+			publishedOTP: rotatedOTP,
+			storedOTP:    testOTP,
 			wantErr:      "missing protocol scheme",
 			wantAttempts: 1,
+			wantOTP:      rotatedOTP,
 		},
 	}
 	previousAccess := ManagerAccess
 	t.Cleanup(func() { ManagerAccess = previousAccess })
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			temporalDir := t.TempDir()
-			otpPath := filepath.Join(temporalDir, bootstraptypes.TagOTP)
-			require.NoError(t, os.WriteFile(otpPath, []byte(testOTP), 0600))
+			secrets := fake.NewClientset().CoreV1().Secrets("default")
+			_, err := secrets.Create(context.Background(), &coreV1Types.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: temporalSecretName},
+				Data:       map[string][]byte{"otp": []byte(tt.storedOTP)},
+			}, metav1.CreateOptions{})
+			require.NoError(t, err)
 
 			bootstrap := bootstraptypes.NewBootstrapInstance()
-			activeConfig := bootstraptypes.SecretConfig{
+			bootstrap.Secret = secrets
+			bootstrap.ReplaceConfig(bootstraptypes.SecretConfig{
 				UUID:     siteID,
-				OTP:      rotatedOTP,
+				OTP:      tt.publishedOTP,
 				CredsURL: "://invalid",
 				CACert:   "active-ca",
-			}
-			bootstrap.ReplaceConfig(activeConfig)
+			})
 			ManagerAccess = &Manager.ManagerAccess{
 				Conf: &Manager.ManagerConf{EB: &conftypes.Config{
-					RunningIn: conftypes.RunningInDocker,
-					Temporal: conftypes.TemporalConfig{
-						TemporalCertPath: temporalDir,
-					},
+					RunningIn:      conftypes.RunningInK8s,
+					TemporalSecret: temporalSecretName,
 				}},
 				Data: &Manager.ManagerData{
 					EB: &elektratypes.Elektra{
@@ -413,19 +428,16 @@ func TestBoostrapAPI_DownloadAndStoreCreds(t *testing.T) {
 				},
 			}
 
-			err := (&BoostrapAPI{}).DownloadAndStoreCreds(context.Background(), []byte(tt.overrideOTP))
+			err = (&BoostrapAPI{}).DownloadAndStoreCreds(context.Background(), []byte(rotatedOTP))
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 			} else {
 				require.NoError(t, err)
 			}
 
-			assert.Equal(t, activeConfig, bootstrap.GetConfig())
+			assert.Equal(t, tt.wantOTP, bootstrap.GetConfig().OTP)
 			assert.Equal(t, tt.wantAttempts, bootstrap.State.DownloadAttempted.Load())
 			assert.Zero(t, bootstrap.State.DownloadSucceeded.Load())
-			storedOTP, readErr := os.ReadFile(otpPath)
-			require.NoError(t, readErr)
-			assert.Equal(t, testOTP, string(storedOTP))
 		})
 	}
 

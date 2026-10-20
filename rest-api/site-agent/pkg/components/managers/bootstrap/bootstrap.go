@@ -257,7 +257,7 @@ func (bs *BoostrapAPI) reloadBootstrapCredentials(dir string) error {
 			return currentConfig, fmt.Errorf("bootstrap Secret Site ID changed from %s to %s", currentSiteID, candidate.UUID)
 		}
 
-		err = bs.downloadAndStoreCreds(ctx, candidate, true)
+		err = bs.downloadAndStoreCreds(ctx, candidate)
 		if err != nil {
 			return currentConfig, err
 		}
@@ -371,18 +371,11 @@ func (bs *BoostrapAPI) DownloadAndStoreCreds(ctx context.Context, otpOverride []
 	bootstrap := ManagerAccess.Data.EB.Managers.Bootstrap
 	return bootstrap.RunCredentialUpdate(ctx, func(candidate bootstraptypes.SecretConfig) (bootstraptypes.SecretConfig, error) {
 		if otpOverride != nil {
-			overrideOTP := string(otpOverride)
-			if candidate.OTP == overrideOTP {
-				// Override rotations publish the OTP only after credential storage
-				// succeeds; the projected OTP file may still be stale.
-				log.Info().Msg("Bootstrap: Credentials already applied for OTP override")
-				return candidate, nil
-			}
-			candidate.OTP = overrideOTP
+			candidate.OTP = string(otpOverride)
 			log.Info().Msg("Bootstrap: Using OTP override")
 		}
 
-		err := bs.downloadAndStoreCreds(ctx, candidate, otpOverride == nil)
+		err := bs.downloadAndStoreCreds(ctx, candidate)
 		if err != nil {
 			return candidate, err
 		}
@@ -394,26 +387,48 @@ func (bs *BoostrapAPI) DownloadAndStoreCreds(ctx context.Context, otpOverride []
 	})
 }
 
-func (bs *BoostrapAPI) downloadAndStoreCreds(ctx context.Context, config bootstraptypes.SecretConfig, skipIfStored bool) error {
-	otpFilePath := ManagerAccess.Conf.EB.Temporal.GetTemporalCertOTPFullPath()
-	otpBytes, err := os.ReadFile(otpFilePath)
-	if err != nil {
-		log.Warn().Err(err).Msg("Bootstrap: Failed to read stored OTP file")
-		// If file doesn't exist yet, that's ok on first run
-		if !os.IsNotExist(err) {
-			return err
+// storedCredentialOTP returns the OTP that storeCredentials last stored, or an
+// empty string before the first store. In Kubernetes it reads the Temporal cert
+// Secret from the API server, because the projected OTP file can still hold the
+// previous OTP after an update. The published configuration is not enough
+// either: Init publishes the bootstrap Secret's OTP before any download.
+func storedCredentialOTP(ctx context.Context) (string, error) {
+	if ManagerAccess.Conf.EB.RunningIn != conftypes.RunningInK8s {
+		otpBytes, err := os.ReadFile(ManagerAccess.Conf.EB.Temporal.GetTemporalCertOTPFullPath())
+		if os.IsNotExist(err) {
+			return "", nil
 		}
-		otpBytes = []byte{}
+		if err != nil {
+			return "", err
+		}
+		return string(otpBytes), nil
 	}
 
-	fileOTP := string(otpBytes)
+	secretIf := ManagerAccess.Data.EB.Managers.Bootstrap.Secret
+	if secretIf == nil {
+		return "", fmt.Errorf("bootstrap: secretIf is nil")
+	}
+	secret, err := secretIf.Get(ctx, ManagerAccess.Conf.EB.TemporalSecret, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	return string(secret.Data["otp"]), nil
+}
+
+func (bs *BoostrapAPI) downloadAndStoreCreds(ctx context.Context, config bootstraptypes.SecretConfig) error {
+	storedOTP, err := storedCredentialOTP(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("Bootstrap: Failed to read stored OTP")
+		return err
+	}
+
 	configOTP := config.OTP
-	if skipIfStored && len(fileOTP) > 0 && fileOTP == configOTP {
-		log.Info().Msgf("Bootstrap: Credentials already downloaded for OTP (file matches config)")
+	if len(storedOTP) > 0 && storedOTP == configOTP {
+		log.Info().Msgf("Bootstrap: Credentials already stored for OTP")
 		return nil
 	}
-	log.Info().Msgf("Bootstrap: Credentials need to be downloaded for OTP (file OTP len=%d, config OTP len=%d, match=%v)",
-		len(fileOTP), len(configOTP), fileOTP == configOTP)
+	log.Info().Msgf("Bootstrap: Credentials need to be downloaded for OTP (stored OTP len=%d, config OTP len=%d)",
+		len(storedOTP), len(configOTP))
 
 	bw := ManagerAccess.Data.EB.Managers.Bootstrap.State
 	// Keep track of events

@@ -8,14 +8,17 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/bootstrap"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
+	bootstraptypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/bootstrap"
 	sitemgr "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/sitemgr"
 	log "github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Test_Bootstrap - test the bootstrap registeration
@@ -59,28 +62,24 @@ func Test_Bootstrap(t *testing.T) {
 				log.Info().Msg("Test Bootstrap Read End")
 			case "touch":
 				log.Info().Msg("Test Bootstrap touch Start")
-				time.Sleep(10 * time.Millisecond)
+				// A new OTP in the bootstrap Secret reaches reloadBootstrapCredentials
+				// only through the watcher that Start runs. The download then fails
+				// against the test creds-url, but the attempt is counted first.
 				w := bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.State
-				files := make([]string, len(bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.Secretfiles))
-				i := 0
-				for k := range bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.Secretfiles {
-					files[i] = k
-					i++
-				}
+				otpPath := filepath.Join(bootstrap.ManagerAccess.Conf.EB.BootstrapSecret, bootstraptypes.TagOTP)
+				originalOTP, err := os.ReadFile(otpPath)
+				require.NoError(t, err)
 				attemptCount := w.DownloadAttempted.Load()
-				for range 2 {
-					// Update file
-					currentTime := time.Now().Local()
-					err := os.Chtimes(files[0],
-						currentTime, currentTime)
-					if err != nil {
-						t.Log(err)
-					}
-					time.Sleep(350 * time.Millisecond)
-					assert.Equal(t, attemptCount, w.DownloadAttempted.Load())
-				}
-				t.Log(w.DownloadAttempted.Load())
-				log.Info().Msg("Test Bootstrap touch Start")
+
+				require.NoError(t, os.WriteFile(otpPath, []byte("touch-test-otp"), 0644))
+				assert.Eventually(t, func() bool {
+					return w.DownloadAttempted.Load() > attemptCount
+				}, 5*time.Second, 20*time.Millisecond, "watcher did not reload the bootstrap Secret")
+
+				// The original OTP matches the active configuration, so restoring it
+				// is skipped without another attempt.
+				require.NoError(t, os.WriteFile(otpPath, originalOTP, 0644))
+				log.Info().Msg("Test Bootstrap touch End")
 			case "noop":
 				log.Info().Msg("Test Bootstrap noop Start")
 				bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadAttempted.Store(0)
