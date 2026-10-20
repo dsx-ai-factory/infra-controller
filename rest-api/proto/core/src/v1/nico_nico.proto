@@ -1281,13 +1281,17 @@ service Forge {
   rpc ReWrapSecrets(ReWrapSecretsRequest) returns (ReWrapSecretsResponse);
 
   // External-validation contract only: these methods are not implemented until
-  // durable holds and attempts are delivered. Scope is the connected Core site
+  // durable holds and attempts are delivered. With internal RBAC enabled, the
+  // explicit empty grants deny callers with an AuthContext before dispatch
+  // (PERMISSION_DENIED). Missing AuthContext is also rejected before dispatch;
+  // no gRPC wire status for that branch is promised here. With RBAC bypassed,
+  // the stubs return UNIMPLEMENTED. Scope is the connected Core site
   // and configured tenant_org_id. Existing mTLS and method authorization are
   // required in addition to tenant-scoped checks; request IDs grant no permission.
-  // Discovers active hold IDs in immutable (created_at, hold_id) order using
+  // Discovers hold IDs (active by default) in immutable (created_at, hold_id) order using
   // exclusive keyset pagination; removal of earlier holds cannot shift pages.
   rpc FindExternalValidationHoldIds(ExternalValidationHoldSearchFilter) returns (ExternalValidationHoldIdList);
-  // Fetches current active holds by discovered IDs within the authorized tenant.
+  // Fetches current holds, including Satisfied, by ID within the authorized tenant.
   rpc FindExternalValidationHoldsByIds(ExternalValidationHoldsByIdsRequest) returns (ExternalValidationHoldList);
   // Atomically opens one attempt or replays the attempt identified by the key.
   rpc StartExternalValidation(StartExternalValidationRequest) returns (StartExternalValidationResponse);
@@ -3583,8 +3587,11 @@ message InstanceAllocationRequest {
   // Contract milestone: present values return FAILED_PRECONDITION until binding
   // is implemented, including in batch requests. External validation uses only
   // the single-instance AllocateInstance RPC; request-bound batch allocation is
-  // outside this contract.
-  optional string external_validation_request_id = 14;
+  // outside this contract. REST consumers require externalValidationRequestId
+  // propagation and machine-readable allocation outcomes through the REST/workflow
+  // boundary before this feature can be used through REST. That runtime support
+  // is deferred; see designs/machine-validation/external-validation-api-contract.md.
+  common.ExternalValidationRequestId external_validation_request_id = 14;
 }
 
 // Batch instance allocation request

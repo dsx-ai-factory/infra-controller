@@ -24,6 +24,7 @@ use std::time::{Duration, SystemTime};
 use ::rpc::forge::forge_server::Forge;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::external_validation::ExternalValidationRequestId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{DpuMachineId, StableHostMachineId};
 use carbide_uuid::machine_validation::MachineValidationId;
@@ -133,7 +134,7 @@ async fn test_external_validation_binding_rejected_before_hydration(
         ..Default::default()
     };
     let bound_request = rpc::InstanceAllocationRequest {
-        external_validation_request_id: Some(uuid::Uuid::new_v4().to_string()),
+        external_validation_request_id: Some(ExternalValidationRequestId::new()),
         ..legacy_request.clone()
     };
 
