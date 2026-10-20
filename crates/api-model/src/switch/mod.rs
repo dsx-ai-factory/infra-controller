@@ -35,6 +35,8 @@ use crate::metadata::Metadata;
 
 mod slas;
 pub mod switch_id;
+#[cfg(test)]
+mod test_decode;
 
 #[derive(Debug, Clone)]
 pub struct NewSwitch {
@@ -250,21 +252,17 @@ impl<'r> FromRow<'r, PgRow> for Switch {
             labels: labels.0,
         };
         let bmc_info = row
-            .try_get::<Option<sqlx::types::Json<BmcInfo>>, _>("bmc_info")
-            .ok()
-            .flatten()
+            .try_get::<Option<sqlx::types::Json<BmcInfo>>, _>("bmc_info")?
             .map(|j| j.0);
         Ok(Switch {
             id: row.try_get("id")?,
             config: config.0,
             status: status.map(|s| s.0),
             deleted: row.try_get("deleted")?,
-            bmc_mac_address: row.try_get("bmc_mac_address").ok().flatten(),
+            bmc_mac_address: row.try_get("bmc_mac_address")?,
             bmc_info,
-            bmc_credential_rotation_requested: row
-                .try_get("bmc_credential_rotation_requested")
-                .unwrap_or(false),
-            decommission_requested: row.try_get("decommission_requested").unwrap_or(false),
+            bmc_credential_rotation_requested: row.try_get("bmc_credential_rotation_requested")?,
+            decommission_requested: row.try_get("decommission_requested")?,
             controller_state: Versioned {
                 value: controller_state.0,
                 version: row.try_get("controller_state_version")?,
@@ -275,14 +273,13 @@ impl<'r> FromRow<'r, PgRow> for Switch {
             firmware_upgrade_status: firmware_upgrade_status.map(|j| j.0),
             nvos_update_status: nvos_update_status.map(|j| j.0),
             fabric_manager_status: fabric_manager_status.map(|j| j.0),
-            // A reader may overlap the additive migration during a rolling deployment.
-            nvlink_domain_uuid: row.try_get("nvlink_domain_uuid").ok().flatten(),
+            nvlink_domain_uuid: row.try_get("nvlink_domain_uuid")?,
             metadata,
             version: row.try_get("version")?,
-            is_primary: row.try_get("is_primary").unwrap_or(false),
-            rack_id: row.try_get("rack_id").ok().flatten(),
-            slot_number: row.try_get("slot_number").ok().flatten(),
-            tray_index: row.try_get("tray_index").ok().flatten(),
+            is_primary: row.try_get("is_primary")?,
+            rack_id: row.try_get("rack_id")?,
+            slot_number: row.try_get("slot_number")?,
+            tray_index: row.try_get("tray_index")?,
             health_reports,
         })
     }

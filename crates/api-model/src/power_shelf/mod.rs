@@ -35,6 +35,8 @@ use crate::metadata::Metadata;
 
 pub mod power_shelf_id;
 mod slas;
+#[cfg(test)]
+mod test_decode;
 
 #[derive(Debug, Clone)]
 pub struct NewPowerShelf {
@@ -152,20 +154,16 @@ impl<'r> FromRow<'r, PgRow> for PowerShelf {
             labels: labels.0,
         };
         let bmc_info = row
-            .try_get::<Option<sqlx::types::Json<BmcInfo>>, _>("bmc_info")
-            .ok()
-            .flatten()
+            .try_get::<Option<sqlx::types::Json<BmcInfo>>, _>("bmc_info")?
             .map(|j| j.0);
         Ok(PowerShelf {
             id: row.try_get("id")?,
             config: config.0,
             status: status.map(|s| s.0),
             deleted: row.try_get("deleted")?,
-            bmc_mac_address: row.try_get("bmc_mac_address").ok().flatten(),
-            bmc_credential_rotation_requested: row
-                .try_get("bmc_credential_rotation_requested")
-                .unwrap_or(false),
-            decommission_requested: row.try_get("decommission_requested").unwrap_or(false),
+            bmc_mac_address: row.try_get("bmc_mac_address")?,
+            bmc_credential_rotation_requested: row.try_get("bmc_credential_rotation_requested")?,
+            decommission_requested: row.try_get("decommission_requested")?,
             bmc_info,
             controller_state: Versioned {
                 value: controller_state.0,
@@ -174,8 +172,8 @@ impl<'r> FromRow<'r, PgRow> for PowerShelf {
             controller_state_outcome: controller_state_outcome.map(|o| o.0),
             metadata,
             version: row.try_get("version")?,
-            rack_id: row.try_get("rack_id").ok().flatten(),
-            nvlink_domain_uuid: row.try_get("nvlink_domain_uuid").ok().flatten(),
+            rack_id: row.try_get("rack_id")?,
+            nvlink_domain_uuid: row.try_get("nvlink_domain_uuid")?,
             power_shelf_maintenance_requested: power_shelf_maintenance_requested.map(|r| r.0),
             power_shelf_reprovisioning_requested: power_shelf_reprovisioning_requested.map(|r| r.0),
             firmware_upgrade_status: firmware_upgrade_status.map(|j| j.0),
