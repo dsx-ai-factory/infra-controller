@@ -2866,6 +2866,7 @@ dependencies = [
  "carbide-api-test-helper",
  "carbide-firmware",
  "carbide-instrument",
+ "carbide-preingestion-manager",
  "carbide-rack-controller",
  "carbide-redfish",
  "carbide-secrets",
@@ -6987,8 +6988,8 @@ dependencies = [
 
 [[package]]
 name = "librms"
-version = "0.0.14"
-source = "git+https://github.com/dsx-ai-factory/nv-rms-client.git?tag=v0.10.1#4bbd502d3d9822fb1dcb8d205b7edaecabb497a6"
+version = "0.11.0"
+source = "git+https://github.com/dsx-ai-factory/nv-rms-client.git?tag=v0.11.0#85c77bc3159014d061b48cee77fdc0011970ef64"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7005,7 +7006,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tonic",
- "tonic-client-wrapper 1.0.0",
+ "tonic-client-wrapper 1.1.0",
  "tonic-prost",
  "tonic-prost-build",
  "tower",
@@ -11753,20 +11754,22 @@ dependencies = [
 
 [[package]]
 name = "tonic-client-wrapper"
-version = "1.0.0"
-source = "git+https://github.com/dsx-ai-factory/nv-rms-client.git?tag=v0.10.1#4bbd502d3d9822fb1dcb8d205b7edaecabb497a6"
+version = "1.1.0"
+source = "git+https://github.com/dsx-ai-factory/nv-rms-client.git?tag=v0.11.0#85c77bc3159014d061b48cee77fdc0011970ef64"
 dependencies = [
  "async-trait",
  "heck",
  "lazy_static",
  "prettyplease",
  "proc-macro2",
+ "prost",
  "prost-types",
  "quote",
  "syn 2.0.117",
  "thiserror 2.0.18",
  "tonic",
  "tonic-prost-build",
+ "tracing",
 ]
 
 [[package]]

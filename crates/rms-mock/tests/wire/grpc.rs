@@ -96,6 +96,7 @@ async fn both_services_are_mounted() {
     let response = v2
         .configure_scale_up_fabric_manager(
             librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest {
+                layout: None,
                 nodes: Some(librms::protos::rack_manager::NodeSet {
                     nodes: vec![node_info("switch-7", "02:00:11:11:22:22")],
                 }),
@@ -391,10 +392,9 @@ async fn an_unknown_job_is_completed_or_not_found_as_each_rpc_specifies() {
     );
 }
 
-/// A request naming no switches is `INVALID_ARGUMENT`, and no job is started
-/// for it.
+/// Reject empty node lists and unsupported layouts before allocating a job.
 #[tokio::test]
-async fn a_fabric_request_naming_no_switches_is_an_invalid_argument() {
+async fn invalid_or_unsupported_fabric_requests_do_not_start_jobs() {
     let url = serve_with(vec![a_switch()]).await;
     let mut v2 = RackManagerV2Client::connect(url.clone()).await.unwrap();
     let mut v1 = RackManagerClient::connect(url).await.unwrap();
@@ -402,27 +402,45 @@ async fn a_fabric_request_naming_no_switches_is_an_invalid_argument() {
     let switches = || librms::protos::rack_manager::NodeSet {
         nodes: vec![node_info("switch-7", "02:00:11:11:22:22")],
     };
+
     let request = |nodes| librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest {
+        layout: None,
         nodes,
         primary_switch_node_id: None,
         domain: None,
         config: Some(fabric_config()),
     };
 
-    for (what, bad) in [
-        ("no nodes", request(None)),
+    for (what, bad, expected_code) in [
+        ("no nodes", request(None), tonic::Code::InvalidArgument),
         (
             "empty node set",
             request(Some(librms::protos::rack_manager::NodeSet {
                 nodes: vec![],
             })),
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            "unsupported layout",
+            librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest {
+                layout: Some(librms::protos::rack_manager_v2::ScaleUpFabricLayout {
+                    fabrics: vec![librms::protos::rack_manager_v2::ScaleUpFabricSpec {
+                        compute_tray_count: 1,
+                        switch_tray_count: 1,
+                        primary_switch_node_id: None,
+                    }],
+                }),
+                ..request(Some(switches()))
+            },
+            tonic::Code::Unimplemented,
         ),
     ] {
         let status = v2
             .configure_scale_up_fabric_manager(bad)
             .await
             .expect_err(what);
-        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{what}");
+
+        assert_eq!(status.code(), expected_code, "{what}");
     }
 
     // Nothing was issued: the first accepted request gets the first id of
@@ -459,6 +477,7 @@ async fn fabric_jobs_are_pollable_and_reach_completed() {
     let job_id = v2
         .configure_scale_up_fabric_manager(
             librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest {
+                layout: None,
                 nodes: Some(librms::protos::rack_manager::NodeSet {
                     nodes: vec![node_info("switch-7", "02:00:11:11:22:22")],
                 }),
@@ -549,6 +568,7 @@ async fn a_fabric_request_matching_no_switch_returns_a_job_that_fails() {
         let job_id = v2
             .configure_scale_up_fabric_manager(
                 librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest {
+                    layout: None,
                     nodes: Some(librms::protos::rack_manager::NodeSet { nodes: case.nodes }),
                     primary_switch_node_id: None,
                     domain: None,
@@ -643,6 +663,7 @@ async fn fabric_status_reports_exactly_one_primary_per_configured_rack() {
     // No primary requested: the switch lowest in the rack is elected.
     v2.configure_scale_up_fabric_manager(
         librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest {
+            layout: None,
             nodes: Some(node_set()),
             primary_switch_node_id: None,
             domain: None,
@@ -670,6 +691,7 @@ async fn fabric_status_reports_exactly_one_primary_per_configured_rack() {
     // A requested primary in the rack replaces the elected one.
     v2.configure_scale_up_fabric_manager(
         librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest {
+            layout: None,
             nodes: Some(node_set()),
             primary_switch_node_id: Some("switch-7".to_string()),
             domain: None,
@@ -733,6 +755,7 @@ async fn an_unmatched_switch_is_never_elected_primary() {
     for requested in [None, Some("switch-1".to_string())] {
         v2.configure_scale_up_fabric_manager(
             librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest {
+                layout: None,
                 nodes: Some(node_set()),
                 primary_switch_node_id: requested.clone(),
                 domain: None,
@@ -1070,6 +1093,7 @@ async fn fabric_election_is_independent_per_rack() {
                 let mut v2 = RackManagerV2Client::connect(url).await.unwrap();
                 v2.configure_scale_up_fabric_manager(
                     librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest {
+                        layout: None,
                         nodes: Some(nodes),
                         primary_switch_node_id: primary,
                         domain: None,
@@ -1401,6 +1425,7 @@ async fn a_faulted_fabric_job_runs_and_then_fails_with_a_message() {
     let job_id = v2
         .configure_scale_up_fabric_manager(
             librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest {
+                layout: None,
                 nodes: Some(librms::protos::rack_manager::NodeSet {
                     nodes: vec![node_info("switch-7", "02:00:11:11:22:22")],
                 }),

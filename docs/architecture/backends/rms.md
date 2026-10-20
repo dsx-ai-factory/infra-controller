@@ -83,6 +83,18 @@ NICo's own SPIFFE certificate mount and presents it to RMS, and because the RMS 
 certificate is minted from the same issuer, both directions verify. Supplying explicit
 certificate paths is an override for sites that want different material.
 
+### Switch Factory-Reset Fallback
+
+NICo sets `allow_ssh_fallback` to `true` for NVOS factory-reset requests. RMS uses
+SSH fallback only when an NVUE connection or TLS failure occurs before the reset
+is submitted. Certificate verification failures also trigger SSH fallback.
+Authentication failures, rejected reset requests, and uncertain submission
+outcomes do not.
+
+RMS uses the switch's configured NVOS credentials to log in over SSH. The username
+must be `admin`. RMS does not verify the switch's SSH host key. Use this workflow
+only on a management network protected against connection interception.
+
 ### RMS APIs NICo Calls
 
 NICo uses a focused slice of the RMS API. Each call belongs to a specific workflow:

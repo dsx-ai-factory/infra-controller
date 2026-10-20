@@ -853,13 +853,6 @@ impl RmsApi for MockRmsClient {
             .unwrap_or(Ok(rms::BatchGetPowerStateResponse::default()))
     }
 
-    async fn sequence_rack_power(
-        &self,
-        _cmd: rms::SequenceRackPowerRequest,
-    ) -> Result<rms::SequenceRackPowerResponse, RackManagerError> {
-        Ok(rms::SequenceRackPowerResponse::default())
-    }
-
     async fn list_node_inventory(
         &self,
     ) -> Result<rms::ListNodeInventoryResponse, RackManagerError> {
@@ -916,20 +909,6 @@ impl RmsApi for MockRmsClient {
         Ok(rms::DeleteNodeResponse::default())
     }
 
-    async fn get_rack_power_on_sequence(
-        &self,
-        _cmd: rms::GetRackPowerOnSequenceRequest,
-    ) -> Result<rms::GetRackPowerOnSequenceResponse, RackManagerError> {
-        Ok(rms::GetRackPowerOnSequenceResponse::default())
-    }
-
-    async fn set_rack_power_on_sequence(
-        &self,
-        _cmd: rms::SetRackPowerOnSequenceRequest,
-    ) -> Result<rms::SetRackPowerOnSequenceResponse, RackManagerError> {
-        Ok(rms::SetRackPowerOnSequenceResponse::default())
-    }
-
     async fn list_racks(&self) -> Result<rms::ListRacksResponse, RackManagerError> {
         Ok(rms::ListRacksResponse::default())
     }
@@ -939,6 +918,20 @@ impl RmsApi for MockRmsClient {
         _cmd: rms::GetNodeFirmwareInventoryRequest,
     ) -> Result<rms::GetNodeFirmwareInventoryResponse, RackManagerError> {
         Ok(rms::GetNodeFirmwareInventoryResponse::default())
+    }
+
+    async fn batch_get_firmware_inventory(
+        &self,
+        _cmd: rms::BatchGetFirmwareInventoryRequest,
+    ) -> Result<rms::BatchGetFirmwareInventoryResponse, RackManagerError> {
+        Err(tonic::Status::unimplemented("batch_get_firmware_inventory is not implemented").into())
+    }
+
+    async fn compare_firmware_object(
+        &self,
+        _cmd: rms::CompareFirmwareObjectRequest,
+    ) -> Result<rms::CompareFirmwareObjectResponse, RackManagerError> {
+        Err(tonic::Status::unimplemented("compare_firmware_object is not implemented").into())
     }
 
     async fn get_rack_firmware_inventory(
