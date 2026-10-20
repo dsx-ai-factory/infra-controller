@@ -316,9 +316,7 @@ impl MockLookupApi {
             };
             let connection = http2::Builder::new(TokioExecutor::new()).serve_connection(
                 TokioIo::new(stream),
-                service_fn(move |request| {
-                    mock_lookup(request, requests_tx.clone(), reply.clone())
-                }),
+                service_fn(move |request| mock_lookup(request, requests_tx.clone(), reply.clone())),
             );
             tokio::pin!(connection);
             tokio::select! {
