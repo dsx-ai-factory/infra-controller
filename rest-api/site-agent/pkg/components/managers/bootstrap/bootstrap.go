@@ -387,12 +387,12 @@ func (bs *BoostrapAPI) DownloadAndStoreCreds(ctx context.Context, otpOverride []
 	})
 }
 
-// storedCredentialOTP returns the OTP that storeCredentials last stored, or an
+// getStoredCredentialOTP returns the OTP that storeCredentials last stored, or an
 // empty string before the first store. In Kubernetes it reads the Temporal cert
 // Secret from the API server, because the projected OTP file can still hold the
 // previous OTP after an update. The published configuration is not enough
 // either: Init publishes the bootstrap Secret's OTP before any download.
-func storedCredentialOTP(ctx context.Context) (string, error) {
+func (bs *BoostrapAPI) getStoredCredentialOTP(ctx context.Context) (string, error) {
 	if ManagerAccess.Conf.EB.RunningIn != conftypes.RunningInK8s {
 		otpBytes, err := os.ReadFile(ManagerAccess.Conf.EB.Temporal.GetTemporalCertOTPFullPath())
 		if os.IsNotExist(err) {
@@ -416,7 +416,7 @@ func storedCredentialOTP(ctx context.Context) (string, error) {
 }
 
 func (bs *BoostrapAPI) downloadAndStoreCreds(ctx context.Context, config bootstraptypes.SecretConfig) error {
-	storedOTP, err := storedCredentialOTP(ctx)
+	storedOTP, err := bs.getStoredCredentialOTP(ctx)
 	if err != nil {
 		log.Warn().Err(err).Msg("Bootstrap: Failed to read stored OTP")
 		return err
