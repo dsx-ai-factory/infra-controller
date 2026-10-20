@@ -5,12 +5,14 @@ package config
 
 import (
 	"fmt"
+
+	configvalidation "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/configvalidation"
 )
 
 // DefaultMetricsNamespace prefixes every metric this worker exposes and matches
 // its nico-rest-workflow Helm service name. Operators override it with
 // metrics.namespace.
-const DefaultMetricsNamespace = "nico_rest_workflow"
+const DefaultMetricsNamespace = configvalidation.DefaultMetricsNamespace
 
 // MetricsConfig holds configuration of Metrics
 type MetricsConfig struct {
