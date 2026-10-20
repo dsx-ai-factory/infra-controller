@@ -51,6 +51,8 @@ NICo performs these operations in order:
 
    RMS uses the switch's configured NVOS credentials to log in over SSH. The
    username must be `admin`. RMS does not verify the switch's SSH host key.
+   Use this workflow only on a management network protected against connection
+   interception.
 
    The reset clears the NVOS configuration, restarts the switch, and restores
    the factory-default NVOS password.

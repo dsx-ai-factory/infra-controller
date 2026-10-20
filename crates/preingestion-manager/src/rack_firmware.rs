@@ -18,7 +18,6 @@
 //! Rack compute-tray firmware handling for preingestion.
 
 use std::net::IpAddr;
-use std::time::Duration;
 
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
 use component_manager::compute_tray_manager::{
@@ -36,11 +35,6 @@ use sqlx::PgPool;
 
 use super::{PreingestionManagerStatic, RackFirmwareDependencies};
 use crate::errors::PreingestionManagerResult;
-
-// Limit each firmware submission or status request, including backend preparation.
-// Firmware jobs run asynchronously and may outlive the request deadline.
-const RACK_FIRMWARE_SUBMISSION_TIMEOUT: Duration = Duration::from_secs(60);
-const RACK_FIRMWARE_STATUS_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct PreparedRackFirmware {
     endpoint: ComputeTrayEndpoint,
@@ -220,7 +214,7 @@ impl PreingestionManagerStatic {
         );
 
         let results = tokio::time::timeout(
-            RACK_FIRMWARE_SUBMISSION_TIMEOUT,
+            self.rack_firmware_submission_timeout,
             compute_tray.update_firmware(
                 &[endpoint],
                 &config_json,
@@ -233,10 +227,10 @@ impl PreingestionManagerStatic {
         )
         .await
         .unwrap_or_else(|_| {
-            Err(ComponentManagerError::OperationOutcomeUnknown(
-                "RMS firmware submission exceeded the 60-second deadline; reconcile the RMS job before retrying pre-ingestion"
-                    .to_string(),
-            ))
+            Err(ComponentManagerError::OperationOutcomeUnknown(format!(
+                "RMS firmware submission exceeded the {}-second deadline; reconcile the RMS job before retrying pre-ingestion",
+                self.rack_firmware_submission_timeout.as_secs(),
+            )))
         });
 
         let result = match results {
@@ -516,7 +510,7 @@ impl PreingestionManagerStatic {
         };
 
         let status = tokio::time::timeout(
-            RACK_FIRMWARE_STATUS_TIMEOUT,
+            self.rack_firmware_status_timeout,
             dependencies
                 .compute_tray
                 .get_firmware_job_status(endpoint.address, bmc_mac, job_id),

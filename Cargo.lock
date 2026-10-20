@@ -2920,6 +2920,7 @@ dependencies = [
  "carbide-api-test-helper",
  "carbide-firmware",
  "carbide-instrument",
+ "carbide-preingestion-manager",
  "carbide-rack-controller",
  "carbide-redfish",
  "carbide-secrets",

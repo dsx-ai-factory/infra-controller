@@ -8,6 +8,7 @@ use std::time::Duration;
 use api_test_helper::mock_rms::MockRmsApi;
 use async_trait::async_trait;
 use carbide_preingestion_manager::PreingestionManager;
+use carbide_preingestion_manager::test_support::set_rack_firmware_request_timeout;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_redfish::libredfish::test_support::RedfishSim;
 use carbide_secrets::credentials::{
@@ -438,10 +439,12 @@ async fn submission_timeout_fails_without_resubmitting(
 
     let rms = Arc::new(MockRmsApi::new());
     let (mut arrived, release) = rms.block_next_apply_firmware_object().await;
-    let preingestion_manager = manager(&pool, &env, rms.clone(), rack_profiles(None));
+
+    let mut preingestion_manager = manager(&pool, &env, rms.clone(), rack_profiles(None));
+    set_rack_firmware_request_timeout(&mut preingestion_manager, Duration::from_secs(1));
 
     tokio::time::timeout(
-        Duration::from_secs(90),
+        Duration::from_secs(10),
         preingestion_manager.run_single_iteration(),
     )
     .await??;
@@ -460,7 +463,7 @@ async fn submission_timeout_fails_without_resubmitting(
     };
 
     assert!(reason.contains("outcome is unknown"));
-    assert!(reason.contains("60-second deadline"));
+    assert!(reason.contains("1-second deadline"));
 
     preingestion_manager.run_single_iteration().await?;
 
@@ -493,8 +496,10 @@ async fn polling_timeout_preserves_job_and_retries(
     )))
     .await;
 
-    let preingestion_manager = manager(&pool, &env, rms.clone(), rack_profiles(None));
+    let mut preingestion_manager = manager(&pool, &env, rms.clone(), rack_profiles(None));
     preingestion_manager.run_single_iteration().await?;
+
+    set_rack_firmware_request_timeout(&mut preingestion_manager, Duration::from_secs(1));
 
     rms.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
         rms::FirmwareJobState::Completed,
@@ -504,7 +509,7 @@ async fn polling_timeout_preserves_job_and_retries(
     let (mut arrived, release) = rms.block_next_get_firmware_job_status().await;
 
     tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_secs(10),
         preingestion_manager.run_single_iteration(),
     )
     .await??;
