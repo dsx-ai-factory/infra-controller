@@ -40,7 +40,7 @@ WORKDIR /workspace/cert-manager
 RUN VERSION=${VERSION} && \
     BUILD_TIME=$(date +"%Y-%m-%d %H:%M:%S") && \
     go build \
-        -ldflags "-extldflags '-static' -w -s" \
+        -ldflags "-extldflags '-static' -w -s -X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}" \
         -o /app/credsmgr \
         ./cmd/credsmgr
 
