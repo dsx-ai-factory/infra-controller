@@ -52,11 +52,13 @@ func TestObfuscateRequestBody(t *testing.T) {
 				"DefaultBmcPassword": "synthetic-default",
 				"CLIENTSECRET":       "synthetic-secret",
 				"clientSecret":       "synthetic-second-secret",
+				"codeVerifier":       "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
 			},
 			want: map[string]interface{}{
 				"DefaultBmcPassword": auditObfuscatedValue,
 				"CLIENTSECRET":       auditObfuscatedValue,
 				"clientSecret":       auditObfuscatedValue,
+				"codeVerifier":       auditObfuscatedValue,
 			},
 		},
 		{

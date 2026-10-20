@@ -9,6 +9,8 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authentication"
 	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 
 	cah "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/api/handler"
 )
@@ -27,14 +29,21 @@ type AuthHandler interface {
 
 // NewAuthRoutes creates new authentication routes using cloud-auth services
 // This function provides a complete authentication API that can be used by any service
-func NewAuthRoutes(keycloakConfig *config.KeycloakConfig) []AuthRoute {
+func NewAuthRoutes(keycloakConfig *config.KeycloakConfig, dbSession *cdb.Session) []AuthRoute {
 	if keycloakConfig == nil {
 		log.Error().Msg("keycloak config is not initialized, cannot create authentication routes")
 		return nil
 	}
+	if dbSession == nil {
+		log.Error().Msg("database session is not initialized, cannot create authentication routes")
+		return nil
+	}
 
-	// Initialize Keycloak auth service
-	keycloakAuth := authentication.NewKeycloakAuthService(keycloakConfig)
+	// Initialize Keycloak auth service with PostgreSQL-backed single-use state redemption
+	keycloakAuth := authentication.NewKeycloakAuthServiceWithStateDAO(
+		keycloakConfig,
+		cdbm.NewOAuthConsumedStateDAO(dbSession),
+	)
 
 	// Create handlers
 	loginHandler := cah.NewLoginHandler(keycloakAuth)

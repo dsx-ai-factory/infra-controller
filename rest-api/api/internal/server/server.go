@@ -260,7 +260,7 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 	if keycloakConfig != nil {
 		log.Info().Msg("Registering Keycloak auth routes")
 		authGroup := e.Group("/auth")
-		authAPIRoutes := handler.NewAuthRoutes(keycloakConfig)
+		authAPIRoutes := handler.NewAuthRoutes(keycloakConfig, dbSession)
 		for _, authnzAPIRoute := range authAPIRoutes {
 			log.Info().Str("method", authnzAPIRoute.Method).Str("path", authnzAPIRoute.Path).Msg("Registering auth route")
 			authGroup.Add(authnzAPIRoute.Method, authnzAPIRoute.Path, authnzAPIRoute.Handler.Handle)

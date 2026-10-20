@@ -19,6 +19,11 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"golang.org/x/oauth2"
 
 	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/api/model"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
@@ -27,6 +32,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/processors"
 	testutil "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/testing"
 	commonConfig "github.com/NVIDIA/infra-controller/rest-api/common/pkg/config"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	tmocks "go.temporal.io/sdk/mocks"
@@ -292,12 +298,13 @@ func TestKeycloakAuthService_InitiateAuthFlow(t *testing.T) {
 	defer testServer.Close()
 
 	tests := []struct {
-		name           string
-		email          string
-		redirectURI    string
-		wantResponse   *model.APILoginResponse
-		wantErr        bool
-		expectedErrMsg string
+		name            string
+		externalBaseURL string
+		email           string
+		redirectURI     string
+		wantResponse    *model.APILoginResponse
+		wantErr         bool
+		expectedErrMsg  string
 	}{
 		{
 			name:        "successful auth flow initiation",
@@ -305,7 +312,18 @@ func TestKeycloakAuthService_InitiateAuthFlow(t *testing.T) {
 			redirectURI: "http://localhost:3000/callback",
 			wantResponse: &model.APILoginResponse{
 				AuthURL:   testServer.URL + "/realms/nico/protocol/openid-connect/auth?client_id=test-client&kc_idp_hint=testorg-idp&login_hint=john.doe%40testorg.com&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback&response_type=code&scope=openid",
-				State:     "",
+				IDP:       "testorg-idp",
+				RealmName: "nico",
+			},
+			wantErr: false,
+		},
+		{
+			name:            "trailing slash on externalBaseURL normalized",
+			externalBaseURL: testServer.URL + "/",
+			email:           "john.doe@testorg.com",
+			redirectURI:     "http://localhost:3000/callback",
+			wantResponse: &model.APILoginResponse{
+				AuthURL:   testServer.URL + "/realms/nico/protocol/openid-connect/auth?client_id=test-client&kc_idp_hint=testorg-idp&login_hint=john.doe%40testorg.com&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback&response_type=code&scope=openid",
 				IDP:       "testorg-idp",
 				RealmName: "nico",
 			},
@@ -328,12 +346,21 @@ func TestKeycloakAuthService_InitiateAuthFlow(t *testing.T) {
 			expectedErrMsg: "failed to find identity provider for domain unknown.com",
 		},
 		{
+			// The redirect URI travels inside the state, so one too long to fit
+			// the callback's size bound is refused at login, not at callback.
+			name:           "redirect URI too long for the OAuth state",
+			email:          "john.doe@testorg.com",
+			redirectURI:    "http://localhost:3000/" + strings.Repeat("p", model.MaxOAuthStateLength),
+			wantResponse:   nil,
+			wantErr:        true,
+			expectedErrMsg: "redirect URI is too long for the OAuth state",
+		},
+		{
 			name:        "no redirect URI provided",
 			email:       "john.doe@testorg.com",
 			redirectURI: "",
 			wantResponse: &model.APILoginResponse{
 				AuthURL:   testServer.URL + "/realms/nico/protocol/openid-connect/auth?client_id=test-client&kc_idp_hint=testorg-idp&login_hint=john.doe%40testorg.com&response_type=code&scope=openid",
-				State:     "",
 				IDP:       "testorg-idp",
 				RealmName: "nico",
 			},
@@ -343,9 +370,13 @@ func TestKeycloakAuthService_InitiateAuthFlow(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			externalBaseURL := testServer.URL
+			if tt.externalBaseURL != "" {
+				externalBaseURL = tt.externalBaseURL
+			}
 			keycloakConfig := &config.KeycloakConfig{
 				BaseURL:         testServer.URL,
-				ExternalBaseURL: testServer.URL,
+				ExternalBaseURL: externalBaseURL,
 				ClientID:        "test-client",
 				ClientSecret:    "test-secret",
 				Realm:           "nico",
@@ -361,7 +392,371 @@ func TestKeycloakAuthService_InitiateAuthFlow(t *testing.T) {
 				assert.Nil(t, response)
 			} else {
 				assert.NoError(t, err)
-				assert.Equal(t, tt.wantResponse, response)
+				assertLoginBindsStateAndPKCE(t, service, response, tt.redirectURI)
+				// State, verifier and challenge differ per login; everything else is fixed.
+				got := *response
+				authURL, perr := url.Parse(got.AuthURL)
+				require.NoError(t, perr)
+				q := authURL.Query()
+				for _, k := range []string{"state", "code_challenge", "code_challenge_method"} {
+					q.Del(k)
+				}
+				authURL.RawQuery = q.Encode()
+				got.AuthURL, got.State, got.CodeVerifier = authURL.String(), "", ""
+				assert.Equal(t, tt.wantResponse, &got)
+			}
+		})
+	}
+}
+
+// assertLoginBindsStateAndPKCE checks that a login response carries a state and a
+// PKCE verifier, sends both to Keycloak in the authorization URL, and that the
+// state verifies against that verifier and redirect URI. Redemption is proven in
+// TestKeycloakAuthService_ConsumeState against PostgreSQL.
+func assertLoginBindsStateAndPKCE(t *testing.T, service *KeycloakAuthService, response *model.APILoginResponse, redirectURI string) {
+	t.Helper()
+	require.NotEmpty(t, response.State)
+	require.Len(t, response.CodeVerifier, 43, "32 random bytes, base64url")
+	authURL, err := url.Parse(response.AuthURL)
+	require.NoError(t, err)
+	q := authURL.Query()
+	assert.Equal(t, response.State, q.Get("state"))
+	assert.Equal(t, oauth2.S256ChallengeFromVerifier(response.CodeVerifier), q.Get("code_challenge"))
+	assert.Equal(t, "S256", q.Get("code_challenge_method"))
+	_, err = service.checkState(response.State, response.CodeVerifier, redirectURI, time.Now())
+	assert.NoError(t, err)
+}
+
+// testCodeVerifier is a well-formed PKCE verifier; the mock token endpoint refuses
+// an authorization-code exchange without one.
+const testCodeVerifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+
+// failingStateDAO fails every redemption and records the deadline its context
+// carried, so a test can prove the store call is bounded without waiting on it.
+type failingStateDAO struct {
+	err         error
+	deadline    time.Time
+	hasDeadline bool
+}
+
+func (f *failingStateDAO) Create(ctx context.Context, _ *cdb.Tx, _ cdbm.OAuthConsumedStateCreateInput) (*cdbm.OAuthConsumedState, bool, error) {
+	f.deadline, f.hasDeadline = ctx.Deadline()
+	return nil, false, f.err
+}
+
+func (f *failingStateDAO) DeleteExpired(_ context.Context, _ *cdb.Tx, _ time.Time, _ int) error {
+	return nil
+}
+
+func TestKeycloakAuthService_ConsumeState(t *testing.T) {
+	ctx := context.Background()
+	recorder := tracetest.NewSpanRecorder()
+	previousProvider := otel.GetTracerProvider()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+	t.Cleanup(func() { otel.SetTracerProvider(previousProvider) })
+
+	dbSession := cdbu.GetTestDBSession(t, false)
+	defer dbSession.Close()
+
+	err := dbSession.DB.ResetModel(ctx, (*cdbm.OAuthConsumedState)(nil))
+	require.NoError(t, err)
+
+	stateDAO := cdbm.NewOAuthConsumedStateDAO(dbSession)
+	baseCfg := &config.KeycloakConfig{
+		Realm:        "nico",
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+	}
+	replicaOne := NewKeycloakAuthServiceWithStateDAO(baseCfg, stateDAO)
+	replicaTwo := NewKeycloakAuthServiceWithStateDAO(baseCfg, stateDAO)
+	otherSecretSvc := NewKeycloakAuthServiceWithStateDAO(&config.KeycloakConfig{
+		Realm:        "nico",
+		ClientID:     "test-client",
+		ClientSecret: "another-secret",
+	}, stateDAO)
+	otherRealmSvc := NewKeycloakAuthServiceWithStateDAO(&config.KeycloakConfig{
+		Realm:        "other-realm",
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+	}, stateDAO)
+	otherClientSvc := NewKeycloakAuthServiceWithStateDAO(&config.KeycloakConfig{
+		Realm:        "nico",
+		ClientID:     "other-client",
+		ClientSecret: "test-secret",
+	}, stateDAO)
+	brokenStore := &failingStateDAO{err: fmt.Errorf("db connection refused")}
+	brokenStoreSvc := NewKeycloakAuthServiceWithStateDAO(baseCfg, brokenStore)
+
+	const redirectURI = "http://localhost:3000/callback"
+	now := time.Now()
+	ownVerifier := oauth2.GenerateVerifier()
+	otherVerifier := oauth2.GenerateVerifier()
+
+	issueFresh := func() string {
+		s, ierr := replicaOne.issueState(ownVerifier, redirectURI, now)
+		require.NoError(t, ierr)
+		return s
+	}
+
+	// An unsigned ("alg": "none") copy of a genuine state: every claim is valid,
+	// so only algorithm pinning can reject it.
+	genuine, _, err := jwt.NewParser().ParseUnverified(issueFresh(), &oauthStateClaims{})
+	require.NoError(t, err)
+	unsignedState, err := jwt.NewWithClaims(jwt.SigningMethodNone, genuine.Claims).SignedString(jwt.UnsafeAllowNoneSignatureType)
+	require.NoError(t, err)
+
+	storeFailureState := issueFresh()
+
+	// Redeemed once here so the replay rows hold regardless of subtest order.
+	replayedState := issueFresh()
+	require.NoError(t, replicaOne.consumeStateAt(ctx, replayedState, ownVerifier, redirectURI, now.Add(time.Minute)))
+	crossReplicaState := issueFresh()
+	require.NoError(t, replicaTwo.consumeStateAt(ctx, crossReplicaState, ownVerifier, redirectURI, now.Add(time.Minute)))
+
+	noStoreSvc := NewKeycloakAuthService(baseCfg)
+	noSecretSvc := NewKeycloakAuthServiceWithStateDAO(&config.KeycloakConfig{
+		Realm:    "nico",
+		ClientID: "test-client",
+	}, stateDAO)
+
+	tests := []struct {
+		name           string
+		service        *KeycloakAuthService
+		state          string
+		verifier       string
+		redirectURI    string
+		now            time.Time
+		wantInvalidErr bool
+		wantReason     string
+		wantOtherErr   string
+		// traced rows go through the public ConsumeState at the real clock and
+		// assert its span; the rest call consumeStateAt with a fixed clock.
+		traced            bool
+		wantSpanStatus    codes.Code
+		wantSpanRejection string
+		// boundedStore, when set, must have received a context deadline of
+		// oauthStateStoreTimeout from the call.
+		boundedStore *failingStateDAO
+	}{
+		{
+			name:           "valid state redeemed once on issuing replica",
+			service:        replicaOne,
+			state:          issueFresh(),
+			verifier:       ownVerifier,
+			redirectURI:    redirectURI,
+			traced:         true,
+			wantSpanStatus: codes.Unset,
+		},
+		{
+			// A rejection is the caller's failure: the bounded reason is recorded
+			// on the span without marking it failed.
+			name:              "same state replayed on same replica is rejected",
+			service:           replicaOne,
+			state:             replayedState,
+			verifier:          ownVerifier,
+			redirectURI:       redirectURI,
+			wantInvalidErr:    true,
+			wantReason:        "already redeemed",
+			traced:            true,
+			wantSpanStatus:    codes.Unset,
+			wantSpanRejection: "invalid or expired OAuth state: already redeemed",
+		},
+		{
+			name:        "state issued on replica one redeemed on replica two",
+			service:     replicaTwo,
+			state:       issueFresh(),
+			verifier:    ownVerifier,
+			redirectURI: redirectURI,
+			now:         now.Add(time.Minute),
+		},
+		{
+			name:           "state redeemed on replica two rejected on replica one",
+			service:        replicaOne,
+			state:          crossReplicaState,
+			verifier:       ownVerifier,
+			redirectURI:    redirectURI,
+			now:            now.Add(2 * time.Minute),
+			wantInvalidErr: true,
+			wantReason:     "already redeemed",
+		},
+		{
+			name:           "another session's verifier",
+			service:        replicaOne,
+			state:          issueFresh(),
+			verifier:       otherVerifier,
+			redirectURI:    redirectURI,
+			now:            now,
+			wantInvalidErr: true,
+			wantReason:     "binding mismatch",
+		},
+		{
+			name:           "unsigned alg none copy of a genuine state",
+			service:        replicaOne,
+			state:          unsignedState,
+			verifier:       ownVerifier,
+			redirectURI:    redirectURI,
+			now:            now,
+			wantInvalidErr: true,
+			wantReason:     "signature mismatch",
+		},
+		{
+			name:           "redirect URI swapped between login and callback",
+			service:        replicaOne,
+			state:          issueFresh(),
+			verifier:       ownVerifier,
+			redirectURI:    "http://localhost:3000/other-callback",
+			now:            now,
+			wantInvalidErr: true,
+		},
+		{
+			name:           "expired state",
+			service:        replicaOne,
+			state:          issueFresh(),
+			verifier:       ownVerifier,
+			redirectURI:    redirectURI,
+			now:            now.Add(oauthStateTTL + time.Second),
+			wantInvalidErr: true,
+			wantReason:     "expired",
+		},
+		{
+			name:           "tampered token encoding",
+			service:        replicaOne,
+			state:          "9" + issueFresh(),
+			verifier:       ownVerifier,
+			redirectURI:    redirectURI,
+			now:            now,
+			wantInvalidErr: true,
+			wantReason:     "malformed",
+		},
+		{
+			name:           "arbitrary state value",
+			service:        replicaOne,
+			state:          "state-alpha",
+			verifier:       ownVerifier,
+			redirectURI:    redirectURI,
+			now:            now,
+			wantInvalidErr: true,
+		},
+		{
+			name:           "oversized state value",
+			service:        replicaOne,
+			state:          strings.Repeat("a", model.MaxOAuthStateLength+1),
+			verifier:       ownVerifier,
+			redirectURI:    redirectURI,
+			now:            now,
+			wantInvalidErr: true,
+		},
+		{
+			name:           "issued for another client secret",
+			service:        otherSecretSvc,
+			state:          issueFresh(),
+			verifier:       ownVerifier,
+			redirectURI:    redirectURI,
+			now:            now,
+			wantInvalidErr: true,
+			wantReason:     "signature mismatch",
+		},
+		{
+			name:           "issued for another realm",
+			service:        otherRealmSvc,
+			state:          issueFresh(),
+			verifier:       ownVerifier,
+			redirectURI:    redirectURI,
+			now:            now,
+			wantInvalidErr: true,
+			wantReason:     "binding mismatch",
+		},
+		{
+			name:           "issued for another client ID",
+			service:        otherClientSvc,
+			state:          issueFresh(),
+			verifier:       ownVerifier,
+			redirectURI:    redirectURI,
+			now:            now,
+			wantInvalidErr: true,
+			wantReason:     "binding mismatch",
+		},
+		{
+			// The store call carries a deadline, so an unreachable PostgreSQL
+			// becomes a prompt 500 rather than a dropped connection.
+			name:           "backing store failure fails closed within the store deadline",
+			service:        brokenStoreSvc,
+			state:          storeFailureState,
+			verifier:       ownVerifier,
+			redirectURI:    redirectURI,
+			wantOtherErr:   "db connection refused",
+			traced:         true,
+			wantSpanStatus: codes.Error,
+			boundedStore:   brokenStore,
+		},
+		{
+			// A service built without a state store must never complete a callback.
+			name:         "service without a state store fails closed",
+			service:      noStoreSvc,
+			state:        issueFresh(),
+			verifier:     ownVerifier,
+			redirectURI:  redirectURI,
+			now:          now,
+			wantOtherErr: "not initialized",
+		},
+		{
+			name:         "missing client secret is a server fault, not an invalid state",
+			service:      noSecretSvc,
+			state:        issueFresh(),
+			verifier:     ownVerifier,
+			redirectURI:  redirectURI,
+			now:          now,
+			wantOtherErr: "not configured",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			callStart := time.Now()
+			var cerr error
+			if tt.traced {
+				cerr = tt.service.ConsumeState(ctx, tt.state, tt.verifier, tt.redirectURI)
+			} else {
+				cerr = tt.service.consumeStateAt(ctx, tt.state, tt.verifier, tt.redirectURI, tt.now)
+			}
+			callEnd := time.Now()
+			switch {
+			case tt.wantInvalidErr:
+				assert.ErrorIs(t, cerr, ErrInvalidOAuthState)
+				if tt.wantReason != "" {
+					assert.ErrorContains(t, cerr, tt.wantReason)
+				}
+			case tt.wantOtherErr != "":
+				require.Error(t, cerr)
+				assert.NotErrorIs(t, cerr, ErrInvalidOAuthState)
+				assert.Contains(t, cerr.Error(), tt.wantOtherErr)
+			default:
+				assert.NoError(t, cerr)
+			}
+
+			if tt.traced {
+				var span sdktrace.ReadOnlySpan
+				for _, s := range recorder.Ended() {
+					if s.Name() == "KeycloakAuthService.ConsumeState" {
+						span = s
+					}
+				}
+				require.NotNil(t, span, "ConsumeState must record a span")
+				assert.Equal(t, tt.wantSpanStatus, span.Status().Code)
+				var rejection string
+				for _, kv := range span.Attributes() {
+					if kv.Key == "oauth.state.rejection" {
+						rejection = kv.Value.AsString()
+					}
+				}
+				assert.Equal(t, tt.wantSpanRejection, rejection)
+			}
+			if tt.boundedStore != nil {
+				// The deadline is set during the call, so it must fall within the
+				// store budget measured from the call's start and end.
+				require.True(t, tt.boundedStore.hasDeadline, "state store call must carry a deadline")
+				assert.WithinRange(t, tt.boundedStore.deadline,
+					callStart.Add(oauthStateStoreTimeout), callEnd.Add(oauthStateStoreTimeout))
 			}
 		})
 	}
@@ -370,17 +765,25 @@ func TestKeycloakAuthService_InitiateAuthFlow(t *testing.T) {
 func TestKeycloakAuthService_ExchangeCodeForTokens(t *testing.T) {
 
 	tests := []struct {
-		name           string
-		code           string
-		redirectURI    string
-		wantResponse   *model.APITokenResponse
-		wantErr        bool
-		expectedErrMsg string
+		name             string
+		code             string
+		redirectURI      string
+		codeVerifier     string
+		emptySecret      bool
+		clientSecret     string // overrides the default test-secret on both sides
+		tokenContentType string
+		tokenBody        string
+		expectedVerifier string
+		wantResponse     *model.APITokenResponse
+		wantErr          bool
+		expectedErrMsg   string
 	}{
 		{
-			name:        "successful code exchange",
-			code:        "valid-auth-code",
-			redirectURI: "http://localhost:3000/callback",
+			name:             "successful code exchange with matching PKCE verifier",
+			code:             "valid-auth-code",
+			redirectURI:      "http://localhost:3000/callback",
+			codeVerifier:     testCodeVerifier,
+			expectedVerifier: testCodeVerifier,
 			wantResponse: &model.APITokenResponse{
 				AccessToken:  "test-access-token",
 				RefreshToken: "test-refresh-token",
@@ -390,38 +793,118 @@ func TestKeycloakAuthService_ExchangeCodeForTokens(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			// Exercises the form encode/decode boundary with every reserved
+			// character class an operator-supplied secret might contain.
+			name:             "client secret with reserved characters reaches the token endpoint intact",
+			code:             "valid-auth-code",
+			redirectURI:      "http://localhost:3000/callback",
+			codeVerifier:     testCodeVerifier,
+			clientSecret:     "p+s%w:rd/ sp&ce=ü",
+			expectedVerifier: testCodeVerifier,
+			wantResponse: &model.APITokenResponse{
+				AccessToken:  "test-access-token",
+				RefreshToken: "test-refresh-token",
+				ExpiresIn:    3600,
+				TokenType:    "Bearer",
+			},
+		},
+		{
+			name:             "wrong PKCE verifier rejected by token endpoint",
+			code:             "valid-auth-code",
+			redirectURI:      "http://localhost:3000/callback",
+			codeVerifier:     strings.Repeat("b", 43),
+			expectedVerifier: testCodeVerifier,
+			wantErr:          true,
+			expectedErrMsg:   "failed to exchange authorization code",
+		},
+		{
 			name:           "invalid authorization code",
 			code:           "invalid-code",
 			redirectURI:    "http://localhost:3000/callback",
+			codeVerifier:   testCodeVerifier,
 			wantResponse:   nil,
 			wantErr:        true,
 			expectedErrMsg: "failed to exchange authorization code",
+		},
+		{
+			name:           "no PKCE verifier",
+			code:           "valid-auth-code",
+			redirectURI:    "http://localhost:3000/callback",
+			codeVerifier:   "",
+			wantErr:        true,
+			expectedErrMsg: "PKCE code verifier is required",
+		},
+		{
+			name:           "missing client credentials rejected before HTTP request",
+			code:           "valid-auth-code",
+			redirectURI:    "http://localhost:3000/callback",
+			codeVerifier:   testCodeVerifier,
+			emptySecret:    true,
+			wantErr:        true,
+			expectedErrMsg: "client credentials not configured",
+		},
+		{
+			name:             "HTTP 200 non-JSON response rejected",
+			code:             "valid-auth-code",
+			redirectURI:      "http://localhost:3000/callback",
+			codeVerifier:     testCodeVerifier,
+			tokenContentType: "text/html",
+			tokenBody:        "<html>upstream login page</html>",
+			wantErr:          true,
+			expectedErrMsg:   "cannot parse json",
+		},
+		{
+			name:           "HTTP 200 JSON response without access token rejected",
+			code:           "valid-auth-code",
+			redirectURI:    "http://localhost:3000/callback",
+			codeVerifier:   testCodeVerifier,
+			tokenBody:      "{}",
+			wantErr:        true,
+			expectedErrMsg: "missing access_token",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			clientSecret := "test-secret"
+			if tt.clientSecret != "" {
+				clientSecret = tt.clientSecret
+			}
+			if tt.emptySecret {
+				clientSecret = ""
+			}
 			keycloakConfig := &config.KeycloakConfig{
 				BaseURL:      "http://localhost:8082",
 				ClientID:     "test-client",
-				ClientSecret: "test-secret",
+				ClientSecret: clientSecret,
 				Realm:        "nico",
+			}
+
+			responses := GetDefaultMockResponses()
+			if tt.tokenBody != "" {
+				responses.Token = tt.tokenBody
 			}
 
 			// Create mock server configuration based on test case
 			mockServerConfig := MockKeycloakServerConfig{
-				Responses: GetDefaultMockResponses(),
+				Responses:        responses,
+				TokenContentType: tt.tokenContentType,
+				ClientSecret:     tt.clientSecret,
 				ValidCredentials: map[string]string{
 					"admin": "admin-password",
 				},
 				ValidTokens: map[string]bool{
 					"valid-access-token": true,
 				},
-				ValidCodes: map[string]bool{},
+				ValidCodes:     map[string]bool{},
+				CodeChallenges: map[string]string{},
 			}
 
 			if tt.code == "valid-auth-code" {
 				mockServerConfig.ValidCodes["valid-auth-code"] = true
+			}
+			if tt.expectedVerifier != "" {
+				mockServerConfig.CodeChallenges["valid-auth-code"] = oauth2.S256ChallengeFromVerifier(tt.expectedVerifier)
 			}
 
 			// Create mock Keycloak server
@@ -436,7 +919,7 @@ func TestKeycloakAuthService_ExchangeCodeForTokens(t *testing.T) {
 
 			service := NewKeycloakAuthServiceWithClient(keycloakConfig, client)
 
-			response, err := service.ExchangeCodeForTokens(context.Background(), tt.code, tt.redirectURI, "")
+			response, err := service.ExchangeCodeForTokens(context.Background(), tt.code, tt.redirectURI, tt.codeVerifier)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -779,7 +1262,7 @@ func TestKeycloakAuthService_Integration(t *testing.T) {
 		assert.Contains(t, authResponse.AuthURL, "testorg-idp")
 
 		// 2. Exchange code for tokens
-		tokenResponse, err := service.ExchangeCodeForTokens(context.Background(), "valid-auth-code", "http://localhost:3000/callback", "")
+		tokenResponse, err := service.ExchangeCodeForTokens(context.Background(), "valid-auth-code", "http://localhost:3000/callback", testCodeVerifier)
 		assert.NoError(t, err)
 		assert.NotNil(t, tokenResponse)
 		assert.Equal(t, "test-access-token", tokenResponse.AccessToken)
@@ -1583,7 +2066,7 @@ func TestKeycloakAuthService_RealServerIntegration(t *testing.T) {
 
 		service := NewKeycloakAuthService(keycloakConfig)
 
-		tokenResponse, err := service.ExchangeCodeForTokens(context.Background(), "valid-auth-code", "http://localhost:3000/callback", "")
+		tokenResponse, err := service.ExchangeCodeForTokens(context.Background(), "valid-auth-code", "http://localhost:3000/callback", testCodeVerifier)
 		assert.NoError(t, err)
 		require.NotNil(t, tokenResponse)
 		assert.Equal(t, "test-access-token", tokenResponse.AccessToken)
@@ -1829,7 +2312,7 @@ func TestKeycloakAuthService_ErrorScenarios(t *testing.T) {
 
 		service := NewKeycloakAuthService(keycloakConfig)
 
-		tokenResponse, err := service.ExchangeCodeForTokens(context.Background(), "expired-code", "http://localhost:3000/callback", "")
+		tokenResponse, err := service.ExchangeCodeForTokens(context.Background(), "expired-code", "http://localhost:3000/callback", testCodeVerifier)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to exchange authorization code")
 		assert.Nil(t, tokenResponse)

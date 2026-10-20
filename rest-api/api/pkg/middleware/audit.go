@@ -74,6 +74,7 @@ var obfuscateFields = map[string]struct{}{
 	"authenticationdata": {},
 	"authtoken":          {},
 	"clientsecret":       {},
+	"codeverifier":       {},
 	"imageauthtoken":     {},
 	"password":           {},
 	"nvospassword":       {},

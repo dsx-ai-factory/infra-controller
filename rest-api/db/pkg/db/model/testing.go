@@ -136,6 +136,9 @@ func TestSetupSchema(t *testing.T, dbSession *db.Session) {
 	// create dpu extension service deployment table
 	err = dbSession.DB.ResetModel(context.Background(), (*DpuExtensionServiceDeployment)(nil))
 	assert.Nil(t, err)
+	// create oauth consumed state table
+	err = dbSession.DB.ResetModel(context.Background(), (*OAuthConsumedState)(nil))
+	assert.Nil(t, err)
 }
 
 // TestBuildUser creates a test User

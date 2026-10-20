@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/oauth2"
 )
 
 // TestMockResponses contains all mock response data
@@ -50,9 +51,12 @@ var DefaultMockResponses = GetDefaultMockResponses()
 // MockKeycloakServerConfig configures the mock server behavior
 type MockKeycloakServerConfig struct {
 	Responses        TestMockResponses
+	TokenContentType string            // defaults to application/json when empty
+	ClientSecret     string            // secret the authorization_code grant must present; defaults to test-secret
 	ValidCredentials map[string]string // username -> password
 	ValidTokens      map[string]bool   // token -> valid
 	ValidCodes       map[string]bool   // code -> valid
+	CodeChallenges   map[string]string // optional code -> expected S256 code_challenge
 }
 
 // DefaultMockServerConfig provides a standard configuration
@@ -126,9 +130,28 @@ func handleTokenEndpoint(res http.ResponseWriter, req *http.Request, config Mock
 			res.WriteHeader(http.StatusUnauthorized)
 		}
 	case "authorization_code":
+		// Keycloak authenticates the confidential client before it looks at the code.
+		expectedSecret := config.ClientSecret
+		if expectedSecret == "" {
+			expectedSecret = "test-secret"
+		}
+		if clientID != "test-client" || clientSecret != expectedSecret {
+			res.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		code := req.Form.Get("code")
-		if config.ValidCodes[code] {
-			res.Header().Set("Content-Type", "application/json")
+		verifier := req.Form.Get("code_verifier")
+		challengeMatches := true
+		expectedChallenge, hasChallenge := config.CodeChallenges[code]
+		if hasChallenge {
+			challengeMatches = oauth2.S256ChallengeFromVerifier(verifier) == expectedChallenge
+		}
+		if config.ValidCodes[code] && verifier != "" && challengeMatches {
+			contentType := config.TokenContentType
+			if contentType == "" {
+				contentType = "application/json"
+			}
+			res.Header().Set("Content-Type", contentType)
 			res.WriteHeader(http.StatusOK)
 			_, _ = res.Write([]byte(config.Responses.Token))
 		} else {
