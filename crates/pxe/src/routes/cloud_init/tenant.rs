@@ -37,6 +37,8 @@ use crate::metrics::{BootEndpoint, CloudInitConsumer, OutcomeReason, PxeBootOutc
 /// Every outcome on these routes carries the same endpoint label.
 const ENDPOINT: BootEndpoint = BootEndpoint::CloudInit(CloudInitConsumer::Tenant);
 const CLOUD_CONFIG_HEADER: &str = "#cloud-config";
+const CLOUD_CONFIG_ARCHIVE_HEADER: &str = "#cloud-config-archive";
+const CLOUD_CONFIG_JSONP_HEADER: &str = "#cloud-config-jsonp";
 const NETWORK_CONFIG_KEY: &str = "network";
 
 /// Serves the tenant's cloud-init document, removing a supported network
@@ -72,7 +74,17 @@ async fn user_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
 /// quoted strings under cloud-init's YAML 1.1 scalar rules. Unsupported
 /// layouts or references into the removed block are passed through unchanged.
 fn user_data_without_network(custom_cloud_init: &str) -> Option<String> {
-    if custom_cloud_init.lines().next()? != CLOUD_CONFIG_HEADER {
+    // Cloud-init matches prefixes after ignoring leading whitespace and case,
+    // with longer archive and JSON-patch prefixes taking precedence.
+    let header = custom_cloud_init
+        .trim_start()
+        .lines()
+        .next()?
+        .to_ascii_lowercase();
+    if !header.starts_with(CLOUD_CONFIG_HEADER)
+        || header.starts_with(CLOUD_CONFIG_ARCHIVE_HEADER)
+        || header.starts_with(CLOUD_CONFIG_JSONP_HEADER)
+    {
         return None;
     }
     let mut expected: serde_yaml::Value = serde_yaml::from_str(custom_cloud_init).ok()?;
@@ -226,10 +238,32 @@ pub(crate) fn get_router(path_prefix: &str) -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use carbide_instrument::testing::MetricsCapture;
+    use carbide_test_support::value_scenarios;
     use rpc::forge;
 
     use super::*;
     use crate::common::{test_app_state, test_app_state_with_templates};
+
+    #[test]
+    fn user_data_recognizes_cloud_config_headers() {
+        value_scenarios!(run = |header: &str| {
+            user_data_without_network(&format!("{header}\nnetwork: {{}}\nhostname: 'on'\n"))
+        };
+            "leading whitespace" {
+                "\n  #cloud-config" => Some("\n  #cloud-config\nhostname: 'on'\n".to_string()),
+            }
+            "trailing whitespace" {
+                "#cloud-config \t" => Some("#cloud-config \t\nhostname: 'on'\n".to_string()),
+            }
+            "case insensitive header" {
+                "#ClOuD-CoNfIg" => Some("#ClOuD-CoNfIg\nhostname: 'on'\n".to_string()),
+            }
+            "distinct formats sharing the cloud-config prefix" {
+                "\n #CLOUD-CONFIG-ARCHIVE" => None,
+                "#cloud-config-jsonp" => None,
+            }
+        );
+    }
 
     #[tokio::test]
     async fn tenant_cloud_config_separates_network_from_user_data() {
