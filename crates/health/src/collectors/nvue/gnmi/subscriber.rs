@@ -357,10 +357,9 @@ struct GnmiCredentialCache {
     init: OnceCell<()>,
     cached: RwLock<Option<GnmiUsernamePassword>>,
     generation: AtomicU64,
-    reload_lock: tokio::sync::Mutex<()>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct GnmiUsernamePassword {
     username: Option<String>,
     password: Option<String>,
@@ -664,24 +663,10 @@ impl GnmiCredentialCache {
             init: OnceCell::new(),
             cached: RwLock::new(None),
             generation: AtomicU64::new(0),
-            reload_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     async fn ensure(&self) -> Result<(GnmiUsernamePassword, u64), HealthError> {
-        if self.credential_provider.reload_before_use() {
-            let _guard = self.reload_lock.lock().await;
-            let credentials =
-                fetch_gnmi_username_password(self.credential_provider.clone(), &self.addr).await?;
-            let mut cached = self.cached.write().map_err(|_| {
-                HealthError::GnmiError("NVUE gNMI credential cache lock poisoned".to_string())
-            })?;
-            if cached.as_ref() != Some(&credentials) {
-                *cached = Some(credentials.clone());
-                self.generation.fetch_add(1, AtomicOrdering::AcqRel);
-            }
-            return Ok((credentials, self.generation.load(AtomicOrdering::Acquire)));
-        }
         if let Some(credentials) = self.cached_credentials()? {
             return Ok(credentials);
         }
@@ -707,11 +692,6 @@ impl GnmiCredentialCache {
         observed_generation: u64,
         error: &HealthError,
     ) -> Result<(), HealthError> {
-        let _reload_guard = if self.credential_provider.reload_before_use() {
-            Some(self.reload_lock.lock().await)
-        } else {
-            None
-        };
         if observed_generation != self.generation.load(AtomicOrdering::Acquire) {
             return Ok(());
         }
@@ -2683,7 +2663,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connections_check_the_shared_reader_without_changing_unchanged_generations() {
+    async fn file_rotation_refreshes_gnmi_cache_after_authentication_failure() {
         use crate::static_credentials::test_support::{
             provider_for_credentials_file, wait_for_password, write_credentials,
         };
@@ -2698,6 +2678,17 @@ mod tests {
         assert_eq!(cache.ensure().await.unwrap().1, generation);
         write_credentials(file.path(), "second");
         wait_for_password(&*provider, &addr, "second").await;
+        assert_eq!(
+            cache.ensure().await.unwrap().0.password.as_deref(),
+            Some("first")
+        );
+        cache
+            .refresh(
+                generation,
+                &HealthError::GnmiStatus(tonic::Status::unauthenticated("rotated credentials")),
+            )
+            .await
+            .unwrap();
         let (second, updated) = cache.ensure().await.unwrap();
         assert_eq!(second.password.as_deref(), Some("second"));
         assert_eq!(updated, generation + 1);

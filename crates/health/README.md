@@ -12,7 +12,7 @@ needed for this workflow.
 ## Static endpoint credentials
 
 Static endpoints may keep inline `username` and `password` fields, or use one
-shared JSON credentials file for both static endpoint lists:
+shared JSON or YAML credentials file for both static endpoint lists:
 
 ```toml
 [endpoint_sources]
@@ -31,38 +31,36 @@ username = "cumulus"
 switch = { serial = "switch-01" }
 ```
 
-See [credentials.example.json](example/credentials.example.json) for the file
-schema. Its optional `profiles` map contains named username/password sets; its
-optional `overrides` map contains partial credentials keyed by MAC address.
-Omitted maps and empty maps both contain no entries. MAC matching ignores
-letter case. Each target optionally selects a profile using
-`credentials_profile`; there is no implicit default profile. Selecting a profile
-requires `static_credentials_file`, and unknown profile names are errors.
+See [credentials.example.json](example/credentials.example.json) for the schema.
+The optional `profiles` map contains named credential sets; `overrides` contains
+partial credentials keyed by MAC, ignoring letter case. Omitted and empty maps
+both contain no entries. `credentials_profile` selects a profile explicitly,
+requires a configured file, and rejects unknown names; there is no default.
 
-Each field resolves independently: **per-MAC override → inline target value →
-selected profile**. Omitted or `null` credential fields inherit; an empty string
-is an explicit value. File-backed targets require both a username and a password
-after resolution; missing fields cause an error. With no file configured, inline
-usernames are required and inline passwords remain optional.
+Fields resolve independently: **per-MAC override → inline target value → selected
+profile**. Omitted or `null` fields inherit; empty strings are explicit values.
+Usernames are required; passwords are optional. With a file configured, target
+MACs must be unique across both static lists.
 
-The file path is optional and has no default; relative paths use the process
-working directory. NICo health loads the file once during startup and shares
-one cached reader across targets. Startup fails if the file is missing or
-malformed, a selected profile is unknown, or a target lacks a resolved username
-or password. The error log names the file and, for lookup errors, the target.
-File notifications trigger reloads, supplemented by a reread every 60 seconds
-for atomic replacements and Kubernetes Secret symlink updates. Requests read
-cached credentials. Writers should replace the complete JSON file atomically.
+The file path is optional with no default; relative paths use the working
+directory. One reader is shared across targets. Startup rejects missing or
+malformed files, unknown profiles, and missing usernames, logging the file path
+and, for lookup errors, the target MAC.
 
-Each update replaces the whole snapshot. Unknown fields, invalid value types,
-malformed JSON, or any invalid MAC key reject the entire update, keeping the last
-valid snapshot. Parse errors identify the failing field when available and
-redact credential values. A valid removal of an override restores the inline or
-profile value; removing a profile still selected by a target, or leaving required
-fields unresolved, causes lookup errors for that target. Profile and override
-additions and removals need no restart. Changes to the main configuration, including target lists and profile selections,
-require a restart. Established gNMI streams use updated credentials when they
-reconnect.
+File events trigger reloads; 60-second polling also detects atomic replacements
+and Kubernetes Secret updates. Replace complete files atomically. Missing files,
+unknown fields, invalid types or MACs, and malformed JSON or YAML retain the
+entire last valid snapshot. Parse errors report line/column when available and
+redact values.
+
+Consumers refresh from the cached snapshot after authentication fails. Redfish
+reads retry; mutating calls are not replayed. NVUE REST fetches again on the next
+collection pass. gNMI refreshes before reconnecting; established streams remain
+connected. Rotation can cause rejected requests or a failed REST collection pass.
+
+Profile/override changes need no restart. Removed overrides restore fallbacks;
+removing a selected profile or the last username causes lookup errors. Main
+configuration changes, including targets and profile selections, require restart.
 
 ## Prerequisites
 

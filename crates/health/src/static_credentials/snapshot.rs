@@ -16,20 +16,15 @@
  */
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
 
-use async_trait::async_trait;
-use carbide_secrets::SecretsError;
-use carbide_secrets::credentials::{
-    BmcCredentialType, CredentialKey, CredentialReader, Credentials,
-};
-use carbide_secrets::local_credentials::StructuredCredentialReader;
 use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 
+use crate::endpoint::BmcCredentials;
+
 /// Partial credentials; omitted or null fields inherit the next fallback.
 /// An explicit empty string is a value and does not inherit.
-#[derive(Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct CredentialOverrides {
     /// Username override, or absence to inherit.
@@ -70,21 +65,19 @@ pub(super) struct BmcCredentialSnapshot {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum ResolutionError {
+pub(super) enum ResolutionError {
     #[error("unknown credential profile {0}")]
     UnknownProfile(String),
     #[error("no username configured for BMC {0}")]
     MissingUsername(MacAddress),
-    #[error("no password configured for BMC {0}")]
-    MissingPassword(MacAddress),
 }
 
 impl BmcCredentialSnapshot {
-    fn resolve(
+    pub(super) fn resolve(
         &self,
         mac: MacAddress,
         config: &BmcCredentialConfig,
-    ) -> Result<Credentials, ResolutionError> {
+    ) -> Result<BmcCredentials, ResolutionError> {
         let profile = config
             .profile
             .as_ref()
@@ -103,55 +96,8 @@ impl BmcCredentialSnapshot {
         let password = entry
             .and_then(|v| v.password.clone())
             .or_else(|| config.inline.password.clone())
-            .or_else(|| profile.and_then(|v| v.password.clone()))
-            .ok_or(ResolutionError::MissingPassword(mac))?;
-        Ok(Credentials::UsernamePassword { username, password })
-    }
-}
-
-/// Binds one target's configuration to a shared cached credential file.
-/// Only `CredentialKey::BmcCredentials` with `BmcCredentialType::BmcRoot` for
-/// the bound MAC is supported; other keys return `None`. Successful lookups
-/// return a complete username/password pair. Unknown profiles or missing resolved
-/// fields return an error. Each lookup uses one complete cached snapshot.
-pub(super) struct BmcFileCredentialReader {
-    reader: Arc<StructuredCredentialReader<BmcCredentialSnapshot>>,
-    mac: MacAddress,
-    config: BmcCredentialConfig,
-}
-
-impl BmcFileCredentialReader {
-    /// Binds a target without creating additional file watches or reload tasks.
-    pub(super) fn new(
-        reader: Arc<StructuredCredentialReader<BmcCredentialSnapshot>>,
-        mac: MacAddress,
-        config: BmcCredentialConfig,
-    ) -> Self {
-        Self {
-            reader,
-            mac,
-            config,
-        }
-    }
-}
-
-#[async_trait]
-impl CredentialReader for BmcFileCredentialReader {
-    async fn get_credentials(
-        &self,
-        key: &CredentialKey,
-    ) -> Result<Option<Credentials>, SecretsError> {
-        match key {
-            CredentialKey::BmcCredentials {
-                credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
-            } if *bmc_mac_address == self.mac => self
-                .reader
-                .snapshot()
-                .resolve(self.mac, &self.config)
-                .map(Some)
-                .map_err(|error| SecretsError::GenericError(error.into())),
-            _ => Ok(None),
-        }
+            .or_else(|| profile.and_then(|v| v.password.clone()));
+        Ok(BmcCredentials::UsernamePassword { username, password })
     }
 }
 
@@ -162,14 +108,6 @@ mod tests {
     use carbide_secrets::local_credentials::{FileCredentialsConfig, StructuredCredentialReader};
 
     use super::*;
-
-    fn key(mac: &str) -> CredentialKey {
-        CredentialKey::BmcCredentials {
-            credential_type: BmcCredentialType::BmcRoot {
-                bmc_mac_address: mac.parse().unwrap(),
-            },
-        }
-    }
 
     #[test]
     fn profile_selection_and_field_precedence() {
@@ -199,7 +137,7 @@ mod tests {
                 Case {
                     scenario: "selected switch profile",
                     input: ("AA:BB:CC:DD:EE:00", config(Some("switch"), None, None)),
-                    expect: Yields(Credentials::new("cumulus", "switch-password")),
+                    expect: Yields(("cumulus".into(), Some("switch-password".into()))),
                 },
                 Case {
                     scenario: "override beats inline; inline beats profile",
@@ -207,12 +145,12 @@ mod tests {
                         "AA:BB:CC:DD:EE:01",
                         config(Some("bmc"), Some("cumulus"), Some("inline")),
                     ),
-                    expect: Yields(Credentials::new("cumulus", "individual")),
+                    expect: Yields(("cumulus".into(), Some("individual".into()))),
                 },
                 Case {
                     scenario: "explicit empty password",
                     input: ("AA:BB:CC:DD:EE:00", config(Some("bmc"), None, Some(""))),
-                    expect: Yields(Credentials::new("admin", "")),
+                    expect: Yields(("admin".into(), Some("".into()))),
                 },
                 Case {
                     scenario: "complete inline credentials without profile",
@@ -220,12 +158,12 @@ mod tests {
                         "AA:BB:CC:DD:EE:00",
                         config(None, Some("inline"), Some("inline-password")),
                     ),
-                    expect: Yields(Credentials::new("inline", "inline-password")),
+                    expect: Yields(("inline".into(), Some("inline-password".into()))),
                 },
                 Case {
                     scenario: "no implicit profile or password",
                     input: ("AA:BB:CC:DD:EE:00", config(None, Some("inline"), None)),
-                    expect: Fails,
+                    expect: Yields(("inline".into(), None)),
                 },
                 Case {
                     scenario: "missing username",
@@ -241,6 +179,14 @@ mod tests {
             |(mac, config)| {
                 snapshot
                     .resolve(mac.parse().unwrap(), &config)
+                    .map(|credentials| match credentials {
+                        BmcCredentials::UsernamePassword { username, password } => {
+                            (username, password)
+                        }
+                        BmcCredentials::SessionToken { .. } => {
+                            panic!("file credentials must use username/password")
+                        }
+                    })
                     .map_err(|_| ())
             },
         );
@@ -250,41 +196,24 @@ mod tests {
     async fn rejects_invalid_snapshot_without_exposing_password() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials.json");
-        for (input, field) in [
-            (
-                r#"{"overrides":{"invalid-mac":{"password":"sensitive"}}}"#,
-                "overrides",
-            ),
-            (
-                r#"{"profiles":{"bmc":{"pasword":"sensitive"}}}"#,
-                "profiles.bmc",
-            ),
-            (
-                r#"{"profiles":{"bmc":{"password":["sensitive"]}}}"#,
-                "profiles.bmc.password",
-            ),
-            (r#"{"profiles":{"bmc":{"password":"sensitive"}}"#, "JSON"),
-            ("default: {password: sensitive}", "JSON"),
-            (
-                r#"{"profiles":{"bmc":{"password":"sensitive"}}} {}"#,
-                "document",
-            ),
+        for input in [
+            r#"{"overrides":{"invalid-mac":{"password":"sensitive"}}}"#,
+            r#"{"profiles":{"bmc":{"pasword":"sensitive"}}}"#,
+            r#"{"profiles":{"bmc":{"password":["sensitive"]}}}"#,
+            r#"{"profiles":{"bmc":{"password":"sensitive"}}"#,
+            "default: {password: sensitive}",
+            r#"{"profiles":{"bmc":{"password":"sensitive"}}} {}"#,
         ] {
             std::fs::write(&path, input).unwrap();
-            let error = StructuredCredentialReader::<BmcCredentialSnapshot>::new_json(
-                FileCredentialsConfig {
+            let error =
+                StructuredCredentialReader::<BmcCredentialSnapshot>::new(FileCredentialsConfig {
                     path: Some(path.clone()),
                     ..Default::default()
-                },
-            )
-            .await
-            .err()
-            .expect("invalid file must fail initial load");
+                })
+                .await
+                .err()
+                .expect("invalid file must fail initial load");
             assert!(!format!("{error:?}").contains("sensitive"));
-            assert!(
-                error.to_string().contains(field),
-                "expected {field} in {error}"
-            );
         }
         let fields = CredentialOverrides {
             username: None,
@@ -294,15 +223,6 @@ mod tests {
     }
 
     #[cfg(unix)]
-    async fn password(reader: &dyn CredentialReader, key: &CredentialKey) -> String {
-        let Some(Credentials::UsernamePassword { password, .. }) =
-            reader.get_credentials(key).await.unwrap()
-        else {
-            panic!("expected username/password credentials");
-        };
-        password
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn projected_file_reloads_additions_removals_and_keeps_last_valid_snapshot() {
@@ -331,54 +251,32 @@ mod tests {
         let path = dir.path().join("credentials.json");
         symlink("..data/credentials.json", &path).unwrap();
         let reader =
-            StructuredCredentialReader::<BmcCredentialSnapshot>::new_json(FileCredentialsConfig {
+            StructuredCredentialReader::<BmcCredentialSnapshot>::new(FileCredentialsConfig {
                 path: Some(path.clone()),
                 poll_interval: Some(Duration::from_millis(25)),
                 ..Default::default()
             })
             .await
             .unwrap();
-        let mac = key("00:11:22:33:44:55");
-        let shared = Arc::new(reader);
-        let reader = BmcFileCredentialReader::new(
-            shared.clone(),
-            "00:11:22:33:44:55".parse().unwrap(),
-            BmcCredentialConfig {
-                profile: Some("bmc".into()),
-                ..Default::default()
-            },
-        );
-        let peer = BmcFileCredentialReader::new(
-            shared,
-            "00:11:22:33:44:66".parse().unwrap(),
-            BmcCredentialConfig {
-                profile: Some("bmc".into()),
-                ..Default::default()
-            },
-        );
-        assert!(Arc::ptr_eq(&reader.reader, &peer.reader));
-        assert_eq!(
-            reader
-                .get_credentials(&key("00:11:22:33:44:66"))
-                .await
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            reader
-                .get_credentials(&CredentialKey::UfmAuth {
-                    fabric: "test".into()
-                })
-                .await
-                .unwrap(),
-            None
-        );
+        let mac = "00:11:22:33:44:55".parse().unwrap();
+        let config = BmcCredentialConfig {
+            profile: Some("bmc".into()),
+            ..Default::default()
+        };
+        let password = || {
+            let BmcCredentials::UsernamePassword { password, .. } =
+                reader.snapshot().resolve(mac, &config).unwrap()
+            else {
+                panic!("file credentials must use username/password");
+            };
+            password.unwrap()
+        };
         for (revision, expected) in [("v2", "individual"), ("v3", "final")] {
             symlink(revision, dir.path().join("..next")).unwrap();
             std::fs::rename(dir.path().join("..next"), dir.path().join("..data")).unwrap();
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
-                    if password(&reader, &mac).await.as_str() == expected {
+                    if password().as_str() == expected {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -398,7 +296,7 @@ mod tests {
                 std::fs::remove_file(&path).unwrap();
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
-            assert_eq!(password(&reader, &mac).await.as_str(), "final");
+            assert_eq!(password().as_str(), "final");
         }
         std::fs::write(
             &path,
@@ -407,7 +305,7 @@ mod tests {
         .unwrap();
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                if password(&reader, &mac).await.as_str() == "recovered" {
+                if password().as_str() == "recovered" {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;

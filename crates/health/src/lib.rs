@@ -168,11 +168,7 @@ async fn build_endpoint_wiring(
             .filter_map(|cfg| {
                 let mac = cfg.mac.parse().ok()?;
                 Some((
-                    endpoint::BmcAddr {
-                        ip: cfg.ip,
-                        port: cfg.port,
-                        mac: Some(mac),
-                    },
+                    mac,
                     static_credentials::BmcCredentialConfig {
                         profile: cfg.credentials_profile.clone(),
                         inline: static_credentials::CredentialOverrides {
@@ -651,6 +647,10 @@ mac = "aa:bb:cc:dd:ee:02"
 username = "cumulus"
 credentials_profile = "bmc"
 switch = {serial = "switch"}
+[[endpoint_sources.static_bmc_endpoints]]
+ip = "192.0.2.3"
+mac = "aa:bb:cc:dd:ee:03"
+username = "passwordless"
 "#,
             ))
             .extract()
@@ -659,27 +659,33 @@ switch = {serial = "switch"}
         config.validate().unwrap();
         let wiring = build_endpoint_wiring(&config, None).await.unwrap();
         let endpoints = wiring.source.fetch_bmc_hosts().await.unwrap();
-        assert_eq!(endpoints.len(), 2);
+        assert_eq!(endpoints.len(), 3);
         let providers = endpoints
             .iter()
             .map(|e| e.bmc.credential_provider())
             .collect::<Vec<_>>();
-        assert!(Arc::ptr_eq(&providers[0], &providers[1]));
+        assert!(
+            providers
+                .iter()
+                .all(|provider| Arc::ptr_eq(&providers[0], provider))
+        );
         for (index, username, password) in [
-            (0, "inline-user", "inline-password"),
-            (1, "cumulus", "individual"),
+            (0, "inline-user", Some("inline-password")),
+            (1, "passwordless", None),
+            (2, "cumulus", Some("individual")),
         ] {
-            let actual = providers[index]
-                .fetch_credentials(&endpoints[index].addr)
-                .await
-                .unwrap();
-            assert!(
-                actual
-                    == BmcCredentials::UsernamePassword {
-                        username: username.into(),
-                        password: Some(password.into()),
-                    }
-            );
+            let mut addr = endpoints[index].addr.clone();
+            addr.ip = "198.51.100.1".parse().unwrap();
+            let actual = providers[index].fetch_credentials(&addr).await.unwrap();
+            let BmcCredentials::UsernamePassword {
+                username: actual_username,
+                password: actual_password,
+            } = actual
+            else {
+                panic!("file credentials must use username/password");
+            };
+            assert_eq!(actual_username, username);
+            assert_eq!(actual_password.as_deref(), password);
         }
     }
 
@@ -694,7 +700,7 @@ switch = {serial = "switch"}
                 None,
             ),
             ("unknown profile", Some("{}"), Some("missing")),
-            ("missing password", Some("{}"), None),
+            ("missing username", Some("{}"), None),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("credentials.json");
@@ -708,7 +714,7 @@ switch = {serial = "switch"}
                 .map(|n| {
                     serde_json::from_value(serde_json::json!({
                         "ip": format!("192.0.2.{n}"), "mac": format!("00:11:22:33:44:{n:02x}"),
-                        "username": "admin", "credentials_profile": profile,
+                        "username": if scenario == "missing username" { None } else { Some("admin") }, "credentials_profile": profile,
                     }))
                     .unwrap()
                 })

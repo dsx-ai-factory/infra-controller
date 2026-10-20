@@ -167,14 +167,15 @@ pub struct EndpointSourcesConfig {
     #[serde(rename = "nico_api", alias = "carbide_api")]
     pub carbide_api: Configurable<CarbideApiConnectionConfig>,
 
-    /// Optional JSON credentials file for both static endpoint lists.
+    /// Optional JSON or YAML credentials file for both static endpoint lists.
     /// Relative paths use the process working directory. Per-MAC overrides take
     /// precedence over inline target fields, then the explicitly selected profile,
     /// independently for username and password. Omitted/null fields inherit; empty strings do not.
-    /// Cached snapshots reload on file events and every 60 seconds. Failed updates
+    /// Cached snapshots reload on file events, with polling every 60 seconds. Failed updates
     /// retain the last valid snapshot; startup requires a readable, valid file,
-    /// valid profile selections, and a resolved username and password per target. Writers should replace the
-    /// file atomically. By default no file is loaded.
+    /// valid profile selections, and a resolved username per target. Passwords are optional.
+    /// Target MACs must be unique when a file is configured. Consumers refresh after
+    /// authentication failures. Writers should replace the file atomically. By default no file is loaded.
     /// Adding/removing overrides does not change the configured target inventory.
     pub static_credentials_file: Option<PathBuf>,
 
@@ -296,8 +297,7 @@ pub struct StaticBmcEndpoint {
     pub mac: String,
     /// Inline fallback username; may be supplied by `static_credentials_file`.
     pub username: Option<String>,
-    /// Inline fallback password. File-backed targets must resolve a password;
-    /// inline-only targets may omit it.
+    /// Optional inline fallback password; omission allows inheritance from the file.
     pub password: Option<String>,
     /// Optional named profile in `static_credentials_file`. No profile is selected
     /// by default; unknown names fail lookup. Requires a configured credentials file.
@@ -395,6 +395,25 @@ impl Debug for StaticBmcEndpoint {
 }
 
 impl StaticBmcEndpoint {
+    fn validate_credential_source(
+        &self,
+        config_path: &str,
+        index: usize,
+        has_file: bool,
+    ) -> Result<(), String> {
+        if !has_file && self.credentials_profile.is_some() {
+            return Err(format!(
+                "{config_path}[{index}].credentials_profile requires endpoint_sources.static_credentials_file"
+            ));
+        }
+        if !has_file && self.username.is_none() {
+            return Err(format!(
+                "{config_path}[{index}].username is required without endpoint_sources.static_credentials_file"
+            ));
+        }
+        Ok(())
+    }
+
     fn identity_count(&self) -> usize {
         usize::from(self.machine.is_some())
             + usize::from(self.power_shelf.is_some())
@@ -471,32 +490,27 @@ impl EndpointSourcesConfig {
         {
             return Err("endpoint_sources.static_credentials_file must not be empty".into());
         }
-        for endpoint in self
-            .static_bmc_endpoints
-            .iter()
-            .chain(&self.static_switch_host_endpoints)
-        {
-            if endpoint.credentials_profile.is_some() && self.static_credentials_file.is_none() {
-                return Err(
-                    "credentials_profile requires endpoint_sources.static_credentials_file".into(),
-                );
-            }
-            if self.static_credentials_file.is_none() && endpoint.username.is_none() {
-                return Err(
-                    "static endpoints require username or endpoint_sources.static_credentials_file"
-                        .into(),
-                );
-            }
-        }
         let mut static_macs = HashMap::new();
 
         for (index, endpoint) in self.static_bmc_endpoints.iter().enumerate() {
             endpoint.validate(BMC_ENDPOINTS_PATH, index)?;
+            endpoint.validate_credential_source(
+                BMC_ENDPOINTS_PATH,
+                index,
+                self.static_credentials_file.is_some(),
+            )?;
 
             let mac = endpoint.mac.parse::<MacAddress>().map_err(|_| {
                 format!("{BMC_ENDPOINTS_PATH}[{index}].mac must be a valid MAC address")
             })?;
 
+            if self.static_credentials_file.is_some()
+                && let Some((existing_path, existing_index)) = static_macs.get(&mac)
+            {
+                return Err(format!(
+                    "{BMC_ENDPOINTS_PATH}[{index}].mac duplicates {existing_path}[{existing_index}].mac"
+                ));
+            }
             static_macs
                 .entry(mac)
                 .or_insert((BMC_ENDPOINTS_PATH, index));
@@ -504,6 +518,11 @@ impl EndpointSourcesConfig {
 
         for (index, endpoint) in self.static_switch_host_endpoints.iter().enumerate() {
             endpoint.validate(SWITCH_HOST_ENDPOINTS_PATH, index)?;
+            endpoint.validate_credential_source(
+                SWITCH_HOST_ENDPOINTS_PATH,
+                index,
+                self.static_credentials_file.is_some(),
+            )?;
 
             let Some(switch) = endpoint.switch.as_ref() else {
                 return Err(format!(
@@ -3532,6 +3551,45 @@ username = "root"
                 ("", "username = \"admin\"\ncredentials_profile = \"bmc\"") => Fails,
             }
         );
+    }
+
+    #[test]
+    fn static_credential_errors_identify_the_entry() {
+        for (list, global, target, field, reason) in [
+            (
+                "static_bmc_endpoints",
+                "",
+                "",
+                "username",
+                "is required without endpoint_sources.static_credentials_file",
+            ),
+            (
+                "static_switch_host_endpoints",
+                "",
+                "username = \"admin\"\ncredentials_profile = \"missing\"",
+                "credentials_profile",
+                "requires endpoint_sources.static_credentials_file",
+            ),
+            (
+                "static_bmc_endpoints",
+                "static_credentials_file = \"credentials.json\"",
+                "username = \"admin\"",
+                "mac",
+                "duplicates endpoint_sources.static_bmc_endpoints[0].mac",
+            ),
+        ] {
+            let input = format!(
+                "[endpoint_sources]\n{global}\n[[endpoint_sources.{list}]]\nip = \"192.0.2.1\"\nmac = \"00:11:22:33:44:55\"\nusername = \"admin\"\nswitch = {{ serial = \"switch-1\", endpoint_role = \"host\" }}\n[[endpoint_sources.{list}]]\nip = \"192.0.2.2\"\nmac = \"00:11:22:33:44:55\"\n{target}"
+            );
+            let config: Config = Figment::new()
+                .merge(Toml::string(&input))
+                .extract()
+                .unwrap();
+            assert_eq!(
+                config.endpoint_sources.validate().unwrap_err(),
+                format!("endpoint_sources.{list}[1].{field} {reason}")
+            );
+        }
     }
 
     #[test]

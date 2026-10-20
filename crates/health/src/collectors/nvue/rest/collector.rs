@@ -275,7 +275,7 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
     async fn run_iteration(&mut self) -> Result<IterationResult, HealthError> {
         self.client.ensure_http_client().await?;
 
-        if (self.provider.reload_before_use() || !self.client.has_credentials())
+        if !self.client.has_credentials()
             && let Err(error) = self.refresh_rest_credentials().await
         {
             tracing::warn!(
@@ -2315,7 +2315,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_iterations_apply_rotated_reader_credentials_on_the_wire() {
+    async fn rest_file_rotation_refreshes_after_authentication_failure() {
         use base64::Engine;
 
         use crate::static_credentials::test_support::{
@@ -2329,13 +2329,19 @@ mod tests {
             axum::routing::get(move |request: http::HeaderMap| {
                 let headers = headers.clone();
                 async move {
-                    headers.lock().unwrap().push(
+                    let mut headers = headers.lock().unwrap();
+                    headers.push(
                         request[http::header::AUTHORIZATION]
                             .to_str()
                             .unwrap()
                             .to_owned(),
                     );
-                    axum::Json(serde_json::json!({"status": "OK"}))
+                    let status = if headers.len() == 2 {
+                        axum::http::StatusCode::UNAUTHORIZED
+                    } else {
+                        axum::http::StatusCode::OK
+                    };
+                    (status, axum::Json(serde_json::json!({"status": "OK"})))
                 }
             }),
         );
@@ -2359,10 +2365,11 @@ mod tests {
         assert_eq!(collector.run_iteration().await.unwrap().fetch_failures, 0);
         write_credentials(file.path(), "second");
         wait_for_password(&*provider, &test_addr(), "second").await;
+        assert_eq!(collector.run_iteration().await.unwrap().fetch_failures, 1);
         assert_eq!(collector.run_iteration().await.unwrap().fetch_failures, 0);
         assert_eq!(
             *captured.lock().unwrap(),
-            ["admin:first", "admin:second"].map(|value| {
+            ["admin:first", "admin:first", "admin:second"].map(|value| {
                 format!(
                     "Basic {}",
                     base64::engine::general_purpose::STANDARD.encode(value)

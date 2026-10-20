@@ -330,7 +330,7 @@ pub struct SwitchData {
     pub nmxt_enabled: bool,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub enum BmcCredentials {
     UsernamePassword {
         username: String,
@@ -341,7 +341,7 @@ pub enum BmcCredentials {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BmcAddr {
     pub ip: IpAddr,
     pub port: Option<u16>,
