@@ -1023,6 +1023,7 @@ async fn test_zero_dpu_network_update_releases_vpc_bound_host_interface(
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }),
     )
     .await?

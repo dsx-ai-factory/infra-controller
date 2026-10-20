@@ -3010,19 +3010,21 @@ mod tests {
 
     use super::*;
 
-    /// A present binding must fail conversion even when empty or otherwise valid.
+    /// A present binding must fail conversion even when defaulted or otherwise valid.
     #[test]
     fn external_validation_binding_is_rejected_before_allocation() {
+        use carbide_uuid::external_validation::ExternalValidationRequestId;
+
         check_values(
             [
                 Check {
-                    scenario: "explicit empty binding is unsupported",
-                    input: String::new(),
+                    scenario: "present default binding is unsupported",
+                    input: ExternalValidationRequestId::default(),
                     expect: tonic::Code::FailedPrecondition,
                 },
                 Check {
                     scenario: "request UUID is unsupported before binding implementation",
-                    input: uuid::Uuid::new_v4().to_string(),
+                    input: ExternalValidationRequestId::new(),
                     expect: tonic::Code::FailedPrecondition,
                 },
             ],

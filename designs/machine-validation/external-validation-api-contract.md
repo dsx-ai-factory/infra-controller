@@ -25,12 +25,16 @@ new RPC handlers return `UNIMPLEMENTED`; existing method authorization may rejec
 calls before they reach a handler. Publishing declarations grants no additional
 permissions and does not create holds or attempts.
 
-All six methods have explicit empty static RBAC grants; runtime tenant/site
-authorization and any service grants belong to their implementation milestones.
+All six methods have explicit empty static RBAC grants. With internal RBAC
+enabled, callers with an `AuthContext` receive `PERMISSION_DENIED` before a
+handler runs. Missing `AuthContext` is also rejected before dispatch; this
+contract does not promise a gRPC wire status for that branch. With RBAC bypassed,
+the stubs return `UNIMPLEMENTED`. Runtime tenant/site authorization and service
+grants belong to the implementation milestones.
 
 A present `InstanceAllocationRequest.external_validation_request_id` returns
 `FAILED_PRECONDITION` until request-bound allocation is implemented, including
-an empty string and requests within `AllocateInstances`. Omission preserves
+a present default UUID and requests within `AllocateInstances`. Omission preserves
 existing allocation behavior. The guard prevents ordinary allocation from
 silently accepting a request that expects a durable validation binding.
 
@@ -85,6 +89,20 @@ this contract. OS and network configuration stay in the existing
 `InstanceAllocationRequest.config`; this workflow does not choose a validator's
 image or network.
 
+## Resource identities
+
+`common.ExternalValidationHoldId`, `common.ExternalValidationCycleId`, and
+`common.ExternalValidationRequestId` are distinct UUID message types. They follow
+the existing `common.InstanceId` convention: each contains a `value` UUID string,
+and Rust uses the corresponding `carbide_uuid::external_validation` type.
+All hold/cycle/request references, including the allocation binding and pagination
+cursor, use these types. The caller-generated `caller_idempotency_key` stays a
+separate UUID string; it is not a NICo request ID.
+
+For example, the protobuf JSON representation of a request reference is
+`"requestId": {"value": "<request-uuid>"}`. The future REST create field below is
+a scalar UUID string translated into this Core message by the REST adapter.
+
 ## Discovery and pagination
 
 Discover IDs on startup and periodically afterward, then retrieve their current
@@ -93,14 +111,24 @@ scope at the connected site. They follow the Core `FindIds`/`FindByIds` conventi
 
 Call `FindExternalValidationHoldIds` with `ExternalValidationHoldSearchFilter`.
 `page_size` is optional, defaults to 20, and accepts 1 through 100; explicit zero
-is invalid. Omit `after` to begin a pass. Results contain active `hold_ids`
-ordered by immutable `created_at ASC`, then `hold_id ASC` in UUID byte order.
+is invalid. Optional `machine_id` selects one exact host; omission includes all
+hosts in the authorized scope. Malformed or DPU IDs are invalid; an unknown host
+returns no matches. Optional `state` selects one state, including Satisfied.
+Omission includes Pending, AttemptOpen, AwaitingCleanup, and Recovery;
+UNSPECIFIED and unknown enum values are invalid. Tenant, machine, and state
+filters combine with AND.
+
+These filters support checking for an active hold on one machine and discovering
+all Pending holds without scanning unrelated results. Omit `after` to begin a
+pass. Results contain matching `hold_ids` ordered by immutable `created_at ASC`,
+then `hold_id ASC` in UUID byte order.
 An empty authorized scope succeeds with an empty ID list.
 
 When more matches exist at the read, `next_cursor` contains the last returned
-ID's creation timestamp and UUID; otherwise it is absent. Continue with that
-cursor in `after` and the same tenant filter. A supplied cursor requires both
-fields; malformed timestamps or UUIDs return `INVALID_ARGUMENT`. The next page
+ID's creation timestamp and UUID; otherwise it is absent. Cursor presence is the
+has-more indicator; no separate `has_more` field is required. Continue with that
+cursor in `after` and the same tenant, machine, and state filters. A supplied
+cursor requires both fields; malformed timestamps or UUIDs return `INVALID_ARGUMENT`. The next page
 selects tuples strictly greater than the cursor without looking up its hold.
 Removing or satisfying an earlier hold cannot shift the next page or repeat an
 already returned ID. A deleted cursor hold does not invalidate traversal.
@@ -108,19 +136,24 @@ already returned ID. A deleted cursor hold does not invalidate traversal.
 Call `FindExternalValidationHoldsByIds` with the tenant scope and 1 through 100
 hold UUIDs from each page. Malformed UUIDs reject the entire request with
 `INVALID_ARGUMENT`. Duplicates are accepted and returned at most once. Results
-are ordered by the same creation/UUID tuple. Unknown, satisfied, removed, and
-out-of-tenant IDs are omitted without disclosing their state. An empty result
-never proves allocation or cleanup completed.
+are ordered by the same creation/UUID tuple. Satisfied holds remain readable to
+the authorized tenant by ID. Unknown,
+removed, and out-of-tenant IDs are omitted without disclosing their state. An
+empty result never proves allocation or cleanup completed. This retrieval is
+not restricted by discovery filters; a hold becoming Satisfied between the two
+calls is returned with its new state.
 
 These calls read live state, not a frozen snapshot. Hold state may change
 between discovery and retrieval. Newly visible holds behind the current cursor
 are picked up by the next reconciliation pass, which restarts without a cursor.
 Do not persist the end cursor as a permanent discovery checkpoint.
 
-Active lists include Pending, AttemptOpen, AwaitingCleanup, and Recovery holds;
-Satisfied holds are excluded. Repair or another health blocker does not hide a
-Pending hold. Each hold includes its machine, tenant organization, stable hold
-and cycle UUIDs, state, creation time, and current attempt. `attempt` is absent
+Default discovery includes active holds only; explicit state filtering and
+by-ID retrieval can also return Satisfied holds. Repair or another health
+blocker does not hide a Pending hold. Each hold includes its machine, tenant organization, stable hold
+and cycle UUIDs, state, creation time, and current attempt. Satisfied holds remain
+available for the lifecycle of the retained hold record; this phase defines no
+automatic hold expiry. By-ID retrieval does not expose a complete attempt history. `attempt` is absent
 in Pending. An attempt's `validation_instance_id` is absent before creation and
 retained after deletion for recovery and replay. Timestamps are UTC.
 
@@ -187,6 +220,58 @@ blocking health alerts, repair admission, ownership, and provisionability at
 allocation commit. Labels cannot establish a binding. A closed or superseded
 request cannot allocate another instance, even after its original instance was
 released.
+
+## REST integration contract (implementation deferred)
+
+Maestro/NRO uses the existing REST Create Instance API. Core gRPC declarations
+alone do not make this workflow usable through REST. The current REST
+`APIInstanceCreateRequest` has no external-validation binding, and the Site
+workflow wraps Core errors without capturing this allocation trailer.
+
+The following is the proposed REST contract for the request-bound allocation
+milestone; it is not implemented or added to OpenAPI by this contract-only PR:
+
+- Add optional scalar UUID `externalValidationRequestId` to the single-instance
+  create model and OpenAPI schema. Omission preserves ordinary allocation;
+  an empty or malformed value is rejected. Translate it into Core's typed
+  `external_validation_request_id` and preserve it through the Site workflow.
+- Require an exact `machineId`, the configured validation tenant, and
+  `allowUnhealthyMachine: true`; omit `instanceTypeId`. Do not add this binding to
+  batch create. Existing tenant/site authorization and other blockers still apply.
+- Persist the request identity, accepted create inputs, and REST-to-Core instance
+  identity before dispatch. A replay of the same request and inputs must reuse
+  that identity and return the original instance rather than generate a new one.
+  Changed accepted inputs conflict.
+- Capture Core's allocation metadata at the gRPC boundary and carry the state
+  through Temporal errors/results into a structured REST response. HTTP status,
+  a generic retryable flag, or parsing an error message cannot substitute for it.
+
+For a bound create response, propose structured fields
+`externalValidationRequestId` (the submitted UUID) and
+`externalValidationAllocationState` (`notStarted`, `creating`, `created`, or
+`unknown`). Preserve these fields in the error representation as well as the
+success response. The OpenAPI/REST implementation must establish the response
+schema before enabling this path.
+
+| Observed result | REST representation | Caller action |
+| --- | --- | --- |
+| Committed allocation or identical committed replay | HTTP 201 with the original instance and `created` | Continue using the saved instance identity. |
+| Definite rejection, confirmed unaccepted | HTTP 4xx with `notStarted`; for an existing attempt this requires authoritative Core confirmation | Correct inputs or cancel only after confirming the attempt is NotStarted. |
+| Accepted allocation still in progress | HTTP 503 with `creating`, preserving Core's `external-validation-allocation-state: creating` meaning | Retry the same request identity and inputs; never cancel. |
+| Lost reply, timeout, or otherwise uncertain outcome | `unknown` if an HTTP response is possible; network failure has no response | Reconcile the saved request; never cancel or create a new attempt merely because the reply was lost. |
+
+A 4xx from a changed-input conflict is not proof that the original create was
+unaccepted. Missing structured state, an unrecognized state, and a bare 5xx are
+unknown outcomes. `notStarted` permits cancellation only while the saved attempt
+still satisfies Core's cancellation preconditions. The REST adapter must not
+classify an accepted operation as a definite rejection after an ambiguous result.
+
+REST model/handler/workflow changes, OpenAPI, SDK regeneration, and integration
+tests are required together in the allocation milestone. These tests must cover
+binding propagation, replay without a second instance, trailer propagation, and
+unknown-outcome recovery. Until that work ships, REST callers cannot perform
+request-bound external-validation allocation; this milestone publishes only the
+Core contract. Hold/attempt REST endpoints are a separate interface decision.
 
 ## Cancellation and completion
 
@@ -256,7 +341,7 @@ authorization and output-redaction decision.
 
 | gRPC code | Meaning and recovery |
 | --- | --- |
-| `INVALID_ARGUMENT` | Required input is missing, a UUID is malformed, pagination/details bounds are exceeded, or an outcome is unspecified or unknown. Correct the request. |
+| `INVALID_ARGUMENT` | Required input is missing, a UUID is malformed, pagination/details bounds are exceeded, or a state filter/outcome is unspecified or unknown. Correct the request. |
 | `UNAUTHENTICATED` | Authentication failed. Use valid credentials. |
 | `PERMISSION_DENIED` | Caller lacks method or tenant/site authorization. Request identity is not sufficient. |
 | `NOT_FOUND` | Machine or request does not exist in the authorized scope. Verify identity; absence of a hold instead returns `NoActiveHold`. |

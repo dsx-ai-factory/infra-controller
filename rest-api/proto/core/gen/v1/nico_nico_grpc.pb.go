@@ -1619,13 +1619,17 @@ type ForgeClient interface {
 	// Secrets management
 	ReWrapSecrets(ctx context.Context, in *ReWrapSecretsRequest, opts ...grpc.CallOption) (*ReWrapSecretsResponse, error)
 	// External-validation contract only: these methods are not implemented until
-	// durable holds and attempts are delivered. Scope is the connected Core site
+	// durable holds and attempts are delivered. With internal RBAC enabled, the
+	// explicit empty grants deny callers with an AuthContext before dispatch
+	// (PERMISSION_DENIED). Missing AuthContext is also rejected before dispatch;
+	// no gRPC wire status for that branch is promised here. With RBAC bypassed,
+	// the stubs return UNIMPLEMENTED. Scope is the connected Core site
 	// and configured tenant_org_id. Existing mTLS and method authorization are
 	// required in addition to tenant-scoped checks; request IDs grant no permission.
-	// Discovers active hold IDs in immutable (created_at, hold_id) order using
+	// Discovers hold IDs (active by default) in immutable (created_at, hold_id) order using
 	// exclusive keyset pagination; removal of earlier holds cannot shift pages.
 	FindExternalValidationHoldIds(ctx context.Context, in *ExternalValidationHoldSearchFilter, opts ...grpc.CallOption) (*ExternalValidationHoldIdList, error)
-	// Fetches current active holds by discovered IDs within the authorized tenant.
+	// Fetches current holds, including Satisfied, by ID within the authorized tenant.
 	FindExternalValidationHoldsByIds(ctx context.Context, in *ExternalValidationHoldsByIdsRequest, opts ...grpc.CallOption) (*ExternalValidationHoldList, error)
 	// Atomically opens one attempt or replays the attempt identified by the key.
 	StartExternalValidation(ctx context.Context, in *StartExternalValidationRequest, opts ...grpc.CallOption) (*StartExternalValidationResponse, error)
@@ -8192,13 +8196,17 @@ type ForgeServer interface {
 	// Secrets management
 	ReWrapSecrets(context.Context, *ReWrapSecretsRequest) (*ReWrapSecretsResponse, error)
 	// External-validation contract only: these methods are not implemented until
-	// durable holds and attempts are delivered. Scope is the connected Core site
+	// durable holds and attempts are delivered. With internal RBAC enabled, the
+	// explicit empty grants deny callers with an AuthContext before dispatch
+	// (PERMISSION_DENIED). Missing AuthContext is also rejected before dispatch;
+	// no gRPC wire status for that branch is promised here. With RBAC bypassed,
+	// the stubs return UNIMPLEMENTED. Scope is the connected Core site
 	// and configured tenant_org_id. Existing mTLS and method authorization are
 	// required in addition to tenant-scoped checks; request IDs grant no permission.
-	// Discovers active hold IDs in immutable (created_at, hold_id) order using
+	// Discovers hold IDs (active by default) in immutable (created_at, hold_id) order using
 	// exclusive keyset pagination; removal of earlier holds cannot shift pages.
 	FindExternalValidationHoldIds(context.Context, *ExternalValidationHoldSearchFilter) (*ExternalValidationHoldIdList, error)
-	// Fetches current active holds by discovered IDs within the authorized tenant.
+	// Fetches current holds, including Satisfied, by ID within the authorized tenant.
 	FindExternalValidationHoldsByIds(context.Context, *ExternalValidationHoldsByIdsRequest) (*ExternalValidationHoldList, error)
 	// Atomically opens one attempt or replays the attempt identified by the key.
 	StartExternalValidation(context.Context, *StartExternalValidationRequest) (*StartExternalValidationResponse, error)
