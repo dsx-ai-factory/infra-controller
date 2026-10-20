@@ -6088,6 +6088,8 @@ async fn test_dpf_helm_chart_create_reconciliation_waits_for_mutable_convergence
 /// Verifies baseline deployment type is saved in the database and the service becomes Ready
 /// after DPF accepts its DPUService. The missing selector allows all DPUs;
 /// the owner label identifies the service for later updates and deletion.
+/// Valid Helm data ensures service VPC updates fail on the baseline restriction,
+/// so an unrelated parsing error cannot mask a missing guard.
 #[crate::sqlx_test]
 async fn test_baseline_dpf_helm_chart_create_reconciles_without_placement_selector(
     db_pool: sqlx::PgPool,
@@ -6156,8 +6158,7 @@ async fn test_baseline_dpf_helm_chart_create_reconciles_without_placement_select
     );
     txn.commit().await?;
 
-    // Reject adding a service VPC interface: these interfaces require an
-    // instance attachment, which baseline services do not support.
+    // Use valid Helm data to isolate the baseline restriction on service VPC updates.
     let rejected = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
@@ -6169,24 +6170,31 @@ async fn test_baseline_dpf_helm_chart_create_reconciles_without_placement_select
             service_id: service_id.to_string(),
             service_name: None,
             description: None,
-            data: String::new(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
             credential: None,
             observability: None,
             if_version_ctr_match: None,
         }))
         .await
         .expect_err("baseline updates must reject service VPC requirements");
+    // Require the baseline-specific error so unrelated validation cannot satisfy the test.
     assert_eq!(rejected.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        rejected.message(),
+        "service VPC interfaces are unsupported for baseline helm services"
+    );
 
     Ok(())
 }
 
 /// Verifies create rejects unsupported deployment types, targets, and service
 /// VPC interfaces before saving a service that the controller would deploy.
+/// Specific errors distinguish each restriction from unrelated validation failures.
 #[crate::sqlx_test]
 async fn test_extension_service_create_rejects_invalid_deployment_type_combinations(
     db_pool: sqlx::PgPool,
 ) -> Result<(), eyre::Report> {
+    // Enable DPF and create the tenant so unrelated prerequisites are satisfied.
     let env = create_dpf_enabled_test_env(db_pool).await;
     create_test_tenants(&env).await?;
     let baseline = rpc::DpuExtensionServiceDeploymentType::Baseline as i32;
@@ -6202,6 +6210,7 @@ async fn test_extension_service_create_rejects_invalid_deployment_type_combinati
                 data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
                 ..Default::default()
             },
+            "dpu_target is unsupported for baseline helm services",
         ),
         // Reject baseline for Kubernetes Pod services; only DPF Helm charts
         // support deployment to all DPUs at creation time.
@@ -6213,17 +6222,20 @@ async fn test_extension_service_create_rejects_invalid_deployment_type_combinati
                 data: TEST_SERVICE_DATA.to_string(),
                 ..Default::default()
             },
+            "baseline deployment_type is supported only for DPF helm chart services",
         ),
-        // Reject unknown enum values instead of treating them as demand driven,
-        // which would leave the service waiting for an instance attachment.
+        // Supply a valid target so an incorrect DemandDriven fallback cannot
+        // satisfy this case through a missing-target error.
         (
             "unknown-deployment-type",
             rpc::CreateDpuExtensionServiceRequest {
                 deployment_type: 99,
+                dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
                 service_type: rpc::DpuExtensionServiceType::DpfHelmChart as i32,
                 data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
                 ..Default::default()
             },
+            "invalid deployment_type",
         ),
         // Reject service VPC interfaces for baseline because NICo creates those
         // interfaces through instance attachment.
@@ -6238,10 +6250,11 @@ async fn test_extension_service_create_rejects_invalid_deployment_type_combinati
                 }],
                 ..Default::default()
             },
+            "service VPC interfaces are unsupported for baseline helm services",
         ),
     ];
 
-    for (name, mut request) in cases {
+    for (name, mut request, expected_message) in cases {
         // Use valid IDs, names, and tenant metadata so each request fails
         // because of the unsupported combination being tested.
         let service_id = ExtensionServiceId::new();
@@ -6249,12 +6262,14 @@ async fn test_extension_service_create_rejects_invalid_deployment_type_combinati
         request.service_name = name.to_string();
         request.tenant_organization_id = "best_org".to_string();
 
+        // Require the intended rejection rather than any InvalidArgument response.
         let rejected = env
             .api
             .create_dpu_extension_service(Request::new(request))
             .await
             .expect_err("invalid deployment-type combinations must fail");
         assert_eq!(rejected.code(), tonic::Code::InvalidArgument, "{name}");
+        assert_eq!(rejected.message(), expected_message, "{name}");
 
         // Check that no service was saved, so the controller cannot deploy
         // a service from the rejected request.

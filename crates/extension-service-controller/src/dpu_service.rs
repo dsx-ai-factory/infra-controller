@@ -59,9 +59,10 @@ pub struct ServiceVpcRegistrationResources {
 /// service based on deployment type. The DPF SDK alone converts this data to
 /// the checked CR type.
 ///
-/// The service is deliberately detached until an instance lifecycle operation
-/// applies `placement_label_key=enabled` to a DPU.  Its `nodeSelector` is an
-/// exact-match selector, so it has no target before that label exists.
+/// Demand-driven services wait until an instance lifecycle operation applies
+/// `placement_label_key=enabled` to a DPU. Their `nodeSelector` is an exact-match
+/// selector, so they have no target before that label exists. Baseline services
+/// omit the selector so DPF can deploy to all managed DPUs without instance attachment.
 pub fn project_dpu_service(
     extension_service_id: ExtensionServiceId,
     namespace: &str,
