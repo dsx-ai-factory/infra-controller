@@ -655,20 +655,24 @@ If step 3 fails before it repoints a workload, there are two ways forward:
 - **Retry the cutover.** Leave every Deployment the script stopped at zero,
   fix the cause, and run `setup.sh` again. The receipt stays valid while those
   Deployments are untouched.
-- **Abandon the cutover.** Set the value back to `auto`, which keeps the
-  workload on `postgres.postgres`. Then scale every Deployment the script
-  stopped back to the replica count it printed for that Deployment, for
-  example:
+- **Abandon the cutover.** Set the value back to `auto`. For Temporal, roll
+  its release back to the revision `helm history` lists as `deployed`, which
+  restores its `postgres.postgres` config and replica counts:
 
   ```bash
-  kubectl scale -n temporal --replicas=1 deploy/temporal-frontend deploy/temporal-history \
-    deploy/temporal-matching deploy/temporal-worker
-  kubectl scale -n nico-rest --replicas=1 deploy/keycloak
+  helm history temporal -n temporal
+  helm rollback temporal <deployed-revision> -n temporal
   ```
 
-  Scaling them up makes the copy stale, so a later migration starts again
-  from step 2. Leaving the value at `true` would stop the next `setup.sh` run
-  on that stale receipt.
+  Scaling Temporal up by hand isn't enough, because a failed upgrade can
+  leave its ConfigMaps on `nico-pg-cluster` without updating its
+  Deployments. For Keycloak, scale it back to the replica count the script
+  printed, for example
+  `kubectl scale -n nico-rest --replicas=1 deploy/keycloak`.
+
+  Either way the copy is now stale, so a later migration starts again from
+  step 2. Leaving the value at `true` would stop the next `setup.sh` run on
+  that stale receipt.
 
 `preflight.sh` stops `setup.sh` from moving a database off the StatefulSet
 before step 2 is done. When `true` would move it, preflight requires the
@@ -677,7 +681,9 @@ unchanged since, because a restart, scale, or recreate in between means the
 copy may be stale. Preflight also stops `false` from moving a database back
 off `nico-pg-cluster`, since there's no supported reverse migration. Both
 checks stop setup, even with `-y`. `auto` never moves a database, so these
-checks only apply to `true` and `false`.
+checks only apply to `true` and `false`. `setup.sh` runs them again right
+before phases 7d and 7f repoint Keycloak and Temporal, in case a workload was
+restarted while the earlier phases ran.
 
 ### Why does the migration script leave things scaled down?
 

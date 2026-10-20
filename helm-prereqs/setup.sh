@@ -2100,6 +2100,21 @@ _record_db_location() {
         -p "{\"data\":{\"${_component}\":\"${_location}\",\"${_component}-migrated\":null}}" >/dev/null
 }
 
+# Preflight checked each move against the migration receipt when setup.sh
+# started, but phases 1 to 6 ran since. Checking again right before the
+# workload is repointed stops setup if it was restarted in the meantime,
+# instead of moving it onto a stale copy.
+_recheck_db_cutover() {
+    _can_move_db "$1" || return 0
+    BLOCKING_ERRORS=()
+    _check_db_cutover "$1" "$2"
+    if [[ ${#BLOCKING_ERRORS[@]} -gt 0 ]]; then
+        printf 'ERROR: %s\n' "${BLOCKING_ERRORS[@]}" >&2
+        echo "  setup.sh stopped before repointing $1." >&2
+        exit 1
+    fi
+}
+
 # --- 7d. Keycloak (conditional) -----------------------------------------------
 # Only deploy Keycloak if nico-rest.yaml has keycloak.enabled: true.
 # If using external OAuth2/OIDC (Option B in nico-rest.yaml), skip this step.
@@ -2166,6 +2181,7 @@ if [[ "${_KC_ENABLED}" == "true" ]]; then
             KEYCLOAK_DB_PASSWORD_SECRET_NAME KEYCLOAK_DB_PASSWORD_SECRET_KEY
     fi
 
+    _recheck_db_cutover keycloak "${_KEYCLOAK_USE_HA_POSTGRES}"
     "${SCRIPT_DIR}/keycloak/setup.sh"
     _record_db_location keycloak "${_KEYCLOAK_USE_HA_POSTGRES}"
     echo "Keycloak ready"
@@ -2262,6 +2278,7 @@ EOF
     TEMPORAL_CMD+=(-f "${_TEMPORAL_CREDS_FILE}")
 fi
 
+_recheck_db_cutover temporal "${_TEMPORAL_USE_HA_POSTGRES}"
 "${TEMPORAL_CMD[@]}"
 _record_db_location temporal "${_TEMPORAL_USE_HA_POSTGRES}"
 echo "Temporal ready"

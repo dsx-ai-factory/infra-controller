@@ -6,6 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFLIGHT_SH="${SCRIPT_DIR}/../preflight.sh"
+SETUP_SH="${SCRIPT_DIR}/../setup.sh"
 TEST_TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TEST_TMP_DIR}"' EXIT
 
@@ -20,6 +21,7 @@ for fn in _yaml_toplevel_value _keycloak_ns _deployed_db_host _db_location \
     eval "${definition}"
 done
 eval "$(grep '^_DB_RECORD_CONFIGMAP=' "${PREFLIGHT_SH}")"
+eval "$(sed -n '/^_recheck_db_cutover()/,/^}/p' "${SETUP_SH}")"
 
 mkdir -p "${TEST_TMP_DIR}/bin"
 # Helm reports its latest revision. FAKE_HELM_TEMPORAL_HOST stands for one whose
@@ -301,6 +303,49 @@ for row in "${can_move_cases[@]}"; do
     fi
     if [[ "${actual}" != "${expected}" ]]; then
         echo "FAIL move check for ${value}: runs ${actual}, want ${expected}" >&2
+        failures=$((failures + 1))
+    fi
+done
+
+# setup.sh checks the move again right before it repoints a workload, since
+# phases 1 to 6 run between preflight and phase 7f. A Temporal restarted in
+# that window stops setup instead of moving onto the stale copy.
+write_values temporal true
+recheck_cases=(
+    "Deployments unchanged since the migration|uid-t/4|0"
+    "Temporal restarted after preflight|uid-t/6|1"
+)
+for row in "${recheck_cases[@]}"; do
+    IFS='|' read -r name deployment_state expected_status <<< "${row}"
+    status=0
+    (
+        export FAKE_TEMPORAL_HOST=postgres.postgres.svc.cluster.local. FAKE_KEYCLOAK_URL="" \
+            FAKE_STANDALONE=statefulset FAKE_RECORD="${temporal_receipt}" \
+            FAKE_DEPLOYMENT_STATE="${deployment_state}" FAKE_READS_FAIL=false \
+            PATH="${TEST_TMP_DIR}/bin:${PATH}"
+        _recheck_db_cutover temporal true
+    ) > /dev/null 2>&1 || status=$?
+    if [[ "${status}" != "${expected_status}" ]]; then
+        echo "FAIL recheck: ${name}: exit ${status}, want ${expected_status}" >&2
+        failures=$((failures + 1))
+    fi
+done
+
+# Each recheck sits directly before the command that repoints its workload.
+# Columns: component|line that repoints it.
+# shellcheck disable=SC2016 # The lines are matched as written in setup.sh.
+recheck_wiring=(
+    'keycloak|"${SCRIPT_DIR}/keycloak/setup.sh"'
+    'temporal|"${TEMPORAL_CMD[@]}"'
+)
+for row in "${recheck_wiring[@]}"; do
+    IFS='|' read -r component repoint <<< "${row}"
+    next_line="$(awk -v call="_recheck_db_cutover ${component} " '
+        found { sub(/^[[:space:]]+/, ""); print; exit }
+        index($0, call) { found = 1 }
+    ' "${SETUP_SH}")"
+    if [[ "${next_line}" != "${repoint}" ]]; then
+        echo "FAIL recheck: setup.sh must call _recheck_db_cutover ${component} right before ${repoint}, not '${next_line}'" >&2
         failures=$((failures + 1))
     fi
 done
