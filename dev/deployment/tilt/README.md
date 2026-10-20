@@ -1,8 +1,7 @@
 # Local development with Tilt
 
 Tilt runs the complete local NICo development stack from the repository's Helm
-charts and Kubernetes sources. DevSpace remains available as a separate
-workflow.
+charts and Kubernetes sources.
 
 > [!WARNING]
 > This workflow is intended only for local development and is
@@ -289,23 +288,6 @@ An earlier draft of this Tilt setup deployed Core as one Helm release named
 
 ```bash
 helm uninstall nico -n nico-system
-```
-
-Tilt and DevSpace deploy the same application object names and should not manage
-the same cluster simultaneously. Before switching an existing DevSpace kind
-cluster to Tilt, run:
-
-```bash
-LOCAL_DEV_INSTALL_REST_PREREQS=0 devspace purge -n nico-system
-```
-
-To switch back to DevSpace, remove the Tilt stack and use the existing DevSpace
-bootstrap and deploy commands:
-
-```bash
-tilt down -f dev/deployment/tilt/Tiltfile
-dev/deployment/devspace/bootstrap-prereqs.sh
-devspace deploy -n nico-system
 ```
 
 ## Stop and remove

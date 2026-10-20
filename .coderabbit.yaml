@@ -33,7 +33,6 @@ reviews:
     - "!crates/dpf/crds/**"
     - "!crates/mqttea-example/src/sample_protos/**"
     - "!crates/ssh-console-mock-api-server/src/generated/**"
-    - "!dev/deployment/devspace/values.generated.yaml"
   path_instructions:
     - path: "crates/**/*.rs"
       instructions: >-

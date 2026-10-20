@@ -1,7 +1,0 @@
-**
-!crates
-!crates/
-!crates/bmc-mock
-!crates/bmc-mock/
-!crates/bmc-mock/dell_poweredge_r750.tar.gz
-!crates/bmc-mock/nvidia_dpu.tar.gz

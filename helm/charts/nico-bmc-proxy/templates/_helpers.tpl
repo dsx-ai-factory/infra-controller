@@ -18,8 +18,8 @@ Resource name prefix. Defaults to the chart name; override with nameOverride.
 
 {{/*
 What image to use: Use subchart-local image if defined, fall back on global
-image. In devspace deployments, {{ include "nico-bmc-proxy.name" . }} gets its own image. In other
-deployments, the main nico image contains all binaries, so we can use that.
+image. A component-specific image can be supplied when the main nico image
+containing all binaries is not used.
 */}}
 {{- define "nico-bmc-proxy.image" -}}
 {{- if not (eq (toString (.Values.image.repository | default "")) "") }}

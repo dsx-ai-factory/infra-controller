@@ -71,9 +71,6 @@ jobs:
       - name: Test secret-scan range resolver
         run: bash .github/ci/test-resolve-secret-scan-range.sh
 
-      - name: Test DevSpace REST integration addresses
-        run: bash dev/deployment/devspace/setup-rest-integration_test.sh
-
       - name: Test development bootstrap addresses
         run: python3 -B dev/bin/test_bootstrap_addresses.py
 
@@ -2152,10 +2149,6 @@ jobs:
 
       - name: Check Core VIP preflight
         run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_external_service_vips.py'
-
-      # Uses python3-yaml installed by the configuration check above.
-      - name: Test DevSpace bootstrap manifests
-        run: /usr/bin/python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
 
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests

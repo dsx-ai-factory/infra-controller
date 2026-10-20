@@ -24,7 +24,6 @@ dev/kube/kind/ci/*
 .skaffold/*/**
 cscope.*
 forged
-.devspace
 
 pxe/nvinit_setup/*
 !pxe/nvinit_setup/.gitkeep

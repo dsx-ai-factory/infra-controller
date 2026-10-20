@@ -1,6 +1,0 @@
-**
-!crates
-!crates/
-!crates/api
-!crates/api/
-!crates/api/casbin-policy.csv

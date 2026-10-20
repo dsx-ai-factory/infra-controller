@@ -301,26 +301,9 @@ complete site onto a bare-metal Kubernetes cluster.
 
 ### Local Development
 
-The fastest way to run the whole stack locally is DevSpace on a kind cluster.
-It compiles the Core and REST images from this clone, deploys the Helm charts,
-and uses Machine-a-Tron to supply mock hosts, so you can exercise the REST API
-and the Core gRPC API end to end without hardware.
-
-```bash
-# 1. Install Docker, kind, kubectl, helm, and devspace. DevSpace builds every
-#    image inside Docker, so no Rust or Go toolchain is needed for this path.
-
-# 2. Create a local cluster. The bootstrap script works on your current
-#    Kubernetes context, so this must exist first.
-kind create cluster --name nico
-
-# 3. Bootstrap the cluster-side prerequisites (cert-manager, PostgreSQL, Vault,
-#    Temporal, and Keycloak) on that context. Safe to re-run.
-dev/deployment/devspace/bootstrap-prereqs.sh
-
-# 4. Build and deploy NICo Core, NICo REST, and the mock hosts.
-devspace deploy
-```
+Use [Local development with Tilt](dev/deployment/tilt/README.md) to run the
+local NICo stack on a kind cluster with mock hardware. The guide covers
+requirements, startup, configuration, and teardown.
 
 For a plain build and test loop without a cluster, install rustup with the
 Rust version pinned in `rust-toolchain.toml`, the Go version in
@@ -334,11 +317,7 @@ make rest-test                           # Go unit tests with PostgreSQL and moc
 cargo make pre-commit-verify-workspace   # what CI runs before merge
 ```
 
-On a fresh Ubuntu VM, `dev/deployment/devspace/setup-devspace-on-host.sh`
-performs all four steps, including the kind cluster.
-
-Refer to [Local Development with DevSpace](dev/deployment/devspace/README.md)
-for profiles, port-forwarding, and teardown, to the
+Refer to the
 [Development](docs/development.md) page for host package prerequisites, to the
 [Build Guide](docs/development/build-guide.md) for ARM64 and release builds,
 and to [AGENTS.md](AGENTS.md) for the full build, test, and lint command
@@ -448,7 +427,7 @@ Runnable inputs and reference configurations that ship with the repository:
 | [`rest-api/`](rest-api/) | The Go REST API, Site Agent, NICo Flow, `nicocli`, and the OpenAPI specification and generated SDK |
 | [`helm/`](helm/) and [`helm-prereqs/`](helm-prereqs/) | The NICo Core Helm chart and the `setup.sh` reference installer for a complete site |
 | [`docs/`](docs/) | Source for the published documentation, including architecture, provisioning, and operations guides |
-| [`dev/`](dev/) | Local development tooling, including the DevSpace deployment with mock hardware |
+| [`dev/`](dev/) | Local development tooling, including the Tilt deployment with mock hardware |
 | [`bluefield/`](bluefield/) and [`pxe/`](pxe/) | DPU image components and PXE boot artifact generation |
 
 ## Roadmap
