@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use std::collections::HashSet;
     use std::path::PathBuf;

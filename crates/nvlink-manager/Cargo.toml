@@ -51,6 +51,8 @@ uuid = { features = ["v4", "serde"], workspace = true }
 x509-parser = { workspace = true }
 
 [dev-dependencies]
+carbide-macros = { path = "../macros" }
+carbide-sqlx-testing = { path = "../sqlx-testing" }
 carbide-test-support = { path = "../test-support" }
 carbide-utils = { path = "../utils", features = ["test-support"] }
 rcgen = { workspace = true }
