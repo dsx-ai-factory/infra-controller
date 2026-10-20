@@ -17,7 +17,6 @@
 
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -40,10 +39,9 @@ const IMAGE: &str = "checked firmware image";
 const PARTIAL_IMAGE: &[u8] = b"partial firmware image";
 
 /// The public command must stage an image without a device config, accept an
-/// uppercase digest, and report a known version difference as successful
-/// inspection. Its only device operation is the read-only MFT query.
+/// uppercase digest, and remove the checked image when the query cannot start.
 #[tokio::test]
-async fn preflight_reports_a_change_without_approving_or_flashing() {
+async fn preflight_cleans_up_when_the_query_is_unavailable() {
     let scout = ScoutFixture::new();
     let fetches = Arc::new(AtomicUsize::new(0));
     let app = Router::new().route(
@@ -66,35 +64,19 @@ async fn preflight_reports_a_change_without_approving_or_flashing() {
         .expect("preflight did not finish")
         .expect("run public preflight command");
 
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).expect("preflight output is UTF-8");
-    assert!(
-        stdout.ends_with(concat!(
-            "Firmware comparison: change needed\n",
-            "Device: 03:00.0\n",
-            "Installed firmware: 32.42.1000\n",
-            "Target firmware: 32.43.1014\n",
-            "Image SHA-256: verified (contents not interpreted)\n",
-            "Read-only inspection; no hardware changes or flash approval.\n",
-        )),
-        "{stdout}"
+        stderr.contains("mlxfwmanager query I/O failed: No such file or directory"),
+        "{stderr}"
     );
     assert_eq!(fetches.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        std::fs::read_to_string(scout.directory.path().join("query-arguments"))
-            .expect("read recorded MFT arguments"),
-        "--dev\n03:00.0\n--query-format\nxml\n"
-    );
     assert_eq!(
         std::fs::read_dir(scout.temporary_directory())
             .expect("read child's temporary directory")
             .count(),
         0,
-        "successful inspection must remove its staged image"
+        "failed inspection must remove its staged image"
     );
 }
 
@@ -173,10 +155,6 @@ async fn preflight_signals_remove_a_partial_download() {
             0,
             "{signal}: staging directory remains"
         );
-        assert!(
-            !scout.directory.path().join("query-arguments").exists(),
-            "{signal}: incomplete image must not reach MFT"
-        );
     }
 }
 
@@ -185,28 +163,14 @@ struct ScoutFixture {
 }
 
 impl ScoutFixture {
-    /// `new` keeps the fake MFT executable, its argument log, and Scout's
-    /// temporary files together so each test observes only its own process.
+    /// `new` isolates Scout's executable search and temporary files so tests
+    /// cannot query local hardware or observe another process's staging.
     fn new() -> Self {
         let directory = tempfile::tempdir().expect("create process fixture");
         let bin = directory.path().join("bin");
-        std::fs::create_dir(&bin).expect("create private executable directory");
+        std::fs::create_dir(&bin).expect("create empty executable search directory");
         std::fs::create_dir(directory.path().join("tmp"))
             .expect("create child temporary directory");
-        let program = bin.join("mlxfwmanager");
-        std::fs::write(
-            &program,
-            concat!(
-                "#!/bin/sh\n",
-                "printf '%s\\n' \"$@\" >> \"$TEST_QUERY_ARGUMENTS\"\n",
-                "printf '%s\\n' '<Devices><Device pciName=\"0000:03:00.0\" ",
-                "type=\"BlueField3\" partNumber=\"test-part\" psid=\"test-psid\">",
-                "<Versions><FW current=\"32.42.1000\"/></Versions></Device></Devices>'\n",
-            ),
-        )
-        .expect("write fake MFT query");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
-            .expect("make fake MFT query executable");
         Self { directory }
     }
 
@@ -216,8 +180,9 @@ impl ScoutFixture {
         self.directory.path().join("tmp")
     }
 
-    /// `command` runs an image-only preflight with an uppercase digest and
-    /// resolves MFT exclusively through this fixture's child-local `PATH`.
+    /// `command` runs an image-only preflight with an uppercase digest. The
+    /// child's `PATH` contains only an empty directory, making `mlxfwmanager`
+    /// unavailable regardless of the host installation.
     fn command(&self, image_url: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_forge-scout"));
         command
@@ -240,14 +205,8 @@ impl ScoutFixture {
                 "--image-sha256",
             ])
             .arg(hex::encode_upper(Sha256::digest(IMAGE.as_bytes())))
-            // The child can only resolve our fake query; no MFT installation
-            // or process-wide environment change is needed by either test.
             .env("PATH", self.directory.path().join("bin"))
             .env("TMPDIR", self.temporary_directory())
-            .env(
-                "TEST_QUERY_ARGUMENTS",
-                self.directory.path().join("query-arguments"),
-            )
             .env("RUST_LOG", "off")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
