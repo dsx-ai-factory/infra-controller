@@ -281,9 +281,8 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
         let now = std::time::Instant::now();
         self.last_metric_emission_time = now;
 
-        // Keep excluded measurements: a new ID may finish processing before the
-        // next database read includes it. Filtering does not map IDs or merge measurements.
-        // Conversely, a newly listed ID contributes only after it has a cached measurement.
+        // Filter totals using the latest ID list without removing cache entries.
+        // A newly processed ID may appear in the next database listing.
         let object_ids_from_database = self
             .object_ids_from_database
             .as_ref()

@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ::db::WithTransaction;
 use ::db::work_lock_manager::WorkLockManagerHandle;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
@@ -182,11 +183,12 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
         &mut self,
         iteration_metrics: &mut PeriodicEnqueuerMetrics,
     ) -> Result<ControllerIteration, IterationError> {
-        // Every enabled replica reads the complete list and publishes it only
-        // after the listing transaction commits successfully.
         let object_ids =
             if let Some(object_ids_from_database_sender) = &self.object_ids_from_database {
-                let object_ids = self.load_object_ids().await?;
+                let object_ids = self
+                    .pool
+                    .with_txn(|txn| self.io.list_objects(txn))
+                    .await??;
                 let object_ids_from_database =
                     object_ids.iter().cloned().collect::<HashSet<_>>().into();
                 object_ids_from_database_sender.send_replace(Some(object_ids_from_database));
@@ -237,17 +239,6 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
         Ok(locked_controller_iteration.iteration_data)
     }
 
-    /// Loads the complete object-ID list and returns it only after its read
-    /// transaction commits, preventing partial or failed reads from publishing.
-    async fn load_object_ids(&self) -> Result<Vec<IO::ObjectId>, IterationError> {
-        // Keep the list and commit in one operation so callers cannot publish
-        // IDs from a transaction whose completion failed.
-        let mut txn = self.pool.begin().await?;
-        let object_ids = self.io.list_objects(&mut txn).await?;
-        txn.commit().await?;
-        Ok(object_ids)
-    }
-
     /// Identifies all active objects that the PeriodicEnqueuer manages
     /// and enqueues them for state handler execution
     async fn enqueue_objects(
@@ -261,7 +252,11 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
         // identity changed after this observation.
         let object_ids = match object_ids {
             Some(object_ids) => object_ids,
-            None => self.load_object_ids().await?,
+            None => {
+                self.pool
+                    .with_txn(|txn| self.io.list_objects(txn))
+                    .await??
+            }
         };
 
         let queued_objects: Vec<_> = object_ids
