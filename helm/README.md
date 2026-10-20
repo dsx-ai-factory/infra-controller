@@ -99,6 +99,11 @@ The profiles are deliberately fixed to the capabilities each peer needs:
 `spiffe://<global.spiffe.trustDomain>/<release namespace>/sa/nico-nmxc`, for
 example `spiffe://nico.local/nico-system/sa/nico-nmxc`.
 
+NVLink partitioning is off by default. Set `nico-api.nvlink.enabled` to render
+`nvlink_config.enabled` into the base configuration; a value in the site
+configuration takes precedence. On a rack with running instances, enabling it
+removes the NMX-C default partition on the first monitor pass.
+
 When `nvlink_config.enabled` or
 `nvlink_config.nmx_c_certificate_rotation.enabled` is `true`, nico-api fills
 in unset NMX-C TLS settings at startup:

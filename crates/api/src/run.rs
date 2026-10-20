@@ -58,7 +58,7 @@ pub async fn run(
     cancel_token: CancellationToken,
     ready_channel: Sender<ApiServerAddresses>,
 ) -> eyre::Result<()> {
-    let carbide_config = carbide_api_core::cfg::load::parse_carbide_config(
+    let mut carbide_config = carbide_api_core::cfg::load::parse_carbide_config(
         &config_path,
         site_config_path.as_deref(),
     )?;
@@ -98,6 +98,9 @@ pub async fn run(
     };
 
     carbide_api_core::cfg::load::log_vpc_peering_policy_deprecations(&carbide_config);
+    carbide_api_core::cfg::load::apply_nmx_c_tls_defaults(std::sync::Arc::make_mut(
+        &mut carbide_config,
+    ));
 
     let Metrics {
         registry,

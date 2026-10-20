@@ -1787,6 +1787,9 @@ message RuntimeConfig {
   // enforced. An explicit list is returned without checking tenant coverage.
   // Older Core versions omit this field; an empty items list is authoritative.
   optional common.StringList site_fabric_null_routes = 58;
+  // Effective nvlink_config.enabled, whether NVLink partitioning is enabled.
+  // Older Core versions omit this field.
+  optional bool nvlink_partitioning_enabled = 59;
 }
 
 message EchoRequest {

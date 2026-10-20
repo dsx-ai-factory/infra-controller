@@ -9511,8 +9511,11 @@ type RuntimeConfig struct {
 	// enforced. An explicit list is returned without checking tenant coverage.
 	// Older Core versions omit this field; an empty items list is authoritative.
 	SiteFabricNullRoutes *StringList `protobuf:"bytes,58,opt,name=site_fabric_null_routes,json=siteFabricNullRoutes,proto3,oneof" json:"site_fabric_null_routes,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// Effective nvlink_config.enabled, whether NVLink partitioning is enabled.
+	// Older Core versions omit this field.
+	NvlinkPartitioningEnabled *bool `protobuf:"varint,59,opt,name=nvlink_partitioning_enabled,json=nvlinkPartitioningEnabled,proto3,oneof" json:"nvlink_partitioning_enabled,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
 }
 
 func (x *RuntimeConfig) Reset() {
@@ -9915,6 +9918,13 @@ func (x *RuntimeConfig) GetSiteFabricNullRoutes() *StringList {
 		return x.SiteFabricNullRoutes
 	}
 	return nil
+}
+
+func (x *RuntimeConfig) GetNvlinkPartitioningEnabled() bool {
+	if x != nil && x.NvlinkPartitioningEnabled != nil {
+		return *x.NvlinkPartitioningEnabled
+	}
+	return false
 }
 
 type EchoRequest struct {
@@ -68287,7 +68297,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x0ebuild_hostname\x18\x06 \x01(\tR\rbuildHostname\x12:\n" +
 	"\fcapabilities\x18\a \x03(\x0e2\x16.forge.BuildCapabilityR\fcapabilities\x12@\n" +
 	"\x0eruntime_config\x182 \x01(\v2\x14.forge.RuntimeConfigH\x00R\rruntimeConfig\x88\x01\x01B\x11\n" +
-	"\x0f_runtime_config\"\xf2\x18\n" +
+	"\x0f_runtime_config\"\xd7\x19\n" +
 	"\rRuntimeConfig\x12\x16\n" +
 	"\x06listen\x18\x01 \x01(\tR\x06listen\x12)\n" +
 	"\x10metrics_endpoint\x18\x02 \x01(\tR\x0fmetricsEndpoint\x12!\n" +
@@ -68343,14 +68353,16 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\fsvpc_enabled\x187 \x01(\bR\vsvpcEnabled\x12#\n" +
 	"\rastra_enabled\x188 \x01(\bR\fastraEnabled\x12)\n" +
 	"\x10ewethers_enabled\x189 \x01(\bR\x0fewethersEnabled\x12N\n" +
-	"\x17site_fabric_null_routes\x18: \x01(\v2\x12.common.StringListH\x03R\x14siteFabricNullRoutes\x88\x01\x01\x1aN\n" +
+	"\x17site_fabric_null_routes\x18: \x01(\v2\x12.common.StringListH\x03R\x14siteFabricNullRoutes\x88\x01\x01\x12C\n" +
+	"\x1bnvlink_partitioning_enabled\x18; \x01(\bH\x04R\x19nvlinkPartitioningEnabled\x88\x01\x01\x1aN\n" +
 	" DpuNicFirmwareUpdateVersionEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x16\n" +
 	"\x14_initial_domain_nameB\x1a\n" +
 	"\x18_dpu_network_pinger_typeB\v\n" +
 	"\t_sitenameB\x1a\n" +
-	"\x18_site_fabric_null_routesJ\x04\b\x03\x10\x04J\x04\b\x06\x10\aJ\x04\b\x0e\x10\x0fJ\x04\b\x18\x10\x19J\x04\b&\x10'R\vdpa_enabled\"'\n" +
+	"\x18_site_fabric_null_routesB\x1e\n" +
+	"\x1c_nvlink_partitioning_enabledJ\x04\b\x03\x10\x04J\x04\b\x06\x10\aJ\x04\b\x0e\x10\x0fJ\x04\b\x18\x10\x19J\x04\b&\x10'R\vdpa_enabled\"'\n" +
 	"\vEchoRequest\x12\x18\n" +
 	"\amessage\x18\x01 \x01(\tR\amessage\"(\n" +
 	"\fEchoResponse\x12\x18\n" +

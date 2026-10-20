@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NvLinkConfig {
-    /// Enables NvLink partitioning. Defaults to true.
-    #[serde(default = "NvLinkConfig::default_enabled")]
+    /// Enables NvLink partitioning. Defaults to false.
+    #[serde(default)]
     pub enabled: bool,
 
     /// Defaults to 1 Minute if not specified.
@@ -106,8 +106,12 @@ impl NvLinkConfig {
     /// CA bundle used when the client certificate Secret has no `ca.crt`.
     pub const DEFAULT_NMX_C_FALLBACK_CA_CERT: &'static str = "/var/run/secrets/nico-roots/ca.crt";
 
-    pub const fn default_enabled() -> bool {
-        true
+    /// Whether the NMX-C certificate monitor runs: `nmx_c_certificate_rotation.enabled` when
+    /// set, otherwise `enabled`.
+    pub fn certificate_rotation_enabled(&self) -> bool {
+        self.nmx_c_certificate_rotation
+            .enabled
+            .unwrap_or(self.enabled)
     }
 
     /// Whether NMX-C is reached over HTTPS rather than plain HTTP.
@@ -131,7 +135,7 @@ impl NvLinkConfig {
         fallback_ca_cert: &std::path::Path,
         default_authority: Option<&str>,
     ) -> DefaultNmxCTls {
-        if !self.enabled && !self.nmx_c_certificate_rotation.enabled {
+        if !self.enabled && !self.certificate_rotation_enabled() {
             return DefaultNmxCTls {
                 client: DefaultNmxCClientTls::NotNeeded,
                 ca: DefaultNmxCCa::NotNeeded,
@@ -191,9 +195,10 @@ impl NvLinkConfig {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct NmxCCertificateRotationConfig {
-    /// Enables NMX-C server certificate expiry checks and rotation. Defaults to true.
-    #[serde(default = "NmxCCertificateRotationConfig::default_enabled")]
-    pub enabled: bool,
+    /// Enables NMX-C server certificate expiry checks and rotation. Unset follows
+    /// `nvlink_config.enabled`; see [`NvLinkConfig::certificate_rotation_enabled`].
+    #[serde(default)]
+    pub enabled: Option<bool>,
 
     /// How often carbide checks the certificate served by NMX-C.
     #[serde(
@@ -222,10 +227,6 @@ pub struct NmxCCertificateRotationConfig {
 }
 
 impl NmxCCertificateRotationConfig {
-    pub const fn default_enabled() -> bool {
-        true
-    }
-
     pub const fn default_run_interval() -> std::time::Duration {
         std::time::Duration::from_secs(60 * 60)
     }
@@ -242,7 +243,7 @@ impl NmxCCertificateRotationConfig {
 impl Default for NmxCCertificateRotationConfig {
     fn default() -> Self {
         Self {
-            enabled: Self::default_enabled(),
+            enabled: None,
             run_interval: Self::default_run_interval(),
             rotate_before_expiry: Self::default_rotate_before_expiry(),
             probe_timeout: Self::default_probe_timeout(),
@@ -253,7 +254,7 @@ impl Default for NmxCCertificateRotationConfig {
 impl Default for NvLinkConfig {
     fn default() -> Self {
         Self {
-            enabled: Self::default_enabled(),
+            enabled: false,
             monitor_run_interval: Self::default_monitor_run_interval(),
             nmx_c_tls_ca_cert_path: None,
             nmx_c_tls_client_cert_path: None,
@@ -297,16 +298,36 @@ mod test {
     }
 
     #[test]
-    fn empty_nvlink_config_is_enabled_and_secure() {
+    fn empty_nvlink_config_is_disabled_and_secure() {
         let config: NvLinkConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config, NvLinkConfig::default());
-        assert!(config.enabled);
+        assert!(!config.enabled);
         assert!(!config.allow_insecure);
-        assert!(config.nmx_c_certificate_rotation.enabled);
+        assert!(!config.certificate_rotation_enabled());
+    }
 
-        let rotation: NmxCCertificateRotationConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(rotation, NmxCCertificateRotationConfig::default());
-        assert!(rotation.enabled);
+    #[test]
+    fn certificate_rotation_follows_partitioning_unless_set() {
+        for (enabled, rotation, expected) in [
+            (false, None, false),
+            (true, None, true),
+            (false, Some(true), true),
+            (true, Some(false), false),
+        ] {
+            let config = NvLinkConfig {
+                enabled,
+                nmx_c_certificate_rotation: NmxCCertificateRotationConfig {
+                    enabled: rotation,
+                    ..NmxCCertificateRotationConfig::default()
+                },
+                ..NvLinkConfig::default()
+            };
+            assert_eq!(
+                config.certificate_rotation_enabled(),
+                expected,
+                "enabled={enabled} rotation={rotation:?}"
+            );
+        }
     }
 
     #[test]
@@ -327,19 +348,23 @@ mod test {
             expected_ca: Option<&'static str>,
         }
 
+        let enabled = || NvLinkConfig {
+            enabled: true,
+            ..NvLinkConfig::default()
+        };
         let operator_tls =
             |ca: Option<&str>, cert: Option<&str>, authority: Option<&str>| NvLinkConfig {
                 nmx_c_tls_ca_cert_path: ca.map(str::to_owned),
                 nmx_c_tls_client_cert_path: cert.map(str::to_owned),
                 nmx_c_tls_client_key_path: cert.map(|_| "/operator/tls.key".to_owned()),
                 nmx_c_tls_authority: authority.map(str::to_owned),
-                ..NvLinkConfig::default()
+                ..enabled()
             };
 
         let cases = [
             Case {
                 name: "client secret with ca.crt",
-                config: NvLinkConfig::default(),
+                config: enabled(),
                 mount: Mount::ClientWithCa,
                 client: DefaultNmxCClientTls::Applied,
                 ca: DefaultNmxCCa::Applied,
@@ -347,7 +372,7 @@ mod test {
             },
             Case {
                 name: "client secret without ca.crt uses fallback CA",
-                config: NvLinkConfig::default(),
+                config: enabled(),
                 mount: Mount::ClientWithoutCa,
                 client: DefaultNmxCClientTls::Applied,
                 ca: DefaultNmxCCa::Applied,
@@ -355,7 +380,7 @@ mod test {
             },
             Case {
                 name: "client certificate not mounted still defaults CA",
-                config: NvLinkConfig::default(),
+                config: enabled(),
                 mount: Mount::RootsOnly,
                 client: DefaultNmxCClientTls::CertificateMissing,
                 ca: DefaultNmxCCa::Applied,
@@ -363,7 +388,7 @@ mod test {
             },
             Case {
                 name: "nothing mounted",
-                config: NvLinkConfig::default(),
+                config: enabled(),
                 mount: Mount::Nothing,
                 client: DefaultNmxCClientTls::CertificateMissing,
                 ca: DefaultNmxCCa::Missing,
@@ -389,7 +414,7 @@ mod test {
                 name: "insecure plain HTTP",
                 config: NvLinkConfig {
                     allow_insecure: true,
-                    ..NvLinkConfig::default()
+                    ..enabled()
                 },
                 mount: Mount::ClientWithCa,
                 client: DefaultNmxCClientTls::NotNeeded,
@@ -410,7 +435,10 @@ mod test {
             Case {
                 name: "certificate monitor alone still gets defaults",
                 config: NvLinkConfig {
-                    enabled: false,
+                    nmx_c_certificate_rotation: NmxCCertificateRotationConfig {
+                        enabled: Some(true),
+                        ..NmxCCertificateRotationConfig::default()
+                    },
                     ..NvLinkConfig::default()
                 },
                 mount: Mount::ClientWithCa,
@@ -419,15 +447,8 @@ mod test {
                 expected_ca: Some("client/ca.crt"),
             },
             Case {
-                name: "partitioning and certificate monitor disabled",
-                config: NvLinkConfig {
-                    enabled: false,
-                    nmx_c_certificate_rotation: NmxCCertificateRotationConfig {
-                        enabled: false,
-                        ..NmxCCertificateRotationConfig::default()
-                    },
-                    ..NvLinkConfig::default()
-                },
+                name: "partitioning and certificate monitor disabled by default",
+                config: NvLinkConfig::default(),
                 mount: Mount::ClientWithCa,
                 client: DefaultNmxCClientTls::NotNeeded,
                 ca: DefaultNmxCCa::NotNeeded,

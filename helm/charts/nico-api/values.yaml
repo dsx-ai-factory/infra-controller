@@ -192,6 +192,14 @@ certificate:
   # Dev/sim only: IP SANs for direct-IP TLS (e.g. API VIP). Leave empty in production.
   ipAddresses: []
 
+## NVLink partitioning. When nvlink.enabled is set, it is rendered as
+## nvlink_config.enabled in the base configuration; a value in the site
+## configuration takes precedence. When it is unset, nico-api's default (false)
+## applies. Enabling partitioning on a rack with running instances removes the
+## NMX-C default partition on the first monitor pass.
+nvlink: {}
+#  enabled: true
+
 ## Optional NVSwitch control-plane certificates. Both leaves use the
 ## same issuer. nicoClient is enabled by default; switchServer is disabled by
 ## default.

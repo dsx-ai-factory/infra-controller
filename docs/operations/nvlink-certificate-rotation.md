@@ -315,9 +315,9 @@ spec:
 
 The `nico-api` Helm chart can create the NICo client certificate, mount its
 Secret read-only, and optionally create an operator-owned server Secret. The
-client certificate profile and the certificate monitor are enabled by default.
-The server certificate profile is disabled by default. Each is controlled
-independently.
+client certificate profile is enabled by default and the server certificate
+profile is disabled by default. The certificate monitor follows
+`nvlink_config.enabled` unless its own `enabled` is set.
 
 Merge the following values into your existing values file. Do not
 replace unrelated site configuration:
@@ -482,7 +482,7 @@ The following table describes the certificate rotation settings:
 
 | Rotation Setting | Default | Meaning |
 | ---------------- | ------- | ------- |
-| `enabled` | `true` | Starts the certificate monitor, including when `[nvlink_config.nmx_c_certificate_rotation]` or `[nvlink_config]` is omitted. This setting is independent of the NVLink partition monitor's `nvlink_config.enabled` gate. |
+| `enabled` | *(follows `nvlink_config.enabled`)* | Starts the certificate monitor. When unset, it follows the NVLink partition monitor's `nvlink_config.enabled`; set it to run or stop the certificate monitor independently. |
 | `run_interval` | `1h` | Target interval between pass starts. The first pass runs at startup; if a pass exceeds the interval, the next pass starts immediately. |
 | `rotate_before_expiry` | `1w` | Inclusive window before `notAfter` in which rotation is requested. Duration strings such as `2w` are supported. |
 | `probe_timeout` | `10s` | Separate timeout applied to TCP connection and TLS handshake operations for each endpoint. |
@@ -491,14 +491,13 @@ The following table describes the certificate rotation settings:
 `rotate_before_expiry`.
 
 <Note>
-`nvlink_config.enabled` defaults to `true`, including when `[nvlink_config]` is
-omitted. Set it to `false` on sites that do not use automated NVLink partition
-reconciliation. The certificate monitor follows only its nested `enabled`
-setting, so a deployment that sets `nvlink_config.enabled = false` still
-rotates NMX-C certificates, and `nico-api` still applies its NMX-C TLS defaults
-for the monitor. Set
-`nvlink_config.nmx_c_certificate_rotation.enabled = false` to stop the
-certificate monitor and its `ConfigureNmxCluster` maintenance requests.
+`nvlink_config.enabled` defaults to `false`, and the certificate monitor
+follows it unless `nvlink_config.nmx_c_certificate_rotation.enabled` is set.
+To rotate NMX-C certificates without automated NVLink partition
+reconciliation, set `nmx_c_certificate_rotation.enabled = true`; `nico-api`
+then applies its NMX-C TLS defaults for the monitor. To run partitioning
+without the monitor and its `ConfigureNmxCluster` maintenance requests, set
+`nmx_c_certificate_rotation.enabled = false`.
 </Note>
 
 Set the server certificate's renewal time comfortably earlier than the NICo

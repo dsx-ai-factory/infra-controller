@@ -173,7 +173,6 @@ func (csh CreateSiteHandler) Handle(c echo.Context) error {
 				NativeNetworking:     true,
 				NetworkSecurityGroup: true,
 				Flow:                 true,
-				NVLinkPartition:      true,
 			},
 		}
 		if apiRequest.Location != nil {
@@ -507,7 +506,6 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 				siteUpdateInput.Config = &cdbm.SiteConfigUpdateInput{
 					NativeNetworking:          apiRequest.Capabilities.NativeNetworking,
 					NetworkSecurityGroup:      apiRequest.Capabilities.NetworkSecurityGroup,
-					NVLinkPartition:           apiRequest.Capabilities.NVLinkPartition,
 					Flow:                      apiRequest.Capabilities.Flow,
 					ImageBasedOperatingSystem: apiRequest.Capabilities.ImageBasedOperatingSystem,
 					DPSPowerManagement:        apiRequest.Capabilities.DPSPowerManagement,
