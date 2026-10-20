@@ -513,7 +513,7 @@ pub(crate) async fn start(
         None
     } else {
         Some(AsyncRequireAuthorizationLayer::new(
-            auth::middleware::InternalRBACHandler::new(),
+            auth::middleware::InternalRBACHandler::new(auth_config.as_ref()),
         ))
     };
 
