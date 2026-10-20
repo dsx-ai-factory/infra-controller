@@ -4750,18 +4750,12 @@ async fn rms_batch_disable_switch_mtls(
                 "RMS does not support switch mTLS disable".to_string(),
             )
         }
-        // The request carries switch credentials and RMS can echo them in a
-        // transport error, so report only the failure kind, not its text.
-        RackManagerError::ApiInvocationError(status) => {
-            ComponentManagerError::OperationOutcomeUnknown(format!(
-                "RMS switch mTLS-disable submission failed with gRPC status {:?} and returned no durable job ID",
-                status.code()
-            ))
-        }
-        RackManagerError::TlsError(_) => ComponentManagerError::OperationOutcomeUnknown(
-            "RMS switch mTLS-disable submission failed with a TLS error and returned no durable job ID"
-                .to_string(),
-        ),
+        // Report the full RMS error: callers have no other way to judge why the
+        // outcome is unknown. This relies on RMS not echoing credentials in its
+        // error text.
+        error => ComponentManagerError::OperationOutcomeUnknown(format!(
+            "RMS switch mTLS-disable submission failed and returned no durable job ID: {error}"
+        )),
     })?;
 
     let batch = response.response.ok_or_else(|| {
@@ -9309,10 +9303,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sw_batch_disable_switch_mtls_submission_error_reports_status_without_message() {
+    async fn sw_batch_disable_switch_mtls_submission_error_reports_full_status() {
         let mock = MockRmsApi::new();
         mock.enqueue_batch_disable_switch_mtls(Err(RackManagerError::ApiInvocationError(
-            tonic::Status::unavailable("password=hunter2"),
+            tonic::Status::unavailable("connection lost"),
         )))
         .await;
 
@@ -9327,8 +9321,8 @@ mod tests {
         let ComponentManagerError::OperationOutcomeUnknown(message) = error else {
             panic!("expected OperationOutcomeUnknown, got {error:?}");
         };
-        assert!(message.contains("Unavailable"), "{message}");
-        assert!(!message.contains("hunter2"), "{message}");
+        assert!(message.contains("currently unavailable"), "{message}");
+        assert!(message.contains("connection lost"), "{message}");
     }
 
     #[tokio::test]
