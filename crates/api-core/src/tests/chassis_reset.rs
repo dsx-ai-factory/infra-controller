@@ -106,6 +106,7 @@ async fn admin_chassis_reset_requires_and_preserves_operator_maintenance(
         machine.current_state(),
         &ManagedHostState::Maintenance {
             operation,
+            retry_count: 0,
             request: machine.machine_maintenance_requested.clone(),
         }
     );

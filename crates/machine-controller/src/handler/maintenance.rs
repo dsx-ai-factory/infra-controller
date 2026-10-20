@@ -36,17 +36,50 @@ use state_controller::state_handler::{
 
 use crate::context::MachineStateHandlerContextObjects;
 
+const MAX_POWER_RETRIES: u32 = 5;
+
 /// Handles the Maintenance state for a host, dispatching on the requested
-/// operation (`PowerOn` / `PowerOff` / `Reset`).
+/// operation (`PowerOn` / `PowerOff` / `Reset` / `ChassisReset`). All
+/// failures schedule up to five retries, waiting 1/2/4/8/16 minutes from each
+/// persisted state transition. A timeout can result in repeating an action that
+/// already executed, including another reset.
 pub(super) async fn handle_maintenance(
     host_machine_id: &HostMachineId,
     mh_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let ManagedHostState::Maintenance { operation, request } = &mh_snapshot.managed_state else {
+    let ManagedHostState::Maintenance {
+        operation,
+        request,
+        retry_count,
+    } = &mh_snapshot.managed_state
+    else {
         unreachable!("handle_maintenance called with non-Maintenance state");
     };
     let request = request.as_ref();
+
+    if *retry_count > 0 {
+        // A replacement request must not wait behind retries of the old one.
+        if let (Some(original), Some(pending)) = (
+            request,
+            mh_snapshot
+                .host_snapshot
+                .machine_maintenance_requested
+                .as_ref(),
+        ) && original != pending
+        {
+            return Ok(StateHandlerOutcome::transition(
+                ManagedHostState::maintenance_for_request(pending.clone()),
+            ));
+        }
+        let delay =
+            chrono::TimeDelta::seconds(60 * 2_i64.pow((*retry_count).min(MAX_POWER_RETRIES) - 1));
+        if mh_snapshot.host_snapshot.state.version.since_state_change() < delay {
+            return Ok(StateHandlerOutcome::wait(format!(
+                "waiting before maintenance power retry {retry_count} for {operation:?}"
+            )));
+        }
+    }
 
     match operation {
         MachineMaintenanceOperation::PowerOn => {
@@ -144,8 +177,9 @@ async fn handle_chassis_reset(
     {
         Ok(client) => client,
         Err(error) => {
-            return finish_maintenance_with_error(
+            return retry_or_fail_maintenance(
                 host_machine_id,
+                mh_snapshot,
                 request,
                 ctx,
                 format!(
@@ -160,8 +194,9 @@ async fn handle_chassis_reset(
         .chassis_reset(chassis_id, libredfish::SystemPowerControl::ForceRestart)
         .await
     {
-        return finish_maintenance_with_error(
+        return retry_or_fail_maintenance(
             host_machine_id,
+            mh_snapshot,
             request,
             ctx,
             format!(
@@ -191,8 +226,9 @@ async fn invoke_power_operation(
     let machine = &mh_snapshot.host_snapshot;
 
     let Some(component_manager) = ctx.services.component_manager.as_ref() else {
-        return finish_maintenance_with_error(
+        return retry_or_fail_maintenance(
             host_machine_id,
+            mh_snapshot,
             request,
             ctx,
             format!(
@@ -211,8 +247,9 @@ async fn invoke_power_operation(
     {
         Ok(endpoint) => endpoint,
         Err(cause) => {
-            return finish_maintenance_with_error(
+            return retry_or_fail_maintenance(
                 host_machine_id,
+                mh_snapshot,
                 request,
                 ctx,
                 format!("Machine {host_machine_id} maintenance ({operation_label}): {cause}"),
@@ -221,7 +258,7 @@ async fn invoke_power_operation(
         }
     };
 
-    match component_manager
+    let summary = match component_manager
         .compute_tray
         .power_control(std::slice::from_ref(&endpoint), action)
         .await
@@ -245,46 +282,63 @@ async fn invoke_power_operation(
                 return finish_maintenance(host_machine_id, request, ctx, ManagedHostState::Ready)
                     .await;
             }
-
-            let summary = result
+            result
                 .error
-                .unwrap_or_else(|| "power control failed".into());
-            tracing::warn!(
-                machine_id = %host_machine_id,
-                operation = operation_label,
-                backend = component_manager.compute_tray.name(),
-                summary = %summary,
-                "Machine power control returned a non-success result",
-            );
-            finish_maintenance_with_error(
-                host_machine_id,
-                request,
-                ctx,
-                format!(
-                    "Machine {host_machine_id} maintenance ({operation_label}): power control failed: {summary}"
-                ),
-            )
-            .await
+                .unwrap_or_else(|| "power control failed".into())
         }
-        Err(error) => {
-            tracing::warn!(
-                machine_id = %host_machine_id,
-                operation = operation_label,
-                backend = component_manager.compute_tray.name(),
-                error = %error,
-                "Machine power control transport error",
-            );
-            finish_maintenance_with_error(
-                host_machine_id,
-                request,
-                ctx,
-                format!(
-                    "Machine {host_machine_id} maintenance ({operation_label}): power control failed: {error}"
-                ),
-            )
-            .await
-        }
+        Err(error) => error.to_string(),
+    };
+
+    tracing::warn!(
+        machine_id = %host_machine_id,
+        operation = operation_label,
+        backend = component_manager.compute_tray.name(),
+        %summary,
+        "Machine power control failed",
+    );
+    retry_or_fail_maintenance(
+        host_machine_id,
+        mh_snapshot,
+        request,
+        ctx,
+        format!("machine {host_machine_id} maintenance ({operation_label}): {summary}"),
+    )
+    .await
+}
+
+async fn retry_or_fail_maintenance(
+    host_machine_id: &HostMachineId,
+    mh_snapshot: &ManagedHostStateSnapshot,
+    request: Option<&MachineMaintenanceRequest>,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    cause: String,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    let ManagedHostState::Maintenance {
+        operation,
+        retry_count,
+        ..
+    } = &mh_snapshot.managed_state
+    else {
+        unreachable!("power maintenance called with non-Maintenance state");
+    };
+    if *retry_count < MAX_POWER_RETRIES {
+        tracing::warn!(machine_id = %host_machine_id, retry_count = retry_count + 1, %cause,
+            "Scheduling maintenance power retry");
+        return Ok(StateHandlerOutcome::transition(
+            ManagedHostState::Maintenance {
+                operation: operation.clone(),
+                request: request.cloned(),
+                retry_count: retry_count + 1,
+            },
+        ));
     }
+    finish_maintenance_with_error(
+        host_machine_id,
+        request,
+        ctx,
+        format!("{cause} (after {retry_count} retries)"),
+    )
+    .await
 }
 
 /// Build the [`ComputeTrayEndpoint`] describing this host for component manager power operations.

@@ -1446,6 +1446,11 @@ pub enum ManagedHostState {
         /// omit this, so their completion must leave pending requests alone.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request: Option<MachineMaintenanceRequest>,
+        /// Power-operation retries scheduled after failures, at most
+        /// five. Zero (including older saved states) attempts immediately;
+        /// counts 1/2/3/4/5 wait 1/2/4/8/16 minutes from the state version timestamp.
+        #[serde(default)]
+        retry_count: u32,
     },
 
     /// Host is assigned to an Instance.
@@ -1892,6 +1897,7 @@ impl ManagedHostState {
         Self::Maintenance {
             operation: request.operation.clone(),
             request: Some(request),
+            retry_count: 0,
         }
     }
 
@@ -3931,6 +3937,30 @@ mod tests {
         dpu_machine, host_machine, managed_host_state_snapshot,
     };
 
+    #[test]
+    fn maintenance_retry_count_persistence() {
+        value_scenarios!(
+            run = |json: &str| {
+                let state: ManagedHostState = serde_json::from_str(json).unwrap();
+                let saved = serde_json::to_value(&state).unwrap();
+                let reloaded: ManagedHostState = serde_json::from_value(saved).unwrap();
+                assert_eq!(state, reloaded);
+                let ManagedHostState::Maintenance { retry_count, request, .. } = reloaded else {
+                    panic!("expected maintenance");
+                };
+                assert!(request.is_none());
+                retry_count
+            };
+            "legacy maintenance starts immediately" {
+                r#"{"state":"maintenance","operation":{"operation":"poweron"}}"# => 0,
+            }
+            "explicit retry progress survives reload" {
+                r#"{"state":"maintenance","operation":{"operation":"poweron"},"retry_count":0}"# => 0,
+                r#"{"state":"maintenance","operation":{"operation":"poweron"},"retry_count":5}"# => 5,
+            }
+        );
+    }
+
     #[derive(Clone, Copy)]
     struct DpuProvisioningInput {
         part_number: &'static str,
@@ -5332,6 +5362,7 @@ mod tests {
                     scenario: "maintenance uses the maintenance SLA",
                     input: stale(ManagedHostState::Maintenance {
                         operation: MachineMaintenanceOperation::PowerOn,
+                        retry_count: 0,
                         request: None,
                     }),
                     expect: (seconds(300), true),
