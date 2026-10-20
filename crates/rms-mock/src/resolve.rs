@@ -184,6 +184,7 @@ mod tests {
 
     fn request(bmc: Option<rms::Endpoint>, host: Option<rms::Endpoint>) -> rms::NodeInfo {
         rms::NodeInfo {
+            additional_host_endpoints: Vec::new(),
             node_id: "n".to_string(),
             rack_id: "r".to_string(),
             r#type: None,
