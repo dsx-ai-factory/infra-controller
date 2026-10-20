@@ -1105,6 +1105,20 @@ mod tests {
 
         let exposition = capture.render();
 
+        for (name, help) in [
+            (
+                "carbide_health_otlp_ingress_records_total",
+                "Number of log records or metric samples accepted into OTLP queues, including replacements and insertions that evict an older entry, by target and signal.",
+            ),
+            (
+                "carbide_health_otlp_egress_records_total",
+                "Number of OTLP log records or metric data points acknowledged by the receiver, excluding explicit partial-success rejections, by target and signal.",
+            ),
+        ] {
+            assert!(exposition.contains(&format!("# TYPE {name} counter\n")));
+            assert!(exposition.contains(&format!("# HELP {name} {help}\n")));
+        }
+
         for config in &configs {
             for signal in ["logs", "metrics"] {
                 for name in [
