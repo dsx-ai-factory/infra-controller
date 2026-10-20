@@ -392,7 +392,7 @@ NICo Core is site-local and continues to manage hardware independently of the RE
 | DPU | Data Processing Unit | Central enforcement point for tenant isolation |
 | EVPN | Ethernet VPN | Control-plane technology used with VXLAN overlays |
 | FMDS | NICo Metadata Service | Metadata service for tenant workloads; legacy artifacts may expand it as NICo Metadata Service |
-| FNN | Full Next-generation Networking | VPC, subnet, and VXLAN management subsystem in Core |
+| FNN | Forge Native Networking | VPC, subnet, and VXLAN management subsystem in Core |
 | gRPC | Google Remote Procedure Call | RPC framework used between the Site Agent and NICo Core |
 | HBN | Host Based Networking | Software networking stack on the DPU for VXLAN and EVPN |
 | IMDS | Instance Metadata Service | Service that can issue identity and metadata to tenant processes |

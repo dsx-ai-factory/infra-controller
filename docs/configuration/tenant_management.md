@@ -725,7 +725,9 @@ phone_home:
   url: http://169.254.169.254/latest/meta-data/phone_home
 ```
 
-The injected `url` is the site-configured phone-home endpoint in `site.phoneHomeUrl`. The default is `http://169.254.169.254/latest/meta-data/phone_home`. The platform operator can override this endpoint for each deployment. If you supply no `userData` when enabling phone-home, NICo generates a minimal `#cloud-config` that contains only the block above.
+The injected `url` is the site-configured phone-home endpoint in `site.phoneHomeUrl`. The default is `http://169.254.169.254/latest/meta-data/phone_home`. The platform operator controls this site-wide value; it is not a per-instance transport selection. If you supply no `userData` when enabling phone-home, NICo generates a minimal `#cloud-config` that contains only the block above.
+
+For direct access to the embedded agent's default listener, set the URL to `http://169.254.169.254:7777/latest/meta-data/phone_home`, or `http://[fd00:76b9::254]:7777/latest/meta-data/phone_home` when IPv6 metadata is enabled. Standalone FMDS defaults to port 80; both modes support listener overrides. A site mixing deployment modes must provide one URL reachable by all affected instances, accounting for any deployment-specific proxy or port forwarding. NICo does not choose the URL's address family or port separately for each DPU.
 
 When you disable phone-home, the removal behavior depends on whether the request supplies `userData`. If it does, NICo removes only a `phone_home` block that reports to the site endpoint and leaves blocks that report elsewhere unchanged. If the request omits `userData`, NICo edits the stored blob. If NICo stored that blob with phone-home enabled, it removes every `phone_home` block. A stored block can contain a URL from before a change to `site.phoneHomeUrl`.
 
@@ -772,7 +774,7 @@ cloud-init runs the `phone_home` module in its final stage, after the rest of yo
 
 - Phone-home only gates *status reporting*. It does not change how the host is provisioned or booted -- the reboot into the provisioned OS happens identically whether or not phone-home is enabled.
 - If phone-home is enabled but the booted OS never runs cloud-init, or the guest cannot reach the metadata endpoint, the callback never arrives and the instance stays in its provisioning state, never reporting ready.
-- The metadata endpoint (by default, `169.254.169.254`) is not a tenant-facing API, and is reachable only from the provisioned host over its link-local metadata link.
+- The callback uses the operator-configured `site.phoneHomeUrl`, which defaults to the DPU-local IPv4 metadata endpoint. Enabling IPv6 metadata transport does not change this setting. Before changing the site-wide URL, the platform operator must confirm that every affected phone-home-enabled guest can reach the selected address and deployment-specific port. Refer to [IPv6 Metadata Transport](../dpu-management/dpu-lifecycle-management.md#ipv6-metadata-transport). Changing the site setting does not rewrite existing stored user data automatically.
 - Rebooting the instance with a one-time custom iPXE override (`instance update --reboot-with-custom-ipxe=true`) re-arms the gate when phone-home is enabled: NICo clears the recorded contact, so the OS must phone home again before the instance is reported ready.
 
 ### Batch Instance Creation
