@@ -32,6 +32,36 @@ use snapshot::BmcCredentialSnapshot;
 
 type Reader = StructuredCredentialReader<BmcCredentialSnapshot>;
 
+#[derive(Debug)]
+struct CredentialReaderError(carbide_secrets::SecretsError);
+
+impl std::fmt::Display for CredentialReaderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for CredentialReaderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.0 {
+            carbide_secrets::SecretsError::GenericError(report) => Some(report.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+impl From<carbide_secrets::SecretsError> for HealthError {
+    fn from(error: carbide_secrets::SecretsError) -> Self {
+        Self::CredentialError(Box::new(CredentialReaderError(error)))
+    }
+}
+
+impl From<snapshot::ResolutionError> for HealthError {
+    fn from(error: snapshot::ResolutionError) -> Self {
+        Self::StaticCredentialResolution(Box::new(error))
+    }
+}
+
 /// Shares one eagerly initialized secrets reader across static endpoints.
 pub(crate) struct StaticCredentialProvider {
     reader: Reader,
@@ -47,14 +77,14 @@ impl StaticCredentialProvider {
             path: Some(path.clone()), poll_interval: Some(Duration::from_secs(60)), ..Default::default()
         }).await.map_err(|error| {
             tracing::error!(path = %path.display(), %error, "failed to load static credential file at startup");
-            HealthError::CredentialError(error)
+            HealthError::from(error)
         })?;
         let snapshot = reader.snapshot();
         let mut targets = HashMap::with_capacity(configs.len());
         for (mac, config) in configs {
             snapshot.resolve(mac, config.as_deref()).map_err(|error| {
                 tracing::error!(path = %path.display(), mac_address = %mac, %error, "invalid static credentials at startup");
-                HealthError::GenericError(error.to_string())
+                HealthError::from(error)
             })?;
             targets.insert(mac, config);
         }
@@ -77,8 +107,60 @@ impl CredentialProvider for StaticCredentialProvider {
             self.reader
                 .snapshot()
                 .resolve(mac, config.as_deref())
-                .map_err(|error| HealthError::GenericError(error.to_string()))
+                .map_err(HealthError::from)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn fetch_preserves_resolution_error_sources() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "{}").unwrap();
+        let reader = Reader::new(FileCredentialsConfig {
+            path: Some(file.path().into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let mac = "00:11:22:33:44:55".parse().unwrap();
+        let addr = BmcAddr {
+            ip: "192.0.2.1".parse().unwrap(),
+            port: None,
+            mac: Some(mac),
+        };
+        let mut provider = StaticCredentialProvider {
+            reader,
+            targets: HashMap::new(),
+        };
+        for profile in [None, Some("missing")] {
+            provider.targets.insert(mac, profile.map(str::to_owned));
+            let error = provider
+                .fetch_credentials(&addr)
+                .await
+                .err()
+                .expect("invalid credentials fail lookup");
+            assert!(matches!(&error, HealthError::StaticCredentialResolution(_)));
+            let source = error
+                .source()
+                .unwrap()
+                .downcast_ref::<snapshot::ResolutionError>()
+                .expect("original resolution error remains available");
+            match source {
+                snapshot::ResolutionError::UnknownProfile(name) => {
+                    assert_eq!(Some(name.as_str()), profile)
+                }
+                snapshot::ResolutionError::MissingUsername(actual) => {
+                    assert!(profile.is_none());
+                    assert_eq!(*actual, mac);
+                }
+            }
+        }
     }
 }
 

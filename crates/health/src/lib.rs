@@ -73,7 +73,11 @@ pub enum HealthError {
 
     /// Failure from the shared credential reader.
     #[error("credential error: {0}")]
-    CredentialError(carbide_secrets::SecretsError),
+    CredentialError(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// A static endpoint's profile or resolved username is invalid.
+    #[error("static credential resolution failed: {0}")]
+    StaticCredentialResolution(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     #[error("generic error: {0}")]
     GenericError(String),
@@ -742,6 +746,8 @@ mac = "aa:bb:cc:dd:ee:03"
 
     #[tokio::test]
     async fn invalid_credential_file_fails_wiring_once_with_its_path() {
+        use std::error::Error as _;
+
         use carbide_instrument::testing::capture_logs_async;
         for (scenario, contents, profile) in [
             ("missing", None, None),
@@ -782,7 +788,22 @@ mac = "aa:bb:cc:dd:ee:03"
                 Some(path.to_str().unwrap()),
                 "{scenario}"
             );
-            assert!(!format!("{:?}", result.err().unwrap()).contains("sensitive"));
+            let error = result.err().unwrap();
+            let source = error.source().expect("credential error retains its source");
+            if scenario == "missing" {
+                let io_error = std::iter::successors(Some(source), |&error| error.source())
+                    .find_map(|error| error.downcast_ref::<std::io::Error>())
+                    .expect("original I/O error remains in the source chain");
+                assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
+            } else if scenario == "malformed" {
+                assert!(matches!(&error, HealthError::CredentialError(_)));
+            } else {
+                assert!(
+                    matches!(&error, HealthError::StaticCredentialResolution(_)),
+                    "{scenario}"
+                );
+            }
+            assert!(!format!("{error:?}").contains("sensitive"));
         }
     }
 }
