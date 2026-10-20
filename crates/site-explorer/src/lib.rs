@@ -46,7 +46,7 @@ use model::errors::OperatorError;
 use model::expected_entity::ExpectedEntity;
 use model::machine::MachineInterfaceSnapshot;
 use model::machine::machine_search_config::MachineSearchConfig;
-use model::machine_boot_interface::{BootInterfaceSelectionSource, MachineBootInterface};
+use model::machine_boot_interface::BootInterfaceSelectionSource;
 use model::machine_interface::InterfaceType;
 use model::rack_type::RackProfileConfig;
 use model::resource_pool::common::CommonPools;
@@ -79,6 +79,8 @@ mod bmc_endpoint_explorer;
 mod redfish;
 pub use bmc_endpoint_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
 pub use redfish::{BmcAccess, EstablishedBmc, ProxiedPools};
+mod boot_interfaces;
+use boot_interfaces::{HostBootInterfaces, NicBootInterfaces};
 mod boot_order_tracker;
 use boot_order_tracker::BootOrderTracker;
 mod inventory_creator;
@@ -1165,7 +1167,7 @@ impl SiteExplorer {
         // However since host information rarely changes (we never reassign MachineInterfaces),
         // this should be ok. The most noticeable effect is that ManagedHost population might be delayed a bit.
         let identify_managed_hosts_start = Instant::now();
-        let nic_redfish_ids = Self::collect_nic_redfish_ids(&explored_hosts);
+        let nic_boot_interfaces = NicBootInterfaces::new(&explored_hosts);
         let (mut identified_hosts, boot_interfaces) = self
             .identify_managed_hosts(
                 metrics,
@@ -1177,8 +1179,8 @@ impl SiteExplorer {
 
         let mut txn = self.txn_begin().await?;
         Self::persist_identified_managed_hosts(&mut txn, &identified_hosts).await?;
-        Self::persist_host_boot_interfaces(&mut txn, &boot_interfaces).await?;
-        Self::persist_nic_redfish_ids(&mut txn, &nic_redfish_ids).await?;
+        boot_interfaces.persist(&mut txn).await?;
+        nic_boot_interfaces.persist(&mut txn).await?;
         txn.commit().await?;
 
         metrics.record_phase_latency(
@@ -1340,10 +1342,7 @@ impl SiteExplorer {
         expected_explored_endpoint_index: &ExploredEndpointIndex,
         explored_dpus: HashMap<IpAddr, ExploredEndpoint>,
         explored_hosts: HashMap<IpAddr, ExploredEndpoint>,
-    ) -> SiteExplorerResult<(
-        Vec<IdentifiedManagedHost>,
-        Vec<(IpAddr, MachineBootInterface)>,
-    )> {
+    ) -> SiteExplorerResult<(Vec<IdentifiedManagedHost>, HostBootInterfaces)> {
         // Per-host DPU policy resolution. Precedence:
         //   1. Per-host `ExpectedMachine.dpu_policy` (`Nic` / `Ignore` wins).
         //   2. Site-wide `SiteExplorerConfig.dpu_policy` setting.
@@ -1367,7 +1366,7 @@ impl SiteExplorer {
         }
 
         let mut managed_hosts = Vec::new();
-        let mut boot_interfaces: Vec<(IpAddr, MachineBootInterface)> = Vec::new();
+        let mut boot_interfaces = HostBootInterfaces::new();
         for (_, ep) in explored_hosts {
             // Resolve the operator-declared DPU policy for this host once;
             // it drives both auto-correction (`check_and_configure_dpu_mode`
@@ -1400,7 +1399,7 @@ impl SiteExplorer {
                     .report
                     .select_host_primary_interface(&[], declared_primary);
                 if let Some(selection) = primary_interface_selection {
-                    queue_host_boot_interface(&ep, selection.mac_address, &mut boot_interfaces);
+                    boot_interfaces.add(&ep, selection.mac_address);
                 }
 
                 managed_hosts.push(IdentifiedManagedHost {
@@ -1666,12 +1665,7 @@ impl SiteExplorer {
                 .select_host_primary_interface(&dpus_explored_for_host, declared_primary);
             if let Some(selection) = primary_interface_selection {
                 let mac_address = selection.mac_address;
-                // Capture the boot interface's [stable] Redfish interface id
-                // alongside its MAC. Only persist when both resolve from the
-                // current report: if the MAC has no matching interface id in
-                // this report, keep the last-known-good stored boot interface
-                // rather than clobbering it with a partial record.
-                queue_host_boot_interface(&ep, mac_address, &mut boot_interfaces);
+                boot_interfaces.add(&ep, mac_address);
 
                 match Self::apply_report_selection(
                     &mut dpus_explored_for_host,
@@ -1794,46 +1788,7 @@ impl SiteExplorer {
             metrics.exploration_identified_managed_hosts += 1;
         }
 
-        // Any transaction touching multiple explored_endpoints needs to sort them the same way to
-        // avoid deadlocks: sort by IP.
-        boot_interfaces.sort_by_key(|(address, _)| *address);
-
         Ok((managed_hosts, boot_interfaces))
-    }
-
-    fn collect_nic_redfish_ids(
-        explored_hosts: &HashMap<IpAddr, ExploredEndpoint>,
-    ) -> Vec<MachineBootInterface> {
-        let mut nic_redfish_ids = Vec::new();
-
-        // Refresh every explored host, including hosts that cannot yet pair
-        // with their DPUs. Only complete pairs replace last-known-good ids.
-        for ep in explored_hosts.values() {
-            for iface in ep
-                .report
-                .systems
-                .iter()
-                .flat_map(|s| s.ethernet_interfaces.iter())
-            {
-                if let Some(interface) =
-                    MachineBootInterface::from_parts(iface.mac_address, iface.id.clone())
-                {
-                    nic_redfish_ids.push(interface);
-                } else if iface.mac_address.is_some()
-                    || iface.id.as_deref().none_if_empty().is_some()
-                {
-                    // Keep fully empty NIC records quiet.
-                    tracing::info!(
-                        bmc_ip_address = %ep.address,
-                        interface_mac_address = ?iface.mac_address,
-                        interface_id = ?iface.id,
-                        "site-explorer: cannot build host NIC boot interface from MAC and interface id; skipping",
-                    );
-                }
-            }
-        }
-
-        nic_redfish_ids
     }
 
     async fn persist_identified_managed_hosts(
@@ -1849,45 +1804,6 @@ impl SiteExplorer {
                 .as_slice(),
         )
         .await?;
-
-        Ok(())
-    }
-
-    async fn persist_host_boot_interfaces(
-        txn: &mut Transaction<'_>,
-        boot_interfaces: &[(IpAddr, MachineBootInterface)],
-    ) -> SiteExplorerResult<()> {
-        // Persist boot interface MACs for host endpoints
-        for (address, boot_interface) in boot_interfaces {
-            db::explored_endpoints::set_boot_interface(*address, boot_interface, txn).await?;
-        }
-
-        Ok(())
-    }
-
-    async fn persist_nic_redfish_ids(
-        txn: &mut Transaction<'_>,
-        nic_boot_interfaces: &[MachineBootInterface],
-    ) -> SiteExplorerResult<()> {
-        // Record each host NIC's Redfish id on its machine_interfaces row so the
-        // primary-flagged row is the host's complete boot interface (MAC + id).
-        // Pending predicted interfaces get the same refresh, so a prediction
-        // minted before the report resolved the id stays as current as the
-        // live report until DHCP promotes it.
-        for boot_interface in nic_boot_interfaces {
-            db::machine_interface::set_boot_interface_id(
-                boot_interface.mac_address,
-                &boot_interface.interface_id,
-                txn,
-            )
-            .await?;
-            db::predicted_machine_interface::set_boot_interface_id(
-                txn,
-                boot_interface.mac_address,
-                &boot_interface.interface_id,
-            )
-            .await?;
-        }
 
         Ok(())
     }
@@ -4372,32 +4288,6 @@ fn chassis_id_sort_key(id: &str) -> ChassisIdSortKey {
     parts.push(ChassisIdSortPart::Text(id[cursor..].to_lowercase()));
 
     ChassisIdSortKey { parts }
-}
-
-/// Queues a complete host boot-interface pair for endpoint persistence.
-///
-/// A report that resolves only the MAC must not overwrite the last-known-good
-/// pair already stored for the endpoint.
-fn queue_host_boot_interface(
-    endpoint: &ExploredEndpoint,
-    mac_address: MacAddress,
-    boot_interfaces: &mut Vec<(IpAddr, MachineBootInterface)>,
-) {
-    if let Some(interface_id) = endpoint.report.find_interface_id_for_mac(mac_address) {
-        boot_interfaces.push((
-            endpoint.address,
-            MachineBootInterface {
-                mac_address,
-                interface_id: interface_id.to_string(),
-            },
-        ));
-    } else {
-        tracing::debug!(
-            bmc_ip_address = %endpoint.address,
-            %mac_address,
-            "boot interface MAC has no matching Redfish interface id in the report; keeping last-known-good stored boot interface",
-        );
-    }
 }
 
 /// State from exploring a host's DPUs and pairing them with DPU BMCs.
