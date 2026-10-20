@@ -29,6 +29,9 @@ use uuid::Uuid;
 use crate::machine_interface::InterfaceType;
 use crate::metadata::Metadata;
 use crate::network_segment::NetworkSegmentType;
+use crate::site_explorer::{
+    BlueFieldOperatingMode, is_bf3_dpu_part_number, is_bf3_supernic_part_number,
+};
 
 /// Operator policy for how NICo treats a host's DPU hardware.
 ///
@@ -74,6 +77,39 @@ impl HostDpuPolicy {
     /// Whether this policy expects NICo to discover and manage the host's DPUs.
     pub fn expects_managed_dpus(self) -> bool {
         matches!(self, Self::Manage)
+    }
+
+    /// Returns the target hardware mode for an already-resolved host policy.
+    ///
+    /// `Nic` targets NIC mode regardless of the part number. `Ignore` has no
+    /// target. `Manage` uses BF3 part numbers: SuperNIC targets NIC mode and
+    /// DPU targets DPU mode. Other or missing part numbers have no target.
+    /// `None` means that no mode change is requested.
+    pub fn target_operating_mode(
+        self,
+        dpu_part_number: Option<&str>,
+    ) -> Option<BlueFieldOperatingMode> {
+        match self {
+            Self::Nic => Some(BlueFieldOperatingMode::Nic),
+            Self::Ignore => None,
+            Self::Manage => {
+                // Preserve existing BF3 part-number heuristics when the operator
+                // hasn't explicitly chosen a mode. Missing part numbers only
+                // disable this heuristic fallback; explicit modes above do not
+                // require a part number. BF4 does not currently
+                // expose a reliable DPU/NIC mode signal over Redfish, so the
+                // default path does not infer or reconfigure BF4 mode,
+                dpu_part_number.and_then(|dpu_part_number| {
+                    if is_bf3_supernic_part_number(dpu_part_number) {
+                        Some(BlueFieldOperatingMode::Nic)
+                    } else if is_bf3_dpu_part_number(dpu_part_number) {
+                        Some(BlueFieldOperatingMode::Dpu)
+                    } else {
+                        None
+                    }
+                })
+            }
+        }
     }
 }
 

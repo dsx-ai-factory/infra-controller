@@ -54,8 +54,7 @@ use model::site_explorer::{
     BlueFieldOperatingMode, Chassis, EndpointExplorationError, EndpointExplorationReport,
     EndpointType, ExploredDpu, ExploredEndpoint, ExploredManagedHost,
     HostPrimaryInterfaceSelection, MachineExpectation, PowerState, PreingestionState, Service,
-    SiteExplorerLastRun, is_bf3_dpu_part_number, is_bf3_supernic_part_number,
-    is_bluefield_part_number, is_bluefield_system,
+    SiteExplorerLastRun, is_bluefield_part_number, is_bluefield_system,
 };
 use sqlx::PgPool;
 use tokio::task::JoinSet;
@@ -1369,7 +1368,7 @@ impl SiteExplorer {
         let mut boot_interfaces = HostBootInterfaces::new();
         for (_, ep) in explored_hosts {
             // Resolve the operator-declared DPU policy for this host once;
-            // it drives both auto-correction (`check_and_configure_dpu_mode`
+            // it drives both auto-correction (`update_dpu_mode`
             // below -- operator override wins over BF3 part-number heuristics)
             // and the post-match attach decision (`Nic` / `Ignore` policies
             // emit a bare managed host regardless of what matched).
@@ -1495,15 +1494,14 @@ impl SiteExplorer {
                             // Fallback matching has only the expected serial and the
                             // discovered DPU BMC report; pass the DPU's own part number
                             // for the legacy BF3 heuristic.
-                            let mode_check = Some(
-                                self.check_and_configure_dpu_mode(
-                                    &dpu_ep,
-                                    dpu_ep.report.dpu_part_number(),
-                                    host_dpu_policy,
-                                    metrics,
-                                )
-                                .await,
-                            );
+                            let part_number = dpu_ep.report.dpu_part_number();
+                            let mode_check =
+                                Some(match host_dpu_policy.target_operating_mode(part_number) {
+                                    Some(target) => {
+                                        self.update_dpu_mode(&dpu_ep, target, metrics).await
+                                    }
+                                    None => Ok(true),
+                                });
 
                             match classify_matched_dpu(&dpu_ep, &ep, mode_check) {
                                 DiscoveredDpu::RunningAsDpu(dpu) => {
@@ -1918,8 +1916,7 @@ impl SiteExplorer {
     /// Record a single host-reported device (a PCIe device or a chassis network
     /// adapter) into `exploration`, against the discovered DPU BMCs.
     ///
-    /// The one piece of IO -- `check_and_configure_dpu_mode`, which may issue a
-    /// `set_nic_mode` to auto-correct a mismatch -- happens here; the actual
+    /// Mode changes (`set_nic_mode`) are applied here; the actual
     /// classification of its result lives in [`classify_matched_dpu`], which is
     /// unit-tested directly. Both the PCIe loop and the chassis fallback call this.
     #[allow(clippy::too_many_arguments)]
@@ -1952,12 +1949,12 @@ impl SiteExplorer {
             return;
         };
 
-        // Resolve the DPU's mode against what the host declared. This is the only
-        // I/O, and may issue a `set_nic_mode` (in which case it returns `Ok(false)`).
-        let mode_check = Some(
-            self.check_and_configure_dpu_mode(dpu_ep, part_number, host_dpu_policy, metrics)
-                .await,
-        );
+        // Resolve the DPU's mode against what the host declared. Report a change
+        // only after `set_nic_mode` succeeds, so failures keep the existing skip path.
+        let mode_check = Some(match host_dpu_policy.target_operating_mode(part_number) {
+            Some(target) => self.update_dpu_mode(dpu_ep, target, metrics).await,
+            None => Ok(true),
+        });
 
         match classify_matched_dpu(dpu_ep, host_ep, mode_check) {
             DiscoveredDpu::RunningAsDpu(dpu) => exploration.running_as_dpu.push(dpu),
@@ -1971,6 +1968,51 @@ impl SiteExplorer {
                 );
             }
         }
+    }
+
+    /// Sends a mode-setting request when the DPU reports a different current mode.
+    ///
+    /// Returns `false` after a successful request, `true` when no request is
+    /// sent (including an unknown current mode), or an error if the request fails.
+    async fn update_dpu_mode(
+        &self,
+        dpu_ep: &ExploredEndpoint,
+        target_operating_mode: BlueFieldOperatingMode,
+        metrics: &mut SiteExplorationMetrics,
+    ) -> SiteExplorerResult<bool> {
+        let observed_mode = dpu_ep.report.bluefield_operating_mode();
+        let Some(observed) = observed_mode.filter(|mode| *mode != target_operating_mode) else {
+            if observed_mode.is_none() {
+                tracing::warn!(
+                    bmc_ip_address = %dpu_ep.address,
+                    dpu_report = ?dpu_ep.report,
+                    "Site explorer cannot determine this DPU's mode"
+                );
+            }
+            return Ok(true);
+        };
+
+        tracing::warn!(
+            bmc_ip_address = %dpu_ep.address,
+            %observed,
+            ?target_operating_mode,
+            "site explorer found a DPU with a mode that does not match the target; will try to reconfigure"
+        );
+        metrics.increment_dpu_migration_signal(DpuMigrationSignal::ModeMismatchFound);
+        let bmc_target_port = self.config.override_target_port.unwrap_or(443);
+        let bmc_target_addr = SocketAddr::new(dpu_ep.address, bmc_target_port);
+
+        let interface = self.find_machine_interface_for_ip(dpu_ep.address).await?;
+
+        self.bmc_client
+            .set_nic_mode(bmc_target_addr, &interface, target_operating_mode)
+            .await
+            .map_err(|err| SiteExplorerError::EndpointExplorationError {
+                action: "set_nic_mode",
+                err,
+            })?;
+        metrics.increment_dpu_migration_signal(DpuMigrationSignal::SetNicModeIssued);
+        Ok(false)
     }
 
     /// Checks if all data that a site exploration run requires is actually configured
@@ -3304,27 +3346,6 @@ impl SiteExplorer {
         }
     }
 
-    async fn set_nic_mode(
-        &self,
-        dpu_endpoint: &ExploredEndpoint,
-        mode: BlueFieldOperatingMode,
-    ) -> SiteExplorerResult<()> {
-        let bmc_target_port = self.config.override_target_port.unwrap_or(443);
-        let bmc_target_addr = SocketAddr::new(dpu_endpoint.address, bmc_target_port);
-
-        let interface = self
-            .find_machine_interface_for_ip(dpu_endpoint.address)
-            .await?;
-
-        self.bmc_client
-            .set_nic_mode(bmc_target_addr, &interface, mode)
-            .await
-            .map_err(|err| SiteExplorerError::EndpointExplorationError {
-                action: "set_nic_mode",
-                err,
-            })
-    }
-
     async fn redfish_power_control(
         &self,
         bmc_ip_address: IpAddr,
@@ -3630,86 +3651,6 @@ impl SiteExplorer {
         }
 
         Ok(ingest_host)
-    }
-
-    /// Returns `true` when the DPU's hardware NIC mode already matches the
-    /// desired target; `false` when the function has issued a `set_nic_mode`
-    /// to fix a mismatch (in which case the caller should skip this host
-    /// for the current site-explorer cycle -- the next cycle will pick up
-    /// the corrected mode).
-    ///
-    /// The target is resolved in priority order:
-    /// 1. If the resolved host policy is [`HostDpuPolicy::Nic`], target
-    ///    NIC mode.
-    /// 2. If the resolved policy is [`HostDpuPolicy::Ignore`], bail out -- the
-    ///    `MachineValidation` state handler is where "hardware reports a
-    ///    DPU but operator said no DPU" gets surfaced as a health alert;
-    ///    we don't try to reconfigure in that case.
-    /// 3. Otherwise ([`HostDpuPolicy::Manage`]), fall back to
-    ///    the existing BF3 SuperNIC / BF3 DPU part-number heuristic for
-    ///    backward compat: BF3 SuperNIC → NIC mode, BF3 DPU → DPU mode,
-    ///    BF2 / unknown → no-op.
-    async fn check_and_configure_dpu_mode(
-        &self,
-        dpu_ep: &ExploredEndpoint,
-        dpu_part_number: Option<&str>,
-        host_dpu_policy: HostDpuPolicy,
-        metrics: &mut SiteExplorationMetrics,
-    ) -> SiteExplorerResult<bool> {
-        // Compute the target operating mode. `None` means "no opinion -- don't
-        // attempt to reconfigure" (e.g., BF2 where the heuristic doesn't
-        // apply, or `Ignore` where we defer to the health-check path).
-        let target_operating_mode: Option<BlueFieldOperatingMode> = match host_dpu_policy {
-            HostDpuPolicy::Nic => Some(BlueFieldOperatingMode::Nic),
-            HostDpuPolicy::Ignore => None,
-            HostDpuPolicy::Manage => {
-                // Preserve existing BF3 part-number heuristics when the operator
-                // hasn't explicitly chosen a mode. Missing part numbers only
-                // disable this heuristic fallback; explicit modes above do not
-                // require a part number. BF4 does not currently
-                // expose a reliable DPU/NIC mode signal over Redfish, so the
-                // default path does not infer or reconfigure BF4 mode,
-                dpu_part_number.and_then(|dpu_part_number| {
-                    if is_bf3_supernic_part_number(dpu_part_number) {
-                        Some(BlueFieldOperatingMode::Nic)
-                    } else if is_bf3_dpu_part_number(dpu_part_number) {
-                        Some(BlueFieldOperatingMode::Dpu)
-                    } else {
-                        None
-                    }
-                })
-            }
-        };
-
-        let Some(target_operating_mode) = target_operating_mode else {
-            return Ok(true);
-        };
-
-        match dpu_ep.report.bluefield_operating_mode() {
-            Some(observed) if observed == target_operating_mode => Ok(true),
-            Some(observed) => {
-                tracing::warn!(
-                    bmc_ip_address = %dpu_ep.address,
-                    part_number = ?dpu_part_number,
-                    %observed,
-                    ?target_operating_mode,
-                    ?host_dpu_policy,
-                    "site explorer found a DPU with a mode that does not match the target; will try to reconfigure"
-                );
-                metrics.increment_dpu_migration_signal(DpuMigrationSignal::ModeMismatchFound);
-                self.set_nic_mode(dpu_ep, target_operating_mode).await?;
-                metrics.increment_dpu_migration_signal(DpuMigrationSignal::SetNicModeIssued);
-                Ok(false)
-            }
-            None => {
-                tracing::warn!(
-                    bmc_ip_address = %dpu_ep.address,
-                    dpu_report = ?dpu_ep.report,
-                    "Site explorer cannot determine this DPU's mode"
-                );
-                Ok(true)
-            }
-        }
     }
 }
 
@@ -4332,8 +4273,8 @@ enum DiscoveredDpu {
     RunningAsDpu(ExploredDpu),
     /// A DPU running as a plain NIC -- counted, but not a managed DPU.
     RunningAsNic,
-    /// Mode didn't match the target; `check_and_configure_dpu_mode` just issued a
-    /// `set_nic_mode`. The host needs a power cycle (handled downstream) before
+    /// Mode didn't match the target; `set_nic_mode` was issued successfully.
+    /// The host needs a power cycle (handled downstream) before
     /// this DPU re-reports in the corrected mode, so we can't pair it this cycle.
     NeedsReconfig,
     /// The DPU's mode couldn't be checked (Redfish error); skip it this cycle.
@@ -4342,8 +4283,7 @@ enum DiscoveredDpu {
 
 /// Classify a discovered DPU against a host.
 ///
-/// The only IO (`check_and_configure_dpu_mode`, which may issue a
-/// `set_nic_mode`) happens in the caller, which passes its result in as
+/// The only IO (`set_nic_mode`) happens in the caller, which passes its result in as
 /// `mode_check` (`None` when the caller deliberately skipped the mode check).
 /// Keeping the decision here makes it unit-testable without a Redfish mock.
 fn classify_matched_dpu(
@@ -5572,7 +5512,7 @@ mod tests {
 
     #[test]
     fn classify_needs_reconfig_when_set_nic_mode_was_issued() {
-        // `Ok(false)` means `check_and_configure_dpu_mode` just issued a `set_nic_mode`.
+        // `Ok(false)` means `set_nic_mode` was issued successfully.
         let dpu = bf2_dpu(Some(BlueFieldOperatingMode::Nic));
         let host = explored_endpoint(load_dell_ep_report());
         assert!(matches!(

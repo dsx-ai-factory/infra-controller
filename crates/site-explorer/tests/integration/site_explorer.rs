@@ -3534,7 +3534,7 @@ async fn test_select_host_primary_interface(
 /// `set_nic_mode(Nic)` on the DPU during its per-host matching loop.
 ///
 /// This exercises the full wire (site-explorer iteration → per-host policy
-/// resolution → `check_and_configure_dpu_mode` → mock Redfish
+/// resolution → `update_dpu_mode` → mock Redfish
 /// `set_nic_mode`) that the unit tests only cover in pieces.
 #[sqlx_test]
 async fn test_site_explorer_auto_corrects_nic_mode_per_expected_machine(
@@ -3606,7 +3606,7 @@ async fn test_site_explorer_auto_corrects_nic_mode_per_expected_machine(
         db::explored_endpoints::set_preingestion_complete(ip, &mut txn).await?;
     }
     txn.commit().await?;
-    // Second iteration: per-host DPU matching + check_and_configure_dpu_mode.
+    // Second iteration: per-host DPU matching and NIC-mode correction.
     explorer.run_single_iteration().await.unwrap();
 
     let calls = explorer
