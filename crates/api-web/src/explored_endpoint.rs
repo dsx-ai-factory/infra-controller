@@ -1471,6 +1471,12 @@ mod tests {
             .render()
             .unwrap();
             assert_eq!(html.contains("Queue refresh"), paused);
+            let refresh_label = if paused {
+                "Queue refresh of endpoint report"
+            } else {
+                "Explore endpoint report"
+            };
+            assert!(html.contains(&format!("aria-label=\"{refresh_label}\"")));
             assert_eq!(
                 html.contains(
                     "queued refresh requests run after all Site Explorer suppressions are cleared"
