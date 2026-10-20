@@ -249,6 +249,7 @@ mod tests {
 
     use axum::Router;
     use nv_redfish::bmc_http::{BmcCredentials, HttpClient};
+    use nv_redfish::core::NoRepair;
     use serde_json::json;
     use url::Url;
 
@@ -295,6 +296,7 @@ mod tests {
                 &BmcCredentials::new("root".to_string(), "password".to_string()),
                 None,
                 &axum::http::HeaderMap::new(),
+                &NoRepair,
             )
             .await
     }
