@@ -1165,7 +1165,8 @@ impl SiteExplorer {
         // However since host information rarely changes (we never reassign MachineInterfaces),
         // this should be ok. The most noticeable effect is that ManagedHost population might be delayed a bit.
         let identify_managed_hosts_start = Instant::now();
-        let (mut identified_hosts, boot_interfaces, nic_boot_interfaces) = self
+        let nic_redfish_ids = Self::collect_nic_redfish_ids(&explored_hosts);
+        let (mut identified_hosts, boot_interfaces) = self
             .identify_managed_hosts(
                 metrics,
                 &expected_endpoint_index,
@@ -1177,7 +1178,7 @@ impl SiteExplorer {
         let mut txn = self.txn_begin().await?;
         Self::persist_identified_managed_hosts(&mut txn, &identified_hosts).await?;
         Self::persist_host_boot_interfaces(&mut txn, &boot_interfaces).await?;
-        Self::persist_nic_redfish_ids(&mut txn, &nic_boot_interfaces).await?;
+        Self::persist_nic_redfish_ids(&mut txn, &nic_redfish_ids).await?;
         txn.commit().await?;
 
         metrics.record_phase_latency(
@@ -1342,7 +1343,6 @@ impl SiteExplorer {
     ) -> SiteExplorerResult<(
         Vec<IdentifiedManagedHost>,
         Vec<(IpAddr, MachineBootInterface)>,
-        Vec<MachineBootInterface>,
     )> {
         // Per-host DPU policy resolution. Precedence:
         //   1. Per-host `ExpectedMachine.dpu_policy` (`Nic` / `Ignore` wins).
@@ -1368,44 +1368,7 @@ impl SiteExplorer {
 
         let mut managed_hosts = Vec::new();
         let mut boot_interfaces: Vec<(IpAddr, MachineBootInterface)> = Vec::new();
-        // Each host NIC's full boot interface (MAC + Redfish id), to record on
-        // its machine_interfaces row so the primary row holds the complete pair.
-        let mut nic_boot_interfaces: Vec<MachineBootInterface> = Vec::new();
-
         for (_, ep) in explored_hosts {
-            // Record every host NIC's boot interface (MAC + Redfish id) on its
-            // machine_interfaces row (matched by MAC), so the primary-flagged
-            // row holds the full pair -- whatever the NIC type (integrated NICs,
-            // SuperNICs, DPU host-PFs, DPUs in NIC mode). This sits before the
-            // `Ignore` and unmatched-host `continue`s below, so every
-            // explored host is covered -- including a zero-DPU host whose primary
-            // boots from a plain NIC. The UPDATE no-ops for MACs with no row
-            // (e.g. a never-cabled NIC). Last-known-good: only NICs that resolve
-            // a full pair in this report are recorded, so a wiped MAC keeps its
-            // prior id.
-            nic_boot_interfaces.extend(ep.report.complete_boot_interfaces());
-
-            // Surface partial records -- a host NIC reporting only one of (MAC,
-            // interface id). `complete_boot_interfaces` skips these, so log here
-            // to make it visible that we saw, and ignored, an incomplete NIC.
-            for iface in ep
-                .report
-                .systems
-                .iter()
-                .flat_map(|s| s.ethernet_interfaces.iter())
-            {
-                let has_mac = iface.mac_address.is_some();
-                let has_id = iface.id.as_deref().is_some_and(|s| !s.is_empty());
-                if has_mac != has_id {
-                    tracing::info!(
-                        bmc_ip_address = %ep.address,
-                        interface_mac_address = ?iface.mac_address,
-                        interface_id = ?iface.id,
-                        "site-explorer: host NIC reported with only one of (MAC, interface id) -- not recording its boot interface",
-                    );
-                }
-            }
-
             // Resolve the operator-declared DPU policy for this host once;
             // it drives both auto-correction (`check_and_configure_dpu_mode`
             // below -- operator override wins over BF3 part-number heuristics)
@@ -1835,7 +1798,42 @@ impl SiteExplorer {
         // avoid deadlocks: sort by IP.
         boot_interfaces.sort_by_key(|(address, _)| *address);
 
-        Ok((managed_hosts, boot_interfaces, nic_boot_interfaces))
+        Ok((managed_hosts, boot_interfaces))
+    }
+
+    fn collect_nic_redfish_ids(
+        explored_hosts: &HashMap<IpAddr, ExploredEndpoint>,
+    ) -> Vec<MachineBootInterface> {
+        let mut nic_redfish_ids = Vec::new();
+
+        // Refresh every explored host, including hosts that cannot yet pair
+        // with their DPUs. Only complete pairs replace last-known-good ids.
+        for ep in explored_hosts.values() {
+            nic_redfish_ids.extend(ep.report.complete_boot_interfaces());
+
+            // Surface partial records -- a host NIC reporting only one of (MAC,
+            // interface id). `complete_boot_interfaces` skips these, so log here
+            // to make it visible that we saw, and ignored, an incomplete NIC.
+            for iface in ep
+                .report
+                .systems
+                .iter()
+                .flat_map(|s| s.ethernet_interfaces.iter())
+            {
+                let has_mac = iface.mac_address.is_some();
+                let has_id = iface.id.as_deref().is_some_and(|s| !s.is_empty());
+                if has_mac != has_id {
+                    tracing::info!(
+                        bmc_ip_address = %ep.address,
+                        interface_mac_address = ?iface.mac_address,
+                        interface_id = ?iface.id,
+                        "site-explorer: host NIC reported with only one of (MAC, interface id) -- not recording its boot interface",
+                    );
+                }
+            }
+        }
+
+        nic_redfish_ids
     }
 
     async fn persist_identified_managed_hosts(
