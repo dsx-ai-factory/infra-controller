@@ -18,9 +18,12 @@ FROM source AS api-builder
 
 RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
     --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
-    cargo build --locked -p carbide-api --bin carbide-api \
+    cargo build --locked \
+    -p carbide-api --bin carbide-api \
+    -p nico-admin-cli --bin nico-admin-cli \
     && mkdir -p /out \
-    && cp /cargo-target/debug/carbide-api /out/carbide-api
+    && cp /cargo-target/debug/carbide-api /out/carbide-api \
+    && cp /cargo-target/debug/nico-admin-cli /out/nico-admin-cli
 
 FROM source AS bmc-proxy-builder
 
@@ -76,9 +79,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /opt/carbide /opt/carbide/firmware /mnt/persistence /var/run/kea
 
 COPY --from=api-builder /out/carbide-api /opt/carbide/carbide-api
+COPY --from=api-builder /out/nico-admin-cli /opt/carbide/nico-admin-cli
 COPY crates/api/casbin-policy.csv /opt/carbide/casbin-policy.csv
 
 ENV CASBIN_POLICY_FILE=/opt/carbide/casbin-policy.csv
+ENV PATH /opt/carbide:$PATH
 
 FROM nico-tilt-runtime-base AS bmc-proxy
 
