@@ -103,7 +103,6 @@ script = '''
 category = "qcow-imager"
 description = "Build qcow-imager.efi for x86_64 only (without scout/BFB); output: static/blobs/internal/x86_64/qcow-imager.efi"
 dependencies = [
-  "mkosi-remove-zypper-from-debian-tools",
   "mkdir-static",
   "mkosi-generate-build-tmpdir",
   "stage-disk_imaging-script",
@@ -116,7 +115,6 @@ dependencies = [
 category = "qcow-imager"
 description = "Build qcow-imager.efi for aarch64 only (without scout/BFB); output: static/blobs/internal/aarch64/qcow-imager.efi"
 dependencies = [
-  "mkosi-remove-zypper-from-debian-tools",
   "mkdir-static",
   "mkosi-generate-build-tmpdir",
   "stage-disk_imaging-script",
@@ -273,7 +271,6 @@ dependencies = [
 [tasks.create-ephemeral-image-x86-host-ci]
 category = "Ephemeral Image"
 dependencies = [
-  "mkosi-remove-zypper-from-debian-tools",
   "mkosi-generate-build-tmpdir",
   "copy-forge-scout-x86_64",
   "copy-forge-prod-root-ca-x86_64",
@@ -295,7 +292,6 @@ dependencies = [
 [tasks.create-ephemeral-image-x86-host]
 category = "Ephemeral Image"
 dependencies = [
-  "mkosi-remove-zypper-from-debian-tools",
   "mkdir-static",
   "mkosi-generate-build-tmpdir",
   "copy-forge-scout-x86_64",
@@ -318,7 +314,6 @@ dependencies = [
 [tasks.create-ephemeral-image-arm-host-ci]
 category = "Ephemeral Image"
 dependencies = [
-  "mkosi-remove-zypper-from-debian-tools",
   "mkosi-generate-build-tmpdir",
   "copy-forge-scout-aarch64",
   "copy-forge-prod-root-ca-aarch64",
@@ -340,7 +335,6 @@ dependencies = [
 [tasks.create-ephemeral-image-arm-host]
 category = "Ephemeral Image"
 dependencies = [
-  "mkosi-remove-zypper-from-debian-tools",
   "mkdir-static",
   "mkosi-generate-build-tmpdir",
   "copy-forge-scout-aarch64",
@@ -508,17 +502,6 @@ args = [
   "clean",
 ]
 
-[tasks.mkosi-remove-zypper-from-debian-tools]
-category = "Ephemeral Image"
-description = "Remove zypper from the debian-tools image, as it's been removed from the repo"
-script = '''
-if [ -f ${REPO_ROOT}/pxe/mkosi/mkosi/resources/mkosi-tools/mkosi.conf.d/10-debian-kali-ubuntu/mkosi.conf ]; then
-  sed -i '/zypper/d' ${REPO_ROOT}/pxe/mkosi/mkosi/resources/mkosi-tools/mkosi.conf.d/10-debian-kali-ubuntu/mkosi.conf
-elif [ -f ${REPO_ROOT}/pxe/mkosi/mkosi/resources/mkosi-tools/mkosi.conf.d/10-debian-ubuntu/mkosi.conf ]; then
-  sed -i '/zypper/d' ${REPO_ROOT}/pxe/mkosi/mkosi/resources/mkosi-tools/mkosi.conf.d/10-debian-ubuntu/mkosi.conf
-fi
-'''
-
 [tasks.mkosi-generate-build-tmpdir]
 category = "Ephemeral Image"
 script_runner = "@duckscript"
@@ -529,7 +512,7 @@ set_env MKOSI_BUILD_TMP ${tmp_name}
 '''
 
 # `depmod` on our runners is in `/sbin`, so add to PATH
-# Note: mkosi v25 uses built-in sandboxing via Linux namespaces (not bwrap)
+# Note: mkosi v26 uses built-in sandboxing via Linux namespaces (not bwrap)
 # which should work on GitHub Actions managed runners.
 [tasks.mkosi-build-scout-x86_64]
 category = "Ephemeral Image"
@@ -537,7 +520,7 @@ script = '''
   PROFILE="scout-oss-x86_64"
   export PATH=${PATH}:/sbin
   mkdir -p "${MKOSI_PACKAGE_CACHE_DIR}"
-  ${REPO_ROOT}/pxe/mkosi/bin/mkosi -E PKG_VERSION="${PKG_VERSION}" --profile ${PROFILE} --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} --with-network build
+  ${REPO_ROOT}/pxe/mkosi/bin/mkosi -E PKG_VERSION="${PKG_VERSION}" --profile ${PROFILE} --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} --with-network=yes build
 '''
 
 [tasks.mkosi-build-scout-loader-x86_64]
