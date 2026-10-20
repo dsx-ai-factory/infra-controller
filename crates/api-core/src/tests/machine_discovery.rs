@@ -1344,19 +1344,18 @@ async fn test_secure_discovery_does_not_fall_back_to_interface_id(
     Ok(())
 }
 
-/// Verifies that real predicted-to-stable discovery promotion is reflected in
-/// the production-wired aggregate live set and emits one machine.
+/// Verifies that discovery replaces the predicted machine ID in the database
+/// and that the machine controller reads the replacement ID and counts one machine.
 #[crate::sqlx_test]
 async fn test_secure_discovery_promotes_predicted_host_by_remote_ip(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     const MACHINE_TOTAL_METRIC: &str = "test_discovery_promoted_machines_total{fresh=\"true\"}";
 
-    // Setup: opt this fixture into the production machine-controller
-    // reconciliation path, isolate its aggregate metric, and create one
-    // predicted host.
+    // Setup: opt this fixture into filtering machine metrics by IDs read from
+    // the database, isolate its aggregate metric, and create one predicted host.
     let mut overrides = TestEnvOverrides::with_config(secure_discovery_config());
-    overrides.machine_aggregate_live_set_reconciliation = Some(true);
+    overrides.machine_filter_metrics_by_existing_object_ids_enabled = Some(true);
     overrides.machine_metric_prefix = Some("test_discovery_promoted_machines");
     let env = create_test_env_with_overrides(pool, overrides).await;
     let host_config = env.managed_host_config();
@@ -1376,9 +1375,9 @@ async fn test_secure_discovery_promotes_predicted_host_by_remote_ip(
 
     // Setup assertion: the database and isolated aggregate both contain only
     // the predicted identity before discovery promotes the row.
-    let live_host_ids = db::managed_host::load_host_ids(&env.pool).await?;
-    assert_eq!(live_host_ids.len(), 1);
-    assert!(live_host_ids.contains(&predicted_machine_id));
+    let database_host_ids = db::managed_host::load_host_ids(&env.pool).await?;
+    assert_eq!(database_host_ids.len(), 1);
+    assert!(database_host_ids.contains(&predicted_machine_id));
     env.run_machine_state_controller_iteration().await;
     assert_eq!(
         env.test_meter.formatted_metric(MACHINE_TOTAL_METRIC),
@@ -1410,26 +1409,26 @@ async fn test_secure_discovery_promotes_predicted_host_by_remote_ip(
     assert_eq!(response.machine_interface_id, Some(host_interface_id));
 
     // Assertion: promotion replaced predicted A with stable B in the database
-    // before the controller observes the next complete live set.
-    let live_host_ids = db::managed_host::load_host_ids(&env.pool).await?;
-    assert_eq!(live_host_ids.len(), 1);
-    assert!(live_host_ids.contains(&stable_machine_id));
-    assert!(!live_host_ids.contains(&predicted_machine_id));
+    // before the controller reads the next complete database ID list.
+    let database_host_ids = db::managed_host::load_host_ids(&env.pool).await?;
+    assert_eq!(database_host_ids.len(), 1);
+    assert!(database_host_ids.contains(&stable_machine_id));
+    assert!(!database_host_ids.contains(&predicted_machine_id));
 
     // Action: run the public manual controller helper so the promoted row is
     // observed and aggregate metrics are emitted through production paths.
     env.run_machine_state_controller_iteration().await;
 
-    // Assertion: the committed live set selects stable B, excludes predicted
-    // A, and emits one machine. The helper clears retained metrics, so the
-    // generic processor regression separately proves A/B cache deduplication.
+    // Assertion: the ID list published after commit contains stable B, excludes
+    // predicted A, and emits one machine. The helper clears retained metrics,
+    // so the generic processor regression separately proves A/B cache filtering.
     assert_eq!(
-        env.machine_aggregate_live_set_contains(&stable_machine_id)
+        env.machine_object_ids_from_database_contains(&stable_machine_id)
             .await,
         Some(true)
     );
     assert_eq!(
-        env.machine_aggregate_live_set_contains(&predicted_machine_id)
+        env.machine_object_ids_from_database_contains(&predicted_machine_id)
             .await,
         Some(false)
     );

@@ -28,7 +28,7 @@ use tracing::Instrument;
 
 use crate::config::IterationConfig;
 use crate::controller::{
-    ControllerIteration, ControllerIterationId, IterationError, LiveObjectSet, db,
+    ControllerIteration, ControllerIterationId, IterationError, ObjectIdsFromDatabase, db,
 };
 use crate::io::StateControllerIO;
 use crate::per_object::PerObjectStateRecorder;
@@ -36,7 +36,7 @@ use crate::per_object::PerObjectStateRecorder;
 /// Periodically enqueues state handling tasks for all objects that are managed by the
 /// state controller.
 /// Queue insertion is guaranteed to run on only one carbide instance at a time;
-/// opted-in live-set observations run on every replica for local metric reconciliation.
+/// enabled database object-ID reads run on every replica for local metric filtering.
 pub(super) struct PeriodicEnqueuer<IO: StateControllerIO> {
     /// A database connection pool that can be used for additional queries
     pub(super) pool: sqlx::PgPool,
@@ -55,9 +55,9 @@ pub(super) struct PeriodicEnqueuer<IO: StateControllerIO> {
     /// task that was already running when its object was deleted cannot
     /// resurrect the series after the first clear.
     pub(super) pending_clears: HashMap<String, Instant>,
-    /// Publishes complete live sets for aggregate metric reconciliation when enabled.
-    pub(super) live_object_ids:
-        Option<tokio::sync::watch::Sender<Option<LiveObjectSet<IO::ObjectId>>>>,
+    /// Publishes complete database object-ID lists for aggregate metric filtering.
+    pub(super) object_ids_from_database:
+        Option<tokio::sync::watch::Sender<Option<ObjectIdsFromDatabase<IO::ObjectId>>>>,
 }
 
 pub(super) struct SingleIterationResult {
@@ -143,7 +143,7 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
         );
 
         let res = self
-            .refresh_live_set_and_handle_iteration(&mut metrics)
+            .refresh_object_ids_and_handle_iteration(&mut metrics)
             .instrument(controller_span.clone())
             .await;
         metrics.recording_finished_at = std::time::Instant::now();
@@ -176,25 +176,27 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
         iteration_result
     }
 
-    /// Refreshes the optional replica-local aggregate live set before competing
-    /// for the queue lock, so non-winning replicas also reconcile their metrics.
-    async fn refresh_live_set_and_handle_iteration(
+    /// Refreshes the optional replica-local database object-ID list before
+    /// competing for the queue lock, so non-winning replicas also filter metrics.
+    async fn refresh_object_ids_and_handle_iteration(
         &mut self,
         iteration_metrics: &mut PeriodicEnqueuerMetrics,
     ) -> Result<ControllerIteration, IterationError> {
-        // Opted-in controllers publish only an observation whose listing
-        // transaction committed successfully.
-        let object_ids = if let Some(live_object_ids_sender) = &self.live_object_ids {
-            let object_ids = self.load_object_ids().await?;
-            let live_object_ids = object_ids.iter().cloned().collect::<HashSet<_>>().into();
-            live_object_ids_sender.send_replace(Some(live_object_ids));
-            Some(object_ids)
-        } else {
-            None
-        };
+        // Every enabled replica reads the complete list and publishes it only
+        // after the listing transaction commits successfully.
+        let object_ids =
+            if let Some(object_ids_from_database_sender) = &self.object_ids_from_database {
+                let object_ids = self.load_object_ids().await?;
+                let object_ids_from_database =
+                    object_ids.iter().cloned().collect::<HashSet<_>>().into();
+                object_ids_from_database_sender.send_replace(Some(object_ids_from_database));
+                Some(object_ids)
+            } else {
+                None
+            };
 
-        // The lock winner reuses the published observation instead of issuing
-        // another full live-set query.
+        // The lock winner reuses the published list instead of issuing another
+        // complete database read.
         self.lock_and_handle_iteration(iteration_metrics, object_ids)
             .await
     }
@@ -235,8 +237,8 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
         Ok(locked_controller_iteration.iteration_data)
     }
 
-    /// Loads one complete live-object observation and returns it only after its
-    /// read transaction commits, preventing partial or failed reads from publishing.
+    /// Loads the complete object-ID list and returns it only after its read
+    /// transaction commits, preventing partial or failed reads from publishing.
     async fn load_object_ids(&self) -> Result<Vec<IO::ObjectId>, IterationError> {
         // Keep the list and commit in one operation so callers cannot publish
         // IDs from a transaction whose completion failed.

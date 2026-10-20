@@ -38,7 +38,7 @@ fn processor(pool: sqlx::PgPool) -> StateProcessor<TestStateControllerIO> {
         metric_holder: Arc::new(MetricHolder::new(None, "test", Duration::from_secs(300))),
         per_object_state: None,
         object_metrics: HashMap::new(),
-        live_object_ids: None,
+        object_ids_from_database: None,
         cancel_token: CancellationToken::new(),
         iteration_config: IterationConfig::default(),
         object_tasks: JoinSet::new(),
@@ -258,8 +258,8 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
     const ORIGINAL_ID: &str = "predicted-host";
     const RENAMED_ID: &str = "stable-host";
 
-    // Setup: create one object and a controller whose aggregate metrics use
-    // replica-local live-set reconciliation.
+    // Setup: create one object and a controller whose aggregate metrics are
+    // filtered by the replica-local database object-ID list.
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
     let work_lock_manager_handle =
@@ -272,13 +272,13 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
     let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
         .database(pool.clone(), work_lock_manager_handle)
         .meter("test_objects", meter.meter())
-        .reconcile_aggregate_metrics_with_live_set()
+        .filter_metrics_by_existing_object_ids()
         .processor_id("identity-change-test".to_string())
         .services(Arc::new(()))
         .build_for_manual_iterations(CancellationToken::new())?;
 
-    // Action: publish the original live set, queue A, and process it through
-    // the production task-result path.
+    // Action: publish the original database ID list, queue A, and process it
+    // through the production task-result path.
     let enqueuer_result = controller.enqueuer.run_single_iteration().await;
     assert!(!enqueuer_result.skipped_iteration);
     assert_eq!(
@@ -307,7 +307,7 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
     );
 
     // Action: rename the same persisted object and give B a distinguishable
-    // state before processing it under the still-current A live set.
+    // state before processing it under the still-current database list containing A.
     let mut txn = pool.begin().await?;
     sqlx::query("UPDATE test_objects SET id=$1, controller_state=$2::json WHERE id=$3")
         .bind(RENAMED_ID)
@@ -342,7 +342,7 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
     controller.processor.emit_metrics();
 
     // Assertion: pending B is retained, but only A's state contributes while
-    // the latest complete snapshot still contains A.
+    // the latest database object-ID list still contains A.
     assert_eq!(
         meter.formatted_metric("test_objects_total{fresh=\"true\"}"),
         Some("1".to_string())
@@ -356,23 +356,23 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
         None
     );
 
-    // Action: reconcile to B, but deliberately do not process the B task that
-    // this sweep queues.
+    // Action: read and publish the database list containing B, but deliberately
+    // do not process the B task that this sweep queues.
     let enqueuer_result = controller.enqueuer.run_single_iteration().await;
     assert!(!enqueuer_result.skipped_iteration);
     controller.processor.emit_metrics();
 
-    // Assertion: the published live set now selects B and excludes A.
-    let live_object_ids = controller
+    // Assertion: the published database ID list contains B and excludes A.
+    let object_ids_from_database = controller
         .processor
-        .live_object_ids
+        .object_ids_from_database
         .as_ref()
-        .expect("reconciliation receiver should be configured")
+        .expect("database object-ID receiver should be configured")
         .borrow()
         .clone()
-        .expect("successful reconciliation should publish a live set");
-    assert!(live_object_ids.contains(RENAMED_ID));
-    assert!(!live_object_ids.contains(ORIGINAL_ID));
+        .expect("successful read should publish database object IDs");
+    assert!(object_ids_from_database.contains(RENAMED_ID));
+    assert!(!object_ids_from_database.contains(ORIGINAL_ID));
 
     // Assertion: the previously retained B state contributes without another
     // B completion, while retained A no longer contributes.
@@ -390,7 +390,7 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
     );
 
     // Action: remove the deliberately unprocessed B queue row, then process a
-    // stale queued A after reconciliation has selected B.
+    // stale queued A after the database ID list contains B.
     let mut txn = pool.begin().await?;
     sqlx::query("DELETE FROM test_state_controller_queued_objects WHERE object_id=$1")
         .bind(RENAMED_ID)
@@ -435,17 +435,17 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
     Ok(())
 }
 
-/// Verifies that a valid A task completing after reconciliation to B cannot
-/// restore A to the aggregate, while its measurement remains safely retained.
+/// Verifies that a valid A task completing after the database ID list changes
+/// to B cannot restore A to the aggregate, while A's measurement remains cached.
 #[carbide_macros::sqlx_test]
-async fn late_result_for_reconciled_identity_does_not_contribute(
+async fn late_result_for_id_absent_from_database_does_not_contribute(
     pool: sqlx::PgPool,
 ) -> eyre::Result<()> {
     const ORIGINAL_ID: &str = "predicted-host";
     const RENAMED_ID: &str = "stable-host";
 
-    // Setup: publish A as live and dispatch its task without inserting the
-    // completed result into the processor cache yet.
+    // Setup: publish a database ID list containing A and dispatch its task
+    // without inserting the completed result into the processor cache yet.
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
     let work_lock_manager_handle =
@@ -457,7 +457,7 @@ async fn late_result_for_reconciled_identity_does_not_contribute(
     let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
         .database(pool.clone(), work_lock_manager_handle)
         .meter("test_objects", meter.meter())
-        .reconcile_aggregate_metrics_with_live_set()
+        .filter_metrics_by_existing_object_ids()
         .processor_id("late-result-test".to_string())
         .services(Arc::new(()))
         .build_for_manual_iterations(CancellationToken::new())?;
@@ -528,8 +528,8 @@ async fn late_result_for_reconciled_identity_does_not_contribute(
     controller.processor.finalize_completed_objects().await?;
     controller.processor.emit_metrics();
 
-    // Assertion: A remains retained for timing safety but only B contributes
-    // once the complete live set contains B instead.
+    // Assertion: A remains cached for timing safety but only B contributes
+    // once the complete database ID list contains B instead.
     assert!(
         controller
             .processor
@@ -545,8 +545,8 @@ async fn late_result_for_reconciled_identity_does_not_contribute(
     Ok(())
 }
 
-/// A test handler that reports an ordinary processing error for an object that
-/// still exists, distinguishing handler failure from live-set disappearance.
+/// A test handler that reports an ordinary processing error for an object whose
+/// ID remains in the database, distinguishing handler failure from ID removal.
 #[derive(Debug)]
 struct AlwaysErrorHandler;
 
@@ -557,8 +557,8 @@ impl StateHandler for AlwaysErrorHandler {
     type ControllerState = TestObjectControllerState;
     type ContextObjects = TestStateControllerContextObjects;
 
-    /// Returns a normal handler error so the test can prove that live-object
-    /// failures remain eligible for aggregate counting.
+    /// Returns a normal handler error so the test can prove that failures for
+    /// IDs still in the database remain eligible for aggregate counting.
     async fn handle_object_state(
         &self,
         _object_id: &String,
@@ -572,15 +572,15 @@ impl StateHandler for AlwaysErrorHandler {
     }
 }
 
-/// Verifies that a failed live-set read preserves the last successful
-/// observation and the useful error measurement for an object still in it.
+/// Verifies that a failed database object-ID read preserves the last successful
+/// list and the useful error measurement for an object still in it.
 #[carbide_macros::sqlx_test]
-async fn failed_reconciliation_preserves_live_object_error_metrics(
+async fn failed_object_id_read_preserves_existing_object_error_metrics(
     pool: sqlx::PgPool,
 ) -> eyre::Result<()> {
     const OBJECT_ID: &str = "live-host";
 
-    // Setup: reconcile one live object and process an ordinary handler error.
+    // Setup: publish one existing object ID and process an ordinary handler error.
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
     let work_lock_manager_handle =
@@ -593,8 +593,8 @@ async fn failed_reconciliation_preserves_live_object_error_metrics(
     let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
         .database(pool, work_lock_manager_handle)
         .meter("test_objects", meter.meter())
-        .reconcile_aggregate_metrics_with_live_set()
-        .processor_id("failed-reconciliation-test".to_string())
+        .filter_metrics_by_existing_object_ids()
+        .processor_id("failed-object-id-read-test".to_string())
         .services(Arc::new(()))
         .io(io.clone())
         .state_handler(Arc::new(AlwaysErrorHandler))
@@ -607,16 +607,16 @@ async fn failed_reconciliation_preserves_live_object_error_metrics(
             .iteration
             .is_some()
     );
-    let successful_live_object_ids = controller
+    let successful_object_ids_from_database = controller
         .processor
-        .live_object_ids
+        .object_ids_from_database
         .as_ref()
-        .expect("reconciliation receiver should be configured")
+        .expect("database object-ID receiver should be configured")
         .borrow()
         .clone()
-        .expect("successful reconciliation should publish a live set");
-    assert_eq!(successful_live_object_ids.len(), 1);
-    assert!(successful_live_object_ids.contains(OBJECT_ID));
+        .expect("successful read should publish database object IDs");
+    assert_eq!(successful_object_ids_from_database.len(), 1);
+    assert!(successful_object_ids_from_database.contains(OBJECT_ID));
     assert_eq!(
         controller
             .processor
@@ -651,19 +651,22 @@ async fn failed_reconciliation_preserves_live_object_error_metrics(
     assert!(!failed_iteration.skipped_iteration);
     controller.processor.emit_metrics();
 
-    // Assertion: failure preserves the same nonempty snapshot rather than
-    // reverting to the startup fallback or publishing an empty set.
-    let retained_live_object_ids = controller
+    // Assertion: failure preserves the same nonempty list rather than
+    // reverting to the startup fallback or publishing an empty list.
+    let retained_object_ids_from_database = controller
         .processor
-        .live_object_ids
+        .object_ids_from_database
         .as_ref()
-        .expect("reconciliation receiver should be configured")
+        .expect("database object-ID receiver should be configured")
         .borrow()
         .clone()
-        .expect("failed reconciliation should preserve the prior live set");
-    assert_eq!(retained_live_object_ids, successful_live_object_ids);
+        .expect("failed read should preserve the prior database object IDs");
+    assert_eq!(
+        retained_object_ids_from_database,
+        successful_object_ids_from_database
+    );
 
-    // Assertion: the retained live object's ordinary error metric survives.
+    // Assertion: the retained existing object's ordinary error metric survives.
     assert_eq!(
         meter.formatted_metric("test_objects_total{fresh=\"true\"}"),
         Some("1".to_string())
@@ -672,14 +675,16 @@ async fn failed_reconciliation_preserves_live_object_error_metrics(
     Ok(())
 }
 
-/// Verifies that an opted-in replica refreshes its aggregate live set even
+/// Verifies that an enabled replica refreshes its database object-ID list even
 /// when another replica holds the global queue-enqueuing lock.
 #[carbide_macros::sqlx_test]
-async fn non_lock_winner_refreshes_aggregate_live_set(pool: sqlx::PgPool) -> eyre::Result<()> {
+async fn non_lock_winner_refreshes_object_ids_from_database(
+    pool: sqlx::PgPool,
+) -> eyre::Result<()> {
     const OBJECT_ID: &str = "live-host";
 
-    // Setup: create a live object and hold the singleton iteration lock from
-    // outside the controller under test.
+    // Setup: create a database object and hold the singleton iteration lock
+    // from outside the controller under test.
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
     let work_lock_manager_handle =
@@ -695,7 +700,7 @@ async fn non_lock_winner_refreshes_aggregate_live_set(pool: sqlx::PgPool) -> eyr
     .await?;
     let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
         .database(pool, work_lock_manager_handle)
-        .reconcile_aggregate_metrics_with_live_set()
+        .filter_metrics_by_existing_object_ids()
         .processor_id("non-lock-winner-test".to_string())
         .services(Arc::new(()))
         .build_for_manual_iterations(CancellationToken::new())?;
@@ -705,16 +710,16 @@ async fn non_lock_winner_refreshes_aggregate_live_set(pool: sqlx::PgPool) -> eyr
     assert!(iteration.skipped_iteration);
 
     // Assertion: the pre-lock committed read was still published locally.
-    let live_object_ids = controller
+    let object_ids_from_database = controller
         .processor
-        .live_object_ids
+        .object_ids_from_database
         .as_ref()
-        .expect("reconciliation receiver should be configured")
+        .expect("database object-ID receiver should be configured")
         .borrow()
         .clone()
-        .expect("successful read should publish a live set");
-    assert_eq!(live_object_ids.len(), 1);
-    assert!(live_object_ids.contains(OBJECT_ID));
+        .expect("successful read should publish database object IDs");
+    assert_eq!(object_ids_from_database.len(), 1);
+    assert!(object_ids_from_database.contains(OBJECT_ID));
 
     std::mem::drop(locked_iteration);
     Ok(())

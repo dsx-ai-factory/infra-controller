@@ -30,7 +30,7 @@ use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::{LiveObjectSet, db};
+use super::{ObjectIdsFromDatabase, db};
 use crate::CheckApplied;
 use crate::config::IterationConfig;
 use crate::db_write_batch::DbWriteBatch;
@@ -74,10 +74,10 @@ pub(super) struct StateProcessor<IO: StateControllerIO> {
     pub(super) per_object_state: Option<PerObjectStateRecorder>,
 
     pub(super) object_metrics: HashMap<IO::ObjectId, CollectedMetrics<IO>>,
-    /// The latest complete live set used only to decide which retained
-    /// measurements contribute to aggregate metrics.
-    pub(super) live_object_ids:
-        Option<tokio::sync::watch::Receiver<Option<LiveObjectSet<IO::ObjectId>>>>,
+    /// The latest complete database object-ID list used only to decide which
+    /// retained measurements contribute to aggregate metrics.
+    pub(super) object_ids_from_database:
+        Option<tokio::sync::watch::Receiver<Option<ObjectIdsFromDatabase<IO::ObjectId>>>>,
     pub(super) cancel_token: CancellationToken,
     pub(super) iteration_config: IterationConfig,
     /// Object handling tasks currently executing. Keeping them in a JoinSet ensures
@@ -281,17 +281,18 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
         let now = std::time::Instant::now();
         self.last_metric_emission_time = now;
 
-        // Retain measurements independently from aggregate eligibility: a new
-        // ID may finish before the next committed live-set observation sees it.
-        let live_object_ids = self
-            .live_object_ids
+        // Keep excluded measurements: a new ID may finish processing before the
+        // next database read includes it. Filtering does not map IDs or merge measurements.
+        // Conversely, a newly listed ID contributes only after it has a cached measurement.
+        let object_ids_from_database = self
+            .object_ids_from_database
             .as_ref()
             .and_then(|receiver| receiver.borrow().clone());
         let mut aggregate = IterationMetrics::<IO>::default();
         for (object_id, object_metrics) in &self.object_metrics {
-            if live_object_ids
+            if object_ids_from_database
                 .as_ref()
-                .is_none_or(|live_object_ids| live_object_ids.contains(object_id))
+                .is_none_or(|object_ids_from_database| object_ids_from_database.contains(object_id))
             {
                 aggregate.merge_object_handling_metrics(&object_metrics.metrics);
             }

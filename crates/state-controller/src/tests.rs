@@ -161,8 +161,8 @@ pub(crate) struct TestStateControllerIO {
 }
 
 impl TestStateControllerIO {
-    /// Makes the next live-object listing fail so reconciliation tests can
-    /// verify that an incomplete observation never replaces the last good set.
+    /// Makes the next database object-ID listing fail so filtering tests can
+    /// verify that a failed read never replaces the last successful list.
     pub(crate) fn fail_next_list_objects(&self) {
         self.fail_next_list_objects.store(true, Ordering::SeqCst);
     }
@@ -291,7 +291,7 @@ impl StateControllerIO for TestStateControllerIO {
     ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
         if self.fail_next_list_objects.swap(false, Ordering::SeqCst) {
             return Err(DatabaseError::Internal {
-                message: "injected live-set read failure".to_string(),
+                message: "injected database object-ID read failure".to_string(),
             });
         }
 

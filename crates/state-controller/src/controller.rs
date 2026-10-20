@@ -36,8 +36,8 @@ pub use enqueuer::Enqueuer;
 pub mod periodic_enqueuer;
 pub mod processor;
 
-/// The latest complete set of live object IDs observed by this controller replica.
-pub(super) type LiveObjectSet<Id> = Arc<HashSet<Id>>;
+/// The latest complete set of object IDs read from the database by this controller replica.
+pub(super) type ObjectIdsFromDatabase<Id> = Arc<HashSet<Id>>;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct ControllerIterationId(pub i64);
@@ -115,17 +115,20 @@ impl<IO: StateControllerIO> StateController<IO> {
         self.run_single_iteration_ext(true).await
     }
 
-    /// Returns whether the latest aggregate-reconciliation live set contains
+    /// Returns whether the latest successfully read database ID list contains
     /// an object so integration tests can verify production wiring without
     /// exposing processor internals.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn aggregate_live_set_contains_for_test(&self, object_id: &IO::ObjectId) -> Option<bool> {
+    pub fn object_ids_from_database_contains_for_test(
+        &self,
+        object_id: &IO::ObjectId,
+    ) -> Option<bool> {
         self.processor
-            .live_object_ids
+            .object_ids_from_database
             .as_ref()?
             .borrow()
             .as_ref()
-            .map(|live_object_ids| live_object_ids.contains(object_id))
+            .map(|object_ids_from_database| object_ids_from_database.contains(object_id))
     }
 
     /// Enqueues state handling tasks for all objects and processes them

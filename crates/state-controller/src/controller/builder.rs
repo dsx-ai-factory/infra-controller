@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::IterationConfig;
 use crate::controller::periodic_enqueuer::{EnqueuerMetricsEmitter, PeriodicEnqueuer};
 use crate::controller::processor::{ProcessorMetricsEmitter, StateProcessor};
-use crate::controller::{LiveObjectSet, StateController};
+use crate::controller::{ObjectIdsFromDatabase, StateController};
 use crate::io::StateControllerIO;
 use crate::metrics::MetricHolder;
 use crate::per_object::PerObjectStateRecorder;
@@ -68,7 +68,7 @@ pub struct Builder<IO: StateControllerIO> {
     state_change_emitter: Arc<StateChangeEmitter<IO::ObjectId, IO::ControllerState>>,
     processor_id: Option<String>,
     per_object_state_metrics: Option<PerObjectStateRecorder>,
-    aggregate_live_set_reconciliation_enabled: bool,
+    filter_metrics_by_existing_object_ids_enabled: bool,
 }
 
 impl<IO: StateControllerIO> Default for Builder<IO> {
@@ -91,7 +91,7 @@ impl<IO: StateControllerIO> Default for Builder<IO> {
             state_change_emitter: Arc::new(StateChangeEmitter::default()),
             processor_id: None,
             per_object_state_metrics: None,
-            aggregate_live_set_reconciliation_enabled: false,
+            filter_metrics_by_existing_object_ids_enabled: false,
         }
     }
 }
@@ -186,11 +186,13 @@ impl<IO: StateControllerIO> Builder<IO> {
 
         let per_object_state_metrics = self.per_object_state_metrics.take();
 
-        // Aggregate reconciliation uses a latest-value channel because only the
-        // newest complete live-set observation is relevant to metric emission.
-        let (live_object_ids_sender, live_object_ids_receiver) = self
-            .aggregate_live_set_reconciliation_enabled
-            .then(|| tokio::sync::watch::channel::<Option<LiveObjectSet<IO::ObjectId>>>(None))
+        // Filtering uses a latest-value channel because only the newest complete
+        // database object-ID list is relevant to aggregate metric emission.
+        let (object_ids_from_database_sender, object_ids_from_database_receiver) = self
+            .filter_metrics_by_existing_object_ids_enabled
+            .then(|| {
+                tokio::sync::watch::channel::<Option<ObjectIdsFromDatabase<IO::ObjectId>>>(None)
+            })
             .map_or((None, None), |(sender, receiver)| {
                 (Some(sender), Some(receiver))
             });
@@ -205,7 +207,7 @@ impl<IO: StateControllerIO> Builder<IO> {
             per_object_state: per_object_state_metrics.clone(),
             known_object_ids: Default::default(),
             pending_clears: Default::default(),
-            live_object_ids: live_object_ids_sender,
+            object_ids_from_database: object_ids_from_database_sender,
         };
 
         let processor_metric_emitter =
@@ -230,7 +232,7 @@ impl<IO: StateControllerIO> Builder<IO> {
             stats_since_last_log: Default::default(),
             last_metric_emission_time: std::time::Instant::now(),
             processor_id,
-            live_object_ids: live_object_ids_receiver,
+            object_ids_from_database: object_ids_from_database_receiver,
         };
 
         let controller = StateController::<IO> {
@@ -316,13 +318,17 @@ impl<IO: StateControllerIO> Builder<IO> {
         self
     }
 
-    /// Reconciles retained aggregate measurements against complete live-object
-    /// observations so an object identity change cannot count both IDs.
+    /// Filters retained aggregate measurements to object IDs from the last
+    /// successful database read, so an identity change cannot count both IDs.
     ///
-    /// This is opt-in because every controller replica performs the live-set
-    /// read, including replicas that do not acquire the global queue lock.
-    pub fn reconcile_aggregate_metrics_with_live_set(mut self) -> Self {
-        self.aggregate_live_set_reconciliation_enabled = true;
+    /// Excluded measurements remain cached. Until the first successful read,
+    /// all cached measurements contribute as before.
+    ///
+    /// This is opt-in because every enabled controller replica reads the
+    /// complete ID list, including replicas that do not acquire the global
+    /// queue lock.
+    pub fn filter_metrics_by_existing_object_ids(mut self) -> Self {
+        self.filter_metrics_by_existing_object_ids_enabled = true;
         self
     }
 
@@ -341,17 +347,17 @@ mod tests {
     use super::Builder;
     use crate::tests::TestStateControllerIO;
 
-    /// Verifies that live-set reconciliation changes controller behavior only
-    /// when a caller explicitly opts in, keeping every other controller unchanged.
+    /// Verifies that filtering aggregate metrics by database object IDs changes
+    /// controller behavior only when a caller explicitly opts in.
     #[test]
-    fn aggregate_live_set_reconciliation_is_opt_in() {
+    fn filter_metrics_by_existing_object_ids_is_opt_in() {
         // Assertion: the generic builder preserves the existing default.
         let default_builder = Builder::<TestStateControllerIO>::default();
-        assert!(!default_builder.aggregate_live_set_reconciliation_enabled);
+        assert!(!default_builder.filter_metrics_by_existing_object_ids_enabled);
 
-        // Action and assertion: the dedicated method enables reconciliation.
+        // Action and assertion: the dedicated method enables filtering.
         let opted_in_builder =
-            Builder::<TestStateControllerIO>::default().reconcile_aggregate_metrics_with_live_set();
-        assert!(opted_in_builder.aggregate_live_set_reconciliation_enabled);
+            Builder::<TestStateControllerIO>::default().filter_metrics_by_existing_object_ids();
+        assert!(opted_in_builder.filter_metrics_by_existing_object_ids_enabled);
     }
 }

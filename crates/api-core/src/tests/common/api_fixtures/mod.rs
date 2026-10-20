@@ -208,9 +208,9 @@ pub(in crate::tests) struct TestEnvOverrides {
     pub(in crate::tests) prevent_allocations_on_stale_dpu_agent_version: Option<bool>,
     pub(in crate::tests) network_segments_drain_period: Option<chrono::Duration>,
     pub(in crate::tests) power_manager_enabled: Option<bool>,
-    /// Enables machine aggregate live-set reconciliation only for tests that
-    /// need to verify the production controller wiring.
-    pub(in crate::tests) machine_aggregate_live_set_reconciliation: Option<bool>,
+    /// Enables filtering machine aggregate metrics by database object IDs only
+    /// for tests that need to verify the production controller wiring.
+    pub(in crate::tests) machine_filter_metrics_by_existing_object_ids_enabled: Option<bool>,
     /// Overrides the machine controller's metric prefix when a test needs to
     /// isolate its aggregate series from other fixture controllers.
     pub(in crate::tests) machine_metric_prefix: Option<&'static str>,
@@ -633,16 +633,16 @@ impl TestEnv {
             .await;
     }
 
-    /// Reports aggregate live-set membership so integration tests can verify
-    /// that the machine controller published the identity selected by discovery.
-    pub(in crate::tests) async fn machine_aggregate_live_set_contains(
+    /// Reports membership in the latest database object-ID list so integration
+    /// tests can verify which identity the machine controller read after discovery.
+    pub(in crate::tests) async fn machine_object_ids_from_database_contains(
         &self,
         machine_id: &HostMachineId,
     ) -> Option<bool> {
         self.machine_state_controller
             .lock()
             .await
-            .aggregate_live_set_contains_for_test(machine_id)
+            .object_ids_from_database_contains_for_test(machine_id)
     }
 
     /// Runs one iteration of the network state controller handler with the services
@@ -1657,10 +1657,10 @@ async fn create_test_env_with_overrides_inner(
         )
         .processor_id(state_controller_id.clone());
     let machine_controller_builder = if overrides
-        .machine_aggregate_live_set_reconciliation
+        .machine_filter_metrics_by_existing_object_ids_enabled
         .unwrap_or(false)
     {
-        machine_controller_builder.reconcile_aggregate_metrics_with_live_set()
+        machine_controller_builder.filter_metrics_by_existing_object_ids()
     } else {
         machine_controller_builder
     };
