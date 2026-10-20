@@ -14,6 +14,7 @@ tilt_dir = os.path.join(repo_root, 'dev/deployment/tilt')
 core_charts = os.path.join(repo_root, 'helm/charts')
 rest_charts = os.path.join(repo_root, 'helm/rest')
 rest_api_dir = os.path.join(repo_root, 'rest-api')
+rest_api_docker_local = os.path.join(rest_api_dir, 'docker/local')
 values_file = os.path.join(tilt_dir, 'values.yaml')
 kea_version = str(read_file(os.path.join(repo_root, 'dev/docker/kea.version'))).strip()
 
@@ -188,7 +189,7 @@ def rest_image(name, dockerfile, only):
     docker_build(
         'localhost/%s' % name,
         rest_api_dir,
-        dockerfile=os.path.join(tilt_dir, dockerfile),
+        dockerfile=os.path.join(rest_api_docker_local, dockerfile),
         only=only + [
             'go.mod',
             'go.sum',
