@@ -4750,8 +4750,17 @@ async fn rms_batch_disable_switch_mtls(
                 "RMS does not support switch mTLS disable".to_string(),
             )
         }
-        _ => ComponentManagerError::OperationOutcomeUnknown(
-            "RMS switch mTLS-disable submission returned no durable job ID".to_string(),
+        // The request carries switch credentials and RMS can echo them in a
+        // transport error, so report only the failure kind, not its text.
+        RackManagerError::ApiInvocationError(status) => {
+            ComponentManagerError::OperationOutcomeUnknown(format!(
+                "RMS switch mTLS-disable submission failed with gRPC status {:?} and returned no durable job ID",
+                status.code()
+            ))
+        }
+        RackManagerError::TlsError(_) => ComponentManagerError::OperationOutcomeUnknown(
+            "RMS switch mTLS-disable submission failed with a TLS error and returned no durable job ID"
+                .to_string(),
         ),
     })?;
 
@@ -9297,6 +9306,29 @@ mod tests {
                 "{scenario}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn sw_batch_disable_switch_mtls_submission_error_reports_status_without_message() {
+        let mock = MockRmsApi::new();
+        mock.enqueue_batch_disable_switch_mtls(Err(RackManagerError::ApiInvocationError(
+            tonic::Status::unavailable("password=hunter2"),
+        )))
+        .await;
+
+        let error = rms_batch_disable_switch_mtls(
+            &mock,
+            vec![rms::NodeInfo::default()],
+            &[rms::SwitchService::NvueApi as i32],
+        )
+        .await
+        .expect_err("submission failure");
+
+        let ComponentManagerError::OperationOutcomeUnknown(message) = error else {
+            panic!("expected OperationOutcomeUnknown, got {error:?}");
+        };
+        assert!(message.contains("Unavailable"), "{message}");
+        assert!(!message.contains("hunter2"), "{message}");
     }
 
     #[tokio::test]
