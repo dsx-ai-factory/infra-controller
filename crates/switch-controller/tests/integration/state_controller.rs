@@ -371,7 +371,9 @@ pub(super) async fn run_switch_controller_with_services(
         .state_handler(Arc::new(SwitchStateHandler::default()))
         .build_for_manual_iterations(cancel_token)
         .unwrap();
-    controller.run_single_iteration().await;
+    // Keep intermediate-state assertions independent of task completion order.
+    // Follow-up transitions run on the next explicit iteration.
+    controller.run_single_iteration_ext(false).await;
 }
 
 /// Builds a component manager around the provided NVSwitch manager.
