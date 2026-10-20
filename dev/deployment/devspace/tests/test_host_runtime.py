@@ -13,6 +13,78 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1]
 
 
 class NativePreparationTests(unittest.TestCase):
+    def test_postgres_waits_for_final_tcp_server(self):
+        script = (SCRIPT_DIR / "prepare-ubuntu-host-for-dev.sh").read_text()
+        function = script[script.index("wait_for_core_postgres() {"):
+                          script.index("\nfetch_dependencies() {")]
+        for available, attempts in (("1", 2), ("0", 60)):
+            with self.subTest(available=available), tempfile.TemporaryDirectory() as directory:
+                calls = Path(directory) / "calls"
+                result = subprocess.run(
+                    ["bash", "-c", '''set -euo pipefail
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+sleep() { :; }
+run_as_user() {
+  printf '%s\\n' "$*" >> "$CALL_LOG"
+  # The initialization server accepts sockets before the final TCP listener.
+  [[ "$*" == *'pg_isready -h 127.0.0.1 '* ]] || return 0
+  [[ "$AVAILABLE" == 1 && "$(wc -l < "$CALL_LOG")" -ge 2 ]]
+}
+''' + function + '\nwait_for_core_postgres\n'],
+                    env={**os.environ, "CORE_POSTGRES_CONTAINER": "fixture",
+                         "CALL_LOG": str(calls), "AVAILABLE": available},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0 if available == "1" else 1, result.stderr)
+                self.assertEqual(len(calls.read_text().splitlines()), attempts)
+                if available == "0":
+                    self.assertIn("PostgreSQL did not become ready", result.stderr)
+
+    def test_summary_uses_existing_storage_paths(self):
+        script = (SCRIPT_DIR / "setup-devspace-on-host.sh").read_text()
+        function = script[script.index("show_summary() {"):script.index("\nmain() {")]
+        for case in ("external", "missing", "discovery-failed"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                docker_root = root / "external disk"
+                docker_root.mkdir()
+                calls = root / "df-paths"
+                # Neither standard runtime directory exists on this fixture host.
+                summary = function.replace("/var/lib/docker", str(root / "docker"))
+                summary = summary.replace("/var/lib/containerd", str(root / "containerd"))
+                result = subprocess.run(
+                    ["bash", "-c", '''set -euo pipefail
+log() { :; }
+run_as_user() { "$@"; }
+kubectl() { :; }
+docker() {
+  case "$1" in
+    inspect) printf '192.0.2.1\\n' ;;
+    system) : ;;
+    info) [[ "$TEST_CASE" != discovery-failed ]] || return 1
+          printf '%s\\n' "$DOCKER_ROOT" ;;
+    *) return 99 ;;
+  esac
+}
+df() {
+  [[ "$1" == -h ]] || return 99
+  shift
+  for path; do
+    [[ -d "$path" ]] || return 1
+    printf '%s\\n' "$path" >> "$CALL_LOG"
+  done
+}
+''' + summary + '\nshow_summary\n'],
+                    env={**os.environ, "CLUSTER_NAME": "fixture", "DEV_USER": "fixture",
+                         "TEST_CASE": case, "CALL_LOG": str(calls),
+                         "DOCKER_ROOT": str(docker_root if case != "missing" else root / "missing")},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                expected = ["/", "/home"] + ([str(docker_root)] if case == "external" else [])
+                self.assertEqual(calls.read_text().splitlines(), expected)
+                self.assertIn("REST health:", result.stdout)
+
     def test_kind_runtime_configuration_is_idempotent(self):
         script = (SCRIPT_DIR / "setup-devspace-on-host.sh").read_text()
         function = script.split("configure_kind_node_tls() {", 1)[1].split("\n}\n", 1)[0]

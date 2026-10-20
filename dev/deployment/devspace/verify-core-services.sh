@@ -17,12 +17,19 @@ while IFS= read -r workload; do
   kubectl -n "${namespace}" rollout status "${workload}" --timeout=300s
 done <<<"${workloads}"
 
+jobs="$(kubectl -n "${namespace}" get jobs -o name)"
+if [[ -n "${jobs}" ]]; then
+  kubectl -n "${namespace}" wait --for=condition=complete job --all --timeout=300s
+fi
+
 # Services without readiness probes can briefly report Ready before crashing.
 # Require a stable pod population and restart counts as well as readiness.
 previous=''
 for attempt in {1..3}; do
   pods="$(kubectl -n "${namespace}" get pods -o json |
-    jq '.items |= map(select(.metadata.deletionTimestamp == null))')"
+    jq '.items |= map(select(.metadata.deletionTimestamp == null) |
+      select((.status.phase == "Failed" and
+        any(.metadata.ownerReferences[]?; .kind == "Job")) | not))')"
   if ! jq -e '.items | length > 0 and all(.[];
       .status.phase == "Succeeded" or
       (.status.phase == "Running" and any(.status.conditions[]?;

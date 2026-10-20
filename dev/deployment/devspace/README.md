@@ -46,7 +46,9 @@ The bootstrap script is responsible for cluster-facing dependencies and generate
 After deployment, DevSpace replaces the chart's DHCP address placeholders with
 the cluster-local DNS, NTP, and PXE Service IPv4 addresses. Explicitly configured
 addresses are preserved. It then waits for all Core Deployments, StatefulSets,
-and DaemonSets to roll out, and checks pod readiness and stable restart counts
+and DaemonSets to roll out and namespace Jobs to complete (up to 300 seconds).
+Retained failed Job-attempt pods are excluded from readiness checks; failed
+non-Job pods still fail verification. It checks pod readiness and stable restart counts
 over twenty seconds. This also applies to the `core-only` profile. A missing
 executable or prerequisite now fails deployment instead of reporting success.
 It also downloads packaged firmware metadata through the PXE HTTP Service from

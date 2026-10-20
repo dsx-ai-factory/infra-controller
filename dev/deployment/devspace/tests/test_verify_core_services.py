@@ -17,7 +17,8 @@ class VerifyCoreServicesTest(unittest.TestCase):
     def test_workload_readiness(self):
         # Exercise the command, including Kubernetes failures and pods without probes.
         for case in ("healthy", "terminating", "rollout-failed", "empty", "api-error", "not-ready",
-                     "restarting", "pxe-http-failed", "pxe-wrong-content", "pxe-exec-timeout"):
+                     "restarting", "pxe-http-failed", "pxe-wrong-content", "pxe-exec-timeout",
+                     "job-retried", "job-failed", "jobs-api-error", "failed-workload"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
                 if case == "pxe-exec-timeout" and not TIMEOUT:
                     self.skipTest("GNU timeout is required for the stalled-exec regression")
@@ -34,6 +35,13 @@ kubectl() {
         '-n isolated rollout status '* )
             [[ "$TEST_CASE" != rollout-failed || "$*" != *nico-pxe* ]]
             ;;
+        '-n isolated get jobs -o name')
+            [[ "$TEST_CASE" != jobs-api-error ]] || return 1
+            if [[ "$TEST_CASE" == job-* ]]; then printf 'job.batch/nico-api-migrate\n'; fi
+            ;;
+        '-n isolated wait --for=condition=complete job --all --timeout=300s')
+            [[ "$TEST_CASE" != job-failed ]]
+            ;;
         '-n isolated get pods -o json')
             [[ ! -f "$TEST_DIRECTORY/observed" ]] || export TEST_OBSERVED=1
             touch "$TEST_DIRECTORY/observed"
@@ -45,8 +53,13 @@ items = [
     {"metadata": {"name": "nico-dns-0", "uid": "dns-uid"}, "status": {
         "phase": "Running", "conditions": [{"type": "Ready", "status": ready}],
         "containerStatuses": [{"restartCount": restarts}]}},
-    {"metadata": {"name": "nico-api-migrate"}, "status": {"phase": "Succeeded"}}
+    {"metadata": {"name": "nico-api-migrate", "ownerReferences": [
+        {"kind": "Job", "name": "nico-api-migrate"}]}, "status": {"phase": "Succeeded"}}
 ]
+if os.environ["TEST_CASE"] in ("job-retried", "failed-workload"):
+    owner = "Job" if os.environ["TEST_CASE"] == "job-retried" else "ReplicaSet"
+    items.append({"metadata": {"uid": "failed-attempt", "ownerReferences": [
+        {"kind": owner, "name": "nico-api-migrate"}]}, "status": {"phase": "Failed"}})
 if os.environ["TEST_CASE"] == "terminating" and "TEST_OBSERVED" not in os.environ:
     items.append({"metadata": {"uid": "old", "deletionTimestamp": "2026-01-01T00:00:00Z"},
                   "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "False"}]}})
@@ -91,7 +104,7 @@ bash "$1" isolated
                                               "pxe/scout-firmware-scripts/nvidia/dgxh100/cx7/metadata.toml")},
                     capture_output=True, text=True, timeout=10,
                 )
-                if case in ("healthy", "terminating"):
+                if case in ("healthy", "terminating", "job-retried"):
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     calls = (Path(directory) / "calls").read_text()
                     for resource in ("deployment.apps/nico-api", "statefulset.apps/nico-dns",
@@ -99,12 +112,20 @@ bash "$1" isolated
                         self.assertIn(f"rollout status {resource} --timeout=300s", calls)
                     self.assertIn("http://nico-pxe.isolated.svc.cluster.local.:18080/public/", calls)
                     self.assertIn("timeout --kill-after=5s 45s kubectl -n isolated exec", calls)
+                    wait = "wait --for=condition=complete job --all --timeout=300s"
+                    if case == "job-retried":
+                        self.assertLess(calls.index(wait), calls.index("get pods -o json"))
+                    else:
+                        self.assertNotIn(wait, calls)
                 elif case == "pxe-exec-timeout":
                     self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
                     self.assertNotIn("PXE HTTP delivery verified", result.stdout)
                 else:
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertNotIn("No such file", result.stderr)
+                    if case in ("job-failed", "jobs-api-error"):
+                        calls = (Path(directory) / "calls").read_text()
+                        self.assertNotIn("get pods -o json", calls)
 
 
 if __name__ == "__main__":

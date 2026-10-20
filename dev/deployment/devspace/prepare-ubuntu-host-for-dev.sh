@@ -772,7 +772,7 @@ wait_for_core_postgres() {
   local _attempt
   for _attempt in {1..60}; do
     if run_as_user docker exec "${CORE_POSTGRES_CONTAINER}" \
-      pg_isready -U postgres -d forgetest >/dev/null 2>&1; then
+      pg_isready -h 127.0.0.1 -U postgres -d forgetest >/dev/null 2>&1; then
       return
     fi
     sleep 1

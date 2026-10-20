@@ -631,7 +631,18 @@ show_summary() {
   log "Setup complete"
   run_as_user kubectl get deployments,statefulsets -A
   run_as_user docker system df
-  df -h / /home /var/lib/docker /var/lib/containerd
+  local docker_root path
+  local paths=(/ /home)
+  if ! docker_root="$(run_as_user docker info --format '{{.DockerRootDir}}')"; then
+    log "Cannot determine Docker storage path for disk usage summary"
+    docker_root=""
+  fi
+  for path in "${docker_root}" /var/lib/containerd; do
+    if [[ -n "${path}" && -d "${path}" ]]; then
+      paths+=("${path}")
+    fi
+  done
+  df -h "${paths[@]}"
   cat <<EOF
 
 Access the services from another machine with:
