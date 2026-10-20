@@ -387,7 +387,7 @@ pub struct ExploredEndpoint {
     pub preingestion_state: PreingestionState,
     /// Indicates that preingestion is waiting for site explorer to refresh the state
     pub waiting_for_explorer_refresh: bool,
-    /// Whether the endpoint will be explored in the next site-explorer run
+    /// Whether exploration is queued. Pending requests remain queued while suppressed.
     pub exploration_requested: bool,
     /// Last BMC Reset issued through redfish
     pub last_redfish_bmc_reset: Option<chrono::DateTime<chrono::Utc>>,

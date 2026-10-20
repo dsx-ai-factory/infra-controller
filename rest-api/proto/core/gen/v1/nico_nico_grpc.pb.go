@@ -848,6 +848,9 @@ type ForgeClient interface {
 	// picks up the freshly persisted report for downstream processing (pairing,
 	// remediation, audit). Returns AlreadyExists
 	// if a concurrent refresh or periodic probe is already in progress.
+	// During DPF provisioning, queues exploration and returns the cached report
+	// with exploration_requested=true. The queued refresh runs after all Site
+	// Explorer suppressions are cleared. Non-DPF suppressions alone return FailedPrecondition.
 	RefreshEndpointReport(ctx context.Context, in *RefreshEndpointReportRequest, opts ...grpc.CallOption) (*ExploredEndpoint, error)
 	// Delete an explored endpoint from the database
 	DeleteExploredEndpoint(ctx context.Context, in *DeleteExploredEndpointRequest, opts ...grpc.CallOption) (*DeleteExploredEndpointResponse, error)
@@ -7342,6 +7345,9 @@ type ForgeServer interface {
 	// picks up the freshly persisted report for downstream processing (pairing,
 	// remediation, audit). Returns AlreadyExists
 	// if a concurrent refresh or periodic probe is already in progress.
+	// During DPF provisioning, queues exploration and returns the cached report
+	// with exploration_requested=true. The queued refresh runs after all Site
+	// Explorer suppressions are cleared. Non-DPF suppressions alone return FailedPrecondition.
 	RefreshEndpointReport(context.Context, *RefreshEndpointReportRequest) (*ExploredEndpoint, error)
 	// Delete an explored endpoint from the database
 	DeleteExploredEndpoint(context.Context, *DeleteExploredEndpointRequest) (*DeleteExploredEndpointResponse, error)

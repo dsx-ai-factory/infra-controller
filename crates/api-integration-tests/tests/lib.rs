@@ -575,10 +575,10 @@ async fn exercise_dpf_exploration_suppression(
     )
     .await?;
     txn.commit().await?;
-    let error = result.expect_err("provisioning must block immediate refresh");
+    let queued = result?;
     eyre::ensure!(
-        error.to_string().contains("paused during DPU provisioning"),
-        "{error}"
+        queued.exploration_requested,
+        "provisioning must queue refresh"
     );
     Ok(())
 }

@@ -349,6 +349,9 @@ service Forge {
   // picks up the freshly persisted report for downstream processing (pairing,
   // remediation, audit). Returns AlreadyExists
   // if a concurrent refresh or periodic probe is already in progress.
+  // During DPF provisioning, queues exploration and returns the cached report
+  // with exploration_requested=true. The queued refresh runs after all Site
+  // Explorer suppressions are cleared. Non-DPF suppressions alone return FailedPrecondition.
   rpc RefreshEndpointReport(RefreshEndpointReportRequest) returns (site_explorer.ExploredEndpoint);
   // Delete an explored endpoint from the database
   rpc DeleteExploredEndpoint(DeleteExploredEndpointRequest) returns (DeleteExploredEndpointResponse);

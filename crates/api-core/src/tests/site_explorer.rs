@@ -866,7 +866,7 @@ async fn prepare_endpoint_exploration_case(
 }
 
 #[sqlx_test]
-async fn test_manual_refreshes_reject_site_explorer_suppressed_bmc(
+async fn test_manual_exploration_respects_site_explorer_suppression(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let metrics = carbide_instrument::testing::MetricsCapture::start();
@@ -923,23 +923,81 @@ async fn test_manual_refreshes_reject_site_explorer_suppressed_bmc(
         );
 
         let calls_before_refresh = endpoint_explore_call_count(&env, bmc_ip);
-        let refresh_error = env
-            .api
-            .refresh_endpoint_report(Request::new(rpc::forge::RefreshEndpointReportRequest {
+        let mut before_refresh = explored_endpoint(&env, bmc_ip).await?;
+        let concurrent_update = if paused_for_dpf && sources.len() == 1 {
+            let mut txn = env.pool.begin().await?;
+            assert!(matches!(
+                db::explored_endpoints::try_update(
+                    bmc_ip,
+                    before_refresh.report_version,
+                    &before_refresh.report,
+                    false,
+                    txn.as_mut(),
+                )
+                .await?,
+                db::ConditionalWrite::Applied(())
+            ));
+            before_refresh = db::explored_endpoints::find_all_by_ip(bmc_ip, txn.as_mut())
+                .await?
+                .remove(0);
+            Some(txn)
+        } else {
+            None
+        };
+        let api = env.api.clone();
+        let refresh = tokio::spawn(async move {
+            api.refresh_endpoint_report(Request::new(rpc::forge::RefreshEndpointReportRequest {
                 ip_address: bmc_ip.to_string(),
             }))
             .await
-            .unwrap_err();
-        assert_eq!(refresh_error.code(), tonic::Code::FailedPrecondition);
-        assert!(
-            refresh_error
-                .message()
-                .contains(&bmc_interface.mac_address.to_string())
-        );
+        });
+        if let Some(txn) = concurrent_update {
+            // Let refresh read the older report, then commit a newer version
+            // while its queue write waits for the endpoint row.
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let blocked: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                         WHERE datname = current_database() AND wait_event_type = 'Lock'
+                         AND query LIKE '%UPDATE explored_endpoints SET exploration_requested%')",
+                    )
+                    .fetch_one(&env.pool)
+                    .await?;
+                    if blocked {
+                        break Ok::<(), sqlx::Error>(());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await??;
+            txn.commit().await?;
+        }
+        let refresh = refresh.await?;
+        if paused_for_dpf {
+            let queued = refresh?.into_inner();
+            assert!(queued.exploration_requested);
+            assert_eq!(
+                queued.report_version,
+                before_refresh.report_version.to_string()
+            );
+            let persisted = explored_endpoint(&env, bmc_ip).await?;
+            assert!(persisted.exploration_requested);
+            assert_eq!(persisted.report, before_refresh.report);
+            assert_eq!(persisted.report_version, before_refresh.report_version);
+        } else {
+            let error = refresh.unwrap_err();
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+            assert!(
+                error
+                    .message()
+                    .contains(&bmc_interface.mac_address.to_string())
+            );
+            assert!(!explored_endpoint(&env, bmc_ip).await?.exploration_requested);
+        }
         assert_eq!(
             endpoint_explore_call_count(&env, bmc_ip),
             calls_before_refresh,
-            "a rejected immediate refresh must not probe the BMC"
+            "suppressed refresh requests must not probe the BMC"
         );
 
         let status = env
@@ -956,11 +1014,11 @@ async fn test_manual_refreshes_reject_site_explorer_suppressed_bmc(
             paused_for_dpf
         );
         if paused_for_dpf {
-            for error in [&refresh_error, &re_explore_error] {
-                assert!(error.message().contains(
+            assert!(
+                re_explore_error.message().contains(
                     "resumes automatically when all site explorer suppressions are cleared"
-                ));
-            }
+                )
+            );
             for request in ["re_explore", "refresh"] {
                 assert!(
                     metrics.counter_delta(
@@ -1005,12 +1063,17 @@ async fn test_manual_refreshes_reject_site_explorer_suppressed_bmc(
             .await?;
         }
         txn.commit().await?;
+        env.api
+            .refresh_endpoint_report(Request::new(rpc::forge::RefreshEndpointReportRequest {
+                ip_address: bmc_ip.to_string(),
+            }))
+            .await?;
+        assert!(!explored_endpoint(&env, bmc_ip).await?.exploration_requested);
+        assert_eq!(
+            endpoint_explore_call_count(&env, bmc_ip),
+            calls_before_refresh + 1
+        );
     }
-    env.api
-        .refresh_endpoint_report(Request::new(rpc::forge::RefreshEndpointReportRequest {
-            ip_address: bmc_ip.to_string(),
-        }))
-        .await?;
 
     Ok(())
 }

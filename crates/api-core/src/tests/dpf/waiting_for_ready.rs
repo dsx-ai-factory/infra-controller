@@ -29,6 +29,8 @@ use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use db::TransactionVending;
 use libredfish::SystemPowerControl;
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
+use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{DpfState, DpuInitState, ManagedHostState, PerformPowerOperation};
 use tokio::time::timeout;
 
@@ -82,6 +84,7 @@ async fn reset_host_to_dpf_state(
     let state_json = serde_json::to_value(&state).unwrap();
     let version = format!("V999-T{}", chrono::Utc::now().timestamp_micros());
 
+    let mut txn = pool.begin().await.unwrap();
     sqlx::query(
         "UPDATE machines SET \
             controller_state = $1, \
@@ -95,9 +98,36 @@ async fn reset_host_to_dpf_state(
     .bind(sqlx::types::Json(&state_json))
     .bind(&version)
     .bind(host_id)
-    .execute(pool)
+    .execute(txn.as_mut())
     .await
     .unwrap();
+    if state.suppresses_exploration_for_dpf() {
+        let host = db::machine::find_one(txn.as_mut(), host_id, Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        let dpu = db::machine::find_one(txn.as_mut(), dpu_id, Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        for mac in [
+            host.status.bmc_info.mac.unwrap(),
+            dpu.status.bmc_info.mac.unwrap(),
+        ] {
+            db::bmc_suppression::upsert(
+                txn.as_mut(),
+                &NewBmcSuppression {
+                    bmc_mac_address: mac,
+                    subsystem: BmcSuppressionSubsystem::SiteExplorer,
+                    source: BmcSuppressionSource::DpfProvisioning,
+                    reason: "provisioning fixture".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+    }
+    txn.commit().await.unwrap();
 }
 
 /// Restores WaitingForReady so tests can replay operator readiness and reboot
@@ -263,6 +293,39 @@ async fn test_waiting_for_ready_no_reboot(pool: sqlx::PgPool) {
     );
 
     assert_provisioning_suppressed(&env, &mh, true).await;
+
+    // A wait must not recreate suppression removed by another writer.
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let version_before_wait = host.state.version;
+    db::bmc_suppression::delete_many_for_source(
+        txn.as_mut(),
+        &[
+            host.status.bmc_info.mac.unwrap(),
+            dpu.status.bmc_info.mac.unwrap(),
+        ],
+        BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::DpfProvisioning,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    assert_eq!(host.state.version, version_before_wait);
+    assert!(
+        matches!(
+            &host.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::Wait { reason, .. })
+                if reason == "Waiting for DPU to reach Ready phase"
+        ),
+        "unexpected outcome: {:?}",
+        host.controller_state_outcome
+    );
+    txn.commit().await.unwrap();
+    assert_provisioning_suppressed(&env, &mh, false).await;
 
     dpu_ready.store(true, Ordering::SeqCst);
 

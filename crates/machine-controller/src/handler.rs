@@ -3240,7 +3240,9 @@ impl StateHandler for MachineStateHandler {
                 _ => &mh_snapshot.managed_state,
             };
             let suppress = next_state.suppresses_exploration_for_dpf();
-            if was_dpf_provisioning || suppress {
+            // Wait outcomes have no state-version check, so they must not recreate
+            // suppression after a concurrent force-delete clears it.
+            if was_dpf_provisioning != suppress {
                 result =
                     Ok(
                         dpf::update_exploration_suppression(outcome, mh_snapshot, suppress, ctx)

@@ -44,7 +44,7 @@ pub enum ExplorationRequest {
     log = info,
     metric = counter,
     message = "Exploration paused during DPU provisioning; resumes automatically when all Site Explorer suppressions are cleared",
-    describe = "Number of periodic endpoint candidates skipped or manual exploration requests rejected during DPF provisioning, by request type.",
+    describe = "Number of periodic endpoint candidates skipped, re-exploration requests rejected, or refresh requests deferred during DPF provisioning, by request type.",
 )]
 struct DpfExplorationDeferred {
     #[label]
@@ -57,8 +57,8 @@ pub(crate) fn record_deferred(bmc_ip: IpAddr, request: ExplorationRequest) {
     carbide_instrument::emit(DpfExplorationDeferred { request, bmc_ip });
 }
 
-/// Rejects a manual report refresh or re-exploration while any source suppresses
-/// Site Explorer. Provisioning rejection also records a deferred-request metric.
+/// Checks suppression before a manual exploration. DPF suppression records a
+/// deferred-request metric; refresh callers queue the request instead of rejecting it.
 pub async fn check_exploration_allowed(
     conn: &mut PgConnection,
     bmc_ip: IpAddr,

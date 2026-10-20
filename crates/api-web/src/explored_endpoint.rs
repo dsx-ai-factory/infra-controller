@@ -705,7 +705,10 @@ pub(super) async fn refresh_endpoint(
                 .unwrap_or_default();
             (
                 StatusCode::OK,
-                Json(serde_json::json!({ "has_exploration_error": has_error })),
+                Json(serde_json::json!({
+                    "has_exploration_error": has_error,
+                    "exploration_requested": ep.exploration_requested,
+                })),
             )
                 .into_response()
         }
@@ -1456,7 +1459,7 @@ mod tests {
         assert_eq!(rendered.matches("clearlasterror_action").count(), 1);
     }
     #[test]
-    fn provisioning_pause_disables_exploration_controls() {
+    fn provisioning_pause_allows_queued_refresh_but_disables_re_exploration() {
         for paused in [false, true] {
             let mut ep = endpoint("192.0.2.10", None);
             ep.exploration_paused_for_dpf = paused;
@@ -1467,10 +1470,10 @@ mod tests {
             })
             .render()
             .unwrap();
-            assert_eq!(html.contains("Explore (paused)"), paused);
+            assert_eq!(html.contains("Queue refresh"), paused);
             assert_eq!(
                 html.contains(
-                    "resume automatically when all Site Explorer suppressions are cleared"
+                    "queued refresh requests run after all Site Explorer suppressions are cleared"
                 ),
                 paused
             );
@@ -1478,7 +1481,11 @@ mod tests {
                 html.contains("disabled title=\"Exploration paused during DPU provisioning\""),
                 paused
             );
-            assert_eq!(html.contains("<a id=\"refresh-endpoint\""), !paused);
+            assert!(html.contains("<a id=\"refresh-endpoint\""));
+            assert_eq!(
+                html.contains("Re-exploration requests are rejected"),
+                paused
+            );
         }
     }
 }

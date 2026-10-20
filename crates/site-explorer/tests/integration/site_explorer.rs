@@ -4277,13 +4277,17 @@ async fn test_dpf_suppression_preserves_report_and_resumes(
         txn.as_mut(),
     )
     .await?;
-    db::explored_endpoints::request_exploration_for_addresses(&[address], txn.as_mut()).await?;
     let mut input = suppression_input(machines[0].mac, BmcSuppressionSubsystem::SiteExplorer);
     input.source = BmcSuppressionSource::DpfProvisioning;
     db::bmc_suppression::upsert(txn.as_mut(), &input).await?;
-    let before = db::explored_endpoints::find_all_by_ip(address, txn.as_mut()).await?;
     txn.commit().await?;
     let explorer = env.test_site_explorer(suppression_test_config(1));
+    let queued = explorer
+        .endpoint_exploration_service()
+        .refresh_endpoint_report(address)
+        .await?;
+    assert!(queued.exploration_requested);
+    let before = db::explored_endpoints::find_by_ips(&env.pool, vec![address]).await?;
     explorer.run_single_iteration().await?;
     assert!(
         explorer
@@ -4318,5 +4322,66 @@ async fn test_dpf_suppression_preserves_report_and_resumes(
             .len(),
         1
     );
+    assert!(
+        !db::explored_endpoints::find_by_ips(&env.pool, vec![address]).await?[0]
+            .exploration_requested
+    );
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_queued_refresh_survives_in_flight_exploration(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let mut machine = env.new_machine("02:00:00:00:10:32", "Vendor1");
+    machine.discover_dhcp(env.api()).await?;
+    let address = machine.ip.parse()?;
+    let report = cached_suppression_report("cached");
+    let mut txn = env.pool.begin().await?;
+    db::explored_endpoints::insert(address, &report, false, txn.as_mut()).await?;
+    txn.commit().await?;
+    let explorer = Arc::new(env.test_site_explorer(suppression_test_config(1)));
+    let mut input = suppression_input(machine.mac, BmcSuppressionSubsystem::SiteExplorer);
+    input.source = BmcSuppressionSource::DpfProvisioning;
+
+    // Success and failure persist reports through different database writes.
+    for result in [
+        Ok(report.clone()),
+        Err(EndpointExplorationError::AvoidLockout),
+    ] {
+        explorer.insert_endpoint_results(vec![(address, result)]);
+        let blocker = explorer.endpoint_explorer().block_next_exploration();
+        let running_explorer = Arc::clone(&explorer);
+        let in_flight = tokio::spawn(async move { running_explorer.run_single_iteration().await });
+        blocker.wait_until_started().await;
+        let mut txn = env.pool.begin().await?;
+        db::bmc_suppression::upsert(txn.as_mut(), &input).await?;
+        txn.commit().await?;
+
+        let queued = explorer
+            .endpoint_exploration_service()
+            .refresh_endpoint_report(address)
+            .await?;
+        assert!(queued.exploration_requested);
+        blocker.release();
+        in_flight.await??;
+        explorer.run_single_iteration().await?;
+        assert!(
+            db::explored_endpoints::find_by_ips(&env.pool, vec![address]).await?[0]
+                .exploration_requested
+        );
+
+        let mut txn = env.pool.begin().await?;
+        db::bmc_suppression::delete(txn.as_mut(), machine.mac, input.subsystem, input.source)
+            .await?;
+        txn.commit().await?;
+        explorer.insert_endpoints(vec![(address, report.clone())]);
+        explorer.run_single_iteration().await?;
+        assert!(
+            !db::explored_endpoints::find_by_ips(&env.pool, vec![address]).await?[0]
+                .exploration_requested
+        );
+    }
     Ok(())
 }

@@ -59,13 +59,15 @@ Protect this file because it contains credentials. `is_primary` defaults to `fal
 
 ## DPF provisioning: Site Explorer suppression
 
-[PR #7775](https://github.com/dsx-ai-factory/infra-controller/pull/7775) pauses periodic Site Explorer scans during DPF provisioning and rejects re-exploration and immediate report-refresh requests. Periodic scans resume automatically when all Site Explorer suppressions are cleared. Rejected requests are not queued; operators must retry them after suppression clears.
+[PR #7775](https://github.com/dsx-ai-factory/infra-controller/pull/7775) pauses periodic Site Explorer scans during DPF provisioning. Report-refresh requests are saved and return the cached report marked as pending. Periodic scans and queued refreshes run after all Site Explorer suppressions are cleared. Re-exploration requests are rejected rather than queued; operators must retry them after suppression clears.
 
 ### Upgrade compatibility
 
 Older `nico-api` binaries cannot decode suppression rows with source `dpf_provisioning`. While these rows exist, an older replica fails its Site Explorer suppression read and cannot complete exploration cycles.
 
 Upgrade every `nico-api` replica before starting DPF provisioning. At sites already using DPF, plan an API maintenance window: stop all old replicas before starting updated replicas. The default rolling update can overlap old and new binaries and does not meet this requirement.
+
+When upgrading from a version without this feature, machines already provisioning are not retroactively suppressed. Suppression is created when a managed host transitions from having no DPU in `WaitingForReady` or `HandleReboot` to having at least one DPU in either state. Existing suppression rows remain effective across restarts.
 
 ### Downgrading to a binary without DPF suppression support
 

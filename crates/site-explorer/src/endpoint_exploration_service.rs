@@ -149,6 +149,8 @@ impl EndpointExplorationService {
         self.locks.try_claim(bmc_ip)
     }
 
+    /// Refreshes an endpoint immediately, or queues it during DPF provisioning.
+    /// Queued refreshes return the cached report with `exploration_requested` set.
     pub async fn refresh_endpoint_report(
         &self,
         bmc_ip: IpAddr,
@@ -171,13 +173,34 @@ impl EndpointExplorationService {
                 id: bmc_ip.to_string(),
             })?;
 
-        crate::suppression::check_exploration_allowed(
+        match crate::suppression::check_exploration_allowed(
             txn.as_pgconn(),
             bmc_ip,
             bmc_interface.mac_address,
             crate::suppression::ExplorationRequest::Refresh,
         )
-        .await?;
+        .await
+        {
+            Ok(()) => {}
+            Err(EndpointExplorationServiceError::DpfProvisioning { .. }) => {
+                db::explored_endpoints::request_exploration_for_addresses(
+                    &[bmc_ip],
+                    txn.as_pgconn(),
+                )
+                .await?;
+                let queued = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn)
+                    .await?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| EndpointExplorationServiceError::NotFound {
+                        kind: "explored_endpoint",
+                        id: bmc_ip.to_string(),
+                    })?;
+                txn.commit().await?;
+                return Ok(queued);
+            }
+            Err(error) => return Err(error),
+        }
 
         let expected_machine =
             db::expected_machine::find_by_bmc_mac_address(&mut txn, bmc_interface.mac_address)

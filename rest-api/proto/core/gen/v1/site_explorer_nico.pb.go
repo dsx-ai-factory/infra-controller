@@ -484,7 +484,7 @@ type ExploredEndpoint struct {
 	// The version of `report`.
 	// Will increase every time the report gets updated.
 	ReportVersion string `protobuf:"bytes,3,opt,name=report_version,json=reportVersion,proto3" json:"report_version,omitempty"`
-	// / Whether the endpoint will be explored in the next site-explorer run
+	// Whether exploration is queued. Pending requests remain queued while suppressed.
 	ExplorationRequested bool `protobuf:"varint,4,opt,name=exploration_requested,json=explorationRequested,proto3" json:"exploration_requested,omitempty"`
 	// The current preingestion state
 	PreingestionState string `protobuf:"bytes,5,opt,name=preingestion_state,json=preingestionState,proto3" json:"preingestion_state,omitempty"`
@@ -500,7 +500,8 @@ type ExploredEndpoint struct {
 	PauseRemediation bool `protobuf:"varint,10,opt,name=pause_remediation,json=pauseRemediation,proto3" json:"pause_remediation,omitempty"`
 	// Periodic exploration, re-exploration, and immediate report refresh are paused
 	// while any DPU waits for DPF readiness or handles a DPF-requested reboot.
-	// Exploration resumes automatically when all Site Explorer suppressions are cleared.
+	// Periodic exploration and queued refreshes resume when all Site Explorer
+	// suppressions are cleared. Re-exploration requests are rejected while paused.
 	// Ad-hoc Explore is unaffected. False when no DPF suppression exists.
 	ExplorationPausedForDpf bool `protobuf:"varint,11,opt,name=exploration_paused_for_dpf,json=explorationPausedForDpf,proto3" json:"exploration_paused_for_dpf,omitempty"`
 	unknownFields           protoimpl.UnknownFields

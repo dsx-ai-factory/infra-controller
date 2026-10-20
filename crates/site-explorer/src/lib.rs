@@ -2227,7 +2227,9 @@ impl SiteExplorer {
             })
     }
 
-    /// Acknowledges pending Site Explorer suppressions and returns all site explorer suppressed BMC MAC addresses.
+    /// Loads the run's suppressed and DPF-provisioning BMC sets, acknowledging
+    /// pending suppressions that require endpoint guards. DPF provisioning does
+    /// not wait for acknowledgement.
     async fn acknowledge_site_explorer_suppressions(
         &self,
     ) -> SiteExplorerResult<SiteExplorerRunContext> {
