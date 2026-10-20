@@ -15,24 +15,69 @@
  * limitations under the License.
  */
 
+use std::collections::HashSet;
+
 use carbide_uuid::switch::SwitchId;
 use db::DatabaseError;
+use mac_address::MacAddress;
 use model::expected_switch::ExpectedSwitch;
-use model::site_explorer::ExploredManagedSwitch;
+use model::site_explorer::{EndpointType, ExploredManagedSwitch};
 use sqlx::{PgConnection, PgPool};
 
-use crate::SiteExplorerConfig;
+use super::Config;
 use crate::errors::SiteExplorerResult;
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 use crate::metrics::SiteExplorationMetrics;
 
 pub struct SwitchCreator {
     database_connection: PgPool,
-    config: SiteExplorerConfig,
+    config: Config,
 }
 
 impl SwitchCreator {
-    pub fn new(database_connection: PgPool, config: SiteExplorerConfig) -> Self {
+    pub(super) async fn identify_switches_to_ingest(
+        &self,
+        expected_endpoint_index: &ExploredEndpointIndex,
+        suppressed_bmc_macs: &HashSet<MacAddress>,
+    ) -> SiteExplorerResult<Vec<ExploredManagedSwitch>> {
+        let mut txn = self
+            .database_connection
+            .begin()
+            .await
+            .map_err(|e| DatabaseError::new("load find_all_preingestion_complete data", e))?;
+
+        let explored_endpoints =
+            db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
+
+        txn.commit()
+            .await
+            .map_err(|e| DatabaseError::new("end find_all_preingestion_complete data", e))?;
+        let managed_switches = explored_endpoints
+            .iter()
+            .filter(|ep| {
+                if let Some(expected) = expected_endpoint_index.matched_expected_switch(&ep.address)
+                    && suppressed_bmc_macs.contains(&expected.bmc_mac_address)
+                {
+                    tracing::info!(
+                        bmc_ip_address = %ep.address,
+                        bmc_mac_address = %expected.bmc_mac_address,
+                        "Skipping ingestion of suppressed switch",
+                    );
+                    return false;
+                }
+                true
+            })
+            .filter(|ep| ep.report.endpoint_type == EndpointType::Bmc && ep.report.is_switch())
+            .map(|ep| ExploredManagedSwitch {
+                bmc_ip: ep.address,
+                report: ep.report.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        Ok(managed_switches)
+    }
+
+    pub fn new(database_connection: PgPool, config: Config) -> Self {
         Self {
             database_connection,
             config,

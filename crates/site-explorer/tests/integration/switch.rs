@@ -303,7 +303,8 @@ async fn switch_creation_preserves_operator_declared_nvos_interfaces(
     db::expected_switch::create(&mut txn, expected_switch.clone()).await?;
     txn.commit().await?;
 
-    let switch_creator = SwitchCreator::new(env.pool.clone(), SiteExplorerConfig::default());
+    let switch_creator =
+        SwitchCreator::new(env.pool.clone(), (&SiteExplorerConfig::default()).into());
     assert!(
         switch_creator
             .create_managed_switch(
@@ -343,7 +344,8 @@ async fn switch_skips_creation_when_bmc_mac_already_used(
     db::expected_switch::create(&mut txn, expected_switch.clone()).await?;
     txn.commit().await?;
 
-    let switch_creator = SwitchCreator::new(env.pool.clone(), SiteExplorerConfig::default());
+    let switch_creator =
+        SwitchCreator::new(env.pool.clone(), (&SiteExplorerConfig::default()).into());
 
     // First discovery, we get a real serial, which succeeds,
     // and inserts a switches row.
@@ -417,7 +419,8 @@ async fn switch_treats_na_chassis_serial_as_missing(
     db::expected_switch::create(&mut txn, expected_switch.clone()).await?;
     txn.commit().await?;
 
-    let switch_creator = SwitchCreator::new(env.pool.clone(), SiteExplorerConfig::default());
+    let switch_creator =
+        SwitchCreator::new(env.pool.clone(), (&SiteExplorerConfig::default()).into());
 
     let result = switch_creator
         .create_managed_switch(

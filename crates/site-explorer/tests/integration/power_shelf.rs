@@ -364,10 +364,11 @@ async fn power_shelf_skips_creation_when_bmc_mac_already_used(
 
     let power_shelf_creator = PowerShelfCreator::new(
         env.pool.clone(),
-        SiteExplorerConfig {
+        (&SiteExplorerConfig {
             create_power_shelves: Arc::new(true.into()),
             ..Default::default()
-        },
+        })
+            .into(),
     );
 
     let explored_endpoint = ExploredEndpoint {
@@ -972,7 +973,7 @@ async fn test_power_shelf_state_history_error_handling(
         ..Default::default()
     };
 
-    let power_shelf_creator = PowerShelfCreator::new(env.pool.clone(), explorer_config);
+    let power_shelf_creator = PowerShelfCreator::new(env.pool.clone(), (&explorer_config).into());
 
     // Create the power shelf using the power shelf creator
     assert!(

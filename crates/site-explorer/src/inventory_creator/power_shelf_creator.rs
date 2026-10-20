@@ -22,10 +22,10 @@ use db::{DatabaseError, ObjectColumnFilter, power_shelf as db_power_shelf};
 use mac_address::MacAddress;
 use model::expected_power_shelf::ExpectedPowerShelf;
 use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
-use model::site_explorer::{EndpointExplorationReport, ExploredEndpoint};
+use model::site_explorer::{EndpointExplorationReport, EndpointType, ExploredEndpoint};
 use sqlx::PgPool;
 
-use crate::SiteExplorerConfig;
+use super::Config;
 use crate::errors::{SiteExplorerError, SiteExplorerResult};
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 use crate::metrics::SiteExplorationMetrics;
@@ -33,12 +33,56 @@ use crate::metrics::SiteExplorationMetrics;
 /// Creates power shelves from site-explorer endpoint reports.
 pub struct PowerShelfCreator {
     database_connection: PgPool,
-    config: SiteExplorerConfig,
+    config: Config,
 }
 
 impl PowerShelfCreator {
+    pub(super) async fn identify_power_shelves_to_ingest(
+        &self,
+        expected_endpoint_index: &ExploredEndpointIndex,
+        suppressed_bmc_macs: &HashSet<MacAddress>,
+    ) -> SiteExplorerResult<Vec<(ExploredEndpoint, EndpointExplorationReport)>> {
+        let mut txn = self
+            .database_connection
+            .begin()
+            .await
+            .map_err(|e| DatabaseError::new("load find_all_preingestion_complete data", e))?;
+
+        let explored_endpoints =
+            db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
+
+        txn.commit()
+            .await
+            .map_err(|e| DatabaseError::new("end find_all_preingestion_complete data", e))?;
+
+        let mut explored_power_shelves = Vec::new();
+        for ep in explored_endpoints.into_iter() {
+            if let Some(expected) =
+                expected_endpoint_index.matched_expected_power_shelf(&ep.address)
+                && suppressed_bmc_macs.contains(&expected.bmc_mac_address)
+            {
+                tracing::info!(
+                    bmc_ip_address = %ep.address,
+                    bmc_mac_address = %expected.bmc_mac_address,
+                    "Skipping ingestion of suppressed power shelf",
+                );
+                continue;
+            }
+
+            if ep.report.endpoint_type != EndpointType::Bmc {
+                continue;
+            }
+            if ep.report.is_power_shelf() {
+                explored_power_shelves.push((ep.clone(), ep.report.clone()));
+            }
+            //ignore other endpoints
+        }
+
+        Ok(explored_power_shelves)
+    }
+
     /// Creates a power-shelf creator with the supplied database and configuration.
-    pub fn new(database_connection: PgPool, config: SiteExplorerConfig) -> Self {
+    pub fn new(database_connection: PgPool, config: Config) -> Self {
         Self {
             database_connection,
             config,

@@ -50,18 +50,19 @@ use model::site_explorer::{
 };
 use sqlx::{PgConnection, PgPool};
 
+use super::Config;
+use crate::IdentifiedManagedHost;
 use crate::errors::{SiteExplorerError, SiteExplorerResult};
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 use crate::managed_host::ManagedHost;
 use crate::metrics::SiteExplorationMetrics;
-use crate::{IdentifiedManagedHost, SiteExplorerConfig};
 
 const DESIRED_BOOT_INTERFACE_RECONCILE_PAGE_SIZE: i64 = 100;
 
 /// Creates machines from site-explorer managed-host reports.
 pub struct MachineCreator {
     database_connection: PgPool,
-    config: SiteExplorerConfig,
+    config: Config,
     common_pools: Arc<CommonPools>,
     rack_profiles: Arc<RackProfileConfig>,
     machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
@@ -72,7 +73,7 @@ impl MachineCreator {
     /// Creates a machine creator with an optional machine-information provider.
     pub fn new(
         database_connection: PgPool,
-        config: SiteExplorerConfig,
+        config: Config,
         common_pools: Arc<CommonPools>,
         rack_profiles: Arc<RackProfileConfig>,
         machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,

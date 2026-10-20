@@ -120,7 +120,7 @@ async fn rejected_admin_address_reconciliation_rolls_back(
     let host_id = mh.host().id;
     let creator = MachineCreator::new(
         env.pool.clone(),
-        env.config.site_explorer.clone(),
+        (&env.config.site_explorer).into(),
         env.common_pools.clone(),
         Arc::new(env.config.rack_profiles.clone()),
         None,

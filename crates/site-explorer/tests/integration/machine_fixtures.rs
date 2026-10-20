@@ -92,7 +92,7 @@ pub(super) fn machine_creator_with_dpf(
 ) -> MachineCreator {
     MachineCreator::new(
         env.pool.clone(),
-        config,
+        (&config).into(),
         env.api().common_pools().clone(),
         Arc::new(env.api().runtime_config.rack_profiles.clone()),
         None,
@@ -106,7 +106,7 @@ pub(super) fn machine_creator_with_info_provider(
 ) -> MachineCreator {
     MachineCreator::new(
         env.pool.clone(),
-        machine_creator_config(),
+        (&machine_creator_config()).into(),
         env.api().common_pools().clone(),
         Arc::new(machine_info_rack_profiles()),
         Some(provider),
