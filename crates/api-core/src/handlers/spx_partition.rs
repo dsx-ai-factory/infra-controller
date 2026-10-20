@@ -142,6 +142,16 @@ pub(crate) async fn delete(
     let vni_pool = api.common_pools.ethernet.pool_dpa_vni.clone();
     api.with_txn(|txn| {
         async move {
+            db::spx_partition::lock_for_delete(txn, id).await?;
+            // Admission may have committed while this transaction waited for
+            // the partition. Under READ COMMITTED, a separate statement takes
+            // a fresh snapshot that includes those references.
+            if db::spx_partition::has_instance_references(&mut **txn, id).await? {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "SPX partition {id} still has instance attachments"
+                )));
+            }
+
             let vni = match db::spx_partition::mark_as_deleted(id, txn).await? {
                 ConditionalWrite::Applied(partition) => partition.vni,
                 ConditionalWrite::NotApplied(SpxPartitionAlreadyDeleted { vni }) => vni,
