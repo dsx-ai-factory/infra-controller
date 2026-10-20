@@ -484,7 +484,7 @@ async fn vpc_consumers_observe_external_pool_growth_after_a_miss(
                 assert_eq!(event.field("pool"), Some(EXTERNAL_VPC_VNI));
                 let labels = [
                     ("operation", "allocate"),
-                    ("failure", "requested_value_unavailable"),
+                    ("failure", "configuration"),
                     ("failure_policy", "required"),
                     ("allocation_mode", "automatic"),
                     ("value_type", "integer"),
@@ -2173,18 +2173,7 @@ async fn create_vpc_rejects_allocations_without_external_pool(
     .build();
     let before = vpc_vni_pool_state(&env).await?;
 
-    // allocate_vpc_vni translates explicit-request preconditions into an unavailable-VNI
-    // message; automatic requests retain the underlying pool configuration error.
-    for (requested_vni, expected_message) in [
-        (
-            Some(50001u32),
-            "VNI `50001` cannot be requested or is already allocated".to_string(),
-        ),
-        (
-            None,
-            format!("resource-pool `{EXTERNAL_VPC_VNI}` has no allocation range"),
-        ),
-    ] {
+    for (requested_vni, assignment_mode) in [(Some(50001u32), "explicit"), (None, "automatic")] {
         let mut request = VpcCreationRequest::builder(tenant_org)
             .metadata(rpc::Metadata {
                 name: "missing-pool-vni".to_string(),
@@ -2200,7 +2189,10 @@ async fn create_vpc_rejects_allocations_without_external_pool(
             .await
             .expect_err("a missing pool must reject both allocation modes");
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-        assert_eq!(error.message(), expected_message);
+        assert_eq!(
+            error.message(),
+            format!("resource-pool `{EXTERNAL_VPC_VNI}` has no {assignment_mode} allocation range")
+        );
         assert_eq!(vpc_vni_pool_state(&env).await?, before);
     }
     let persisted_ids = api
@@ -2247,6 +2239,19 @@ async fn create_vpc_rejects_unconfigured_assignment_mode(
             .await
             .expect_err("the pool must reject an unconfigured assignment mode");
         assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
+        let assignment_mode = if requested_vni.is_some() {
+            "explicit"
+        } else {
+            "automatic"
+        };
+        assert_eq!(
+            error.message(),
+            format!(
+                "resource-pool `{}` has no {assignment_mode} allocation range",
+                env.common_pools.ethernet.pool_vpc_vni.name()
+            ),
+            "{scenario}"
+        );
         assert_eq!(vpc_vni_pool_state(&env).await?, before, "{scenario}");
 
         let expected_ids = if auto_assign {
@@ -2437,17 +2442,35 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
         .unwrap()
         .into_inner();
 
-    // A VNI is allocated
-    assert!(forge_vpc.status.as_ref().and_then(|s| s.vni).is_some());
+    // The requested VNI is allocated.
+    assert_eq!(forge_vpc.status.as_ref().and_then(|s| s.vni), Some(60001));
     // The 'config' VNI and the status VNI match
     assert_eq!(
         forge_vpc_config(&forge_vpc).vni,
         forge_vpc.status.as_ref().and_then(|s| s.vni)
     );
 
-    // Create another VPC by explicitly selecting a VNI from
-    // the allowed pool, but use the same VNI, so it should fail.
-    let _ = env
+    let vpc_id = forge_vpc.id.unwrap();
+    let vni_pool = env.common_pools.ethernet.pool_vpc_vni.name();
+    assert_eq!(
+        resource_pool_entry_state(&env, vni_pool, 60001).await?,
+        ResourcePoolEntryState::Allocated {
+            owner: vpc_id.to_string(),
+            owner_type: OwnerType::Vpc.to_string(),
+        }
+    );
+    assert!(
+        db::resource_pool::stats(&env.pool, vni_pool)
+            .await?
+            .non_auto_assign_free
+            > 0,
+        "other explicit VNIs must remain free so this is a conflict, not exhaustion"
+    );
+    let original_vpc = find_test_vpc(&env, vpc_id).await?;
+    let original_allocations = vpc_vni_pool_state(&env).await?;
+
+    // Reusing the allocated VNI must fail without changing either VPC or pool state.
+    let error = env
         .api
         .create_vpc(
             VpcCreationRequest::builder(&tenant.organization_id)
@@ -2459,15 +2482,30 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
                 .tonic_request(),
         )
         .await
-        .unwrap_err();
+        .expect_err("an already allocated explicit VNI must be rejected");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        "VNI `60001` cannot be requested or is already allocated"
+    );
+    assert_eq!(find_test_vpc(&env, vpc_id).await?, original_vpc);
+    assert_eq!(vpc_vni_pool_state(&env).await?, original_allocations);
+    assert_eq!(
+        env.api
+            .find_vpc_ids(tonic::Request::new(rpc::forge::VpcSearchFilter {
+                tenant_org_id: Some(tenant.organization_id.clone()),
+                ..Default::default()
+            }))
+            .await?
+            .into_inner()
+            .vpc_ids,
+        vec![vpc_id],
+        "the rejected request must not persist a second VPC"
+    );
 
     // Clean it up so the rest of our tests can work with a single VPC in the DB.
     env.api
-        .delete_vpc(
-            VpcDeletionRequest::builder()
-                .id(forge_vpc.id.unwrap())
-                .tonic_request(),
-        )
+        .delete_vpc(VpcDeletionRequest::builder().id(vpc_id).tonic_request())
         .await
         .unwrap()
         .into_inner();

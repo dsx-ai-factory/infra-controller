@@ -293,10 +293,10 @@ pub(crate) async fn create_initial_vpcs(
                     .await
             }
             // A pool with neither a binding nor values has nothing to allocate.
-            Ok(None) => Err(db::DatabaseError::FailedPrecondition(format!(
-                "resource-pool `{}` has no allocation range",
-                vni_pool.name()
-            ))
+            Ok(None) => Err(resource_pool::ResourcePoolError::MissingAllocationRange {
+                pool_name: vni_pool.name().to_string(),
+                auto_assign: def.vni.is_none(),
+            }
             .into()),
             Err(ResourcePoolRegistryError::Database(error)) => Err(error.into()),
             Err(error) => return Err(error.into()),

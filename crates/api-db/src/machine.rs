@@ -5009,7 +5009,7 @@ mod test {
             MachineId::from_str("fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng")?;
         for (scenario, exhaust_pool, expected_failure) in [
             ("exhausted", true, "exhausted"),
-            ("unconfigured", false, "requested_value_unavailable"),
+            ("unconfigured", false, "configuration"),
         ] {
             let mut txn = pool.begin().await?;
             let asn_pool = &common_pools.ethernet.pool_fnn_asn;

@@ -1269,10 +1269,10 @@ async fn allocate_vpc_vni(
                 .await
         }
         // The optional external pool may have neither a binding nor SQL values.
-        Ok(None) => Err(db::DatabaseError::FailedPrecondition(format!(
-            "resource-pool `{}` has no allocation range",
-            source_pool.name()
-        ))
+        Ok(None) => Err(resource_pool::ResourcePoolError::MissingAllocationRange {
+            pool_name: source_pool.name().to_string(),
+            auto_assign: requested_vni.is_none(),
+        }
         .into()),
         // Database lookup failures belong to the allocation attempt; unsupported
         // backend selections are configuration errors, before allocation starts.

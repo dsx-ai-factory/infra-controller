@@ -51,6 +51,7 @@ pub(crate) enum ResourcePoolOperation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
 pub(crate) enum ResourcePoolFailure {
     Exhausted,
+    Configuration,
     RequestedValueUnavailable,
     Parse,
     Database,
@@ -270,6 +271,10 @@ where
 }
 
 /// `allocate` reserves a value from the automatic or explicit assignment partition.
+/// Returns [`ResourcePoolError::MissingAllocationRange`] when the selected
+/// partition has no configured values, or [`ResourcePoolError::Empty`] when
+/// all of its configured values are allocated.
+///
 /// An omitted `requested_value` requires `auto_assign=true`; an exact request
 /// requires `auto_assign=false`. Use [`allocate_exact`] when an exact request
 /// may claim a free value from either partition.
@@ -349,11 +354,10 @@ RETURNING allocate.value
                 if used != 0 {
                     return Err(ResourcePoolError::Empty.into());
                 }
-                let assignment = if auto_assign { "automatic" } else { "explicit" };
-                return Err(DatabaseError::FailedPrecondition(format!(
-                    "resource-pool `{}` has no {assignment} allocation range",
-                    value.name()
-                ))
+                return Err(ResourcePoolError::MissingAllocationRange {
+                    pool_name: value.name().to_string(),
+                    auto_assign,
+                }
                 .into());
             }
             if !auto_assign {
@@ -756,6 +760,9 @@ pub(crate) fn classify_resource_pool_failure(
         ResourcePoolDatabaseError::ResourcePool(ResourcePoolError::Empty) => {
             ResourcePoolFailure::Exhausted
         }
+        ResourcePoolDatabaseError::ResourcePool(ResourcePoolError::MissingAllocationRange {
+            ..
+        }) => ResourcePoolFailure::Configuration,
         ResourcePoolDatabaseError::ResourcePool(ResourcePoolError::Parse { .. }) => {
             ResourcePoolFailure::Parse
         }
@@ -764,10 +771,12 @@ pub(crate) fn classify_resource_pool_failure(
 }
 
 fn classify_database_failure(error: &DatabaseError) -> ResourcePoolFailure {
-    if matches!(error, DatabaseError::FailedPrecondition(_)) {
-        ResourcePoolFailure::RequestedValueUnavailable
-    } else {
-        ResourcePoolFailure::Database
+    match error {
+        DatabaseError::ResourcePoolError(ResourcePoolError::MissingAllocationRange { .. }) => {
+            ResourcePoolFailure::Configuration
+        }
+        DatabaseError::FailedPrecondition(_) => ResourcePoolFailure::RequestedValueUnavailable,
+        _ => ResourcePoolFailure::Database,
     }
 }
 
@@ -867,7 +876,8 @@ fn emit_classified_allocation_failure(
             owner_id: owner_id.to_string(),
             pool: diagnostic_pool.to_string(),
         }),
-        ResourcePoolFailure::RequestedValueUnavailable
+        ResourcePoolFailure::Configuration
+        | ResourcePoolFailure::RequestedValueUnavailable
         | ResourcePoolFailure::Parse
         | ResourcePoolFailure::Database => {
             emit(ResourcePoolAllocationFailed {
@@ -2361,17 +2371,22 @@ mod tests {
         Ok(())
     }
 
-    /// Unavailable values and unconfigured assignment modes are failed preconditions.
+    /// Missing assignment modes remain distinct from unavailable requested values.
     #[crate::sqlx_test]
-    async fn allocate_requested_value_unavailable_is_failed_precondition(
+    async fn allocate_distinguishes_missing_ranges_from_unavailable_values(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use model::resource_pool::define::{Range, ResourcePoolDef, ResourcePoolType};
 
-        for (scenario, auto_assign, requested_value) in [
-            ("value outside explicit range", false, Some(99)),
-            ("value in automatic-only pool", true, Some(10)),
-            ("automatic allocation in explicit-only pool", false, None),
+        for (scenario, auto_assign, requested_value, missing_auto_assign) in [
+            ("value outside explicit range", false, Some(99), None),
+            ("value in automatic-only pool", true, Some(10), Some(false)),
+            (
+                "automatic allocation in explicit-only pool",
+                false,
+                None,
+                Some(true),
+            ),
         ] {
             let mut txn = pool.begin().await?;
             define(
@@ -2404,18 +2419,61 @@ mod tests {
             .await
             .expect_err("requesting an unavailable value must error");
 
-            assert!(
-                matches!(
-                    &err,
-                    ResourcePoolDatabaseError::Database(boxed)
-                        if matches!(boxed.as_ref(), DatabaseError::FailedPrecondition(_))
-                ),
-                "{scenario}: expected FailedPrecondition, got {err:?}"
-            );
+            match missing_auto_assign {
+                Some(expected_auto_assign) => {
+                    assert!(
+                        matches!(
+                            &err,
+                            ResourcePoolDatabaseError::ResourcePool(
+                                ResourcePoolError::MissingAllocationRange { pool_name, auto_assign }
+                            ) if pool_name == pool_handle.name() && *auto_assign == expected_auto_assign
+                        ),
+                        "{scenario}: expected missing range, got {err:?}"
+                    );
+                    assert!(!is_requested_value_unavailable(&err), "{scenario}");
+                }
+                None => {
+                    assert!(is_requested_value_unavailable(&err), "{scenario}: {err:?}");
+                }
+            }
+            let status = tonic::Status::from(DatabaseError::from(err));
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{scenario}");
 
             txn.rollback().await?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn missing_range_classification_survives_database_wrapping() {
+        let missing_range = || ResourcePoolError::MissingAllocationRange {
+            pool_name: "test-pool".to_string(),
+            auto_assign: true,
+        };
+        for (scenario, error) in [
+            (
+                "pool error",
+                ResourcePoolDatabaseError::from(missing_range()),
+            ),
+            (
+                "database wrapper",
+                ResourcePoolDatabaseError::from(DatabaseError::from(missing_range())),
+            ),
+        ] {
+            assert_eq!(
+                classify_resource_pool_failure(&error),
+                ResourcePoolFailure::Configuration,
+                "{scenario}"
+            );
+            assert!(!is_requested_value_unavailable(&error), "{scenario}");
+            let status = tonic::Status::from(DatabaseError::from(error));
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{scenario}");
+            assert_eq!(
+                status.message(),
+                "resource-pool `test-pool` has no automatic allocation range",
+                "{scenario}"
+            );
+        }
     }
 
     /// Requesting a specific value from an EXHAUSTED non-auto-assign pool must

@@ -180,7 +180,7 @@ pub enum CarbideError {
     },
 
     #[error("resource pool error: {0}")]
-    ResourcePoolError(#[from] resource_pool::ResourcePoolError),
+    ResourcePoolError(#[source] resource_pool::ResourcePoolError),
 
     #[error("resource pool database error: {0}")]
     ResourcePoolDatabaseError(#[source] ResourcePoolDatabaseError),
@@ -331,9 +331,23 @@ impl From<ResourcePoolRegistryError> for CarbideError {
     }
 }
 
+impl From<resource_pool::ResourcePoolError> for CarbideError {
+    fn from(error: resource_pool::ResourcePoolError) -> Self {
+        match error {
+            resource_pool::ResourcePoolError::MissingAllocationRange { .. } => {
+                Self::FailedPrecondition(error.to_string())
+            }
+            error => Self::ResourcePoolError(error),
+        }
+    }
+}
+
 impl From<ResourcePoolDatabaseError> for CarbideError {
     fn from(error: ResourcePoolDatabaseError) -> Self {
         match error {
+            ResourcePoolDatabaseError::ResourcePool(
+                error @ resource_pool::ResourcePoolError::MissingAllocationRange { .. },
+            ) => error.into(),
             ResourcePoolDatabaseError::Database(error) => (*error).into(),
             error => Self::ResourcePoolDatabaseError(error),
         }
@@ -392,7 +406,7 @@ impl From<DatabaseError> for CarbideError {
             DatabaseError::TenantSitePrefixQuotaExceeded { used, limit } => {
                 TenantSitePrefixQuotaExceeded { used, limit }
             }
-            DatabaseError::ResourcePoolError(e) => ResourcePoolError(e),
+            DatabaseError::ResourcePoolError(e) => e.into(),
             DatabaseError::RpcUuidConversionError(e) => RpcUuidConversionError(e),
             DatabaseError::Sqlx(e) => DBError(e),
             DatabaseError::TenantError(e) => TenantError(e),
@@ -728,6 +742,59 @@ fn tenant_site_prefix_quota_error_is_actionable() {
         "Review the tenant's retained SitePrefixes; complete removal of an unneeded prefix or \
          increase max_site_prefixes_per_tenant if additional roots are intended."
     );
+}
+
+#[test]
+fn missing_allocation_range_preserves_status_through_wrappers() {
+    use resource_pool::ResourcePoolError;
+
+    #[derive(Debug)]
+    enum Wrapper {
+        Pool,
+        PoolDatabase,
+        Database,
+        NestedDatabase,
+    }
+    for wrapper in [
+        Wrapper::Pool,
+        Wrapper::PoolDatabase,
+        Wrapper::Database,
+        Wrapper::NestedDatabase,
+    ] {
+        let error = ResourcePoolError::MissingAllocationRange {
+            pool_name: "test-pool".to_string(),
+            auto_assign: false,
+        };
+        let error = match wrapper {
+            Wrapper::Pool => CarbideError::from(error),
+            Wrapper::PoolDatabase => CarbideError::from(ResourcePoolDatabaseError::from(error)),
+            Wrapper::Database => CarbideError::from(DatabaseError::from(error)),
+            Wrapper::NestedDatabase => {
+                CarbideError::from(ResourcePoolDatabaseError::from(DatabaseError::from(error)))
+            }
+        };
+        let status = tonic::Status::from(error);
+        assert_eq!(
+            status.code(),
+            tonic::Code::FailedPrecondition,
+            "{wrapper:?}"
+        );
+        assert_eq!(
+            status.message(),
+            "resource-pool `test-pool` has no explicit allocation range",
+            "{wrapper:?}"
+        );
+        assert_eq!(
+            status
+                .metadata()
+                .get("nico-error-code")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "NICO-API-412",
+            "{wrapper:?}"
+        );
+    }
 }
 
 #[test]

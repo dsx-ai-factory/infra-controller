@@ -742,6 +742,7 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
 enum InitialVpcAllocationFailure {
     Exhausted,
     RequestedUnavailable,
+    MissingPool,
 }
 
 impl InitialVpcAllocationFailure {
@@ -749,12 +750,13 @@ impl InitialVpcAllocationFailure {
         match self {
             Self::Exhausted => "initial-vpc-empty",
             Self::RequestedUnavailable => "initial-vpc-requested",
+            Self::MissingPool => "initial-vpc-unconfigured",
         }
     }
 
     fn requested_vni(self) -> Option<i32> {
         match self {
-            Self::Exhausted => None,
+            Self::Exhausted | Self::MissingPool => None,
             Self::RequestedUnavailable => Some(42),
         }
     }
@@ -773,6 +775,13 @@ impl InitialVpcAllocationFailure {
                 ("failure", "requested_value_unavailable"),
                 ("failure_policy", "required"),
                 ("allocation_mode", "requested"),
+                ("value_type", "integer"),
+            ],
+            Self::MissingPool => [
+                ("operation", "allocate"),
+                ("failure", "configuration"),
+                ("failure_policy", "required"),
+                ("allocation_mode", "automatic"),
                 ("value_type", "integer"),
             ],
         }
@@ -835,7 +844,7 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                 scenario: "requested VNI unavailable",
                 input: InitialVpcAllocationFailure::RequestedUnavailable,
                 expect: Yields(InitialVpcAllocationFailureRecord {
-                    error_kind: "requested_value_unavailable",
+                    error_kind: "failed_precondition",
                     error_message:
                         "`42` not an available value for resource-pool `initial-vpc-requested`"
                             .to_string(),
@@ -858,6 +867,33 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                     counter_delta: 1.0,
                 }),
             },
+            Case {
+                scenario: "absent pool configuration",
+                input: InitialVpcAllocationFailure::MissingPool,
+                expect: Yields(InitialVpcAllocationFailureRecord {
+                    error_kind: "failed_precondition",
+                    error_message:
+                        "resource-pool `initial-vpc-unconfigured` has no automatic allocation range"
+                            .to_string(),
+                    metadata_name: "resource_pool_allocation_failed".to_string(),
+                    event_name: Some("resource_pool_allocation_failed".to_string()),
+                    metric_name: Some(LIFECYCLE_FAILURES_METRIC.to_string()),
+                    level: tracing::Level::ERROR,
+                    message: "Error allocating from resource pool".to_string(),
+                    operation: Some("allocate".to_string()),
+                    failure: Some("configuration".to_string()),
+                    failure_policy: Some("required".to_string()),
+                    allocation_mode: Some("automatic".to_string()),
+                    value_type: Some("integer".to_string()),
+                    owner_id_is_vpc: true,
+                    pool: Some("initial-vpc-unconfigured".to_string()),
+                    error: Some(
+                        "resource-pool `initial-vpc-unconfigured` has no automatic allocation range"
+                            .to_string(),
+                    ),
+                    counter_delta: 1.0,
+                }),
+            },
         ],
         |failure| {
             let db_pool = db_pool.clone();
@@ -866,9 +902,11 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                     ResourcePool::<i32>::new(failure.pool_name().to_string(), ValueType::Integer);
                 let mut txn = db_pool.begin().await.expect("begin seed transaction");
                 let auto_assign = matches!(failure, InitialVpcAllocationFailure::Exhausted);
-                db::resource_pool::populate(&source_pool, &mut txn, vec![43], auto_assign)
-                    .await
-                    .expect("seed an allocation range");
+                if !matches!(failure, InitialVpcAllocationFailure::MissingPool) {
+                    db::resource_pool::populate(&source_pool, &mut txn, vec![43], auto_assign)
+                        .await
+                        .expect("seed an allocation range");
+                }
                 if auto_assign {
                     db::resource_pool::allocate(
                         &source_pool,
@@ -896,22 +934,28 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                 let registry = ResourcePoolRegistry::resolve(
                     PoolDefinitionSource::SeedConfiguration,
                     &mut txn,
-                    &HashMap::from([(
-                        failure.pool_name().to_string(),
-                        ResourcePoolSelection {
-                            pool_name: failure.pool_name().to_string(),
-                            value_domain: ResourcePoolValueDomain::Integer,
-                            backend_name: None,
-                            backend_kind: ResourcePoolBackendKind::Integrated,
-                            authority_id: INTEGRATED_AUTHORITY_ID.to_string(),
-                            remote_pool: failure.pool_name().to_string(),
-                        },
-                    )]),
+                    &if matches!(failure, InitialVpcAllocationFailure::MissingPool) {
+                        HashMap::new()
+                    } else {
+                        HashMap::from([(
+                            failure.pool_name().to_string(),
+                            ResourcePoolSelection {
+                                pool_name: failure.pool_name().to_string(),
+                                value_domain: ResourcePoolValueDomain::Integer,
+                                backend_name: None,
+                                backend_kind: ResourcePoolBackendKind::Integrated,
+                                authority_id: INTEGRATED_AUTHORITY_ID.to_string(),
+                                remote_pool: failure.pool_name().to_string(),
+                            },
+                        )])
+                    },
                 )
                 .await
                 .expect("resolve configured VPC pool");
-                // Resolve the seeded pool so the failure comes from the allocator.
-                assert!(registry.get(failure.pool_name()).is_some());
+                assert_eq!(
+                    registry.get(failure.pool_name()).is_some(),
+                    !matches!(failure, InitialVpcAllocationFailure::MissingPool)
+                );
                 txn.commit().await.expect("commit pool binding");
                 let metrics = MetricsCapture::start();
                 let (result, logs) = capture_logs_async(crate::db_init::create_initial_vpcs(
@@ -928,7 +972,7 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                             ResourcePoolError::Empty,
                         ),
                     ) => "resource_pool_empty",
-                    crate::CarbideError::FailedPrecondition(_) => "requested_value_unavailable",
+                    crate::CarbideError::FailedPrecondition(_) => "failed_precondition",
                     error => panic!("unexpected initial VPC allocation error: {error:?}"),
                 };
                 let event_logs = logs
@@ -1154,10 +1198,10 @@ async fn test_network_segment_metrics(
     test_type: MetricsTestType,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut overrides = TestEnvOverrides::no_network_segments();
-    // This tests relies that drain period is not ended between two
-    // consequential run_single_iteration
-    overrides.network_segments_drain_period = Some(chrono::Duration::seconds(10));
-    let env = create_test_env_with_overrides(pool.clone(), overrides).await;
+    // Keep the segment in DrainAllocatedIPs for the metrics snapshot, including
+    // when parallel tests delay controller iterations.
+    overrides.network_segments_drain_period = Some(chrono::Duration::hours(1));
+    let env = create_test_env_with_overrides(pool.clone(), overrides.clone()).await;
 
     let segment =
         create_network_segment_with_api(&env, true, true, None, test_type.segment_type() as i32, 1)
@@ -1234,8 +1278,7 @@ async fn test_network_segment_metrics(
 
     drop(env);
 
-    let env =
-        create_test_env_with_overrides(pool.clone(), TestEnvOverrides::no_network_segments()).await;
+    let env = create_test_env_with_overrides(pool.clone(), overrides).await;
 
     // Delete the segment, releasing the VNI back to the pool
     env.api
