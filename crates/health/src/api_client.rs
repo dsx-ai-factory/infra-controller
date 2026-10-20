@@ -449,6 +449,7 @@ pub struct ApiEndpointSource {
 #[derive(Clone)]
 struct CachedBmcClient {
     client: Arc<BmcClient>,
+    addr: BmcAddr,
     kind: ApiCredentialKind,
     system_uuid: SharedSystemUuid,
 }
@@ -981,7 +982,7 @@ impl ApiEndpointSource {
         });
         let cached = {
             let mut cache = self.bmc_client_cache.lock().expect("cache mutex poisoned");
-            cache_or_create_bmc_client(&mut cache, mac, credential_kind, |kind| {
+            cache_or_create_bmc_client(&mut cache, mac, &addr, credential_kind, |kind| {
                 let provider: Arc<dyn CredentialProvider> = Arc::new(ApiCredentialProvider {
                     client: self.api.client.clone(),
                     kind,
@@ -1012,12 +1013,19 @@ impl ApiEndpointSource {
     }
 }
 
+/// Returns the cached client for a BMC MAC, creating one on first use.
+///
+/// A client is bound to the address it was built with, so an address or port
+/// change for the same MAC replaces the client. The resolved system UUID is
+/// carried over because the MAC still identifies the same hardware.
 fn cache_or_create_bmc_client(
     cache: &mut HashMap<MacAddress, CachedBmcClient>,
     mac: MacAddress,
+    addr: &BmcAddr,
     credential_kind: ApiCredentialKind,
     make_client: impl FnOnce(ApiCredentialKind) -> Result<Arc<BmcClient>, HealthError>,
 ) -> Result<CachedBmcClient, HealthError> {
+    let mut system_uuid = SharedSystemUuid::default();
     if let Some(existing) = cache.get(&mac) {
         if existing.kind != credential_kind {
             return Err(HealthError::GenericError(format!(
@@ -1028,14 +1036,24 @@ fn cache_or_create_bmc_client(
                 credential_kind.tag(),
             )));
         }
-        return Ok(existing.clone());
+        if existing.addr == *addr {
+            return Ok(existing.clone());
+        }
+        tracing::info!(
+            bmc_mac = %mac,
+            old_address = ?existing.addr,
+            new_address = ?addr,
+            "BMC address changed; replacing cached BMC client"
+        );
+        system_uuid = existing.system_uuid.clone();
     }
 
     let client = make_client(credential_kind.clone())?;
     let cached = CachedBmcClient {
         client,
+        addr: addr.clone(),
         kind: credential_kind,
-        system_uuid: SharedSystemUuid::default(),
+        system_uuid,
     };
     cache.insert(mac, cached.clone());
     Ok(cached)
@@ -1643,19 +1661,29 @@ mod tests {
         let mut cache: HashMap<MacAddress, CachedBmcClient> = HashMap::new();
         let factory_calls = AtomicUsize::new(0);
 
-        let first =
-            cache_or_create_bmc_client(&mut cache, test_mac(), ApiCredentialKind::Bmc, |kind| {
+        let first = cache_or_create_bmc_client(
+            &mut cache,
+            test_mac(),
+            &test_addr(),
+            ApiCredentialKind::Bmc,
+            |kind| {
                 factory_calls.fetch_add(1, Ordering::SeqCst);
                 make_test_client(kind)
-            })
-            .expect("first insert");
+            },
+        )
+        .expect("first insert");
 
-        let second =
-            cache_or_create_bmc_client(&mut cache, test_mac(), ApiCredentialKind::Bmc, |kind| {
+        let second = cache_or_create_bmc_client(
+            &mut cache,
+            test_mac(),
+            &test_addr(),
+            ApiCredentialKind::Bmc,
+            |kind| {
                 factory_calls.fetch_add(1, Ordering::SeqCst);
                 make_test_client(kind)
-            })
-            .expect("cache hit");
+            },
+        )
+        .expect("cache hit");
 
         assert!(
             Arc::ptr_eq(&first.client, &second.client),
@@ -1721,6 +1749,65 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn cache_replaces_client_when_bmc_address_changes() {
+        let mut cache: HashMap<MacAddress, CachedBmcClient> = HashMap::new();
+        let original = test_addr();
+        let moved = BmcAddr {
+            ip: "10.99.0.2".parse().expect("valid test IP"),
+            ..test_addr()
+        };
+        let repointed = BmcAddr {
+            port: Some(8443),
+            ..moved.clone()
+        };
+
+        let first = cache_or_create_bmc_client(
+            &mut cache,
+            test_mac(),
+            &original,
+            ApiCredentialKind::Bmc,
+            make_test_client,
+        )
+        .expect("first insert");
+        let system_uuid = uuid::uuid!("4c4c4544-0044-4710-8052-cac04f4b4632");
+        first
+            .system_uuid
+            .get_or_try_init(|| async { Ok::<_, std::convert::Infallible>(Some(system_uuid)) })
+            .await
+            .expect("infallible UUID initialization");
+
+        let mut previous = first;
+        for addr in [&moved, &repointed] {
+            let replaced = cache_or_create_bmc_client(
+                &mut cache,
+                test_mac(),
+                addr,
+                ApiCredentialKind::Bmc,
+                make_test_client,
+            )
+            .expect("address change rebuilds the client");
+            assert!(
+                !Arc::ptr_eq(&previous.client, &replaced.client),
+                "a changed address must not reuse the client bound to {:?}",
+                previous.addr
+            );
+            assert_eq!(&replaced.addr, addr);
+            assert_eq!(replaced.system_uuid.get(), Some(system_uuid));
+            previous = replaced;
+        }
+
+        let reused = cache_or_create_bmc_client(
+            &mut cache,
+            test_mac(),
+            &repointed,
+            ApiCredentialKind::Bmc,
+            |_| panic!("an unchanged address must reuse the cached client"),
+        )
+        .expect("cache hit");
+        assert!(Arc::ptr_eq(&previous.client, &reused.client));
+    }
+
     #[test]
     fn cache_rejects_conflicting_credential_kinds() {
         let mut cache: HashMap<MacAddress, CachedBmcClient> = HashMap::new();
@@ -1728,6 +1815,7 @@ mod tests {
         cache_or_create_bmc_client(
             &mut cache,
             test_mac(),
+            &test_addr(),
             ApiCredentialKind::Bmc,
             make_test_client,
         )
@@ -1736,6 +1824,7 @@ mod tests {
         let err = cache_or_create_bmc_client(
             &mut cache,
             test_mac(),
+            &test_addr(),
             ApiCredentialKind::SwitchNvosAdmin {
                 switch_id: test_switch_id(),
             },
@@ -1891,6 +1980,7 @@ mod tests {
             cache_or_create_bmc_client(
                 &mut cache,
                 test_mac(),
+                &test_addr(),
                 ApiCredentialKind::Bmc,
                 make_test_client,
             )

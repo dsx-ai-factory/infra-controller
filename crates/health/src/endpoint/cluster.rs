@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -429,8 +430,24 @@ fn build_endpoints(
     bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
 ) -> Vec<Arc<BmcEndpoint>> {
     let mut endpoints = Vec::with_capacity(nodes.len());
+    // The endpoint key derives one-to-one from the BMC IP, so a repeated IP
+    // would map two inventory rows onto one set of collectors.
+    let mut first_rows: HashMap<IpAddr, (String, Option<String>)> = HashMap::new();
 
     for node in nodes {
+        if let Some((first_hostname, first_rack)) = first_rows.get(&node.bmc_ip) {
+            tracing::warn!(
+                bmc_ip = %node.bmc_ip,
+                hostname = %node.hostname,
+                rack = node.rack.as_deref(),
+                first_hostname = %first_hostname,
+                first_rack = first_rack.as_deref(),
+                "Skipping cluster inventory row with duplicate BMC IP; keeping the first row"
+            );
+            continue;
+        }
+        first_rows.insert(node.bmc_ip, (node.hostname.clone(), node.rack.clone()));
+
         let rack_id = node.rack.as_deref().map(RackId::new);
 
         let mac = match node.bmc_ip {
@@ -587,5 +604,47 @@ mod tests {
             assert_eq!(username, "reader");
             assert_eq!(password.as_deref(), Some("test-password"));
         }
+    }
+
+    #[tokio::test]
+    async fn file_inventory_keeps_first_row_for_duplicate_bmc_ip() {
+        let inventory = tempfile::NamedTempFile::new().expect("create inventory file");
+        std::fs::write(
+            inventory.path(),
+            json!({
+                "default_credentials": {"username": "reader", "password": "test-password"},
+                "nodes": [
+                    {"hostname": "host-a", "bmc_ip": "10.2.3.4", "rack": "rack-a"},
+                    {"hostname": "host-b", "bmc_ip": "10.2.3.4", "rack": "rack-b"},
+                    {"hostname": "host-c", "bmc_ip": "10.2.3.5", "rack": "rack-b"},
+                ],
+            })
+            .to_string(),
+        )
+        .expect("write inventory file");
+        let source = ClusterEndpointSource::from_config(
+            ClusterEndpointSourceConfig {
+                inventory_path: inventory.path().to_path_buf(),
+                ..Default::default()
+            },
+            &reqwest(),
+            None,
+            10,
+            None,
+        );
+
+        let endpoints = source.fetch_bmc_hosts().await.expect("load inventory");
+        let rows: Vec<_> = endpoints
+            .iter()
+            .map(|endpoint| (endpoint.key(), endpoint.rack_id.clone()))
+            .collect();
+
+        assert_eq!(
+            rows,
+            [
+                ("02:00:0A:02:03:04".to_string(), Some(RackId::new("rack-a"))),
+                ("02:00:0A:02:03:05".to_string(), Some(RackId::new("rack-b"))),
+            ]
+        );
     }
 }
