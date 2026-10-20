@@ -1653,6 +1653,7 @@ mod tests {
                     &credentials,
                     None,
                     &headers,
+                    &nv_redfish::core::NoRepair,
                 )
                 .await
                 .unwrap();
@@ -2054,6 +2055,7 @@ mod tests {
                     &credentials,
                     None,
                     &headers_b,
+                    &nv_redfish::core::NoRepair,
                 )
                 .await
                 .unwrap();

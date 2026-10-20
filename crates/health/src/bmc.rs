@@ -38,7 +38,7 @@ use nv_redfish::core::query::{ExpandQuery, FilterQuery};
 use nv_redfish::core::upload::{MultipartUpdateRequest, UploadReader};
 use nv_redfish::core::{
     Action, Bmc, BoxTryStream, EntityTypeRef, Expandable, ModificationResponse, ODataETag, ODataId,
-    SessionCreateResponse, StreamEvent,
+    Repair, RepairError, SessionCreateResponse, StreamEvent,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -370,6 +370,19 @@ impl BmcClient {
         result
     }
 
+    fn finish_repaired<T>(
+        &self,
+        operation: &'static str,
+        result: Result<T, RepairError<HealthError>>,
+    ) -> Result<T, RepairError<HealthError>> {
+        if let Err(RepairError::Transport(error)) = &result
+            && let Some(error) = bmc_source_error(error)
+        {
+            log_bmc_error(operation, error);
+        }
+        result
+    }
+
     pub async fn ensure_credentials(&self) -> Result<(), HealthError> {
         self.init
             .get_or_try_init(|| async {
@@ -581,6 +594,46 @@ impl BmcClient {
                     "Retry after BMC credential refresh also failed"
                 );
             })
+    }
+
+    /// [`Self::read_with_auth_retry`] for a repaired read, which fails with a
+    /// [`RepairError`] rather than a [`HealthError`].
+    ///
+    /// A document that does not deserialize is not an authentication failure,
+    /// so it passes through the retry as a BMC error and is handed back as the
+    /// [`RepairError::Decode`] it was.
+    async fn read_repaired_with_auth_retry<T, E, Op, Fut>(
+        &self,
+        op: Op,
+    ) -> Result<T, RepairError<HealthError>>
+    where
+        HealthError: From<E>,
+        Op: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T, RepairError<E>>>,
+    {
+        let decode_error = StdMutex::new(None);
+        let result = self
+            .read_with_auth_retry(|| async {
+                match op().await {
+                    Ok(value) => Ok(value),
+                    Err(RepairError::Transport(error)) => Err(HealthError::from(error)),
+                    Err(RepairError::Decode(error)) => {
+                        let message = error.to_string();
+                        *decode_error.lock().expect("decode error mutex poisoned") = Some(error);
+                        Err(HealthError::BmcError(message.into()))
+                    }
+                }
+            })
+            .await;
+        result.map_err(|error| {
+            match decode_error
+                .into_inner()
+                .expect("decode error mutex poisoned")
+            {
+                Some(decode) => RepairError::Decode(decode),
+                None => RepairError::Transport(error),
+            }
+        })
     }
 
     /// Whether `generation` was already proven wrong by a replay that ran with
@@ -928,7 +981,7 @@ fn redact_request_credential<T>(
         NvBmcCredentials::Token { token } if !token.is_empty() => {
             vec![token.clone()]
         }
-        NvBmcCredentials::Token { .. } => Vec::new(),
+        NvBmcCredentials::Token { .. } | NvBmcCredentials::Anonymous => Vec::new(),
     };
 
     if sensitive_values.is_empty() {
@@ -1009,6 +1062,7 @@ impl HttpClient for InstrumentedHttpClient {
         credentials: &nv_redfish::bmc_http::BmcCredentials,
         etag: Option<ODataETag>,
         custom_headers: &HeaderMap,
+        repair: &impl Repair,
     ) -> Result<T, Self::Error>
     where
         T: DeserializeOwned + Send + Sync,
@@ -1018,7 +1072,7 @@ impl HttpClient for InstrumentedHttpClient {
         let started = Instant::now();
         let result = self
             .inner
-            .get::<T>(url, credentials, etag, custom_headers)
+            .get::<T>(url, credentials, etag, custom_headers, repair)
             .await;
         let external_duration = started.elapsed();
 
@@ -1378,6 +1432,51 @@ impl Bmc for BmcClient {
             })
             .await;
         self.finish("get", result)
+    }
+
+    async fn get_repaired<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
+        &self,
+        id: &ODataId,
+        repair: &impl Repair,
+    ) -> Result<Arc<T>, RepairError<Self::Error>> {
+        let result = self
+            .read_repaired_with_auth_retry(|| async move {
+                let result = self.inner.get_repaired::<T>(id, repair).await;
+                if let Ok(value) = &result {
+                    self.note_bmc_identity_from(value.as_ref());
+                }
+                result
+            })
+            .await;
+        self.finish_repaired("get", result)
+    }
+
+    async fn expand_repaired<T: Expandable>(
+        &self,
+        id: &ODataId,
+        query: ExpandQuery,
+        repair: &impl Repair,
+    ) -> Result<Arc<T>, RepairError<Self::Error>> {
+        let result = self
+            .read_repaired_with_auth_retry(|| async {
+                self.inner.expand_repaired(id, query.clone(), repair).await
+            })
+            .await;
+        self.finish_repaired("expand", result)
+    }
+
+    async fn filter_repaired<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
+        &self,
+        id: &ODataId,
+        query: FilterQuery,
+        repair: &impl Repair,
+    ) -> Result<Arc<T>, RepairError<Self::Error>> {
+        let result = self
+            .read_repaired_with_auth_retry(|| async {
+                self.inner.filter_repaired(id, query.clone(), repair).await
+            })
+            .await;
+        self.finish_repaired("filter", result)
     }
 
     async fn poll<R: Send + Sync + for<'de> Deserialize<'de>>(

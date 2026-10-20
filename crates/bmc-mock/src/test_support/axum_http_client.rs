@@ -26,7 +26,8 @@ use nv_redfish::bmc_http::{
 };
 use nv_redfish::core::upload::{MultipartUpdateRequest, UploadReader};
 use nv_redfish::core::{
-    BmcError, BmcErrorClass, BoxTryStream, ModificationResponse, ODataETag, SessionCreateResponse,
+    BmcError, BmcErrorClass, BoxTryStream, ModificationResponse, ODataETag, Repair,
+    SessionCreateResponse,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -160,6 +161,7 @@ impl HttpClient for AxumRouterHttpClient {
         credentials: &BmcCredentials,
         _: Option<ODataETag>,
         custom_headers: &HeaderMap,
+        repair: &impl Repair,
     ) -> Result<T, Self::Error>
     where
         T: DeserializeOwned,
@@ -175,7 +177,8 @@ impl HttpClient for AxumRouterHttpClient {
                 text: String::from_utf8_lossy(&bytes).to_string(),
             });
         }
-        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(Error::Json)?;
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).map_err(Error::Json)?;
+        repair.repair(&mut value);
         serde_json::from_value(value).map_err(Error::Json)
     }
 
