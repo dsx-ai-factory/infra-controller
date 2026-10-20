@@ -2554,7 +2554,6 @@ mod tests {
         assert_eq!(adapter.port_mac_addresses, vec![mac_address]);
         assert_eq!(report.all_mac_addresses(), vec![mac_address]);
         assert_eq!(report.find_interface_id_for_mac(mac_address), None);
-        assert_eq!(report.complete_boot_interfaces().count(), 0);
     }
 
     #[tokio::test]

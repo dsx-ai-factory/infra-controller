@@ -1809,25 +1809,25 @@ impl SiteExplorer {
         // Refresh every explored host, including hosts that cannot yet pair
         // with their DPUs. Only complete pairs replace last-known-good ids.
         for ep in explored_hosts.values() {
-            nic_redfish_ids.extend(ep.report.complete_boot_interfaces());
-
-            // Surface partial records -- a host NIC reporting only one of (MAC,
-            // interface id). `complete_boot_interfaces` skips these, so log here
-            // to make it visible that we saw, and ignored, an incomplete NIC.
             for iface in ep
                 .report
                 .systems
                 .iter()
                 .flat_map(|s| s.ethernet_interfaces.iter())
             {
-                let has_mac = iface.mac_address.is_some();
-                let has_id = iface.id.as_deref().is_some_and(|s| !s.is_empty());
-                if has_mac != has_id {
+                if let Some(interface) =
+                    MachineBootInterface::from_parts(iface.mac_address, iface.id.clone())
+                {
+                    nic_redfish_ids.push(interface);
+                } else if iface.mac_address.is_some()
+                    || iface.id.as_deref().none_if_empty().is_some()
+                {
+                    // Keep fully empty NIC records quiet.
                     tracing::info!(
                         bmc_ip_address = %ep.address,
                         interface_mac_address = ?iface.mac_address,
                         interface_id = ?iface.id,
-                        "site-explorer: host NIC reported with only one of (MAC, interface id) -- not recording its boot interface",
+                        "site-explorer: cannot build host NIC boot interface from MAC and interface id; skipping",
                     );
                 }
             }
