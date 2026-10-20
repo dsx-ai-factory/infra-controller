@@ -37,8 +37,6 @@ use crate::metrics::{BootEndpoint, CloudInitConsumer, OutcomeReason, PxeBootOutc
 /// Every outcome on these routes carries the same endpoint label.
 const ENDPOINT: BootEndpoint = BootEndpoint::CloudInit(CloudInitConsumer::Tenant);
 const CLOUD_CONFIG_HEADER: &str = "#cloud-config";
-const CLOUD_CONFIG_ARCHIVE_HEADER: &str = "#cloud-config-archive";
-const CLOUD_CONFIG_JSONP_HEADER: &str = "#cloud-config-jsonp";
 const NETWORK_CONFIG_KEY: &str = "network";
 
 /// Serves the tenant's cloud-init document, removing a supported network
@@ -74,17 +72,9 @@ async fn user_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
 /// quoted strings under cloud-init's YAML 1.1 scalar rules. Unsupported
 /// layouts or references into the removed block are passed through unchanged.
 fn user_data_without_network(custom_cloud_init: &str) -> Option<String> {
-    // Cloud-init matches prefixes after ignoring leading whitespace and case,
-    // with longer archive and JSON-patch prefixes taking precedence.
-    let header = custom_cloud_init
-        .trim_start()
-        .lines()
-        .next()?
-        .to_ascii_lowercase();
-    if !header.starts_with(CLOUD_CONFIG_HEADER)
-        || header.starts_with(CLOUD_CONFIG_ARCHIVE_HEADER)
-        || header.starts_with(CLOUD_CONFIG_JSONP_HEADER)
-    {
+    // Require a complete header token so suffixed formats pass through unchanged.
+    let header = custom_cloud_init.split_whitespace().next()?;
+    if !header.eq_ignore_ascii_case(CLOUD_CONFIG_HEADER) {
         return None;
     }
     let mut expected: serde_yaml::Value = serde_yaml::from_str(custom_cloud_init).ok()?;
@@ -258,9 +248,13 @@ mod tests {
             "case insensitive header" {
                 "#ClOuD-CoNfIg" => Some("#ClOuD-CoNfIg\nhostname: 'on'\n".to_string()),
             }
-            "distinct formats sharing the cloud-config prefix" {
+            "header comment" {
+                "#cloud-config # comment" => Some("#cloud-config # comment\nhostname: 'on'\n".to_string()),
+            }
+            "suffixed header tokens" {
                 "\n #CLOUD-CONFIG-ARCHIVE" => None,
                 "#cloud-config-jsonp" => None,
+                "#cloud-config-future" => None,
             }
         );
     }
