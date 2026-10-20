@@ -616,6 +616,11 @@ type ForgeClient interface {
 	// Reads persisted VPC routing and allocation state without changing it.
 	GetVpcRoutingState(ctx context.Context, in *VpcRoutingStateRequest, opts ...grpc.CallOption) (*VpcRoutingState, error)
 	CreateSpxPartition(ctx context.Context, in *SpxPartitionCreationRequest, opts ...grpc.CallOption) (*SpxPartition, error)
+	// Marks the partition deleted and releases its VNI if the partition still owns
+	// that reservation, committing both changes together. Repeating the request
+	// for a deleted, unreferenced partition succeeds. Returns FailedPrecondition
+	// while any instance, including a terminating one, still references it.
+	// An omitted id returns InvalidArgument; an unknown partition returns Internal.
 	DeleteSpxPartition(ctx context.Context, in *SpxPartitionDeletionRequest, opts ...grpc.CallOption) (*SpxPartitionDeletionResult, error)
 	FindSpxPartitionIds(ctx context.Context, in *SpxPartitionSearchFilter, opts ...grpc.CallOption) (*SpxPartitionIdList, error)
 	FindSpxPartitionsByIds(ctx context.Context, in *SpxPartitionsByIdsRequest, opts ...grpc.CallOption) (*SpxPartitionList, error)
@@ -7110,6 +7115,11 @@ type ForgeServer interface {
 	// Reads persisted VPC routing and allocation state without changing it.
 	GetVpcRoutingState(context.Context, *VpcRoutingStateRequest) (*VpcRoutingState, error)
 	CreateSpxPartition(context.Context, *SpxPartitionCreationRequest) (*SpxPartition, error)
+	// Marks the partition deleted and releases its VNI if the partition still owns
+	// that reservation, committing both changes together. Repeating the request
+	// for a deleted, unreferenced partition succeeds. Returns FailedPrecondition
+	// while any instance, including a terminating one, still references it.
+	// An omitted id returns InvalidArgument; an unknown partition returns Internal.
 	DeleteSpxPartition(context.Context, *SpxPartitionDeletionRequest) (*SpxPartitionDeletionResult, error)
 	FindSpxPartitionIds(context.Context, *SpxPartitionSearchFilter) (*SpxPartitionIdList, error)
 	FindSpxPartitionsByIds(context.Context, *SpxPartitionsByIdsRequest) (*SpxPartitionList, error)

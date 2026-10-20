@@ -7377,12 +7377,20 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Site still has Instance attachments, including attachments on terminating Instances. The Partition and its status history remain unchanged. Retry after removing active attachments and waiting for terminating Instances to finish deleting.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
       description: |-
         Delete a specific SpectrumX Partition by ID.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
-        Tenant must own the Partition. The request is rejected while any Instance is still attached to the Partition. The Partition moves to `Deleting` and its record is removed once the Site stops reporting it.
+        Tenant must own the Partition. The request is rejected with `400` while the API lists an attached Instance and `412` when the Site reports remaining attachments, including on terminating Instances. A rejected deletion leaves the Partition and its status history unchanged. Retry after removing active attachments and waiting for terminating Instances to finish deleting.
+
+        Once deletion is accepted, the Partition moves to `Deleting` and its record is removed once the Site stops reporting it.
       tags:
         - SpectrumX Partition
   '/v2/org/{org}/nico/nvlink-logical-partition':

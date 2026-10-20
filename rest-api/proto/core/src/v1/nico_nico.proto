@@ -81,6 +81,11 @@ service Forge {
   rpc GetVpcRoutingState(VpcRoutingStateRequest) returns (VpcRoutingState);
 
   rpc CreateSpxPartition(SpxPartitionCreationRequest) returns (SpxPartition);
+  // Marks the partition deleted and releases its VNI if the partition still owns
+  // that reservation, committing both changes together. Repeating the request
+  // for a deleted, unreferenced partition succeeds. Returns FailedPrecondition
+  // while any instance, including a terminating one, still references it.
+  // An omitted id returns InvalidArgument; an unknown partition returns Internal.
   rpc DeleteSpxPartition(SpxPartitionDeletionRequest) returns (SpxPartitionDeletionResult);
   rpc FindSpxPartitionIds(SpxPartitionSearchFilter) returns (SpxPartitionIdList);
   rpc FindSpxPartitionsByIds(SpxPartitionsByIdsRequest) returns (SpxPartitionList);

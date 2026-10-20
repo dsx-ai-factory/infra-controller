@@ -2784,7 +2784,9 @@ pub(crate) async fn batch_allocate_instances(
     Ok(snapshots)
 }
 
-/// Batch validate SPX partition ownership for multiple (partition_id, tenant_id) pairs
+/// Validates SPX ownership and locks the partitions for attachment admission.
+/// Keep the transaction open through the instance writes, as required by
+/// `db::spx_partition::find_active_for_share`.
 pub(crate) async fn batch_validate_spx_partition_ownership(
     txn: &mut PgConnection,
     validations: &[(SpxPartitionId, &TenantOrganizationId)],
@@ -2794,19 +2796,10 @@ pub(crate) async fn batch_validate_spx_partition_ownership(
         return Ok(());
     }
 
-    // Batch query all unique partitions
-    let unique_partition_ids: Vec<_> = validations
-        .iter()
-        .map(|(id, _)| *id)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+    let partition_ids: Vec<_> = validations.iter().map(|(id, _)| *id).collect();
 
-    let partitions = db::spx_partition::find_by(
-        txn,
-        ObjectColumnFilter::List(db::spx_partition::IdColumn, &unique_partition_ids),
-    )
-    .await?;
+    // Lock the complete batch before persisting any instance attachments.
+    let partitions = db::spx_partition::find_active_for_share(txn, &partition_ids).await?;
 
     let partition_map: HashMap<_, _> = partitions.into_iter().map(|p| (p.id, p)).collect();
 
@@ -2891,25 +2884,33 @@ pub(crate) async fn validate_ib_partition_ownership(
     batch_validate_ib_partition_ownership(txn, &validations).await
 }
 
+/// Validates SPX ownership while holding admission locks through this transaction.
+/// The caller must persist the instance configuration before committing it.
+/// Update validation keeps its existing errors, which differ from batch allocation.
 pub(crate) async fn validate_spx_partition_ownership(
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     instance_tenant: &TenantOrganizationId,
     spxcfg: &InstanceSpxConfig,
 ) -> Result<(), CarbideError> {
+    let partition_ids: Vec<_> = spxcfg
+        .spx_attachments
+        .iter()
+        .map(|attachment| attachment.spx_partition_id)
+        .collect();
+    let partitions: HashMap<_, _> =
+        db::spx_partition::find_active_for_share(txn.as_mut(), &partition_ids)
+            .await?
+            .into_iter()
+            .map(|partition| (partition.id, partition))
+            .collect();
+
     for attachment in &spxcfg.spx_attachments {
         let partition_id = attachment.spx_partition_id;
-
-        let partition = db::spx_partition::find_by(
-            txn.as_mut(),
-            ObjectColumnFilter::List(db::spx_partition::IdColumn, &[partition_id]),
-        )
-        .await?;
-        if partition.len() != 1 {
+        let Some(spx_partition) = partitions.get(&partition_id) else {
             return Err(CarbideError::InvalidArgument(format!(
                 "SPX partition {partition_id} is not found",
             )));
-        }
-        let spx_partition = &partition[0];
+        };
         if spx_partition.tenant_organization_id != *instance_tenant {
             return Err(CarbideError::InvalidArgument(format!(
                 "SPX partition {partition_id} is not owned by the tenant {instance_tenant}",
