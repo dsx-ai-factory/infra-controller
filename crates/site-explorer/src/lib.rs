@@ -1165,7 +1165,7 @@ impl SiteExplorer {
         // However since host information rarely changes (we never reassign MachineInterfaces),
         // this should be ok. The most noticeable effect is that ManagedHost population might be delayed a bit.
         let identify_managed_hosts_start = Instant::now();
-        let mut identified_hosts = self
+        let (mut identified_hosts, boot_interfaces, nic_boot_interfaces) = self
             .identify_managed_hosts(
                 metrics,
                 &expected_endpoint_index,
@@ -1173,6 +1173,17 @@ impl SiteExplorer {
                 explored_hosts,
             )
             .await?;
+
+        let mut txn = self.txn_begin().await?;
+        Self::persist_identified_managed_hosts(
+            &mut txn,
+            &identified_hosts,
+            &boot_interfaces,
+            &nic_boot_interfaces,
+        )
+        .await?;
+        txn.commit().await?;
+
         metrics.record_phase_latency(
             "identify_managed_hosts",
             identify_managed_hosts_start.elapsed(),
@@ -1332,7 +1343,11 @@ impl SiteExplorer {
         expected_explored_endpoint_index: &ExploredEndpointIndex,
         explored_dpus: HashMap<IpAddr, ExploredEndpoint>,
         explored_hosts: HashMap<IpAddr, ExploredEndpoint>,
-    ) -> SiteExplorerResult<Vec<IdentifiedManagedHost>> {
+    ) -> SiteExplorerResult<(
+        Vec<IdentifiedManagedHost>,
+        Vec<(IpAddr, MachineBootInterface)>,
+        Vec<MachineBootInterface>,
+    )> {
         // Per-host DPU policy resolution. Precedence:
         //   1. Per-host `ExpectedMachine.dpu_policy` (`Nic` / `Ignore` wins).
         //   2. Site-wide `SiteExplorerConfig.dpu_policy` setting.
@@ -1824,10 +1839,17 @@ impl SiteExplorer {
         // avoid deadlocks: sort by IP.
         boot_interfaces.sort_by_key(|(address, _)| *address);
 
-        let mut txn = self.txn_begin().await?;
+        Ok((managed_hosts, boot_interfaces, nic_boot_interfaces))
+    }
 
+    async fn persist_identified_managed_hosts(
+        txn: &mut Transaction<'_>,
+        managed_hosts: &[IdentifiedManagedHost],
+        boot_interfaces: &[(IpAddr, MachineBootInterface)],
+        nic_boot_interfaces: &[MachineBootInterface],
+    ) -> SiteExplorerResult<()> {
         db::explored_managed_host::update(
-            &mut txn,
+            txn,
             managed_hosts
                 .iter()
                 .map(|identified| &identified.explored_host)
@@ -1837,8 +1859,8 @@ impl SiteExplorer {
         .await?;
 
         // Persist boot interface MACs for host endpoints
-        for (address, boot_interface) in &boot_interfaces {
-            db::explored_endpoints::set_boot_interface(*address, boot_interface, &mut txn).await?;
+        for (address, boot_interface) in boot_interfaces {
+            db::explored_endpoints::set_boot_interface(*address, boot_interface, txn).await?;
         }
 
         // Record each host NIC's Redfish id on its machine_interfaces row so the
@@ -1846,24 +1868,22 @@ impl SiteExplorer {
         // Pending predicted interfaces get the same refresh, so a prediction
         // minted before the report resolved the id stays as current as the
         // live report until DHCP promotes it.
-        for boot_interface in &nic_boot_interfaces {
+        for boot_interface in nic_boot_interfaces {
             db::machine_interface::set_boot_interface_id(
                 boot_interface.mac_address,
                 &boot_interface.interface_id,
-                &mut txn,
+                txn,
             )
             .await?;
             db::predicted_machine_interface::set_boot_interface_id(
-                &mut txn,
+                txn,
                 boot_interface.mac_address,
                 &boot_interface.interface_id,
             )
             .await?;
         }
 
-        txn.commit().await?;
-
-        Ok(managed_hosts)
+        Ok(())
     }
 
     /// `assign_host_chassis_ids` joins each explored DPU to one host BMC
