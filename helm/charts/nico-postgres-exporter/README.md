@@ -132,11 +132,43 @@ Only the latest top 20 entries per exporter are exposed; a failed collection cle
 the snapshot and sets query-statistics health to zero. An empty successful snapshot
 also has no table rows but keeps query-statistics health at one.
 
-For an external database, preload `pg_stat_statements`, install its extension in
-the monitored database, and grant `pg_read_all_stats` to the exporter login to see
-other roles' query text and IDs. Without that membership, PostgreSQL can redact
-those fields, causing statement collection to fail. The connectivity probe only
-requires CONNECT permission and still works when statement collection fails.
+For an external database, configure the PostgreSQL server before enabling the
+exporter. Add `pg_stat_statements` to `shared_preload_libraries` (preserving any
+other libraries), and set these parameters in `postgresql.conf` or your database
+provider's equivalent server configuration:
+
+```ini
+pg_stat_statements.track = 'top'
+pg_stat_statements.track_utility = 'off'
+```
+
+`track` defaults to `top`; `track_utility` defaults to `on` and must be disabled
+for this exporter on every PostgreSQL version. This excludes utility statements
+(such as `CREATE ROLE` and `ALTER ROLE`) from new statistics. On PostgreSQL 15 and
+earlier, their query text can include password literals that would become
+Prometheus labels and appear in Grafana. See the
+[PostgreSQL parameter documentation](https://www.postgresql.org/docs/15/pgstatstatements.html#PGSTATSTATEMENTS-CONFIG-PARAMS).
+
+Restart PostgreSQL if adding a preload library; otherwise reload its
+configuration. Install the `pg_stat_statements` extension in the monitored
+database and grant `pg_read_all_stats` to the exporter login to see other roles'
+query text and IDs. Without that membership, PostgreSQL can redact those fields,
+causing statement collection to fail. The connectivity probe only requires
+CONNECT permission and still works when statement collection fails.
+
+If statistics were collected with utility tracking enabled, disabling it does
+not remove existing entries. Before starting or resuming the exporter, have a
+superuser run the following in a database with the extension installed:
+
+```sql
+SHOW pg_stat_statements.track_utility;
+SELECT pg_stat_statements_reset();
+```
+
+Verify that `SHOW` returns `off`. The reset discards statement statistics across
+all databases and roles on that server. It does not remove query labels already
+stored in Prometheus or other monitoring storage; handle any previously exposed
+credentials and retained data through your site's incident process.
 
 | Metric | Type | Meaning |
 | --- | --- | --- |
@@ -149,7 +181,7 @@ requires CONNECT permission and still works when statement collection fails.
 
 The three statement gauges carry `query` (PostgreSQL's representative SQL text)
 and `statement_id` (`dbid:userid:queryid:toplevel`) labels. Query text is retained
-in Prometheus and may include literals in utility statements. The health and
+in Prometheus; restrict access to the monitoring data. The health and
 timestamp gauges have no exporter-defined labels. The
 ServiceMonitor adds `component=nico-postgres-exporter`, alongside Prometheus's
 normal target labels. Prometheus `up` measures exporter scrape health separately

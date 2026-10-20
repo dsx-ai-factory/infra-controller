@@ -80,12 +80,16 @@ places the dashboard ConfigMap in `observability`, waiting for Prometheus,
 PostgreSQL, and local configuration before installation. Disabling observability
 excludes the exporter release and dashboard.
 
-With observability enabled, Tilt sets `pg_stat_statements.track: top` and grants
-the application owner `pg_read_all_stats` membership. CloudNativePG manages the
+With observability enabled, Tilt sets `pg_stat_statements.track: top` and
+`pg_stat_statements.track_utility: off`, excluding utility statements that could
+contain password literals from new query statistics. It also grants the application
+owner `pg_read_all_stats` membership. CloudNativePG manages the
 preload library and installs the extension in connectable databases when that
 parameter is present; changing the preload configuration can restart PostgreSQL.
 See [CloudNativePG's managed-extension contract](https://cloudnative-pg.io/docs/1.28/postgresql_conf/#enabling-pg_stat_statements).
 The shared chart itself does not configure extensions or database permissions.
+For external databases and existing statistics collected before disabling utility
+tracking, follow the [database setup instructions](../../../helm/charts/nico-postgres-exporter/README.md#database-collection-and-dashboard).
 
 The dashboard JSON now lives in the chart at
 [`dashboards/nico-postgres.json`](../../../helm/charts/nico-postgres-exporter/dashboards/nico-postgres.json).

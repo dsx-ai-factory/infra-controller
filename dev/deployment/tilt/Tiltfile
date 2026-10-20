@@ -587,7 +587,10 @@ if not enable_rest:
 if enable_observability:
     # CNPG manages the preload library and extension when this parameter is set.
     pg_config = postgres_values['cluster'].setdefault('postgresql', {})
-    pg_config.setdefault('parameters', {})['pg_stat_statements.track'] = 'top'
+    pg_parameters = pg_config.setdefault('parameters', {})
+    pg_parameters['pg_stat_statements.track'] = 'top'
+    # Utility statements can contain passwords in the exported query label.
+    pg_parameters['pg_stat_statements.track_utility'] = 'off'
     # The application owner also monitors statements issued by the other dev roles.
     postgres_values['cluster']['roles'].append({
         'name': postgres_values['cluster']['initdb']['owner'],
