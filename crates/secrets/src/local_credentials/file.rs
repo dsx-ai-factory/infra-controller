@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 
 use super::CredentialSnapshot;
 use crate::SecretsError;
-use crate::credentials::CredentialReader;
+use crate::credentials::{CredentialKey, CredentialReader, Credentials};
 
 const DEFAULT_FILE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_CREDENTIALS_FILE_PATH: &str = "secrets.yaml";
@@ -205,6 +205,12 @@ pub struct StructuredCredentialReader<T> {
 }
 
 impl<T: DeserializeOwned + Send + Sync + 'static> StructuredCredentialReader<T> {
+    /// Returns one complete cached snapshot. Existing references remain valid
+    /// across reloads; a later call observes the latest published snapshot.
+    pub fn snapshot(&self) -> Arc<T> {
+        self.credentials.load_full()
+    }
+
     /// Loads JSON or YAML; reloads when the existing watchers report changes.
     pub async fn new(config: FileCredentialsConfig) -> Result<Self, SecretsError> {
         Self::new_with_primary_watcher(config, start_primary_watcher, FileFormat::JsonOrYaml).await
@@ -367,13 +373,11 @@ impl<T: DeserializeOwned + Send + Sync + 'static> StructuredCredentialReader<T> 
 }
 
 #[async_trait]
-impl<K, V, T> CredentialReader<K, V> for StructuredCredentialReader<T>
-where
-    K: Sync,
-    V: Send,
-    T: CredentialReader<K, V> + Send + Sync,
-{
-    async fn get_credentials(&self, key: &K) -> Result<Option<V>, SecretsError> {
+impl CredentialReader for FileCredentialsWatcher {
+    async fn get_credentials(
+        &self,
+        key: &CredentialKey,
+    ) -> Result<Option<Credentials>, SecretsError> {
         self.credentials.load().get_credentials(key).await
     }
 }
@@ -386,6 +390,44 @@ mod tests {
 
     use super::*;
     use crate::credentials::{CredentialKey, CredentialType, Credentials};
+
+    #[tokio::test]
+    async fn custom_snapshot_references_survive_reload() {
+        use std::collections::HashMap;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("snapshot.json");
+        tokio::fs::write(&path, r#"{"version":1}"#).await.unwrap();
+        let reader =
+            StructuredCredentialReader::<HashMap<String, u64>>::new_json(FileCredentialsConfig {
+                path: Some(path.clone()),
+                poll_interval: Some(Duration::from_millis(25)),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let previous = reader.snapshot();
+        let replacement = dir.path().join("next.json");
+        tokio::fs::write(&replacement, r#"{"version":2}"#)
+            .await
+            .unwrap();
+        tokio::fs::rename(&replacement, &path).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if reader.snapshot().get("version") == Some(&2) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("new snapshot becomes visible");
+        assert_eq!(
+            previous.get("version"),
+            Some(&1),
+            "held snapshot stays consistent"
+        );
+    }
 
     #[tokio::test]
     async fn loads_json_file_and_reloads_on_change() {
