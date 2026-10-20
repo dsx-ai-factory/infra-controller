@@ -445,7 +445,20 @@ PUT /v2/org/{org}/nico/expected-machine/all added `#/components/schemas/SkuTpm, 
 PUT /v2/org/{org}/nico/expected-machine/all the `items/sku/components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`
 
 # Machine metadata now renders unavailable DMI and BMC data as null instead of
-# omitting those response fields.
+# omitting those response fields. oasdiff v1.21 reports oneOf/type deltas; older
+# versions report response-property-became-nullable for the same wire contract.
+API GET /v2/org/{org}/nico/machine added `#/components/schemas/MachineBMCInfo, subschema #2` to the `items/metadata/bmcInfo` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine added `#/components/schemas/MachineDMIData, subschema #2` to the `items/metadata/dmiData` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine the `items/metadata/bmcInfo` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine the `items/metadata/dmiData` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} added `#/components/schemas/MachineBMCInfo, subschema #2` to the `metadata/bmcInfo` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} added `#/components/schemas/MachineDMIData, subschema #2` to the `metadata/dmiData` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the `metadata/bmcInfo` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the `metadata/dmiData` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} added `#/components/schemas/MachineBMCInfo, subschema #2` to the `metadata/bmcInfo` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} added `#/components/schemas/MachineDMIData, subschema #2` to the `metadata/dmiData` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the `metadata/bmcInfo` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the `metadata/dmiData` response's property `type` changed from `object` to `any` for status `200`
 API GET /v2/org/{org}/nico/machine the response property `items/metadata/bmcInfo` became nullable for the status `200`
 API GET /v2/org/{org}/nico/machine the response property `items/metadata/dmiData` became nullable for the status `200`
 API GET /v2/org/{org}/nico/machine/{machineId} the response property `metadata/bmcInfo` became nullable for the status `200`
