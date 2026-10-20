@@ -64,6 +64,9 @@ tracing-opentelemetry = "0.33.0"
 # NV-Redfish
 nv-redfish = { version = "0.20.0" }
 nv-redfish-dispatcher = { version = "0.20.0" }
+nv-redfish-server-core = { version = "0.20.0" }
+nv-redfish-csdl-compiler = { version = "0.20.0" }
+nv-redfish-schema = { version = "0.20.0" }
 
 ########
 # MARK: - Pinned packages that we can't upgrade due to conflicts or just bugs

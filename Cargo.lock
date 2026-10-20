@@ -856,6 +856,9 @@ dependencies = [
  "metrics-endpoint",
  "nix 0.31.3",
  "nv-redfish",
+ "nv-redfish-csdl-compiler",
+ "nv-redfish-schema",
+ "nv-redfish-server-core",
  "quick-xml 0.39.4",
  "rand 0.10.1",
  "regex",
@@ -8143,6 +8146,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ed4cfdf4afa05b3c96b3663d9694c2e05ab7fe1014e87f3e067be6d91a447b1"
 dependencies = [
  "glob",
+]
+
+[[package]]
+name = "nv-redfish-server-core"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3294e87292478950888cdeb77a28df86c650924d595bf303453bc59130fbe328"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

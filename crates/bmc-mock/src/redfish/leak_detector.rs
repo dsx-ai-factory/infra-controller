@@ -17,11 +17,9 @@
 
 use std::borrow::Cow;
 
-use serde_json::json;
-
-use crate::json::{JsonExt, JsonPatch};
+use super::schema::leak_detector as schema;
 use crate::redfish;
-use crate::redfish::Builder;
+use crate::redfish::ModelExt;
 
 pub(super) fn collection(chassis_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!(
@@ -39,7 +37,7 @@ pub(super) fn resource<'a>(chassis_id: &str, leak_detector_id: &'a str) -> redfi
     let odata_id = format!("{}/{leak_detector_id}", collection(chassis_id).odata_id);
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#LeakDetector.v1_0_0.LeakDetector"),
+        odata_type: Cow::Borrowed(redfish::schema::leak_detector::LeakDetector::ODATA_TYPE),
         id: Cow::Borrowed(leak_detector_id),
         name: Cow::Borrowed("Leak Detector"),
     }
@@ -54,56 +52,21 @@ pub(crate) struct LeakDetector {
 
 impl LeakDetector {
     pub(crate) fn to_json(&self, chassis_id: &str) -> serde_json::Value {
-        let mut builder = builder(&resource(chassis_id, &self.id))
-            .detector_state(self.detector_state)
-            .leak_detector_type("Moisture");
-        if let Some(user_label) = &self.user_label {
-            builder = builder.user_label(user_label);
-        }
-        builder.build()
-    }
-}
-
-fn builder(resource: &redfish::Resource) -> LeakDetectorBuilder {
-    LeakDetectorBuilder {
-        value: resource.json_patch().patch(json!({
-            "Status": redfish::resource::Status::Ok.into_json(),
-            "DetectorState": "OK",
-            "LeakDetectorType": "Moisture",
-        })),
-    }
-}
-
-struct LeakDetectorBuilder {
-    value: serde_json::Value,
-}
-
-impl Builder for LeakDetectorBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-        }
-    }
-}
-
-impl LeakDetectorBuilder {
-    fn detector_state(self, detector_state: redfish::resource::Status) -> Self {
-        self.apply_patch(json!({
-            "DetectorState": detector_state.as_str(),
-            "Status": detector_state.into_json(),
-        }))
-    }
-
-    fn leak_detector_type(self, value: &str) -> Self {
-        self.add_str_field("LeakDetectorType", value)
-    }
-
-    fn user_label(self, value: &str) -> Self {
-        self.add_str_field("UserLabel", value)
-    }
-
-    fn build(self) -> serde_json::Value {
-        self.value
+        let resource = resource(chassis_id, &self.id);
+        let detector = schema::LeakDetector::new(
+            resource.odata_id.as_ref(),
+            resource.id.as_ref(),
+            resource.name.as_ref(),
+        )
+        .detector_state(self.detector_state.into())
+        .status(self.detector_state.into())
+        .leak_detector_type(schema::LeakDetectorType::Moisture);
+        let detector = if let Some(label) = &self.user_label {
+            detector.user_label(label.as_ref())
+        } else {
+            detector
+        };
+        detector.into_json()
     }
 }
 

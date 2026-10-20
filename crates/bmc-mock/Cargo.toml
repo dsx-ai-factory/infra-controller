@@ -50,6 +50,7 @@ nv-redfish = { workspace = true, features = [
   "computer-systems",
   "event-service",
 ] }
+nv-redfish-server-core = { workspace = true }
 nix = { features = ["fs"], workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
@@ -68,6 +69,10 @@ tower-http = { features = ["normalize-path"], workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { features = ["env-filter"], workspace = true }
 url = { workspace = true }
+
+[build-dependencies]
+nv-redfish-csdl-compiler = { workspace = true }
+nv-redfish-schema = { workspace = true }
 
 [dev-dependencies]
 libredfish = { workspace = true }

@@ -83,23 +83,27 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::bmc_state::BmcState;
-use crate::json::{JsonExt, JsonPatch};
-use crate::redfish::Builder;
+use crate::json::JsonExt;
+use crate::redfish::ModelExt;
 use crate::{Callbacks, http, redfish};
 
 pub(crate) fn resource<'a>() -> redfish::Resource<'a> {
     redfish::Resource {
         odata_id: Cow::Borrowed("/redfish/v1/UpdateService"),
-        odata_type: Cow::Borrowed("#UpdateService.v1_9_0.UpdateService"),
+        odata_type: Cow::Borrowed(redfish::schema::update_service::UpdateService::ODATA_TYPE),
         id: Cow::Borrowed("UpdateService"),
         name: Cow::Borrowed("Update Service"),
     }
 }
 
-pub(crate) fn builder(resource: &redfish::Resource) -> UpdateServiceBuilder {
-    UpdateServiceBuilder {
-        value: resource.json_patch(),
-    }
+pub(crate) fn builder(
+    resource: &redfish::Resource,
+) -> redfish::schema::update_service::UpdateService {
+    redfish::schema::update_service::UpdateService::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
 }
 
 pub(crate) fn simple_update_target() -> String {
@@ -606,15 +610,18 @@ struct SimpleUpdateRequest {
 /// Advertise only the push URI(s) that this platform's BMC actually supports.
 async fn get_update_service<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     let us = &state.update_service_state;
-    let mut b = builder(&resource())
-        .firmware_inventory(&redfish::software_inventory::firmware_inventory_collection());
+    let mut b = builder(&resource()).firmware_inventory(
+        redfish::software_inventory::firmware_inventory_collection()
+            .odata_id
+            .as_ref(),
+    );
     if us.advertise_multipart_push_uri {
         b = b.multipart_http_push_uri(MULTIPART_UPLOAD_PATH);
     }
     if us.advertise_legacy_http_push_uri {
-        b = b.apply_patch(json!({ "HttpPushUri": resource().odata_id }));
+        b = b.http_push_uri(resource().odata_id.as_ref());
     }
-    b.build().into_ok_response()
+    b.into_json().into_ok_response()
 }
 
 /// Redfish SimpleUpdate (Dell iDRAC, BFB/DPU path).
@@ -707,33 +714,6 @@ async fn get_firmware_inventory_resource<C: Callbacks>(
         .unwrap_or_else(http::not_found)
 }
 
-pub(crate) struct UpdateServiceBuilder {
-    value: serde_json::Value,
-}
-
-impl Builder for UpdateServiceBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-        }
-    }
-}
-
-impl UpdateServiceBuilder {
-    pub(crate) fn build(self) -> serde_json::Value {
-        self.value
-    }
-
-    pub(crate) fn firmware_inventory(self, v: &redfish::Collection<'_>) -> Self {
-        self.apply_patch(v.nav_property("FirmwareInventory"))
-    }
-
-    /// Multipart HTTP push URI (AMI/GB200/GB300 consumers).
-    pub(crate) fn multipart_http_push_uri(self, uri: &str) -> Self {
-        self.apply_patch(json!({ "MultipartHttpPushUri": uri }))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -749,7 +729,7 @@ mod tests {
             .iter()
             .map(|(id, v)| {
                 software_inventory::builder(&software_inventory::firmware_inventory_resource(id))
-                    .version(v)
+                    .version(*v)
                     .build()
             })
             .collect();

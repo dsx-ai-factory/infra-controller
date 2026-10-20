@@ -19,8 +19,6 @@
 
 use std::borrow::Cow;
 
-use serde_json::json;
-
 use crate::hw::rack::{RackPlacement, TrayPlacement};
 use crate::redfish;
 
@@ -104,22 +102,27 @@ pub(super) fn cbc_chassis(
 ) -> redfish::chassis::SingleChassisConfig {
     redfish::chassis::SingleChassisConfig {
         id: chassis_id,
-        chassis_type: "Component".into(),
+        chassis_type: redfish::schema::chassis::ChassisType::Component,
         manufacturer: Some("Nvidia".into()),
         part_number: Some("750-0567-002".into()),
         model: Some("18x1RU CBL Cartridge".into()),
         serial_number: Some("1821220000000".into()),
         pcie_devices: Some(vec![]),
         oem: topology.map(|topology| {
-            json!({
-                "Nvidia": {
-                    "@odata.type": "#NvidiaChassis.v1_4_0.NvidiaCBCChassis",
-                    "ChassisPhysicalSlotNumber": topology.chassis_physical_slot_number,
-                    "ComputeTrayIndex": topology.compute_tray_index,
-                    "RevisionId": topology.revision_id,
-                    "TopologyId": topology.topology_id,
-                }
-            })
+            [(
+                "Nvidia".to_string(),
+                redfish::oem::object(
+                    "#NvidiaChassis.v1_4_0.NvidiaCBCChassis",
+                    redfish::schema::nvidia_chassis::NvidiaCbcChassis::new()
+                        .chassis_physical_slot_number(i64::from(
+                            topology.chassis_physical_slot_number,
+                        ))
+                        .compute_tray_index(i64::from(topology.compute_tray_index))
+                        .revision_id(i64::from(topology.revision_id))
+                        .topology_id(i64::from(topology.topology_id)),
+                ),
+            )]
+            .into()
         }),
         ..redfish::chassis::SingleChassisConfig::defaults()
     }

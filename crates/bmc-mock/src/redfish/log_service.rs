@@ -21,8 +21,8 @@ use std::sync::Mutex;
 
 use serde_json::{Value, json};
 
-use crate::json::{JsonExt, JsonPatch};
-use crate::redfish::Builder;
+use crate::json::JsonExt;
+use crate::redfish::ModelExt;
 use crate::{ResourceResetType, redfish};
 
 pub(super) fn manager_collection(manager_id: &str) -> redfish::Collection<'static> {
@@ -47,7 +47,7 @@ pub(super) fn system_resource<'a>(system_id: &str, service_id: &'a str) -> redfi
     let odata_id = format!("/redfish/v1/Systems/{system_id}/LogServices/{service_id}");
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#LogService.v1_2_0.LogService"),
+        odata_type: Cow::Borrowed(redfish::schema::log_service::LogService::ODATA_TYPE),
         name: Cow::Borrowed("Log Service"),
         id: Cow::Borrowed(service_id),
     }
@@ -72,98 +72,41 @@ pub(super) fn system_entries_collection<'a>(
     }
 }
 
-pub(super) fn builder(resource: &redfish::Resource<'_>) -> LogServiceBuilder {
-    LogServiceBuilder {
-        value: resource.json_patch(),
+pub(super) fn builder(resource: &redfish::Resource<'_>) -> super::schema::log_service::LogService {
+    super::schema::log_service::LogService::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
+}
+
+pub(crate) fn event_entry(
+    collection: &redfish::Collection<'_>,
+    id: &str,
+) -> super::schema::log_entry::LogEntry {
+    use super::schema::log_entry::{LogEntry, LogEntryRequired, LogEntryType};
+    LogEntry::new(LogEntryRequired {
+        odata_id: format!("{}/{id}", collection.odata_id),
+        id: id.to_string(),
+        name: "Log Entry".to_string(),
+        entry_type: LogEntryType::Event,
+    })
+}
+
+impl super::schema::log_service::LogService {
+    pub(super) fn capacity(self, max_records: usize, clear_log_target: &str) -> serde_json::Value {
+        self.service_enabled(true)
+            .max_number_of_records(max_records.try_into().expect("log capacity fits i64"))
+            .over_write_policy(super::schema::log_service::OverWritePolicy::WrapsWhenFull)
+            .into_json()
+            // Bound actions are not emitted by the server schema generator yet.
+            .patch(json!({"Actions": {"#LogService.ClearLog": {"target": clear_log_target}}}))
     }
 }
 
-pub(crate) fn event_entry(collection: &redfish::Collection<'_>, id: &str) -> EntryBuilder {
-    let odata_id = format!("{}/{}", collection.odata_id, id);
-    EntryBuilder {
-        value: redfish::Resource {
-            odata_id: Cow::Owned(odata_id),
-            odata_type: Cow::Borrowed("#LogEntry.v1_15_0.LogEntry"),
-            name: Cow::Borrowed("Log Entry"),
-            id: Cow::Borrowed(id),
-        }
-        .json_patch(),
-    }
-    .entry_type("Event")
-}
-
-pub(super) struct LogServiceBuilder {
-    value: serde_json::Value,
-}
-
-impl Builder for LogServiceBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-        }
-    }
-}
-
-impl LogServiceBuilder {
-    pub(super) fn entries(self, v: &redfish::Collection<'_>) -> Self {
-        self.apply_patch(v.nav_property("Entries"))
-    }
-
-    /// The bound and the wrap policy a client needs to interpret a log that
-    /// no longer holds its oldest entries, plus the action that empties it.
-    pub(super) fn capacity(self, max_records: usize, clear_log_target: &str) -> Self {
-        self.apply_patch(json!({
-            "ServiceEnabled": true,
-            "MaxNumberOfRecords": max_records,
-            "OverWritePolicy": "WrapsWhenFull",
-            "Actions": {"#LogService.ClearLog": {"target": clear_log_target}},
-        }))
-    }
-
-    pub(super) fn build(self) -> serde_json::Value {
-        self.value
-    }
-}
-
-pub(crate) struct EntryBuilder {
-    value: serde_json::Value,
-}
-
-impl Builder for EntryBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-        }
-    }
-}
-
-impl EntryBuilder {
-    fn entry_type(self, v: &str) -> Self {
-        self.add_str_field("EntryType", v)
-    }
-
-    pub(crate) fn message(self, v: &str) -> Self {
-        self.add_str_field("Message", v)
-    }
-
-    pub(crate) fn severity(self, v: &str) -> Self {
-        self.add_str_field("Severity", v)
-    }
-
-    pub(crate) fn created(self, v: &str) -> Self {
-        self.add_str_field("Created", v)
-    }
-
-    pub(crate) fn message_id(self, v: &str) -> Self {
-        self.add_str_field("MessageId", v)
-    }
-
-    pub(crate) fn origin_of_condition(self, odata_id: &str) -> Self {
-        self.apply_patch(json!({"Links": {"OriginOfCondition": {"@odata.id": odata_id}}}))
-    }
-
-    pub(crate) fn build(self) -> serde_json::Value {
-        self.value
+impl super::schema::log_entry::LogEntry {
+    pub(crate) fn origin_of_condition(self, uri: &str) -> Self {
+        self.links(super::schema::log_entry::Links::new().origin_of_condition(uri))
     }
 }
 
@@ -172,15 +115,6 @@ impl EntryBuilder {
 pub(crate) enum Severity {
     Ok,
     Warning,
-}
-
-impl Severity {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Ok => "OK",
-            Self::Warning => "Warning",
-        }
-    }
 }
 
 /// A lifecycle record the mock appends to a system event log and publishes as
@@ -392,14 +326,17 @@ impl StoredEntry {
         let builder = event_entry(collection, &self.id.to_string())
             .message(&self.draft.message)
             .message_id(self.draft.message_id)
-            .severity(self.draft.severity.as_str())
+            .severity(match self.draft.severity {
+                Severity::Ok => super::schema::log_entry::EventSeverity::Ok,
+                Severity::Warning => super::schema::log_entry::EventSeverity::Warning,
+            })
             .created(&self.created);
         if self.draft.origin.is_empty() {
             builder
         } else {
             builder.origin_of_condition(&self.draft.origin)
         }
-        .build()
+        .into_json()
     }
 }
 
@@ -439,6 +376,15 @@ impl LogServices {
     /// The log that receives lifecycle entries.
     pub(crate) fn primary(&self) -> Option<&EventLog> {
         self.services.first()
+    }
+}
+
+impl From<Severity> for super::schema::resource::Health {
+    fn from(value: Severity) -> Self {
+        match value {
+            Severity::Ok => Self::Ok,
+            Severity::Warning => Self::Warning,
+        }
     }
 }
 

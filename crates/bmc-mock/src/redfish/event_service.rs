@@ -674,10 +674,7 @@ async fn subscription<C: Callbacks>(
     let context = state
         .subscription_context(id)
         .ok_or(EventServiceError::NotFound)?;
-    let document = event_destination::builder(&event_destination::resource(id))
-        .context(&context)
-        .sse()
-        .build();
+    let document = event_destination::sse(&event_destination::resource(id), &context);
     Ok(Json(document).into_response())
 }
 
