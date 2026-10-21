@@ -27,16 +27,15 @@ use db::machine as db_machine;
 use mac_address::MacAddress;
 use model::component_manager::PowerAction;
 use model::machine::{
-    FailureCause, FailureDetails, FailureSource, HostMachine, MachineMaintenanceOperation,
-    MachineMaintenanceRequest, ManagedHostState, ManagedHostStateSnapshot, StateMachineArea,
+    FailureCause, FailureDetails, FailureSource, HostMachine, MAX_MAINTENANCE_POWER_RETRIES,
+    MachineMaintenanceOperation, MachineMaintenanceRequest, ManagedHostState,
+    ManagedHostStateSnapshot, StateMachineArea, maintenance_power_retry_backoff,
 };
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
 use crate::context::MachineStateHandlerContextObjects;
-
-const MAX_POWER_RETRIES: u32 = 5;
 
 /// Handles the Maintenance state for a host, dispatching on the requested
 /// operation (`PowerOn` / `PowerOff` / `Reset` / `ChassisReset`). All
@@ -72,9 +71,8 @@ pub(super) async fn handle_maintenance(
                 ManagedHostState::maintenance_for_request(pending.clone()),
             ));
         }
-        let delay =
-            chrono::TimeDelta::seconds(60 * 2_i64.pow((*retry_count).min(MAX_POWER_RETRIES) - 1));
-        if mh_snapshot.host_snapshot.state.version.since_state_change() < delay {
+        let elapsed = mh_snapshot.host_snapshot.state.version.since_state_change();
+        if elapsed.to_std().unwrap_or_default() < maintenance_power_retry_backoff(*retry_count) {
             return Ok(StateHandlerOutcome::wait(format!(
                 "waiting before maintenance power retry {retry_count} for {operation:?}"
             )));
@@ -321,7 +319,7 @@ async fn retry_or_fail_maintenance(
     else {
         unreachable!("power maintenance called with non-Maintenance state");
     };
-    if *retry_count < MAX_POWER_RETRIES {
+    if *retry_count < MAX_MAINTENANCE_POWER_RETRIES {
         tracing::warn!(machine_id = %host_machine_id, retry_count = retry_count + 1, %cause,
             "Scheduling maintenance power retry");
         return Ok(StateHandlerOutcome::transition(

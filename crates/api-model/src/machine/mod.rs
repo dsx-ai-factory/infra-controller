@@ -1890,6 +1890,22 @@ impl std::fmt::Display for ValidationState {
 /// machine stays in its failure state until an operator intervenes.
 pub const MAX_FIRMWARE_UPGRADE_RETRIES: u32 = 5;
 
+/// Maximum retries after the initial attempt of a maintenance power operation.
+pub const MAX_MAINTENANCE_POWER_RETRIES: u32 = 5;
+
+/// Planned wait from the maintenance state version timestamp before an attempt.
+/// Zero attempts immediately; retries 1 through 5 wait 1/2/4/8/16 minutes.
+/// Larger counts are clamped to the final delay. The handler and SLA calculation
+/// share this schedule so planned waits do not count as overdue execution.
+pub fn maintenance_power_retry_backoff(retry_count: u32) -> std::time::Duration {
+    match retry_count {
+        0 => std::time::Duration::ZERO,
+        n => {
+            std::time::Duration::from_secs(60 * 2_u64.pow(n.min(MAX_MAINTENANCE_POWER_RETRIES) - 1))
+        }
+    }
+}
+
 impl ManagedHostState {
     /// Starts `Maintenance` with the requested operation and saves the full
     /// request so completion can check whether it is still pending.
@@ -3467,9 +3483,10 @@ pub fn state_sla(
         ManagedHostState::BootConfiguring { .. } => {
             StateSla::with_sla(slas::BOOT_CONFIGURING, time_in_state)
         }
-        ManagedHostState::Maintenance { .. } => {
-            StateSla::with_sla(slas::MAINTENANCE, time_in_state)
-        }
+        ManagedHostState::Maintenance { retry_count, .. } => StateSla::with_sla(
+            slas::MAINTENANCE + maintenance_power_retry_backoff(*retry_count),
+            time_in_state,
+        ),
         ManagedHostState::Assigned { instance_state } => match instance_state {
             InstanceState::Ready => StateSla::no_sla(),
             InstanceState::BootingWithDiscoveryImage { retry } => {
@@ -5591,6 +5608,45 @@ mod tests {
                 );
                 (state_sla.sla, state_sla.time_in_state_above_sla)
             },
+        );
+    }
+
+    #[test]
+    fn maintenance_sla_allows_backoff_but_detects_overdue_execution() {
+        let machine_id: MachineId = "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng"
+            .parse()
+            .unwrap();
+        let sla_config = slas::MachineSlaConfig::new(Duration::minutes(10));
+        value_scenarios!(
+            run = |(retry_count, elapsed_seconds)| {
+                let state = ManagedHostState::Maintenance {
+                    operation: MachineMaintenanceOperation::PowerOn,
+                    request: None,
+                    retry_count,
+                };
+                let version = format!(
+                    "V1-T{}",
+                    (Utc::now() - Duration::seconds(elapsed_seconds)).timestamp_micros(),
+                ).parse().unwrap();
+                let result = state_sla(
+                    &machine_id,
+                    &state,
+                    &version,
+                    &health_report_with_alerts(vec![]),
+                    &sla_config,
+                );
+                (result.sla.unwrap().as_secs(), result.time_in_state_above_sla)
+            };
+            "planned wait longer than the base SLA" {
+                (4, 470) => (780, false),
+            }
+            "execution retains five minutes after the longest wait" {
+                (5, 1_250) => (1_260, false),
+            }
+            "overdue execution still breaches SLA" {
+                (4, 781) => (780, true),
+                (5, 1_261) => (1_260, true),
+            }
         );
     }
 
