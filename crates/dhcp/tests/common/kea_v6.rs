@@ -223,9 +223,17 @@ impl Kea6 {
             .unwrap_or_else(|| temp_base_directory.path().join("kea-leases6.csv"));
 
         let mut temp_conf_fd = File::create(&temp_conf_file)?;
-        temp_conf_fd.write_all(
-            Kea6::config(api_server_url, &lease_file, metrics_endpoint, config).as_bytes(),
-        )?;
+        let mut configuration: serde_json::Value = serde_json::from_str(&Kea6::config(
+            api_server_url,
+            &lease_file,
+            metrics_endpoint,
+            config,
+        ))?;
+        configuration["Dhcp6"]["control-socket"] = json!({
+            "socket-type": "unix",
+            "socket-name": temp_base_directory.path().join("control.sock"),
+        });
+        temp_conf_fd.write_all(serde_json::to_string(&configuration)?.as_bytes())?;
 
         // Close the config before spawning Kea so the child reads complete JSON.
         drop(temp_conf_fd);
@@ -444,6 +452,25 @@ impl Kea6 {
         self.metrics_endpoint
     }
 
+    /// Read native Kea counters through its control socket, including pool counters
+    /// on versions that expose them. Missing counters remain absent.
+    pub(crate) fn statistics(&self) -> Result<serde_json::Value, eyre::Report> {
+        use std::os::unix::net::UnixStream;
+        let mut stream = UnixStream::connect(self.temp_base_directory.path().join("control.sock"))?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+        stream.write_all(br#"{"command":"statistic-get-all"}"#)?;
+        let response = serde_json::Deserializer::from_reader(stream)
+            .into_iter::<serde_json::Value>()
+            .next()
+            .ok_or_else(|| eyre::eyre!("empty Kea control response"))??;
+        eyre::ensure!(
+            response["result"] == 0,
+            "Kea statistics command failed: {response}"
+        );
+        Ok(response["arguments"].clone())
+    }
+
     /// Restart the same Kea6 config and memfile, clearing process-local hook cache.
     pub(crate) fn restart(&mut self) -> Result<(), eyre::Report> {
         let run_permit = self
@@ -559,6 +586,12 @@ impl Kea6 {
                 }
             ],
             "loggers": [
+                {
+                    "name": "kea-dhcp6.bad-packets",
+                    "output_options": [{"output": "stdout"}],
+                    "severity": "DEBUG",
+                    "debuglevel": 99
+                },
                 {
                     "name": "kea-dhcp6",
                     "output_options": [{"output": "stdout"}],
