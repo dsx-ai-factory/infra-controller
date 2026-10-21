@@ -111,7 +111,18 @@ chmod +x "${TEST_TMP_DIR}/bin/helm" "${TEST_TMP_DIR}/bin/kubectl"
 
 unset KEYCLOAK_NS
 _SITE_VALUES_CFG="${TEST_TMP_DIR}/values.yaml"
+_REST_VALUES_CFG="${TEST_TMP_DIR}/nico-rest.yaml"
 failures=0
+
+write_rest_values() {
+    cat > "${_REST_VALUES_CFG}" <<EOF
+nico-rest-api:
+  config:
+    keycloak:
+      enabled: $1
+EOF
+}
+write_rest_values true
 
 write_values() {
     local component="$1" value="$2" postgresql_enabled="${3:-true}"
@@ -219,6 +230,22 @@ FAKE_TEMPORAL_HOST=postgres.postgres.svc.cluster.local. \
 check_errors "Temporal services disagree" "${BLOCKING_ERRORS[*]:-}" \
     "auto could not tell which PostgreSQL the deployed temporal uses"
 
+# Phase 7d doesn't deploy a Keycloak that nico-rest.yaml disables, so a
+# Deployment the Site runs itself under that name can't block setup, even one
+# whose KC_DB_URL comes from valueFrom.
+write_rest_values false
+write_values keycloak auto
+BLOCKING_ERRORS=()
+FAKE_TEMPORAL_HOST="" FAKE_KEYCLOAK_URL=valueFrom FAKE_STANDALONE=statefulset FAKE_RECORD="" \
+    FAKE_DEPLOYMENT_STATE="" FAKE_READS_FAIL=false PATH="${TEST_TMP_DIR}/bin:${PATH}" \
+    _resolve_use_ha_postgres keycloak
+if [[ "${_USE_HA_POSTGRES}" != "true" ]]; then
+    echo "FAIL disabled Keycloak: resolved '${_USE_HA_POSTGRES}', want 'true'" >&2
+    failures=$((failures + 1))
+fi
+check_errors "disabled Keycloak" "${BLOCKING_ERRORS[*]:-}" ""
+write_rest_values true
+
 # The chart fails to render any other value, so preflight stops on it without
 # cluster access.
 write_values keycloak maybe
@@ -227,13 +254,13 @@ _check_use_ha_postgres_value keycloak
 check_errors "invalid value" "${BLOCKING_ERRORS[*]:-}" \
     "keycloak.useHaPostgres must be true, false, or auto (got 'maybe')"
 
-# With postgresql.enabled false, nico-pg-cluster is the Site's own PostgreSQL.
+# With postgresql.enabled false, nico-pg-cluster is an external or out-of-band PostgreSQL.
 # A new Site's auto can't assume it's provisioned, but a Site already on it
 # stays there. Columns: name|value|deployed Temporal DB host|expected.
 external_cases=(
     "new Site keeps the StatefulSet|auto||false"
-    "Site already on its own PostgreSQL|auto|nico-pg-cluster.postgres.svc.cluster.local|true"
-    "explicit true selects its own PostgreSQL|true||true"
+    "Site already on an external or out-of-band PostgreSQL|auto|nico-pg-cluster.postgres.svc.cluster.local|true"
+    "explicit true selects an external or out-of-band PostgreSQL|true||true"
 )
 for row in "${external_cases[@]}"; do
     IFS='|' read -r name value temporal_host expected <<< "${row}"
@@ -243,21 +270,21 @@ for row in "${external_cases[@]}"; do
         FAKE_DEPLOYMENT_STATE="" FAKE_READS_FAIL=false PATH="${TEST_TMP_DIR}/bin:${PATH}" \
         _resolve_use_ha_postgres temporal
     if [[ "${_USE_HA_POSTGRES}" != "${expected}" ]]; then
-        echo "FAIL external Postgres, ${name}: resolved '${_USE_HA_POSTGRES}', want '${expected}' (errors: ${BLOCKING_ERRORS[*]:-none})" >&2
+        echo "FAIL postgresql.enabled false, ${name}: resolved '${_USE_HA_POSTGRES}', want '${expected}' (errors: ${BLOCKING_ERRORS[*]:-none})" >&2
         failures=$((failures + 1))
     fi
-    check_errors "external Postgres, ${name}" "${BLOCKING_ERRORS[*]:-}" ""
+    check_errors "postgresql.enabled false, ${name}" "${BLOCKING_ERRORS[*]:-}" ""
 done
 
-# The migration script can't copy into the Site's own PostgreSQL yet, so the
+# The migration script can't copy into an external or out-of-band PostgreSQL yet, so the
 # missing receipt points there instead of at the script.
 write_values temporal true false
 BLOCKING_ERRORS=()
 FAKE_TEMPORAL_HOST="postgres.postgres.svc.cluster.local." FAKE_KEYCLOAK_URL="" \
     FAKE_STANDALONE=statefulset FAKE_RECORD="" FAKE_DEPLOYMENT_STATE="" FAKE_READS_FAIL=false \
     PATH="${TEST_TMP_DIR}/bin:${PATH}" _check_db_cutover temporal true
-check_errors "external Postgres cutover without a migration" "${BLOCKING_ERRORS[*]:-}" \
-    "the migration script can't copy it into the Site's own PostgreSQL yet"
+check_errors "postgresql.enabled false cutover without a migration" "${BLOCKING_ERRORS[*]:-}" \
+    "2.4 doesn't support copying it into an external or out-of-band PostgreSQL"
 
 # The move check runs for an explicit value. Same columns as above without
 # expected, plus the current uid/generation every Deployment of the workload

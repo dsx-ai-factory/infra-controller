@@ -650,6 +650,7 @@ fi
 #     required keys. (Comment lines and inline `# …` comments are stripped first.)
 # ---------------------------------------------------------------------------
 _SITE_VALUES_CFG="${SCRIPT_DIR}/values.yaml"
+_REST_VALUES_CFG="${SCRIPT_DIR}/values/nico-rest.yaml"
 _PLACEHOLDER_RE='EXAMPLE|examplesite|example\.com|TMP_SITE|REPLACE_WITH|<your-registry>|<yoursite>|your-site|changeme|REPLACE_ME'
 for _vf in "${_SITE_VALUES_CFG}" "${_CORE_VALUES_CFG}" "${_METALLB_CFG}"; do
     [[ -f "${_vf}" ]] || continue
@@ -818,13 +819,22 @@ _db_location() {
 # Resolves temporal.useHaPostgres or keycloak.useHaPostgres into
 # _USE_HA_POSTGRES as true or false. `auto` keeps the database where
 # _db_location finds it, so it never moves an existing database, and a new Site
-# gets nico-pg-cluster. With postgresql.enabled false, nico-pg-cluster is the
-# Site's own PostgreSQL, which only exists once the Site provisions it, so a
-# new Site's `auto` means false. Records a blocking error and leaves
+# gets nico-pg-cluster. With postgresql.enabled false, nico-pg-cluster is an
+# external or out-of-band PostgreSQL, which only exists once the Site
+# provisions it, so a new Site's `auto` means false. Records a blocking error and leaves
 # _USE_HA_POSTGRES empty when it can't decide, since phase 7 can't run then.
+#
+# A Keycloak that nico-rest.yaml disables resolves to true without looking at
+# the cluster. Phase 7d won't deploy it, so it needs no database, and a
+# Deployment the Site runs itself under that name must not block setup.
 _resolve_use_ha_postgres() {
     local _component="$1" _value
     _USE_HA_POSTGRES=""
+    if [[ "${_component}" == "keycloak" \
+        && "$(_yaml_toplevel_value "${_REST_VALUES_CFG}" keycloak enabled)" != "true" ]]; then
+        _USE_HA_POSTGRES=true
+        return 0
+    fi
     _value="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" "${_component}" useHaPostgres)"
     case "${_value}" in
         true | false)
@@ -917,7 +927,7 @@ _check_db_cutover() {
     fi
     if [[ -z "${_receipt}" ]]; then
         if [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" postgresql enabled)" == "false" ]]; then
-            BLOCKING_ERRORS+=("${_component}.useHaPostgres: true moves ${_component} off the standalone postgres.postgres StatefulSet, but its data hasn't been migrated, and the migration script can't copy it into the Site's own PostgreSQL yet. Set it to auto until it can")
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: true moves ${_component} off the standalone postgres.postgres StatefulSet, but its data hasn't been migrated, and 2.4 doesn't support copying it into an external or out-of-band PostgreSQL. Set it to auto. Support is tracked in https://github.com/dsx-ai-factory/infra-controller/issues/7989")
         else
             BLOCKING_ERRORS+=("${_component}.useHaPostgres: true moves ${_component} off the standalone postgres.postgres StatefulSet, but its data hasn't been migrated. Run '${_hint}' first")
         fi
@@ -1353,7 +1363,7 @@ EOF
             _STANDALONE_PG_WORKLOADS="${_STANDALONE_PG_WORKLOADS:+${_STANDALONE_PG_WORKLOADS} and }Keycloak"
         _STANDALONE_PG_HINT="Migrate to nico-pg-cluster with the guide in helm-prereqs/README.md, \"Consolidating Temporal/Keycloak onto nico-pg-cluster\""
         if [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" postgresql enabled)" == "false" ]]; then
-            _STANDALONE_PG_HINT="Move them onto the Site's own PostgreSQL as helm-prereqs/README.md, \"Using your own PostgreSQL\", describes"
+            _STANDALONE_PG_HINT="Move them onto an external or out-of-band PostgreSQL as helm-prereqs/README.md, \"Using an external or out-of-band PostgreSQL\", describes"
         fi
         if [[ -n "${_STANDALONE_PG_WORKLOADS}" ]]; then
             WARNINGS+=("Deprecated: the standalone postgres.postgres StatefulSet still serves ${_STANDALONE_PG_WORKLOADS}. Support for it will be removed in 2.5. ${_STANDALONE_PG_HINT}")
@@ -1366,7 +1376,7 @@ EOF
             _check_db_cutover temporal "${_TEMPORAL_USE_HA_POSTGRES}"
         fi
         if [[ -n "${_KEYCLOAK_USE_HA_POSTGRES}" ]] \
-            && [[ "$(_yaml_toplevel_value "${SCRIPT_DIR}/values/nico-rest.yaml" keycloak enabled)" == "true" ]]; then
+            && [[ "$(_yaml_toplevel_value "${_REST_VALUES_CFG}" keycloak enabled)" == "true" ]]; then
             if _can_move_db keycloak; then
                 _check_db_cutover keycloak "${_KEYCLOAK_USE_HA_POSTGRES}"
             fi
