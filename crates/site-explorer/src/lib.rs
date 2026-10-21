@@ -1421,9 +1421,9 @@ impl SiteExplorer {
             // Record the host's DPU devices against the discovered DPU BMCs.
             // A DPU can appear as a PCIe device under a system or as a chassis
             // network adapter (vendor-dependent), so we scan the PCIe inventory first
-            // and fall back to chassis adapters only if it turned up nothing. The
-            // per-device logic -- counting, `set_nic_mode` auto-correction, NIC-mode
-            // stripping -- lives once in `record_host_dpu_device` / `classify_matched_dpu`.
+            // and fall back to chassis adapters if no managed DPUs remain expected.
+            // DpuExplorationState handles counting and classification; mode changes
+            // happen between those steps.
             let mut dpu_exploration = DpuExplorationState::new();
             let mut seen_bluefield_serials = HashSet::new();
             for system in ep.report.systems.iter() {
@@ -1441,16 +1441,22 @@ impl SiteExplorer {
                         );
                         continue;
                     }
-                    self.record_host_dpu_device(
-                        pcie_device.part_number.as_deref(),
+                    let part_number = pcie_device.part_number.as_deref();
+                    if let Some(dpu_ep) = dpu_exploration.record_reported_device(
+                        part_number,
                         pcie_device.serial_number.as_deref(),
                         &dpu_sn_to_endpoint,
-                        host_dpu_policy,
-                        &ep,
-                        &mut dpu_exploration,
-                        metrics,
-                    )
-                    .await;
+                    ) {
+                        // Resolve the DPU's mode against what the host declared. Report a change
+                        // only after `set_nic_mode` succeeds, so failures keep the existing skip path.
+                        let mode_check =
+                            Some(match host_dpu_policy.target_operating_mode(part_number) {
+                                Some(target) => self.update_dpu_mode(dpu_ep, target, metrics).await,
+                                None => Ok(true),
+                            });
+
+                        dpu_exploration.record_matched_dpu(dpu_ep, &ep, mode_check);
+                    }
                 }
             }
 
@@ -1473,16 +1479,24 @@ impl SiteExplorer {
                             );
                             continue;
                         }
-                        self.record_host_dpu_device(
+                        if let Some(dpu_ep) = dpu_exploration.record_reported_device(
                             record.part_number,
                             record.serial_number,
                             &dpu_sn_to_endpoint,
-                            host_dpu_policy,
-                            &ep,
-                            &mut dpu_exploration,
-                            metrics,
-                        )
-                        .await;
+                        ) {
+                            // Resolve the DPU's mode against what the host declared. Report a change
+                            // only after `set_nic_mode` succeeds, so failures keep the existing skip path.
+                            let mode_check = Some(
+                                match host_dpu_policy.target_operating_mode(record.part_number) {
+                                    Some(target) => {
+                                        self.update_dpu_mode(dpu_ep, target, metrics).await
+                                    }
+                                    None => Ok(true),
+                                },
+                            );
+
+                            dpu_exploration.record_matched_dpu(dpu_ep, &ep, mode_check);
+                        }
                     }
                 }
             }
@@ -1929,39 +1943,6 @@ impl SiteExplorer {
             dpus[..=primary_dpu_position].rotate_right(1);
         }
         ReportSelectionOrdering::Applied
-    }
-
-    /// Record a single host-reported device (a PCIe device or a chassis network
-    /// adapter) into `exploration`, against the discovered DPU BMCs.
-    ///
-    /// Mode changes (`set_nic_mode`) are applied here; the actual
-    /// classification of its result lives in [`classify_matched_dpu`], which is
-    /// unit-tested directly. Both the PCIe loop and the chassis fallback call this.
-    #[allow(clippy::too_many_arguments)]
-    async fn record_host_dpu_device(
-        &self,
-        part_number: Option<&str>,
-        serial_number: Option<&str>,
-        dpu_sn_to_endpoint: &HashMap<String, ExploredEndpoint>,
-        host_dpu_policy: HostDpuPolicy,
-        host_ep: &ExploredEndpoint,
-        exploration: &mut DpuExplorationState,
-        metrics: &mut SiteExplorationMetrics,
-    ) {
-        let Some(dpu_ep) =
-            exploration.record_reported_device(part_number, serial_number, dpu_sn_to_endpoint)
-        else {
-            return;
-        };
-
-        // Resolve the DPU's mode against what the host declared. Report a change
-        // only after `set_nic_mode` succeeds, so failures keep the existing skip path.
-        let mode_check = Some(match host_dpu_policy.target_operating_mode(part_number) {
-            Some(target) => self.update_dpu_mode(dpu_ep, target, metrics).await,
-            None => Ok(true),
-        });
-
-        exploration.record_matched_dpu(dpu_ep, host_ep, mode_check);
     }
 
     /// Sends a mode-setting request when the DPU reports a different current mode.
