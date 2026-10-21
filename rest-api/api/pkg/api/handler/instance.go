@@ -92,8 +92,7 @@ func buildInstanceNetworkConfig(auto bool, interfaceConfigs []*corev1.InstanceIn
 }
 
 // loadInstanceInterfaceVpcs parses VPC-selection intent and returns each
-// requested REST VPC keyed by its REST ID. validateInstanceInterfaceVpcs
-// checks the loaded VPCs.
+// requested REST VPC keyed by its REST ID.
 func loadInstanceInterfaceVpcs(ctx context.Context, logger *zerolog.Logger, dbSession *cdb.Session, interfaces []model.APIInterfaceCreateOrUpdateRequest) (map[uuid.UUID]*cdbm.Vpc, *cutil.APIError) {
 	requestedVpcIDs := make([]uuid.UUID, 0, len(interfaces))
 	seenVpcIDs := make(map[uuid.UUID]struct{}, len(interfaces))
@@ -137,51 +136,6 @@ func loadInstanceInterfaceVpcs(ctx context.Context, logger *zerolog.Logger, dbSe
 	}
 
 	return vpcByID, nil
-}
-
-// validateInstanceInterfaceVpcs checks the VPCs that loadInstanceInterfaceVpcs
-// loaded. Call it only after authorizeForeignVpcAttachment, so a Tenant
-// without the capability can't read a foreign VPC's state from these errors.
-func validateInstanceInterfaceVpcs(vpcByID map[uuid.UUID]*cdbm.Vpc, interfaces []model.APIInterfaceCreateOrUpdateRequest, siteID uuid.UUID) *cutil.APIError {
-	seenVpcIDs := make(map[uuid.UUID]struct{}, len(vpcByID))
-	for _, ifc := range interfaces {
-		if ifc.VpcID == nil {
-			continue
-		}
-		vpcID := uuid.MustParse(*ifc.VpcID)
-		if _, ok := seenVpcIDs[vpcID]; ok {
-			continue
-		}
-		seenVpcIDs[vpcID] = struct{}{}
-
-		vpc := vpcByID[vpcID]
-		if vpc.SiteID != siteID {
-			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request does not belong to Site", vpcID), nil)
-		}
-		if vpc.ControllerVpcID == nil || vpc.Status != cdbm.VpcStatusReady {
-			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request data is not in Ready state", vpcID), nil)
-		}
-		if vpc.NetworkVirtualizationType == nil || *vpc.NetworkVirtualizationType != cdbm.VpcFNN {
-			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request must have FNN network virtualization type", vpcID), nil)
-		}
-	}
-
-	return nil
-}
-
-// authorizeForeignVpcAttachment returns an error unless the Tenant has the
-// targetedInstanceCreation capability at the Site, which also authorizes
-// attaching Interfaces to another Tenant's VPC or VPC Prefix.
-func authorizeForeignVpcAttachment(ctx context.Context, logger *zerolog.Logger, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID) *cutil.APIError {
-	enabled, err := common.TenantHasTargetedInstanceCreation(ctx, nil, dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &siteID})
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to resolve targetedInstanceCreation capability for cross-Tenant VPC attachment")
-		return cutil.NewAPIError(http.StatusInternalServerError, "Failed to resolve targetedInstanceCreation capability, DB error", nil)
-	}
-	if !enabled {
-		return cutil.NewAPIError(http.StatusForbidden, "Tenant does not have targetedInstanceCreation capability enabled", nil)
-	}
-	return nil
 }
 
 // instanceInterfaceVpcSelection converts persisted REST VPC intent to the
@@ -672,14 +626,8 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 
 	// Authorize foreign selectors before validating them, so a Tenant without the
 	// capability can't read a foreign VPC or VPC Prefix's state from the errors.
-	if apiRequest.IntroducesForeignVpcAttachment(tenant.ID, interfaceVpcIDMap, vpcPrefixIDMap) {
-		if apiErr := authorizeForeignVpcAttachment(ctx, &logger, cih.dbSession, tenant, site.ID); apiErr != nil {
-			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
-		}
-	}
-	if interfaceVpcErr = validateInstanceInterfaceVpcs(interfaceVpcIDMap, apiRequest.Interfaces, site.ID); interfaceVpcErr != nil {
-		logger.Warn().Err(interfaceVpcErr).Msg("failed to validate VPCs specified by Instance interfaces")
-		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
+	if apiErr := apiRequest.AuthorizeAndValidateInterfaceVpcs(ctx, &logger, cih.dbSession, tenant, site.ID, interfaceVpcIDMap, vpcPrefixIDMap); apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
 
 	// Resolve the referenced SpectrumX Partitions before any writes so a bad ID is a 400
@@ -3030,15 +2978,17 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	// validating them, so a Tenant without the capability can't read a foreign VPC
 	// or VPC Prefix's state from the errors. Unchanged foreign attachments still
 	// pass after revocation through the identity comparison below.
-	foreignVpcAttachmentAuthorized := false
-	if apiRequest.SelectsNewForeignVpc(tenant.ID, interfaceVpcIDMap, vpcPrefixIDMap, existingIfcsForAuthorization) {
-		if apiErr := authorizeForeignVpcAttachment(ctx, &logger, uih.dbSession, tenant, site.ID); apiErr != nil {
-			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
-		}
-		foreignVpcAttachmentAuthorized = true
-	}
-	if interfaceVpcErr = validateInstanceInterfaceVpcs(interfaceVpcIDMap, apiRequest.Interfaces, site.ID); interfaceVpcErr != nil {
-		logger.Warn().Err(interfaceVpcErr).Msg("failed to validate VPCs specified by Instance interfaces")
+	foreignVpcAttachmentAuthorized, interfaceVpcErr := apiRequest.AuthorizeAndValidateInterfaceVpcs(
+		ctx,
+		&logger,
+		uih.dbSession,
+		tenant,
+		site.ID,
+		interfaceVpcIDMap,
+		vpcPrefixIDMap,
+		existingIfcsForAuthorization,
+	)
+	if interfaceVpcErr != nil {
 		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
 	}
 
@@ -3316,15 +3266,8 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	if !foreignVpcAttachmentAuthorized {
-		introducesForeignAttachment, attachmentErr := apiRequest.IntroducesForeignVpcAttachment(tenant.ID, dbInterfaces, existingIfcsForAuthorization)
-		if attachmentErr != nil {
-			logger.Error().Err(attachmentErr).Msg("failed to compare requested and persisted Interface identities")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to authorize cross-Tenant VPC attachments", nil)
-		}
-		if introducesForeignAttachment {
-			if apiErr := authorizeForeignVpcAttachment(ctx, &logger, uih.dbSession, tenant, site.ID); apiErr != nil {
-				return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
-			}
+		if apiErr := apiRequest.AuthorizeIntroducedForeignVpcAttachment(ctx, &logger, uih.dbSession, tenant, site.ID, dbInterfaces, existingIfcsForAuthorization); apiErr != nil {
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 		}
 	}
 
