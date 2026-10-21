@@ -1277,8 +1277,8 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 			run: func(t *testing.T) {
 				existing := existingSkuProto()
 				existing.SchemaVersion = model.CoreSkuSchemaVersion
-				existing.AssociatedMachineIds = []*corev1.MachineId{{Id: "machine-1"}}
 				replacementResponse := proto.Clone(existing).(*corev1.Sku)
+				replacementResponse.AssociatedMachineIds = []*corev1.MachineId{{Id: "machine-1"}}
 				replacementResponse.Components = validSkuCreateRequest("").ToProto().Skus[0].Components
 				fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
 					findResponse:    &corev1.SkuList{Skus: []*corev1.Sku{existing}},
@@ -1303,8 +1303,7 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 
 				var coreReq corev1.Sku
 				require.NoError(t, protojson.Unmarshal(fixture.requests[1].RequestJSON, &coreReq))
-				require.Len(t, coreReq.AssociatedMachineIds, 1)
-				assert.Equal(t, "machine-1", coreReq.AssociatedMachineIds[0].GetId())
+				assert.Empty(t, coreReq.AssociatedMachineIds)
 				assert.Equal(t, existing.Description, coreReq.Description)
 				assert.Equal(t, existing.DeviceType, coreReq.DeviceType)
 
@@ -1319,6 +1318,13 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 				assert.Equal(t, []string{"machine-1"}, saved.AssociatedMachineIds)
 				assert.Equal(t, replacementResponse.GetDescription(), saved.Description)
 				assert.Equal(t, replacementResponse.DeviceType, saved.DeviceType)
+
+				getHandler := NewGetSkuHandler(fixture.updateHandler.dbSession, nil, &config.Config{})
+				getRec := fixture.request(t, http.MethodGet, "sku-1", nil, getHandler.Handle)
+				require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+				var getResponse model.APISku
+				require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &getResponse))
+				assert.Equal(t, []string{"machine-1"}, getResponse.AssociatedMachineIds)
 			},
 		},
 		{

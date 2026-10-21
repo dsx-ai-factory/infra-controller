@@ -2160,6 +2160,78 @@ pub(in crate::tests) mod tests {
     }
 
     #[crate::sqlx_test]
+    async fn test_replace_sku_returns_persisted_machine_associations(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        use rpc::forge::forge_server::Forge;
+
+        let env = create_test_env(pool.clone()).await;
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+        let machine_id: MachineId = machine_id.into();
+
+        let (mut sku, original_verify_request_time) = {
+            let mut txn = pool.begin().await?;
+            let sku = db::sku::generate_sku_from_machine(txn.as_mut(), &machine_id).await?;
+            db::sku::create(&mut txn, &sku).await?;
+            db::machine::assign_sku(&mut txn, &machine_id, &sku.id).await?;
+            let machine =
+                db::machine::find_one(txn.as_mut(), &machine_id, MachineSearchConfig::default())
+                    .await?
+                    .expect("assigned machine should exist");
+            let verify_request_time = machine
+                .status
+                .hw_sku
+                .and_then(|status| status.verify_request_time);
+            txn.commit().await?;
+            (sku, verify_request_time)
+        };
+        // Change a component to prove the API commits its replacement. An empty
+        // request association list must still return the assignment saved above.
+        sku.components.cpus[0].thread_count *= 2;
+        let replacement_thread_count = sku.components.cpus[0].thread_count;
+        let sku_id = sku.id.clone();
+        let request = rpc::forge::Sku {
+            associated_machine_ids: Vec::new(),
+            ..sku.into()
+        };
+
+        let response = env
+            .api
+            .replace_sku(tonic::Request::new(request))
+            .await?
+            .into_inner();
+
+        assert_eq!(response.associated_machine_ids, vec![machine_id]);
+
+        let mut connection = pool.acquire().await?;
+        let saved_sku = db::sku::find(&mut connection, std::slice::from_ref(&sku_id))
+            .await?
+            .pop()
+            .expect("replaced SKU should exist");
+        assert_eq!(
+            saved_sku.components.cpus[0].thread_count,
+            replacement_thread_count
+        );
+
+        let saved_machine = db::machine::find_one(
+            connection.as_mut(),
+            &machine_id,
+            MachineSearchConfig::default(),
+        )
+        .await?
+        .expect("assigned machine should exist after replacement");
+        assert_eq!(saved_machine.config.hw_sku, Some(sku_id));
+        let verify_request_time = saved_machine
+            .status
+            .hw_sku
+            .and_then(|status| status.verify_request_time)
+            .expect("replacement should request SKU verification");
+        assert_ne!(Some(verify_request_time), original_verify_request_time);
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
     async fn test_delete_sku_in_use_reports_correct_machine_count(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
