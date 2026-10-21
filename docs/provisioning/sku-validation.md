@@ -347,12 +347,24 @@ set `skuId` in the request or pass `--sku-id` to `nicocli expected-machine creat
 NICo copies the ID only when it creates the machine. Changing the SKU ID in an entry does not change a machine
 that already exists; use `sku assign` and `sku unassign` for that.
 
-The two paths differ in when the SKU has to exist. The REST API requires it when you save the entry: the create
-and update requests reject an unknown `skuId` with HTTP 422 and `SKU ID specified in request does not exist`,
-the batch requests report `the SkuID specified for Expected Machine does not exist in DB` for the affected
-item, and the replace-all request fails with HTTP 400 and `SkuID specified for an Expected Machine does not exist on
-the Site`. The admin CLI saves the entry without checking, so a host whose entry names a SKU that does not exist yet
-enters `SkuMissing` as described below.
+The two paths differ in when the SKU has to exist. REST requires a supplied `skuId` to identify an existing SKU
+at the Expected Machine's Site. For single POST and PATCH requests, REST checks your Site access before looking
+up the SKU. It rejects missing SKUs and SKUs from another Site with HTTP 422 and "SKU ID specified in request
+does not exist". Batch create and update requests return HTTP 400 with a per-item `skuID` error prefixed by
+"the SkuID specified for Expected Machine does not exist in DB:" followed by the supplied ID. Replace-all
+returns HTTP 400 and "SkuID specified for an Expected Machine does not exist on the Site". The admin CLI saves
+the entry without checking, so a host whose entry names a SKU that does not exist yet enters `SkuMissing` as
+described below.
+
+For single create, batch create, and replace-all entries, omitting `skuId` or setting it to `null` leaves the
+association unset. For single and batch PATCH, omission and null preserve the existing association. These
+requests reject an empty `skuId` with HTTP 400, and PATCH cannot remove the association. The
+[Batch Update](ingesting-hosts-rest-api.md#batch-update) requirement for the same fields in every item also
+applies to `skuId`.
+
+Inventory synchronization does not check the SKU's Site. An entry saved through the admin CLI or directly
+in Core can therefore reference a SKU stored under another Site in REST. GET responses return that stored
+`skuId` but omit `sku`, even with `includeRelation=Sku`.
 
 If the SKU exists when the host reaches BOM validation, verification proceeds as for any assigned SKU: a matching
 host continues ingestion, and a mismatch moves the host to `SkuVerificationFailed` with a health alert. If the SKU

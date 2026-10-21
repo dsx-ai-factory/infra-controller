@@ -4499,6 +4499,16 @@ paths:
         '409':
           description: An Expected Machine with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
+        '422':
+          description: The supplied `skuId` does not identify a SKU at this Expected Machine's Site. REST checks your access to the Site before looking up the SKU.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              example:
+                source: nico
+                message: SKU ID specified in request does not exist
+                data: null
       tags:
         - Expected Machine
     get:
@@ -4892,6 +4902,16 @@ paths:
         '409':
           description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine update is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
+        '422':
+          description: The supplied `skuId` does not identify a SKU at this Expected Machine's Site. REST checks your access to the Site before looking up the SKU.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              example:
+                source: nico
+                message: SKU ID specified in request does not exist
+                data: null
       tags:
         - Expected Machine
     delete:
@@ -29967,10 +29987,11 @@ components:
           type:
             - string
             - 'null'
-          description: Optional ID of the SKU associated with this Expected Machine
+          description: Stored SKU ID for this Expected Machine, or null when no association is stored. The ID can belong to another Site, including when inventory synchronization imports an entry configured directly in Core.
         sku:
           $ref: '#/components/schemas/Sku'
-          description: SKU information for this Expected Machine (populated when includeRelation=Sku is specified)
+          description: |-
+            SKU information included when `includeRelation=Sku` is specified and the associated SKU belongs to this Expected Machine's Site. For an association to another Site's SKU, REST omits `sku` and returns the stored `skuId`.
         machineId:
           type:
             - string
@@ -30133,7 +30154,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional ID of the SKU to associate with this Expected Machine
+          description: Optional ID of an existing SKU at this Expected Machine's Site. Omission or null leaves the SKU association unset. REST rejects an empty string with HTTP 400.
         rackId:
           type:
             - string
@@ -30321,7 +30342,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional ID of the SKU to associate with this Expected Machine
+          description: Optional ID of an existing SKU at this Expected Machine's Site. Omission or null preserves the current SKU association in single and batch PATCH requests. REST rejects an empty string with HTTP 400. PATCH cannot remove the SKU association.
         rackId:
           type:
             - string
