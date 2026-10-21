@@ -539,8 +539,20 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Load VPCs only for interfaces using Core-managed prefix selection.
-	interfaceVpcIDMap, interfaceVpcErr := loadInstanceInterfaceVpcs(ctx, &logger, bcih.dbSession, apiRequest.Interfaces, site.ID)
+	interfaceVpcIDMap, interfaceVpcErr := loadInstanceInterfaceVpcs(ctx, &logger, bcih.dbSession, apiRequest.Interfaces)
 	if interfaceVpcErr != nil {
+		logger.Warn().Err(interfaceVpcErr).Msg("failed to validate VPCs specified by batch Instance interfaces")
+		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
+	}
+
+	// Authorize foreign selectors before validating them, so a Tenant without the
+	// capability can't read a foreign VPC or VPC Prefix's state from the errors.
+	if apiRequest.IntroducesForeignVpcAttachment(tenant.ID, interfaceVpcIDMap, vpcPrefixIDMap) {
+		if apiErr := authorizeForeignVpcAttachment(ctx, &logger, bcih.dbSession, tenant, site.ID); apiErr != nil {
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
+		}
+	}
+	if interfaceVpcErr = validateInstanceInterfaceVpcs(interfaceVpcIDMap, apiRequest.Interfaces, site.ID); interfaceVpcErr != nil {
 		logger.Warn().Err(interfaceVpcErr).Msg("failed to validate VPCs specified by batch Instance interfaces")
 		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
 	}
@@ -807,22 +819,6 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			}
 			logger.Error().Msg("one or more Interfaces in request data specify VPC Prefixes that do not belong to VPCs specified in `vpcId` or `secondaryVpcIds`")
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "One or more Interfaces in request data specify VPC Prefixes that do not belong to VPCs specified in `vpcId` or `secondaryVpcIds`", nil)
-		}
-	}
-
-	introducesForeignAttachment, attachmentErr := apiRequest.IntroducesForeignVpcAttachment(tenant.ID, dbInterfaces)
-	if attachmentErr != nil {
-		logger.Error().Err(attachmentErr).Msg("failed to compare requested and persisted Interface identities")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to authorize cross-Tenant VPC attachments", nil)
-	}
-	if introducesForeignAttachment {
-		enabled, capabilityErr := common.TenantHasTargetedInstanceCreation(ctx, nil, bcih.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &site.ID})
-		if capabilityErr != nil {
-			logger.Error().Err(capabilityErr).Msg("failed to resolve targetedInstanceCreation capability for cross-Tenant VPC attachment")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve targetedInstanceCreation capability, DB error", nil)
-		}
-		if !enabled {
-			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have targetedInstanceCreation capability enabled", nil)
 		}
 	}
 

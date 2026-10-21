@@ -625,6 +625,45 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
+			name: "batch create does not reveal foreign VPC state without targetedInstanceCreation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIBatchInstanceCreateRequest{
+					NamePrefix:      "test-batch-cross-tenant-state-hidden",
+					Count:           2,
+					TenantID:        tn1.ID.String(),
+					InstanceTypeID:  istCrossTenantVpc.ID.String(),
+					VpcID:           vpcFNN.ID.String(),
+					SecondaryVpcIDs: []string{vpcOtherTenant.ID.String()},
+					IpxeScript:      cutil.GetPtr("test script"),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpcFNN.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							// Not FNN, so validation would reject it with a 400 if it ran first.
+							VpcID:      cutil.GetPtr(vpcOtherTenant.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				prepareReq: func(t *testing.T, _ *model.APIBatchInstanceCreateRequest) {
+					disableTargetedInstanceCreation(t)
+				},
+				reqOrg:   tnOrg,
+				reqUser:  tnu1,
+				respCode: http.StatusForbidden,
+				respMsg:  "Tenant does not have targetedInstanceCreation capability enabled",
+			},
+		},
+		{
 			name: "batch create permits a foreign VPC attachment with targetedInstanceCreation",
 			fields: fields{
 				dbSession: dbSession,

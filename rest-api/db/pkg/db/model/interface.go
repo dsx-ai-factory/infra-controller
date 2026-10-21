@@ -367,6 +367,15 @@ func (ifcd InterfaceSQLDAO) setQueryWithFilter(filter InterfaceFilterInput, quer
 						AND vp.deleted IS NULL
 				)`, *filter.VpcID)
 		})
+		// Site deletion soft-deletes Instances before it deletes their Interfaces,
+		// so exclude Interfaces whose Instance is already gone. This stays outside
+		// the group so it applies to both the direct-VPC and VPC Prefix matches.
+		query = query.Where(`EXISTS (
+			SELECT 1
+			FROM instance AS i
+			WHERE i.id = ifc.instance_id
+				AND i.deleted IS NULL
+		)`)
 		cotel.SetAttribute(interfaceDAOSpan, attribute.String("vpc_id", filter.VpcID.String()))
 	}
 

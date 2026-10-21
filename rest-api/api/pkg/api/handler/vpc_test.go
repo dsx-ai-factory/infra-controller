@@ -4380,6 +4380,7 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 				reqUser:  tnu1,
 				respCode: http.StatusBadRequest,
 			},
+			responseContains: "one or more instances for this VPC",
 		},
 	}
 	for _, tt := range tests {
