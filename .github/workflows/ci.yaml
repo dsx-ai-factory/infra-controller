@@ -2189,7 +2189,7 @@ jobs:
       - name: Test vfkit launcher and isolated lab lifecycle
         run: |
           sudo apt-get install -y --no-install-recommends gnupg gpgv
-          /usr/bin/python3 -B -m unittest discover -s dev/deployment/devspace/vfkit -p 'test_*.py'
+          /usr/bin/python3 -B -m unittest discover -s dev/deployment/devspace/vfkit/tests -t dev/deployment/devspace/vfkit -p 'test_*.py'
 
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests

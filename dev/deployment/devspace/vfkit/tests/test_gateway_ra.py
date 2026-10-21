@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import patch
 
 
-SCRIPT = Path(__file__).parent / "lab/guest/renew-ipv6-router.sh"
+SCRIPT = Path(__file__).resolve().parents[1] / "lab/guest/renew-ipv6-router.sh"
 
 
 class RouterRenewalTests(unittest.TestCase):
