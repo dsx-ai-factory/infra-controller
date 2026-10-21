@@ -1349,10 +1349,22 @@ async fn test_rejected_network_observation_does_not_acknowledge_admin_network_ch
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(error.message(), "internal database error");
+    let source = std::error::Error::source(&error)
+        .expect("database status source")
+        .source()
+        .expect("original database error")
+        .downcast_ref::<db::DatabaseError>()
+        .expect("typed database error");
+    let db::DatabaseError::Sqlx(annotated) = source else {
+        panic!("expected the original database error: {source:?}");
+    };
+    assert!(matches!(annotated.source, sqlx::Error::RowNotFound));
     assert!(
-        error
-            .message()
-            .contains("update machine status observation")
+        annotated
+            .to_string()
+            .contains("update machine status observation"),
+        "{annotated}"
     );
     assert_eq!(
         use_admin_network_changed(&env, dpu_machine_id).await,

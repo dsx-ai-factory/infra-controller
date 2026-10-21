@@ -1921,9 +1921,29 @@ async fn test_can_not_create_2_instances_with_same_id(_: PgPoolOptions, options:
         )
         .await;
 
-    // TODO: Do not leak the full database error to users
     let err = result.expect_err("Expect instance creation to fail");
-    assert!(err.message().contains("Database Error: error returned from database: duplicate key value violates unique constraint \"instances_pkey\""));
+    assert_eq!(err.code(), tonic::Code::Internal);
+    assert_eq!(
+        err.message(),
+        "internal database error: duplicate key value violates unique constraint"
+    );
+    assert_eq!(
+        err.metadata().get("nico-error-text").unwrap(),
+        "internal database error: duplicate key value violates unique constraint"
+    );
+    let source = std::error::Error::source(&err)
+        .unwrap()
+        .downcast_ref::<crate::errors::CarbideErrorWithLocation>()
+        .unwrap();
+    assert_eq!(source.error.pg_sqlstate().as_deref(), Some("23505"));
+    assert!(!source.error.is_retryable_transaction_error());
+    let crate::errors::CarbideError::DBError(annotated) = &source.error else {
+        panic!("expected the original database error: {source:?}");
+    };
+    let sqlx::Error::Database(database_error) = &annotated.source else {
+        panic!("expected a database constraint error: {annotated:?}");
+    };
+    assert_eq!(database_error.constraint(), Some("instances_pkey"));
 }
 
 #[crate::sqlx_test]

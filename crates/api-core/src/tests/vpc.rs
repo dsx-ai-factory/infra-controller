@@ -348,20 +348,32 @@ async fn vpc_creation_rolls_back_allocation_on_entity_write_failure(
         ("failed-create-configured", Creation::Configured),
     ] {
         let error = match creation {
-            Creation::Api => env
-                .api
-                .create_vpc(
-                    VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
-                        .metadata(rpc::Metadata {
-                            name: name.to_string(),
-                            ..Default::default()
-                        })
-                        .network_virtualization_type(rpc::forge::VpcVirtualizationType::Flat as i32)
-                        .tonic_request(),
-                )
-                .await
-                .expect_err("injected VPC insert failure")
-                .to_string(),
+            Creation::Api => {
+                let error = env
+                    .api
+                    .create_vpc(
+                        VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                            .metadata(rpc::Metadata {
+                                name: name.to_string(),
+                                ..Default::default()
+                            })
+                            .network_virtualization_type(
+                                rpc::forge::VpcVirtualizationType::Flat as i32,
+                            )
+                            .tonic_request(),
+                    )
+                    .await
+                    .expect_err("injected VPC insert failure");
+                assert_eq!(error.code(), tonic::Code::Internal, "{name}");
+                assert_eq!(error.message(), "internal database error", "{name}");
+                std::error::Error::source(&error)
+                    .expect("database status source")
+                    .source()
+                    .expect("original database error")
+                    .downcast_ref::<db::DatabaseError>()
+                    .expect("typed database error")
+                    .to_string()
+            }
             Creation::Configured => db_init::create_initial_vpcs(
                 &env.pool,
                 &HashMap::from([(
@@ -793,7 +805,18 @@ async fn vpc_binding_read_failures_preserve_allocations_and_report_errors(
             tonic::Code::Internal,
             "{pool_name}/{allocation_mode}"
         );
-        assert!(error.message().contains("resource_pool_binding"), "{error}");
+        assert_eq!(error.message(), "internal database error");
+        let source = std::error::Error::source(&error)
+            .expect("database status source")
+            .downcast_ref::<crate::errors::CarbideErrorWithLocation>()
+            .expect("Carbide error source");
+        let crate::errors::CarbideError::DBError(annotated) = &source.error else {
+            panic!("expected the original database error: {source:?}");
+        };
+        assert!(
+            annotated.to_string().contains("resource_pool_binding"),
+            "{annotated}"
+        );
         let events: Vec<_> = logs
             .iter()
             .filter(|log| log.field("metric_name") == Some(LIFECYCLE_FAILURES_METRIC))
@@ -854,7 +877,18 @@ async fn vpc_binding_read_failures_preserve_allocations_and_report_errors(
         .await
         .expect_err("the binding table is unavailable during deletion");
     assert_eq!(error.code(), tonic::Code::Internal);
-    assert!(error.message().contains("resource_pool_binding"), "{error}");
+    assert_eq!(error.message(), "internal database error");
+    let source = std::error::Error::source(&error)
+        .expect("database status source")
+        .downcast_ref::<crate::errors::CarbideErrorWithLocation>()
+        .expect("Carbide error source");
+    let crate::errors::CarbideError::DBError(annotated) = &source.error else {
+        panic!("expected the original database error: {source:?}");
+    };
+    assert!(
+        annotated.to_string().contains("resource_pool_binding"),
+        "{annotated}"
+    );
     let pools_after: Vec<serde_json::Value> = sqlx::query_scalar(pool_query)
         .fetch_all(&mut *observer)
         .await?;
@@ -1374,9 +1408,17 @@ async fn change_vpc_routing_profile_rolls_back_allocation_on_write_failure(
             ))
             .await
             .expect_err("injected VPC write failure");
+        assert_eq!(error.code(), tonic::Code::Internal, "{vni:?}");
+        assert_eq!(error.message(), "internal database error", "{vni:?}");
+        let source = std::error::Error::source(&error)
+            .expect("database status source")
+            .source()
+            .expect("original database error")
+            .downcast_ref::<db::DatabaseError>()
+            .expect("typed database error");
         assert!(
-            error.message().contains("reject_profile_change"),
-            "{vni:?}: {error}"
+            source.violates_constraint("reject_profile_change"),
+            "{vni:?}: {source}"
         );
         assert_eq!(find_test_vpc(&env, vpc_id).await?, before, "{vni:?}");
         assert_eq!(

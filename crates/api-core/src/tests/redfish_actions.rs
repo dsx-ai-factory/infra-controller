@@ -670,9 +670,16 @@ async fn failed_claim_commit_does_not_dispatch_and_same_action_can_retry(pool: P
         .await
         .expect_err("claim commit must fail");
     assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(error.message(), "internal database error");
+    let source = std::error::Error::source(&error)
+        .expect("database status source")
+        .source()
+        .expect("original database error")
+        .downcast_ref::<db::DatabaseError>()
+        .expect("typed database error");
     assert!(
-        error.message().contains("test_applier_commit_failure"),
-        "{error}"
+        source.violates_constraint("test_applier_commit_failure"),
+        "{source}"
     );
     let action = fetch_action(&pool, request_id).await;
     assert!(action.applied_at.is_none());

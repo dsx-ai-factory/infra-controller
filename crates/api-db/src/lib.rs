@@ -129,6 +129,7 @@ use std::fmt::{Display, Formatter};
 use std::ops::{Deref, DerefMut};
 use std::panic::Location;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use carbide_instrument::{Event, LabelValue, emit};
 #[cfg(test)]
@@ -338,6 +339,22 @@ impl AnnotatedSqlxError {
             line: loc.line(),
             query: op_name.as_ref().to_string(),
             source,
+        }
+    }
+
+    /// Returns fixed client-facing text without SQL, locations, or driver diagnostics.
+    ///
+    /// REST matches `ErrMsgSiteControllerDuplicateEntryFound` to retry SSH Key Group
+    /// creation as an update. Keep that phrase until REST uses a structured code.
+    pub fn status_message(&self) -> &'static str {
+        if self
+            .source
+            .as_database_error()
+            .is_some_and(|error| error.is_unique_violation())
+        {
+            "internal database error: duplicate key value violates unique constraint"
+        } else {
+            "internal database error"
         }
     }
 }
@@ -565,7 +582,32 @@ impl Error for AnnotatedSqlxError {
     }
 }
 
+// Tonic includes its immediate source's Debug in Status formatting. Keep the
+// direct conversion's diagnostic reachable without exposing it to web callers.
+struct RetainedDatabaseError(DatabaseError);
+
+impl Display for RetainedDatabaseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("internal database error")
+    }
+}
+
+impl std::fmt::Debug for RetainedDatabaseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+impl Error for RetainedDatabaseError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
 impl From<DatabaseError> for tonic::Status {
+    /// Maps database errors to their gRPC codes and messages.
+    /// `Sqlx` failures use fixed `Internal` text; the diagnostic is logged and
+    /// available through `Error::source()`, but omitted from status formatting.
     fn from(from: DatabaseError) -> Self {
         // If env RUST_BACKTRACE is set extract handler and err location
         // If it's not set `Backtrace::capture()` is very cheap to call
@@ -603,6 +645,11 @@ impl From<DatabaseError> for tonic::Status {
         }
 
         match &from {
+            DatabaseError::Sqlx(error) => {
+                let mut status = Status::internal(error.status_message());
+                status.set_source(Arc::new(RetainedDatabaseError(from)));
+                status
+            }
             DatabaseError::AddressParseError(e) => Status::invalid_argument(e.to_string()),
             error @ DatabaseError::AlreadyFoundError { .. } => {
                 Status::failed_precondition(error.to_string())
@@ -1058,6 +1105,94 @@ mod tests {
         assert_eq!(err.line, line!() - 4);
         assert_eq!(err.file, file!());
         assert!(format!("{err}").contains(DB_QUERY));
+    }
+
+    #[tokio::test]
+    async fn sqlx_status_hides_diagnostics_and_retains_source() {
+        let driver_message = "private diagnostic: duplicate key value violates unique constraint";
+        let error = DatabaseError::query(
+            "SELECT private_column FROM private_table",
+            sqlx::Error::protocol(driver_message),
+        );
+        let diagnostic = error.to_string();
+        let (status, logs) =
+            carbide_instrument::testing::capture_logs_async(async { tonic::Status::from(error) })
+                .await;
+
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(status.message(), "internal database error");
+        assert!(status.metadata().is_empty());
+        for formatted in [status.to_string(), format!("{status:?}")] {
+            assert!(!formatted.contains("private"));
+            assert!(!formatted.contains(file!()));
+        }
+        assert_eq!(
+            format!("{:?}", status.source().unwrap()),
+            "internal database error"
+        );
+        assert!(logs.iter().any(|log| {
+            log.level == tracing::Level::ERROR
+                && log.message == "database error conversion"
+                && log.field("error") == Some(diagnostic.as_str())
+        }));
+
+        let source = status
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
+            .downcast_ref::<DatabaseError>()
+            .unwrap();
+        assert_eq!(source.to_string(), diagnostic);
+        let DatabaseError::Sqlx(annotated) = source else {
+            panic!("expected the original database error: {source:?}");
+        };
+        assert!(matches!(
+            &annotated.source,
+            sqlx::Error::Protocol(message) if message == driver_message
+        ));
+        assert_eq!(annotated.query, "SELECT private_column FROM private_table");
+        assert_eq!(annotated.file, file!());
+    }
+
+    #[test]
+    fn database_domain_status_messages_are_preserved() {
+        check_values(
+            [
+                Check {
+                    scenario: "missing resource",
+                    input: DatabaseError::NotFoundError {
+                        kind: "machine",
+                        id: "missing-machine".to_string(),
+                    },
+                    expect: tonic::Code::NotFound,
+                },
+                Check {
+                    scenario: "concurrent modification",
+                    input: DatabaseError::ConcurrentModificationError(
+                        "machine",
+                        "old-version".to_string(),
+                    ),
+                    expect: tonic::Code::FailedPrecondition,
+                },
+                Check {
+                    scenario: "non-SQLx internal error",
+                    input: DatabaseError::internal("domain diagnostic".to_string()),
+                    expect: tonic::Code::Internal,
+                },
+                Check {
+                    scenario: "non-SQLx fallback",
+                    input: DatabaseError::NetworkSegmentNotAllocated,
+                    expect: tonic::Code::Internal,
+                },
+            ],
+            |error| {
+                let message = error.to_string();
+                let status = tonic::Status::from(error);
+                assert_eq!(status.message(), message);
+                status.code()
+            },
+        );
     }
 
     #[test]

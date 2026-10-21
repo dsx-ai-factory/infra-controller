@@ -277,7 +277,8 @@ where
             // the nico-internal error code and mitigation.
             if let Some(CarbideErrorWithLocation { error, location }) = carbide_error {
                 let schema = error.operator_error_schema();
-                // Note: don't add schema.text here, it's always identical to what we already add to e.g. rpc.grpc.status_description
+                // Skip `schema.text`: for `DBError` it contains the SQLx diagnostic
+                // already logged by the conversion to `Status`.
                 request_span.record("nico.error_code", schema.error_code.to_string());
                 if let Some(mitigation) = schema.mitigation {
                     request_span.record("nico.mitigation", mitigation);

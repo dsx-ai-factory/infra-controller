@@ -566,16 +566,26 @@ async fn test_remove_external_config_decode_failure_rolls_back(
         .await
         .expect_err("invalid persisted version must fail removal");
     assert_eq!(status.code(), tonic::Code::Internal);
+    assert_eq!(status.message(), "internal database error");
+    let source = std::error::Error::source(&status)
+        .expect("database status source")
+        .source()
+        .expect("original database error")
+        .downcast_ref::<db::DatabaseError>()
+        .expect("typed database error");
+    let db::DatabaseError::Sqlx(annotated) = source else {
+        panic!("expected the original database error: {source:?}");
+    };
     assert!(
-        status
-            .message()
+        annotated
+            .to_string()
             .contains("DELETE FROM machine_validation_external_config"),
-        "{status}"
+        "{annotated}"
     );
-    assert!(
-        status.message().contains("decoding column \"version\""),
-        "{status}"
-    );
+    let sqlx::Error::ColumnDecode { index, .. } = &annotated.source else {
+        panic!("expected a column decoding error: {annotated:?}");
+    };
+    assert_eq!(index, "\"version\"");
 
     // PostgreSQL deletes the row before SQLx decodes `RETURNING`, so the
     // handler must return without committing even though the statement succeeded.
