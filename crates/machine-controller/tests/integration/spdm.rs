@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::collections::BTreeSet;
+
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::{
     FixtureDefault as _, MOCK_HOST_HARDWARE_CLASS,
@@ -56,9 +58,9 @@ async fn setup_spdm_host(pool: PgPool) -> (Env, TestManagedHost) {
     (env, mh)
 }
 
-/// Polling must use current selected results across jobs, including for failure details.
+/// A matching job polls the latest machine results for its devices, including failure details.
 #[sqlx_test]
-async fn terminal_spdm_jobs_recheck_current_attesters(pool: sqlx::PgPool) -> eyre::Result<()> {
+async fn matching_spdm_jobs_poll_latest_machine_results(pool: sqlx::PgPool) -> eyre::Result<()> {
     enum Expected {
         Advance,
         Wait,
@@ -69,7 +71,6 @@ async fn terminal_spdm_jobs_recheck_current_attesters(pool: sqlx::PgPool) -> eyr
         job_state: SpdmAttestationState,
         gpu_0_state: SpdmAttestationState,
         gpu_1_state: SpdmAttestationState,
-        disable_policy: bool,
         expected: Expected,
     }
     let cases = [
@@ -78,7 +79,6 @@ async fn terminal_spdm_jobs_recheck_current_attesters(pool: sqlx::PgPool) -> eyr
             job_state: SpdmAttestationState::Cancelled,
             gpu_0_state: SpdmAttestationState::Passed,
             gpu_1_state: SpdmAttestationState::Failed("selected current failure".to_string()),
-            disable_policy: false,
             expected: Expected::Failed,
         },
         Case {
@@ -86,7 +86,6 @@ async fn terminal_spdm_jobs_recheck_current_attesters(pool: sqlx::PgPool) -> eyr
             job_state: SpdmAttestationState::Failed("superseded job failure".to_string()),
             gpu_0_state: SpdmAttestationState::Passed,
             gpu_1_state: SpdmAttestationState::Passed,
-            disable_policy: false,
             expected: Expected::Advance,
         },
         Case {
@@ -94,7 +93,6 @@ async fn terminal_spdm_jobs_recheck_current_attesters(pool: sqlx::PgPool) -> eyr
             job_state: SpdmAttestationState::Passed,
             gpu_0_state: SpdmAttestationState::Cancelled,
             gpu_1_state: SpdmAttestationState::Passed,
-            disable_policy: false,
             expected: Expected::Advance,
         },
         Case {
@@ -102,16 +100,14 @@ async fn terminal_spdm_jobs_recheck_current_attesters(pool: sqlx::PgPool) -> eyr
             job_state: SpdmAttestationState::Passed,
             gpu_0_state: SpdmAttestationState::FetchMetadata,
             gpu_1_state: SpdmAttestationState::Passed,
-            disable_policy: false,
             expected: Expected::Wait,
         },
         Case {
-            scenario: "a disabled policy advances without contacting the BMC",
-            job_state: SpdmAttestationState::Failed("obsolete failure".to_string()),
+            scenario: "an unfinished matching job waits even when newer machine results have passed",
+            job_state: SpdmAttestationState::FetchMetadata,
             gpu_0_state: SpdmAttestationState::Passed,
             gpu_1_state: SpdmAttestationState::Passed,
-            disable_policy: true,
-            expected: Expected::Advance,
+            expected: Expected::Wait,
         },
     ];
     let (mut env, mh) = setup_spdm_host(pool).await;
@@ -135,16 +131,9 @@ async fn terminal_spdm_jobs_recheck_current_attesters(pool: sqlx::PgPool) -> eyr
         sqlx::query("DELETE FROM attestation_profiles")
             .execute(&mut *txn)
             .await?;
-        let selection = if case.disable_policy {
-            AttesterSelection {
-                mode: AttesterSelectionMode::None,
-                component_ids: Vec::new(),
-            }
-        } else {
-            AttesterSelection {
-                mode: AttesterSelectionMode::Allowlist,
-                component_ids: vec![ComponentIdMatch::Prefix("HGX_IRoT_GPU".to_string())],
-            }
+        let selection = AttesterSelection {
+            mode: AttesterSelectionMode::Allowlist,
+            component_ids: vec![ComponentIdMatch::Prefix("HGX_IRoT_GPU".to_string())],
         };
         db::attestation_profile::create(
             &mut txn,
@@ -162,10 +151,22 @@ async fn terminal_spdm_jobs_recheck_current_attesters(pool: sqlx::PgPool) -> eyr
                 current_time - chrono::Duration::minutes(1),
             ),
             (
+                "HGX_IRoT_GPU_2",
+                SpdmAttestationState::Passed,
+                job_id,
+                current_time - chrono::Duration::minutes(1),
+            ),
+            (
+                "HGX_IRoT_GPU_1",
+                SpdmAttestationState::Passed,
+                job_id,
+                current_time - chrono::Duration::minutes(1),
+            ),
+            (
                 "HGX_IRoT_GPU_1",
                 SpdmAttestationState::Failed("historical failure".to_string()),
                 historical_job_id,
-                current_time - chrono::Duration::minutes(1),
+                current_time - chrono::Duration::minutes(2),
             ),
             (
                 "HGX_IRoT_GPU_0",
@@ -207,15 +208,22 @@ async fn terminal_spdm_jobs_recheck_current_attesters(pool: sqlx::PgPool) -> eyr
         }
         db::machine::update_state(&mut txn, &mh.host.id, &poll_state).await?;
         txn.commit().await?;
-        if case.disable_policy {
-            env.redfish_sim
-                .set_create_client_error("the BMC cannot be reached");
-        }
 
         env.run_single_iteration().await;
         // Reload the state and persisted outcome to distinguish waiting from a handler error.
         let mut txn = env.test_harness.db_txn().await;
         let machine = mh.host.db_machine(&mut txn).await;
+        let cancelled: bool = sqlx::query_scalar(
+            "SELECT bool_or(cancelled_at IS NOT NULL) FROM spdm_machine_devices_attestation WHERE job_id = $1",
+        )
+        .bind(job_id)
+        .fetch_one(&mut *txn)
+        .await?;
+        assert!(
+            !cancelled,
+            "{}: a matching job must not be cancelled",
+            case.scenario
+        );
         match case.expected {
             Expected::Advance => assert_eq!(
                 machine.current_state(),
@@ -263,6 +271,207 @@ async fn terminal_spdm_jobs_recheck_current_attesters(pool: sqlx::PgPool) -> eyr
                 assert_eq!(*retry_count, 0);
                 assert_eq!(*failed_machine_id, machine_id);
             }
+        }
+    }
+    Ok(())
+}
+
+/// Membership changes cancel the old job before returning to the trigger state.
+#[sqlx_test]
+async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::Result<()> {
+    struct Case {
+        scenario: &'static str,
+        job_devices: Vec<(&'static str, SpdmAttestationState)>,
+        selected_devices: &'static [&'static str],
+    }
+    let cases = [
+        Case {
+            scenario: "an added attester restarts an active job even with results in another job",
+            job_devices: vec![("HGX_IRoT_GPU_0", SpdmAttestationState::FetchMetadata)],
+            selected_devices: &["HGX_IRoT_GPU_0", "HGX_IRoT_GPU_1"],
+        },
+        Case {
+            scenario: "removing a failed attester cancels the terminal job",
+            job_devices: vec![
+                ("HGX_IRoT_GPU_0", SpdmAttestationState::Passed),
+                (
+                    "HGX_IRoT_GPU_1",
+                    SpdmAttestationState::Failed("removed device failure".to_string()),
+                ),
+            ],
+            selected_devices: &["HGX_IRoT_GPU_0"],
+        },
+        Case {
+            scenario: "a replacement with the same device count still restarts the job",
+            job_devices: vec![("HGX_IRoT_GPU_0", SpdmAttestationState::Passed)],
+            selected_devices: &["HGX_IRoT_GPU_1"],
+        },
+        Case {
+            scenario: "an empty selection cancels an active job and then skips without contacting the BMC",
+            job_devices: vec![("HGX_IRoT_GPU_0", SpdmAttestationState::FetchMetadata)],
+            selected_devices: &[],
+        },
+    ];
+    let (mut env, mh) = setup_spdm_host(pool).await;
+    let machine_id: MachineId = mh.host.id.into();
+    let trigger_state = ManagedHostState::HostInit {
+        machine_state: MachineState::SpdmMeasuring {
+            spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
+        },
+    };
+
+    for case in cases {
+        env.redfish_sim.clear_create_client_error();
+        let job_id = uuid::Uuid::new_v4();
+        let other_job_id = uuid::Uuid::new_v4();
+        let mut txn = env.test_harness.db_txn().await;
+        // Isolate each selection change from jobs and policies left by earlier cases.
+        sqlx::query("DELETE FROM spdm_machine_devices_attestation WHERE machine_id = $1")
+            .bind(machine_id)
+            .execute(&mut *txn)
+            .await?;
+        sqlx::query("DELETE FROM attestation_profiles")
+            .execute(&mut *txn)
+            .await?;
+        let selection = AttesterSelection {
+            mode: if case.selected_devices.is_empty() {
+                AttesterSelectionMode::None
+            } else {
+                AttesterSelectionMode::Allowlist
+            },
+            component_ids: case
+                .selected_devices
+                .iter()
+                .map(|id| ComponentIdMatch::Exact((*id).to_string()))
+                .collect(),
+        };
+        db::attestation_profile::create(
+            &mut txn,
+            MOCK_HOST_HARDWARE_CLASS,
+            &AttestationPolicyDocument::new(selection),
+            "test",
+        )
+        .await?;
+        for (device_id, state) in &case.job_devices {
+            sqlx::query(
+                "INSERT INTO spdm_machine_devices_attestation
+                 (machine_id, device_id, nonce, state, job_id, started_at)
+                 VALUES ($1, $2, gen_random_uuid(), $3, $4, now() - interval '1 minute')",
+            )
+            .bind(machine_id)
+            .bind(device_id)
+            .bind(sqlx::types::Json(state))
+            .bind(job_id)
+            .execute(&mut *txn)
+            .await?;
+        }
+        // Existing evidence elsewhere cannot substitute for membership in the polled job.
+        // This job must also remain uncancelled when the polled job is replaced.
+        sqlx::query(
+            "INSERT INTO spdm_machine_devices_attestation
+             (machine_id, device_id, nonce, state, job_id, started_at)
+             VALUES ($1, 'HGX_IRoT_GPU_1', gen_random_uuid(), $2, $3, now())",
+        )
+        .bind(machine_id)
+        .bind(sqlx::types::Json(SpdmAttestationState::Passed))
+        .bind(other_job_id)
+        .execute(&mut *txn)
+        .await?;
+        db::machine::update_state(
+            &mut txn,
+            &mh.host.id,
+            &ManagedHostState::HostInit {
+                machine_state: MachineState::SpdmMeasuring {
+                    spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
+                },
+            },
+        )
+        .await?;
+        txn.commit().await?;
+        if case.selected_devices.is_empty() {
+            env.redfish_sim
+                .set_create_client_error("the BMC cannot be reached");
+        }
+
+        env.run_single_iteration().await;
+        // Reload both effects: cancellation and the lifecycle transition must be persisted together.
+        let mut txn = env.test_harness.db_txn().await;
+        let machine = mh.host.db_machine(&mut txn).await;
+        assert_eq!(machine.current_state(), &trigger_state, "{}", case.scenario);
+        let old_attestations =
+            db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
+        assert_eq!(
+            old_attestations.len(),
+            case.job_devices.len(),
+            "{}",
+            case.scenario
+        );
+        assert!(
+            old_attestations
+                .iter()
+                .all(|attester| attester.cancelled_at.is_some()),
+            "{}: every old job device must have a cancellation request",
+            case.scenario
+        );
+        let other_attestations =
+            db::attestation::spdm::get_attestations_for_job_id(&mut txn, &other_job_id).await?;
+        assert!(
+            other_attestations
+                .iter()
+                .all(|attester| attester.cancelled_at.is_none()),
+            "{}: unrelated jobs must remain uncancelled",
+            case.scenario
+        );
+        txn.commit().await?;
+
+        env.run_single_iteration().await;
+        // The trigger creates a distinct job for the current selection, or follows its empty-selection skip path.
+        let mut txn = env.test_harness.db_txn().await;
+        let machine = mh.host.db_machine(&mut txn).await;
+        if case.selected_devices.is_empty() {
+            assert_eq!(
+                machine.current_state(),
+                &ManagedHostState::HostInit {
+                    machine_state: MachineState::WaitingForDiscovery,
+                },
+                "{}",
+                case.scenario
+            );
+            let jobs: Vec<uuid::Uuid> = sqlx::query_scalar(
+                "SELECT DISTINCT job_id FROM spdm_machine_devices_attestation WHERE machine_id = $1",
+            ).bind(machine_id).fetch_all(&mut *txn).await?;
+            assert_eq!(
+                jobs.into_iter().collect::<BTreeSet<_>>(),
+                BTreeSet::from([job_id, other_job_id]),
+                "{}: no replacement job should be created for an empty selection",
+                case.scenario
+            );
+        } else {
+            let ManagedHostState::HostInit {
+                machine_state:
+                    MachineState::SpdmMeasuring {
+                        spdm_measuring_state: SpdmMeasuringState::PollResult(new_job_id),
+                    },
+            } = machine.current_state()
+            else {
+                panic!("{}: {:?}", case.scenario, machine.current_state());
+            };
+            assert_ne!(*new_job_id, job_id, "{}", case.scenario);
+            assert_ne!(*new_job_id, other_job_id, "{}", case.scenario);
+            let new_attestations =
+                db::attestation::spdm::get_attestations_for_job_id(&mut txn, new_job_id).await?;
+            assert_eq!(
+                new_attestations
+                    .iter()
+                    .map(|attester| attester.device_id.as_str())
+                    .collect::<BTreeSet<_>>(),
+                case.selected_devices
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>(),
+                "{}",
+                case.scenario
+            );
         }
     }
     Ok(())

@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::collections::HashSet;
+
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
 use carbide_uuid::machine::MachineId;
 use chrono::{DateTime, SubsecRound, Utc};
@@ -477,31 +479,7 @@ pub(crate) async fn handle_spdm_poll_state(
     next_skip_state: ManagedHostState,
     restart_state: ManagedHostState,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let mut txn = services.db_pool.begin().await?;
-
-    // A completed job may be removed before the machine controller reads its result.
-    // Restart in the caller's lifecycle stage; the next iteration creates a fresh job.
-    let attestation_status =
-        match db::attestation::spdm::get_attestation_job_status(&mut txn, job_id).await {
-            Ok(status) => status,
-            Err(db::DatabaseError::NotFoundError { .. }) => {
-                tracing::info!(
-                    machine_id = %host_machine_id,
-                    %job_id,
-                    "SPDM attestation job not found; restarting attestation"
-                );
-                return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
-            }
-            Err(error) => return Err(error.into()),
-        };
-
-    // Release the job-status transaction before selection can contact the BMC.
-    txn.commit().await?;
-    if attestation_status == SpdmAttestationStatus::InProgress {
-        return Ok(StateHandlerOutcome::do_nothing());
-    }
-
-    // Every terminal job is re-evaluated against the current profile and BMC inventory.
+    // Check current membership even while the job is collecting, without holding a transaction over Redfish.
     let selection = select_machine_attesters(
         &services.db_pool,
         async || {
@@ -514,49 +492,79 @@ pub(crate) async fn handle_spdm_poll_state(
         std::time::Duration::MAX,
     )
     .await?;
-    let selected_device_ids = selection
-        .attesters
-        .into_iter()
-        .map(|attester| attester.id)
-        .collect_vec();
-
-    // Match scheduling's skip path when the current policy selects no work.
-    if selected_device_ids.is_empty() {
-        return Ok(StateHandlerOutcome::transition(next_skip_state));
-    }
-
     let mut txn = services.db_pool.begin().await?;
-    // A finished job alone does not settle newer or other selected device attestations.
-    let attestation_status = match db::attestation::spdm::list_single_machine_attestation_status(
-        &mut txn,
-        host_machine_id,
-        Some(&selected_device_ids),
-    )
-    .await
+
+    // Retention can remove a job before either read; restart in the caller's lifecycle stage.
+    let job_attestations =
+        match db::attestation::spdm::get_attestations_for_job_id(&mut txn, job_id).await {
+            Ok(attestations) => attestations,
+            Err(db::DatabaseError::NotFoundError { .. }) => {
+                tracing::info!(
+                    machine_id = %host_machine_id,
+                    %job_id,
+                    "SPDM attestation job not found; restarting attestation"
+                );
+                return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
+            }
+            Err(error) => return Err(error.into()),
+        };
+    let job_device_ids = job_attestations
+        .into_iter()
+        .map(|attester| attester.device_id)
+        .collect_vec();
+    let job_devices = job_device_ids.iter().collect::<HashSet<_>>();
+    let selected_devices = selection
+        .attesters
+        .iter()
+        .map(|attester| &attester.id)
+        .collect::<HashSet<_>>();
+
+    // Additions, removals, and an empty selection all invalidate the job's membership.
+    // Commit cancellation with the transition so the next iteration can create the replacement job.
+    if selected_devices != job_devices {
+        db::attestation::spdm::cancel_attestation_job(&mut txn, job_id).await?;
+        tracing::info!(
+            machine_id = %host_machine_id,
+            %job_id,
+            "SPDM attester selection changed; cancelling job and restarting attestation"
+        );
+        return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
+    }
+    let job_status = match db::attestation::spdm::get_attestation_job_status(&mut txn, job_id).await
     {
         Ok(status) => status,
         Err(db::DatabaseError::NotFoundError { .. }) => {
-            // Retention may remove the selected evidence during BMC selection.
             tracing::info!(
                 machine_id = %host_machine_id,
                 %job_id,
-                "Selected SPDM attestation records not found; restarting attestation"
+                "SPDM attestation job not found; restarting attestation"
             );
             return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
         }
         Err(error) => return Err(error.into()),
     };
+    if job_status == SpdmAttestationStatus::InProgress {
+        return Ok(StateHandlerOutcome::do_nothing());
+    }
+
+    // A finished job alone does not settle newer attestations for its devices.
+    let attestation_status = db::attestation::spdm::list_single_machine_attestation_status(
+        &mut txn,
+        host_machine_id,
+        Some(&job_device_ids),
+    )
+    .await?;
 
     match attestation_status {
         SpdmAttestationStatus::Passed | SpdmAttestationStatus::Cancelled => {
             Ok(StateHandlerOutcome::transition(next_skip_state).with_txn(txn))
         }
         SpdmAttestationStatus::Failed => {
-            // Use the same selected devices and latest revisions as the machine status.
+            // Use the same job devices and latest revisions as the machine status.
             let attestation_states = db::attestation::spdm::get_latest_attestations_for_machine_id(
                 &mut txn,
                 host_machine_id,
-                &selected_device_ids,
+                &job_device_ids,
             )
             .await?;
             // here, move to failed state with full details
