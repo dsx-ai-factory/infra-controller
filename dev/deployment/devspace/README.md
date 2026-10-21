@@ -12,6 +12,17 @@ The intent is that the app deploy path stays the same whether the prerequisites 
 - installed by the provided bootstrap script, or
 - brought by the developer from elsewhere.
 
+DevSpace builds the REST API with a Git-derived version instead of the Dockerfile's
+`dev` default, allowing SDK compatibility checks to evaluate the actual release.
+The command-backed `LOCAL_DEV_REST_VERSION` variable is recalculated without
+caching using `git describe --tags --first-parent --match 'v[0-9]*.[0-9]*.[0-9]*' --dirty`.
+It uses the nearest matching tag on the first-parent history, includes the commit
+distance and hash after that tag, and adds `-dirty` for tracked local changes.
+The checkout must contain a reachable matching tag and its history; shallow
+checkouts may need their history and tags fetched before deployment. A checkout
+without such a tag fails version resolution rather than claiming SDK compatibility
+with an invented release. SDK minimum-version checks remain enabled.
+
 ## Prerequisites Bootstrap
 
 The bootstrap script operates on the current Kubernetes context and does not require a particular Kubernetes distribution. The provided full-stack deploy path uses kind-specific hooks to load locally built images into contexts named `kind-<cluster>`.
