@@ -283,7 +283,8 @@ Tests must exercise the changed surface:
   provider-owned and other-tenant resources.
 - A site-wide picker that clears a narrower scope invalidates filtered caches
   before fetching and after restoring scope on every exit. Test the scoped case.
-- Test that an option token is rejected as a missing preceding option's value.
+- When an option consumes a separate value, test that another option token is
+  rejected instead of consumed as that value.
 - Restore terminal state before another selector; propagate restoration errors.
   Return one non-nil error unchanged and use `errors.Join` only when both the
   operation and restoration fail. Only a direct cancellation sentinel counts

@@ -32,7 +32,8 @@ reviews:
     - "!rest-api/sdk/standard/configuration.go"
     - "!rest-api/sdk/standard/response.go"
     - "!rest-api/sdk/standard/utils.go"
-    - "!rest-api/workflow-schema/site-agent/workflows/v1/*_nico.proto"
+    - "!rest-api/proto/core/src/v1/*_nico.proto"
+    - "!rest-api/proto/flow/src/v1/*.proto"
     - "!crates/dpf/crds/**"
     - "!crates/mqttea-example/src/sample_protos/**"
     - "!crates/ssh-console-mock-api-server/src/generated/**"
@@ -43,11 +44,7 @@ reviews:
         Report a defect introduced, made reachable, or materially worsened by
         this PR. Identify the reviewed revision, concrete trigger, and
         observable consequence. Compare with the base before flagging unchanged
-        behavior. Exception for materially revised guidance: report conflicting
-        or ambiguous instructions that could cause concrete incorrect behavior,
-        even if inherited from the base. Cite the relevant wording, specific
-        misapplication, and observable consequence.
-        Read the PR rationale, relevant construction paths, callers,
+        behavior. Read the PR rationale, relevant construction paths, callers,
         wrappers, and retained tests; check evidence that contradicts the claim.
         If proposing a remedy, verify that it fixes the stated problem under the
         actual framework and runner without violating another contract.
@@ -107,11 +104,11 @@ reviews:
         checks and API response fields, including empty values except for the
         documented date-gated deprecation and opt-in includeRelation cases.
         Pagination must sort deterministically before slicing, with supported orderBy
-        values and default documented in OpenAPI. Verify changed model fields
-        and routes against rest-api/openapi/spec.yaml. Generated SDK changes
+        values and default documented in OpenAPI. Verify changed model fields and
+        routes against rest-api/openapi/spec.yaml. Generated SDK changes
         belong in the source contract. Run tests through the repository Make
-        targets that start the required services. Receiver-method preferences
-        alone are not findings.
+        targets that start the required services. Receiver-method and test-layout
+        preferences alone are not findings.
     - path: "**/*.proto"
       instructions: >-
         Distinguish protobuf binary-wire and ProtoJSON/Any compatibility from
@@ -121,6 +118,26 @@ reviews:
         consumer. A renamed message with the same field numbers and wire types
         is not by itself proof of a payload encoding break. Review generator-owned
         sources, not imported generated declarations.
+    - path: "**/*.md"
+      instructions: >-
+        Check operator commands within the threshold above. Report a command
+        that fails as written, exposes a credential in arguments or logs, writes
+        a secret to a predictable or broadly readable path, or runs a destructive
+        step before the backup or export it depends on succeeds. Spelling,
+        grammar, ordering, and link style alone are not findings.
+    - path: "**/*.sh"
+      instructions: >-
+        Check scripts within the threshold above. Report an ignored failure that
+        lets a later step run on partial state, a retry or rerun that skips a
+        required step, a credential exposed in arguments or logs, or a secret
+        written to a predictable or broadly readable path. Quoting and
+        portability alone are not findings unless a supported input breaks.
+    - path: "{**/AGENTS.md,STYLE_GUIDE.md,CONTRIBUTING.md,.coderabbit.yaml}"
+      instructions: >-
+        When this PR materially revises guidance, report conflicting or
+        ambiguous instructions that could cause concrete incorrect behavior,
+        even if inherited from the base. Cite the relevant wording, specific
+        misapplication, and observable consequence.
   auto_review:
     enabled: true
     ignore_usernames: ["rwthompsonii"] # Preserve existing author opt-outs.

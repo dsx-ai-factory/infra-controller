@@ -19,10 +19,10 @@ For repository conventions, follow `STYLE_GUIDE.md` over conflicting user-global
 `AGENTS.md` guidance. Explicit task instructions still take precedence.
 
 Follow [Engineering Guidelines](CONTRIBUTING.md#engineering-guidelines) for scope,
-reuse, evidence, and verification. Preserve others' work. Do not edit `AGENTS.md`
-or `STYLE_GUIDE.md` unless the user requests those changes. Never commit secrets
-or local environment files; keep local secrets in gitignored `.local_envrc` and
-follow [secret scanning](CONTRIBUTING.md#secret-scanning).
+reuse, evidence, and verification. Preserve others' work. Do not edit any
+`AGENTS.md` file or `STYLE_GUIDE.md` unless the user requests those changes.
+Never commit secrets or local environment files; keep local secrets in
+gitignored `.local_envrc` and follow [secret scanning](CONTRIBUTING.md#secret-scanning).
 
 ## Find the authoritative source
 

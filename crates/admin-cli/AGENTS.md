@@ -101,10 +101,17 @@ than an alias, and include every nested `subcommand` segment.
 
 ### Verify rendered help
 
-Build with `cargo build -p nico-admin-cli`. Render the affected command's long
-help with `cargo run -q -p nico-admin-cli --` followed by its actual command path
-and `--help`. Capture the output to a file and inspect its `EXAMPLES:` section,
-for example with `sed -n '/EXAMPLES/,$p'` followed by that file's path.
+Build, render the affected command's long help to a file, and read its
+`EXAMPLES:` section. Write to a file rather than piping into `grep`. The agent
+sandbox can drop piped output, so a pipe can print nothing even when the block
+is present.
+
+```bash
+cargo build -p nico-admin-cli
+cargo run -q -p nico-admin-cli -- <command path> --help > tmp/help.txt 2>&1
+sed -n '/EXAMPLES/,$p' tmp/help.txt
+```
+
 Check that continued source lines render as complete single-line commands and
 that every command path matches the parsed subcommand name.
 
@@ -178,9 +185,10 @@ Clap rejects a required global argument. Choose the scope deliberately:
 | Global parent value | Validate at dispatch | Full entry in child options; may follow the child command |
 
 Redfish uses the required-parent form for `--address`, an `IP:port` value whose
-port defaults to `443`. It applies to every child, including `browse`, which
-proxies through the API server and does not consume the value. The flag must
-precede the child command. `--username` and `--password` remain optional.
+port defaults to `443`. Every Redfish child talks to the BMC directly, and the
+flag must precede the child command. `--username` and `--password` remain
+optional. Browsing a Redfish tree through the API server is the separate
+top-level `browse redfish` command, which does not take `--address`.
 
 Use the global form only when an argument must be accepted after the child
 command or be required for some children but not others. Validate at dispatch
