@@ -299,6 +299,13 @@ impl DgxGB300Nvl<'_> {
                     let id = format!("IO_Board_{n}");
                     ioboard.as_chassis(id.into())
                 }))
+                // The BMC's own ERoT, which the real tray lists too.
+                .chain(std::iter::once(redfish::chassis::SingleChassisConfig {
+                    id: "ERoT_BMC_0".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::Component,
+                    manufacturer: Some("NVIDIA".into()),
+                    ..redfish::chassis::SingleChassisConfig::defaults()
+                }))
                 .chain(std::iter::once(dpu_chassis(
                     "Riser_Slot1_BlueField_3_Card",
                     &self.dpu,

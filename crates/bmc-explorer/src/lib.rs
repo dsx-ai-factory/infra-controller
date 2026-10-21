@@ -143,8 +143,14 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
         // of BlueField_ERoT. Because carbide doesn't need
         // BlueField_ERoT we just skip it.
         // BlueField-4: skip IRoT NIC (invalid STATIC UUID breaks parsing).
+        // GB200/GB300 host BMCs: the BMC's ERoT chassis intermittently
+        // times out the same way, and carbide doesn't need it either.
         lazy_fetch: if is_nvidia_vendor && is_bf4_product(root.product()) {
             Some(should_fetch_bf4_chassis_except_irot_nic)
+        } else if root.vendor() == Some(Vendor::new("NVIDIA"))
+            && root.product() == Some(Product::new("GB BMC"))
+        {
+            Some(|odata_id| odata_id.last_segment() != Some("ERoT_BMC_0"))
         } else {
             (root.vendor() == Some(Vendor::new("Nvidia"))
                 && root.product() == Some(Product::new("BlueField-3 DPU")))
