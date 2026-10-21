@@ -3438,6 +3438,7 @@ esac
                 &test_service_addresses(),
                 HBNDeviceNames::hbn_23(),
                 None,
+                None,
             )
             .await?
         );
