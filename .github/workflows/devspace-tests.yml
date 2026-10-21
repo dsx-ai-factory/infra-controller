@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Advisory only: keep this check out of required checks and publishing workflows.
+# Fork PRs run on the copy-pr-bot branch after maintainer approval, matching
+# fern-docs-ci.yml. Never run an unapproved fork head on a self-hosted runner.
+name: DevSpace regression tests (advisory)
+
+on:
+  pull_request:
+    paths:
+      - 'devspace.yaml'
+      - 'dev/deployment/devspace/**'
+      - 'pxe/scout-firmware-scripts/nvidia/dgxh100/cx7/metadata.toml'
+      - '.github/workflows/devspace-tests.yml'
+      - '.github/ci/test_devspace_workflow.py'
+  push:
+    branches:
+      - 'pull-request/[0-9]+'
+    paths:
+      - 'devspace.yaml'
+      - 'dev/deployment/devspace/**'
+      - 'pxe/scout-firmware-scripts/nvidia/dgxh100/cx7/metadata.toml'
+      - '.github/workflows/devspace-tests.yml'
+      - '.github/ci/test_devspace_workflow.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devspace-advisory-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  devspace-tests:
+    name: DevSpace regressions (advisory)
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/pull-request/'))
+      || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: linux-amd64-cpu4
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install regression test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml jq git coreutils
+
+      - name: Check advisory workflow boundaries
+        run: /usr/bin/python3 -B .github/ci/test_devspace_workflow.py
+
+      - name: Run DevSpace regression tests
+        run: /usr/bin/python3 -B -m unittest discover -s dev/deployment/devspace/tests -t dev/deployment/devspace -v
