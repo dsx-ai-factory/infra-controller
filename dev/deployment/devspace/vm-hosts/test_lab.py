@@ -159,9 +159,15 @@ class LabTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "architecture"):
             lab.domain_xml(lab.target(1), Path("/lab"), 4096, 2, lab.BRIDGE, "s390x")
 
-    def test_network_rules_need_only_ipv4_and_include_guest_egress(self):
+    def test_network_rules_forward_both_families_and_nat_only_ipv4(self):
         rules = list(lab.network_rules("kind0", "eth0"))
-        self.assertEqual({rule[1] for rule in rules}, {"iptables"})
+        self.assertEqual({rule[1] for rule in rules}, {"iptables", "ip6tables"})
+        self.assertFalse(
+            any(
+                rule[1] == "ip6tables" and rule[4][-1] in ("MASQUERADE", "SNAT")
+                for rule in rules
+            )
+        )
         self.assertIn(
             (
                 "host",
@@ -297,7 +303,9 @@ class LabTests(unittest.TestCase):
                     lab, "inspect", return_value={"State": {"Running": True}}
                 ),
                 mock.patch.object(lab, "owned"),
-                mock.patch.object(lab, "run"),
+                mock.patch.object(
+                    lab, "run", side_effect=lambda *args: calls.append(args)
+                ),
                 mock.patch.object(lab, "virsh", side_effect=virsh),
                 mock.patch.object(
                     lab,
@@ -309,6 +317,13 @@ class LabTests(unittest.TestCase):
             self.assertLess(
                 calls.index(("managedsave", name)), calls.index(("network-down",))
             )
+            for suffix in ("dhcp4", "dhcp6", "ra"):
+                relay = f"{lab.NAME}-{suffix}"
+                self.assertLess(
+                    calls.index(("managedsave", name)),
+                    calls.index(("docker", "stop", relay)),
+                )
+                self.assertIn(("docker", "rm", relay), calls)
 
     def test_network_resume_only_unpauses_owned_matching_domains(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -343,8 +358,11 @@ class LabTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     lab.configuration(count, memory, cpus, disk)
 
-    def test_route_overlap_rejects_ipv4_conflicts(self):
-        for cidr, conflict in ((lab.IPV4_SUBNET, "10.84.0.0/16"),):
+    def test_route_overlap_rejects_both_address_families(self):
+        for cidr, conflict in (
+            (lab.IPV4_SUBNET, "10.84.0.0/16"),
+            (lab.IPV6_SUBNET, "fd42:84:30::10/128"),
+        ):
             with self.subTest(cidr=cidr):
                 with self.assertRaisesRegex(ValueError, "overlaps"):
                     lab.validate_routes([{"dst": conflict}], cidr)
@@ -418,7 +436,7 @@ class ProfileValuesTests(unittest.TestCase):
         )
         self.assertNotIn("bmc_proxy", proxy)
         self.assertFalse(result["nico-machine-a-tron"]["enabled"])
-        self.assertFalse(result["nico-dhcp"]["dhcp"]["v6Enabled"])
+        self.assertTrue(result["nico-dhcp"]["dhcp"]["v6Enabled"])
         self.assertEqual(
             result["nico-pxe"]["bootArtifactContainers"][0]["imagePullPolicy"],
             "IfNotPresent",

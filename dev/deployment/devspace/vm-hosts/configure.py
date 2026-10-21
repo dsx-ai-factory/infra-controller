@@ -53,7 +53,9 @@ def values(base, image, architecture=None):
         "nico-api": {"siteConfig": {"nicoApiSiteConfig": site}},
         "nico-bmc-proxy": {"configFiles": {"nicoBmcProxyConfig": proxy}},
         "nico-machine-a-tron": {"enabled": False},
-        "nico-dhcp": {"dhcp": {"v6Enabled": False}},
+        "nico-dhcp": {
+            "dhcp": {"v6Enabled": True, "v6ServerIdentifier": "020000840001"}
+        },
         "nico-pxe": {
             "bootArtifactContainers": [
                 {
