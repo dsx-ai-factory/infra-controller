@@ -1948,21 +1948,8 @@ impl SiteExplorer {
         exploration: &mut DpuExplorationState,
         metrics: &mut SiteExplorationMetrics,
     ) {
-        // Count every DPU the host reports, independent of whether we've
-        // discovered its BMC yet.
-        if part_number
-            .map(str::trim)
-            .is_some_and(is_bluefield_part_number)
-        {
-            exploration.reported_total += 1;
-        }
-
-        // Only a device whose serial matches a *discovered* DPU BMC is ours to
-        // classify; anything else is some other device, or a DPU whose BMC
-        // we haven't explored yet.
-        let Some(dpu_ep) = serial_number
-            .map(str::trim)
-            .and_then(|sn| dpu_sn_to_endpoint.get(sn))
+        let Some(dpu_ep) =
+            exploration.record_reported_device(part_number, serial_number, dpu_sn_to_endpoint)
         else {
             return;
         };
@@ -1974,18 +1961,7 @@ impl SiteExplorer {
             None => Ok(true),
         });
 
-        match classify_matched_dpu(dpu_ep, host_ep, mode_check) {
-            DiscoveredDpu::RunningAsDpu(dpu) => exploration.running_as_dpu.push(dpu),
-            DiscoveredDpu::RunningAsNic => exploration.running_as_nic_total += 1,
-            DiscoveredDpu::NeedsReconfig => exploration.all_configured = false,
-            DiscoveredDpu::ModeCheckFailed(err) => {
-                tracing::warn!(
-                    bmc_ip_address = %dpu_ep.address,
-                    error = %err,
-                    "failed to check DPU mode; skipping this device",
-                );
-            }
-        }
+        exploration.record_matched_dpu(dpu_ep, host_ep, mode_check);
     }
 
     /// Sends a mode-setting request when the DPU reports a different current mode.
@@ -4056,6 +4032,51 @@ impl DpuExplorationState {
             running_as_nic_total: 0,
             all_configured: true,
             running_as_dpu: Vec::new(),
+        }
+    }
+
+    /// Counts a host-reported DPU and looks up its discovered BMC by serial.
+    fn record_reported_device<'a>(
+        &mut self,
+        part_number: Option<&str>,
+        serial_number: Option<&str>,
+        dpu_sn_to_endpoint: &'a HashMap<String, ExploredEndpoint>,
+    ) -> Option<&'a ExploredEndpoint> {
+        // Count every DPU the host reports, independent of whether we've
+        // discovered its BMC yet.
+        if part_number
+            .map(str::trim)
+            .is_some_and(is_bluefield_part_number)
+        {
+            self.reported_total += 1;
+        }
+
+        // Only a device whose serial matches a *discovered* DPU BMC is ours to
+        // classify; anything else is some other device, or a DPU whose BMC
+        // we haven't explored yet.
+        serial_number
+            .map(str::trim)
+            .and_then(|sn| dpu_sn_to_endpoint.get(sn))
+    }
+
+    /// Records a matched DPU after its mode check or configuration attempt.
+    fn record_matched_dpu(
+        &mut self,
+        dpu_ep: &ExploredEndpoint,
+        host_ep: &ExploredEndpoint,
+        mode_check: Option<SiteExplorerResult<bool>>,
+    ) {
+        match classify_matched_dpu(dpu_ep, host_ep, mode_check) {
+            DiscoveredDpu::RunningAsDpu(dpu) => self.running_as_dpu.push(dpu),
+            DiscoveredDpu::RunningAsNic => self.running_as_nic_total += 1,
+            DiscoveredDpu::NeedsReconfig => self.all_configured = false,
+            DiscoveredDpu::ModeCheckFailed(err) => {
+                tracing::warn!(
+                    bmc_ip_address = %dpu_ep.address,
+                    error = %err,
+                    "failed to check DPU mode; skipping this device",
+                );
+            }
         }
     }
 
