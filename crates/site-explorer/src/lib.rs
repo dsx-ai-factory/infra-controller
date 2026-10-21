@@ -1577,12 +1577,12 @@ impl SiteExplorer {
             // must wait for the next iteration.
             if needs_expected_serial_fallback && let Some(expected_machine) = expected_machine {
                 for dpu_sn in &expected_machine.data.fallback_dpu_serial_numbers {
-                    if let Some(dpu_ep) = dpu_sn_to_endpoint.remove(dpu_sn.as_str()) {
+                    if let Some(dpu_ep) = dpu_sn_to_endpoint.get(dpu_sn.as_str()) {
                         // Fallback matching has only the expected serial and the
                         // discovered DPU BMC report; pass the DPU's own part number
                         // for the legacy BF3 heuristic.
                         let matched_dpu = MatchedDpu {
-                            endpoint: &dpu_ep,
+                            endpoint: dpu_ep,
                             part_number: dpu_ep.report.dpu_part_number(),
                             source: DpuMatchSource::ExpectedSerial(dpu_sn),
                         };
