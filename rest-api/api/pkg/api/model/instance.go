@@ -16,11 +16,13 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	goset "github.com/deckarep/golang-set/v2"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -1006,11 +1008,89 @@ func selectsNewForeignVpc(tenantID uuid.UUID, vpcs map[uuid.UUID]*cdbm.Vpc, vpcP
 	return false
 }
 
+// authorizeAndValidateInstanceInterfaceVpcs checks authorization before
+// returning detailed validation errors about a foreign VPC.
+func authorizeAndValidateInstanceInterfaceVpcs(
+	ctx context.Context,
+	logger *zerolog.Logger,
+	dbSession *cdb.Session,
+	tenant *cdbm.Tenant,
+	siteID uuid.UUID,
+	requiresAuthorization bool,
+	vpcs map[uuid.UUID]*cdbm.Vpc,
+	interfaces []APIInterfaceCreateOrUpdateRequest,
+) *cutil.APIError {
+	if requiresAuthorization {
+		enabled, err := cdbm.TenantHasTargetedInstanceCreation(
+			ctx,
+			nil,
+			dbSession,
+			tenant,
+			&cdbm.TenantPrivilegeScope{SiteID: &siteID},
+		)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to resolve targetedInstanceCreation capability for cross-Tenant VPC attachment")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to resolve targetedInstanceCreation capability, DB error", nil)
+		}
+		if !enabled {
+			return cutil.NewAPIError(http.StatusForbidden, "Tenant does not have targetedInstanceCreation capability enabled", nil)
+		}
+	}
+
+	seenVpcIDs := make(map[uuid.UUID]struct{}, len(vpcs))
+	for _, ifc := range interfaces {
+		if ifc.VpcID == nil {
+			continue
+		}
+		vpcID := uuid.MustParse(*ifc.VpcID)
+		if _, ok := seenVpcIDs[vpcID]; ok {
+			continue
+		}
+		seenVpcIDs[vpcID] = struct{}{}
+
+		vpc := vpcs[vpcID]
+		if vpc.SiteID != siteID {
+			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request does not belong to Site", vpcID), nil)
+		}
+		if vpc.ControllerVpcID == nil || vpc.Status != cdbm.VpcStatusReady {
+			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request data is not in Ready state", vpcID), nil)
+		}
+		if vpc.NetworkVirtualizationType == nil || *vpc.NetworkVirtualizationType != cdbm.VpcFNN {
+			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request must have FNN network virtualization type", vpcID), nil)
+		}
+	}
+
+	return nil
+}
+
 // IntroducesForeignVpcAttachment reports whether Instance create selects a VPC
 // or VPC Prefix owned by another Tenant. It takes the loaded selectors so the
 // capability can be checked before they are validated.
 func (icr *APIInstanceCreateRequest) IntroducesForeignVpcAttachment(tenantID uuid.UUID, vpcs map[uuid.UUID]*cdbm.Vpc, vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix) bool {
 	return selectsNewForeignVpc(tenantID, vpcs, vpcPrefixes, nil)
+}
+
+// AuthorizeAndValidateInterfaceVpcs authorizes foreign VPC selectors before
+// validating the selected VPCs' Site, readiness, and virtualization type.
+func (icr *APIInstanceCreateRequest) AuthorizeAndValidateInterfaceVpcs(
+	ctx context.Context,
+	logger *zerolog.Logger,
+	dbSession *cdb.Session,
+	tenant *cdbm.Tenant,
+	siteID uuid.UUID,
+	vpcs map[uuid.UUID]*cdbm.Vpc,
+	vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix,
+) *cutil.APIError {
+	return authorizeAndValidateInstanceInterfaceVpcs(
+		ctx,
+		logger,
+		dbSession,
+		tenant,
+		siteID,
+		icr.IntroducesForeignVpcAttachment(tenant.ID, vpcs, vpcPrefixes),
+		vpcs,
+		icr.Interfaces,
+	)
 }
 
 // ValidateDpuExtensionServiceDeployments validates the DpuExtensionServiceDeployments for the Instance create request
@@ -1023,6 +1103,29 @@ func (icr *APIInstanceCreateRequest) ValidateDpuExtensionServiceDeployments(desd
 // the capability can be checked before they are validated.
 func (bicr *APIBatchInstanceCreateRequest) IntroducesForeignVpcAttachment(tenantID uuid.UUID, vpcs map[uuid.UUID]*cdbm.Vpc, vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix) bool {
 	return selectsNewForeignVpc(tenantID, vpcs, vpcPrefixes, nil)
+}
+
+// AuthorizeAndValidateInterfaceVpcs authorizes foreign VPC selectors before
+// validating the selected VPCs' Site, readiness, and virtualization type.
+func (bicr *APIBatchInstanceCreateRequest) AuthorizeAndValidateInterfaceVpcs(
+	ctx context.Context,
+	logger *zerolog.Logger,
+	dbSession *cdb.Session,
+	tenant *cdbm.Tenant,
+	siteID uuid.UUID,
+	vpcs map[uuid.UUID]*cdbm.Vpc,
+	vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix,
+) *cutil.APIError {
+	return authorizeAndValidateInstanceInterfaceVpcs(
+		ctx,
+		logger,
+		dbSession,
+		tenant,
+		siteID,
+		bicr.IntroducesForeignVpcAttachment(tenant.ID, vpcs, vpcPrefixes),
+		vpcs,
+		bicr.Interfaces,
+	)
 }
 
 // Validate ensure the values passed in batch instance create request are acceptable
@@ -1634,10 +1737,64 @@ func (iur *APIInstanceUpdateRequest) SelectsNewForeignVpc(tenantID uuid.UUID, vp
 	return selectsNewForeignVpc(tenantID, vpcs, vpcPrefixes, existing)
 }
 
+// AuthorizeAndValidateInterfaceVpcs authorizes newly selected foreign VPCs
+// before validating the selected VPCs' Site, readiness, and virtualization
+// type. The returned boolean reports whether authorization was required.
+func (iur *APIInstanceUpdateRequest) AuthorizeAndValidateInterfaceVpcs(
+	ctx context.Context,
+	logger *zerolog.Logger,
+	dbSession *cdb.Session,
+	tenant *cdbm.Tenant,
+	siteID uuid.UUID,
+	vpcs map[uuid.UUID]*cdbm.Vpc,
+	vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix,
+	existing []cdbm.Interface,
+) (bool, *cutil.APIError) {
+	requiresAuthorization := iur.SelectsNewForeignVpc(tenant.ID, vpcs, vpcPrefixes, existing)
+	return requiresAuthorization, authorizeAndValidateInstanceInterfaceVpcs(
+		ctx,
+		logger,
+		dbSession,
+		tenant,
+		siteID,
+		requiresAuthorization,
+		vpcs,
+		iur.Interfaces,
+	)
+}
+
 // IntroducesForeignVpcAttachment reports whether Instance update
 // introduces a foreign Interface identity that cannot reuse a persisted row.
 func (iur *APIInstanceUpdateRequest) IntroducesForeignVpcAttachment(tenantID uuid.UUID, requested, existing []cdbm.Interface) (bool, error) {
 	return introducesForeignVpcAttachment(requested, existing, tenantID)
+}
+
+// AuthorizeIntroducedForeignVpcAttachment authorizes a foreign Interface
+// identity that cannot reuse a persisted Interface.
+func (iur *APIInstanceUpdateRequest) AuthorizeIntroducedForeignVpcAttachment(
+	ctx context.Context,
+	logger *zerolog.Logger,
+	dbSession *cdb.Session,
+	tenant *cdbm.Tenant,
+	siteID uuid.UUID,
+	requested []cdbm.Interface,
+	existing []cdbm.Interface,
+) *cutil.APIError {
+	requiresAuthorization, err := iur.IntroducesForeignVpcAttachment(tenant.ID, requested, existing)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to compare requested and persisted Interface identities")
+		return cutil.NewAPIError(http.StatusInternalServerError, "Failed to authorize cross-Tenant VPC attachments", nil)
+	}
+	return authorizeAndValidateInstanceInterfaceVpcs(
+		ctx,
+		logger,
+		dbSession,
+		tenant,
+		siteID,
+		requiresAuthorization,
+		nil,
+		nil,
+	)
 }
 
 // ValidateDpuExtensionServiceDeployments validates the DpuExtensionServiceDeployments for the Instance update request
