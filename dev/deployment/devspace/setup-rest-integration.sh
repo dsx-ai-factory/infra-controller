@@ -363,7 +363,7 @@ for ((attempt = 1; attempt <= verify_attempts; attempt++)); do
       # run a tenant OS and need not have Scout connected.
       scouts_ready=true
       while IFS= read -r machine_id; do
-        if ! bash "${SCRIPT_DIR}/core-admin.sh" scout-stream ping "${machine_id}" >/dev/null 2>&1; then
+        if ! FORGE_CLIENT_REQUEST_TIMEOUT_SECS=15 bash "${SCRIPT_DIR}/core-admin.sh" scout-stream ping "${machine_id}" >/dev/null 2>&1; then
           scouts_ready=false
           break
         fi
