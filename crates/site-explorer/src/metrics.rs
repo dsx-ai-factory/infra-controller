@@ -1249,24 +1249,39 @@ pub(super) fn exploration_error_to_metric_label(error: &EndpointExplorationError
     .to_string()
 }
 
+/// How long past the run interval, or past the iteration that set the cycle
+/// time, the last iteration's metrics stay visible to the observable gauges.
+const METRICS_HOLD_MARGIN: Duration = Duration::from_secs(60);
+
+/// How long to hold the metrics of an iteration that took `iteration_duration`:
+/// one more cycle up to a quarter longer than this one, plus the margin. The
+/// next iteration starts after the run interval or when this one ends,
+/// whichever is later, and a stuck explorer still ages out.
+fn metrics_hold_period(run_interval: Duration, iteration_duration: Duration) -> Duration {
+    run_interval
+        .max(iteration_duration.saturating_add(iteration_duration / 4))
+        .saturating_add(METRICS_HOLD_MARGIN)
+}
+
 /// Stores Metric data shared between SiteExplorer and the OpenTelemetry background task
 pub(super) struct MetricHolder {
     instruments: SiteExplorerInstruments,
     last_iteration_metrics: SharedMetricsHolder<SiteExplorationMetrics>,
+    run_interval: Duration,
 }
 
 impl MetricHolder {
-    pub(super) fn new(
-        meter: Meter,
-        hold_period: std::time::Duration,
-        config: &SiteExplorerConfig,
-    ) -> Self {
-        let last_iteration_metrics = SharedMetricsHolder::with_hold_period(hold_period);
+    pub(super) fn new(meter: Meter, config: &SiteExplorerConfig) -> Self {
+        let last_iteration_metrics = SharedMetricsHolder::with_hold_period(metrics_hold_period(
+            config.run_interval,
+            Duration::ZERO,
+        ));
         let instruments =
             SiteExplorerInstruments::new(meter, last_iteration_metrics.clone(), config);
         Self {
             instruments,
             last_iteration_metrics,
+            run_interval: config.run_interval,
         }
     }
 
@@ -1278,8 +1293,11 @@ impl MetricHolder {
         metrics.endpoint_exploration_duration.clear();
         metrics.endpoint_exploration_step_latency.clear();
         metrics.site_explorer_phase_latency.clear();
-        // And store the remaining metrics
-        self.last_iteration_metrics.update(metrics);
+        // And store the remaining metrics until the next iteration can replace them
+        let hold_period =
+            metrics_hold_period(self.run_interval, metrics.recording_started_at.elapsed());
+        self.last_iteration_metrics
+            .update_held_for(metrics, hold_period);
     }
 }
 
@@ -1294,6 +1312,44 @@ mod tests {
     use prometheus::{Encoder, TextEncoder};
 
     use super::*;
+
+    #[test]
+    fn metrics_hold_period_covers_the_longer_of_interval_and_iteration() {
+        let secs = Duration::from_secs;
+        // input: (run interval, iteration duration); expect: hold period
+        check_values(
+            [
+                Check {
+                    scenario: "a short iteration holds for the interval plus the margin",
+                    input: (secs(30), secs(10)),
+                    expect: secs(90),
+                },
+                Check {
+                    scenario: "a long iteration holds for a quarter more than its length plus the margin",
+                    input: (secs(30), secs(14 * 60)),
+                    expect: secs(14 * 60 + 210 + 60),
+                },
+                Check {
+                    scenario: "an iteration that grows by a quarter is still covered when it ends",
+                    input: (secs(30), secs(60 * 60)),
+                    expect: secs(75 * 60 + 60),
+                },
+                Check {
+                    scenario: "a hold at the duration limit saturates",
+                    input: (Duration::MAX, secs(10)),
+                    expect: Duration::MAX,
+                },
+                Check {
+                    scenario: "an iteration at the duration limit saturates",
+                    input: (secs(30), Duration::MAX),
+                    expect: Duration::MAX,
+                },
+            ],
+            |(run_interval, iteration_duration)| {
+                metrics_hold_period(run_interval, iteration_duration)
+            },
+        );
+    }
 
     struct LatencyHistogramTestMeter {
         meter_provider: SdkMeterProvider,
@@ -1835,7 +1891,6 @@ mod tests {
         let test_meter = LatencyHistogramTestMeter::new("carbide_site_explorer_*_latency");
         let metric_holder = MetricHolder::new(
             test_meter.meter_provider.meter("site-explorer-test"),
-            Duration::MAX,
             &SiteExplorerConfig::default(),
         );
 

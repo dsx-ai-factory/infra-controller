@@ -1170,7 +1170,7 @@ pub async fn set_pause_ingestion_and_poweron(
 
 #[cfg(test)]
 mod tests {
-    use model::site_explorer::{Chassis, NetworkAdapter};
+    use model::site_explorer::{Chassis, EndpointExplorationError, EndpointType, NetworkAdapter};
 
     use super::*;
 
@@ -1279,6 +1279,55 @@ mod tests {
         let requested = find_all_by_ip(address, &mut txn).await.unwrap().remove(0);
         assert!(requested.exploration_requested);
         assert_eq!(requested.report_version, endpoint.report_version);
+    }
+
+    /// A failed first probe is persisted the way a report is: the row holds
+    /// the error and the latency on a report without an endpoint type, starts
+    /// in `Initial` at version one, and later failures advance it in place.
+    /// The planner then sees a never-explored endpoint, not an unexplored
+    /// interface.
+    #[crate::sqlx_test]
+    async fn a_failed_first_probe_persists_an_initial_row_that_later_failures_advance(
+        pool: sqlx::PgPool,
+    ) {
+        let mut txn = pool.begin().await.unwrap();
+        let address: IpAddr = "10.0.5.1".parse().unwrap();
+        let refused = EndpointExplorationError::ConnectionRefused {
+            details: "connection refused".to_string(),
+        };
+        let mut report = EndpointExplorationReport::new_with_error(refused);
+        report.last_exploration_latency = Some(std::time::Duration::from_millis(1500));
+        insert(address, &report, false, &mut txn).await.unwrap();
+
+        let inserted = find_all_by_ip(address, &mut txn).await.unwrap().remove(0);
+        assert_eq!(inserted.report, report);
+        assert_eq!(inserted.preingestion_state, PreingestionState::Initial);
+        assert_eq!(inserted.report_version.version_nr(), 1);
+        assert!(!inserted.waiting_for_explorer_refresh);
+
+        let timeout = EndpointExplorationError::ConnectionTimeout {
+            details: "deadline exceeded".to_string(),
+        };
+        let latency = std::time::Duration::from_secs(2);
+        assert_eq!(
+            try_update_last_exploration_error(
+                address,
+                inserted.report_version,
+                &timeout,
+                latency,
+                &mut txn,
+            )
+            .await
+            .unwrap(),
+            ConditionalWrite::Applied(())
+        );
+        let retried = find_all_by_ip(address, &mut txn).await.unwrap().remove(0);
+        assert_eq!(retried.report.endpoint_type, EndpointType::Unknown);
+        assert_eq!(retried.report.last_exploration_error, Some(timeout));
+        assert_eq!(retried.report.last_exploration_latency, Some(latency));
+        assert_eq!(retried.report_version.version_nr(), 2);
+        assert!(retried.waiting_for_explorer_refresh);
+        txn.rollback().await.unwrap();
     }
 
     /// An `UpgradeFirmwareWait` state — the one the "installing" predicate keys
