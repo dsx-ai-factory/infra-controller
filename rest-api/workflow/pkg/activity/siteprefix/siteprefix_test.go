@@ -658,7 +658,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, before, after)
 		}},
-		{"soft deleted tenant Core ID cannot be reused", func(t *testing.T, f fixture) {
+		{"recently deleted tenant is not restored by potentially stale inventory", func(t *testing.T, f fixture) {
 			prefix := testPrefix()
 			prefix.Status.Authority = corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED
 			prefix.Config.TenantOrganizationId = &f.tenant.Org
@@ -668,6 +668,50 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			prefix.Id.Value = root.SitePrefixID.String()
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
 			require.NotNil(t, f.blocks(t)[0].Deleted)
+		}},
+		{"retired tenant recovers its identity without cloud IPAM", func(t *testing.T, f fixture) {
+			prefix := testPrefix()
+			prefix.Status.Authority = corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED
+			prefix.Config.TenantOrganizationId = &f.tenant.Org
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			root := f.blocks(t)[0]
+			dao := cdbm.NewIPBlockDAO(f.session)
+			_, err := dao.Update(ctx, nil, cdbm.IPBlockUpdateInput{IPBlockID: root.ID, Status: cutil.GetPtr(cdbm.IPBlockStatusDeleting)})
+			require.NoError(t, err)
+			require.NoError(t, dao.Delete(ctx, nil, root.ID))
+			deleted := time.Now().Add(-time.Hour)
+			_, err = f.session.DB.NewUpdate().Model((*cdbm.IPBlock)(nil)).WhereAllWithDeleted().
+				Set("deleted = ?", deleted).Where("id = ?", root.ID).Exec(ctx)
+			require.NoError(t, err)
+			retired := f.linkedBlock(t, *root.SitePrefixID)
+			prefix.Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			require.Equal(t, retired, f.linkedBlock(t, *root.SitePrefixID))
+			prefix.Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_READY
+			prefix.Config.Prefix = "10.1.0.0/24"
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			require.Equal(t, retired, f.linkedBlock(t, *root.SitePrefixID))
+			prefix.Config.Prefix = "10.0.0.0/24"
+			prefix.Metadata.Name = "core-name"
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			restored := f.linkedBlock(t, *root.SitePrefixID)
+			require.Nil(t, restored.Deleted)
+			require.Equal(t, root.ID, restored.ID)
+			require.Equal(t, root.SitePrefixID, restored.SitePrefixID)
+			require.Equal(t, root.TenantID, restored.TenantID)
+			require.Equal(t, root.Created, restored.Created)
+			require.Equal(t, root.Name, restored.Name)
+			require.False(t, restored.Managed)
+			require.Equal(t, cdbm.IPBlockStatusReady, restored.Status)
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			require.Equal(t, restored, f.linkedBlock(t, *root.SitePrefixID))
+			details, _, err := cdbm.NewStatusDetailDAO(f.session).GetAll(ctx, nil,
+				cdbm.StatusDetailFilterInput{EntityIDs: []string{root.ID.String()}}, paginator.PageInput{})
+			require.NoError(t, err)
+			require.Len(t, details, 2)
+			prefixes, err := ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixCidrs(ctx, f.namespace())
+			require.NoError(t, err)
+			require.Empty(t, prefixes)
 		}},
 		{"Core identity cannot move between owners", func(t *testing.T, f fixture) {
 			root := f.root(t, true)
@@ -1169,10 +1213,19 @@ func TestValidatePrefix(t *testing.T) {
 		{"operator v6", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Config.Prefix = "fd00::/64"; return p }, true},
 		{"metadata absent", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Metadata = nil; return p }, false},
 		{"metadata bounds", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Metadata.Name = strings.Repeat("x", 257); return p }, false},
+		{"non-ASCII name", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Metadata.Name = "prefix\u00e9"; return p }, false},
 		{"name NUL", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Metadata.Name = "prefix\x00name"; return p }, false},
 		{"name newline", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Metadata.Name = "prefix\nname"; return p }, false},
 		{"name DEL", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Metadata.Name = "prefix\x7fname"; return p }, false},
 		{"description NUL", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Metadata.Description = "description\x00"; return p }, false},
+		{"non-ASCII label key", func(p *corev1.SitePrefix) *corev1.SitePrefix {
+			p.Metadata.Labels = []*corev1.Label{{Key: "key\u0080"}}
+			return p
+		}, false},
+		{"ASCII control in label key", func(p *corev1.SitePrefix) *corev1.SitePrefix {
+			p.Metadata.Labels = []*corev1.Label{{Key: "key\x7f"}}
+			return p
+		}, true},
 		{"duplicate label", func(p *corev1.SitePrefix) *corev1.SitePrefix {
 			p.Metadata.Labels = []*corev1.Label{{Key: "x"}, {Key: "x"}}
 			return p

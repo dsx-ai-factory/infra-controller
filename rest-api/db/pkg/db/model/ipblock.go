@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -124,6 +126,8 @@ type IPBlock struct {
 	Tenant                   *Tenant                 `bun:"rel:belongs-to,join:tenant_id=id"`
 	SitePrefixID             *uuid.UUID              `bun:"site_prefix_id,type:uuid"`
 	// Managed is true for Site fabric/root/overlay blocks and blocks allocated to Tenants by the Provider, false for blocks created by Tenants.
+	// Bun's default tag replaces zero values with the SQL default, so default:true
+	// would override explicit false inserts. Create supplies the default instead.
 	Managed         bool       `bun:"managed,notnull"`
 	RoutingType     string     `bun:"routing_type,notnull"`
 	Prefix          string     `bun:"prefix,notnull"`
@@ -135,6 +139,24 @@ type IPBlock struct {
 	Updated         time.Time  `bun:"updated,nullzero,notnull,default:current_timestamp"`
 	Deleted         *time.Time `bun:"deleted,soft_delete"`
 	CreatedBy       *uuid.UUID `bun:"created_by,type:uuid"`
+}
+
+// Key identifies an IP Block by Site, provider, tenant, management, CIDR, family,
+// and routing type. REST/Core IDs, metadata, and lifecycle are checked separately.
+func (ipb *IPBlock) Key() string {
+	values := url.Values{
+		"site_id":                    {ipb.SiteID.String()},
+		"infrastructure_provider_id": {ipb.InfrastructureProviderID.String()},
+		"managed":                    {strconv.FormatBool(ipb.Managed)},
+		"prefix":                     {ipb.Prefix},
+		"prefix_length":              {strconv.Itoa(ipb.PrefixLength)},
+		"protocol_version":           {ipb.ProtocolVersion},
+		"routing_type":               {ipb.RoutingType},
+	}
+	if ipb.TenantID != nil {
+		values.Set("tenant_id", ipb.TenantID.String())
+	}
+	return values.Encode()
 }
 
 // ContainsPrefix reports whether prefix belongs to this IPBlock.
@@ -174,7 +196,8 @@ type IPBlockCreateInput struct {
 	SiteID                   uuid.UUID
 	InfrastructureProviderID uuid.UUID
 	TenantID                 *uuid.UUID
-	// SitePrefixID identifies the related Core SitePrefix, independently of management.
+	// SitePrefixID identifies the related Core SitePrefix for this block, if available.
+	// Provider-allocated tenant blocks may have no Core SitePrefix; the link does not indicate management.
 	SitePrefixID *uuid.UUID
 	// Managed defaults to true. Tenant-created IP Blocks explicitly set false.
 	Managed         *bool
